@@ -491,6 +491,11 @@ fn derive_repeatable(
                         return false;
                     }
                 }
+                OperationKind::RuntimeDealloc => {
+                    if root_of(&operation.operands[0], &roots).is_some() {
+                        return false;
+                    }
+                }
                 OperationKind::BuildClosure { .. } | OperationKind::BuildSubscript { .. } => {
                     if operation
                         .operands
@@ -511,7 +516,13 @@ fn derive_repeatable(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CompilerSession, ExecutionTarget, MirOptimization, module::Path};
+    use crate::{
+        CompilerSession, ExecutionTarget, Location, MirOptimization,
+        hir::value::LiteralValue,
+        mir::{Operation, builder::FunctionBuilder, terminator::Terminator},
+        module::Path,
+        std::math::int_type,
+    };
     use ustr::ustr;
 
     /// Provenance over a compiled module, plus a lookup from source name to local id.
@@ -695,6 +706,59 @@ mod tests {
             !summary.repeatable,
             "AddressorPlace permits mutation; repeatability must be proved separately"
         );
+    }
+
+    #[test]
+    fn deallocating_through_an_argument_makes_an_addressor_nonrepeatable() {
+        let build = |deallocate| {
+            let session = CompilerSession::new();
+            let env = session.module_env();
+            let span = Location::new_synthesized();
+            let mut function =
+                FunctionBuilder::new(ustr("addressor"), CallResultConvention::ADDRESSOR_PLACE);
+            let argument = function.add_parameter(
+                int_type(),
+                ParameterKind::Parameter(ArgConvention::MutableRef),
+            );
+            let result = function.add_parameter(int_type(), ParameterKind::Return);
+            let zero = function.add_constant(int_type(), LiteralValue::new_native(0isize), &env);
+            let block = function.add_block();
+            if deallocate {
+                let slot = function
+                    .append_operation(
+                        block,
+                        Operation::address_offset_place(
+                            span,
+                            mir::Value::Parameter(argument),
+                            mir::Value::Constant(zero),
+                            int_type(),
+                        ),
+                    )
+                    .unwrap();
+                let pointer = function
+                    .append_operation(block, Operation::load(span, slot))
+                    .unwrap();
+                function.append_operation(block, Operation::runtime_dealloc(span, pointer));
+            }
+            function.append_operation(
+                block,
+                Operation::store(
+                    span,
+                    mir::Value::Parameter(argument),
+                    mir::Value::Parameter(result),
+                ),
+            );
+            function.set_terminator(block, Terminator::ret(span));
+            function.finish_unverified()
+        };
+
+        let repeatable = |body: &Function| {
+            derive_repeatable(body, ModuleId::from_index(0), &[], &|_| {
+                AddressorSummary::UNKNOWN
+            })
+        };
+        assert!(repeatable(&build(false)));
+        assert!(!repeatable(&build(true)));
     }
 
     #[test]

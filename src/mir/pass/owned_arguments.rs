@@ -777,7 +777,7 @@ fn place_origins(function: &Function) -> FxHashMap<mir::ValueId, mir::ValueId> {
                 continue;
             };
             match &operation.kind {
-                OperationKind::Alloca { .. } => {
+                OperationKind::Alloca { .. } | OperationKind::RuntimeAlloc { .. } => {
                     origins.insert(result, result);
                 }
                 OperationKind::Subfield { .. }

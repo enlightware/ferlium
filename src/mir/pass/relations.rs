@@ -673,6 +673,17 @@ impl State {
         self.set_fact(symbol, fact);
     }
 
+    /// Stops tracking a place whose storage lifetime has ended.
+    fn forget(&mut self, place: PlaceId, interner: &mut Interner) {
+        let mut forgotten = vec![place];
+        interner
+            .places
+            .inside(place, &mut |child| forgotten.push(child));
+        for child in forgotten {
+            self.current.remove(&child);
+        }
+    }
+
     fn common_facts_and_predicates(
         &self,
         other: &State,
@@ -705,7 +716,9 @@ impl State {
 /// The type of storage each root holds, as the body declares it.
 ///
 /// An interned place carries no type — only a root and field positions — so recognizing that a slot
-/// is an array's length, or a range iterator, means going back to where the storage was declared.
+/// is an array's length, or a range iterator, means going back to where its stack storage was
+/// declared. Run-time allocations are byte extents whose pointee type does not describe the whole
+/// allocation, so they are deliberately absent.
 struct RootTypes {
     allocas: FxHashMap<ValueId, Type>,
     parameters: Vec<Type>,
@@ -1118,17 +1131,20 @@ fn run(context: &Context<'_>, mut interner: Interner) -> Run {
 
 /// Seeds the structural register-to-place map shared by local recognition and the fixed point.
 ///
-/// MIR registers are SSA. An `alloca` result always names its root and a `subfield` result always
-/// names the same child of its base, independently of which flow state reaches a use. Resolve those
-/// identities once rather than rediscovering and carrying them through every state. The small fixed
-/// point only accommodates block order not being dominance order; each successful round binds at
-/// least one of the finite register set.
+/// MIR registers are SSA. An `alloca` or `runtime_alloc` result always names its root and a
+/// `subfield` result always names the same child of its base, independently of which flow state
+/// reaches a use. Resolve those identities once rather than rediscovering and carrying them through
+/// every state. The small fixed point only accommodates block order not being dominance order;
+/// each successful round binds at least one of the finite register set.
 fn seed_register_places(func: &Function, escaped: &FxHashSet<Root>, interner: &mut Interner) {
     for block in func.blocks() {
         for operation in func.block(block).operations() {
-            let OperationKind::Alloca { .. } = operation.kind else {
+            if !matches!(
+                operation.kind,
+                OperationKind::Alloca { .. } | OperationKind::RuntimeAlloc { .. }
+            ) {
                 continue;
-            };
+            }
             let Some(register) = operation.result_id() else {
                 continue;
             };
@@ -1380,7 +1396,9 @@ fn writes_into(operation: &Operation, root: Root, register_places: &PlaceBinding
         _ => false,
     };
     match &operation.kind {
-        OperationKind::Alloca { .. } | OperationKind::AllocaPlace { .. } => false,
+        OperationKind::Alloca { .. }
+        | OperationKind::AllocaPlace { .. }
+        | OperationKind::RuntimeAlloc { .. } => false,
         // Reads: the place is borrowed and left as it was.
         OperationKind::Load
         | OperationKind::CompareEqual
@@ -1658,7 +1676,7 @@ fn transfer(
         // `alloca_place` is deliberately absent: the escape scan does not register its result as a
         // root, so nothing could ever mark it escaped, and tracking a place the scan cannot escape
         // would be trusting writes it never saw. Its slots stay unnamed until the scan roots them.
-        OperationKind::Alloca { .. } => {
+        OperationKind::Alloca { .. } | OperationKind::RuntimeAlloc { .. } => {
             let Some(result) = operation.result_id() else {
                 return;
             };
@@ -1669,6 +1687,11 @@ fn transfer(
             let place = interner.place_root(root);
             interner.bind_register_place(result, place);
             state.define(place, def, interner, None);
+        }
+        OperationKind::RuntimeDealloc => {
+            if let Some(place) = tracked_place(state, &operation.operands[0], escaped, interner) {
+                state.forget(place, interner);
+            }
         }
         OperationKind::Store => {
             let Some(place) = tracked_place(state, &operation.operands[1], escaped, interner)

@@ -90,12 +90,16 @@ across passes. The role is instead a property of the *defining* operation, deriv
 
 | Role | Meaning |
 |---|---|
-| place | Pointer to addressable storage. |
-| materialized value | A value available without dereferencing a place. Owned materialized values have exactly one consuming use on each feasible path. |
+| place | Addressable storage, printed as `place T`. It is not a first-class pointer value. |
+| materialized value | A value available without dereferencing a place. |
 | variant tag | An opaque semantic tag identity, comparable only with symbolic variant-tag pattern data. |
 | evidence | A dictionary, subscript, or variant-storage choice used for generic dispatch/layout. Compile-time evidence may recursively close a definition over other evidence. |
 | stack marker | A saved allocation frontier consumed by `stack_restore`. |
 | open projection | A yielded place plus the accessor contract whose slide must be ended exactly once. |
+
+An owned result has exactly one consuming use on every returning path which executes its
+definition. Mutually exclusive paths may consume it differently. A store transfers its obligation
+to storage, whose initialization and drop obligations are tracked separately.
 
 Almost every operation fixes its result's role by itself. `load` is the exception, reading its role
 from its operand, so the derivation is a table rather than a function per operation. Lowering fills
@@ -108,12 +112,13 @@ frame is still on the stack. Each finished body is then checked as a whole at th
 which needs no `ModuleEnv`, no trait solving and no dataflow, so it runs before the heavier analyses
 trip over the consequences; it also covers passes, which rewrite a block's operations directly.
 
-Every register definition renders the role it takes: `*T` for a place, `T` for a materialized value,
-and `dict`, `subscript`, `fn`, `pattern`, `stack` or `open *T` for the rest. This is what
+Every register definition renders the role it takes: `place T` for addressable storage, `T` for a
+materialized value, and `dict`, `subscript`, `fn`, `pattern`, `stack` or `open place T` for the rest.
+`*T` is a materialized pointer value which address-consuming operations may dereference. This is what
 distinguishes an `alloca` slot from an `alloca_place` one:
 
 ```
-%r0: **int = alloca_place int
+%r0: place *int = alloca_place int
 %r1: *int = load %r0
 ```
 
@@ -164,7 +169,7 @@ The operation kind fixes operand arity, roles, and result shape. The main groups
 
 | Group | Operations | Contract |
 |---|---|---|
-| storage | `alloca`, `alloca_place`, `load`, `store`, `clear`, `memcpy`, `move` | `store` never drops; `memcpy` requires a concrete `TrivialCopy` pointee; `move` leaves its source absent. Dynamic allocation/move carries a layout witness. |
+| storage | `alloca`, `alloca_place`, `runtime_alloc`, `runtime_dealloc`, `load`, `store`, `clear`, `memcpy`, `move` | Stack storage follows stack regions; runtime storage has an explicit lifetime. `store` never drops; `memcpy` requires a concrete `TrivialCopy` pointee; `move` leaves its source absent. |
 | aggregates | `subfield`, `variant`, `extract_tag`, `build_array` | Aggregate construction and ownership remain field-addressable. Product `subfield` records its aggregate type and carries `Value` witnesses for direct inline members with open layouts. A variant operation first builds an uninitialized payload shell. Generic variant construction and payload-marked `subfield` operations carry the selected payload's `Value<B>` layout witness; projection reads inline/indirect classification from the stored tag. `extract_tag` yields an opaque semantic tag, not the raw ABI word. `build_array` initializes fresh canonical array storage from borrowed `TrivialCopy` elements. |
 | evidence | `dict_entry`, `build_dictionary`, `subscript_member`, `build_subscript` | Evidence remains symbolic. Construction closes a definition over evidence operands; dictionary entries are closed function places. |
 | calls/projections | `call`, `project`, `end_project` | Proven source-infallible forms are ordinary operations. Potentially source-fallible forms occur only inside `invoke`. |
@@ -288,13 +293,28 @@ must match it. First-class callables always expose `Value`. When a `NoValue` imp
 first-class, physical lowering supplies an adapter entry that invokes it and produces the logical
 unit result.
 
+### Runtime allocation
+
+Physical MIR exposes the compiled runtime boundary directly:
+
+```text
+runtime_alloc<A>(byte_size: int, align: int) -> *A
+runtime_dealloc(address: *A)
+```
+
+The result is a materialized pointer value; the pointee type describes the storage reached through
+it, while the explicit byte size gives the allocation its extent. An array of `A` therefore also
+receives `*A`. Allocation is fresh, uninitialized and owned until transferred or deallocated.
+Deallocation accepts the materialized allocation pointer, and a zero-byte allocation remains valid
+and reclaimable. Both operations are pinned.
+
 ### Typed byte addressing
 
 Physical MIR adds two representation-level address operations:
 
 ```text
-address_offset<A>(base_address, byte_offset: int) -> *A
-address_offset_place<A>(base_address, byte_offset: int) -> **A
+address_offset<A>(base_address, byte_offset: int) -> place A
+address_offset_place<A>(base_address, byte_offset: int) -> place *A
 ```
 
 The base is address-bearing and the offset is a materialized Ferlium `int`. `address_offset` yields

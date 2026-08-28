@@ -605,12 +605,16 @@ fn note_operation(operation: &Operation, site: Site, uses: &mut FxHashMap<ValueI
             }
             write(call.result, uses);
         }
-        OperationKind::Load | OperationKind::CompareEqual | OperationKind::ExtractTag => {
+        OperationKind::Load
+        | OperationKind::CompareEqual
+        | OperationKind::ExtractTag
+        | OperationKind::RuntimeAlloc { .. } => {
             operation
                 .operands
                 .iter()
                 .for_each(|operand| read(operand, uses));
         }
+        OperationKind::RuntimeDealloc => unsafe_use(&operation.operands[0], uses),
         OperationKind::Store => {
             unsafe_use(&operation.operands[0], uses);
             write(&operation.operands[1], uses);

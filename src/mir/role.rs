@@ -54,6 +54,7 @@ use crate::{
         value::{Constant, ConstantId},
     },
     module::{ModuleEnv, id::Id},
+    std::math::int_type,
     types::r#type::{CallImplType, CallResultConvention, Type, TypeKind},
 };
 
@@ -84,6 +85,17 @@ impl MirType {
                 format!("*({})", ty.format_with(env))
             }
             _ => format!("*{}", self.format(env)),
+        }
+    }
+
+    /// Formats `self` after the `place` keyword, preserving the boundary between the place and a
+    /// lowered type whose own syntax has lower precedence.
+    fn format_as_place_pointee(&self, env: &ModuleEnv<'_>) -> String {
+        match self {
+            Self::Lowered(ty) if lowered_type_needs_pointer_parentheses(*ty, env) => {
+                format!("({})", ty.format_with(env))
+            }
+            _ => self.format(env),
         }
     }
 
@@ -120,12 +132,12 @@ pub(crate) enum ValueRole {
 }
 
 impl ValueRole {
-    /// Renders this role the way a definition site annotates it, `*int` for a place holding an
-    /// `int` and `int` for the value itself.
+    /// Renders this role the way a definition site annotates it, `place int` for addressable
+    /// storage holding an `int` and `int` for the value itself.
     pub(crate) fn annotation(&self, env: &ModuleEnv<'_>) -> String {
         match self {
             Self::Materialized(ty) => ty.format(env),
-            Self::Place(ty) => ty.format_as_pointer_pointee(env),
+            Self::Place(ty) => format!("place {}", ty.format_as_place_pointee(env)),
             Self::VariantTag => "tag".to_string(),
             Self::Dictionary => "dict".to_string(),
             Self::Subscript => "subscript".to_string(),
@@ -134,8 +146,8 @@ impl ValueRole {
             Self::Pattern => "pattern".to_string(),
             Self::StackMarker => "stack".to_string(),
             Self::OpenProjection { yielded, .. } => {
-                let yielded = MirType::Lowered(*yielded).format_as_pointer_pointee(env);
-                format!("open {yielded}")
+                let yielded = MirType::Lowered(*yielded).format_as_place_pointee(env);
+                format!("open place {yielded}")
             }
         }
     }
@@ -390,8 +402,12 @@ impl ValueRoles {
             OperationResult::Pointer(pointee) => {
                 ValueRole::Place(self.resolve_result_type(*pointee, constants)?)
             }
+            OperationResult::MaterializedPointer(pointee) => ValueRole::Materialized(
+                MirType::pointer_to(self.resolve_result_type(*pointee, constants)?),
+            ),
             OperationResult::Pointee(pointer) => match self.resolve_result(*pointer, constants)? {
                 ValueRole::Place(ty) => ValueRole::Materialized(ty),
+                ValueRole::Materialized(MirType::Pointer(ty)) => ValueRole::Materialized(*ty),
                 ValueRole::OpenProjection { yielded, .. } => {
                     ValueRole::Materialized(MirType::Lowered(yielded))
                 }
@@ -414,6 +430,9 @@ impl ValueRoles {
             OperationResult::Pointer(inner) => {
                 MirType::pointer_to(self.resolve_result_type(*inner, constants)?)
             }
+            OperationResult::MaterializedPointer(inner) => {
+                MirType::pointer_to(self.resolve_result_type(*inner, constants)?)
+            }
             OperationResult::Same(value) => match self.get(&value, constants)?.into_owned() {
                 ValueRole::Materialized(ty) | ValueRole::Place(ty) => ty,
                 ValueRole::OpenProjection { yielded, .. } => MirType::Lowered(yielded),
@@ -421,6 +440,7 @@ impl ValueRoles {
             },
             OperationResult::Pointee(pointer) => match self.resolve_result(*pointer, constants)? {
                 ValueRole::Place(ty) => ty,
+                ValueRole::Materialized(MirType::Pointer(ty)) => *ty,
                 ValueRole::OpenProjection { yielded, .. } => MirType::Lowered(yielded),
                 other => panic!("pointee type requested from {other:?}"),
             },
@@ -513,9 +533,9 @@ fn parameter_role(parameter: &Parameter, result_convention: CallResultConvention
 fn result_dependency(result: &OperationResult) -> Option<mir::ValueId> {
     match result {
         OperationResult::Same(mir::Value::Register(value_id)) => Some(*value_id),
-        OperationResult::Pointee(inner) | OperationResult::Pointer(inner) => {
-            result_dependency(inner)
-        }
+        OperationResult::Pointee(inner)
+        | OperationResult::Pointer(inner)
+        | OperationResult::MaterializedPointer(inner) => result_dependency(inner),
         _ => None,
     }
 }
@@ -562,6 +582,31 @@ pub(crate) fn check_operand_roles(
             if !operands.is_empty() {
                 evidence(0);
             }
+        }
+        OperationKind::RuntimeAlloc { .. } => {
+            for index in 0..2 {
+                let role = role(index);
+                assert!(
+                    matches!(
+                        &*role,
+                        ValueRole::Materialized(MirType::Lowered(ty))
+                            if *ty == int_type()
+                    ),
+                    "MIR function `{func_name}` {at}: runtime_alloc operand {index} must be a materialized int, got {role:?}"
+                );
+            }
+        }
+        OperationKind::RuntimeDealloc => {
+            let role = role(0);
+            let allocation_address = matches!(
+                &*role,
+                ValueRole::Materialized(MirType::Pointer(pointee))
+                    if matches!(&**pointee, MirType::Lowered(_))
+            );
+            assert!(
+                allocation_address,
+                "MIR function `{func_name}` {at}: runtime_dealloc requires a materialized allocation pointer, got {role:?}"
+            );
         }
         OperationKind::Variant {
             storage,

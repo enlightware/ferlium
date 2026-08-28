@@ -16,10 +16,11 @@
 //! `Register`/`Parameter` does not encode its role, so the per-function MIR verifier derives it from
 //! signatures and defining operations before execution:
 //!
-//! - **place** — a pointer into storage (the result of an `alloca`/`subfield`/`dict_entry`, or an
-//!   incoming by-pointer parameter). Consumed by `load`, `store`, `subfield`, `drop`, etc.
+//! - **place** — addressable storage (the result of an `alloca`/`subfield`/`dict_entry`, or an
+//!   incoming by-pointer parameter). Places are borrowed and consumed by `load`, `store`,
+//!   `subfield`, `drop`, etc.
 //! - **value** — a materialized register or constant (the result of a `load`/`comp_eq`, or a literal
-//!   constant). An owned materialized value has *exactly one* consuming use.
+//!   constant). A pointer value can also be dereferenced by place-consuming operations.
 //! - **variant tag** — an opaque semantic tag produced by `extract_tag`, comparable only with
 //!   symbolic variant-tag pattern data.
 //! - **dictionary** — a symbolic trait dictionary (evidence), consumed by `dict_entry`/`call` and
@@ -112,14 +113,17 @@ impl Operation {
         self.kind.result(self)
     }
 
-    /// Whether this operation's result is an owned value which must be consumed exactly once.
+    /// Whether this operation's result carries ownership which must be consumed exactly once on
+    /// every returning control-flow path that executes the definition.
     ///
-    /// Most result registers merely denote a place or a `TrivialCopy` representation. Constructors
-    /// that transfer ownership into a `store` are different: removing that store must retain the
-    /// producer or arrange another consuming use.
+    /// Most result registers merely denote a borrowed place or a `TrivialCopy` representation.
+    /// Constructors and fresh run-time allocations transfer ownership into a `store` or explicit
+    /// deallocation; removing that consuming operation must retain or redirect the obligation.
     pub fn result_requires_consuming_use(&self) -> bool {
         match &self.kind {
-            OperationKind::Variant { .. } | OperationKind::CloneClosureEnv { .. } => true,
+            OperationKind::RuntimeAlloc { .. }
+            | OperationKind::Variant { .. }
+            | OperationKind::CloneClosureEnv { .. } => true,
             OperationKind::BuildClosure {
                 num_hidden_dicts,
                 has_env_dict,
@@ -246,6 +250,41 @@ impl Operation {
             span,
             operands: Box::new([]),
             kind: OperationKind::AllocaPlace { pointing_to },
+        }
+    }
+
+    /// Allocates an explicitly sized run-time region and returns its base as a materialized pointer
+    /// to `pointee`.
+    ///
+    /// `size` is the complete byte extent, which may hold any number of adjacent `pointee` values;
+    /// `align` is the allocation's positive power-of-two alignment. The fresh allocation is
+    /// uninitialized and remains live until its address is transferred to owning storage or passed
+    /// to [`Self::runtime_dealloc`]. A zero-byte allocation is valid and reclaimable.
+    pub fn runtime_alloc(
+        span: Location,
+        pointee: Type,
+        size: mir::Value,
+        align: mir::Value,
+    ) -> Self {
+        Operation {
+            result_id: None,
+            span,
+            operands: Box::new([size, align]),
+            kind: OperationKind::RuntimeAlloc { pointee },
+        }
+    }
+
+    /// Deallocates the run-time allocation identified by `address`.
+    ///
+    /// The target runtime recovers the allocation's byte extent and alignment from the address;
+    /// neither is repeated in MIR. The allocation's initialized values must already have been
+    /// dropped and its owning storage must be cleared separately.
+    pub fn runtime_dealloc(span: Location, address: mir::Value) -> Self {
+        Operation {
+            result_id: None,
+            span,
+            operands: Box::new([address]),
+            kind: OperationKind::RuntimeDealloc,
         }
     }
 
@@ -974,6 +1013,11 @@ pub enum OperationKind {
     Alloca { ty: Type },
     /// Stack storage for a pointer to a value of `pointing_to`.
     AllocaPlace { pointing_to: Type },
+    /// An explicitly sized run-time allocation whose base is interpreted as a pointer to
+    /// `pointee`.
+    RuntimeAlloc { pointee: Type },
+    /// Pointer-only release of a run-time allocation.
+    RuntimeDealloc,
     /// A statically or dynamically resolved function call with its instantiated call-site type.
     /// Optional metadata records generic instantiation and optimized ownership transfer. Both are
     /// boxed to keep every operation compact; most calls need no metadata at all.
@@ -1082,6 +1126,8 @@ impl OperationKind {
             BuildClosure { function, .. } => visit(function),
             Alloca { .. }
             | AllocaPlace { .. }
+            | RuntimeAlloc { .. }
+            | RuntimeDealloc
             | Call { .. }
             | Project { .. }
             | EndProject
@@ -1124,6 +1170,8 @@ impl OperationKind {
             BuildClosure { function, .. } => Some(*function),
             Alloca { .. }
             | AllocaPlace { .. }
+            | RuntimeAlloc { .. }
+            | RuntimeDealloc
             | Call { .. }
             | Project { .. }
             | EndProject
@@ -1176,6 +1224,9 @@ pub enum OperationResult {
     /// A pointer to a type.
     Pointer(Box<OperationResult>),
 
+    /// A materialized pointer value to a type.
+    MaterializedPointer(Box<OperationResult>),
+
     /// An opaque semantic variant-tag identity. It is compiler-internal, equality-comparable only,
     /// and has no Ferlium-expressible type.
     VariantTag,
@@ -1198,6 +1249,11 @@ impl OperationResult {
     fn pointer_to(pointee: OperationResult) -> OperationResult {
         OperationResult::Pointer(Box::new(pointee))
     }
+
+    /// Returns the type of a materialized pointer to an instance of `pointee`.
+    fn materialized_pointer_to(pointee: OperationResult) -> OperationResult {
+        OperationResult::MaterializedPointer(Box::new(pointee))
+    }
 }
 
 impl OperationKind {
@@ -1209,6 +1265,9 @@ impl OperationKind {
             AllocaPlace { pointing_to } => OperationResult::pointer_to(
                 OperationResult::pointer_to(OperationResult::Lowered(*pointing_to)),
             ),
+            RuntimeAlloc { pointee } => {
+                OperationResult::materialized_pointer_to(OperationResult::Lowered(*pointee))
+            }
             Project { yielded: ty, .. }
             | Subfield { ty, .. }
             | AddressOffset { ty }
@@ -1235,6 +1294,7 @@ impl OperationKind {
             | Clear
             | Memcpy
             | Move
+            | RuntimeDealloc
             | StackRestore
             | CheckCallDepth
             | CheckFuel
@@ -1255,6 +1315,16 @@ impl OperationKind {
             AllocaPlace { .. } => {
                 assert!(whole.operands.is_empty(), "alloca_place takes no operands")
             }
+            RuntimeAlloc { .. } => assert_eq!(
+                whole.operands.len(),
+                2,
+                "runtime_alloc takes the byte size and alignment"
+            ),
+            RuntimeDealloc => assert_eq!(
+                whole.operands.len(),
+                1,
+                "runtime_dealloc takes exactly the allocation address"
+            ),
             Call { .. } => assert!(
                 whole.operands.len() >= 2,
                 "call needs the callee and a trailing result place"
@@ -1426,6 +1496,14 @@ impl OperationKind {
             AllocaPlace { pointing_to } => {
                 write!(f, "alloca_place {}", pointing_to.format_with(env))
             }
+            RuntimeAlloc { pointee } => write!(
+                f,
+                "runtime_alloc {} size {} align {}",
+                pointee.format_with(env),
+                whole.operands[0].format_with(env),
+                whole.operands[1].format_with(env)
+            ),
+            RuntimeDealloc => write!(f, "runtime_dealloc {}", whole.operands[0].format_with(env)),
             Call { ty, metadata } => {
                 write!(f, "call ")?;
                 fmt_callee_and_args(
@@ -1683,9 +1761,12 @@ fn fmt_callee_and_args(
 mod tests {
     use std::mem::size_of;
 
-    use super::{Operation, OperationKind};
+    use super::{Operation, OperationKind, OperationResult};
     use crate::{
-        CompilerSession, Location, format::FormatWith, hir::value::VariantPayloadStorage,
+        CompilerSession, Location,
+        format::FormatWith,
+        hir::value::VariantPayloadStorage,
+        mir::{ParameterId, Value},
         types::r#type::Type,
     };
     use ustr::ustr;
@@ -1723,5 +1804,21 @@ mod tests {
         );
 
         assert_eq!(operation.format_with(&env).to_string(), "variant Some");
+    }
+
+    #[test]
+    fn runtime_allocation_result_is_a_typed_pointer_independent_of_its_extent() {
+        let operation = Operation::runtime_alloc(
+            Location::new_synthesized(),
+            Type::unit(),
+            Value::Parameter(ParameterId::new(0)),
+            Value::Parameter(ParameterId::new(1)),
+        );
+
+        assert_eq!(
+            operation.result(),
+            OperationResult::MaterializedPointer(Box::new(OperationResult::Lowered(Type::unit())))
+        );
+        assert!(operation.result_requires_consuming_use());
     }
 }

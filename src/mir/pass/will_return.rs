@@ -162,6 +162,8 @@ fn operation_returns(operation: &Operation, callee_returns: &impl Fn(FunctionId)
         | OperationKind::DropClosureEnv => false,
         OperationKind::Alloca { .. }
         | OperationKind::AllocaPlace { .. }
+        | OperationKind::RuntimeAlloc { .. }
+        | OperationKind::RuntimeDealloc
         | OperationKind::CompareEqual
         | OperationKind::Load
         | OperationKind::Subfield { .. }

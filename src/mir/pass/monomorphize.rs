@@ -1058,6 +1058,7 @@ fn substitute_in_operation(operation: &mut Operation, mapper: &mut impl TypeMapp
         }
         OperationKind::BuildArray { element_ty } => *element_ty = element_ty.map(mapper),
         OperationKind::AllocaPlace { pointing_to } => *pointing_to = pointing_to.map(mapper),
+        OperationKind::RuntimeAlloc { pointee } => *pointee = pointee.map(mapper),
         OperationKind::Call { ty, metadata } => {
             **ty = ty.map(mapper);
             // The instantiation this body's own calls record. Easy to miss because it is not a
@@ -1086,6 +1087,7 @@ fn substitute_in_operation(operation: &mut Operation, mapper: &mut impl TypeMapp
         | OperationKind::StackRestore
         | OperationKind::CheckCallDepth
         | OperationKind::CheckFuel
+        | OperationKind::RuntimeDealloc
         | OperationKind::DropClosureEnv => {}
         OperationKind::Clone { ty } | OperationKind::Drop { ty } => *ty = ty.map(mapper),
     }

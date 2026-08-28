@@ -82,6 +82,7 @@ impl PlaceRoots {
                 let root = match operation.kind {
                     OperationKind::Alloca { .. }
                     | OperationKind::AllocaPlace { .. }
+                    | OperationKind::RuntimeAlloc { .. }
                     | OperationKind::SubscriptMember { .. } => Some(Root::Alloca(result)),
                     OperationKind::DictEntry { .. } => Some(Root::DictEntry(result)),
                     _ => None,
@@ -494,6 +495,7 @@ fn record_writes(
         OperationKind::Clear | OperationKind::Drop { .. } | OperationKind::DropClosureEnv => {
             write(&operation.operands[0])
         }
+        OperationKind::RuntimeDealloc => write(&operation.operands[0]),
         OperationKind::BuildArray { .. } => {
             if let Some(destination) = operation.operands.last() {
                 write(destination);
@@ -508,6 +510,7 @@ fn record_writes(
         | OperationKind::BuildClosure { .. } => operation.operands.iter().for_each(write),
         OperationKind::Alloca { .. }
         | OperationKind::AllocaPlace { .. }
+        | OperationKind::RuntimeAlloc { .. }
         | OperationKind::CompareEqual
         | OperationKind::Load
         | OperationKind::Subfield { .. }
@@ -680,7 +683,7 @@ mod tests {
         // the register and its operation.
         let alloca = body
             .find(&format!("{result}: "))
-            .filter(|start| body[*start..].starts_with(&format!("{result}: *")))
+            .filter(|start| body[*start..].starts_with(&format!("{result}: place ")))
             .filter(|start| {
                 body[*start..]
                     .split_once(" = ")

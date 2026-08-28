@@ -461,8 +461,7 @@ fn cache_path() -> Option<PathBuf> {
                 .map(|directories| directories.cache_dir().join("compiled-std"))
         })?;
     Some(directory.join(format!(
-        "std-v{}-{}-{}.bin",
-        super::STD_SNAPSHOT_FORMAT_VERSION,
+        "std-{}-{}.bin",
         env!("FERLIUM_STD_SOURCE_FINGERPRINT"),
         env!("FERLIUM_SEMANTIC_BUILD_FINGERPRINT"),
     )))

@@ -33,11 +33,6 @@ pub(crate) use cache::{
 };
 pub(crate) use callable::{NativeCallableCatalog, SnapshotFunctionBody};
 pub(crate) use checkpoint::{ModuleCheckpointShape, SnapshotModuleCheckpoint};
-#[cfg(all(
-    feature = "std-cache",
-    not(all(target_arch = "wasm32", target_os = "unknown"))
-))]
-pub(crate) use envelope::STD_SNAPSHOT_FORMAT_VERSION;
 pub(crate) use envelope::{StdSnapshot, StdSnapshotHeader};
 pub(crate) use function::SnapshotModuleFunction;
 pub(crate) use hir::SnapshotHirArena;

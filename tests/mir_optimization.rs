@@ -250,7 +250,7 @@ fn generated_mixed_value_glue_skips_trivial_members() {
     let clone =
         rendered_function_with_prefix(&raw, "std::Value<(std::int, std::string)>::clone#impl:");
     assert!(clone.contains(
-        "%r0: *int = subfield @c0 from %p1\n    %r1: *int = subfield @c0 from %p0\n    memcpy %r1 to %r0"
+        "%r0: place int = subfield @c0 from %p1\n    %r1: place int = subfield @c0 from %p0\n    memcpy %r1 to %r0"
     ), "the int member must be copied directly:\n{clone}");
     assert!(
         clone.contains("Value<std::string>::clone"),

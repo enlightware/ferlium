@@ -749,6 +749,9 @@ impl<'a> Interpreter<'a> {
                 let place = self.alloc_cell(Value::uninit(), span)?;
                 Self::bind(slots, def.unwrap(), Binding::Place(place));
             }
+            OperationKind::RuntimeAlloc { .. } | OperationKind::RuntimeDealloc => {
+                panic!("runtime allocation operations require the physical MIR interpreter")
+            }
             OperationKind::Subfield { .. } => {
                 self.exec_subfield(func, slots, &operation.operands, def.unwrap());
             }

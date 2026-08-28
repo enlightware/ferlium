@@ -251,6 +251,10 @@ enum SnapshotOperationKind {
     AllocaPlace {
         pointing_to: SnapshotTypeId,
     },
+    RuntimeAlloc {
+        pointee: SnapshotTypeId,
+    },
+    RuntimeDealloc,
     Call {
         ty: SnapshotCallImplType,
         metadata: Option<SnapshotCallMetadata>,
@@ -775,6 +779,10 @@ impl SnapshotOperationKind {
             Source::AllocaPlace { pointing_to } => Stored::AllocaPlace {
                 pointing_to: graph.capture(*pointing_to)?,
             },
+            Source::RuntimeAlloc { pointee } => Stored::RuntimeAlloc {
+                pointee: graph.capture(*pointee)?,
+            },
+            Source::RuntimeDealloc => Stored::RuntimeDealloc,
             Source::Call { ty, metadata } => Stored::Call {
                 ty: SnapshotCallImplType::capture(ty, graph)?,
                 metadata: metadata
@@ -890,6 +898,10 @@ impl SnapshotOperationKind {
             Stored::AllocaPlace { pointing_to } => Runtime::AllocaPlace {
                 pointing_to: resolve_type(types, *pointing_to)?,
             },
+            Stored::RuntimeAlloc { pointee } => Runtime::RuntimeAlloc {
+                pointee: resolve_type(types, *pointee)?,
+            },
+            Stored::RuntimeDealloc => Runtime::RuntimeDealloc,
             Stored::Call { ty, metadata } => Runtime::Call {
                 ty: Box::new(ty.materialize(types)?),
                 metadata: metadata

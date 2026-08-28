@@ -452,6 +452,7 @@ impl PlaceOrigins {
         let origin = match &operation.kind {
             OperationKind::Alloca { .. }
             | OperationKind::AllocaPlace { .. }
+            | OperationKind::RuntimeAlloc { .. }
             | OperationKind::DictEntry { .. }
             | OperationKind::SubscriptMember { .. } => Some(PlaceOrigin {
                 root: Root::Alloca(result),
@@ -854,6 +855,9 @@ fn transfer(
         | OperationKind::CloneClosureEnv { .. } => {
             forget_write(state, origins, &operation.operands[0]);
         }
+        // Deallocation invalidates every cached place which may be rooted in the released region.
+        // Allocation itself produces a fresh root and cannot change an existing cached value.
+        OperationKind::RuntimeDealloc => state.clear(),
         // Restoring can pop the out-slot holding the cached pointer. Scoped projections can run
         // arbitrary setup/cleanup code and are outside the AddressorPlace contract.
         OperationKind::StackRestore | OperationKind::Project { .. } | OperationKind::EndProject => {

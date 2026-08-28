@@ -655,6 +655,8 @@ pub(super) fn may_leave_frame_storage(operation: &mir::Operation) -> bool {
             .any(|operand| matches!(operand, mir::Value::Subscript(_))),
         OperationKind::CompareEqual
         | OperationKind::Load
+        | OperationKind::RuntimeAlloc { .. }
+        | OperationKind::RuntimeDealloc
         | OperationKind::Subfield { .. }
         | OperationKind::AddressOffset { .. }
         | OperationKind::AddressOffsetPlace { .. }

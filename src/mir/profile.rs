@@ -114,6 +114,7 @@ impl MirInstructionKind {
             Self::Operation(Op::Alloca | Op::AllocaPlace | Op::Load | Op::Store | Op::Clear) => {
                 Cost::Storage
             }
+            Self::Operation(Op::RuntimeAlloc | Op::RuntimeDealloc) => Cost::Semantic,
             Self::Operation(
                 Op::Subfield
                 | Op::AddressOffset
@@ -230,6 +231,7 @@ impl MirExecutionProfile {
 
         let ty = match &operation.kind {
             OperationKind::Alloca { ty }
+            | OperationKind::RuntimeAlloc { pointee: ty }
             | OperationKind::Subfield { ty, .. }
             | OperationKind::AddressOffset { ty }
             | OperationKind::DictEntry { ty, .. }

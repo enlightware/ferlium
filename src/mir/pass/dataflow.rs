@@ -57,7 +57,7 @@ use crate::{
 /// A root of addressable storage the analysis can track.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum Root {
-    /// Storage allocated by an `alloca` in this function.
+    /// Storage allocated by an `alloca` or `runtime_alloc` in this function.
     Alloca(ValueId),
     /// Storage owned by the caller and named by a parameter.
     Parameter(ParameterId),
@@ -489,7 +489,7 @@ fn transfer(
     let place_of = |operand| register_places.place_of(operand);
     let tracked = |place| !escaped.contains(&register_places.root_of_place(place));
     match &operation.kind {
-        OperationKind::Alloca { .. } => {
+        OperationKind::Alloca { .. } | OperationKind::RuntimeAlloc { .. } => {
             let Some(result) = operation.result_id() else {
                 return;
             };
@@ -498,9 +498,14 @@ fn transfer(
                 return;
             }
             let place = place_of(&mir::Value::Register(result))
-                .expect("the structural scan interns every alloca");
+                .expect("the structural scan interns every allocation");
             state.forget_within(place, register_places);
             state.places.insert(place, Fact::Uninit);
+        }
+        OperationKind::RuntimeDealloc => {
+            if let Some(place) = place_of(&operation.operands[0]) {
+                state.forget_within(place, register_places);
+            }
         }
         OperationKind::Store => {
             let Some(place) = place_of(&operation.operands[1]) else {
@@ -787,9 +792,9 @@ pub(crate) fn field_index(operand: &mir::Value, func: &Function) -> Option<Proje
 /// Roots that reach a context the analysis does not model, and are therefore never tracked.
 ///
 /// Conservative by construction: the modelled operations below are a whitelist, and every other use
-/// of a place escapes its root. A root also escapes if it is reached other than through an `alloca`
-/// result or a parameter — an operand this scan cannot resolve to a root escapes nothing precisely
-/// because nothing was tracked for it in the first place.
+/// of a place escapes its root. A root also escapes if it is reached other than through an `alloca`,
+/// a `runtime_alloc`, or a parameter — an operand this scan cannot resolve to a root escapes nothing
+/// precisely because nothing was tracked for it in the first place.
 ///
 /// `mutations_modelled` names the operations whose writes through a place the *caller's* transfer
 /// function describes, so that the place stays tracked instead of escaping. Answering true is a
@@ -808,7 +813,10 @@ pub(crate) fn escaping_roots(
     for block_id in func.blocks() {
         for operation in func.block(block_id).operations() {
             match (&operation.kind, operation.result_id()) {
-                (OperationKind::Alloca { .. }, Some(result)) => {
+                (
+                    OperationKind::Alloca { .. } | OperationKind::RuntimeAlloc { .. },
+                    Some(result),
+                ) => {
                     let place = place_builder.intern_root(Root::Alloca(result));
                     place_builder
                         .bindings
@@ -888,7 +896,9 @@ pub(crate) fn escaping_roots(
     let scan = |operation: &Operation, escaped: &mut FxHashSet<Root>| {
         match &operation.kind {
             // Modelled: these consume places in ways the transfer functions describe exactly.
-            OperationKind::Alloca { .. } => {}
+            OperationKind::Alloca { .. } | OperationKind::RuntimeAlloc { .. } => {}
+            // The operation consumes the address without exposing it elsewhere.
+            OperationKind::RuntimeDealloc => {}
             // `comp_eq` borrows its scrutinee for a literal snapshot and never moves it, so the
             // place stays tracked; its second operand is compile-time pattern data.
             OperationKind::Load

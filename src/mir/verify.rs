@@ -340,6 +340,45 @@ struct AnalysisState {
     open_projections: FxHashSet<mir::Value>,
 }
 
+/// Path-sensitive lifetime state of one owned SSA register.
+///
+/// `NOT_PRODUCED | CONSUMED` naturally occurs at a loop header: the first iteration has not run the
+/// definition yet, while a backedge has already consumed the previous iteration's value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OwnedRegisterState(u8);
+
+impl OwnedRegisterState {
+    const NOT_PRODUCED: Self = Self(1 << 0);
+    const LIVE: Self = Self(1 << 1);
+    const CONSUMED: Self = Self(1 << 2);
+
+    fn join(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    fn may_be_live(self) -> bool {
+        self.0 & Self::LIVE.0 != 0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RegisterOwnershipState {
+    registers: FxHashMap<mir::ValueId, OwnedRegisterState>,
+}
+
+impl RegisterOwnershipState {
+    fn join(&mut self, other: &Self) -> bool {
+        debug_assert_eq!(self.registers.len(), other.registers.len());
+        let mut changed = false;
+        for (register, state) in &mut self.registers {
+            let joined = state.join(other.registers[register]);
+            changed |= joined != *state;
+            *state = joined;
+        }
+        changed
+    }
+}
+
 impl AnalysisState {
     fn has_same_allocation_frontier(&self, other: &Self) -> bool {
         self.roots.iter().zip(&other.roots).all(|(left, right)| {
@@ -465,7 +504,7 @@ impl<'a> Verifier<'a> {
         self.collect_value_information();
         self.verify_operand_roles_and_dominance();
         self.verify_source_failure_flow();
-        self.verify_register_consumption();
+        self.verify_register_ownership();
         self.verify_storage_ownership();
     }
 
@@ -1135,35 +1174,116 @@ impl<'a> Verifier<'a> {
         );
     }
 
-    fn verify_register_consumption(&mut self) {
-        let mut consuming_uses: FxHashMap<mir::Value, usize> = FxHashMap::default();
-        for &node in &self.node_order {
-            let Some(whole) = self.operation(node) else {
-                continue;
-            };
-            for (index, operand) in whole.operands.iter().enumerate() {
-                if self.operand_consumes_value(whole, index) {
-                    *consuming_uses.entry(operand.clone()).or_default() += 1;
+    /// Verifies that every executed owned-register definition is consumed exactly once on each
+    /// returning path. A definition may have several syntactic consumers in mutually exclusive
+    /// blocks; joins retain whether any incoming path is still live.
+    fn verify_register_ownership(&self) {
+        let initial = RegisterOwnershipState {
+            registers: self
+                .node_order
+                .iter()
+                .copied()
+                .filter(|node| self.register_needs_consuming_use(*node))
+                .map(|node| {
+                    let mir::Value::Register(register) = self.definition(node).unwrap() else {
+                        unreachable!("operation results are registers")
+                    };
+                    (register, OwnedRegisterState::NOT_PRODUCED)
+                })
+                .collect(),
+        };
+        if initial.registers.is_empty() {
+            return;
+        }
+
+        let mut inputs: Vec<Option<RegisterOwnershipState>> = vec![None; self.node_order.len()];
+        let entry = self.block_first[&self.func.entry()];
+        inputs[self.node_index[&entry]] = Some(initial);
+        let mut worklist = VecDeque::from([entry]);
+
+        while let Some(node) = worklist.pop_front() {
+            let index = self.node_index[&node];
+            let mut state = inputs[index]
+                .clone()
+                .expect("ownership worklist nodes have an input state");
+
+            for (operand_index, operand) in self.operands(node).iter().enumerate() {
+                let mir::Value::Register(register) = operand else {
+                    continue;
+                };
+                let Some(register_state) = state.registers.get_mut(register) else {
+                    continue;
+                };
+                assert_eq!(
+                    *register_state,
+                    OwnedRegisterState::LIVE,
+                    "MIR function `{}` node {}: use of owned register {} while its state is {:?}",
+                    self.func.name,
+                    node,
+                    operand,
+                    register_state
+                );
+                if self
+                    .operation(node)
+                    .is_some_and(|operation| self.operand_consumes_value(operation, operand_index))
+                {
+                    *register_state = OwnedRegisterState::CONSUMED;
                 }
             }
-        }
-        for &node in &self.node_order {
-            let Some(value) = self.definition(node) else {
-                continue;
-            };
+
             if self.register_needs_consuming_use(node) {
-                assert_eq!(
-                    consuming_uses.get(&value).copied().unwrap_or(0),
-                    1,
-                    "MIR function `{}`: owned register {value} must have exactly one consuming use",
-                    self.func.name
+                let mir::Value::Register(register) = self.definition(node).unwrap() else {
+                    unreachable!("operation results are registers")
+                };
+                let previous = state.registers[&register];
+                assert!(
+                    !previous.may_be_live(),
+                    "MIR function `{}` node {}: owned register {} is redefined while its previous loop iteration may still be live",
+                    self.func.name,
+                    node,
+                    register
                 );
+                state.registers.insert(register, OwnedRegisterState::LIVE);
+            }
+
+            if matches!(
+                self.terminator(node),
+                Some(TerminatorKind::Return | TerminatorKind::PropagateError)
+            ) {
+                let live = state
+                    .registers
+                    .iter()
+                    .find(|(_, state)| state.may_be_live());
+                assert!(
+                    live.is_none(),
+                    "MIR function `{}` node {}: frame exits with live owned register {}",
+                    self.func.name,
+                    node,
+                    live.unwrap().0
+                );
+            }
+
+            for (target, _) in self.successors(node) {
+                let target_index = self.node_index[&target];
+                let changed = match &mut inputs[target_index] {
+                    Some(input) => input.join(&state),
+                    slot @ None => {
+                        *slot = Some(state.clone());
+                        true
+                    }
+                };
+                if changed {
+                    worklist.push_back(target);
+                }
             }
         }
     }
 
     fn operand_consumes_value(&self, node: &crate::mir::Operation, index: usize) -> bool {
-        matches!(node.kind, OperationKind::Store) && index == 0
+        matches!(
+            node.kind,
+            OperationKind::Store | OperationKind::RuntimeDealloc
+        ) && index == 0
     }
 
     fn register_needs_consuming_use(&self, node: NodeId) -> bool {
@@ -1243,6 +1363,7 @@ impl<'a> Verifier<'a> {
                     normal.roots[root].set_all(LeafState::ABSENT);
                 }
                 OperationKind::AllocaPlace { .. } => {}
+                OperationKind::RuntimeAlloc { .. } | OperationKind::RuntimeDealloc => {}
                 OperationKind::Store => {
                     self.transfer_store(&operands[0], &operands[1], &mut normal);
                 }
@@ -1864,7 +1985,7 @@ mod tests {
             terminator::Terminator,
         },
         module::{FunctionId, LocalFunctionId, ModuleId},
-        std::{math::int_type, string::string_type},
+        std::{logic::bool_type, math::int_type, string::string_type},
         types::{
             effects::{PrimitiveEffect, effect, no_effects},
             r#type::{CallImplType, CallResultConvention, FnType, Type},
@@ -2331,7 +2452,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "must have exactly one consuming use")]
+    #[should_panic(expected = "frame exits with live owned register")]
     fn rejects_unconsumed_owned_register() {
         let span = Location::new_synthesized();
         let mut f = FunctionBuilder::new("bad_register_lifetime".into(), Default::default());
@@ -2401,6 +2522,212 @@ mod tests {
         append(&mut f, block, Operation::stack_restore(span, marker));
         terminate_return(&mut f, block, span);
         verify(f);
+    }
+
+    #[test]
+    fn a_runtime_allocation_can_be_consumed_by_pointer_only_deallocation() {
+        let span = Location::new_synthesized();
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let mut f = FunctionBuilder::new("runtime_allocation".into(), Default::default());
+        let size = f.add_constant(int_type(), LiteralValue::new_native(24isize), &env);
+        let align = f.add_constant(int_type(), LiteralValue::new_native(8isize), &env);
+        let block = f.add_block();
+        let allocation = append_result(
+            &mut f,
+            block,
+            Operation::runtime_alloc(
+                span,
+                int_type(),
+                Value::Constant(size),
+                Value::Constant(align),
+            ),
+        );
+        append(&mut f, block, Operation::runtime_dealloc(span, allocation));
+        terminate_return(&mut f, block, span);
+        f.finish(env);
+    }
+
+    #[test]
+    fn a_runtime_allocation_can_be_consumed_differently_on_exclusive_paths() {
+        let span = Location::new_synthesized();
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let mut f =
+            FunctionBuilder::new("conditional_runtime_ownership".into(), Default::default());
+        let size = f.add_constant(int_type(), LiteralValue::new_native(24isize), &env);
+        let align = f.add_constant(int_type(), LiteralValue::new_native(8isize), &env);
+        let condition = f.add_constant(bool_type(), LiteralValue::new_native(true), &env);
+        let entry = f.add_block();
+        let deallocate = f.add_block();
+        let transfer = f.add_block();
+        let allocation = append_result(
+            &mut f,
+            entry,
+            Operation::runtime_alloc(
+                span,
+                int_type(),
+                Value::Constant(size),
+                Value::Constant(align),
+            ),
+        );
+        let owner = append_result(&mut f, entry, Operation::alloca_place(span, int_type()));
+        f.set_terminator(
+            entry,
+            Terminator::cond_br(span, Value::Constant(condition), deallocate, transfer),
+        );
+        append(
+            &mut f,
+            deallocate,
+            Operation::runtime_dealloc(span, allocation.clone()),
+        );
+        terminate_return(&mut f, deallocate, span);
+        append(&mut f, transfer, Operation::store(span, allocation, owner));
+        terminate_return(&mut f, transfer, span);
+        f.finish(env);
+    }
+
+    #[test]
+    #[should_panic(expected = "frame exits with live owned register")]
+    fn every_returning_path_must_consume_a_runtime_allocation() {
+        let span = Location::new_synthesized();
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let mut f = FunctionBuilder::new("conditional_runtime_leak".into(), Default::default());
+        let size = f.add_constant(int_type(), LiteralValue::new_native(8isize), &env);
+        let align = f.add_constant(int_type(), LiteralValue::new_native(8isize), &env);
+        let condition = f.add_constant(bool_type(), LiteralValue::new_native(true), &env);
+        let entry = f.add_block();
+        let deallocate = f.add_block();
+        let leak = f.add_block();
+        let join = f.add_block();
+        let allocation = append_result(
+            &mut f,
+            entry,
+            Operation::runtime_alloc(
+                span,
+                int_type(),
+                Value::Constant(size),
+                Value::Constant(align),
+            ),
+        );
+        f.set_terminator(
+            entry,
+            Terminator::cond_br(span, Value::Constant(condition), deallocate, leak),
+        );
+        append(
+            &mut f,
+            deallocate,
+            Operation::runtime_dealloc(span, allocation),
+        );
+        f.set_terminator(deallocate, Terminator::goto(span, join));
+        f.set_terminator(leak, Terminator::goto(span, join));
+        terminate_return(&mut f, join, span);
+        f.finish(env);
+    }
+
+    #[test]
+    #[should_panic(expected = "use of owned register")]
+    fn an_owned_register_cannot_be_used_after_consumption() {
+        let span = Location::new_synthesized();
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let mut f =
+            FunctionBuilder::new("use_after_runtime_deallocation".into(), Default::default());
+        let size = f.add_constant(int_type(), LiteralValue::new_native(8isize), &env);
+        let align = f.add_constant(int_type(), LiteralValue::new_native(8isize), &env);
+        let block = f.add_block();
+        let allocation = append_result(
+            &mut f,
+            block,
+            Operation::runtime_alloc(
+                span,
+                int_type(),
+                Value::Constant(size),
+                Value::Constant(align),
+            ),
+        );
+        append(
+            &mut f,
+            block,
+            Operation::runtime_dealloc(span, allocation.clone()),
+        );
+        append_result(&mut f, block, Operation::load(span, allocation));
+        terminate_return(&mut f, block, span);
+        f.finish(env);
+    }
+
+    #[test]
+    #[should_panic(expected = "owned register")]
+    fn a_runtime_allocation_must_be_transferred_or_deallocated() {
+        let span = Location::new_synthesized();
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let mut f = FunctionBuilder::new("leaked_runtime_allocation".into(), Default::default());
+        let size = f.add_constant(int_type(), LiteralValue::new_native(8isize), &env);
+        let align = f.add_constant(int_type(), LiteralValue::new_native(8isize), &env);
+        let block = f.add_block();
+        append_result(
+            &mut f,
+            block,
+            Operation::runtime_alloc(
+                span,
+                int_type(),
+                Value::Constant(size),
+                Value::Constant(align),
+            ),
+        );
+        terminate_return(&mut f, block, span);
+        f.finish(env);
+    }
+
+    #[test]
+    #[should_panic(expected = "requires a materialized allocation pointer")]
+    fn runtime_deallocation_rejects_the_address_of_a_pointer_slot() {
+        let span = Location::new_synthesized();
+        let mut f = FunctionBuilder::new("deallocate_pointer_slot".into(), Default::default());
+        let block = f.add_block();
+        let slot = append_result(&mut f, block, Operation::alloca_place(span, int_type()));
+        append(&mut f, block, Operation::runtime_dealloc(span, slot));
+        terminate_return(&mut f, block, span);
+        verify(f);
+    }
+
+    #[test]
+    #[should_panic(expected = "requires a materialized allocation pointer")]
+    fn runtime_deallocation_rejects_stack_storage() {
+        let span = Location::new_synthesized();
+        let mut f = FunctionBuilder::new("deallocate_stack_storage".into(), Default::default());
+        let block = f.add_block();
+        let slot = append_result(&mut f, block, Operation::alloca(span, int_type()));
+        append(&mut f, block, Operation::runtime_dealloc(span, slot));
+        terminate_return(&mut f, block, span);
+        verify(f);
+    }
+
+    #[test]
+    #[should_panic(expected = "runtime_alloc operand 0 must be a materialized int")]
+    fn runtime_allocation_rejects_a_non_integer_extent() {
+        let span = Location::new_synthesized();
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let mut f = FunctionBuilder::new("invalid_runtime_extent".into(), Default::default());
+        let size = f.add_constant(bool_type(), LiteralValue::new_native(true), &env);
+        let align = f.add_constant(int_type(), LiteralValue::new_native(1isize), &env);
+        let block = f.add_block();
+        let allocation = append_result(
+            &mut f,
+            block,
+            Operation::runtime_alloc(
+                span,
+                Type::unit(),
+                Value::Constant(size),
+                Value::Constant(align),
+            ),
+        );
+        append(&mut f, block, Operation::runtime_dealloc(span, allocation));
+        terminate_return(&mut f, block, span);
+        f.finish(env);
     }
 
     #[test]
