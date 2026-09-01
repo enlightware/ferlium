@@ -16,7 +16,10 @@ use crate::{
     parser::location::Location,
     std::{
         core_traits_names::NUM_TRAIT_NAME,
-        value::{dynamic_product_member_layouts, value_type_needs_layout_witness},
+        value::{
+            dynamic_product_member_layouts, generated_value_evidence_types,
+            value_type_needs_layout_witness,
+        },
     },
     types::{
         trait_solver::TraitSolver,
@@ -207,6 +210,7 @@ impl UnifiedTypeInference {
         value_trait_id: TraitId,
         env: ModuleEnv<'_>,
     ) {
+        self.activate_compiler_derived_value_constraint_leaves(value_trait_id, env);
         self.substitute_in_local_decls_in_place(locals);
         for local in &mut *locals {
             // A local demands the `Value` witness for either of two independent reasons, and both
@@ -222,11 +226,45 @@ impl UnifiedTypeInference {
             if (deferred_storage_became_owned || allocates_dynamically_sized_storage)
                 && !local.ty.is_function()
             {
-                self.add_activated_value_constraint(value_trait_id, local.ty, local.scope);
+                self.add_activated_value_constraint(value_trait_id, local.ty, local.scope, env);
             }
         }
-        self.activate_take_local_value_constraints(arena, root, locals, value_trait_id);
+        self.activate_take_local_value_constraints(arena, root, locals, value_trait_id, env);
         self.activate_product_layout_constraints(arena, root, value_trait_id, env);
+    }
+
+    /// Replace the public prerequisite of a compiler-derived `Value<X>` application with the
+    /// external evidence leaves from which its closed dictionary is constructed. The original
+    /// obligation remains available to type inference, but does not become a callable parameter.
+    fn activate_compiler_derived_value_constraint_leaves(
+        &mut self,
+        value_trait_id: TraitId,
+        env: ModuleEnv<'_>,
+    ) {
+        let derived = self.remaining_ty_constraints.clone();
+        for constraint in derived {
+            let PubTypeConstraint::HaveTrait {
+                trait_id,
+                input_tys,
+                output_tys,
+                output_effs,
+                span,
+            } = constraint
+            else {
+                continue;
+            };
+            if trait_id != value_trait_id
+                || input_tys.len() != 1
+                || !output_tys.is_empty()
+                || !output_effs.is_empty()
+            {
+                continue;
+            }
+            let ty = self.substitute_in_type(input_tys[0]);
+            if generated_value_evidence_types(ty, &env).is_some() {
+                self.add_activated_value_constraint(value_trait_id, ty, span.use_site, env);
+            }
+        }
     }
 
     /// Activate the direct member-layout evidence needed by generic product construction and
@@ -256,8 +294,16 @@ impl UnifiedTypeInference {
         if let Some(product_ty) = product_ty {
             let product_ty = self.substitute_in_type(product_ty);
             for member_ty in dynamic_product_member_layouts(product_ty, node.span, &env) {
-                self.add_activated_value_constraint(value_trait_id, member_ty, node.span);
+                self.add_activated_value_constraint(value_trait_id, member_ty, node.span, env);
             }
+        }
+        let variant_payload_ty = match &node.kind {
+            NodeKind::Variant(variant) => Some(arena[variant.payload].ty),
+            NodeKind::Project(project) if project.variant_payload => Some(node.ty),
+            _ => None,
+        };
+        if let Some(payload_ty) = variant_payload_ty {
+            self.add_activated_value_constraint(value_trait_id, payload_ty, node.span, env);
         }
         let inst_data = match &node.kind {
             NodeKind::GetFunction(get) => Some(&get.inst_data),
@@ -275,7 +321,12 @@ impl UnifiedTypeInference {
                 {
                     let receiver_ty = self.substitute_in_type(subscript_ty.receiver_ty());
                     for member_ty in dynamic_product_member_layouts(receiver_ty, node.span, &env) {
-                        self.add_activated_value_constraint(value_trait_id, member_ty, node.span);
+                        self.add_activated_value_constraint(
+                            value_trait_id,
+                            member_ty,
+                            node.span,
+                            env,
+                        );
                     }
                 }
             }
@@ -291,16 +342,17 @@ impl UnifiedTypeInference {
         node_id: NodeId,
         locals: &[LocalDecl],
         value_trait_id: TraitId,
+        env: ModuleEnv<'_>,
     ) {
         let node = &arena[node_id];
         if let NodeKind::TakeLocalValue(take) = &node.kind
             && matches!(take.mode, crate::module::PendingTakeLocalValueMode::Unknown)
             && !locals[take.id.as_index()].owns_storage()
         {
-            self.add_activated_value_constraint(value_trait_id, node.ty, node.span);
+            self.add_activated_value_constraint(value_trait_id, node.ty, node.span, env);
         }
         for child in node.kind.child_node_ids() {
-            self.activate_take_local_value_constraints(arena, child, locals, value_trait_id);
+            self.activate_take_local_value_constraints(arena, child, locals, value_trait_id, env);
         }
     }
 
@@ -309,15 +361,31 @@ impl UnifiedTypeInference {
         value_trait_id: TraitId,
         ty: Type,
         span: Location,
+        env: ModuleEnv<'_>,
     ) {
         let ty = self.substitute_in_type(ty);
         if ty.is_function() {
             return;
         }
-        let constraint =
-            PubTypeConstraint::new_have_trait(value_trait_id, vec![ty], vec![], vec![], span);
-        if !self.remaining_ty_constraints.contains(&constraint) {
-            self.remaining_ty_constraints.push(constraint);
+        let evidence_tys = generated_value_evidence_types(ty, &env)
+            .map(|evidence| {
+                evidence
+                    .into_iter()
+                    .filter(|evidence_ty| *evidence_ty != ty)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| vec![ty]);
+        for evidence_ty in evidence_tys {
+            let constraint = PubTypeConstraint::new_have_trait(
+                value_trait_id,
+                vec![evidence_ty],
+                vec![],
+                vec![],
+                span,
+            );
+            if !self.remaining_ty_constraints.contains(&constraint) {
+                self.remaining_ty_constraints.push(constraint);
+            }
         }
     }
 

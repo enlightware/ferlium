@@ -3122,13 +3122,17 @@ fn closure_over_generic_in_concrete_caller() {
 #[test]
 fn closure_forwarding_enclosing_generic_dict() {
     // 2b: a generic-bodied lambda built inside a generic function forwards that function's own
-    // dictionary `@extra` parameters. `build_closure` carries the forwarded `%p` dict operands
-    // (the hidden dicts and the trailing env dictionary) alongside the cloned value capture.
+    // dictionary `@extra` parameters. The aggregate environment dictionary is constructed from
+    // those external leaves and follows the cloned value capture.
     let mut session = TestSession::new();
     let out = session.emit_mir("fn adder(n) { |x| x + n }");
+    let build = out
+        .lines()
+        .find(|line| line.contains("build_closure <test>::$lambda$1("))
+        .unwrap_or_else(|| panic!("no lambda build_closure operation:\n{out}"));
     assert!(
-        out.contains("build_closure <test>::$lambda$1(%p0, %p1, %p2, %r0, %p1)"),
-        "expected forwarded %p dict operands on build_closure, got:\n{out}"
+        build.contains("$lambda$1(%p0, %p1,") && build.ends_with(", %r0)"),
+        "expected forwarded leaf evidence and a closed environment dictionary, got:\n{build}"
     );
 }
 

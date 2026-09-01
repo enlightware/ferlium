@@ -957,7 +957,7 @@ pub struct VariantMetadata {
 /// Static product identity and the run-time member layouts carried by a `subfield` operation.
 ///
 /// `layout_witness_tys` is positional against the evidence operands following the aggregate and
-/// logical field index. It contains only direct inline members whose layouts are not static in the
+/// logical field index. It contains every direct member whose inline layout is not static in the
 /// containing function.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct ProductProjectionMetadata {

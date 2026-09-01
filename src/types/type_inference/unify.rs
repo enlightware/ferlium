@@ -22,10 +22,7 @@ use crate::{
     parser::location::Location,
     std::{
         core_traits_names::{FROM_ITERATOR_TRAIT_NAME, REPR_TRAIT_NAME, VALUE_TRAIT_NAME},
-        value::{
-            is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
-            type_has_static_layout,
-        },
+        value::{is_compiler_provided_value_trait_application, type_has_static_layout},
     },
     types::{
         effects::{EffType, EffectVar, no_effects},
@@ -1166,13 +1163,13 @@ impl UnifiedTypeInference {
             let trait_def = trait_solver.trait_def(trait_id);
             if output_tys.is_empty()
                 && output_effs.is_empty()
-                && (is_value_trait_for_function_type(trait_id, trait_def, &input_tys, &output_tys)
-                    || is_function_surface_only_value_trait_application(
-                        trait_id,
-                        trait_def,
-                        &input_tys,
-                        &output_tys,
-                    ))
+                && is_compiler_provided_value_trait_application(
+                    trait_id,
+                    trait_def,
+                    &input_tys,
+                    &output_tys,
+                    trait_solver,
+                )
             {
                 return Ok(None);
             }

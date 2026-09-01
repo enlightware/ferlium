@@ -28,20 +28,22 @@ use crate::{
     internal_compilation_error,
     module::{
         self, BlanketImpls, BlanketTraitImpls, ConcreteTraitImplKey, CurrentTypeItems, Def,
-        DefKind, DefTable, DictionaryEntryEvidence, FunctionId, LocalDecl, LocalDeclId,
-        LocalFunctionId, LocalImplId, Module, ModuleEnv, ModuleFunction, ModuleId,
-        PendingFunctionBody, PendingFunctionCollector, PendingModuleFunction, ProjectionKey,
-        QualifiedNameEnv, ResolvedValueLayout, TraitDictionary, TraitId, TraitImpl, TraitImplId,
-        TraitImpls, TypeDefId, Visibility, build_capturing_dictionary_value,
-        build_dictionary_value, id::Id, unique_generated_name,
+        DefKind, DefTable, FunctionId, LocalDecl, LocalDeclId, LocalFunctionId, LocalImplId,
+        Module, ModuleEnv, ModuleFunction, ModuleId, PendingFunctionBody, PendingFunctionCollector,
+        PendingModuleFunction, ProjectionKey, QualifiedNameEnv, ResolvedValueLayout,
+        TraitDictionary, TraitId, TraitImpl, TraitImplId, TraitImpls, TypeDefId, Visibility,
+        build_capturing_dictionary_value, build_dictionary_value, dictionary_capture_plan, id::Id,
+        unique_generated_name,
     },
     std::{
         STD_MODULE_ID,
         core_traits_names::{REPR_TRAIT_NAME, TRIVIAL_COPY_TRAIT_NAME, VALUE_TRAIT_NAME},
         value::{
+            generated_value_evidence_types, generated_value_layout_getter,
+            is_compiler_provided_value_trait_application,
             is_function_surface_only_value_trait_application, is_value_trait,
             is_value_trait_for_function_type, value_layout_associated_const_values,
-            value_layout_for_type,
+            value_layout_for_type, value_layout_getter_evidence_types,
         },
     },
     types::effects::{EffType, Effect, EffectVar},
@@ -332,6 +334,37 @@ impl TypeMapper for AlphaCanonicalTypeMapper {
 pub(crate) fn alpha_canonicalize_types(types: &[Type]) -> Vec<Type> {
     let mut mapper = AlphaCanonicalTypeMapper::default();
     types.iter().map(|ty| ty.map(&mut mapper)).collect()
+}
+
+/// Alpha-canonicalize types and return the instantiation from canonical variables back to the
+/// caller's variables. Generated dictionary definitions use the canonical side; construction
+/// sites apply the returned substitution to their capture schemas.
+pub(crate) fn alpha_canonicalize_types_with_instantiation(
+    types: &[Type],
+) -> (Vec<Type>, InstSubst) {
+    let mut mapper = AlphaCanonicalTypeMapper::default();
+    let canonical = types.iter().map(|ty| ty.map(&mut mapper)).collect();
+    let ty_subst = mapper
+        .ty_vars
+        .into_iter()
+        .map(|(original, canonical)| (canonical, Type::variable(original)))
+        .collect();
+    let eff_subst = mapper
+        .effect_vars
+        .into_iter()
+        .map(|(original, canonical)| (canonical, EffType::single_variable(original)))
+        .collect();
+    (canonical, (ty_subst, eff_subst))
+}
+
+pub(crate) fn alpha_canonicalize_dictionary_requirements(
+    requirements: &[DictionaryReq],
+) -> Vec<DictionaryReq> {
+    let mut mapper = AlphaCanonicalTypeMapper::default();
+    requirements
+        .iter()
+        .map(|requirement| requirement.instantiate(&mut mapper))
+        .collect()
 }
 
 pub(crate) fn current_function_map(def_table: &DefTable) -> FxHashMap<Ustr, LocalFunctionId> {
@@ -736,14 +769,16 @@ impl TraitOutputQuery for TraitSolverProbe<'_> {
         output_tys: &[Type],
         output_effs: &[EffType],
     ) -> bool {
-        let trait_def = trait_def_from_parts(self.current_type_items, self.others, trait_id);
-        is_compiler_provided_no_output_trait_application(
-            trait_id,
-            trait_def,
-            input_tys,
-            output_tys,
-            output_effs,
-        )
+        self.with_solver(|solver| {
+            is_compiler_provided_no_output_trait_application(
+                trait_id,
+                solver.trait_def(trait_id),
+                input_tys,
+                output_tys,
+                output_effs,
+                solver,
+            )
+        })
     }
 
     fn solve_outputs_query(
@@ -885,13 +920,13 @@ fn is_compiler_provided_no_output_trait_application(
     input_tys: &[Type],
     output_tys: &[Type],
     output_effs: &[EffType],
+    env: &impl crate::std::value::TypeLayoutEnv,
 ) -> bool {
     output_tys.is_empty()
         && output_effs.is_empty()
-        && (is_value_trait_for_function_type(trait_id, trait_def, input_tys, output_tys)
-            || is_function_surface_only_value_trait_application(
-                trait_id, trait_def, input_tys, output_tys,
-            ))
+        && is_compiler_provided_value_trait_application(
+            trait_id, trait_def, input_tys, output_tys, env,
+        )
 }
 
 impl<'a> TraitSolver<'a> {
@@ -1273,7 +1308,6 @@ impl<'a> TraitSolver<'a> {
                     assumptions,
                     fn_span,
                     arena,
-                    None,
                     BlanketConstraintMode::AllowUnknown,
                 )? {
                     BlanketImplMatch::No => TraitImprovementMatch::No,
@@ -1835,7 +1869,6 @@ impl<'a> TraitSolver<'a> {
         assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
-        value_trait_id: Option<TraitId>,
         mode: BlanketConstraintMode,
     ) -> Result<BlanketImplMatch, InternalCompilationError> {
         // First instantiate the blanket-local type and effect variables with
@@ -1927,21 +1960,10 @@ impl<'a> TraitSolver<'a> {
                             *tag,
                             *payload_ty,
                         )),
-                        PubTypeConstraint::VariantPayloadLayout { payload_ty, .. } => {
-                            // The case provenance is needed when elaborating the blanket method,
-                            // but its runtime argument is the ordinary `Value<payload_ty>`
-                            // dictionary.
-                            runtime_requirements.push(ResolvedRuntimeRequirement {
-                                index: *constraint_index,
-                                req: DictionaryReq::new_trait_impl(
-                                    value_trait_id.expect(
-                                        "layout obligations are excluded from improvement probes",
-                                    ),
-                                    vec![*payload_ty],
-                                    Vec::new(),
-                                    Vec::new(),
-                                ),
-                            });
+                        PubTypeConstraint::VariantPayloadLayout { .. } => {
+                            // This is an inference-only trigger. The payload's ordinary `Value`
+                            // leaves are separate constraints and therefore separate runtime
+                            // requirements; the case-qualified trigger has no ABI slot.
                             continue;
                         }
                         _ => None,
@@ -2499,32 +2521,6 @@ impl<'a> TraitSolver<'a> {
         definition
     }
 
-    fn dictionary_capture_plan(
-        trait_id: TraitId,
-        input_tys: &[Type],
-        requirements: &[DictionaryReq],
-    ) -> (Vec<DictionaryReq>, Vec<DictionaryEntryEvidence>) {
-        let mut schema = Vec::new();
-        let mapping = requirements
-            .iter()
-            .map(|requirement| match requirement {
-                DictionaryReq::TraitImpl {
-                    trait_id: requirement_trait,
-                    input_tys: requirement_inputs,
-                    ..
-                } if *requirement_trait == trait_id && requirement_inputs == input_tys => {
-                    DictionaryEntryEvidence::SelfDictionary
-                }
-                _ => {
-                    let index = schema.len();
-                    schema.push(requirement.clone());
-                    DictionaryEntryEvidence::Capture(index)
-                }
-            })
-            .collect();
-        (schema, mapping)
-    }
-
     fn canonical_entry_requirements(&self, requirements: &[DictionaryReq]) -> Vec<DictionaryReq> {
         let mut canonical = Vec::with_capacity(requirements.len());
         for requirement in requirements {
@@ -2757,22 +2753,70 @@ impl<'a> TraitSolver<'a> {
                 dictionary_ty_for_use,
             ));
         }
-        let associated_const_values =
-            value_layout_associated_const_values(input_tys[0], span, self)?;
-        let associated_const_values = associated_const_values
-            .into_iter()
-            .map(LiteralValue::new_native)
-            .collect::<Vec<_>>();
         let associated_const_names =
             self.impl_associated_const_names(trait_id, &canonical_input_tys, &[], &[], 0, 0, &[]);
-        let associated_const_getters = TraitImpls::bundle_pending_trivial_associated_const_getters(
-            &associated_const_values,
-            &associated_const_tys,
-            &mut self.fn_collector,
-            |index| associated_const_names[index],
-        );
+        let requirements = generated_value_evidence_types(canonical_input_tys[0], self)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|ty| DictionaryReq::new_trait_impl(trait_id, vec![ty], vec![], vec![]))
+            .collect::<Vec<_>>();
+        let static_values =
+            value_layout_associated_const_values(canonical_input_tys[0], span, self).ok();
+        let (associated_const_values, associated_const_getters, getter_requirements) =
+            if let Some(values) = static_values {
+                let values = values
+                    .into_iter()
+                    .map(LiteralValue::new_native)
+                    .collect::<Vec<_>>();
+                let getters = TraitImpls::bundle_pending_trivial_associated_const_getters(
+                    &values,
+                    &associated_const_tys,
+                    &mut self.fn_collector,
+                    |index| associated_const_names[index],
+                );
+                let getter_requirements = vec![Vec::new(); getters.len()];
+                (values, getters, getter_requirements)
+            } else {
+                let mut getters = Vec::with_capacity(associated_const_tys.len());
+                let mut getter_requirements = Vec::with_capacity(associated_const_tys.len());
+                for index in
+                    (0..associated_const_tys.len()).map(TraitAssociatedConstIndex::from_index)
+                {
+                    getter_requirements.push(
+                        value_layout_getter_evidence_types(
+                            canonical_input_tys[0],
+                            index,
+                            span,
+                            self,
+                        )?
+                        .into_iter()
+                        .map(|ty| DictionaryReq::new_trait_impl(trait_id, vec![ty], vec![], vec![]))
+                        .collect(),
+                    );
+                    let getter =
+                        generated_value_layout_getter(canonical_input_tys[0], index, span, self)?;
+                    let id = self.fn_collector.next_id();
+                    self.fn_collector.push_with_visibility(
+                        associated_const_names[index.as_index()],
+                        getter,
+                        Visibility::Module,
+                    );
+                    getters.push(id);
+                }
+                (Vec::new(), getters, getter_requirements)
+            };
         let dictionary_ty = TraitImpls::dictionary_ty(method_tys, associated_const_tys);
-        let dictionary_value = build_dictionary_value(&methods, &associated_const_getters);
+        let entry_requirements = std::iter::repeat_n(requirements, methods.len())
+            .chain(getter_requirements)
+            .collect::<Vec<_>>();
+        let (capture_schema, entry_capture_mappings) =
+            dictionary_capture_plan(trait_id, &canonical_input_tys, &entry_requirements);
+        let dictionary_value = build_capturing_dictionary_value(
+            &methods,
+            &associated_const_getters,
+            capture_schema,
+            entry_capture_mappings,
+        );
         let imp = TraitImpl::new(
             Vec::new(),
             Vec::new(),
@@ -2800,13 +2844,13 @@ impl<'a> TraitSolver<'a> {
         ))
     }
 
-    fn compiler_provided_value_dictionary_node_kind(
+    pub(crate) fn materialize_compiler_provided_value_dictionary(
         &mut self,
         arena: &mut NodeArena,
         trait_id: TraitId,
         input_tys: &[Type],
         span: Location,
-    ) -> Result<(NodeKind, Type), InternalCompilationError> {
+    ) -> Result<(TraitImplId, Type), InternalCompilationError> {
         // Look through the concrete generated-Value cache before deriving method bodies. The
         // lower-level materializer also checks this key, but by then
         // `generic_value_methods_for_type` has already recursively generated every method. Layout
@@ -2826,10 +2870,7 @@ impl<'a> TraitSolver<'a> {
                 self.trait_def(trait_id)
                     .get_dictionary_type_for_tys(input_tys, &[], &[]);
             return Ok((
-                get_dictionary(TraitImplId::new(
-                    self.current_type_items.module.id,
-                    local_id,
-                )),
+                TraitImplId::new(self.current_type_items.module.id, local_id),
                 dictionary_ty,
             ));
         }
@@ -2844,8 +2885,18 @@ impl<'a> TraitSolver<'a> {
         } else {
             generic_value_methods_for_type(self, trait_id, input_tys, span, arena)?
         };
+        self.materialize_generated_value_impl_from_methods(trait_id, input_tys, span, methods)
+    }
+
+    fn compiler_provided_value_dictionary_node_kind(
+        &mut self,
+        arena: &mut NodeArena,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        span: Location,
+    ) -> Result<(NodeKind, Type), InternalCompilationError> {
         let (impl_id, dictionary_ty) =
-            self.materialize_generated_value_impl_from_methods(trait_id, input_tys, span, methods)?;
+            self.materialize_compiler_provided_value_dictionary(arena, trait_id, input_tys, span)?;
         Ok((get_dictionary(impl_id), dictionary_ty))
     }
 
@@ -3236,7 +3287,6 @@ impl<'a> TraitSolver<'a> {
                     ConstraintAssumptions::all(&[]),
                     fn_span,
                     arena,
-                    Some(value_trait_id),
                     blanket_constraint_mode,
                 )?;
                 let BlanketImplMatch::Yes {
@@ -3420,9 +3470,9 @@ impl<'a> TraitSolver<'a> {
                             |index| associated_const_names[index],
                         );
                     let dictionary_ty = TraitImpls::dictionary_ty(tys, associated_const_tys);
-                    let (capture_schema, capture_mapping) =
-                        Self::dictionary_capture_plan(trait_id, input_tys, &entry_requirements);
-                    let mut entry_capture_mappings = vec![capture_mapping; methods.len()];
+                    let method_requirements = vec![entry_requirements.clone(); methods.len()];
+                    let (capture_schema, mut entry_capture_mappings) =
+                        dictionary_capture_plan(trait_id, input_tys, &method_requirements);
                     // These getters were generated immediately above from materialized literals;
                     // their schemes have no hidden evidence parameters.
                     entry_capture_mappings
@@ -3580,9 +3630,9 @@ impl<'a> TraitSolver<'a> {
                 let associated_const_getters = self.impls.data[local_impl_id.as_index()]
                     .associated_const_getters
                     .clone();
-                let (capture_schema, capture_mapping) =
-                    Self::dictionary_capture_plan(trait_id, input_tys, &entry_requirements);
-                let mut entry_capture_mappings = vec![capture_mapping; methods.len()];
+                let method_requirements = vec![entry_requirements.clone(); methods.len()];
+                let (capture_schema, mut entry_capture_mappings) =
+                    dictionary_capture_plan(trait_id, input_tys, &method_requirements);
                 // Materialized associated constants use the capture-free literal getters bundled
                 // with this concrete implementation.
                 entry_capture_mappings
@@ -4025,6 +4075,7 @@ impl TraitOutputQuery for TraitSolver<'_> {
             input_tys,
             output_tys,
             output_effs,
+            self,
         )
     }
 

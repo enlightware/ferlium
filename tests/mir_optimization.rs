@@ -378,7 +378,7 @@ fn final_effect_rows_share_one_concrete_and_one_generic_iterator_artifact_family
         .collect::<Vec<_>>();
     let generic_value = value
         .iter()
-        .filter(|line| line.contains("int ! e₀>"))
+        .filter(|line| !line.contains("int ! ()>"))
         .collect::<Vec<_>>();
     assert_eq!(
         concrete_value.len(),

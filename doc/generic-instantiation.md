@@ -85,11 +85,14 @@ argument lists are always as long as the quantifier lists.
 
 ## Sharing compiler-generated open dictionaries
 
-Some runtime dictionaries are generated while their input type still contains variables. The
-important example is `Value` for a structure whose unresolved parts occur only under function
-fields: those parts affect the semantic function type, but structural `Value` code treats the
-function value as opaque. Blanket trait applications can likewise be materialized with output
-effect variables that the unconstrained query later defaults.
+Some runtime dictionaries are generated while their input type still contains variables. A
+compiler-derived `Value<X>` dictionary closes over the external `Value` evidence at `X`'s leaves;
+recursive occurrences use the dictionary itself. Thus `Value<Tree<T>>` is constructed from
+`Value<T>` rather than becoming another requirement of a generic function. A representation-open
+named type owned by another module is an opaque leaf supplied by its owner's dictionary. The
+`SIZE` and `ALIGN` entries are generated functions over the same captures when the layout is open.
+Function fields remain opaque to the structural code. Blanket trait applications can likewise be
+materialized with output effect variables that the unconstrained query later defaults.
 
 Caller-local variable identities do not distinguish such generated code. Before using an open
 input as a generated-artifact cache key, the compiler alpha-canonicalizes type, mutability and effect

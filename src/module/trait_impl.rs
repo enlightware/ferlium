@@ -211,6 +211,50 @@ pub enum DictionaryEntryEvidence {
     SelfDictionary,
 }
 
+/// Build one closed dictionary's canonical capture schema and per-entry mappings.
+///
+/// A requirement for the dictionary being defined maps to `SelfDictionary`; all other evidence is
+/// deduplicated in first-use order across entries. Methods and associated-constant getters use the
+/// same planner so an executable getter is not a special dictionary representation.
+pub(crate) fn dictionary_capture_plan(
+    trait_id: TraitId,
+    input_tys: &[Type],
+    entry_requirements: &[Vec<DictionaryReq>],
+) -> (Vec<DictionaryReq>, Vec<Vec<DictionaryEntryEvidence>>) {
+    let mut schema = Vec::new();
+    let mappings = entry_requirements
+        .iter()
+        .map(|requirements| {
+            requirements
+                .iter()
+                .map(|requirement| match requirement {
+                    DictionaryReq::TraitImpl {
+                        trait_id: requirement_trait,
+                        input_tys: requirement_inputs,
+                        ..
+                    } if *requirement_trait == trait_id && requirement_inputs == input_tys => {
+                        DictionaryEntryEvidence::SelfDictionary
+                    }
+                    _ => {
+                        let index = schema
+                            .iter()
+                            .position(|existing: &DictionaryReq| {
+                                existing.same_capture_schema_entry(requirement)
+                            })
+                            .unwrap_or_else(|| {
+                                let index = schema.len();
+                                schema.push(requirement.clone());
+                                index
+                            });
+                        DictionaryEntryEvidence::Capture(index)
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    (schema, mappings)
+}
+
 /// A projected entry from a runtime trait dictionary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TraitDictionaryEntry {

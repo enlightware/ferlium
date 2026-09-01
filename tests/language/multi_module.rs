@@ -271,6 +271,48 @@ fn private_repr_type_can_be_named_and_used_through_public_trait_impls() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn foreign_generic_value_layout_uses_the_owner_dictionary() {
+    let mut session = TestSession::new();
+
+    compile_module(
+        &mut session,
+        "base",
+        indoc! { r#"
+            #[private_repr]
+            pub struct Pair<T>(T, T)
+
+            pub fn pair<T>(left: T, right: T) -> Pair<T> {
+                Pair(left, right)
+            }
+        "# },
+    );
+    compile_module(
+        &mut session,
+        "user",
+        indoc! { r#"
+            struct Wrap<T> {
+                pair: base::Pair<T>,
+                marker: int,
+            }
+
+            fn layout<T>(pair: base::Pair<T>) -> int {
+                Value::<Wrap<T>>::SIZE + Value::<Wrap<T>>::ALIGN
+            }
+
+            pub fn result() -> int {
+                layout(base::pair(1, 2))
+            }
+        "# },
+    );
+
+    assert_val_eq!(
+        session.run("user::result()"),
+        int((4 * std::mem::size_of::<usize>()) as isize)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn public_generic_value_impl_can_use_a_private_representation() {
     let mut session = TestSession::new();
 

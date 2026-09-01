@@ -123,11 +123,12 @@ pub(super) fn emitted_associated_const_values(
         if ty_var_count != 0 {
             return Ok(Vec::new());
         }
+        // A cross-module product cycle remains symbolic until the module dependency check rejects
+        // it. Emit getters so that diagnostic, rather than layout synthesis, owns the failure.
         return Ok(
-            value_layout_associated_const_values(input_tys[0], span, solver)?
-                .into_iter()
-                .map(LiteralValue::new_native)
-                .collect(),
+            value_layout_associated_const_values(input_tys[0], span, solver)
+                .map(|values| values.into_iter().map(LiteralValue::new_native).collect())
+                .unwrap_or_default(),
         );
     }
 

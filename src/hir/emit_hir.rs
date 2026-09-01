@@ -74,9 +74,7 @@ use crate::{
         SubscriptMemberFunctionKind, TraitImpl, UModuleFunction, Visibility, YieldProvenance,
         build_dictionary_value, id::Id,
     },
-    std::value::{
-        is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
-    },
+    std::value::is_compiler_provided_value_trait_application,
     std::{STD_MODULE_ID, core_traits_names::VALUE_TRAIT_NAME},
     types::coherence::check_trait_impl,
     types::effects::{EffType, EffectVar},
@@ -1339,10 +1337,13 @@ pub(super) fn is_compiler_provided_value_constraint(
             ..
         } => {
             let trait_def = module_env.trait_def(*trait_id);
-            is_value_trait_for_function_type(*trait_id, trait_def, input_tys, output_tys)
-                || is_function_surface_only_value_trait_application(
-                    *trait_id, trait_def, input_tys, output_tys,
-                )
+            is_compiler_provided_value_trait_application(
+                *trait_id,
+                trait_def,
+                input_tys,
+                output_tys,
+                &module_env,
+            )
         }
         _ => false,
     }

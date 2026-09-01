@@ -521,9 +521,11 @@ fn inferred_function_value_derivation_from_grammar_fuzzer_does_not_panic() {
         .into_inner();
     match error {
         CompilationErrorImpl::TraitImplNotFound { trait_ref, .. } => {
-            assert_eq!(trait_ref, "Value");
+            // Function values are compiler-derived, so inference proceeds to the malformed
+            // iteration and reports its actual unsatisfied operation.
+            assert_eq!(trait_ref, "Iterator");
         }
-        other => panic!("expected TraitImplNotFound for Value, got {other:?}"),
+        other => panic!("expected TraitImplNotFound, got {other:?}"),
     }
 }
 

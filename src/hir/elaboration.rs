@@ -19,8 +19,7 @@ use crate::{
             DictElaborationCtx, DictionaryReq, EvidenceBindingSource, ExtraParameters,
             LateFunctionInstData, StaticEvidence, find_projection_subscript_dict_index,
             find_projection_subscript_dict_index_for_receiver_ty, find_trait_impl_dict_index,
-            find_variant_payload_indirection_index, find_variant_payload_layout_index,
-            instantiate_dictionary_requirements,
+            find_variant_payload_indirection_index, instantiate_dictionary_requirements,
         },
         value_dispatch::{resolve_local_clone, resolve_local_drop},
     },
@@ -81,7 +80,7 @@ use itertools::{Itertools, process_results};
 
 use crate::{
     containers::{SVec2, b},
-    hir::emit_value_impl::{function_value_method, generic_value_methods_for_type},
+    hir::emit_value_impl::function_value_method,
     hir::value::LiteralValue,
     hir::{
         self, ArgConvention, CallArgument, ENodeArena, ENodeId, Elaborated, Node, NodeArena,
@@ -89,9 +88,10 @@ use crate::{
         VariantPayloadStorageSource,
     },
     std::value::{
-        is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
-        type_has_static_layout, value_layout_associated_const_values,
-        variant_payload_storage_for_type,
+        dynamic_product_member_layouts, generated_value_evidence_types,
+        is_function_surface_only_value_trait_application, is_value_trait,
+        is_value_trait_for_function_type, type_has_static_layout,
+        value_layout_associated_const_values, variant_payload_storage_for_type,
     },
     types::effects::{EffType, Effect, EffectsInstSubst, no_effects},
     types::mutability::MutType,
@@ -99,6 +99,7 @@ use crate::{
         CallImplType, CallResultConvention, FnArgType, FnType, Type, TypeKind, TypeVar,
     },
     types::{
+        trait_solver::alpha_canonicalize_types_with_instantiation,
         type_like::TypeLike,
         type_mapper::{BitmapInstantiationMapper, TypeMapper},
     },
@@ -130,20 +131,6 @@ fn function_value_dictionary_node_kind(
         .map(TraitMethodIndex::from_index)
         .map(|method_index| function_value_method(ctx.trait_solver, method_index, span))
         .collect::<Result<Vec<_>, _>>()?;
-    value_dictionary_node_kind_from_methods(trait_id, input_tys, span, methods, ctx)
-}
-
-/// Build a generated `Value` dictionary for a structural type whose unresolved
-/// type variables appear only inside function types.
-fn generic_derived_value_dictionary_node_kind(
-    arena: &mut NodeArena,
-    trait_id: TraitId,
-    input_tys: &[Type],
-    span: Location,
-    ctx: &mut DictElaborationCtx<'_, '_, '_>,
-) -> Result<(NodeKind, Type), InternalCompilationError> {
-    let methods =
-        generic_value_methods_for_type(ctx.trait_solver, trait_id, input_tys, span, arena)?;
     value_dictionary_node_kind_from_methods(trait_id, input_tys, span, methods, ctx)
 }
 
@@ -179,14 +166,30 @@ fn trait_dictionary_node_kind(
         return function_value_dictionary_node_kind(trait_id, &input_tys, span, ctx);
     }
 
-    let trait_def = ctx.trait_solver.trait_def(trait_id);
-    if is_function_surface_only_value_trait_application(
-        trait_id,
-        trait_def,
-        &input_tys,
-        &output_tys,
-    ) {
-        return generic_derived_value_dictionary_node_kind(arena, trait_id, &input_tys, span, ctx);
+    if is_value_trait(trait_id, trait_def)
+        && input_tys.len() == 1
+        && output_tys.is_empty()
+        && generated_value_evidence_types(input_tys[0], ctx.trait_solver).is_some()
+    {
+        let binding = trait_dictionary_evidence_binding(
+            arena,
+            trait_id,
+            &input_tys,
+            &output_tys,
+            &[],
+            span,
+            ctx,
+        )?;
+        let ty = ctx
+            .trait_solver
+            .trait_def(trait_id)
+            .get_dictionary_type_for_tys(&input_tys, &output_tys, &[]);
+        return Ok((
+            NodeKind::LoadDictionary(hir::LoadDictionary {
+                extra_parameter: binding,
+            }),
+            ty,
+        ));
     }
 
     if !input_tys.iter().all(|ty| ty.is_trait_input_resolved()) {
@@ -239,6 +242,51 @@ pub(crate) fn trait_dictionary_evidence_binding(
         output_effs,
         &ctx.retained_effect_vars,
     );
+    let is_open_generated_value = {
+        let trait_def = ctx.trait_solver.trait_def(trait_id);
+        is_value_trait(trait_id, trait_def)
+            && input_tys.len() == 1
+            && output_tys.is_empty()
+            && generated_value_evidence_types(input_tys[0], ctx.trait_solver).is_some()
+    };
+    if is_open_generated_value {
+        let (canonical_input_tys, instantiation) =
+            alpha_canonicalize_types_with_instantiation(&input_tys);
+        let (selected, _) = ctx
+            .trait_solver
+            .materialize_compiler_provided_value_dictionary(
+                arena,
+                trait_id,
+                &canonical_input_tys,
+                span,
+            )?;
+        let definition = TraitDictionaryId::new(selected.module, selected.impl_id);
+        let mut mapper = BitmapInstantiationMapper::new(&instantiation);
+        let capture_schema = ctx
+            .trait_solver
+            .get_impl_data_by_id(selected)
+            .dictionary_value
+            .capture_schema()
+            .iter()
+            .map(|requirement| requirement.instantiate(&mut mapper))
+            .collect::<Vec<_>>();
+        let mut captures = Vec::with_capacity(capture_schema.len());
+        for requirement in &capture_schema {
+            captures.push(evidence_binding_for_requirement(
+                arena,
+                requirement,
+                span,
+                ctx,
+            )?);
+        }
+        let requirement =
+            DictionaryReq::new_trait_impl(trait_id, input_tys, output_tys, output_effs);
+        let source = EvidenceBindingSource::ConstructedDictionary {
+            definition,
+            captures,
+        };
+        return Ok(ctx.intern_evidence_binding(requirement, source));
+    }
     if !input_tys.iter().all(|ty| ty.is_trait_input_resolved()) {
         return Err(internal_compilation_error!(Internal {
             error: format!(
@@ -777,11 +825,11 @@ fn bind_representation_type_instantiation(
     true
 }
 
-/// Extend a late recursive-call substitution through variant constraints.
+/// Extend a late recursive-call substitution through variant-storage constraints.
 ///
 /// The function surface often maps only one node of a mutually recursive type world. Variant
-/// storage and layout requirements retain both their enclosing type and payload type, so
-/// matching the same kind of case requirement propagates that known mapping to the adjacent node.
+/// storage requirements retain both their enclosing type and payload type, so matching the same
+/// case requirement propagates that known mapping to the adjacent node.
 /// A small backtracking search finds the unique globally compatible assignment; choosing
 /// requirements greedily would not be confluent. A shared tag alone is never enough: two unrelated
 /// `.Some` requirements remain ambiguous and cause an internal error rather than exchanging
@@ -896,7 +944,6 @@ fn compatible_variant_requirement_substitutions(
     subst: &VariantRequirementSubstitution,
 ) -> Vec<VariantRequirementSubstitution> {
     let VariantRequirement {
-        kind,
         variant_ty,
         tag,
         payload_ty,
@@ -909,12 +956,11 @@ fn compatible_variant_requirement_substitutions(
                 return None;
             }
             let VariantRequirement {
-                kind: candidate_kind,
                 variant_ty: candidate_variant_ty,
                 tag: candidate_tag,
                 payload_ty: candidate_payload_ty,
             } = *candidate;
-            if candidate_kind != kind || candidate_tag != tag {
+            if candidate_tag != tag {
                 return None;
             }
             let mut trial = subst.clone();
@@ -955,22 +1001,15 @@ fn compatible_variant_requirement_substitutions(
         .collect()
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum VariantEvidenceKind {
-    Storage,
-    Layout,
-}
-
 #[derive(Clone, Copy)]
 struct VariantRequirement {
-    kind: VariantEvidenceKind,
     variant_ty: Type,
     tag: Ustr,
     payload_ty: Type,
 }
 
 fn variant_requirements(parameters: &ExtraParameters) -> Vec<VariantRequirement> {
-    let mut requirements = parameters
+    parameters
         .requirements
         .iter()
         .filter_map(|requirement| match requirement {
@@ -979,23 +1018,13 @@ fn variant_requirements(parameters: &ExtraParameters) -> Vec<VariantRequirement>
                 tag,
                 payload_ty,
             } => Some(VariantRequirement {
-                kind: VariantEvidenceKind::Storage,
                 variant_ty: *variant_ty,
                 tag: *tag,
                 payload_ty: *payload_ty,
             }),
             _ => None,
         })
-        .collect::<Vec<_>>();
-    requirements.extend(parameters.variant_payload_layouts.iter().map(|binding| {
-        VariantRequirement {
-            kind: VariantEvidenceKind::Layout,
-            variant_ty: binding.variant_ty,
-            tag: binding.tag,
-            payload_ty: binding.payload_ty,
-        }
-    }));
-    requirements
+        .collect()
 }
 
 /// Reconstruct effect-variable instantiation while walking corresponding type surfaces.
@@ -1320,6 +1349,43 @@ pub fn elaborate_generated_functions(
         function.definition = module.functions[id.as_index()].definition.clone();
         function.spans = module.functions[id.as_index()].spans.clone();
 
+        // Generators author pending HIR with canonical variable ids A, B, … . An enclosing
+        // inference pass may have renamed the quantifiers in the committed placeholder without
+        // visiting a function generated during that pass. Re-establish the positional
+        // correspondence before dictionary lookup; matching evidence alpha-equivalently at each
+        // use would be ambiguous for functions with several independent variables.
+        let target_type_quantifiers = crate::types::type_scheme::TypeScheme::list_ty_vars(
+            &function.definition.ty_scheme.ty,
+            function.definition.ty_scheme.constraints.iter(),
+        );
+        let type_subst = target_type_quantifiers
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, target)| (TypeVar::new(index as u32), Type::variable(target)))
+            .collect();
+        let target_effect_quantifiers = crate::types::type_scheme::TypeScheme::list_eff_vars(
+            &function.definition.ty_scheme.ty,
+            function.definition.ty_scheme.constraints.iter(),
+        );
+        let effect_subst = target_effect_quantifiers
+            .iter()
+            .copied()
+            .sorted()
+            .enumerate()
+            .map(|(index, target)| {
+                (
+                    crate::types::effects::EffectVar::new(index as u32),
+                    EffType::single_variable(target),
+                )
+            })
+            .collect();
+        let subst = (type_subst, effect_subst);
+        let mut mapper = BitmapInstantiationMapper::new(&subst);
+        crate::hir::emit_hir::instantiate_function_descr_in_place(&mut function, &mut mapper);
+        function.definition.ty_scheme.ty_quantifiers = target_type_quantifiers;
+        function.definition.ty_scheme.eff_quantifiers = target_effect_quantifiers;
+
         let dicts = module.functions[id.as_index()]
             .definition
             .ty_scheme
@@ -1394,6 +1460,50 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             in_progress: FxHashSet::default(),
             warnings,
         }
+    }
+
+    /// Make the closed `Value<ty>` evidence needed by physical layout available to MIR lowering.
+    ///
+    /// Type inference exposes only the external evidence leaves of a compiler-derived aggregate.
+    /// Elaboration constructs the aggregate dictionaries themselves and records them in the
+    /// function evidence graph, where MIR lowering can retrieve them by their logical type.
+    fn ensure_value_layout_evidence(
+        &mut self,
+        ty: Type,
+        span: Location,
+    ) -> Result<(), InternalCompilationError> {
+        if type_has_static_layout(ty, span, self.ctx.trait_solver) {
+            return Ok(());
+        }
+        let value_trait = self
+            .ctx
+            .trait_solver
+            .std_trait_id(crate::std::core_traits_names::VALUE_TRAIT_NAME);
+        trait_dictionary_evidence_binding(
+            &mut self.generated,
+            value_trait,
+            &[ty],
+            &[],
+            &[],
+            span,
+            self.ctx,
+        )?;
+        Ok(())
+    }
+
+    /// Record every dictionary consumed when a product is allocated or one of its fields is
+    /// addressed. Nested open members have their own closed dictionaries even though all of them
+    /// ultimately capture the same source-level leaf evidence.
+    fn ensure_product_layout_evidence(
+        &mut self,
+        aggregate_ty: Type,
+        span: Location,
+    ) -> Result<(), InternalCompilationError> {
+        let members = dynamic_product_member_layouts(aggregate_ty, span, self.ctx.trait_solver);
+        for member in members {
+            self.ensure_value_layout_evidence(member, span)?;
+        }
+        Ok(())
     }
 
     fn push_owned_call_temp(
@@ -2144,17 +2254,11 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 // Even a concrete selected implementation can be a dictionary constructor.
                 // Uniform dictionary projection preserves its hidden evidence; capture-free
                 // dictionaries remain symbolic constants and optimize back to direct calls.
-                let (is_value_function, is_function_surface_only, argument_names) = {
+                let (is_value_function, argument_names) = {
                     let trait_def = self.ctx.trait_solver.trait_def(trait_id);
                     let definition = &trait_def.method(method_index).1;
                     (
                         is_value_trait_for_function_type(trait_id, trait_def, &input_tys, &[]),
-                        is_function_surface_only_value_trait_application(
-                            trait_id,
-                            trait_def,
-                            &input_tys,
-                            &[],
-                        ),
                         definition.arg_names.clone(),
                     )
                 };
@@ -2180,36 +2284,6 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                         ty,
                         inst_data: hir::FnInstData::none(),
                     }))
-                } else if is_function_surface_only {
-                    let (dict_ty, entry_index) = {
-                        let trait_def = self.ctx.trait_solver.trait_def(trait_id);
-                        let dict_ty = trait_def.get_dictionary_type_for_tys(&input_tys, &[], &[]);
-                        let (entry_index, _) =
-                            dictionary_method_projection_data(trait_def, dict_ty, method_index);
-                        (dict_ty, entry_index)
-                    };
-                    let (dict_kind, _) = trait_dictionary_node_kind(
-                        &mut self.generated,
-                        trait_id,
-                        &input_tys,
-                        &[],
-                        &[],
-                        method_span,
-                        self.ctx,
-                    )?;
-                    let dictionary = self.elaborate_synthetic_node(
-                        dict_kind,
-                        dict_ty,
-                        no_effects(),
-                        method_span,
-                    )?;
-                    call_dictionary_function(
-                        dictionary,
-                        entry_index,
-                        arguments.arguments,
-                        argument_names,
-                        ty,
-                    )
                 } else {
                     let (dict_kind, dict_ty) = trait_dictionary_node_kind(
                         &mut self.generated,
@@ -2536,35 +2610,19 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     drop: drop.map(|drop| drop.into_elaborated()),
                 })
             }
-            Tuple(nodes) => Tuple(b(SVec2::from_vec(
-                self.elaborate_node_iter(src, nodes.iter().copied())?,
-            ))),
+            Tuple(nodes) => {
+                self.ensure_product_layout_evidence(node_ty, node_span)?;
+                Tuple(b(SVec2::from_vec(
+                    self.elaborate_node_iter(src, nodes.iter().copied())?,
+                )))
+            }
             Project(project) => {
                 let value = project.value;
                 let index = project.index;
-                if project.variant_payload
-                    && !type_has_static_layout(node_ty, node_span, self.ctx.trait_solver)
-                {
-                    let variant_ty = src[value].ty;
-                    // A projection carries no semantic case tag. That is sufficient here because
-                    // cases with the same payload type use the same Value<B> layout dictionary;
-                    // construction, which must encode the selected tag, performs the exact lookup.
-                    let has_case_layout =
-                        self.ctx
-                            .dicts
-                            .variant_payload_layouts
-                            .iter()
-                            .any(|binding| {
-                                binding.variant_ty == variant_ty && binding.payload_ty == node_ty
-                            });
-                    if !has_case_layout {
-                        return Err(internal_compilation_error!(Internal {
-                            error: format!(
-                                "dynamic variant payload projection from {variant_ty:?} to {node_ty:?} has no case-qualified layout binding"
-                            ),
-                            span: node_span,
-                        }));
-                    }
+                if project.variant_payload {
+                    self.ensure_value_layout_evidence(node_ty, node_span)?;
+                } else {
+                    self.ensure_product_layout_evidence(src[value].ty, node_span)?;
                 }
                 Project(hir::Project {
                     value: self.elaborate_node(src, value)?,
@@ -2572,15 +2630,19 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     variant_payload: project.variant_payload,
                 })
             }
-            Record(nodes) => Record(b(SVec2::from_vec(
-                self.elaborate_node_iter(src, nodes.iter().copied())?,
-            ))),
+            Record(nodes) => {
+                self.ensure_product_layout_evidence(node_ty, node_span)?;
+                Record(b(SVec2::from_vec(
+                    self.elaborate_node_iter(src, nodes.iter().copied())?,
+                )))
+            }
             FieldAccess(field_access) => {
                 use TypeKind::*;
                 let child_id = field_access.value;
                 let field_name = field_access.field;
                 let child = self.elaborate_node(src, child_id)?;
                 let child_ty = src[child_id].ty;
+                self.ensure_product_layout_evidence(child_ty, node_span)?;
                 let ty_data = child_ty.data();
                 let ty_data = if let Some(named) = ty_data.as_named() {
                     let named = named.clone();
@@ -2644,32 +2706,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             }
             Variant(variant) => {
                 let payload_ty = src[variant.payload].ty;
-                if !type_has_static_layout(payload_ty, node_span, self.ctx.trait_solver) {
-                    let index = find_variant_payload_layout_index(
-                        self.ctx.dicts,
-                        node_ty,
-                        variant.tag,
-                        payload_ty,
-                    )
-                    .ok_or_else(|| {
-                        internal_compilation_error!(Internal {
-                            error: format!(
-                                "dynamic payload layout evidence for type {node_ty:?} and case .{}({payload_ty:?}) not found for generic construction",
-                                variant.tag
-                            ),
-                            span: node_span,
-                        })
-                    })?;
-                    let value_trait_id = self
-                        .ctx
-                        .trait_solver
-                        .std_trait_id(crate::std::core_traits_names::VALUE_TRAIT_NAME);
-                    debug_assert!(matches!(
-                        &self.ctx.dicts.requirements[index],
-                        DictionaryReq::TraitImpl { trait_id, input_tys, .. }
-                            if *trait_id == value_trait_id && input_tys.as_slice() == [payload_ty]
-                    ));
-                }
+                self.ensure_value_layout_evidence(payload_ty, node_span)?;
                 let payload_storage = if matches!(&*node_ty.data(), TypeKind::Variable(_)) {
                     let index = find_variant_payload_indirection_index(
                         self.ctx.dicts,
@@ -2794,7 +2831,6 @@ mod tests {
     fn extra_parameters(requirements: Vec<DictionaryReq>) -> ExtraParameters {
         ExtraParameters {
             requirements,
-            variant_payload_layouts: Vec::new(),
             repr_map: FxHashMap::default(),
         }
     }
@@ -3056,7 +3092,6 @@ mod tests {
         );
         let dicts = ExtraParameters {
             requirements: vec![],
-            variant_payload_layouts: vec![],
             repr_map: FxHashMap::default(),
         };
         let generated_projection_subscripts =
@@ -3165,7 +3200,6 @@ mod tests {
         );
         let dicts = ExtraParameters {
             requirements: vec![],
-            variant_payload_layouts: vec![],
             repr_map: FxHashMap::default(),
         };
         let generated_projection_subscripts =
@@ -3234,7 +3268,6 @@ mod tests {
                 vec![],
                 vec![],
             )],
-            variant_payload_layouts: vec![],
             repr_map: FxHashMap::default(),
         };
         let generated_projection_subscripts =

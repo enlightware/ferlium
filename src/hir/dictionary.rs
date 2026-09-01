@@ -20,7 +20,7 @@ use crate::{
     types::{
         effects::{EffType, EffectVar},
         mutability::MutType,
-        trait_solver::TraitSolver,
+        trait_solver::{TraitSolver, alpha_canonicalize_dictionary_requirements},
         r#type::{FnType, SubscriptType, Type, TypeVar},
         type_like::{TypeLike, instantiate_effect_types_in_place, instantiate_types_in_place},
         type_mapper::TypeMapper,
@@ -357,26 +357,12 @@ pub struct EvidenceBinding {
     pub source: EvidenceBindingSource,
 }
 
-/// Associates a case-qualified payload-layout obligation with the physical `Value<payload_ty>`
-/// dictionary parameter that satisfies it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VariantPayloadLayoutBinding {
-    pub variant_ty: Type,
-    pub tag: Ustr,
-    pub payload_ty: Type,
-    pub parameter: EvidenceBindingId,
-}
-
 /// Data structure to hold extra parameters for a function.
 #[derive(Clone, Debug)]
 pub struct ExtraParameters {
     /// The dictionary requirements for the function.
     /// This is a list of dictionaries that will be passed as extra parameters to the function.
     pub requirements: Vec<DictionaryReq>,
-    /// Case-qualified uses of the physical `Value<B>` parameters above.
-    ///
-    /// Several cases, as well as ordinary `Value<B>` operations, may share one parameter.
-    pub variant_payload_layouts: Vec<VariantPayloadLayoutBinding>,
     /// A map from type variables to other type variables containing their representation type.
     /// This is used to resolve type variables when looking up field dict indices.
     pub repr_map: FxHashMap<TypeVar, TypeVar>,
@@ -449,23 +435,6 @@ pub fn find_variant_payload_indirection_index(
                 && *requirement_tag == tag
         )
     })
-}
-
-pub fn find_variant_payload_layout_index(
-    dicts: &ExtraParameters,
-    variant_ty: Type,
-    tag: Ustr,
-    payload_ty: Type,
-) -> Option<usize> {
-    dicts
-        .variant_payload_layouts
-        .iter()
-        .find(|binding| {
-            binding.variant_ty == variant_ty
-                && binding.tag == tag
-                && binding.payload_ty == payload_ty
-        })
-        .map(|binding| binding.parameter.as_index())
 }
 
 pub fn find_trait_impl_dict_index(
@@ -664,15 +633,21 @@ impl<'d, 'sr, 'sm> DictElaborationCtx<'d, 'sr, 'sm> {
                 expected.len(),
                 "constructed dictionary capture count does not match its definition"
             );
+            let actual = captures
+                .iter()
+                .map(|capture| {
+                    self.evidence_bindings[capture.as_index()]
+                        .requirement
+                        .clone()
+                })
+                .collect::<Vec<_>>();
+            let actual = alpha_canonicalize_dictionary_requirements(&actual);
+            let expected = alpha_canonicalize_dictionary_requirements(expected);
             assert!(
-                captures
+                actual
                     .iter()
-                    .zip(expected)
-                    .all(
-                        |(capture, expected)| self.evidence_bindings[capture.as_index()]
-                            .requirement
-                            .same_capture_schema_entry(expected)
-                    ),
+                    .zip(&expected)
+                    .all(|(actual, expected)| actual.same_capture_schema_entry(expected)),
                 "constructed dictionary captures do not match its definition's canonical schema"
             );
         }

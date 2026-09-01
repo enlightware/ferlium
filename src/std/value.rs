@@ -12,7 +12,7 @@ use std::mem;
 use ustr::{Ustr, ustr};
 
 use crate::{
-    FxHashSet, Location,
+    FxHashMap, FxHashSet, Location,
     ast::{Path, UnnamedArg},
     compiler::error::InternalCompilationError,
     containers::b,
@@ -30,15 +30,19 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        self, ConcreteTraitImplKey, FunctionId, LocalDecl, LocalDeclId, Module, ModuleEnv,
-        PendingFunctionBody, PendingLocalDrop, PendingModuleFunction, ProjectionIndex,
+        self, ConcreteTraitImplKey, EvidenceBindingId, FunctionId, LocalDecl, LocalDeclId, Module,
+        ModuleEnv, PendingFunctionBody, PendingLocalDrop, PendingModuleFunction, ProjectionIndex,
         ResolvedValueLayout, TraitId, TraitImpl, TraitImplId, TraitImpls, TypeDefId, id::Id,
     },
     std::{
         STD_MODULE_ID,
-        core_traits_names::{INSPECT_TRAIT_NAME, VALUE_TRAIT_NAME},
+        core_traits_names::{
+            BITS_TRAIT_NAME, INSPECT_TRAIT_NAME, NUM_TRAIT_NAME, ORD_TRAIT_NAME, VALUE_TRAIT_NAME,
+        },
         hash::hasher_type,
         logic::bool_type,
+        math::int_type,
+        ordering::ORDERING_GREATER,
         string::{static_str_type, string_type},
     },
     types::{
@@ -51,6 +55,7 @@ use crate::{
         trait_solver::TraitSolver,
         r#type::{CallImplType, FnArgType, FnType, Type, TypeDef, TypeKind, tuple_type},
         type_like::TypeLike,
+        type_scheme::PubTypeConstraint,
     },
 };
 
@@ -173,13 +178,7 @@ impl ValueLayout {
         Self::new(align_to(size, align), align)
     }
 
-    fn compact_record(mut fields: Vec<(Ustr, ValueLayout)>) -> Self {
-        fields.sort_by(|(left_name, left), (right_name, right)| {
-            compact_record_member_order(*left_name, left.align, *right_name, right.align)
-        });
-        Self::product(fields.into_iter().map(|(_, layout)| layout))
-    }
-
+    #[cfg(test)]
     fn variant(payloads: impl IntoIterator<Item = ValueLayout>) -> Self {
         let tag = Self::native::<u32>();
         let mut size = tag.size;
@@ -190,6 +189,185 @@ impl ValueLayout {
             align = align.max(payload.align);
         }
         Self::new(align_to(size, align), align)
+    }
+}
+
+/// A target-matched `Value` layout expression.
+///
+/// Static layouts fold to [`Constant`](ValueLayoutExpr::Constant). Open layouts retain only the
+/// associated-constant reads which a generated dictionary getter must perform at run time. The
+/// same expression is evaluated for compile-time layout queries and emitted as HIR for open
+/// generated `Value` dictionaries, keeping the two calculations identical by construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ValueLayoutExpr {
+    Constant(isize),
+    AssociatedConst {
+        ty: Type,
+        index: TraitAssociatedConstIndex,
+    },
+    Add(Box<Self>, Box<Self>),
+    Max(Box<Self>, Box<Self>),
+    AlignTo(Box<Self>, Box<Self>),
+}
+
+impl ValueLayoutExpr {
+    fn constant(value: usize, span: Location) -> Result<Self, InternalCompilationError> {
+        isize::try_from(value).map(Self::Constant).map_err(|_| {
+            internal_compilation_error!(Internal {
+                error: format!("Value layout component {value} does not fit in int"),
+                span,
+            })
+        })
+    }
+
+    fn associated_const(ty: Type, index: TraitAssociatedConstIndex) -> Self {
+        Self::AssociatedConst { ty, index }
+    }
+
+    fn add(left: Self, right: Self, span: Location) -> Result<Self, InternalCompilationError> {
+        match (&left, &right) {
+            (Self::Constant(0), _) => Ok(right),
+            (_, Self::Constant(0)) => Ok(left),
+            (Self::Constant(left), Self::Constant(right)) => {
+                left.checked_add(*right).map(Self::Constant).ok_or_else(|| {
+                    internal_compilation_error!(Internal {
+                        error: "Value size does not fit in int".to_owned(),
+                        span,
+                    })
+                })
+            }
+            _ => Ok(Self::Add(Box::new(left), Box::new(right))),
+        }
+    }
+
+    fn max(left: Self, right: Self) -> Self {
+        match (&left, &right) {
+            (Self::Constant(left), Self::Constant(right)) => Self::Constant((*left).max(*right)),
+            _ if left == right => left,
+            _ => Self::Max(Box::new(left), Box::new(right)),
+        }
+    }
+
+    fn align_to(
+        offset: Self,
+        align: Self,
+        span: Location,
+    ) -> Result<Self, InternalCompilationError> {
+        match (&offset, &align) {
+            (_, Self::Constant(1)) | (Self::Constant(0), _) => Ok(offset),
+            (Self::Constant(offset), Self::Constant(align)) => {
+                let offset = usize::try_from(*offset).expect("layout offsets are non-negative");
+                let align = usize::try_from(*align).expect("layout alignments are positive");
+                Self::constant(super::value::align_to(offset, align), span)
+            }
+            _ => Ok(Self::AlignTo(Box::new(offset), Box::new(align))),
+        }
+    }
+
+    pub(crate) fn constant_value(&self) -> Option<isize> {
+        match self {
+            Self::Constant(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    fn collect_evidence_types(&self, evidence: &mut Vec<Type>) {
+        match self {
+            Self::Constant(_) => {}
+            Self::AssociatedConst { ty, .. } => {
+                if !evidence.contains(ty) {
+                    evidence.push(*ty);
+                }
+            }
+            Self::Add(left, right) | Self::Max(left, right) | Self::AlignTo(left, right) => {
+                left.collect_evidence_types(evidence);
+                right.collect_evidence_types(evidence);
+            }
+        }
+    }
+
+    fn evidence_types(&self) -> Vec<Type> {
+        let mut evidence = Vec::new();
+        self.collect_evidence_types(&mut evidence);
+        evidence
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ValueLayoutFormula {
+    pub(crate) size: ValueLayoutExpr,
+    pub(crate) align: ValueLayoutExpr,
+}
+
+impl ValueLayoutFormula {
+    fn constant(layout: ValueLayout, span: Location) -> Result<Self, InternalCompilationError> {
+        Ok(Self {
+            size: ValueLayoutExpr::constant(layout.size, span)?,
+            align: ValueLayoutExpr::constant(layout.align, span)?,
+        })
+    }
+
+    fn product(
+        fields: impl IntoIterator<Item = Self>,
+        compact: bool,
+        span: Location,
+    ) -> Result<Self, InternalCompilationError> {
+        let mut size = ValueLayoutExpr::Constant(0);
+        let mut align = ValueLayoutExpr::Constant(1);
+        for field in fields {
+            if !compact {
+                size = ValueLayoutExpr::align_to(size, field.align.clone(), span)?;
+            }
+            size = ValueLayoutExpr::add(size, field.size, span)?;
+            align = ValueLayoutExpr::max(align, field.align);
+        }
+        size = ValueLayoutExpr::align_to(size, align.clone(), span)?;
+        Ok(Self { size, align })
+    }
+
+    fn variant(
+        payloads: impl IntoIterator<Item = Self>,
+        span: Location,
+    ) -> Result<Self, InternalCompilationError> {
+        let tag = Self::constant(ValueLayout::native::<u32>(), span)?;
+        let mut size = tag.size.clone();
+        let mut align = tag.align.clone();
+        for payload in payloads {
+            let payload_offset =
+                ValueLayoutExpr::align_to(tag.size.clone(), payload.align.clone(), span)?;
+            let payload_end = ValueLayoutExpr::add(payload_offset, payload.size, span)?;
+            size = ValueLayoutExpr::max(size, payload_end);
+            align = ValueLayoutExpr::max(align, payload.align);
+        }
+        size = ValueLayoutExpr::align_to(size, align.clone(), span)?;
+        Ok(Self { size, align })
+    }
+
+    fn resolved(&self, span: Location) -> Result<ValueLayout, InternalCompilationError> {
+        let Some(size) = self.size.constant_value() else {
+            return Err(internal_compilation_error!(Internal {
+                error: "cannot compute Value size without run-time evidence".to_owned(),
+                span,
+            }));
+        };
+        let Some(align) = self.align.constant_value() else {
+            return Err(internal_compilation_error!(Internal {
+                error: "cannot compute Value alignment without run-time evidence".to_owned(),
+                span,
+            }));
+        };
+        let size = usize::try_from(size).expect("layout sizes are non-negative");
+        let align = usize::try_from(align).expect("layout alignments are positive");
+        Ok(ValueLayout::new(size, align))
+    }
+
+    fn associated_const(self, index: TraitAssociatedConstIndex) -> ValueLayoutExpr {
+        if index == VALUE_SIZE_ASSOC_CONST_INDEX {
+            self.size
+        } else {
+            assert_eq!(index, VALUE_ALIGN_ASSOC_CONST_INDEX);
+            self.align
+        }
     }
 }
 
@@ -209,15 +387,8 @@ pub(crate) struct ProductMemberLayout {
     /// Present for records and absent for positional tuple members.
     pub(crate) name: Option<Ustr>,
     pub(crate) ty: Type,
-    pub(crate) storage: ProductMemberStorage,
-    /// Absent exactly when the member's inline layout comes from its run-time `Value` evidence.
+    /// Absent exactly when the member's layout comes from its run-time `Value` evidence.
     pub(crate) static_layout: Option<ResolvedValueLayout>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProductMemberStorage {
-    Inline,
-    Indirect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,6 +405,14 @@ pub(crate) struct ProductLayoutSpec {
 }
 
 impl ProductLayoutSpec {
+    /// Return the logical member types whose layout remains open.
+    pub(crate) fn dynamic_member_layouts(&self) -> Vec<Type> {
+        self.members
+            .iter()
+            .filter_map(|member| member.static_layout.is_none().then_some(member.ty))
+            .collect()
+    }
+
     /// Whether `candidate` precedes `target` in compact-record order, given the ordering of
     /// their alignments.
     pub(crate) fn compact_member_precedes(
@@ -302,22 +481,6 @@ impl ProductLayoutSpec {
     }
 }
 
-fn compact_record_member_order(
-    left_name: Ustr,
-    left_align: usize,
-    right_name: Ustr,
-    right_align: usize,
-) -> std::cmp::Ordering {
-    let alignment_order = left_align.cmp(&right_align);
-    if alignment_order == std::cmp::Ordering::Equal && left_name == right_name {
-        std::cmp::Ordering::Equal
-    } else if compact_record_member_precedes(left_name, right_name, alignment_order) {
-        std::cmp::Ordering::Less
-    } else {
-        std::cmp::Ordering::Greater
-    }
-}
-
 fn compact_record_member_precedes(
     candidate_name: Ustr,
     target_name: Ustr,
@@ -332,6 +495,7 @@ fn compact_record_member_precedes(
 
 pub(crate) trait TypeLayoutEnv {
     fn type_def(&self, id: TypeDefId) -> &TypeDef;
+    fn current_module_id(&self) -> crate::module::ModuleId;
 }
 
 /// Whether following the representation-bearing fields of `start` can return to `target`.
@@ -373,16 +537,16 @@ fn representation_reaches(
     }
 }
 
-/// Classify one embedded field occurrence. An edge inside a recursive representation component is
-/// indirect; every other field is inline.
-fn field_payload_storage(
-    owner: Type,
-    field: Type,
+/// Classify one variant payload occurrence. A recursive payload is indirect; every other payload
+/// is inline. Products always own their members inline, so recursion is cut only at variant edges.
+fn payload_storage_in_variant(
+    variant: Type,
+    payload: Type,
     env: &impl TypeLayoutEnv,
 ) -> VariantPayloadStorage {
     VariantPayloadStorage::from_indirect(representation_reaches(
-        field,
-        owner,
+        payload,
+        variant,
         env,
         &mut FxHashSet::default(),
     ))
@@ -421,7 +585,7 @@ pub(crate) fn variant_payload_storage_for_type(
                 if payload_ty == Type::unit() {
                     return Ok(VariantPayloadStorage::Inline);
                 }
-                return Ok(field_payload_storage(structural_ty, payload_ty, env));
+                return Ok(payload_storage_in_variant(structural_ty, payload_ty, env));
             }
             TypeKind::Named(named) => {
                 structural_ty = env
@@ -442,69 +606,68 @@ impl TypeLayoutEnv for ModuleEnv<'_> {
     fn type_def(&self, id: TypeDefId) -> &TypeDef {
         ModuleEnv::type_def(self, id)
     }
+
+    fn current_module_id(&self) -> crate::module::ModuleId {
+        self.current.module_id()
+    }
 }
 
 impl TypeLayoutEnv for TraitSolver<'_> {
     fn type_def(&self, id: TypeDefId) -> &TypeDef {
         TraitSolver::type_def(self, id)
     }
+
+    fn current_module_id(&self) -> crate::module::ModuleId {
+        self.current_type_items.module.id
+    }
 }
 
-fn layout_for_value_type(
+fn value_layout_formula_inner(
     ty: Type,
     span: Location,
     env: &impl TypeLayoutEnv,
     active: &mut FxHashSet<Type>,
-) -> Result<ValueLayout, InternalCompilationError> {
+) -> Result<ValueLayoutFormula, InternalCompilationError> {
     if !active.insert(ty) {
-        return Err(internal_compilation_error!(Internal {
-            error: format!(
-                "uncut recursive edge while computing the canonical Value layout of {ty:?}"
-            ),
-            span,
-        }));
+        // Valid recursive representations encounter a variant payload before returning here, and
+        // that payload contributes a pointer-sized constant instead. Keeping any remaining cycle
+        // symbolic lets the type/module cycle diagnostics reject it at their proper boundary.
+        return Ok(ValueLayoutFormula {
+            size: ValueLayoutExpr::associated_const(ty, VALUE_SIZE_ASSOC_CONST_INDEX),
+            align: ValueLayoutExpr::associated_const(ty, VALUE_ALIGN_ASSOC_CONST_INDEX),
+        });
     }
     let ty_data = ty.data();
     use TypeKind::*;
     let layout = match &*ty_data {
-        Native(native) => {
-            ValueLayout::new(native.bare_ty.value_size(), native.bare_ty.value_align())
-        }
+        Native(native) => ValueLayoutFormula::constant(
+            ValueLayout::new(native.bare_ty.value_size(), native.bare_ty.value_align()),
+            span,
+        )?,
         Tuple(member_tys) => {
             let member_tys = member_tys.clone();
             drop(ty_data);
             let fields = member_tys
                 .into_iter()
-                .map(|member_ty| {
-                    if field_payload_storage(ty, member_ty, env).is_indirect() {
-                        Ok(ValueLayout::native::<usize>())
-                    } else {
-                        layout_for_value_type(member_ty, span, env, active)
-                    }
-                })
+                .map(|member_ty| value_layout_formula_inner(member_ty, span, env, active))
                 .collect::<Result<Vec<_>, _>>()?;
             active.remove(&ty);
-            return Ok(ValueLayout::product(fields));
+            return ValueLayoutFormula::product(fields, false, span);
         }
         Record(fields) => {
-            let named_field_tys = fields
+            let field_tys = fields
                 .iter()
-                .map(|(name, field_ty)| (*name, *field_ty))
+                .map(|(_, field_ty)| *field_ty)
                 .collect::<Vec<_>>();
             drop(ty_data);
-            let fields = named_field_tys
+            let fields = field_tys
                 .into_iter()
-                .map(|(name, field_ty)| {
-                    let layout = if field_payload_storage(ty, field_ty, env).is_indirect() {
-                        Ok(ValueLayout::native::<usize>())
-                    } else {
-                        layout_for_value_type(field_ty, span, env, active)
-                    }?;
-                    Ok((name, layout))
-                })
+                .map(|field_ty| value_layout_formula_inner(field_ty, span, env, active))
                 .collect::<Result<Vec<_>, _>>()?;
             active.remove(&ty);
-            return Ok(ValueLayout::compact_record(fields));
+            // Compact ordering removes all interior padding. Names affect offsets, but the total
+            // layout is the aligned sum of member sizes with the maximum member alignment.
+            return ValueLayoutFormula::product(fields, true, span);
         }
         Variant(variants) => {
             let payload_tys = variants
@@ -515,40 +678,184 @@ fn layout_for_value_type(
             let payloads = payload_tys
                 .into_iter()
                 .map(|payload_ty| {
-                    if field_payload_storage(ty, payload_ty, env).is_indirect() {
-                        Ok(ValueLayout::native::<usize>())
+                    if payload_storage_in_variant(ty, payload_ty, env).is_indirect() {
+                        ValueLayoutFormula::constant(ValueLayout::native::<usize>(), span)
                     } else {
-                        layout_for_value_type(payload_ty, span, env, active)
+                        value_layout_formula_inner(payload_ty, span, env, active)
                     }
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             active.remove(&ty);
-            return Ok(ValueLayout::variant(payloads));
+            return ValueLayoutFormula::variant(payloads, span);
         }
         Named(named) => {
             let named = named.clone();
             drop(ty_data);
-            let shape_ty = env
-                .type_def(named.def)
-                .instantiated_shape_with_effects(&named.params, &named.effect_params);
-            let layout = layout_for_value_type(shape_ty, span, env, active)?;
+            let type_def = env.type_def(named.def);
+            // A representation-open foreign type is an opaque layout leaf supplied by its
+            // owner-provided Value dictionary. Effect variables confined to callable fields do
+            // not make the representation open, so their fixed layout remains computable here.
+            if !ty.is_constant()
+                && (type_def.has_custom_value_impl
+                    || type_def
+                        .attributes
+                        .iter()
+                        .any(|attribute| attribute.path.0 == ustr(NO_DERIVE_VALUE_ATTRIBUTE))
+                    || (named.def.module != env.current_module_id()
+                        && value_type_needs_layout_witness(ty)))
+            {
+                active.remove(&ty);
+                return Ok(ValueLayoutFormula {
+                    size: ValueLayoutExpr::associated_const(ty, VALUE_SIZE_ASSOC_CONST_INDEX),
+                    align: ValueLayoutExpr::associated_const(ty, VALUE_ALIGN_ASSOC_CONST_INDEX),
+                });
+            }
+            let shape_ty =
+                type_def.instantiated_shape_with_effects(&named.params, &named.effect_params);
+            let layout = value_layout_formula_inner(shape_ty, span, env, active)?;
             active.remove(&ty);
             return Ok(layout);
         }
-        Function(_) | Subscript(_) => ValueLayout::callable(),
-        Never => ValueLayout::product([]),
-        Variable(_) => {
-            drop(ty_data);
-            active.remove(&ty);
-            return Err(internal_compilation_error!(Internal {
-                error: format!("cannot compute Value layout for type {ty:?}"),
-                span,
-            }));
-        }
+        Function(_) | Subscript(_) => ValueLayoutFormula::constant(ValueLayout::callable(), span)?,
+        Never => ValueLayoutFormula::product([], false, span)?,
+        Variable(_) => ValueLayoutFormula {
+            size: ValueLayoutExpr::associated_const(ty, VALUE_SIZE_ASSOC_CONST_INDEX),
+            align: ValueLayoutExpr::associated_const(ty, VALUE_ALIGN_ASSOC_CONST_INDEX),
+        },
     };
     drop(ty_data);
     active.remove(&ty);
     Ok(layout)
+}
+
+pub(crate) fn value_layout_formula_for_type(
+    ty: Type,
+    span: Location,
+    env: &impl TypeLayoutEnv,
+) -> Result<ValueLayoutFormula, InternalCompilationError> {
+    value_layout_formula_inner(ty, span, env, &mut FxHashSet::default())
+}
+
+pub(crate) fn value_layout_getter_evidence_types(
+    ty: Type,
+    associated_const: TraitAssociatedConstIndex,
+    span: Location,
+    env: &impl TypeLayoutEnv,
+) -> Result<Vec<Type>, InternalCompilationError> {
+    Ok(value_layout_formula_for_type(ty, span, env)?
+        .associated_const(associated_const)
+        .evidence_types())
+}
+
+fn collect_generated_value_evidence_types(
+    ty: Type,
+    root: Type,
+    env: &impl TypeLayoutEnv,
+    active: &mut FxHashSet<Type>,
+    evidence: &mut Vec<Type>,
+) -> bool {
+    if ty.is_constant() || ty.is_function() || ty.is_subscript() {
+        return true;
+    }
+    if !active.insert(ty) {
+        if ty == root && !evidence.contains(&ty) {
+            evidence.push(ty);
+        }
+        return true;
+    }
+
+    let data = ty.data().clone();
+    let derivable = match data {
+        TypeKind::Tuple(fields) => fields.into_iter().all(|field| {
+            collect_generated_value_evidence_types(field, root, env, active, evidence)
+        }),
+        TypeKind::Record(fields) | TypeKind::Variant(fields) => {
+            fields.into_iter().all(|(_, field)| {
+                collect_generated_value_evidence_types(field, root, env, active, evidence)
+            })
+        }
+        TypeKind::Named(named) => {
+            let type_def = env.type_def(named.def);
+            let compiler_derived = named.def.module == env.current_module_id()
+                && !type_def.has_custom_value_impl
+                && !type_def
+                    .attributes
+                    .iter()
+                    .any(|attribute| attribute.path.0 == ustr(NO_DERIVE_VALUE_ATTRIBUTE));
+            if compiler_derived {
+                let shape =
+                    type_def.instantiated_shape_with_effects(&named.params, &named.effect_params);
+                collect_generated_value_evidence_types(shape, root, env, active, evidence)
+            } else {
+                if !evidence.contains(&ty) {
+                    evidence.push(ty);
+                }
+                true
+            }
+        }
+        TypeKind::Variable(_) | TypeKind::Native(_) => {
+            if !evidence.contains(&ty) {
+                evidence.push(ty);
+            }
+            true
+        }
+        TypeKind::Function(_) | TypeKind::Subscript(_) | TypeKind::Never => true,
+    };
+    active.remove(&ty);
+    derivable
+}
+
+/// Return the external `Value` evidence from which a compiler-derived dictionary can be built.
+/// Recursive occurrences of the root are retained for entry mapping to `SelfDictionary`; they do
+/// not become dictionary captures.
+pub(crate) fn generated_value_evidence_types(
+    ty: Type,
+    env: &impl TypeLayoutEnv,
+) -> Option<Vec<Type>> {
+    let data = ty.data().clone();
+    let root_is_derivable = match data {
+        TypeKind::Tuple(_) | TypeKind::Record(_) | TypeKind::Variant(_) => true,
+        TypeKind::Named(named) => {
+            let type_def = env.type_def(named.def);
+            named.def.module == env.current_module_id()
+                && !type_def.has_custom_value_impl
+                && !type_def
+                    .attributes
+                    .iter()
+                    .any(|attribute| attribute.path.0 == ustr(NO_DERIVE_VALUE_ATTRIBUTE))
+        }
+        TypeKind::Function(_) | TypeKind::Subscript(_) => true,
+        TypeKind::Variable(_) | TypeKind::Native(_) | TypeKind::Never => false,
+    };
+    if !root_is_derivable {
+        return None;
+    }
+    let mut evidence = Vec::new();
+    collect_generated_value_evidence_types(ty, ty, env, &mut FxHashSet::default(), &mut evidence)
+        .then_some(evidence)
+}
+
+/// Return whether a complete `Value` dictionary for this application is synthesized by the
+/// compiler from its external evidence leaves.
+pub(crate) fn is_compiler_provided_value_trait_application(
+    trait_id: TraitId,
+    trait_def: &Trait,
+    input_tys: &[Type],
+    output_tys: &[Type],
+    env: &impl TypeLayoutEnv,
+) -> bool {
+    is_value_trait(trait_id, trait_def)
+        && input_tys.len() == 1
+        && output_tys.is_empty()
+        && generated_value_evidence_types(input_tys[0], env).is_some()
+}
+
+fn layout_for_value_type(
+    ty: Type,
+    span: Location,
+    env: &impl TypeLayoutEnv,
+) -> Result<ValueLayout, InternalCompilationError> {
+    value_layout_formula_for_type(ty, span, env)?.resolved(span)
 }
 
 pub(crate) fn value_layout_for_type(
@@ -556,7 +863,7 @@ pub(crate) fn value_layout_for_type(
     span: Location,
     env: &impl TypeLayoutEnv,
 ) -> Result<ResolvedValueLayout, InternalCompilationError> {
-    let layout = layout_for_value_type(ty, span, env, &mut FxHashSet::default())?;
+    let layout = layout_for_value_type(ty, span, env)?;
     let size = u32::try_from(layout.size).map_err(|_| {
         internal_compilation_error!(Internal {
             error: format!("Value size {} does not fit in u32", layout.size),
@@ -577,7 +884,7 @@ pub(crate) fn value_layout_associated_const_values(
     span: Location,
     env: &impl TypeLayoutEnv,
 ) -> Result<[isize; 2], InternalCompilationError> {
-    layout_for_value_type(ty, span, env, &mut FxHashSet::default())?.associated_const_values(span)
+    layout_for_value_type(ty, span, env)?.associated_const_values(span)
 }
 
 /// Returns whether `ty` has a statically known run-time layout: its size and alignment can be
@@ -594,29 +901,21 @@ pub(crate) fn value_layout_associated_const_values(
 /// Storage of a statically sized type may be allocated with a plain `alloca` and moved with direct
 /// `load`/`store`; everything else must go through its `Value` dictionary witness.
 pub(crate) fn type_has_static_layout(ty: Type, span: Location, env: &impl TypeLayoutEnv) -> bool {
-    layout_for_value_type(ty, span, env, &mut FxHashSet::default()).is_ok()
+    layout_for_value_type(ty, span, env).is_ok()
 }
 
-/// Return the direct inline product members whose layouts require run-time `Value` evidence.
+/// Return the product members whose physical lowering requires run-time `Value` evidence.
 ///
-/// The returned order is the logical tuple/record order. Recursive representation edges are
-/// pointers and therefore need no member witness. Named products are inspected through their
-/// instantiated structural shape while retaining the named owner for recursive-edge detection.
+/// The returned order is the logical tuple/record order. Named products are inspected through
+/// their instantiated structural shape.
 pub(crate) fn dynamic_product_member_layouts(
     ty: Type,
     span: Location,
     env: &impl TypeLayoutEnv,
 ) -> Vec<Type> {
-    product_members(ty, env)
-        .map(|product| product.members)
+    product_layout_spec(ty, span, env)
+        .map(|product| product.dynamic_member_layouts())
         .unwrap_or_default()
-        .into_iter()
-        .filter_map(|(_, member)| {
-            (!field_payload_storage(ty, member, env).is_indirect()
-                && !type_has_static_layout(member, span, env))
-            .then_some(member)
-        })
-        .collect()
 }
 
 struct DirectProductMembers {
@@ -672,25 +971,10 @@ pub(crate) fn product_layout_spec(
     let members = product
         .members
         .into_iter()
-        .map(|(name, member_ty)| {
-            let (storage, static_layout) =
-                if field_payload_storage(ty, member_ty, env).is_indirect() {
-                    (
-                        ProductMemberStorage::Indirect,
-                        Some(ResolvedValueLayout::native::<usize>()),
-                    )
-                } else {
-                    (
-                        ProductMemberStorage::Inline,
-                        value_layout_for_type(member_ty, span, env).ok(),
-                    )
-                };
-            ProductMemberLayout {
-                name,
-                ty: member_ty,
-                storage,
-                static_layout,
-            }
+        .map(|(name, member_ty)| ProductMemberLayout {
+            name,
+            ty: member_ty,
+            static_layout: value_layout_for_type(member_ty, span, env).ok(),
         })
         .collect();
     Some(ProductLayoutSpec {
@@ -856,7 +1140,7 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
             .get_local_or_import_function(span, module_path, function_name)
     }
 
-    fn value_method_call(
+    fn trait_method_call(
         &mut self,
         method: ValueMethod,
         span: Location,
@@ -972,7 +1256,235 @@ fn value_method_call_node(
     locals: &mut Vec<LocalDecl>,
     arguments: Vec<NodeId>,
 ) -> Result<NodeId, InternalCompilationError> {
-    ctx.value_method_call(method, span, arena, locals, arguments)
+    ctx.trait_method_call(method, span, arena, locals, arguments)
+}
+
+fn named_trait_method_call_node(
+    ctx: &mut ValueBodyCtx<'_, '_>,
+    trait_name: &str,
+    method_name: &str,
+    arguments: Vec<NodeId>,
+    arena: &mut NodeArena,
+    locals: &mut Vec<LocalDecl>,
+    span: Location,
+) -> Result<NodeId, InternalCompilationError> {
+    let trait_id = ctx.solver.std_trait_id(trait_name);
+    let method_index = ctx
+        .solver
+        .trait_def(trait_id)
+        .method_index(ustr(method_name))
+        .expect("compiler-known trait method exists");
+    ctx.trait_method_call(
+        ValueMethod {
+            trait_id,
+            input_ty: int_type(),
+            method_index,
+        },
+        span,
+        arena,
+        locals,
+        arguments,
+    )
+}
+
+fn value_layout_expr_node(
+    expr: &ValueLayoutExpr,
+    evidence: &FxHashMap<Type, EvidenceBindingId>,
+    ctx: &mut ValueBodyCtx<'_, '_>,
+    arena: &mut NodeArena,
+    locals: &mut Vec<LocalDecl>,
+    span: Location,
+) -> Result<NodeId, InternalCompilationError> {
+    let node = match expr {
+        ValueLayoutExpr::Constant(value) => {
+            alloc_synth_node(arena, hir::hir_syn::native(*value), int_type())
+        }
+        ValueLayoutExpr::AssociatedConst { ty, index } => {
+            let value_trait = ctx.solver.std_trait_id(VALUE_TRAIT_NAME);
+            let trait_def = ctx.solver.trait_def(value_trait);
+            let dictionary_ty = trait_def.get_dictionary_type_for_tys(&[*ty], &[], &[]);
+            let dictionary = alloc_synth_node(
+                arena,
+                hir::NodeKind::LoadDictionary(hir::LoadDictionary {
+                    extra_parameter: evidence[ty],
+                }),
+                dictionary_ty,
+            );
+            alloc_synth_node(
+                arena,
+                hir::hir_syn::call_dictionary_function(
+                    dictionary,
+                    trait_def.dictionary_associated_const_index(*index),
+                    Vec::new(),
+                    Vec::new(),
+                    CallImplType::value(FnType::new_by_val([], int_type(), EffType::empty())),
+                ),
+                int_type(),
+            )
+        }
+        ValueLayoutExpr::Add(left, right) => {
+            let left = value_layout_expr_node(left, evidence, ctx, arena, locals, span)?;
+            let right = value_layout_expr_node(right, evidence, ctx, arena, locals, span)?;
+            named_trait_method_call_node(
+                ctx,
+                NUM_TRAIT_NAME,
+                "add",
+                vec![left, right],
+                arena,
+                locals,
+                span,
+            )?
+        }
+        ValueLayoutExpr::Max(left, right) => {
+            use hir::hir_syn::*;
+
+            let left = value_layout_expr_node(left, evidence, ctx, arena, locals, span)?;
+            let right = value_layout_expr_node(right, evidence, ctx, arena, locals, span)?;
+            let local_slot = locals.len();
+            let (store_left, left_id) = store_new_local(
+                left,
+                local_slot,
+                "$layout_left",
+                MutVal::constant(),
+                int_type(),
+                locals,
+            );
+            let store_left = alloc_synth_node(arena, store_left, Type::unit());
+            let (store_right, right_id) = store_new_local(
+                right,
+                local_slot + 1,
+                "$layout_right",
+                MutVal::constant(),
+                int_type(),
+                locals,
+            );
+            let store_right = alloc_synth_node(arena, store_right, Type::unit());
+            let left = alloc_synth_node(arena, load_local(left_id), int_type());
+            let right = alloc_synth_node(arena, load_local(right_id), int_type());
+            let comparison = named_trait_method_call_node(
+                ctx,
+                ORD_TRAIT_NAME,
+                "cmp",
+                vec![left, right],
+                arena,
+                locals,
+                span,
+            )?;
+            let take_left = alloc_synth_node(arena, load_local(left_id), int_type());
+            let take_right = alloc_synth_node(arena, load_local(right_id), int_type());
+            let maximum = alloc_synth_node(
+                arena,
+                case(
+                    comparison,
+                    vec![(
+                        LiteralValue::new_variant_tag(ustr(ORDERING_GREATER)),
+                        take_left,
+                    )],
+                    take_right,
+                ),
+                int_type(),
+            );
+            alloc_synth_node(
+                arena,
+                block_with_cleanup([store_left, store_right, maximum], vec![left_id, right_id]),
+                int_type(),
+            )
+        }
+        ValueLayoutExpr::AlignTo(offset, align) => {
+            let offset = value_layout_expr_node(offset, evidence, ctx, arena, locals, span)?;
+            let align = value_layout_expr_node(align, evidence, ctx, arena, locals, span)?;
+            let one = alloc_synth_node(arena, hir::hir_syn::native(1_isize), int_type());
+            let align_minus_one = named_trait_method_call_node(
+                ctx,
+                NUM_TRAIT_NAME,
+                "sub",
+                vec![align, one],
+                arena,
+                locals,
+                span,
+            )?;
+            let sum = named_trait_method_call_node(
+                ctx,
+                NUM_TRAIT_NAME,
+                "add",
+                vec![offset, align_minus_one],
+                arena,
+                locals,
+                span,
+            )?;
+            let neg_align = named_trait_method_call_node(
+                ctx,
+                NUM_TRAIT_NAME,
+                "neg",
+                vec![align],
+                arena,
+                locals,
+                span,
+            )?;
+            named_trait_method_call_node(
+                ctx,
+                BITS_TRAIT_NAME,
+                "bit_and",
+                vec![sum, neg_align],
+                arena,
+                locals,
+                span,
+            )?
+        }
+    };
+    Ok(node)
+}
+
+/// Build one executable `Value::SIZE` or `Value::ALIGN` getter for an open structural type.
+///
+/// The function's hidden constraints are exactly the associated-constant reads retained by the
+/// canonical layout expression. Dictionary construction can therefore close the getter over the
+/// same evidence without giving associated constants a second runtime representation.
+pub(crate) fn generated_value_layout_getter(
+    input_ty: Type,
+    associated_const: TraitAssociatedConstIndex,
+    span: Location,
+    solver: &mut TraitSolver<'_>,
+) -> Result<PendingModuleFunction, InternalCompilationError> {
+    let expression =
+        value_layout_formula_for_type(input_ty, span, solver)?.associated_const(associated_const);
+    let evidence_tys = expression.evidence_types();
+    let value_trait = solver.std_trait_id(VALUE_TRAIT_NAME);
+    let constraints = evidence_tys
+        .iter()
+        .copied()
+        .map(|ty| {
+            PubTypeConstraint::new_have_trait(value_trait, vec![ty], Vec::new(), Vec::new(), span)
+        })
+        .collect::<Vec<_>>();
+    let evidence = evidence_tys
+        .into_iter()
+        .enumerate()
+        .map(|(index, ty)| (ty, EvidenceBindingId::from_index(index)))
+        .collect();
+    let definition = CallableDefinition::new_infer_quantifiers_with_constraints(
+        FnType::new_by_val([], int_type(), EffType::empty()),
+        constraints,
+        [],
+        "Compiler-generated Value layout getter.",
+    );
+    let mut arena = NodeArena::default();
+    let mut locals = Vec::new();
+    let mut ctx = ValueBodyCtx::generic(solver);
+    let root = value_layout_expr_node(
+        &expression,
+        &evidence,
+        &mut ctx,
+        &mut arena,
+        &mut locals,
+        span,
+    )?;
+    Ok(PendingModuleFunction::new(
+        definition,
+        PendingScriptFunction::new(arena, root, 0),
+        None,
+        locals,
+    ))
 }
 
 const FUNCTION_VALUE_METHOD_NAMES: [&str; 5] = [

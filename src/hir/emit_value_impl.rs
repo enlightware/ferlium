@@ -11,20 +11,28 @@ use crate::{
     FxHashMap, FxHashSet, Location, Modules, ast,
     compiler::error::InternalCompilationError,
     hir::{
-        NodeArena, dictionary::DictElaborationCtx, elaboration::elaborate_generated_functions,
-        emit_associated_consts::emitted_associated_const_values, emit_functions::EmitTraitOutput,
-        emit_hir::add_source_associated_const_getters,
+        NodeArena,
+        dictionary::DictElaborationCtx,
+        elaboration::elaborate_generated_functions,
+        emit_associated_consts::emitted_associated_const_values,
+        emit_functions::EmitTraitOutput,
+        emit_hir::{
+            PendingModuleFunctions, add_pending_function_anonymous,
+            add_source_associated_const_getters,
+        },
     },
     internal_compilation_error,
     module::{
         LocalFunctionId, Module, ModuleEnv, PendingGeneratedStructuralProjectionSubscripts,
-        PendingModuleFunction, QualifiedNameEnv, TypeDefId, Visibility, id::Id,
+        PendingModuleFunction, QualifiedNameEnv, TypeDefId, Visibility,
+        build_capturing_dictionary_value, dictionary_capture_plan, id::Id,
     },
     std::core_traits_names::VALUE_TRAIT_NAME,
     std::value::{
         NO_DERIVE_VALUE_ATTRIBUTE, derive_generic_value_code_entries,
-        function_value_method_function, function_value_method_name,
-        is_function_surface_only_value_type, variant_payload_storage_type,
+        function_value_method_function, function_value_method_name, generated_value_evidence_types,
+        generated_value_layout_getter, variant_payload_storage_for_type,
+        variant_payload_storage_type,
     },
     types::{
         coherence::check_trait_impl,
@@ -75,6 +83,17 @@ pub(crate) fn generic_value_methods_for_type(
     // the use-site dictionary retains the caller's actual type.
     let canonical_input_tys = alpha_canonicalize_types(input_tys);
     let input_tys = canonical_input_tys.as_slice();
+    let evidence_tys = generated_value_evidence_types(input_tys[0], solver).ok_or_else(|| {
+        internal_compilation_error!(TraitImplNotFound {
+            trait_ref: trait_id,
+            input_tys: input_tys.to_vec(),
+            fn_span: span,
+        })
+    })?;
+    let constraints = evidence_tys
+        .into_iter()
+        .map(|ty| PubTypeConstraint::new_have_trait(trait_id, vec![ty], vec![], vec![], span))
+        .collect::<Vec<_>>();
     let Some(code_entries) =
         derive_generic_value_code_entries(trait_id, input_tys, span, arena, solver)?
     else {
@@ -89,11 +108,16 @@ pub(crate) fn generic_value_methods_for_type(
         let trait_def = solver.trait_def(trait_id);
         let definitions = trait_def.instantiate_for_tys(input_tys, &[], &[]);
         let qualified_name_env = solver.qualified_name_env();
+        let suffix = if input_tys.iter().any(|ty| !ty.is_constant()) {
+            "-generic"
+        } else {
+            ""
+        };
         let method_names = (0..definitions.len())
             .map(|index| {
                 let method_index = TraitMethodIndex::from_index(index);
                 Ustr::from(&format!(
-                    "{}-generic",
+                    "{}{suffix}",
                     qualified_name_env.disambiguated_impl_method_name(
                         trait_id,
                         trait_def,
@@ -111,7 +135,7 @@ pub(crate) fn generic_value_methods_for_type(
         (definitions, method_names)
     };
     let mut methods = Vec::with_capacity(code_entries.len());
-    for (method_index, (definition, (body, locals))) in
+    for (method_index, (mut definition, (body, locals))) in
         definitions.into_iter().zip(code_entries).enumerate()
     {
         let name = method_names[method_index];
@@ -124,6 +148,10 @@ pub(crate) fn generic_value_methods_for_type(
             continue;
         }
 
+        definition.ty_scheme = TypeScheme::new_infer_quantifiers_with_constraints(
+            definition.ty_scheme.ty.clone(),
+            constraints.clone(),
+        );
         let runtime_arg_count = definition.arg_names.len();
         let function =
             PendingModuleFunction::from_body(definition, body, runtime_arg_count, None, locals);
@@ -193,12 +221,8 @@ fn auto_value_constraints(
         constraints.insert(constraint);
     }
 
-    for (variant_case, member_ty) in auto_value_direct_members(input_ty, env) {
-        if member_ty == Type::unit()
-            || member_ty.is_function()
-            || is_function_surface_only_value_type(member_ty)
-            || !type_has_any_ty_var(member_ty, params)
-        {
+    for member_ty in generated_value_evidence_types(input_ty, env).unwrap_or_default() {
+        if member_ty == Type::unit() || !type_has_any_ty_var(member_ty, params) {
             continue;
         }
         let constraint = PubTypeConstraint::new_have_trait(
@@ -209,7 +233,13 @@ fn auto_value_constraints(
             span,
         );
         constraints.insert(constraint);
+    }
+
+    for (variant_case, member_ty) in auto_value_direct_members(input_ty, env) {
         if let Some((variant_ty, tag)) = variant_case {
+            if variant_payload_storage_for_type(variant_ty, tag, span, env).is_ok() {
+                continue;
+            }
             // The layout witness describes the object projected directly from the variant. For
             // scalar payloads that object is the uniform one-element tuple storage, even though
             // the generated Value method subsequently projects and operates on the scalar member.
@@ -453,16 +483,63 @@ pub(super) fn emit_auto_value_impls(
                 eff_var_count,
                 &constraints,
             );
-        associated_const_names.truncate(associated_const_values.len());
-        let associated_const_getters = add_source_associated_const_getters(
-            output,
-            others,
-            &associated_const_values,
-            &associated_const_tys,
-            &associated_const_names,
-            type_def_span,
-        )?;
-        output.add_emitted_impl(
+        let associated_const_getters = if associated_const_values.is_empty()
+            && !associated_const_tys.is_empty()
+        {
+            let getters = {
+                let mut solver = trait_solver_from_module!(output, others);
+                (0..associated_const_tys.len())
+                    .map(crate::types::r#trait::TraitAssociatedConstIndex::from_index)
+                    .map(|index| {
+                        generated_value_layout_getter(input_ty, index, type_def_span, &mut solver)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            let mut pending = PendingModuleFunctions::default();
+            let ids = getters
+                .into_iter()
+                .map(|getter| add_pending_function_anonymous(output, &mut pending, getter))
+                .collect::<Vec<_>>();
+            elaborate_generated_functions(output, others, &mut pending, ids.iter().copied())?;
+            for (name, id) in associated_const_names
+                .iter()
+                .copied()
+                .zip(ids.iter().copied())
+            {
+                output.name_function_with_visibility(id, name, Visibility::Module);
+            }
+            ids
+        } else {
+            associated_const_names.truncate(associated_const_values.len());
+            add_source_associated_const_getters(
+                output,
+                others,
+                &associated_const_values,
+                &associated_const_tys,
+                &associated_const_names,
+                type_def_span,
+            )?
+        };
+        let entry_requirements = function_ids
+            .iter()
+            .chain(associated_const_getters.iter())
+            .map(|id| {
+                output.functions[id.as_index()]
+                    .definition
+                    .ty_scheme
+                    .extra_parameters(ModuleEnv::new(output, others))
+                    .requirements
+            })
+            .collect::<Vec<_>>();
+        let (capture_schema, entry_capture_mappings) =
+            dictionary_capture_plan(value_trait_id, &[input_ty], &entry_requirements);
+        let dictionary_value = build_capturing_dictionary_value(
+            &function_ids,
+            &associated_const_getters,
+            capture_schema,
+            entry_capture_mappings,
+        );
+        let impl_id = output.add_emitted_impl(
             value_trait_id,
             EmitTraitOutput {
                 input_tys: vec![input_ty],
@@ -479,6 +556,7 @@ pub(super) fn emit_auto_value_impls(
             public,
             Some(type_def_span),
         );
+        output.impls.data[impl_id.as_index()].dictionary_value = dictionary_value;
     }
 
     Ok(())

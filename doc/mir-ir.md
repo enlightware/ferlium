@@ -170,7 +170,7 @@ The operation kind fixes operand arity, roles, and result shape. The main groups
 | Group | Operations | Contract |
 |---|---|---|
 | storage | `alloca`, `alloca_place`, `runtime_alloc`, `runtime_dealloc`, `load`, `store`, `clear`, `memcpy`, `move` | Stack storage follows stack regions; runtime storage has an explicit lifetime. `store` never drops; `memcpy` requires a concrete `TrivialCopy` pointee; `move` leaves its source absent. |
-| aggregates | `subfield`, `variant`, `extract_tag`, `build_array` | Aggregate construction and ownership remain field-addressable. Product `subfield` records its aggregate type and carries `Value` witnesses for direct inline members with open layouts. A variant operation first builds an uninitialized payload shell. Generic variant construction and payload-marked `subfield` operations carry the selected payload's `Value<B>` layout witness; projection reads inline/indirect classification from the stored tag. `extract_tag` yields an opaque semantic tag, not the raw ABI word. `build_array` initializes fresh canonical array storage from borrowed `TrivialCopy` elements. |
+| aggregates | `subfield`, `variant`, `extract_tag`, `build_array` | Aggregate construction and ownership remain field-addressable. Product `subfield` records its aggregate type and carries `Value` witnesses for direct members with open inline layouts. A variant operation first builds an uninitialized payload shell. Generic variant construction and payload-marked `subfield` operations carry the selected payload's `Value<B>` layout witness; projection reads inline/indirect classification from the stored tag. `extract_tag` yields an opaque semantic tag, not the raw ABI word. `build_array` initializes fresh canonical array storage from borrowed `TrivialCopy` elements. |
 | evidence | `dict_entry`, `build_dictionary`, `subscript_member`, `build_subscript` | Evidence remains symbolic. Construction closes a definition over evidence operands; dictionary entries are closed function places. |
 | calls/projections | `call`, `project`, `end_project` | Proven source-infallible forms are ordinary operations. Potentially source-fallible forms occur only inside `invoke`. |
 | ownership | `clone`, `drop`, `build_closure`, `clone_closure_env`, `drop_closure_env` | Semantic ownership actions are explicit. `Value::clone` and `Value::drop` are source-infallible by contract. |
@@ -258,8 +258,8 @@ serialized standalone MIR format will need explicit normalized-layout/equality m
 
 ## Physical MIR stage
 
-> Status: canonical compact inline-product byte-address lowering is implemented; indirect product
-> ownership, the remaining representations, and the unboxed interpreter are planned.
+> Status: canonical compact product byte-address lowering is implemented; variant payloads, the
+> remaining representations, and the unboxed interpreter are planned.
 
 Physical lowering consumes the complete optimized `MirArtifacts`, including declared bodies and
 retained specializations. It resolves physical addresses, representations, callable environments,
@@ -319,17 +319,16 @@ address_offset_place<A>(base_address, byte_offset: int) -> place *A
 
 The base is address-bearing and the offset is a materialized Ferlium `int`. `address_offset` yields
 an aligned inline place of `A`; `address_offset_place` yields a slot containing an indirect place of
-`A`, which `load` dereferences. Both retain the base allocation's provenance. Byte-offset
-expressions use ordinary calls such as `Num<int>::add` and `Num<int>::mul`.
+`A`. Loading the latter yields `*A`, while using that pointer as an address reaches `place A`. Both
+retain the base allocation's provenance. Byte-offset expressions use ordinary calls such as
+`Num<int>::add` and `Num<int>::mul`.
 
 Semantic MIR retains logical `subfield` operations through its ordinary optimization rounds. A
 product projection names the aggregate and carries the direct member `Value` witnesses required
-when its physical offset is still open. Physical lowering replaces inline projections with an
-ABI-derived offset and `address_offset`, emitting a closed addressor helper over those witnesses
-when needed. Owning indirect members retain their logical projection until their lifecycle is
-expanded, so the readiness verifier rejects such a projection until that pass is implemented.
-Remaining borrows can then use `address_offset_place` and `load`. Buffer call expansion uses the
-loaded backing pointer and element-size evidence.
+when an inline layout is open. Physical lowering replaces it with `address_offset`, emitting a
+closed addressor helper over open layout witnesses when needed. Variant payload lowering introduces
+indirection only for recursive payloads. Buffer call expansion uses the loaded backing pointer and
+element-size evidence.
 
 ### First-class subscript environments
 

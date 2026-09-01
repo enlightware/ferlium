@@ -1086,11 +1086,10 @@ fn partial_call_outcome(
     }
 }
 
-/// Where an operation carries its callee, for the three kinds that dispatch through one.
+/// Where an operation carries its callee for direct and lifecycle dispatch.
 ///
-/// `drop` and `clone` name a `Value` method exactly as a call names a function — the interpreter
-/// resolves all three through the same contract, a constant reference or the place of a function
-/// value read by reference — so all three are devirtualizable at the same price.
+/// Drop and clone operations name a `Value` method exactly as a call names a function: a constant
+/// reference or the place of a function value read by reference.
 fn callee_operand_index(operation: &Operation) -> Option<usize> {
     match operation.kind {
         OperationKind::Call { .. } => Some(0),

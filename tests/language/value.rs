@@ -2591,11 +2591,11 @@ fn open_generic_variant_match_accepts_recursive_payload_storage() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn variant_layout_and_ordinary_value_requirement_share_dictionary() {
-    // Spell out `Value<(T,)>` so this exercises an ordinary dictionary obligation and the
-    // case-qualified layout obligation for exactly the same physical evidence slot.
+    // The tuple and variant dictionaries are constructed from the one source-level `Value<T>`
+    // leaf rather than becoming additional parameters of `wrap`.
     let source = r#"
         enum Option<T> { None, Some(T) }
-        fn wrap<T>(x: T) -> Option<T> where T: Value, (T,): Value {
+        fn wrap<T>(x: T) -> Option<T> where T: Value {
             let mut payload = (x,);
             let copied = payload;
             Option::Some(copied.0)
@@ -2610,8 +2610,8 @@ fn variant_layout_and_ordinary_value_requirement_share_dictionary() {
         .unwrap_or_else(|| panic!("no `wrap` MIR signature:\n{mir}"));
     assert_eq!(
         wrap_signature.matches("@extra").count(),
-        2,
-        "expected one Value<T> and one shared Value<(T,)> parameter:\n{wrap_signature}"
+        1,
+        "expected only the external Value<T> evidence leaf:\n{wrap_signature}"
     );
     for mode in RunMode::ALL {
         let mut session = TestSession::new();
@@ -2638,8 +2638,8 @@ fn variant_cases_with_the_same_payload_share_layout_dictionary() {
         .unwrap_or_else(|| panic!("no `choose` MIR signature:\n{mir}"));
     assert_eq!(
         choose_signature.matches("@extra").count(),
-        2,
-        "expected one Value<T> and one Value<(T,)> shared by both cases:\n{choose_signature}"
+        1,
+        "expected both cases to reuse the one external Value<T> evidence leaf:\n{choose_signature}"
     );
     for mode in RunMode::ALL {
         let mut session = TestSession::new();

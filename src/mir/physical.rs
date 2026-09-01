@@ -30,7 +30,7 @@ use crate::{
         math::int_type,
         ordering::{ORDERING_EQUAL, ORDERING_GREATER},
         value::{
-            ProductLayoutOrder, ProductLayoutSpec, ProductMemberLayout, ProductMemberStorage,
+            ProductLayoutOrder, ProductLayoutSpec, ProductMemberLayout,
             VALUE_ALIGN_ASSOC_CONST_INDEX, VALUE_SIZE_ASSOC_CONST_INDEX, product_layout_spec,
             value_layout_getter_entry,
         },
@@ -54,9 +54,6 @@ pub(crate) enum BackendReadinessError {
         operation: &'static str,
     },
     InvalidProductProjection {
-        function: FunctionId,
-    },
-    UnsupportedIndirectProductMember {
         function: FunctionId,
     },
     InvalidPhysicalCall {
@@ -86,11 +83,6 @@ impl fmt::Display for BackendReadinessError {
             Self::InvalidProductProjection { function } => write!(
                 f,
                 "physical entry m{}:f{} contains an invalid product projection",
-                function.module, function.function
-            ),
-            Self::UnsupportedIndirectProductMember { function } => write!(
-                f,
-                "physical entry m{}:f{} projects an indirect product member before its ownership operations have been lowered",
                 function.module, function.function
             ),
             Self::InvalidPhysicalCall {
@@ -244,18 +236,7 @@ impl<'a> PhysicalLowerer<'a> {
         if member.ty != *field_ty {
             return Err(BackendReadinessError::InvalidProductProjection { function });
         }
-        // An indirect member's slot owns its pointee allocation. Construction, move, clone and drop
-        // must be expanded while the logical projection is still visible; only then can remaining
-        // borrows become address_offset_place plus load.
-        if member.storage == ProductMemberStorage::Indirect {
-            return Err(BackendReadinessError::UnsupportedIndirectProductMember { function });
-        }
-        let expected_witnesses = spec
-            .members
-            .iter()
-            .filter(|member| member.static_layout.is_none())
-            .map(|member| member.ty)
-            .collect::<Vec<_>>();
+        let expected_witnesses = spec.dynamic_member_layouts();
         if expected_witnesses.as_slice() != product.layout_witness_tys.as_ref() {
             return Err(BackendReadinessError::InvalidProductProjection { function });
         }
@@ -270,24 +251,10 @@ impl<'a> PhysicalLowerer<'a> {
                 edit.add_constant(int_type(), LiteralValue::new_native(offset), &self.env);
             let base = operation.operands[0].clone();
             let offset = Value::Constant(constant);
-            match member.storage {
-                ProductMemberStorage::Inline => {
-                    let mut replacement =
-                        Operation::address_offset(operation.span, base, offset, *field_ty);
-                    replacement.assign_result_id(Some(result));
-                    edit.replace_operation_sequence(block, operation_index, [replacement]);
-                }
-                ProductMemberStorage::Indirect => {
-                    let mut slot_operation =
-                        Operation::address_offset_place(operation.span, base, offset, *field_ty);
-                    let slot = edit
-                        .assign_new_result(&mut slot_operation)
-                        .expect("address_offset_place produces a place slot");
-                    let mut load = Operation::load(operation.span, slot);
-                    load.assign_result_id(Some(result));
-                    edit.replace_operation_sequence(block, operation_index, [slot_operation, load]);
-                }
-            }
+            let mut replacement =
+                Operation::address_offset(operation.span, base, offset, *field_ty);
+            replacement.assign_result_id(Some(result));
+            edit.replace_operation_sequence(block, operation_index, [replacement]);
             return Ok(());
         }
 
@@ -581,21 +548,11 @@ fn finish_product_addressor(
     span: Location,
 ) -> Function {
     let byte_offset = append_result(&mut builder, block, Operation::load(span, offset));
-    let address = match member.storage {
-        ProductMemberStorage::Inline => append_result(
-            &mut builder,
-            block,
-            Operation::address_offset(span, base, byte_offset, member.ty),
-        ),
-        ProductMemberStorage::Indirect => {
-            let slot = append_result(
-                &mut builder,
-                block,
-                Operation::address_offset_place(span, base, byte_offset, member.ty),
-            );
-            append_result(&mut builder, block, Operation::load(span, slot))
-        }
-    };
+    let address = append_result(
+        &mut builder,
+        block,
+        Operation::address_offset(span, base, byte_offset, member.ty),
+    );
     builder.append_operation(block, Operation::store(span, address, destination));
     builder.set_terminator(block, Terminator::ret(span));
     builder.finish_unverified()
@@ -1198,26 +1155,5 @@ mod tests {
             1,
             "field zero has a constant offset and the second open member needs an addressor"
         );
-    }
-
-    #[test]
-    fn an_indirect_recursive_member_waits_for_ownership_lowering() {
-        let mut session = CompilerSession::new();
-        let module = compile(
-            &mut session,
-            "enum List { Nil, Cons(int, List) }\n\
-             fn tail(value: List) -> List {\n\
-                 match value { Cons(head, tail) => tail, Nil => List::Nil }\n\
-             }",
-            "indirect_product_member",
-        );
-        let error = match lower(&mut session, module) {
-            Ok(_) => panic!("indirect product lowering must wait for ownership expansion"),
-            Err(error) => error,
-        };
-        let BackendReadinessError::UnsupportedIndirectProductMember { function } = error else {
-            panic!("unexpected physical-lowering error: {error}");
-        };
-        assert_eq!(function.module, module);
     }
 }

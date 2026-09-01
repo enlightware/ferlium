@@ -16,7 +16,7 @@ use crate::{
         self, NodeArena, NodeId, NodeKind,
         dictionary::{DictElaborationCtx, find_trait_impl_dict_index},
         elaboration::trait_dictionary_evidence_binding,
-        emit_value_impl::{function_value_method, generic_value_methods_for_type},
+        emit_value_impl::function_value_method,
         function::{ArgConvention, arg_conventions_for_args},
     },
     internal_compilation_error,
@@ -28,7 +28,8 @@ use crate::{
         core_traits_names::VALUE_TRAIT_NAME,
         string::{STRING_FROM_STATIC_FUNCTION_NAME, static_str_type, string_type},
         value::{
-            VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX, is_function_surface_only_value_type,
+            VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX, generated_value_evidence_types,
+            is_function_surface_only_value_type,
         },
     },
     types::{
@@ -126,22 +127,16 @@ fn resolve_value_method_dispatch(
             function_value_method(ctx.trait_solver, method_index, span)?,
         )));
     }
-    if is_function_surface_only_value_type(ty) {
-        let value_trait_id = ctx.trait_solver.std_trait_id(VALUE_TRAIT_NAME);
-        let methods =
-            generic_value_methods_for_type(ctx.trait_solver, value_trait_id, &[ty], span, arena)?;
-        return Ok(ResolvedValueMethodDispatch::Static(FunctionId::new(
-            current_module,
-            methods[usize::from(method_index)],
-        )));
-    }
     let value_trait_id = ctx.trait_solver.std_trait_id(VALUE_TRAIT_NAME);
     if let Some(dict_index) = find_trait_impl_dict_index(ctx.dicts, value_trait_id, &[ty]) {
         return Ok(ResolvedValueMethodDispatch::Dictionary(
             EvidenceBindingId::from_index(dict_index),
         ));
     }
-    if ty.is_constant() {
+    if ty.is_constant()
+        || is_function_surface_only_value_type(ty)
+        || generated_value_evidence_types(ty, ctx.trait_solver).is_some()
+    {
         return Ok(ResolvedValueMethodDispatch::Dictionary(
             trait_dictionary_evidence_binding(arena, value_trait_id, &[ty], &[], &[], span, ctx)?,
         ));
@@ -399,6 +394,7 @@ fn validate_generated_temp_drop(
         .solve_concrete_trivial_copy_layout(ty, span)?
         .is_some()
         || is_function_surface_only_value_type(ty)
+        || generated_value_evidence_types(ty, trait_solver).is_some()
     {
         return Ok(());
     }

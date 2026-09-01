@@ -22,6 +22,7 @@ use crate::{
     hir::dictionary::ExtraParameters,
     parser::location::InstantiableLocation,
     std::value::{
+        is_compiler_provided_value_trait_application,
         is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
     },
     types::trait_solver::TraitSolver,
@@ -36,10 +37,8 @@ use ustr::Ustr;
 
 use crate::{
     hir::FnInstData,
-    hir::dictionary::{
-        DictionaryReq, VariantPayloadLayoutBinding, instantiate_dictionary_requirements,
-    },
-    module::{EvidenceBindingId, ModuleEnv, TraitId, id::Id},
+    hir::dictionary::{DictionaryReq, instantiate_dictionary_requirements},
+    module::{ModuleEnv, TraitId},
     types::effects::{EffType, EffectVar, EffectsInstSubst, no_effects},
     types::r#type::{
         FnArgType, SubscriptMemberType, SubscriptResultConvention, SubscriptType, Type,
@@ -380,13 +379,13 @@ impl PubTypeConstraint {
                 ..
             } => {
                 let trait_def = trait_solver.trait_def(*trait_id);
-                // Function-related `Value` constraints are compiler-provided, so they
-                // do not need normal trait solving to remain in the scheme.
-                if is_value_trait_for_function_type(*trait_id, trait_def, input_tys, output_tys)
-                    || is_function_surface_only_value_trait_application(
-                        *trait_id, trait_def, input_tys, output_tys,
-                    )
-                {
+                if is_compiler_provided_value_trait_application(
+                    *trait_id,
+                    trait_def,
+                    input_tys,
+                    output_tys,
+                    trait_solver,
+                ) {
                     return Ok(None);
                 }
                 if input_tys.iter().all(|ty| ty.is_trait_input_resolved()) {
@@ -1181,40 +1180,15 @@ pub(crate) fn extra_parameters_from_constraints(
     // case-qualified uses of ordinary `Value<B>` evidence, not additional runtime parameters.
     let value_trait_id = env.expect_std_trait_id(crate::std::core_traits_names::VALUE_TRAIT_NAME);
     let mut requirements = Vec::new();
-    let mut variant_payload_layouts = Vec::new();
     for constraint in constraints {
         let requirement = match constraint {
             ProjectionSubscriptIs { .. } | TypeHasVariant { .. } => {
                 constraint.dictionary_requirement_key(value_trait_id)
             }
-            VariantPayloadLayout {
-                variant_ty,
-                tag,
-                payload_ty,
-                ..
-            } => {
-                let value_requirement = constraint
-                    .dictionary_requirement_key(value_trait_id)
-                    .expect("a variant layout obligation always has a dictionary key");
-                let parameter_index = requirements
-                    .iter()
-                    .position(|requirement| requirement == &value_requirement)
-                    .unwrap_or_else(|| {
-                        let index = requirements.len();
-                        requirements.push(value_requirement);
-                        index
-                    });
-                let binding = VariantPayloadLayoutBinding {
-                    variant_ty: *variant_ty,
-                    tag: *tag,
-                    payload_ty: *payload_ty,
-                    parameter: EvidenceBindingId::from_index(parameter_index),
-                };
-                if !variant_payload_layouts.contains(&binding) {
-                    variant_payload_layouts.push(binding);
-                }
-                None
-            }
+            // This inference-only obligation activates the external `Value` leaves of the payload.
+            // Elaboration constructs the closed payload dictionary from those leaves, so the
+            // case-qualified constraint itself has no calling-convention slot.
+            VariantPayloadLayout { .. } => None,
             HaveTrait {
                 trait_id,
                 input_tys,
@@ -1222,8 +1196,6 @@ pub(crate) fn extra_parameters_from_constraints(
                 ..
             } => {
                 let trait_def = env.trait_def(*trait_id);
-                // Function-related `Value` dictionaries are synthesized by
-                // dictionary passing instead of being passed as hidden args.
                 if !trait_def.has_runtime_dictionary_entries()
                     || is_value_trait_for_function_type(*trait_id, trait_def, input_tys, output_tys)
                     || is_function_surface_only_value_trait_application(
@@ -1251,7 +1223,6 @@ pub(crate) fn extra_parameters_from_constraints(
 
     ExtraParameters {
         requirements,
-        variant_payload_layouts,
         repr_map,
     }
 }
