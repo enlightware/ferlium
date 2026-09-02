@@ -123,6 +123,8 @@ impl Operation {
         match &self.kind {
             OperationKind::RuntimeAlloc { .. }
             | OperationKind::Variant { .. }
+            | OperationKind::BuildSubscript { .. }
+            | OperationKind::CloneSubscriptEnv { .. }
             | OperationKind::CloneClosureEnv { .. } => true,
             OperationKind::BuildClosure {
                 num_hidden_dicts,
@@ -577,13 +579,10 @@ impl Operation {
         }
     }
 
-    /// Creates a `build_subscript` operation, which bundles the symbolic subscript at operand `0`
-    /// with captured hidden evidence — the remaining operands, each a symbolic dictionary or
-    /// subscript operand — yielding a first-class subscript value of type `ty`. Captures are
-    /// appended to the base environment. HIR elaboration flattens ordinary construction onto an
-    /// open symbolic base; with no captures this instead reads an already-closed base into a fresh
-    /// first-class value, which is how a subscript clone is lowered.
-    pub fn build_subscript(
+    /// Creates non-owning closed subscript evidence by appending `captures` to `subscript`'s
+    /// existing evidence environment. HIR elaboration flattens ordinary construction onto an open
+    /// symbolic base.
+    pub fn build_subscript_evidence(
         span: Location,
         subscript: mir::Value,
         evidence: Vec<mir::Value>,
@@ -595,7 +594,52 @@ impl Operation {
             result_id: None,
             span,
             operands: operands.into_boxed_slice(),
+            kind: OperationKind::BuildSubscriptEvidence { ty },
+        }
+    }
+
+    /// Materializes closed subscript evidence as an owned first-class subscript value.
+    pub fn build_subscript(span: Location, subscript: mir::Value, ty: Type) -> Self {
+        Operation {
+            result_id: None,
+            span,
+            operands: Box::new([subscript]),
             kind: OperationKind::BuildSubscript { ty },
+        }
+    }
+
+    /// Deep-clones the environment of the first-class subscript at `source`.
+    pub fn clone_subscript_env(span: Location, source: mir::Value, ty: Type) -> Self {
+        Operation {
+            result_id: None,
+            span,
+            operands: Box::new([source]),
+            kind: OperationKind::CloneSubscriptEnv { ty },
+        }
+    }
+
+    /// Drops the owned environment of the first-class subscript at `target`.
+    pub fn drop_subscript_env(span: Location, target: mir::Value) -> Self {
+        Operation {
+            result_id: None,
+            span,
+            operands: Box::new([target]),
+            kind: OperationKind::DropSubscriptEnv,
+        }
+    }
+
+    /// Borrows one callable member from a closed subscript without copying its environment.
+    pub fn borrow_subscript_member(
+        span: Location,
+        subscript: mir::Value,
+        mut_member: bool,
+        ty: Type,
+    ) -> Self {
+        Operation {
+            result_id: None,
+            span,
+            operands: Box::new([subscript]),
+            kind: OperationKind::BorrowSubscriptMember { mut_member, ty },
         }
     }
 
@@ -1106,8 +1150,16 @@ pub enum OperationKind {
     },
     /// Resolve a member function place from a symbolic subscript.
     SubscriptMember { mut_member: bool, ty: Type },
-    /// Bundle a symbolic subscript with its captured evidence.
+    /// Close symbolic subscript evidence over additional evidence operands.
+    BuildSubscriptEvidence { ty: Type },
+    /// Materialize closed subscript evidence as an owned first-class value.
     BuildSubscript { ty: Type },
+    /// Deep-clone a first-class subscript's owned environment.
+    CloneSubscriptEnv { ty: Type },
+    /// Drop a first-class subscript's owned environment.
+    DropSubscriptEnv,
+    /// Borrow a callable member from a closed subscript environment.
+    BorrowSubscriptMember { mut_member: bool, ty: Type },
     /// Construct a tagged variant shell whose payload is initialized separately.
     Variant {
         tag: Ustr,
@@ -1191,7 +1243,11 @@ impl OperationKind {
             | DictEntry { .. }
             | BuildDictionary { .. }
             | SubscriptMember { .. }
+            | BuildSubscriptEvidence { .. }
             | BuildSubscript { .. }
+            | CloneSubscriptEnv { .. }
+            | DropSubscriptEnv
+            | BorrowSubscriptMember { .. }
             | Variant { .. }
             | BuildArray { .. }
             | ExtractTag
@@ -1238,7 +1294,11 @@ impl OperationKind {
             | DictEntry { .. }
             | BuildDictionary { .. }
             | SubscriptMember { .. }
+            | BuildSubscriptEvidence { .. }
             | BuildSubscript { .. }
+            | CloneSubscriptEnv { .. }
+            | DropSubscriptEnv
+            | BorrowSubscriptMember { .. }
             | Variant { .. }
             | BuildArray { .. }
             | ExtractTag
@@ -1284,6 +1344,9 @@ pub enum OperationResult {
 
     /// A materialized pointer value to a type.
     MaterializedPointer(Box<OperationResult>),
+
+    /// A callable borrowing a first-class subscript environment for one invocation.
+    BorrowedCallable(Type),
 
     /// An opaque semantic variant-tag identity. It is compiler-internal, equality-comparable only,
     /// and has no Ferlium-expressible type.
@@ -1333,13 +1396,17 @@ impl OperationKind {
             | SubscriptMember { ty, .. } => {
                 OperationResult::pointer_to(OperationResult::Lowered(*ty))
             }
+            BorrowSubscriptMember { ty, .. } => OperationResult::BorrowedCallable(*ty),
             AddressOffsetPlace { pointing_to } => OperationResult::pointer_to(
                 OperationResult::pointer_to(OperationResult::Lowered(*pointing_to)),
             ),
             CompareEqual => OperationResult::Lowered(cached_primitive_ty!(bool)),
             Load => OperationResult::pointee_of(OperationResult::Same(whole.operands[0].clone())),
-            BuildDictionary { ty, .. }
-            | BuildSubscript { ty }
+            BuildDictionary { ty, .. } | BuildSubscriptEvidence { ty } => {
+                OperationResult::Lowered(*ty)
+            }
+            BuildSubscript { ty }
+            | CloneSubscriptEnv { ty }
             | BuildClosure { ty, .. }
             | CloneClosureEnv { ty } => OperationResult::Lowered(*ty),
             Variant { metadata, .. } => OperationResult::Lowered(metadata.ty),
@@ -1361,6 +1428,7 @@ impl OperationKind {
             | CheckFuel
             | Clone { .. }
             | Drop { .. }
+            | DropSubscriptEnv
             | DropClosureEnv => OperationResult::Nothing,
         }
     }
@@ -1457,9 +1525,29 @@ impl OperationKind {
                 1,
                 "subscript_member takes exactly the symbolic subscript operand"
             ),
-            BuildSubscript { .. } => assert!(
+            BuildSubscriptEvidence { .. } => assert!(
                 !whole.operands.is_empty(),
-                "build_subscript takes the symbolic subscript operand plus its evidence captures"
+                "build_subscript_evidence takes a base plus its evidence captures"
+            ),
+            BuildSubscript { .. } => assert_eq!(
+                whole.operands.len(),
+                1,
+                "build_subscript takes exactly one closed subscript-evidence operand"
+            ),
+            CloneSubscriptEnv { .. } => assert_eq!(
+                whole.operands.len(),
+                1,
+                "clone_subscript_env takes exactly the source subscript place"
+            ),
+            DropSubscriptEnv => assert_eq!(
+                whole.operands.len(),
+                1,
+                "drop_subscript_env takes exactly the target subscript place"
+            ),
+            BorrowSubscriptMember { .. } => assert_eq!(
+                whole.operands.len(),
+                1,
+                "borrow_subscript_member takes exactly one closed subscript operand"
             ),
             Variant {
                 storage,
@@ -1668,8 +1756,12 @@ impl OperationKind {
                 if *mut_member { "mut" } else { "ref" },
                 whole.operands[0].format_with(env)
             ),
-            BuildSubscript { .. } => {
-                write!(f, "build_subscript {}", whole.operands[0].format_with(env))?;
+            BuildSubscriptEvidence { .. } => {
+                write!(
+                    f,
+                    "build_subscript_evidence {}",
+                    whole.operands[0].format_with(env)
+                )?;
                 if whole.operands.len() > 1 {
                     write!(f, " capturing (")?;
                     for (i, operand) in whole.operands[1..].iter().enumerate() {
@@ -1682,6 +1774,25 @@ impl OperationKind {
                 }
                 Ok(())
             }
+            BuildSubscript { .. } => {
+                write!(f, "build_subscript {}", whole.operands[0].format_with(env))
+            }
+            CloneSubscriptEnv { .. } => write!(
+                f,
+                "clone_subscript_env {}",
+                whole.operands[0].format_with(env)
+            ),
+            DropSubscriptEnv => write!(
+                f,
+                "drop_subscript_env {}",
+                whole.operands[0].format_with(env)
+            ),
+            BorrowSubscriptMember { mut_member, .. } => write!(
+                f,
+                "borrow_subscript_member {} from {}",
+                if *mut_member { "mut" } else { "ref" },
+                whole.operands[0].format_with(env)
+            ),
             Variant {
                 tag,
                 storage,
@@ -1857,7 +1968,7 @@ mod tests {
         format::FormatWith,
         hir::value::VariantPayloadStorage,
         mir::{ParameterId, Value},
-        types::r#type::Type,
+        types::r#type::{SubscriptType, Type},
     };
     use ustr::ustr;
 
@@ -1910,5 +2021,20 @@ mod tests {
             OperationResult::MaterializedPointer(Box::new(OperationResult::Lowered(Type::unit())))
         );
         assert!(operation.result_requires_consuming_use());
+    }
+
+    #[test]
+    fn first_class_subscript_construction_and_clone_produce_owned_values() {
+        let span = Location::new_synthesized();
+        let ty = Type::subscript_type(SubscriptType::new(vec![], Type::unit(), None, None));
+        let source = Value::Parameter(ParameterId::new(0));
+
+        let build = Operation::build_subscript(span, source.clone(), ty);
+        let clone = Operation::clone_subscript_env(span, source.clone(), ty);
+        let drop = Operation::drop_subscript_env(span, source);
+
+        assert!(build.result_requires_consuming_use());
+        assert!(clone.result_requires_consuming_use());
+        assert_eq!(drop.result(), OperationResult::Nothing);
     }
 }

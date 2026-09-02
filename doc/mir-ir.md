@@ -171,9 +171,9 @@ The operation kind fixes operand arity, roles, and result shape. The main groups
 |---|---|---|
 | storage | `alloca`, `alloca_place`, `runtime_alloc`, `runtime_dealloc`, `is_initialized`, `load`, `store`, `clear`, `memcpy`, `move`, `move_bytes` | Stack storage follows stack regions; runtime storage has an explicit lifetime. `is_initialized` exposes a physical drop flag without fixing its storage layout. `store` never drops; `memcpy` requires a concrete `TrivialCopy` pointee; moves leave their source absent. `move_bytes` carries an already-materialized byte extent instead of a layout dictionary. |
 | aggregates | `subfield`, `variant`, `extract_tag`, `extract_payload_indirection`, `build_array` | Aggregate construction and ownership remain field-addressable. Product `subfield` records its aggregate type and carries `Value` witnesses for direct members with open inline layouts. A variant operation first builds an uninitialized payload shell. Generic variant construction and payload-marked `subfield` operations carry the selected payload's `Value<B>` layout witness; projection reads inline/indirect classification from the stored tag. `extract_tag` yields an opaque semantic tag, while physical `extract_payload_indirection` yields the representation bit as `bool`. `build_array` initializes fresh canonical array storage from borrowed `TrivialCopy` elements. |
-| evidence | `dict_entry`, `build_dictionary`, `subscript_member`, `build_subscript` | Evidence remains symbolic. Construction closes a definition over evidence operands; dictionary entries are closed function places. |
+| evidence | `dict_entry`, `build_dictionary`, `subscript_member`, `build_subscript_evidence` | Evidence remains symbolic. Construction closes a definition over evidence operands; dictionary entries are closed function places. |
 | calls/projections | `call`, `project`, `end_project` | Proven source-infallible forms are ordinary operations. Potentially source-fallible forms occur only inside `invoke`. |
-| ownership | `clone`, `drop`, `build_closure`, `clone_closure_env`, `drop_closure_env` | Semantic ownership actions are explicit. `Value::clone` and `Value::drop` are source-infallible by contract. |
+| ownership | `clone`, `drop`, `build_closure`, `clone_closure_env`, `drop_closure_env`, `build_subscript`, `clone_subscript_env`, `drop_subscript_env` | Semantic ownership actions are explicit. `Value::clone` and `Value::drop` are source-infallible by contract. |
 | matching | `comp_eq` | Compares a borrowed/materialized runtime value with compile-time pattern data. |
 | stack/runtime | `stack_save`, `stack_restore`, `check_call_depth`, `check_fuel` | Stack markers describe allocation frontiers. Runtime guards are pinned operations whose sandbox violations leave the MIR CFG. |
 
@@ -365,14 +365,14 @@ helper which releases and clears the pointer slot.
 
 ### First-class subscript environments
 
-`BuildSubscript` creates an owned environment. Planned `CloneSubscriptEnv` and
-`DropSubscriptEnv` operations clone and release it; moving transfers it. The ABI defines the
-descriptor, environment layout, and clone/drop dispatch.
+`BuildSubscriptEvidence` closes non-owning symbolic evidence. `BuildSubscript` materializes it as
+an owned first-class value; `CloneSubscriptEnv` and `DropSubscriptEnv` clone and release that
+environment, while moving transfers it. The ABI defines its descriptor and environment layout.
 
-`SubscriptMember` produces a physical-stage-only `BorrowedCallable`: the selected `ref` or `mut`
-entry and a borrow of the original subscript environment. The verifier accepts it only as the
-callee of `Call` or `Project`. `Call` holds the borrow for one invocation; `Project` holds it until
-the matching `EndProject`.
+Physical lowering refines semantic `SubscriptMember` into `BorrowSubscriptMember`, which produces a
+`BorrowedCallable`: the selected `ref` or `mut` entry and a borrow of the original environment. The
+verifier accepts it only as the callee of `Call` or `Project`. `Call` holds the borrow for one
+invocation; `Project` holds it until the matching `EndProject`.
 
 The callable type determines its visible ABI. The descriptor-specific entry determines its
 environment schema. Invocation borrows stored evidence and clones source-value captures into the

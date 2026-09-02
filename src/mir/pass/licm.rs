@@ -492,9 +492,10 @@ fn record_writes(
             write(&operation.operands[0]);
             write(&operation.operands[1]);
         }
-        OperationKind::Clear | OperationKind::Drop { .. } | OperationKind::DropClosureEnv => {
-            write(&operation.operands[0])
-        }
+        OperationKind::Clear
+        | OperationKind::Drop { .. }
+        | OperationKind::DropSubscriptEnv
+        | OperationKind::DropClosureEnv => write(&operation.operands[0]),
         OperationKind::RuntimeDealloc => write(&operation.operands[0]),
         OperationKind::BuildArray { .. } => {
             if let Some(destination) = operation.operands.last() {
@@ -506,6 +507,7 @@ fn record_writes(
         OperationKind::Project { .. }
         | OperationKind::EndProject
         | OperationKind::BuildDictionary { .. }
+        | OperationKind::BuildSubscriptEvidence { .. }
         | OperationKind::BuildSubscript { .. }
         | OperationKind::BuildClosure { .. } => operation.operands.iter().for_each(write),
         OperationKind::Alloca { .. }
@@ -518,6 +520,7 @@ fn record_writes(
         | OperationKind::AddressOffsetPlace { .. }
         | OperationKind::DictEntry { .. }
         | OperationKind::SubscriptMember { .. }
+        | OperationKind::BorrowSubscriptMember { .. }
         | OperationKind::Variant { .. }
         | OperationKind::ExtractTag
         | OperationKind::ExtractPayloadIndirection
@@ -526,6 +529,7 @@ fn record_writes(
         | OperationKind::StackRestore
         | OperationKind::CheckCallDepth
         | OperationKind::CheckFuel
+        | OperationKind::CloneSubscriptEnv { .. }
         | OperationKind::CloneClosureEnv { .. } => {}
     }
 }

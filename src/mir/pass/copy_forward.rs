@@ -669,7 +669,9 @@ fn note_operation(operation: &Operation, site: Site, uses: &mut FxHashMap<ValueI
                 .skip(1)
                 .for_each(|operand| unsafe_use(operand, uses));
         }
-        OperationKind::DropClosureEnv => write(&operation.operands[0], uses),
+        OperationKind::DropSubscriptEnv | OperationKind::DropClosureEnv => {
+            write(&operation.operands[0], uses)
+        }
         OperationKind::Alloca { .. }
         | OperationKind::Project { .. }
         | OperationKind::EndProject
@@ -679,7 +681,10 @@ fn note_operation(operation: &Operation, site: Site, uses: &mut FxHashMap<ValueI
         | OperationKind::DictEntry { .. }
         | OperationKind::BuildDictionary { .. }
         | OperationKind::SubscriptMember { .. }
+        | OperationKind::BuildSubscriptEvidence { .. }
         | OperationKind::BuildSubscript { .. }
+        | OperationKind::CloneSubscriptEnv { .. }
+        | OperationKind::BorrowSubscriptMember { .. }
         | OperationKind::Variant { .. }
         | OperationKind::BuildClosure { .. }
         | OperationKind::CloneClosureEnv { .. } => operation

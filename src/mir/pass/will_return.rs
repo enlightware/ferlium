@@ -155,9 +155,11 @@ fn operation_returns(operation: &Operation, callee_returns: &impl Fn(FunctionId)
         OperationKind::Clone { .. } => direct(operation.operands.get(2)),
         OperationKind::Drop { .. } => direct(operation.operands.get(1)),
         // `Project` runs an accessor until its yield; `EndProject` resumes the suspended body.
-        // Closure-environment clone/drop recursively invoke functions stored in runtime values.
+        // First-class callable clone/drop recursively invoke functions stored in runtime values.
         OperationKind::Project { .. }
         | OperationKind::EndProject
+        | OperationKind::CloneSubscriptEnv { .. }
+        | OperationKind::DropSubscriptEnv
         | OperationKind::CloneClosureEnv { .. }
         | OperationKind::DropClosureEnv => false,
         OperationKind::Alloca { .. }
@@ -172,7 +174,9 @@ fn operation_returns(operation: &Operation, callee_returns: &impl Fn(FunctionId)
         | OperationKind::DictEntry { .. }
         | OperationKind::BuildDictionary { .. }
         | OperationKind::SubscriptMember { .. }
+        | OperationKind::BuildSubscriptEvidence { .. }
         | OperationKind::BuildSubscript { .. }
+        | OperationKind::BorrowSubscriptMember { .. }
         | OperationKind::Variant { .. }
         | OperationKind::BuildArray { .. }
         | OperationKind::ExtractTag

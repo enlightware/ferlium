@@ -12,6 +12,7 @@ mod dictionary;
 mod evidence;
 pub(crate) mod program;
 mod subscript;
+mod subscript_lifecycle;
 
 use std::fmt;
 
@@ -515,6 +516,7 @@ impl<'a> PhysicalLowerer<'a> {
             }
         }
         self.lower_buffer_calls(function, &mut edit)?;
+        subscript_lifecycle::lower_members(&mut edit);
         if let Some((base, variant_ty, payload_ty)) = value_drop_variant(original, &edit, self.env)
         {
             self.release_variant_on_value_drop_return(&mut edit, base, variant_ty, payload_ty);
@@ -2483,6 +2485,12 @@ fn verify_physical_operation(
             },
         });
     }
+    if matches!(operation.kind, OperationKind::SubscriptMember { .. }) {
+        return Err(BackendReadinessError::UnresolvedPhysicalOperation {
+            function: owner,
+            operation: "subscript_member",
+        });
+    }
     verify_local_function_operands(
         artifacts.module,
         artifacts.entry_count(),
@@ -2551,13 +2559,13 @@ fn constructed_subscript_definitions(
                     _ => &[],
                 })
         })
-        .filter(|operation| matches!(operation.kind, OperationKind::BuildSubscript { .. }))
+        .filter(|operation| matches!(operation.kind, OperationKind::BuildSubscriptEvidence { .. }))
         .collect::<Vec<_>>();
     let mut results = FxHashSet::default();
     for operation in &operations {
         let result = operation
             .result_id()
-            .expect("build_subscript produces a subscript value");
+            .expect("build_subscript_evidence produces subscript evidence");
         assert!(results.insert(result), "MIR values have unique definitions");
     }
     let mut definitions = FxHashMap::default();
@@ -2566,7 +2574,7 @@ fn constructed_subscript_definitions(
         for operation in &operations {
             let result = operation
                 .result_id()
-                .expect("build_subscript produces a subscript value");
+                .expect("build_subscript_evidence produces subscript evidence");
             if definitions.contains_key(&result) {
                 continue;
             }
@@ -2661,11 +2669,11 @@ fn verify_evidence_operation(
     constructed_subscripts: &FxHashMap<mir::ValueId, ConstructedSubscript>,
     operation: &Operation,
 ) -> Result<(), BackendReadinessError> {
-    if matches!(operation.kind, OperationKind::BuildSubscript { .. }) {
+    if matches!(operation.kind, OperationKind::BuildSubscriptEvidence { .. }) {
         let base = operation
             .operands
             .first()
-            .expect("build_subscript has a base operand");
+            .expect("build_subscript_evidence has a base operand");
         verify_subscript_base(artifacts, owner, base)?;
         verify_evidence_operands(artifacts, owner, operation.operands[1..].iter())?;
     } else {
@@ -2702,10 +2710,10 @@ fn verify_evidence_operation(
         });
     }
 
-    if matches!(operation.kind, OperationKind::BuildSubscript { .. }) {
+    if matches!(operation.kind, OperationKind::BuildSubscriptEvidence { .. }) {
         let result = operation
             .result_id()
-            .expect("build_subscript produces a subscript value");
+            .expect("build_subscript_evidence produces subscript evidence");
         if let Some(value) = constructed_subscripts.get(&result)
             && let Some(definition) = artifacts.subscript(value.definition)
             && value.capture_count != definition.capture_schema().len()
@@ -2718,7 +2726,7 @@ fn verify_evidence_operation(
             });
         }
     }
-    if let OperationKind::SubscriptMember { mut_member, .. } = operation.kind
+    if let OperationKind::BorrowSubscriptMember { mut_member, .. } = operation.kind
         && let Some(value) = operation
             .operands
             .first()
@@ -3119,7 +3127,57 @@ mod tests {
     }
 
     #[test]
-    fn build_subscript_appends_captures_while_a_captureless_build_clones() {
+    fn physical_subscript_materialization_borrows_members_ephemerally() {
+        let mut session = CompilerSession::new();
+        session.set_allow_experimental(true);
+        let module = compile(
+            &mut session,
+            "subscript cell<T>(slot: &mut T) -> T where T: Value {\n\
+                 ref { let local = slot; yield local }\n\
+                 mut { let mut local = slot; yield local; slot = local }\n\
+             }\n\
+             fn use_cell() {\n\
+                 let first = cell;\n\
+                 let second = first;\n\
+                 let mut value = 3;\n\
+                 let before = value->[first];\n\
+                 value->[second] + before\n\
+             }",
+            "subscript_lifecycle",
+        );
+        let (physical, _) = lower(&mut session, module).unwrap();
+        let kinds = physical
+            .entries
+            .iter()
+            .flatten()
+            .flat_map(|body| {
+                body.blocks().flat_map(|block| {
+                    body.block(block)
+                        .operations()
+                        .iter()
+                        .map(|operation| &operation.kind)
+                })
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            kinds
+                .iter()
+                .any(|kind| matches!(kind, OperationKind::BuildSubscript { .. }))
+        );
+        assert!(
+            kinds
+                .iter()
+                .any(|kind| matches!(kind, OperationKind::BorrowSubscriptMember { .. }))
+        );
+        assert!(
+            kinds
+                .iter()
+                .all(|kind| !matches!(kind, OperationKind::SubscriptMember { .. }))
+        );
+    }
+
+    #[test]
+    fn build_subscript_evidence_appends_captures_before_materialization() {
         let definition = SubscriptId::new(ModuleId::from_index(3), LocalSubscriptId::from_index(4));
         let span = Location::new_synthesized();
         let subscript_ty =
@@ -3136,7 +3194,7 @@ mod tests {
         let extended = builder
             .append_operation(
                 block,
-                Operation::build_subscript(
+                Operation::build_subscript_evidence(
                     span,
                     base,
                     vec![Value::Evidence(Box::new(
@@ -3146,18 +3204,19 @@ mod tests {
                 ),
             )
             .unwrap();
-        let cloned = builder
+        let materialized = builder
             .append_operation(
                 block,
-                Operation::build_subscript(span, extended, vec![], subscript_ty),
+                Operation::build_subscript(span, extended.clone(), subscript_ty),
             )
             .unwrap();
         builder.set_terminator(block, Terminator::ret(span));
 
         let constructed = constructed_subscript_definitions(&builder.finish_unverified());
-        let cloned = static_subscript(&cloned, &constructed).unwrap();
-        assert_eq!(cloned.definition, definition);
-        assert_eq!(cloned.capture_count, 2);
+        let extended = static_subscript(&extended, &constructed).unwrap();
+        assert_eq!(extended.definition, definition);
+        assert_eq!(extended.capture_count, 2);
+        assert!(static_subscript(&materialized, &constructed).is_none());
     }
 
     #[test]
@@ -3184,7 +3243,12 @@ mod tests {
         let block = builder.add_block();
         builder.append_operation(
             block,
-            Operation::subscript_member(span, Value::Subscript(definition), false, Type::unit()),
+            Operation::borrow_subscript_member(
+                span,
+                Value::Subscript(definition),
+                false,
+                Type::unit(),
+            ),
         );
         builder.set_terminator(block, Terminator::ret(span));
         physical.entries.push(Some(builder.finish_unverified()));
@@ -3233,7 +3297,12 @@ mod tests {
         let block = builder.add_block();
         builder.append_operation(
             block,
-            Operation::subscript_member(span, Value::Subscript(definition), true, Type::unit()),
+            Operation::borrow_subscript_member(
+                span,
+                Value::Subscript(definition),
+                true,
+                Type::unit(),
+            ),
         );
         builder.set_terminator(block, Terminator::ret(span));
         physical.entries.push(Some(builder.finish_unverified()));
@@ -3265,7 +3334,12 @@ mod tests {
         let block = builder.add_block();
         builder.append_operation(
             block,
-            Operation::subscript_member(span, Value::Subscript(foreign), false, Type::unit()),
+            Operation::borrow_subscript_member(
+                span,
+                Value::Subscript(foreign),
+                false,
+                Type::unit(),
+            ),
         );
         builder.set_terminator(block, Terminator::ret(span));
         physical.entries.push(Some(builder.finish_unverified()));

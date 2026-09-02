@@ -2246,7 +2246,9 @@ fn generic_product_subfields_carry_direct_member_layout_evidence() {
         "generic tuple projection needs every member layout:\n{mir}"
     );
     assert!(
-        mir.contains("build_subscript subscript(<test>::{ item: A }.item) capturing (%p0)"),
+        mir.contains(
+            "build_subscript_evidence subscript(<test>::{ item: A }.item) capturing (%p0)"
+        ),
         "a forwarded structural addressor must retain its open member layout:\n{mir}"
     );
 }

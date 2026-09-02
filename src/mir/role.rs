@@ -122,6 +122,8 @@ pub(crate) enum ValueRole {
     /// Opaque evidence selecting the inline or indirect representation of a variant payload.
     VariantPayloadStorage,
     Function,
+    /// A callable paired with a borrow of its subscript environment.
+    BorrowedCallable(Type),
     Pattern,
     StackMarker,
     /// A yielded place paired with the accessor contract whose slide must be ended exactly once.
@@ -143,6 +145,9 @@ impl ValueRole {
             Self::Subscript => "subscript".to_string(),
             Self::VariantPayloadStorage => "layout".to_string(),
             Self::Function => "fn".to_string(),
+            Self::BorrowedCallable(ty) => {
+                format!("borrowed {}", ty.format_with(env))
+            }
             Self::Pattern => "pattern".to_string(),
             Self::StackMarker => "stack".to_string(),
             Self::OpenProjection { yielded, .. } => {
@@ -170,7 +175,10 @@ impl ValueRole {
     pub(crate) fn is_callee_operand(&self) -> bool {
         matches!(
             self,
-            Self::Function | Self::Place(_) | Self::Materialized(MirType::Pointer(_))
+            Self::Function
+                | Self::BorrowedCallable(_)
+                | Self::Place(_)
+                | Self::Materialized(MirType::Pointer(_))
         )
     }
 
@@ -392,7 +400,7 @@ impl ValueRoles {
         if matches!(operation.kind, OperationKind::BuildDictionary { .. }) {
             return Some(ValueRole::Dictionary);
         }
-        if matches!(operation.kind, OperationKind::BuildSubscript { .. }) {
+        if matches!(operation.kind, OperationKind::BuildSubscriptEvidence { .. }) {
             return Some(ValueRole::Subscript);
         }
         self.resolve_result(result, constants)
@@ -407,6 +415,7 @@ impl ValueRoles {
             OperationResult::MaterializedPointer(pointee) => ValueRole::Materialized(
                 MirType::pointer_to(self.resolve_result_type(*pointee, constants)?),
             ),
+            OperationResult::BorrowedCallable(ty) => ValueRole::BorrowedCallable(ty),
             OperationResult::Pointee(pointer) => match self.resolve_result(*pointer, constants)? {
                 ValueRole::Place(ty) => ValueRole::Materialized(ty),
                 ValueRole::Materialized(MirType::Pointer(ty)) => ValueRole::Materialized(*ty),
@@ -447,6 +456,7 @@ impl ValueRoles {
                 other => panic!("pointee type requested from {other:?}"),
             },
             OperationResult::VariantTag
+            | OperationResult::BorrowedCallable(_)
             | OperationResult::StackMarker
             | OperationResult::Nothing => {
                 panic!("non-value result used as a value type")
@@ -688,6 +698,8 @@ pub(crate) fn check_operand_roles(
         | OperationKind::ExtractPayloadIndirection
         | OperationKind::IsInitialized
         | OperationKind::Clear
+        | OperationKind::DropSubscriptEnv
+        | OperationKind::CloneSubscriptEnv { .. }
         | OperationKind::DropClosureEnv
         | OperationKind::CloneClosureEnv { .. } => place(0),
         OperationKind::CompareEqual => {
@@ -737,17 +749,20 @@ pub(crate) fn check_operand_roles(
             place(0);
             value(1);
         }
-        OperationKind::DictEntry { .. } | OperationKind::SubscriptMember { .. } => evidence(0),
+        OperationKind::DictEntry { .. }
+        | OperationKind::SubscriptMember { .. }
+        | OperationKind::BorrowSubscriptMember { .. } => evidence(0),
         OperationKind::BuildDictionary { .. } => {
             for index in 0..operands.len() {
                 evidence(index);
             }
         }
-        OperationKind::BuildSubscript { .. } => {
+        OperationKind::BuildSubscriptEvidence { .. } => {
             for index in 0..operands.len() {
                 evidence(index);
             }
         }
+        OperationKind::BuildSubscript { .. } => evidence(0),
         OperationKind::Store => {
             let stored = role(0);
             assert!(
@@ -911,8 +926,8 @@ mod tests {
 
     use crate::{
         Location,
-        mir::{Operation, builder::FunctionBuilder, value::StaticEvidence},
-        module::{LocalImplId, ModuleId, TraitDictionaryId},
+        mir::{Operation, Value, builder::FunctionBuilder, value::StaticEvidence},
+        module::{LocalImplId, LocalSubscriptId, ModuleId, SubscriptId, TraitDictionaryId},
         std::math::int_type,
         types::r#type::Type,
     };
@@ -951,5 +966,32 @@ mod tests {
             .unwrap();
 
         builder.append_operation(block, Operation::store(span, extracted, integer));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "stored operand must be a value or place pointer, got BorrowedCallable"
+    )]
+    fn borrowed_subscript_member_cannot_escape_into_storage() {
+        let span = Location::new_synthesized();
+        let mut builder =
+            FunctionBuilder::new("bad_borrowed_callable_store".into(), Default::default());
+        let block = builder.add_block();
+        let borrowed = builder
+            .append_operation(
+                block,
+                Operation::borrow_subscript_member(
+                    span,
+                    Value::Subscript(SubscriptId::new(ModuleId::new(0), LocalSubscriptId::new(0))),
+                    false,
+                    Type::unit(),
+                ),
+            )
+            .unwrap();
+        let destination = builder
+            .append_operation(block, Operation::alloca(span, Type::unit()))
+            .unwrap();
+
+        builder.append_operation(block, Operation::store(span, borrowed, destination));
     }
 }

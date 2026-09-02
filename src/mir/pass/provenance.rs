@@ -486,7 +486,7 @@ fn derive_repeatable(
                         return false;
                     }
                 }
-                OperationKind::DropClosureEnv => {
+                OperationKind::DropSubscriptEnv | OperationKind::DropClosureEnv => {
                     if root_of(&operation.operands[0], &roots).is_some() {
                         return false;
                     }
@@ -496,7 +496,9 @@ fn derive_repeatable(
                         return false;
                     }
                 }
-                OperationKind::BuildClosure { .. } | OperationKind::BuildSubscript { .. } => {
+                OperationKind::BuildClosure { .. }
+                | OperationKind::BuildSubscriptEvidence { .. }
+                | OperationKind::BuildSubscript { .. } => {
                     if operation
                         .operands
                         .iter()
@@ -520,8 +522,9 @@ mod tests {
         CompilerSession, ExecutionTarget, Location, MirOptimization,
         hir::value::LiteralValue,
         mir::{Operation, builder::FunctionBuilder, terminator::Terminator},
-        module::Path,
+        module::{LocalSubscriptId, Path, SubscriptId},
         std::math::int_type,
+        types::r#type::{SubscriptType, Type},
     };
     use ustr::ustr;
 
@@ -759,6 +762,50 @@ mod tests {
         };
         assert!(repeatable(&build(false)));
         assert!(!repeatable(&build(true)));
+    }
+
+    #[test]
+    fn capturing_an_argument_in_subscript_evidence_makes_an_addressor_nonrepeatable() {
+        let span = Location::new_synthesized();
+        let subscript_ty =
+            Type::subscript_type(SubscriptType::new(vec![], Type::unit(), None, None));
+        let mut function =
+            FunctionBuilder::new(ustr("addressor"), CallResultConvention::ADDRESSOR_PLACE);
+        let argument = function.add_parameter(
+            int_type(),
+            ParameterKind::Parameter(ArgConvention::MutableRef),
+        );
+        let result = function.add_parameter(int_type(), ParameterKind::Return);
+        let block = function.add_block();
+        function.append_operation(
+            block,
+            Operation::build_subscript_evidence(
+                span,
+                mir::Value::Subscript(SubscriptId::new(
+                    ModuleId::from_index(0),
+                    LocalSubscriptId::from_index(0),
+                )),
+                vec![mir::Value::Parameter(argument)],
+                subscript_ty,
+            ),
+        );
+        function.append_operation(
+            block,
+            Operation::store(
+                span,
+                mir::Value::Parameter(argument),
+                mir::Value::Parameter(result),
+            ),
+        );
+        function.set_terminator(block, Terminator::ret(span));
+        let body = function.finish_unverified();
+
+        assert!(!derive_repeatable(
+            &body,
+            ModuleId::from_index(0),
+            &[],
+            &|_| AddressorSummary::UNKNOWN,
+        ));
     }
 
     #[test]

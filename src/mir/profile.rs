@@ -105,6 +105,8 @@ impl MirInstructionKind {
                 | Op::EndProject
                 | Op::Clone
                 | Op::Drop
+                | Op::CloneSubscriptEnv
+                | Op::DropSubscriptEnv
                 | Op::CloneClosureEnv
                 | Op::DropClosureEnv,
             ) => Cost::Semantic,
@@ -112,6 +114,7 @@ impl MirInstructionKind {
                 Op::Memcpy
                 | Op::Move
                 | Op::MoveBytes
+                | Op::BuildSubscript
                 | Op::BuildClosure
                 | Op::Variant
                 | Op::BuildArray,
@@ -127,7 +130,8 @@ impl MirInstructionKind {
                 | Op::DictEntry
                 | Op::BuildDictionary
                 | Op::SubscriptMember
-                | Op::BuildSubscript,
+                | Op::BuildSubscriptEvidence
+                | Op::BorrowSubscriptMember,
             ) => Cost::Addressing,
             Self::Operation(
                 Op::CompareEqual
@@ -246,7 +250,10 @@ impl MirExecutionProfile {
             | OperationKind::AddressOffset { ty }
             | OperationKind::DictEntry { ty, .. }
             | OperationKind::SubscriptMember { ty, .. }
+            | OperationKind::BuildSubscriptEvidence { ty }
             | OperationKind::BuildSubscript { ty }
+            | OperationKind::CloneSubscriptEnv { ty }
+            | OperationKind::BorrowSubscriptMember { ty, .. }
             | OperationKind::Clone { ty }
             | OperationKind::Drop { ty }
             | OperationKind::BuildClosure { ty, .. }

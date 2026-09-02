@@ -49,7 +49,10 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::mir::{
-    self, BlockId, Function, OperationKind, edit::FunctionEdit, terminator::TerminatorKind,
+    self, BlockId, Function, OperationKind,
+    edit::FunctionEdit,
+    role::{ValueRole, ValueRoles},
+    terminator::TerminatorKind,
     value::ValueId,
 };
 use crate::{
@@ -586,6 +589,7 @@ fn remove_empty_local_stack_regions(
         grows_frame: bool,
     }
 
+    let roles = ValueRoles::derive(func);
     for block in func.blocks() {
         let already_removed = removed.get(&block).cloned().unwrap_or_default();
         let mut regions: Vec<Region> = Vec::new();
@@ -620,7 +624,7 @@ fn remove_empty_local_stack_regions(
                         }
                     }
                 }
-                _ if may_leave_frame_storage(operation) => {
+                _ if may_leave_frame_storage(operation, func, &roles) => {
                     if let Some(region) = regions.last_mut() {
                         region.grows_frame = true;
                     }
@@ -640,7 +644,11 @@ fn remove_empty_local_stack_regions(
 /// This is intentionally conservative. Several interpreter operations materialize temporary places
 /// even though they are not spelled `alloca`; dictionary/subscript projection, semantic drop and a
 /// call carrying symbolic subscript evidence can do so. False positives merely retain a bracket.
-pub(super) fn may_leave_frame_storage(operation: &mir::Operation) -> bool {
+pub(super) fn may_leave_frame_storage(
+    operation: &mir::Operation,
+    func: &Function,
+    roles: &ValueRoles,
+) -> bool {
     match &operation.kind {
         OperationKind::Alloca { .. }
         | OperationKind::AllocaPlace { .. }
@@ -653,10 +661,24 @@ pub(super) fn may_leave_frame_storage(operation: &mir::Operation) -> bool {
         // evidence and environment internally. The one caller-frame temporary is a symbolic
         // subscript passed as script evidence; retaining every such call is conservative because a
         // native call can marshal the same operand without allocating a cell.
-        OperationKind::Call { .. } => operation
-            .operands
-            .iter()
-            .any(|operand| matches!(operand, mir::Value::Subscript(_))),
+        OperationKind::Call { ty, .. } => {
+            let Some(visible_start) = operation
+                .operands
+                .len()
+                .checked_sub(ty.fn_ty.args.len() + 1)
+                .filter(|start| *start >= 1)
+            else {
+                return true;
+            };
+            operation.operands[1..visible_start].iter().any(|operand| {
+                roles.get(operand, func.constants()).is_none_or(|role| {
+                    matches!(
+                        &*role,
+                        ValueRole::Subscript | ValueRole::VariantPayloadStorage
+                    )
+                })
+            })
+        }
         OperationKind::CompareEqual
         | OperationKind::Load
         | OperationKind::RuntimeAlloc { .. }
@@ -665,7 +687,11 @@ pub(super) fn may_leave_frame_storage(operation: &mir::Operation) -> bool {
         | OperationKind::AddressOffset { .. }
         | OperationKind::AddressOffsetPlace { .. }
         | OperationKind::BuildDictionary { .. }
+        | OperationKind::BuildSubscriptEvidence { .. }
         | OperationKind::BuildSubscript { .. }
+        | OperationKind::CloneSubscriptEnv { .. }
+        | OperationKind::DropSubscriptEnv
+        | OperationKind::BorrowSubscriptMember { .. }
         | OperationKind::Variant { .. }
         | OperationKind::BuildArray { .. }
         | OperationKind::ExtractTag
@@ -1116,7 +1142,20 @@ fn is_exact_clone_lifetime_role(operation: &mir::Operation, position: usize) -> 
 
 #[cfg(test)]
 mod tests {
-    use crate::{CompilerSession, ExecutionTarget, MirOptimization, Path, format::FormatWith};
+    use crate::{
+        CompilerSession, ExecutionTarget, Location, MirOptimization, Path,
+        format::FormatWith,
+        mir::{
+            Operation, ParameterKind, Value, builder::FunctionBuilder, role::ValueRoles,
+            terminator::Terminator,
+        },
+        module::{FunctionId, LocalFunctionId, LocalSubscriptId, ModuleId, SubscriptId, id::Id},
+        std::math::int_type,
+        types::{
+            effects::no_effects,
+            r#type::{CallImplType, FnType, SubscriptType, Type},
+        },
+    };
 
     fn optimized(src: &str) -> String {
         let mut session = CompilerSession::new();
@@ -1387,6 +1426,49 @@ mod tests {
             !caller.contains("stack_save") && !caller.contains("stack_restore"),
             "a self-reclaiming call does not make the inline region nonempty:\n{caller}"
         );
+    }
+
+    #[test]
+    fn a_call_materializing_symbolic_subscript_evidence_grows_the_frame() {
+        let span = Location::new_synthesized();
+        let subscript_ty =
+            Type::subscript_type(SubscriptType::new(vec![], Type::unit(), None, None));
+        let mut builder = FunctionBuilder::new("caller".into(), Default::default());
+        let capture = builder.add_parameter(int_type(), ParameterKind::Dictionary);
+        let destination = builder.add_parameter(int_type(), ParameterKind::Return);
+        let block = builder.add_block();
+        let evidence = builder
+            .append_operation(
+                block,
+                Operation::build_subscript_evidence(
+                    span,
+                    Value::Subscript(SubscriptId::new(
+                        ModuleId::from_index(0),
+                        LocalSubscriptId::from_index(0),
+                    )),
+                    vec![Value::Parameter(capture)],
+                    subscript_ty,
+                ),
+            )
+            .expect("build_subscript_evidence produces evidence");
+        builder.append_operation(
+            block,
+            Operation::call(
+                span,
+                Value::Function(FunctionId::new(
+                    ModuleId::from_index(0),
+                    LocalFunctionId::from_index(0),
+                )),
+                [evidence, Value::Parameter(destination)],
+                CallImplType::value(FnType::new_by_val([], int_type(), no_effects())),
+            ),
+        );
+        builder.set_terminator(block, Terminator::ret(span));
+        let function = builder.finish_unverified();
+        let roles = ValueRoles::derive(&function);
+        let call = &function.block(block).operations()[1];
+
+        assert!(super::may_leave_frame_storage(call, &function, &roles));
     }
 
     /// A local place in an inlined body belongs to the former callee frame. Its bracket must stay

@@ -1038,7 +1038,10 @@ fn substitute_in_operation(operation: &mut Operation, mapper: &mut impl TypeMapp
         | OperationKind::DictEntry { ty, .. }
         | OperationKind::BuildDictionary { ty, .. }
         | OperationKind::SubscriptMember { ty, .. }
+        | OperationKind::BuildSubscriptEvidence { ty }
         | OperationKind::BuildSubscript { ty }
+        | OperationKind::CloneSubscriptEnv { ty }
+        | OperationKind::BorrowSubscriptMember { ty, .. }
         | OperationKind::BuildClosure { ty, .. }
         | OperationKind::CloneClosureEnv { ty } => *ty = ty.map(mapper),
         OperationKind::Subfield { ty, product, .. } => {
@@ -1092,6 +1095,7 @@ fn substitute_in_operation(operation: &mut Operation, mapper: &mut impl TypeMapp
         | OperationKind::CheckCallDepth
         | OperationKind::CheckFuel
         | OperationKind::RuntimeDealloc
+        | OperationKind::DropSubscriptEnv
         | OperationKind::DropClosureEnv => {}
         OperationKind::Clone { ty } | OperationKind::Drop { ty } => *ty = ty.map(mapper),
     }

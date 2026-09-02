@@ -759,8 +759,27 @@ impl<'a> Interpreter<'a> {
                     span,
                 )?;
             }
-            OperationKind::BuildSubscript { .. } => {
-                self.exec_build_subscript(slots, &operation.operands, def.unwrap());
+            OperationKind::BuildSubscriptEvidence { .. } => {
+                self.exec_build_subscript_evidence(slots, &operation.operands, def.unwrap());
+            }
+            OperationKind::BuildSubscript { .. } | OperationKind::CloneSubscriptEnv { .. } => {
+                let subscript = self.subscript_operand(slots, &operation.operands[0]);
+                Self::bind(
+                    slots,
+                    def.unwrap(),
+                    Binding::Value(Value::subscript_value(subscript)),
+                );
+            }
+            OperationKind::DropSubscriptEnv => {
+                let place = self.place_operand(slots, &operation.operands[0]);
+                let target = place
+                    .target_mut(&mut self.ctx)
+                    .expect("drop_subscript_env of an invalid place");
+                let value = std::mem::replace(target, Value::uninit());
+                value.discard_storage();
+            }
+            OperationKind::BorrowSubscriptMember { .. } => {
+                panic!("borrowed subscript callables require the physical MIR interpreter")
             }
             OperationKind::Load => {
                 self.exec_load(slots, &operation.operands, def.unwrap())?;
@@ -988,12 +1007,9 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
 
-    /// Executes a `build_subscript` operation: bundles the base subscript with captured hidden
-    /// evidence, mirroring `eval_build_subscript_value` — each capture operand is interned
-    /// evidence, a symbolic dictionary or a subscript value read (non-consumingly) from its
-    /// operand.
+    /// Closes symbolic subscript evidence over additional hidden evidence operands.
     #[inline(never)]
-    fn exec_build_subscript(
+    fn exec_build_subscript_evidence(
         &mut self,
         slots: &mut FxHashMap<mir::Value, Binding>,
         operands: &[mir::Value],
@@ -2473,6 +2489,15 @@ impl<'a> Interpreter<'a> {
         {
             return *subscript;
         }
+        if let mir::Value::Register(_) | mir::Value::Parameter(_) = v
+            && let Some(Binding::Value(value)) = slots.get(v)
+        {
+            return value
+                .as_subscript()
+                .expect("a subscript operand must resolve to a subscript value")
+                .as_ref()
+                .clone();
+        }
         let place = self.place_operand(slots, v);
         place
             .target_ref(&self.ctx)
@@ -2485,8 +2510,8 @@ impl<'a> Interpreter<'a> {
 
     /// Binds an `@extra` evidence operand at a call boundary: a symbolic trait dictionary binds to
     /// its interned id; a symbolic subscript constant is materialized into a fresh cell holding the
-    /// bare subscript value (passed by place, the same shape as forwarded subscript evidence);
-    /// anything else is already a place.
+    /// bare subscript value (passed by place, the same shape as forwarded subscript evidence).
+    /// Place-form evidence is forwarded unchanged.
     fn evidence_binding(
         &mut self,
         slots: &FxHashMap<mir::Value, Binding>,
@@ -2511,6 +2536,20 @@ impl<'a> Interpreter<'a> {
             Ok(Binding::Place(
                 self.alloc_cell(Value::subscript(*id), span)?,
             ))
+        } else if matches!(op, mir::Value::Register(_) | mir::Value::Parameter(_))
+            && matches!(slots.get(op), Some(Binding::Value(_)))
+        {
+            match self.hidden_evidence_operand(slots, op) {
+                HiddenEvidenceArgValue::Subscript(subscript) => Ok(Binding::Place(
+                    self.alloc_cell(Value::subscript_value(*subscript), span)?,
+                )),
+                HiddenEvidenceArgValue::VariantPayloadStorage(storage) => Ok(Binding::Place(
+                    self.alloc_cell(Value::native(storage.is_indirect()), span)?,
+                )),
+                HiddenEvidenceArgValue::TraitDictionary(_) => {
+                    unreachable!("dictionary bindings are handled first")
+                }
+            }
         } else {
             Ok(Binding::Place(self.place_operand(slots, op)))
         }
@@ -2533,6 +2572,22 @@ impl<'a> Interpreter<'a> {
             return HiddenEvidenceArgValue::Subscript(crate::containers::b(SubscriptValue::bare(
                 *id,
             )));
+        }
+        if let mir::Value::Register(_) | mir::Value::Parameter(_) = op
+            && let Some(Binding::Value(value)) = slots.get(op)
+        {
+            if let Some(indirect) = value.as_primitive_ty::<bool>() {
+                return HiddenEvidenceArgValue::VariantPayloadStorage(
+                    VariantPayloadStorage::from_indirect(*indirect),
+                );
+            }
+            return HiddenEvidenceArgValue::Subscript(crate::containers::b(
+                value
+                    .as_subscript()
+                    .expect("hidden evidence must be a subscript or variant storage mode")
+                    .as_ref()
+                    .clone(),
+            ));
         }
         let place = self.place_operand(slots, op);
         let value = place

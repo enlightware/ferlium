@@ -492,8 +492,9 @@ classes remain out for their own reasons.
   writes in between.
 - **An owned materialized value**, `build_subscript` among them, cannot be merged at all: such a
   register must have exactly one consuming use, and merging is what gives it two.
-- **`subscript_member`** also materializes a function place in a cell, but is not yet represented in
-  the computation key. If added, it needs the same stack-region kill as `dict_entry`.
+- **`subscript_member`** materializes a function place in semantic MIR and therefore needs the same
+  stack-region argument as `dict_entry` before it could be numbered. Physical lowering instead
+  refines it to the ephemeral `borrow_subscript_member`.
 
 Dominance itself is `mir::dominance`, shared with the verifier, which dominates *instructions* rather
 than blocks because an invoked operation's result is anchored at the normal successor and must not

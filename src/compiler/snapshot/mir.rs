@@ -291,7 +291,18 @@ enum SnapshotOperationKind {
         mut_member: bool,
         ty: SnapshotTypeId,
     },
+    BuildSubscriptEvidence {
+        ty: SnapshotTypeId,
+    },
     BuildSubscript {
+        ty: SnapshotTypeId,
+    },
+    CloneSubscriptEnv {
+        ty: SnapshotTypeId,
+    },
+    DropSubscriptEnv,
+    BorrowSubscriptMember {
+        mut_member: bool,
         ty: SnapshotTypeId,
     },
     Variant {
@@ -841,7 +852,18 @@ impl SnapshotOperationKind {
                 mut_member: *mut_member,
                 ty: graph.capture(*ty)?,
             },
+            Source::BuildSubscriptEvidence { ty } => Stored::BuildSubscriptEvidence {
+                ty: graph.capture(*ty)?,
+            },
             Source::BuildSubscript { ty } => Stored::BuildSubscript {
+                ty: graph.capture(*ty)?,
+            },
+            Source::CloneSubscriptEnv { ty } => Stored::CloneSubscriptEnv {
+                ty: graph.capture(*ty)?,
+            },
+            Source::DropSubscriptEnv => Stored::DropSubscriptEnv,
+            Source::BorrowSubscriptMember { mut_member, ty } => Stored::BorrowSubscriptMember {
+                mut_member: *mut_member,
                 ty: graph.capture(*ty)?,
             },
             Source::Variant {
@@ -967,7 +989,18 @@ impl SnapshotOperationKind {
                 mut_member: *mut_member,
                 ty: resolve_type(types, *ty)?,
             },
+            Stored::BuildSubscriptEvidence { ty } => Runtime::BuildSubscriptEvidence {
+                ty: resolve_type(types, *ty)?,
+            },
             Stored::BuildSubscript { ty } => Runtime::BuildSubscript {
+                ty: resolve_type(types, *ty)?,
+            },
+            Stored::CloneSubscriptEnv { ty } => Runtime::CloneSubscriptEnv {
+                ty: resolve_type(types, *ty)?,
+            },
+            Stored::DropSubscriptEnv => Runtime::DropSubscriptEnv,
+            Stored::BorrowSubscriptMember { mut_member, ty } => Runtime::BorrowSubscriptMember {
+                mut_member: *mut_member,
                 ty: resolve_type(types, *ty)?,
             },
             Stored::Variant {

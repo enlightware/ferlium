@@ -35,8 +35,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     mir::{
-        self, BlockId, Function, OperationKind, edit::FunctionEdit, terminator::TerminatorKind,
-        value::ValueId,
+        self, BlockId, Function, OperationKind, edit::FunctionEdit, role::ValueRoles,
+        terminator::TerminatorKind, value::ValueId,
     },
     module::id::Id,
 };
@@ -106,7 +106,8 @@ pub(crate) fn remove_redundant_stack_markers(func: &Function) -> Option<Function
         return None;
     }
 
-    let entry_states = analyze(func);
+    let roles = ValueRoles::derive(func);
+    let entry_states = analyze(func, &roles);
 
     // A redundant save's marker is replaced by one already holding the same frontier. The
     // substitution is justified where it is *decided* — the two markers are equal integers there —
@@ -139,7 +140,7 @@ pub(crate) fn remove_redundant_stack_markers(func: &Function) -> Option<Function
                 }
                 _ => {}
             }
-            step(operation, &mut state);
+            step(operation, func, &roles, &mut state);
         }
     }
     if dead.is_empty() {
@@ -185,7 +186,7 @@ fn resolve(substitution: &FxHashMap<ValueId, ValueId>, marker: ValueId) -> Value
 }
 
 /// The frontier state on entry to each reachable block.
-fn analyze(func: &Function) -> FxHashMap<BlockId, Frontier> {
+fn analyze(func: &Function, roles: &ValueRoles) -> FxHashMap<BlockId, Frontier> {
     let mut entry_states: FxHashMap<BlockId, Frontier> = FxHashMap::default();
     entry_states.insert(func.entry(), Frontier::default());
 
@@ -201,10 +202,10 @@ fn analyze(func: &Function) -> FxHashMap<BlockId, Frontier> {
             let mut state = entry;
             let basic_block = func.block(block);
             for operation in basic_block.operations() {
-                step(operation, &mut state);
+                step(operation, func, roles, &mut state);
             }
             if let TerminatorKind::Invoke { operation, .. } = &basic_block.terminator().kind {
-                step(operation, &mut state);
+                step(operation, func, roles, &mut state);
             }
             for successor in basic_block.terminator().successors() {
                 let updated = match entry_states.get(&successor) {
@@ -222,7 +223,7 @@ fn analyze(func: &Function) -> FxHashMap<BlockId, Frontier> {
 }
 
 /// Advances the frontier state across one operation.
-fn step(operation: &mir::Operation, state: &mut Frontier) {
+fn step(operation: &mir::Operation, func: &Function, roles: &ValueRoles, state: &mut Frontier) {
     match &operation.kind {
         OperationKind::StackSave => {
             if let Some(marker) = operation.result_id() {
@@ -240,7 +241,7 @@ fn step(operation: &mir::Operation, state: &mut Frontier) {
             }
         }
         _ => {
-            if may_leave_frame_storage(operation) {
+            if may_leave_frame_storage(operation, func, roles) {
                 state.clear();
             }
         }

@@ -544,13 +544,13 @@ impl<'a> Emitter<'a> {
                             .iter()
                             .map(|capture| self.context.evidence_bindings[capture].clone())
                             .collect();
-                        self.insert(Operation::build_subscript(
+                        self.insert(Operation::build_subscript_evidence(
                             self.context.span,
                             mir::Value::Subscript(*definition),
                             captures,
                             binding.requirement.to_dict_type_in_env(&self.env),
                         ))
-                        .expect("build_subscript must produce evidence")
+                        .expect("build_subscript_evidence must produce evidence")
                     }
                 }
             };
@@ -2059,6 +2059,21 @@ impl<'a> Emitter<'a> {
             K::LoadSubscriptEvidence(n) => {
                 self.context.evidence_bindings[&n.extra_parameter].clone()
             }
+            K::BuildSubscriptValue(n) => {
+                if let Some(evidence) = self.static_evidence_node(node) {
+                    return mir::Value::Evidence(Box::new(evidence));
+                }
+                let base = self.lower_subscript_operand(&self.hir_arena[n.subscript]);
+                let captures = n
+                    .evidence_captures
+                    .iter()
+                    .map(|capture| self.lower_extra_argument(&self.hir_arena[*capture]))
+                    .collect();
+                self.insert(Operation::build_subscript_evidence(
+                    node.span, base, captures, node.ty,
+                ))
+                .expect("build_subscript_evidence produces closed evidence")
+            }
             _ => self.lower_as_place(node),
         }
     }
@@ -2091,7 +2106,9 @@ impl<'a> Emitter<'a> {
         use hir::NodeKind as K;
         match &node.kind {
             K::GetDictionary(_) | K::LoadDictionary(_) => self.lower_dictionary_operand(node),
-            K::GetSubscript(_) | K::LoadSubscriptEvidence(_) => self.lower_subscript_operand(node),
+            K::GetSubscript(_) | K::LoadSubscriptEvidence(_) | K::BuildSubscriptValue(_) => {
+                self.lower_subscript_operand(node)
+            }
             K::LoadVariantPayloadStorageEvidence(n) => {
                 self.context.evidence_bindings[&n.extra_parameter].clone()
             }
@@ -2645,58 +2662,43 @@ impl<'a> Emitter<'a> {
             }
 
             K::GetSubscript(n) => {
-                // A first-class reference to a statically known subscript: a symbolic constant,
-                // stored into the destination exactly like a dictionary.
-                let subscript = mir::Value::Subscript(n.subscript);
-                self.store_into_if_needed(node.span, subscript, destination);
+                if let Some(destination) = destination {
+                    let subscript = self
+                        .insert(Operation::build_subscript(
+                            node.span,
+                            mir::Value::Subscript(n.subscript),
+                            node.ty,
+                        ))
+                        .expect("build_subscript produces a first-class value");
+                    self.store(node.span, subscript, destination);
+                }
             }
 
-            K::BuildSubscriptValue(n) => {
-                // Bundle the base subscript with captured hidden evidence into a first-class
-                // subscript value (mirroring `eval_build_subscript_value`).
-                if let Some(evidence) = self.static_evidence_node(node) {
-                    self.store_into_if_needed(
-                        node.span,
-                        mir::Value::Evidence(Box::new(evidence)),
-                        destination,
-                    );
+            K::BuildSubscriptValue(_) => {
+                let Some(destination) = destination else {
                     return;
-                }
-                let base = self.lower_subscript_operand(&self.hir_arena[n.subscript]);
-                let evidence: Vec<mir::Value> = n
-                    .evidence_captures
-                    .iter()
-                    .map(|e| self.lower_extra_argument(&self.hir_arena[*e]))
-                    .collect();
+                };
+                let evidence = self.lower_subscript_operand(node);
                 let value = self
-                    .insert(Operation::build_subscript(
-                        node.span, base, evidence, node.ty,
-                    ))
-                    .unwrap();
-                self.store_into_if_needed(node.span, value, destination);
+                    .insert(Operation::build_subscript(node.span, evidence, node.ty))
+                    .expect("build_subscript produces a first-class value");
+                self.store(node.span, value, destination);
             }
 
             K::CloneSubscriptValue(n) => {
-                // Clone a first-class subscript value: read the source (non-consumingly) into a
-                // fresh value — a capture-less `build_subscript` (mirroring
-                // `eval_clone_subscript_value`, which snapshots the source's subscript value).
-                let source = self.lower_subscript_operand(&self.hir_arena[n.source]);
+                let Some(destination) = destination else {
+                    return;
+                };
+                let source = self.lower_as_place(&self.hir_arena[n.source]);
                 let value = self
-                    .insert(Operation::build_subscript(
-                        node.span,
-                        source,
-                        vec![],
-                        node.ty,
-                    ))
-                    .unwrap();
-                self.store_into_if_needed(node.span, value, destination);
+                    .insert(Operation::clone_subscript_env(node.span, source, node.ty))
+                    .expect("clone_subscript_env produces a first-class value");
+                self.store(node.span, value, destination);
             }
 
             K::DropSubscriptValue(n) => {
-                // Drop a first-class subscript value: it carries only interned evidence (no user
-                // resource), so no semantic operation is emitted (mirroring
-                // `eval_drop_subscript_value`). The target place is still lowered for effects.
-                let _ = self.lower_as_place(&self.hir_arena[n.target]);
+                let target = self.lower_as_place(&self.hir_arena[n.target]);
+                self.insert(Operation::drop_subscript_env(node.span, target));
                 self.store_unit_result(node.span, destination);
             }
 
@@ -2972,12 +2974,12 @@ impl<'a> Emitter<'a> {
             }
 
             K::LoadSubscriptEvidence(n) => {
-                // Forwarded subscript evidence is likewise an incoming by-pointer extra parameter.
-                // When it is used as a first-class value rather than only as call metadata, copy
-                // that value into the requested destination.
-                if destination.is_some() {
-                    let p = self.context.evidence_bindings[&n.extra_parameter].clone();
-                    self.memcpy_into_if_needed(node.span, p, destination);
+                if let Some(destination) = destination {
+                    let evidence = self.context.evidence_bindings[&n.extra_parameter].clone();
+                    let value = self
+                        .insert(Operation::build_subscript(node.span, evidence, node.ty))
+                        .expect("build_subscript produces a first-class value");
+                    self.store(node.span, value, destination);
                 }
             }
 

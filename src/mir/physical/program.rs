@@ -365,7 +365,7 @@ fn verify_operation(
     operation: &Operation,
 ) -> Result<(), PhysicalProgramError> {
     for (index, operand) in operation.operands.iter().enumerate() {
-        if index == 0 && matches!(operation.kind, OperationKind::BuildSubscript { .. }) {
+        if index == 0 && matches!(operation.kind, OperationKind::BuildSubscriptEvidence { .. }) {
             verify_subscript_base(program, owner, operand)?;
         } else {
             verify_value(program, owner, operand)?;
@@ -415,13 +415,13 @@ fn verify_operation(
             });
         }
     }
-    if let OperationKind::BuildSubscript { .. } = operation.kind
+    if let OperationKind::BuildSubscriptEvidence { .. } = operation.kind
         && let Some(result) = operation.result_id()
         && let Some(value) = subscripts.get(&result)
     {
         verify_subscript_capture_count(program, owner, *value)?;
     }
-    if let OperationKind::SubscriptMember { mut_member, .. } = operation.kind
+    if let OperationKind::BorrowSubscriptMember { mut_member, .. } = operation.kind
         && let Some(value) = operation
             .operands
             .first()

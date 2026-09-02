@@ -1394,6 +1394,13 @@ impl<'a> Verifier<'a> {
                     self.transfer_drop(&operands[0], &mut normal);
                     self.transfer_drop(&operands[0], &mut unwind);
                 }
+                OperationKind::DropSubscriptEnv => {
+                    self.transfer_drop(&operands[0], &mut normal);
+                    self.transfer_drop(&operands[0], &mut unwind);
+                }
+                // Dropping a closure environment leaves a valid environment-less function value
+                // in the target place, so it does not end that place's initialized lifetime.
+                OperationKind::DropClosureEnv => {}
                 // The destination takes on the obligation the copy creates, exactly as a call's
                 // result place does — a clone *is* a call to `Value::clone`, spelled as an
                 // operation so its subject is legible.
@@ -1821,7 +1828,7 @@ impl<'a> Verifier<'a> {
                     OperationKind::Load
                     | OperationKind::CompareEqual
                     | OperationKind::ExtractTag
-                    | OperationKind::BuildSubscript { .. } => false,
+                    | OperationKind::BuildSubscriptEvidence { .. } => false,
                     _ => match operation.result() {
                         OperationResult::Lowered(ty) => !self.is_trivial_copy(ty),
                         _ => false,
