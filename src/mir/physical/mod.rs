@@ -6,9 +6,12 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 
-//! Physical MIR lowering and readiness verification.
+//! Physical MIR lowering, readiness verification, and whole-program resolution.
 
 mod dictionary;
+mod evidence;
+pub(crate) mod program;
+mod subscript;
 
 use std::fmt;
 
@@ -36,8 +39,9 @@ use crate::{
         value::{ConstantId, StaticEvidence},
     },
     module::{
-        DictionaryEntryEvidence, FunctionId, LocalFunctionId, LocalImplId, ModuleEnv, ModuleId,
-        ProjectionIndex, ResolvedValueLayout, TraitDictionaryId, id::Id,
+        DictionaryEntryEvidence, FunctionId, LocalFunctionId, LocalImplId, LocalSubscriptId,
+        ModuleEnv, ModuleId, ProjectionIndex, ResolvedValueLayout, SubscriptId, TraitDictionaryId,
+        id::Id,
     },
     std::{
         buffer::buffer_element_type,
@@ -62,6 +66,9 @@ use crate::{
 
 use dictionary::PhysicalDictionaryCatalog;
 pub(crate) use dictionary::{PhysicalDictionaryDefinition, PhysicalDictionaryEntry};
+use evidence::{PhysicalEvidenceReferences, try_for_each_static_evidence};
+use subscript::PhysicalSubscriptCatalog;
+pub(crate) use subscript::{PhysicalSubscriptDefinition, PhysicalSubscriptMember};
 
 /// A physical-lowering or readiness failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,6 +120,28 @@ pub(crate) enum BackendReadinessError {
         owner: FunctionId,
         dictionary: TraitDictionaryId,
         entry: TraitDictionaryEntryIndex,
+    },
+    InvalidSubscriptDefinition {
+        subscript: SubscriptId,
+    },
+    InvalidSubscriptMember {
+        subscript: SubscriptId,
+        target: FunctionId,
+    },
+    UnresolvedSubscriptReference {
+        owner: FunctionId,
+        subscript: SubscriptId,
+    },
+    InvalidSubscriptCaptureCount {
+        owner: FunctionId,
+        subscript: SubscriptId,
+        expected: usize,
+        actual: usize,
+    },
+    MissingSubscriptMember {
+        owner: FunctionId,
+        subscript: SubscriptId,
+        mut_member: bool,
     },
 }
 
@@ -200,6 +229,44 @@ impl fmt::Display for BackendReadinessError {
                 dictionary.module_id,
                 dictionary.impl_id
             ),
+            Self::InvalidSubscriptDefinition { subscript } => write!(
+                f,
+                "physical subscript m{}:s{} has invalid relocatable metadata",
+                subscript.module, subscript.subscript
+            ),
+            Self::InvalidSubscriptMember { subscript, target } => write!(
+                f,
+                "physical subscript m{}:s{} refers to unavailable member m{}:f{}",
+                subscript.module, subscript.subscript, target.module, target.function
+            ),
+            Self::UnresolvedSubscriptReference { owner, subscript } => write!(
+                f,
+                "physical entry m{}:f{} refers to unavailable subscript m{}:s{}",
+                owner.module, owner.function, subscript.module, subscript.subscript
+            ),
+            Self::InvalidSubscriptCaptureCount {
+                owner,
+                subscript,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "physical entry m{}:f{} closes subscript m{}:s{} over {actual} captures, expected {expected}",
+                owner.module, owner.function, subscript.module, subscript.subscript
+            ),
+            Self::MissingSubscriptMember {
+                owner,
+                subscript,
+                mut_member,
+            } => write!(
+                f,
+                "physical entry m{}:f{} selects missing {} member from subscript m{}:s{}",
+                owner.module,
+                owner.function,
+                if *mut_member { "mut" } else { "ref" },
+                subscript.module,
+                subscript.subscript
+            ),
         }
     }
 }
@@ -211,6 +278,7 @@ pub(crate) struct BackendReadyMirArtifacts {
     module: ModuleId,
     entries: Vec<Option<Function>>,
     dictionaries: PhysicalDictionaryCatalog,
+    subscripts: PhysicalSubscriptCatalog,
 }
 
 impl BackendReadyMirArtifacts {
@@ -248,6 +316,26 @@ impl BackendReadyMirArtifacts {
     ) -> Option<&PhysicalDictionaryEntry> {
         self.dictionary(id)?.entries().get(entry.as_index())
     }
+
+    pub(crate) fn subscripts(&self) -> &[PhysicalSubscriptDefinition] {
+        self.subscripts.definitions()
+    }
+
+    pub(crate) fn subscript_imports(&self) -> &[SubscriptId] {
+        self.subscripts.imports()
+    }
+
+    pub(crate) fn subscript(&self, id: SubscriptId) -> Option<&PhysicalSubscriptDefinition> {
+        self.subscripts.definition(id)
+    }
+
+    pub(crate) fn subscript_member(
+        &self,
+        id: SubscriptId,
+        mut_member: bool,
+    ) -> Option<PhysicalSubscriptMember> {
+        self.subscript(id)?.member(mut_member)
+    }
 }
 
 /// Lower one module's complete optimized MIR artifact set and verify the result.
@@ -283,11 +371,14 @@ pub(crate) fn lower_physical_mir(
         }
     }
     entries.extend(lowerer.helpers.into_iter().map(Some));
-    let dictionaries = PhysicalDictionaryCatalog::from_module(module, env.current, &entries);
+    let references = PhysicalEvidenceReferences::collect(&entries);
+    let dictionaries = PhysicalDictionaryCatalog::from_module(module, env.current, &references);
+    let subscripts = PhysicalSubscriptCatalog::from_module(module, env.current, env, &references);
     let artifacts = BackendReadyMirArtifacts {
         module,
         entries,
         dictionaries,
+        subscripts,
     };
     verify_physical_mir(&artifacts)?;
     Ok(artifacts)
@@ -2316,6 +2407,7 @@ fn int_unary(
 
 fn verify_physical_mir(artifacts: &BackendReadyMirArtifacts) -> Result<(), BackendReadinessError> {
     verify_dictionary_catalog(artifacts)?;
+    verify_subscript_catalog(artifacts)?;
     let module = artifacts.module;
     for index in 0..artifacts.entry_count() {
         let function = LocalFunctionId::from_index(index);
@@ -2324,6 +2416,7 @@ fn verify_physical_mir(artifacts: &BackendReadyMirArtifacts) -> Result<(), Backe
         };
         let function_id = FunctionId::new(module, function);
         let constructed_dictionaries = constructed_dictionary_definitions(body);
+        let constructed_subscripts = constructed_subscript_definitions(body);
 
         #[cfg(any(debug_assertions, test, feature = "std-snapshot"))]
         {
@@ -2337,6 +2430,7 @@ fn verify_physical_mir(artifacts: &BackendReadyMirArtifacts) -> Result<(), Backe
                     artifacts,
                     function_id,
                     &constructed_dictionaries,
+                    &constructed_subscripts,
                     operation,
                 )?;
             }
@@ -2346,22 +2440,23 @@ fn verify_physical_mir(artifacts: &BackendReadyMirArtifacts) -> Result<(), Backe
                         artifacts,
                         function_id,
                         &constructed_dictionaries,
+                        &constructed_subscripts,
                         operation,
                     )?;
                 }
-                _ => verify_local_function_operands(
-                    module,
-                    artifacts.entry_count(),
-                    function_id,
-                    block.terminator().operands().iter(),
-                )
-                .and_then(|_| {
-                    verify_dictionary_operands(
+                _ => {
+                    verify_local_function_operands(
+                        module,
+                        artifacts.entry_count(),
+                        function_id,
+                        block.terminator().operands().iter(),
+                    )?;
+                    verify_evidence_operands(
                         artifacts,
                         function_id,
                         block.terminator().operands().iter(),
-                    )
-                })?,
+                    )?;
+                }
             }
         }
     }
@@ -2372,6 +2467,7 @@ fn verify_physical_operation(
     artifacts: &BackendReadyMirArtifacts,
     owner: FunctionId,
     constructed_dictionaries: &FxHashMap<mir::ValueId, TraitDictionaryId>,
+    constructed_subscripts: &FxHashMap<mir::ValueId, ConstructedSubscript>,
     operation: &Operation,
 ) -> Result<(), BackendReadinessError> {
     if let OperationKind::Subfield {
@@ -2393,7 +2489,13 @@ fn verify_physical_operation(
         owner,
         operation.operands.iter(),
     )?;
-    verify_dictionary_operation(artifacts, owner, constructed_dictionaries, operation)?;
+    verify_evidence_operation(
+        artifacts,
+        owner,
+        constructed_dictionaries,
+        constructed_subscripts,
+        operation,
+    )?;
     if let Some(target) = operation.kind.function_id() {
         verify_local_function_target(artifacts.module, artifacts.entry_count(), owner, target)?;
     }
@@ -2425,6 +2527,68 @@ fn record_constructed_dictionary(
             .result_id()
             .expect("build_dictionary produces a dictionary value");
         assert!(definitions.insert(result, definition).is_none());
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ConstructedSubscript {
+    definition: SubscriptId,
+    capture_count: usize,
+}
+
+fn constructed_subscript_definitions(
+    body: &Function,
+) -> FxHashMap<mir::ValueId, ConstructedSubscript> {
+    let operations = body
+        .blocks()
+        .flat_map(|block| {
+            let block = body.block(block);
+            block
+                .operations()
+                .iter()
+                .chain(match &block.terminator().kind {
+                    TerminatorKind::Invoke { operation, .. } => std::slice::from_ref(operation),
+                    _ => &[],
+                })
+        })
+        .filter(|operation| matches!(operation.kind, OperationKind::BuildSubscript { .. }))
+        .collect::<Vec<_>>();
+    let mut results = FxHashSet::default();
+    for operation in &operations {
+        let result = operation
+            .result_id()
+            .expect("build_subscript produces a subscript value");
+        assert!(results.insert(result), "MIR values have unique definitions");
+    }
+    let mut definitions = FxHashMap::default();
+    loop {
+        let mut changed = false;
+        for operation in &operations {
+            let result = operation
+                .result_id()
+                .expect("build_subscript produces a subscript value");
+            if definitions.contains_key(&result) {
+                continue;
+            }
+            let Some(base) = operation
+                .operands
+                .first()
+                .and_then(|base| static_subscript(base, &definitions))
+            else {
+                continue;
+            };
+            definitions.insert(
+                result,
+                ConstructedSubscript {
+                    definition: base.definition,
+                    capture_count: base.capture_count + operation.operands.len() - 1,
+                },
+            );
+            changed = true;
+        }
+        if !changed {
+            return definitions;
+        }
     }
 }
 
@@ -2461,13 +2625,53 @@ fn verify_dictionary_catalog(
     Ok(())
 }
 
-fn verify_dictionary_operation(
+fn verify_subscript_catalog(
+    artifacts: &BackendReadyMirArtifacts,
+) -> Result<(), BackendReadinessError> {
+    for (index, definition) in artifacts.subscripts().iter().enumerate() {
+        let expected_id = SubscriptId::new(artifacts.module, LocalSubscriptId::from_index(index));
+        if definition.id() != expected_id {
+            return Err(BackendReadinessError::InvalidSubscriptDefinition {
+                subscript: definition.id(),
+            });
+        }
+        for member in [definition.member(false), definition.member(true)]
+            .into_iter()
+            .flatten()
+        {
+            let target = member.function();
+            // Native members legitimately occupy a function-table slot without a MIR body.
+            if target.module != artifacts.module
+                || target.function.as_index() >= artifacts.entry_count()
+            {
+                return Err(BackendReadinessError::InvalidSubscriptMember {
+                    subscript: definition.id(),
+                    target,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn verify_evidence_operation(
     artifacts: &BackendReadyMirArtifacts,
     owner: FunctionId,
     constructed_dictionaries: &FxHashMap<mir::ValueId, TraitDictionaryId>,
+    constructed_subscripts: &FxHashMap<mir::ValueId, ConstructedSubscript>,
     operation: &Operation,
 ) -> Result<(), BackendReadinessError> {
-    verify_dictionary_operands(artifacts, owner, operation.operands.iter())?;
+    if matches!(operation.kind, OperationKind::BuildSubscript { .. }) {
+        let base = operation
+            .operands
+            .first()
+            .expect("build_subscript has a base operand");
+        verify_subscript_base(artifacts, owner, base)?;
+        verify_evidence_operands(artifacts, owner, operation.operands[1..].iter())?;
+    } else {
+        verify_evidence_operands(artifacts, owner, operation.operands.iter())?;
+    }
+
     if let OperationKind::BuildDictionary { definition, .. } = operation.kind {
         verify_dictionary_reference(artifacts, owner, definition)?;
         if let Some(metadata) = artifacts.dictionary(definition)
@@ -2497,21 +2701,76 @@ fn verify_dictionary_operation(
             entry: entry_index,
         });
     }
+
+    if matches!(operation.kind, OperationKind::BuildSubscript { .. }) {
+        let result = operation
+            .result_id()
+            .expect("build_subscript produces a subscript value");
+        if let Some(value) = constructed_subscripts.get(&result)
+            && let Some(definition) = artifacts.subscript(value.definition)
+            && value.capture_count != definition.capture_schema().len()
+        {
+            return Err(BackendReadinessError::InvalidSubscriptCaptureCount {
+                owner,
+                subscript: value.definition,
+                expected: definition.capture_schema().len(),
+                actual: value.capture_count,
+            });
+        }
+    }
+    if let OperationKind::SubscriptMember { mut_member, .. } = operation.kind
+        && let Some(value) = operation
+            .operands
+            .first()
+            .and_then(|operand| static_subscript(operand, constructed_subscripts))
+        && let Some(definition) = artifacts.subscript(value.definition)
+        && definition.member(mut_member).is_none()
+    {
+        return Err(BackendReadinessError::MissingSubscriptMember {
+            owner,
+            subscript: value.definition,
+            mut_member,
+        });
+    }
     Ok(())
 }
 
-fn verify_dictionary_operands<'a>(
+fn verify_subscript_base(
+    artifacts: &BackendReadyMirArtifacts,
+    owner: FunctionId,
+    value: &Value,
+) -> Result<(), BackendReadinessError> {
+    match value {
+        Value::Subscript(definition) => verify_subscript_reference(artifacts, owner, *definition),
+        Value::Evidence(evidence) => match evidence.as_ref() {
+            StaticEvidence::Subscript {
+                definition,
+                captures,
+            } => {
+                verify_subscript_reference(artifacts, owner, *definition)?;
+                for capture in captures {
+                    verify_static_evidence(artifacts, owner, capture)?;
+                }
+                Ok(())
+            }
+            _ => verify_static_evidence(artifacts, owner, evidence),
+        },
+        _ => verify_evidence_value(artifacts, owner, value),
+    }
+}
+
+fn verify_evidence_operands<'a>(
     artifacts: &BackendReadyMirArtifacts,
     owner: FunctionId,
     operands: impl Iterator<Item = &'a Value>,
 ) -> Result<(), BackendReadinessError> {
     for operand in operands {
-        verify_dictionary_value(artifacts, owner, operand)?;
+        verify_evidence_value(artifacts, owner, operand)?;
     }
     Ok(())
 }
 
-fn verify_dictionary_value(
+fn verify_evidence_value(
     artifacts: &BackendReadyMirArtifacts,
     owner: FunctionId,
     value: &Value,
@@ -2530,6 +2789,19 @@ fn verify_dictionary_value(
                 });
             }
         }
+        Value::Subscript(definition) => {
+            verify_subscript_reference(artifacts, owner, *definition)?;
+            if let Some(metadata) = artifacts.subscript(*definition)
+                && !metadata.capture_schema().is_empty()
+            {
+                return Err(BackendReadinessError::InvalidSubscriptCaptureCount {
+                    owner,
+                    subscript: *definition,
+                    expected: metadata.capture_schema().len(),
+                    actual: 0,
+                });
+            }
+        }
         Value::Evidence(evidence) => verify_static_evidence(artifacts, owner, evidence)?,
         _ => {}
     }
@@ -2541,7 +2813,7 @@ fn verify_static_evidence(
     owner: FunctionId,
     evidence: &StaticEvidence,
 ) -> Result<(), BackendReadinessError> {
-    let captures = match evidence {
+    try_for_each_static_evidence(evidence, &mut |evidence| match evidence {
         StaticEvidence::Dictionary {
             definition,
             captures,
@@ -2557,15 +2829,27 @@ fn verify_static_evidence(
                     actual: captures.len(),
                 });
             }
-            captures.as_ref()
+            Ok(())
         }
-        StaticEvidence::Subscript { captures, .. } => captures.as_ref(),
-        StaticEvidence::VariantPayloadStorage(_) => return Ok(()),
-    };
-    for capture in captures {
-        verify_static_evidence(artifacts, owner, capture)?;
-    }
-    Ok(())
+        StaticEvidence::Subscript {
+            definition,
+            captures,
+        } => {
+            verify_subscript_reference(artifacts, owner, *definition)?;
+            if let Some(metadata) = artifacts.subscript(*definition)
+                && captures.len() != metadata.capture_schema().len()
+            {
+                return Err(BackendReadinessError::InvalidSubscriptCaptureCount {
+                    owner,
+                    subscript: *definition,
+                    expected: metadata.capture_schema().len(),
+                    actual: captures.len(),
+                });
+            }
+            Ok(())
+        }
+        StaticEvidence::VariantPayloadStorage(_) => Ok(()),
+    })
 }
 
 fn verify_dictionary_reference(
@@ -2580,6 +2864,18 @@ fn verify_dictionary_reference(
     }
 }
 
+fn verify_subscript_reference(
+    artifacts: &BackendReadyMirArtifacts,
+    owner: FunctionId,
+    subscript: SubscriptId,
+) -> Result<(), BackendReadinessError> {
+    if artifacts.subscripts.contains_reference(subscript) {
+        Ok(())
+    } else {
+        Err(BackendReadinessError::UnresolvedSubscriptReference { owner, subscript })
+    }
+}
+
 fn static_dictionary_definition(
     value: &Value,
     constructed_dictionaries: &FxHashMap<mir::ValueId, TraitDictionaryId>,
@@ -2591,6 +2887,30 @@ fn static_dictionary_definition(
             _ => None,
         },
         Value::Register(register) => constructed_dictionaries.get(register).copied(),
+        _ => None,
+    }
+}
+
+fn static_subscript(
+    value: &Value,
+    constructed: &FxHashMap<mir::ValueId, ConstructedSubscript>,
+) -> Option<ConstructedSubscript> {
+    match value {
+        Value::Subscript(definition) => Some(ConstructedSubscript {
+            definition: *definition,
+            capture_count: 0,
+        }),
+        Value::Evidence(evidence) => match evidence.as_ref() {
+            StaticEvidence::Subscript {
+                definition,
+                captures,
+            } => Some(ConstructedSubscript {
+                definition: *definition,
+                capture_count: captures.len(),
+            }),
+            _ => None,
+        },
+        Value::Register(register) => constructed.get(register).copied(),
         _ => None,
     }
 }
@@ -2659,7 +2979,7 @@ mod tests {
         compiler::MirOptimization,
         module::{ModuleEnv, Path, TraitDictionaryEntry},
         std::ordering::ordering_type,
-        types::type_like::TypeLike,
+        types::{r#type::SubscriptType, type_like::TypeLike},
     };
 
     use super::*;
@@ -2689,6 +3009,19 @@ mod tests {
             known,
         )?;
         Ok((physical, first_helper))
+    }
+
+    fn rebuild_evidence_catalogs(
+        session: &CompilerSession,
+        artifacts: &mut BackendReadyMirArtifacts,
+    ) {
+        let references = PhysicalEvidenceReferences::collect(&artifacts.entries);
+        let source = session.expect_fresh_module(artifacts.module);
+        let env = ModuleEnv::new(source, session.raw_modules());
+        artifacts.dictionaries =
+            PhysicalDictionaryCatalog::from_module(artifacts.module, source, &references);
+        artifacts.subscripts =
+            PhysicalSubscriptCatalog::from_module(artifacts.module, source, env, &references);
     }
 
     #[test]
@@ -2747,6 +3080,282 @@ mod tests {
     }
 
     #[test]
+    fn physical_module_owns_its_relocatable_subscript_definitions() {
+        let mut session = CompilerSession::new();
+        session.set_allow_experimental(true);
+        let module = compile(
+            &mut session,
+            "subscript cell<T>(slot: &mut T) -> T\n\
+             where T: Value {\n\
+                 ref { let local = slot; yield local }\n\
+                 mut { let mut local = slot; yield local; slot = local }\n\
+             }\n\
+             fn use_cell() { let accessor = cell; let mut value = 3; value->[accessor] }",
+            "subscript_catalog",
+        );
+        let subscript = session
+            .expect_fresh_module(module)
+            .get_local_subscript_id(ustr::ustr("cell"))
+            .unwrap();
+        let (physical, _) = lower(&mut session, module).unwrap();
+        let definition = physical
+            .subscript(SubscriptId::new(module, subscript))
+            .unwrap();
+
+        assert_eq!(definition.capture_schema().len(), 1);
+        let semantic = session
+            .expect_fresh_module(module)
+            .get_subscript_by_id(subscript)
+            .unwrap();
+        assert_eq!(
+            definition.member(false).unwrap().provenance(),
+            semantic.ref_member.as_ref().unwrap().provenance
+        );
+        assert_eq!(
+            definition.member(true).unwrap().provenance(),
+            semantic.mut_member.as_ref().unwrap().provenance
+        );
+        assert_eq!(physical.subscript_imports(), &[]);
+    }
+
+    #[test]
+    fn build_subscript_appends_captures_while_a_captureless_build_clones() {
+        let definition = SubscriptId::new(ModuleId::from_index(3), LocalSubscriptId::from_index(4));
+        let span = Location::new_synthesized();
+        let subscript_ty =
+            Type::subscript_type(SubscriptType::new(vec![], Type::unit(), None, None));
+        let mut builder = FunctionBuilder::new(
+            ustr::ustr("subscript_construction"),
+            CallResultConvention::Value,
+        );
+        let block = builder.add_block();
+        let base = Value::Evidence(Box::new(StaticEvidence::Subscript {
+            definition,
+            captures: vec![StaticEvidence::VariantPayloadStorage(false)].into_boxed_slice(),
+        }));
+        let extended = builder
+            .append_operation(
+                block,
+                Operation::build_subscript(
+                    span,
+                    base,
+                    vec![Value::Evidence(Box::new(
+                        StaticEvidence::VariantPayloadStorage(true),
+                    ))],
+                    subscript_ty,
+                ),
+            )
+            .unwrap();
+        let cloned = builder
+            .append_operation(
+                block,
+                Operation::build_subscript(span, extended, vec![], subscript_ty),
+            )
+            .unwrap();
+        builder.set_terminator(block, Terminator::ret(span));
+
+        let constructed = constructed_subscript_definitions(&builder.finish_unverified());
+        let cloned = static_subscript(&cloned, &constructed).unwrap();
+        assert_eq!(cloned.definition, definition);
+        assert_eq!(cloned.capture_count, 2);
+    }
+
+    #[test]
+    fn a_capture_bearing_subscript_cannot_be_used_bare() {
+        let mut session = CompilerSession::new();
+        session.set_allow_experimental(true);
+        let module = compile(
+            &mut session,
+            "subscript cell<T>(slot: &mut T) -> T where T: Value {\n\
+                 ref { let local = slot; yield local }\n\
+             }",
+            "bare_subscript",
+        );
+        let (mut physical, _) = lower(&mut session, module).unwrap();
+        let definition = physical
+            .subscripts()
+            .iter()
+            .find(|definition| !definition.capture_schema().is_empty())
+            .unwrap()
+            .id();
+        let span = Location::new_synthesized();
+        let mut builder =
+            FunctionBuilder::new(ustr::ustr("bare_subscript"), CallResultConvention::Value);
+        let block = builder.add_block();
+        builder.append_operation(
+            block,
+            Operation::subscript_member(span, Value::Subscript(definition), false, Type::unit()),
+        );
+        builder.set_terminator(block, Terminator::ret(span));
+        physical.entries.push(Some(builder.finish_unverified()));
+
+        assert!(matches!(
+            verify_physical_mir(&physical),
+            Err(BackendReadinessError::InvalidSubscriptCaptureCount {
+                subscript,
+                expected,
+                actual: 0,
+                ..
+            }) if subscript == definition && expected > 0
+        ));
+    }
+
+    #[test]
+    fn selecting_an_absent_subscript_member_is_rejected() {
+        let mut session = CompilerSession::new();
+        session.set_allow_experimental(true);
+        let module = compile(
+            &mut session,
+            "subscript read_only(slot: &mut int) -> int {\n\
+                 ref { let local = slot; yield local }\n\
+             }",
+            "missing_subscript_member",
+        );
+        let (mut physical, _) = lower(&mut session, module).unwrap();
+        let definition = physical
+            .subscripts()
+            .iter()
+            .find(|definition| definition.member(false).is_some())
+            .unwrap()
+            .id();
+        assert!(
+            physical
+                .subscript(definition)
+                .unwrap()
+                .member(true)
+                .is_none()
+        );
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new(
+            ustr::ustr("missing_subscript_member"),
+            CallResultConvention::Value,
+        );
+        let block = builder.add_block();
+        builder.append_operation(
+            block,
+            Operation::subscript_member(span, Value::Subscript(definition), true, Type::unit()),
+        );
+        builder.set_terminator(block, Terminator::ret(span));
+        physical.entries.push(Some(builder.finish_unverified()));
+
+        assert!(matches!(
+            verify_physical_mir(&physical),
+            Err(BackendReadinessError::MissingSubscriptMember {
+                subscript,
+                mut_member: true,
+                ..
+            }) if subscript == definition
+        ));
+    }
+
+    #[test]
+    fn whole_program_resolution_rejects_an_unresolved_foreign_subscript() {
+        let mut session = CompilerSession::new();
+        let module = compile(&mut session, "fn anchor() {}", "unresolved_subscript");
+        let (mut physical, _) = lower(&mut session, module).unwrap();
+        let foreign = SubscriptId::new(
+            ModuleId::from_index(module.as_index() + 1),
+            LocalSubscriptId::from_index(0),
+        );
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new(
+            ustr::ustr("unresolved_subscript"),
+            CallResultConvention::Value,
+        );
+        let block = builder.add_block();
+        builder.append_operation(
+            block,
+            Operation::subscript_member(span, Value::Subscript(foreign), false, Type::unit()),
+        );
+        builder.set_terminator(block, Terminator::ret(span));
+        physical.entries.push(Some(builder.finish_unverified()));
+        rebuild_evidence_catalogs(&session, &mut physical);
+
+        assert!(matches!(
+            program::resolve_physical_program(vec![physical]),
+            Err(program::PhysicalProgramError::UnresolvedSubscript { subscript, .. })
+                if subscript == foreign
+        ));
+    }
+
+    #[test]
+    fn whole_program_resolution_resolves_and_interns_static_evidence() {
+        let mut session = CompilerSession::new();
+        session.set_allow_experimental(true);
+        let module = compile(
+            &mut session,
+            "subscript cell<T>(slot: &mut T) -> T\n\
+             where T: Value { ref { let local = slot; yield local } }\n\
+             fn use_cell() { let accessor = cell; let mut value = 3; value->[accessor] }",
+            "physical_link",
+        );
+        let (user, _) = lower(&mut session, module).unwrap();
+        let (std, _) = lower(&mut session, crate::std::STD_MODULE_ID).unwrap();
+
+        let resolved = program::resolve_physical_program(vec![user, std]).unwrap();
+
+        assert!(resolved.module(crate::std::STD_MODULE_ID).is_some());
+        assert!(resolved.module(module).is_some());
+        assert!(
+            resolved.static_evidence().iter().any(|evidence| matches!(
+                evidence,
+                program::InternedStaticEvidence::Subscript { .. }
+            ))
+        );
+        assert!(resolved.static_evidence().iter().any(|evidence| matches!(
+            evidence,
+            program::InternedStaticEvidence::Dictionary { .. }
+        )));
+        assert!(resolved.modules().iter().any(|module| {
+            module.entries.iter().flatten().any(|function| {
+                function.blocks().any(|block| {
+                    function.block(block).operations().iter().any(|operation| {
+                        operation
+                            .operands
+                            .iter()
+                            .any(|operand| resolved.evidence_id(operand).is_some())
+                    })
+                })
+            })
+        }));
+    }
+
+    #[test]
+    fn whole_program_resolution_resolves_a_foreign_subscript() {
+        let mut session = CompilerSession::new();
+        session.set_allow_experimental(true);
+        let base = compile(
+            &mut session,
+            "#[private_repr]\n\
+             pub struct Secret { inner: [int] }\n\
+             pub fn make(value: int) -> Secret { Secret { inner: [value] } }\n\
+             pub subscript Secret.value(self) -> int {\n\
+                 ref mut { return self.inner[0] }\n\
+             }",
+            "base",
+        );
+        let user = compile(
+            &mut session,
+            "fn read_value<T>(value: &mut T) -> int { value.value }\n\
+             fn read() -> int { let mut value = base::make(7); read_value(value) }",
+            "user",
+        );
+        let base_module = session.expect_fresh_module(base);
+        assert_eq!(base_module.subscript_count(), 1);
+        let subscript = SubscriptId::new(base, LocalSubscriptId::from_index(0));
+        let (base_physical, _) = lower(&mut session, base).unwrap();
+        let (user_physical, _) = lower(&mut session, user).unwrap();
+        let (std, _) = lower(&mut session, crate::std::STD_MODULE_ID).unwrap();
+
+        assert!(user_physical.subscript_imports().contains(&subscript));
+        let resolved =
+            program::resolve_physical_program(vec![user_physical, std, base_physical]).unwrap();
+
+        assert!(resolved.subscript(subscript).is_some());
+        assert!(resolved.subscript_member(subscript, true).is_some());
+    }
+
+    #[test]
     fn physical_module_records_foreign_dictionary_references() {
         let mut session = CompilerSession::new();
         let module = compile(&mut session, "fn anchor() {}", "dictionary_import");
@@ -2774,15 +3383,16 @@ mod tests {
         );
         builder.set_terminator(entry, Terminator::ret(span));
         let entries = [Some(builder.finish_unverified())];
-        let dictionaries = PhysicalDictionaryCatalog::from_module(
-            module,
-            session.expect_fresh_module(module),
-            &entries,
-        );
+        let references = PhysicalEvidenceReferences::collect(&entries);
+        let source = session.expect_fresh_module(module);
+        let env = ModuleEnv::new(source, session.raw_modules());
+        let dictionaries = PhysicalDictionaryCatalog::from_module(module, source, &references);
+        let subscripts = PhysicalSubscriptCatalog::from_module(module, source, env, &references);
         let physical = BackendReadyMirArtifacts {
             module,
             entries: entries.into(),
             dictionaries,
+            subscripts,
         };
         assert_eq!(physical.dictionary_imports(), &[foreign, nested_foreign]);
     }
@@ -2831,11 +3441,7 @@ mod tests {
         );
         builder.set_terminator(block, Terminator::ret(span));
         physical.entries.push(Some(builder.finish_unverified()));
-        physical.dictionaries = PhysicalDictionaryCatalog::from_module(
-            module,
-            session.expect_fresh_module(module),
-            &physical.entries,
-        );
+        rebuild_evidence_catalogs(&session, &mut physical);
 
         assert!(matches!(
             verify_physical_mir(&physical),

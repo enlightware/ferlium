@@ -44,7 +44,7 @@ use crate::{
     format::FormatWith,
     hir::value::VariantPayloadStorage,
     mir,
-    module::{FunctionId, ModuleEnv},
+    module::{FunctionId, ModuleEnv, TraitDictionaryId},
     types::{
         effects::{EffType, Effect, PrimitiveEffect},
         r#trait::TraitDictionaryEntryIndex,
@@ -526,7 +526,7 @@ impl Operation {
     /// dictionary — a method function value, or an associated const — of type `ty`. `call`, `drop`,
     /// and `memcpy` consume that place exactly as they consume a `subfield` result. Physical MIR
     /// retains this projection together with relocatable metadata for the referenced definition;
-    /// the whole-session linker selects its target representation.
+    /// whole-program assembly selects its target representation.
     pub fn dict_entry(
         span: Location,
         dict: mir::Value,
@@ -544,7 +544,7 @@ impl Operation {
     /// Closes a dictionary definition over its ordered hidden-evidence captures.
     pub fn build_dictionary(
         span: Location,
-        definition: crate::module::TraitDictionaryId,
+        definition: TraitDictionaryId,
         captures: Vec<mir::Value>,
         ty: Type,
     ) -> Self {
@@ -579,9 +579,10 @@ impl Operation {
 
     /// Creates a `build_subscript` operation, which bundles the symbolic subscript at operand `0`
     /// with captured hidden evidence — the remaining operands, each a symbolic dictionary or
-    /// subscript operand — yielding a first-class subscript value of type `ty`. With no captures it
-    /// reads the subscript operand into a fresh first-class value (the lowering of a subscript
-    /// clone).
+    /// subscript operand — yielding a first-class subscript value of type `ty`. Captures are
+    /// appended to the base environment. HIR elaboration flattens ordinary construction onto an
+    /// open symbolic base; with no captures this instead reads an already-closed base into a fresh
+    /// first-class value, which is how a subscript clone is lowered.
     pub fn build_subscript(
         span: Location,
         subscript: mir::Value,
@@ -1100,7 +1101,7 @@ pub enum OperationKind {
     },
     /// Close a trait dictionary definition over hidden evidence operands.
     BuildDictionary {
-        definition: crate::module::TraitDictionaryId,
+        definition: TraitDictionaryId,
         ty: Type,
     },
     /// Resolve a member function place from a symbolic subscript.

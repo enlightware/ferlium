@@ -275,15 +275,19 @@ their externally visible identity. Generated helpers are ordinary entries in the
 The lowerer builds a physical function table. The readiness verifier checks it and returns
 `BackendReadyMirArtifacts`. Both stages use the same MIR structures without a phase parameter.
 
-Each physical module also owns a relocatable dictionary catalog. A definition records its stable
-module-qualified identity, capture schema, entry functions, and entry-to-capture mappings. Concrete
-references to definitions owned by other modules form an explicit import list. The readiness
-verifier checks owned definitions against this catalog; the linker checks imported capture counts
-and entry indices after resolving their owning catalogs. Neither needs the semantic `Module` arenas.
+Each physical module owns relocatable dictionary and subscript catalogs. A dictionary definition
+records its stable identity, capture schema, entry functions, and entry-to-capture mappings. A
+subscript definition records its identity, capture schema, optional `ref` and `mut` functions, and
+their provenance. Foreign references form explicit import lists. The readiness verifier checks
+local metadata. Whole-program assembly resolves foreign capture counts, entries, and members
+without consulting semantic `Module` arenas.
 
-A target-independent whole-session link step combines these physical modules, resolves their
-imports, interns equivalent static evidence trees, and assigns any dense indexes required by the
-executor. It does not eagerly materialize a dictionary value for every definition.
+A target-independent assembly step creates a `ResolvedPhysicalProgram` over the independently
+lowered artifacts. It does not rewrite or merge their MIR bodies. The resolved view validates
+function and evidence imports and interns equivalent static evidence trees referenced by retained
+bodies. Stable module-qualified identities remain available; an executor may assign target indexes
+or concrete addresses from the catalogs. Assembly does not eagerly materialize every dictionary or
+subscript definition.
 
 Backend-ready MIR may retain symbolic operands, `DictEntry`, variant construction, and
 `extract_tag`. Each executor supplies their target representation. Interpreter-only native calls

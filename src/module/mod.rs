@@ -819,6 +819,11 @@ impl Module {
         self.subscripts.get(id.as_index())
     }
 
+    /// Get the number of subscript definitions in this module.
+    pub(crate) fn subscript_count(&self) -> usize {
+        self.subscripts.len()
+    }
+
     /// Get a local subscript ID by name.
     pub fn get_local_subscript_id(&self, name: Ustr) -> Option<LocalSubscriptId> {
         self.get_definition(name)

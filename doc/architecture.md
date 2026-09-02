@@ -12,8 +12,10 @@ backends consume the backend-ready physical MIR stage specified in [mir-ir.md](m
 Compiled execution uses one generated module for all Ferlium modules in a `CompilerSession`.
 Independent compilation and dynamic linking of Ferlium modules are outside the current design.
 Physical lowering processes each source module separately: every result is a relocatable
-function and evidence catalog. A target-independent whole-session link step resolves those catalogs
-before Wasm, Cranelift, or another machine backend assigns target indexes and addresses.
+function table with dictionary and subscript catalogs. A target-independent assembly step creates a
+resolved whole-program view over the unchanged module artifacts. It validates their imports and
+interns referenced static evidence before an interpreter or machine backend executes them. Wasm,
+Cranelift, and other machine backends assign their own target indexes and addresses later.
 
 In the browser, the Rust runtime and generated Ferlium code are separate Wasm instances sharing
 one linear memory supplied by the runtime:

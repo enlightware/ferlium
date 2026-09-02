@@ -392,6 +392,9 @@ impl ValueRoles {
         if matches!(operation.kind, OperationKind::BuildDictionary { .. }) {
             return Some(ValueRole::Dictionary);
         }
+        if matches!(operation.kind, OperationKind::BuildSubscript { .. }) {
+            return Some(ValueRole::Subscript);
+        }
         self.resolve_result(result, constants)
     }
 
