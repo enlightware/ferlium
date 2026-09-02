@@ -763,6 +763,15 @@ pub(crate) fn check_operand_roles(
                 evidence(2);
             }
         }
+        OperationKind::MoveBytes { .. } => {
+            place(0);
+            place(1);
+            let size = role(2);
+            assert!(
+                matches!(&*size, ValueRole::Materialized(MirType::Lowered(ty)) if *ty == int_type()),
+                "MIR function `{func_name}` {at}: move_bytes size must be a materialized int, got {size:?}"
+            );
+        }
         OperationKind::StackRestore => {
             let role = role(0);
             assert!(

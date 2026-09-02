@@ -36,8 +36,8 @@
 //! original needs no accompanying type check. An entry whose meaning depended on the instantiation
 //! could not be admitted without one, and none is.
 //!
-//! Consumers currently include partial call simplification, dead-call elimination and integer
-//! range reasoning.
+//! Consumers currently include partial call simplification, dead-call elimination, integer range
+//! reasoning, and target-independent physical lowering.
 #![allow(dead_code)]
 
 use rustc_hash::FxHashMap;
@@ -51,7 +51,10 @@ use crate::{
     },
     std::{
         STD_MODULE_ID,
-        core_traits_names::{BITS_TRAIT_NAME, ITERATOR_TRAIT_NAME, NUM_TRAIT_NAME, ORD_TRAIT_NAME},
+        buffer::buffer_type,
+        core_traits_names::{
+            BITS_TRAIT_NAME, ITERATOR_TRAIT_NAME, NUM_TRAIT_NAME, ORD_TRAIT_NAME, VALUE_TRAIT_NAME,
+        },
         math::{float_type, int_type},
     },
     types::{
@@ -143,6 +146,18 @@ pub(crate) enum KnownCallee {
     /// `Iterator<RangeInclusiveIterator>::next(iterator)` — as [`RangeNext`](Self::RangeNext), with
     /// an inclusive bound.
     RangeInclusiveNext,
+    /// The mutable member of the private `buffer_slot` subscript.
+    BufferSlot,
+    /// The private `buffer_with_capacity` storage constructor.
+    BufferWithCapacity,
+    /// The private whole-buffer ownership transfer.
+    BufferMove,
+    /// The private element ownership transfer between Buffer slots.
+    BufferMoveInto,
+    /// The private element ownership transfer out of a Buffer slot.
+    BufferTake,
+    /// `Value<Buffer<A>>::drop`.
+    BufferDrop,
 }
 
 impl KnownCallee {
@@ -167,6 +182,19 @@ impl KnownCallee {
                 | Self::FloatNeg
                 | Self::FloatCmp
                 | Self::BoolNot
+        )
+    }
+
+    /// Whether physical lowering replaces this private Buffer operation.
+    pub(crate) fn is_buffer(self) -> bool {
+        matches!(
+            self,
+            Self::BufferSlot
+                | Self::BufferWithCapacity
+                | Self::BufferMove
+                | Self::BufferMoveInto
+                | Self::BufferTake
+                | Self::BufferDrop
         )
     }
 }
@@ -209,6 +237,8 @@ pub(crate) struct KnownCallees {
     int_add_ty: CallImplType,
     int_sub: FunctionId,
     int_sub_ty: CallImplType,
+    int_mul: FunctionId,
+    int_mul_ty: CallImplType,
     int_neg: FunctionId,
     int_neg_ty: CallImplType,
     int_bit_and: FunctionId,
@@ -244,6 +274,7 @@ impl KnownCallees {
         let range_inclusive_iterator = resolver.named_type("RangeInclusiveIterator");
         let int_add = resolver.method(NUM_TRAIT_NAME, int_type(), "add");
         let int_sub = resolver.method(NUM_TRAIT_NAME, int_type(), "sub");
+        let int_mul = resolver.method(NUM_TRAIT_NAME, int_type(), "mul");
         let int_neg = resolver.method(NUM_TRAIT_NAME, int_type(), "neg");
         let int_bit_and = resolver.method(BITS_TRAIT_NAME, int_type(), "bit_and");
         let int_cmp = resolver.method(ORD_TRAIT_NAME, int_type(), "cmp");
@@ -253,10 +284,7 @@ impl KnownCallees {
         let entries = [
             (int_add, KnownCallee::IntAdd),
             (int_sub, KnownCallee::IntSub),
-            (
-                resolver.method(NUM_TRAIT_NAME, int_type(), "mul"),
-                KnownCallee::IntMul,
-            ),
+            (int_mul, KnownCallee::IntMul),
             (int_neg, KnownCallee::IntNeg),
             (
                 resolver.method(NUM_TRAIT_NAME, int_type(), "from_int"),
@@ -303,6 +331,28 @@ impl KnownCallees {
                 resolver.method(ITERATOR_TRAIT_NAME, range_inclusive_iterator, "next"),
                 KnownCallee::RangeInclusiveNext,
             ),
+            (
+                resolver.subscript_mut_member("buffer_slot"),
+                KnownCallee::BufferSlot,
+            ),
+            (
+                resolver.function("buffer_with_capacity"),
+                KnownCallee::BufferWithCapacity,
+            ),
+            (resolver.function("buffer_move"), KnownCallee::BufferMove),
+            (
+                resolver.function("buffer_move_into"),
+                KnownCallee::BufferMoveInto,
+            ),
+            (resolver.function("buffer_take"), KnownCallee::BufferTake),
+            (
+                resolver.blanket_method(
+                    VALUE_TRAIT_NAME,
+                    buffer_type(Type::variable_id(0)),
+                    "drop",
+                ),
+                KnownCallee::BufferDrop,
+            ),
         ];
         Self {
             by_id: entries.into_iter().collect(),
@@ -310,6 +360,8 @@ impl KnownCallees {
             int_add_ty: resolver.call_impl_type(int_add),
             int_sub,
             int_sub_ty: resolver.call_impl_type(int_sub),
+            int_mul,
+            int_mul_ty: resolver.call_impl_type(int_mul),
             int_neg,
             int_neg_ty: resolver.call_impl_type(int_neg),
             int_bit_and,
@@ -342,6 +394,10 @@ impl KnownCallees {
 
     pub(crate) fn int_sub(&self) -> (FunctionId, &CallImplType) {
         (self.int_sub, &self.int_sub_ty)
+    }
+
+    pub(crate) fn int_mul(&self) -> (FunctionId, &CallImplType) {
+        (self.int_mul, &self.int_mul_ty)
     }
 
     pub(crate) fn int_neg(&self) -> (FunctionId, &CallImplType) {
@@ -547,6 +603,34 @@ impl Resolver<'_> {
             .methods[index];
         FunctionId::new(STD_MODULE_ID, local)
     }
+
+    /// A method of the exact blanket implementation headed by `input_ty`.
+    fn blanket_method(&self, trait_name: &str, input_ty: Type, method: &str) -> FunctionId {
+        let trait_id = Module::expect_std_trait_id(self.modules, trait_name);
+        let index = self
+            .std_module
+            .trait_def(trait_id)
+            .methods
+            .iter()
+            .position(|(name, _)| name == &ustr(method))
+            .unwrap_or_else(|| panic!("trait `{trait_name}` declares no method `{method}`"));
+        let implementations = self
+            .std_module
+            .get_blanket_impl_by_key(&trait_id)
+            .unwrap_or_else(|| panic!("std declares no blanket `{trait_name}` implementation"));
+        let (_, &impl_id) = implementations
+            .iter()
+            .find(|(key, _)| key.input_tys.as_slice() == [input_ty])
+            .unwrap_or_else(|| {
+                panic!("std does not blanket-implement `{trait_name}` for this type")
+            });
+        let local = self
+            .std_module
+            .get_impl_data(impl_id)
+            .expect("an impl id from the table has data")
+            .methods[index];
+        FunctionId::new(STD_MODULE_ID, local)
+    }
 }
 
 #[cfg(test)]
@@ -566,8 +650,22 @@ mod tests {
         let session = CompilerSession::new();
         assert_eq!(
             known_callees(&session).by_id.len(),
-            19,
+            25,
             "two known callees resolved to the same function id"
+        );
+    }
+
+    #[test]
+    fn each_buffer_callee_has_its_own_identity() {
+        let session = CompilerSession::new();
+        assert_eq!(
+            known_callees(&session)
+                .by_id
+                .values()
+                .filter(|callee| callee.is_buffer())
+                .count(),
+            6,
+            "two Buffer callees resolved to the same function id"
         );
     }
 
@@ -616,6 +714,23 @@ mod tests {
             Some(semantics),
             "canonicalizing to a known original must yield that original's semantics"
         );
+    }
+
+    #[test]
+    fn buffer_resolution_sees_through_specialization() {
+        let session = CompilerSession::new();
+        let table = known_callees(&session);
+        let (&known, &operation) = table
+            .by_id
+            .iter()
+            .find(|(_, callee)| callee.is_buffer())
+            .expect("the Buffer table is not empty");
+        let specialized = FunctionId::new(
+            STD_MODULE_ID,
+            LocalFunctionId::from_index(session.std_module().function_count()),
+        );
+        assert_eq!(table.resolve(specialized, |_| None), None);
+        assert_eq!(table.resolve(specialized, |_| Some(known)), Some(operation));
     }
 
     /// Field positions must come from the type, never from the declaration. Records are laid out

@@ -27,7 +27,7 @@ use crate::{
         edit::FunctionEdit,
         pass::{
             dataflow::{Root, escaping_roots},
-            known_callee::KnownCallees,
+            known_callee::{KnownCallee, KnownCallees},
         },
         role::{MirType, ValueRoles},
         terminator::{Terminator, TerminatorKind},
@@ -38,6 +38,7 @@ use crate::{
         id::Id,
     },
     std::{
+        buffer::buffer_element_type,
         core_traits_names::VALUE_TRAIT_NAME,
         logic::bool_type,
         math::int_type,
@@ -77,6 +78,9 @@ pub(crate) enum BackendReadinessError {
     InvalidVariantShellStore {
         function: FunctionId,
     },
+    InvalidBufferCall {
+        function: FunctionId,
+    },
     InvalidPhysicalCall {
         owner: FunctionId,
         target: FunctionId,
@@ -114,6 +118,11 @@ impl fmt::Display for BackendReadinessError {
             Self::InvalidVariantShellStore { function } => write!(
                 f,
                 "physical entry m{}:f{} does not store each variant shell exactly once",
+                function.module, function.function
+            ),
+            Self::InvalidBufferCall { function } => write!(
+                f,
+                "physical entry m{}:f{} contains an invalid Buffer call",
                 function.module, function.function
             ),
             Self::InvalidPhysicalCall {
@@ -167,6 +176,12 @@ pub(crate) fn lower_physical_mir(
     let mut entries = semantic.cloned_entries();
     let helper_base = FunctionId::new(module, LocalFunctionId::from_index(entries.len()));
     let mut lowerer = PhysicalLowerer::new(helper_base, env, known);
+    for (index, specialization) in semantic.specializations().iter().enumerate() {
+        let local = LocalFunctionId::from_index(semantic.len() + index);
+        lowerer
+            .originals
+            .insert(FunctionId::new(module, local), specialization.original);
+    }
     for (index, entry) in entries.iter_mut().enumerate() {
         if let Some(body) = entry.take() {
             let local = LocalFunctionId::from_index(index);
@@ -193,6 +208,9 @@ struct ProductAddressorKey {
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum PhysicalHelperKey {
     Product(ProductAddressorKey),
+    BufferDrop {
+        buffer_ty: Type,
+    },
     // Allocation follows the representation decision carried by the shell operation itself, so
     // retain it in the key rather than assuming two otherwise-equal shell sites agree. Addressors
     // recompute their decision canonically from the aggregate and payload types instead.
@@ -236,6 +254,7 @@ struct PhysicalLowerer<'a> {
     known: &'a KnownCallees,
     helper_ids: FxHashMap<PhysicalHelperKey, FunctionId>,
     helpers: Vec<Function>,
+    originals: FxHashMap<FunctionId, FunctionId>,
 }
 
 impl<'a> PhysicalLowerer<'a> {
@@ -246,6 +265,7 @@ impl<'a> PhysicalLowerer<'a> {
             known,
             helper_ids: FxHashMap::default(),
             helpers: Vec::new(),
+            originals: FxHashMap::default(),
         }
     }
 
@@ -309,6 +329,7 @@ impl<'a> PhysicalLowerer<'a> {
                 )?,
             }
         }
+        self.lower_buffer_calls(function, &mut edit)?;
         if let Some((base, variant_ty, payload_ty)) = value_drop_variant(original, &edit, self.env)
         {
             self.release_variant_on_value_drop_return(&mut edit, base, variant_ty, payload_ty);
@@ -318,6 +339,291 @@ impl<'a> PhysicalLowerer<'a> {
             edit.reorder_blocks_in_reverse_postorder();
         }
         Ok(edit.finish_unverified())
+    }
+
+    fn buffer_callee(&self, operation: &Operation) -> Option<KnownCallee> {
+        if !matches!(operation.kind, OperationKind::Call { .. }) {
+            return None;
+        }
+        let Some(Value::Function(callee)) = operation.operands.first() else {
+            return None;
+        };
+        self.known
+            .resolve(*callee, |id| self.originals.get(&id).copied())
+            .filter(|callee| callee.is_buffer())
+    }
+
+    fn lower_buffer_calls(
+        &mut self,
+        function: FunctionId,
+        edit: &mut FunctionEdit,
+    ) -> Result<(), BackendReadinessError> {
+        enum Candidate {
+            Call(KnownCallee, Operation),
+            Drop(Operation),
+        }
+
+        let mut candidates = Vec::new();
+        for block in edit.blocks().collect::<Vec<_>>() {
+            if let TerminatorKind::Invoke { operation, .. } = &edit.block(block).terminator.kind
+                && self.buffer_callee(operation).is_some()
+            {
+                return Err(BackendReadinessError::InvalidBufferCall { function });
+            }
+            for (index, operation) in edit.block(block).operations.iter().enumerate() {
+                let candidate = if let Some(callee) = self.buffer_callee(operation) {
+                    Candidate::Call(callee, operation.clone())
+                } else {
+                    match operation.kind {
+                        // Lifecycle dispatch may obtain its callee through a dictionary place, so
+                        // recognize Buffer drop from the operation's semantic type instead.
+                        OperationKind::Drop { ty } if buffer_element_type(ty).is_some() => {
+                            Candidate::Drop(operation.clone())
+                        }
+                        _ => continue,
+                    }
+                };
+                candidates.push((block, index, candidate));
+            }
+        }
+
+        for (block, index, candidate) in candidates.into_iter().rev() {
+            match candidate {
+                Candidate::Call(KnownCallee::BufferDrop, mut operation) => {
+                    let buffer_ty = buffer_call_type(&operation, 1, function)?.fn_ty.args[0].ty;
+                    let element_ty = buffer_element_type(buffer_ty)
+                        .ok_or(BackendReadinessError::InvalidBufferCall { function })?;
+                    operation.operands[0] =
+                        Value::Function(self.intern_buffer_drop(buffer_ty, element_ty));
+                    edit.replace_operation_sequence(block, index, [operation]);
+                }
+                Candidate::Call(callee, operation) => {
+                    let replacement = self.expand_buffer_call(function, callee, operation, edit)?;
+                    edit.replace_operation_sequence(block, index, replacement);
+                }
+                Candidate::Drop(mut operation) => {
+                    let OperationKind::Drop { ty: buffer_ty } = operation.kind else {
+                        unreachable!()
+                    };
+                    let element_ty = buffer_element_type(buffer_ty)
+                        .ok_or(BackendReadinessError::InvalidBufferCall { function })?;
+                    operation.operands[1] =
+                        Value::Function(self.intern_buffer_drop(buffer_ty, element_ty));
+                    operation.operands = operation.operands[..2].to_vec().into_boxed_slice();
+                    edit.replace_operation_sequence(block, index, [operation]);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn intern_buffer_drop(&mut self, buffer_ty: Type, element_ty: Type) -> FunctionId {
+        let key = PhysicalHelperKey::BufferDrop { buffer_ty };
+        if let Some(id) = self.helper_ids.get(&key) {
+            return *id;
+        }
+        let id = self.next_helper_id();
+        let body = build_buffer_drop(buffer_ty, element_ty, self.helpers.len(), self.env);
+        self.helper_ids.insert(key, id);
+        self.helpers.push(body);
+        id
+    }
+
+    fn expand_buffer_call(
+        &self,
+        function: FunctionId,
+        callee: KnownCallee,
+        operation: Operation,
+        edit: &mut FunctionEdit,
+    ) -> Result<Vec<Operation>, BackendReadinessError> {
+        let expected = match callee {
+            KnownCallee::BufferSlot | KnownCallee::BufferWithCapacity => 3,
+            KnownCallee::BufferMove => 2,
+            KnownCallee::BufferMoveInto => 5,
+            KnownCallee::BufferTake => 3,
+            KnownCallee::BufferDrop => unreachable!(),
+            _ => unreachable!("only Buffer callees reach Buffer expansion"),
+        };
+        let call_ty = buffer_call_type(&operation, expected, function)?;
+        let arguments = &operation.operands[1..=expected];
+        let destination = operation.operands[expected + 1].clone();
+        let span = operation.span;
+        let element_ty = match callee {
+            KnownCallee::BufferSlot | KnownCallee::BufferTake => {
+                let element_ty = buffer_argument_element_type(call_ty, 0, function)?;
+                if call_ty.ret() != element_ty {
+                    return Err(BackendReadinessError::InvalidBufferCall { function });
+                }
+                element_ty
+            }
+            KnownCallee::BufferWithCapacity => buffer_element_type(call_ty.ret())
+                .ok_or(BackendReadinessError::InvalidBufferCall { function })?,
+            KnownCallee::BufferMove => {
+                let element_ty = buffer_argument_element_type(call_ty, 0, function)?;
+                if buffer_argument_element_type(call_ty, 1, function)? != element_ty {
+                    return Err(BackendReadinessError::InvalidBufferCall { function });
+                }
+                element_ty
+            }
+            KnownCallee::BufferMoveInto => {
+                let element_ty = buffer_argument_element_type(call_ty, 0, function)?;
+                if buffer_argument_element_type(call_ty, 2, function)? != element_ty {
+                    return Err(BackendReadinessError::InvalidBufferCall { function });
+                }
+                element_ty
+            }
+            KnownCallee::BufferDrop => unreachable!(),
+            _ => unreachable!("only Buffer callees reach Buffer expansion"),
+        };
+        let mut replacement = Vec::new();
+        match callee {
+            KnownCallee::BufferWithCapacity => {
+                let total = edit_int_binary(
+                    edit,
+                    &mut replacement,
+                    self.known.int_mul(),
+                    arguments[0].clone(),
+                    arguments[1].clone(),
+                    span,
+                );
+                let total = edit_result(edit, &mut replacement, Operation::load(span, total));
+                let align = edit_result(
+                    edit,
+                    &mut replacement,
+                    Operation::load(span, arguments[2].clone()),
+                );
+                let allocation = edit_result(
+                    edit,
+                    &mut replacement,
+                    Operation::runtime_alloc(span, element_ty, total, align),
+                );
+                let slot = edit_buffer_pointer_slot(
+                    edit,
+                    &mut replacement,
+                    destination,
+                    element_ty,
+                    span,
+                    self.env,
+                );
+                replacement.push(Operation::store(span, allocation, slot));
+            }
+            KnownCallee::BufferSlot => {
+                let address = edit_buffer_element_address(
+                    edit,
+                    &mut replacement,
+                    arguments[0].clone(),
+                    arguments[1].clone(),
+                    arguments[2].clone(),
+                    element_ty,
+                    self.known,
+                    span,
+                    self.env,
+                );
+                replacement.push(Operation::store(span, address, destination));
+            }
+            KnownCallee::BufferTake => {
+                let address = edit_buffer_element_address(
+                    edit,
+                    &mut replacement,
+                    arguments[0].clone(),
+                    arguments[1].clone(),
+                    arguments[2].clone(),
+                    element_ty,
+                    self.known,
+                    span,
+                    self.env,
+                );
+                let size = edit_result(
+                    edit,
+                    &mut replacement,
+                    Operation::load(span, arguments[2].clone()),
+                );
+                replacement.push(Operation::move_bytes(
+                    span,
+                    element_ty,
+                    address,
+                    destination,
+                    size,
+                ));
+            }
+            KnownCallee::BufferMoveInto => {
+                let source_element = edit_buffer_element_address(
+                    edit,
+                    &mut replacement,
+                    arguments[0].clone(),
+                    arguments[1].clone(),
+                    arguments[4].clone(),
+                    element_ty,
+                    self.known,
+                    span,
+                    self.env,
+                );
+                let target_element = edit_buffer_element_address(
+                    edit,
+                    &mut replacement,
+                    arguments[2].clone(),
+                    arguments[3].clone(),
+                    arguments[4].clone(),
+                    element_ty,
+                    self.known,
+                    span,
+                    self.env,
+                );
+                let size = edit_result(
+                    edit,
+                    &mut replacement,
+                    Operation::load(span, arguments[4].clone()),
+                );
+                replacement.push(Operation::move_bytes(
+                    span,
+                    element_ty,
+                    source_element,
+                    target_element,
+                    size,
+                ));
+                edit_store_unit(edit, &mut replacement, destination, span, self.env);
+            }
+            KnownCallee::BufferMove => {
+                let source = edit_buffer_pointer_slot(
+                    edit,
+                    &mut replacement,
+                    arguments[0].clone(),
+                    element_ty,
+                    span,
+                    self.env,
+                );
+                let target = edit_buffer_pointer_slot(
+                    edit,
+                    &mut replacement,
+                    arguments[1].clone(),
+                    element_ty,
+                    span,
+                    self.env,
+                );
+                let old = edit_result(
+                    edit,
+                    &mut replacement,
+                    Operation::load(span, target.clone()),
+                );
+                replacement.push(Operation::runtime_dealloc(span, old));
+                replacement.push(Operation::clear(span, target.clone()));
+                replacement.push(Operation::move_value(span, source.clone(), target));
+                // A capacity-zero Buffer has no addressable slot, so the ABI deliberately uses
+                // the canonical zero-byte placeholder layout instead of `A`'s alignment.
+                let zero = edit_int_constant(edit, 0, self.env);
+                let one = edit_int_constant(edit, 1, self.env);
+                let empty = edit_result(
+                    edit,
+                    &mut replacement,
+                    Operation::runtime_alloc(span, element_ty, zero, one),
+                );
+                replacement.push(Operation::store(span, empty, source));
+                edit_store_unit(edit, &mut replacement, destination, span, self.env);
+            }
+            KnownCallee::BufferDrop => unreachable!(),
+            _ => unreachable!("only Buffer callees reach Buffer expansion"),
+        }
+        Ok(replacement)
     }
 
     fn lower_product_projection(
@@ -827,6 +1133,150 @@ impl<'a> PhysicalLowerer<'a> {
         self.helper_ids.insert(helper_key, id);
         id
     }
+}
+
+fn buffer_call_type(
+    operation: &Operation,
+    visible_arguments: usize,
+    function: FunctionId,
+) -> Result<&CallImplType, BackendReadinessError> {
+    let OperationKind::Call { ty, .. } = &operation.kind else {
+        return Err(BackendReadinessError::InvalidBufferCall { function });
+    };
+    if ty.fn_ty.args.len() != visible_arguments || operation.operands.len() != visible_arguments + 2
+    {
+        return Err(BackendReadinessError::InvalidBufferCall { function });
+    }
+    Ok(ty)
+}
+
+fn buffer_argument_element_type(
+    call_ty: &CallImplType,
+    argument: usize,
+    function: FunctionId,
+) -> Result<Type, BackendReadinessError> {
+    call_ty
+        .fn_ty
+        .args
+        .get(argument)
+        .and_then(|argument| buffer_element_type(argument.ty))
+        .ok_or(BackendReadinessError::InvalidBufferCall { function })
+}
+
+fn edit_result(
+    edit: &mut FunctionEdit,
+    operations: &mut Vec<Operation>,
+    mut operation: Operation,
+) -> Value {
+    let result = edit
+        .assign_new_result(&mut operation)
+        .expect("the inserted operation produces a result");
+    operations.push(operation);
+    result
+}
+
+fn edit_int_constant(edit: &mut FunctionEdit, value: isize, env: ModuleEnv<'_>) -> Value {
+    Value::Constant(edit.add_constant(int_type(), LiteralValue::new_native(value), &env))
+}
+
+fn edit_int_binary(
+    edit: &mut FunctionEdit,
+    operations: &mut Vec<Operation>,
+    callee: (FunctionId, &CallImplType),
+    left: Value,
+    right: Value,
+    span: Location,
+) -> Value {
+    let result = edit_result(edit, operations, Operation::alloca(span, int_type()));
+    operations.push(Operation::call(
+        span,
+        Value::Function(callee.0),
+        [left, right, result.clone()],
+        callee.1.clone(),
+    ));
+    result
+}
+
+fn edit_buffer_pointer_slot(
+    edit: &mut FunctionEdit,
+    operations: &mut Vec<Operation>,
+    buffer: Value,
+    element_ty: Type,
+    span: Location,
+    env: ModuleEnv<'_>,
+) -> Value {
+    let zero = edit_int_constant(edit, 0, env);
+    edit_result(
+        edit,
+        operations,
+        Operation::address_offset_place(span, buffer, zero, element_ty),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn edit_buffer_element_address(
+    edit: &mut FunctionEdit,
+    operations: &mut Vec<Operation>,
+    buffer: Value,
+    index: Value,
+    element_size: Value,
+    element_ty: Type,
+    known: &KnownCallees,
+    span: Location,
+    env: ModuleEnv<'_>,
+) -> Value {
+    let pointer_slot = edit_buffer_pointer_slot(edit, operations, buffer, element_ty, span, env);
+    let base = edit_result(edit, operations, Operation::load(span, pointer_slot));
+    let offset = edit_int_binary(edit, operations, known.int_mul(), index, element_size, span);
+    let offset = edit_result(edit, operations, Operation::load(span, offset));
+    edit_result(
+        edit,
+        operations,
+        Operation::address_offset(span, base, offset, element_ty),
+    )
+}
+
+fn edit_store_unit(
+    edit: &mut FunctionEdit,
+    operations: &mut Vec<Operation>,
+    destination: Value,
+    span: Location,
+    env: ModuleEnv<'_>,
+) {
+    let unit = edit.add_constant(Type::unit(), LiteralValue::new_native(()), &env);
+    operations.push(Operation::store(span, Value::Constant(unit), destination));
+}
+
+fn build_buffer_drop(
+    buffer_ty: Type,
+    element_ty: Type,
+    helper_index: usize,
+    env: ModuleEnv<'_>,
+) -> Function {
+    let span = Location::new_synthesized();
+    let name = Ustr::from(&format!("#physical:buffer_drop:{helper_index}"));
+    let mut builder = FunctionBuilder::new(name, CallResultConvention::Value);
+    let buffer = Value::Parameter(builder.add_parameter(
+        buffer_ty,
+        ParameterKind::Parameter(ArgConvention::MutableRef),
+    ));
+    let destination = Value::Parameter(builder.add_parameter(Type::unit(), ParameterKind::Return));
+    let entry = builder.add_block();
+    let zero = builder.add_constant(int_type(), LiteralValue::new_native(0isize), &env);
+    let pointer_slot = append_result(
+        &mut builder,
+        entry,
+        Operation::address_offset_place(span, buffer, Value::Constant(zero), element_ty),
+    );
+    let allocation = append_result(
+        &mut builder,
+        entry,
+        Operation::load(span, pointer_slot.clone()),
+    );
+    builder.append_operation(entry, Operation::runtime_dealloc(span, allocation));
+    builder.append_operation(entry, Operation::clear(span, pointer_slot));
+    finish_unit_result(&mut builder, entry, destination, span, env);
+    builder.finish_unverified()
 }
 
 fn variant_payload_projections(
@@ -1902,6 +2352,7 @@ mod tests {
         compiler::MirOptimization,
         module::{ModuleEnv, Path},
         std::ordering::ordering_type,
+        types::type_like::TypeLike,
     };
 
     use super::*;
@@ -2492,6 +2943,91 @@ mod tests {
                 .operations()
                 .iter()
                 .any(|operation| matches!(operation.kind, OperationKind::RuntimeAlloc { .. }))
+        }));
+    }
+
+    #[test]
+    fn array_mutation_lowers_every_buffer_operation() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            "fn append_and_pop(array: &mut [int], value: int) -> Option<int> {\n\
+                 array_append(array, value);\n\
+                 array_pop_back(array)\n\
+             }",
+            "physical_buffer",
+        );
+        let (physical, first_helper) = lower(&mut session, module).unwrap();
+
+        let operations = (0..physical.entry_count())
+            .filter_map(|index| physical.get(LocalFunctionId::from_index(index)))
+            .flat_map(|body| {
+                body.blocks()
+                    .flat_map(|block| body.block(block).operations())
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            operations
+                .iter()
+                .any(|operation| { matches!(operation.kind, OperationKind::RuntimeAlloc { .. }) })
+        );
+        assert!(
+            operations
+                .iter()
+                .any(|operation| { matches!(operation.kind, OperationKind::RuntimeDealloc) })
+        );
+        assert!(
+            operations
+                .iter()
+                .any(|operation| { matches!(operation.kind, OperationKind::MoveBytes { .. }) })
+        );
+        assert!(
+            operations
+                .iter()
+                .any(|operation| { matches!(operation.kind, OperationKind::AddressOffset { .. }) })
+        );
+        assert!(
+            (first_helper.as_index()..physical.entry_count()).any(|index| {
+                physical
+                    .get(LocalFunctionId::from_index(index))
+                    .is_some_and(|body| body.name.as_str().contains("buffer_drop"))
+            }),
+            "Buffer drop is redirected to a generated physical release helper"
+        );
+        assert!(!operations.iter().any(|operation| {
+            let Some(Value::Function(callee)) = operation.operands.first() else {
+                return false;
+            };
+            session
+                .known_callees()
+                .resolve(*callee, |_| None)
+                .is_some_and(KnownCallee::is_buffer)
+        }));
+    }
+
+    #[test]
+    fn std_buffer_moves_keep_open_element_types() {
+        let mut session = CompilerSession::new();
+        let (physical, _) = lower(&mut session, crate::std::STD_MODULE_ID).unwrap();
+
+        let operations = (0..physical.entry_count())
+            .filter_map(|index| physical.get(LocalFunctionId::from_index(index)))
+            .flat_map(|body| {
+                body.blocks()
+                    .flat_map(|block| body.block(block).operations())
+            })
+            .collect::<Vec<_>>();
+        assert!(operations.iter().any(|operation| {
+            matches!(operation.kind, OperationKind::MoveBytes { ty } if !ty.is_constant())
+        }));
+        assert!(!operations.iter().any(|operation| {
+            let Some(Value::Function(callee)) = operation.operands.first() else {
+                return false;
+            };
+            session
+                .known_callees()
+                .resolve(*callee, |_| None)
+                .is_some_and(KnownCallee::is_buffer)
         }));
     }
 }

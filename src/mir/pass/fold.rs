@@ -1064,25 +1064,7 @@ fn partial_call_outcome(
         KnownCallee::FloatMul if float_is(0, 1.0) => copy(1),
         KnownCallee::FloatMul if float_is(1, 1.0) => copy(0),
         KnownCallee::FloatCmp if same_argument(0, 1) => Some(CallRewrite::EqualOrdering),
-        KnownCallee::IntAdd
-        | KnownCallee::IntSub
-        | KnownCallee::IntMul
-        | KnownCallee::IntNeg
-        | KnownCallee::IntFromInt
-        | KnownCallee::IntCmp
-        | KnownCallee::FloatAdd
-        | KnownCallee::FloatSub
-        | KnownCallee::FloatMul
-        | KnownCallee::FloatNeg
-        | KnownCallee::FloatCmp
-        | KnownCallee::BoolNot
-        | KnownCallee::ArrayLen
-        | KnownCallee::ArrayResolveIndex
-        | KnownCallee::ArrayIndex
-        | KnownCallee::ArrayOffsetUnchecked
-        | KnownCallee::ArrayWrapIndex
-        | KnownCallee::RangeNext
-        | KnownCallee::RangeInclusiveNext => None,
+        _ => None,
     }
 }
 

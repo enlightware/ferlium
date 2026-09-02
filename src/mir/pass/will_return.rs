@@ -182,6 +182,7 @@ fn operation_returns(operation: &Operation, callee_returns: &impl Fn(FunctionId)
         | OperationKind::Clear
         | OperationKind::Memcpy
         | OperationKind::Move
+        | OperationKind::MoveBytes { .. }
         | OperationKind::StackSave
         | OperationKind::StackRestore
         | OperationKind::CheckCallDepth

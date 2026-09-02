@@ -311,6 +311,9 @@ enum SnapshotOperationKind {
     Clear,
     Memcpy,
     Move,
+    MoveBytes {
+        ty: SnapshotTypeId,
+    },
     StackSave,
     StackRestore,
     CheckCallDepth,
@@ -863,6 +866,9 @@ impl SnapshotOperationKind {
             Source::Clear => Stored::Clear,
             Source::Memcpy => Stored::Memcpy,
             Source::Move => Stored::Move,
+            Source::MoveBytes { ty } => Stored::MoveBytes {
+                ty: graph.capture(*ty)?,
+            },
             Source::StackSave => Stored::StackSave,
             Source::StackRestore => Stored::StackRestore,
             Source::CheckCallDepth => Stored::CheckCallDepth,
@@ -989,6 +995,9 @@ impl SnapshotOperationKind {
             Stored::Clear => Runtime::Clear,
             Stored::Memcpy => Runtime::Memcpy,
             Stored::Move => Runtime::Move,
+            Stored::MoveBytes { ty } => Runtime::MoveBytes {
+                ty: resolve_type(types, *ty)?,
+            },
             Stored::StackSave => Runtime::StackSave,
             Stored::StackRestore => Runtime::StackRestore,
             Stored::CheckCallDepth => Runtime::CheckCallDepth,

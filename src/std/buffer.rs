@@ -6,7 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::mem;
+use std::{any::TypeId, mem};
 
 use ustr::ustr;
 
@@ -31,7 +31,7 @@ use crate::{
         effects::no_effects,
         r#type::{
             BareNativeType, BareNativeTypeB, CallResultConvention, FnArgType, FnType, NativeType,
-            Type,
+            Type, TypeKind,
         },
         type_scheme::{PubTypeConstraint, TypeScheme},
     },
@@ -128,6 +128,21 @@ pub(crate) fn buffer_type(element_ty: Type) -> Type {
         bare_ty: buffer_bare_native_type(),
         arguments: vec![element_ty],
     })
+}
+
+/// The element type of the private compiled Buffer representation.
+pub(crate) fn buffer_element_type(ty: Type) -> Option<Type> {
+    let data = ty.data();
+    let TypeKind::Native(native) = &*data else {
+        return None;
+    };
+    if BareNativeType::type_id(native.bare_ty.as_ref()) == TypeId::of::<BufferBareNativeType>()
+        && native.arguments.len() == 1
+    {
+        Some(native.arguments[0])
+    } else {
+        None
+    }
 }
 
 fn buffer_eq(_: &Buffer, _: &Buffer) -> bool {
@@ -315,8 +330,11 @@ fn buffer_move_into(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlo
         mem::replace(source, Value::uninit())
     };
     let target = target.target_mut(ctx).map_err(RuntimeError::new_native)?;
-    let old = mem::replace(target, value);
-    old.discard_storage();
+    assert!(
+        matches!(target, Value::Uninit),
+        "buffer_move_into target slot must be uninitialized"
+    );
+    *target = value;
     cont(Value::unit())
 }
 
@@ -342,7 +360,7 @@ fn buffer_move_into_descr() -> ModuleFunction {
             "target_index",
             "element_size",
         ],
-        "Moves a buffer slot into another buffer slot.",
+        "Moves a buffer slot into an uninitialized slot of another buffer.",
         ContextNativeFn::new(
             "buffer_move_into",
             &[],

@@ -614,7 +614,7 @@ fn transfer(
         OperationKind::Subfield { .. }
         | OperationKind::AddressOffset { .. }
         | OperationKind::AddressOffsetPlace { .. } => {}
-        OperationKind::Memcpy | OperationKind::Move => {
+        OperationKind::Memcpy | OperationKind::Move | OperationKind::MoveBytes { .. } => {
             let source = place_of(&operation.operands[0]);
             let destination = place_of(&operation.operands[1]);
             let fact = match &source {
@@ -627,8 +627,10 @@ fn transfer(
                 state.set_place(place, fact, register_places);
             }
             // A move leaves its source moved-out; a memcpy preserves it.
-            if matches!(operation.kind, OperationKind::Move)
-                && let Some(place) = source
+            if matches!(
+                operation.kind,
+                OperationKind::Move | OperationKind::MoveBytes { .. }
+            ) && let Some(place) = source
                 && tracked(place)
             {
                 state.set_place(place, Fact::Uninit, register_places);
@@ -959,6 +961,9 @@ pub(crate) fn escaping_roots(
                     escape_operand(operand, escaped);
                 }
             }
+            // Source and destination ownership are modelled above; the remaining operand is a
+            // materialized integer extent, not evidence or a place that can escape.
+            OperationKind::MoveBytes { .. } => {}
             OperationKind::Call { ty, .. } => match call_operands(&operation.operands, ty) {
                 // A `Let` argument is immutable and non-escaping by the language's own convention,
                 // and the callee reads its function value and evidence by reference. What a call

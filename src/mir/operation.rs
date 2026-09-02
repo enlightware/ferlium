@@ -827,6 +827,23 @@ impl Operation {
         }
     }
 
+    /// Creates a physical ownership transfer of one initialized `ty` value using an explicit byte
+    /// extent. The source becomes absent and the previously absent destination becomes initialized.
+    pub fn move_bytes(
+        span: Location,
+        ty: Type,
+        source: mir::Value,
+        destination: mir::Value,
+        size: mir::Value,
+    ) -> Self {
+        Operation {
+            result_id: None,
+            span,
+            operands: Box::new([source, destination, size]),
+            kind: OperationKind::MoveBytes { ty },
+        }
+    }
+
     /// Creates a 'drop' operation.
     ///
     /// Drops the pointee of `target` (a place) by invoking the `Value::drop` implementation named by
@@ -1115,6 +1132,8 @@ pub enum OperationKind {
     Memcpy,
     /// Transfer ownership between places, optionally using a run-time layout witness.
     Move,
+    /// Transfer ownership between places using an explicit physical byte extent.
+    MoveBytes { ty: Type },
     /// Save the current stack top.
     StackSave,
     /// Restore a previously saved stack top.
@@ -1181,6 +1200,7 @@ impl OperationKind {
             | Clear
             | Memcpy
             | Move
+            | MoveBytes { .. }
             | StackSave
             | StackRestore
             | CheckCallDepth
@@ -1227,6 +1247,7 @@ impl OperationKind {
             | Clear
             | Memcpy
             | Move
+            | MoveBytes { .. }
             | StackSave
             | StackRestore
             | CheckCallDepth
@@ -1332,6 +1353,7 @@ impl OperationKind {
             | Clear
             | Memcpy
             | Move
+            | MoveBytes { .. }
             | RuntimeDealloc
             | StackRestore
             | CheckCallDepth
@@ -1484,6 +1506,11 @@ impl OperationKind {
             Move => assert!(
                 matches!(whole.operands.len(), 2 | 3),
                 "move takes source and destination places, plus the layout witness iff dynamic"
+            ),
+            MoveBytes { .. } => assert_eq!(
+                whole.operands.len(),
+                3,
+                "move_bytes takes source, destination and byte size"
             ),
             StackSave => {
                 assert!(whole.operands.is_empty(), "stack_save takes no operands")
@@ -1717,6 +1744,14 @@ impl OperationKind {
                 }
                 Ok(())
             }
+            MoveBytes { ty } => write!(
+                f,
+                "move_bytes {} {} to {} size {}",
+                ty.format_with(env),
+                whole.operands[0].format_with(env),
+                whole.operands[1].format_with(env),
+                whole.operands[2].format_with(env)
+            ),
             StackSave => write!(f, "stack_save"),
             StackRestore => write!(f, "stack_restore {}", whole.operands[0].format_with(env)),
             CheckCallDepth => write!(f, "check_call_depth"),

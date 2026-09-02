@@ -1410,7 +1410,7 @@ fn writes_into(operation: &Operation, root: Root, register_places: &PlaceBinding
         | OperationKind::AddressOffsetPlace { .. }
         | OperationKind::DictEntry { .. } => false,
         OperationKind::Store => rooted(&operation.operands[1]),
-        OperationKind::Memcpy | OperationKind::Move => {
+        OperationKind::Memcpy | OperationKind::Move | OperationKind::MoveBytes { .. } => {
             rooted(&operation.operands[1]) || operation.operands.iter().skip(2).any(rooted)
         }
         OperationKind::Clear | OperationKind::Drop { .. } => rooted(&operation.operands[0]),
@@ -1771,7 +1771,7 @@ fn transfer(
             }
         }
         OperationKind::AddressOffset { .. } | OperationKind::AddressOffsetPlace { .. } => {}
-        OperationKind::Memcpy | OperationKind::Move => {
+        OperationKind::Memcpy | OperationKind::Move | OperationKind::MoveBytes { .. } => {
             let source = tracked_place(state, &operation.operands[0], escaped, interner);
             let fact = source.map(|place| {
                 let symbol = state.symbol_of(place, interner);
@@ -1816,8 +1816,10 @@ fn transfer(
                 }
             }
             // A move leaves its source holding nothing nameable; a memcpy preserves it.
-            if matches!(operation.kind, OperationKind::Move)
-                && let Some(place) = source
+            if matches!(
+                operation.kind,
+                OperationKind::Move | OperationKind::MoveBytes { .. }
+            ) && let Some(place) = source
             {
                 state.define(place, def, interner, None);
             }
@@ -1970,24 +1972,9 @@ fn result_fact(
             let len = interner.place_field(array, layouts.array_len);
             Some(Fact::Value(state.place_affine(len, interner)))
         }
-        // Each of these computes something this representation cannot yet state: a guarded
-        // selection, a wrap, a step whose direction is itself a comparison. The result is still a
-        // nameable value, which is what the fresh symbol gives it.
-        KnownCallee::ArrayResolveIndex
-        | KnownCallee::ArrayIndex
-        | KnownCallee::ArrayOffsetUnchecked
-        | KnownCallee::ArrayWrapIndex
-        | KnownCallee::RangeNext
-        | KnownCallee::RangeInclusiveNext
-        // This domain deliberately carries affine integers only. Boolean and float semantics are
-        // resolved for other consumers, but admitting them here would make wrapping/order proofs
-        // ill-typed.
-        | KnownCallee::BoolNot
-        | KnownCallee::FloatAdd
-        | KnownCallee::FloatSub
-        | KnownCallee::FloatMul
-        | KnownCallee::FloatNeg
-        | KnownCallee::FloatCmp => None,
+        // This domain carries affine integers only. Other known callees conservatively contribute
+        // no fact; their result remains nameable through the fresh symbol assigned by the caller.
+        _ => None,
     }
 }
 

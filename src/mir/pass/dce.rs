@@ -675,6 +675,7 @@ pub(super) fn may_leave_frame_storage(operation: &mir::Operation) -> bool {
         | OperationKind::Clear
         | OperationKind::Memcpy
         | OperationKind::Move
+        | OperationKind::MoveBytes { .. }
         | OperationKind::StackSave
         | OperationKind::StackRestore
         | OperationKind::CheckCallDepth
@@ -1101,7 +1102,10 @@ fn is_exact_clone_lifetime_role(operation: &mir::Operation, position: usize) -> 
     match &operation.kind {
         OperationKind::Clone { .. } => position == 1,
         OperationKind::Drop { .. } | OperationKind::Clear => position == 0,
-        OperationKind::Store | OperationKind::Memcpy | OperationKind::Move => position == 1,
+        OperationKind::Store
+        | OperationKind::Memcpy
+        | OperationKind::Move
+        | OperationKind::MoveBytes { .. } => position == 1,
         OperationKind::BuildArray { .. } => position + 1 == operation.operands.len(),
         OperationKind::Call { ty, .. } => {
             dataflow::call_result_operand_index(&operation.operands, ty) == Some(position)

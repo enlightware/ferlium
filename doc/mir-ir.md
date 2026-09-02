@@ -169,7 +169,7 @@ The operation kind fixes operand arity, roles, and result shape. The main groups
 
 | Group | Operations | Contract |
 |---|---|---|
-| storage | `alloca`, `alloca_place`, `runtime_alloc`, `runtime_dealloc`, `is_initialized`, `load`, `store`, `clear`, `memcpy`, `move` | Stack storage follows stack regions; runtime storage has an explicit lifetime. `is_initialized` exposes a physical drop flag without fixing its storage layout. `store` never drops; `memcpy` requires a concrete `TrivialCopy` pointee; `move` leaves its source absent. |
+| storage | `alloca`, `alloca_place`, `runtime_alloc`, `runtime_dealloc`, `is_initialized`, `load`, `store`, `clear`, `memcpy`, `move`, `move_bytes` | Stack storage follows stack regions; runtime storage has an explicit lifetime. `is_initialized` exposes a physical drop flag without fixing its storage layout. `store` never drops; `memcpy` requires a concrete `TrivialCopy` pointee; moves leave their source absent. `move_bytes` carries an already-materialized byte extent instead of a layout dictionary. |
 | aggregates | `subfield`, `variant`, `extract_tag`, `extract_payload_indirection`, `build_array` | Aggregate construction and ownership remain field-addressable. Product `subfield` records its aggregate type and carries `Value` witnesses for direct members with open inline layouts. A variant operation first builds an uninitialized payload shell. Generic variant construction and payload-marked `subfield` operations carry the selected payload's `Value<B>` layout witness; projection reads inline/indirect classification from the stored tag. `extract_tag` yields an opaque semantic tag, while physical `extract_payload_indirection` yields the representation bit as `bool`. `build_array` initializes fresh canonical array storage from borrowed `TrivialCopy` elements. |
 | evidence | `dict_entry`, `build_dictionary`, `subscript_member`, `build_subscript` | Evidence remains symbolic. Construction closes a definition over evidence operands; dictionary entries are closed function places. |
 | calls/projections | `call`, `project`, `end_project` | Proven source-infallible forms are ordinary operations. Potentially source-fallible forms occur only inside `invoke`. |
@@ -258,7 +258,7 @@ serialized standalone MIR format will need explicit normalized-layout/equality m
 
 ## Physical MIR stage
 
-> Status: canonical product and variant-payload byte-address lowering is implemented; the remaining
+> Status: canonical product, variant-payload and Buffer lowering is implemented; the remaining
 > representations and the unboxed interpreter are planned.
 
 Physical lowering consumes the complete optimized `MirArtifacts`, including declared bodies and
@@ -341,7 +341,13 @@ semantic payload drop and releases the allocation before returning. A failed par
 in caller-owned return storage uses guarded cleanup; nested allocations are released from inner to
 outer.
 
-Buffer call expansion uses the loaded backing pointer and element-size evidence.
+The private Buffer operations lower by treating `Buffer<A>` storage as one owning `*A` slot.
+Construction allocates `capacity * element_size` bytes. Slot projection computes
+`base + index * element_size`; take and slot-to-slot transfer use `move_bytes<A>` so an open `A`
+needs only the size already passed by std. Slot-to-slot transfer requires an absent destination.
+Whole-buffer movement releases the target allocation, transfers the source pointer, and leaves a
+valid zero-byte allocation in the source. Ordinary conditional `drop` dispatches to a generated
+helper which releases and clears the pointer slot.
 
 ### First-class subscript environments
 

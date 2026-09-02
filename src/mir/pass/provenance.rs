@@ -471,7 +471,7 @@ fn derive_repeatable(
                         return false;
                     }
                 }
-                OperationKind::Memcpy | OperationKind::Move => {
+                OperationKind::Memcpy | OperationKind::Move | OperationKind::MoveBytes { .. } => {
                     if root_of(&operation.operands[1], &roots).is_some() {
                         return false;
                     }

@@ -1008,6 +1008,10 @@ impl<'a> Verifier<'a> {
                     );
                 }
             }
+            OperationKind::MoveBytes { ty } => {
+                self.verify_place_representation(node, 0, &operands[0], MirType::Lowered(*ty));
+                self.verify_place_representation(node, 1, &operands[1], MirType::Lowered(*ty));
+            }
             _ => {}
         }
     }
@@ -1378,6 +1382,9 @@ impl<'a> Verifier<'a> {
                     self.transfer_copy_or_move(&operands[0], &operands[1], false, &mut normal);
                 }
                 OperationKind::Move => {
+                    self.transfer_copy_or_move(&operands[0], &operands[1], true, &mut normal);
+                }
+                OperationKind::MoveBytes { .. } => {
                     self.transfer_copy_or_move(&operands[0], &operands[1], true, &mut normal);
                 }
                 OperationKind::Clear => {

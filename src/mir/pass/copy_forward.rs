@@ -154,7 +154,10 @@ pub(crate) fn forward_redundant_storage(func: &Function, env: ModuleEnv<'_>) -> 
             let [producer, transfer] = pair else {
                 unreachable!()
             };
-            if !matches!(transfer.kind, OperationKind::Move | OperationKind::Memcpy) {
+            if !matches!(
+                transfer.kind,
+                OperationKind::Move | OperationKind::MoveBytes { .. } | OperationKind::Memcpy
+            ) {
                 continue;
             }
             let [mir::Value::Register(transfer_source), destination, ..] =
@@ -411,6 +414,7 @@ fn initialization_destination_index(operation: &Operation) -> Option<usize> {
         OperationKind::Store
         | OperationKind::Memcpy
         | OperationKind::Move
+        | OperationKind::MoveBytes { .. }
         | OperationKind::Clone { .. } => Some(1),
         OperationKind::Call { .. } => operation.operands.len().checked_sub(1),
         _ => None,
@@ -642,6 +646,11 @@ fn note_operation(operation: &Operation, site: Site, uses: &mut FxHashMap<ValueI
                 .iter()
                 .skip(2)
                 .for_each(|operand| unsafe_use(operand, uses));
+        }
+        OperationKind::MoveBytes { .. } => {
+            write(&operation.operands[0], uses);
+            write(&operation.operands[1], uses);
+            read(&operation.operands[2], uses);
         }
         OperationKind::Clone { .. } => {
             read(&operation.operands[0], uses);

@@ -777,6 +777,9 @@ impl<'a> Interpreter<'a> {
             OperationKind::Move => {
                 self.exec_move(slots, &operation.operands)?;
             }
+            OperationKind::MoveBytes { .. } => {
+                panic!("move_bytes requires the physical MIR interpreter")
+            }
             OperationKind::CompareEqual => {
                 self.exec_compare_equal(func, slots, &operation.operands, def.unwrap());
             }

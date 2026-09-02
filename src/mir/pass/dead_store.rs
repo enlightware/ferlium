@@ -222,7 +222,10 @@ fn whole_place_write_index(operation: &mir::Operation) -> Option<usize> {
 fn is_exact_place_read(operation: &mir::Operation, position: usize) -> bool {
     matches!(
         operation.kind,
-        OperationKind::Load | OperationKind::Memcpy | OperationKind::Move
+        OperationKind::Load
+            | OperationKind::Memcpy
+            | OperationKind::Move
+            | OperationKind::MoveBytes { .. }
     ) && position == 0
 }
 
