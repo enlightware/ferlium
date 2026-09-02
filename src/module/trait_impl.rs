@@ -299,6 +299,10 @@ impl TraitDictionary {
         &self.capture_schema
     }
 
+    pub fn entry_count(&self) -> usize {
+        self.functions.len()
+    }
+
     pub fn entry_capture_mappings(&self) -> &[Vec<DictionaryEntryEvidence>] {
         &self.entry_capture_mappings
     }

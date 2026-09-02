@@ -23,19 +23,18 @@ pub enum Value {
     Constant(ConstantId),
 
     /// A symbolic trait dictionary, identified by the canonical handle of the impl that satisfies
-    /// it. The dictionary is kept symbolic (an interned id) rather than materialized into a tuple
-    /// of trait-function values (including associated-constant getters); the MIR interpreter
-    /// dispatches through the interned id, and a later tuple-lowering pass (for a real
-    /// backend) rebuilds the witness table from the impl arena. A *forwarded* dictionary (one a
-    /// generic function received as an extra parameter) is instead represented by its `Parameter`.
+    /// it. The MIR interpreters dispatch through the id. A physical module carries relocatable
+    /// metadata for its definitions and imports, from which the whole-session linker selects the
+    /// target representation. A *forwarded* dictionary received as an extra parameter is instead
+    /// represented by its `Parameter`.
     Dictionary(TraitDictionaryId),
 
     /// A symbolic first-class subscript (projection evidence), identified by the id of the
     /// subscript it references. Like a dictionary it is kept symbolic rather than materialized: the
-    /// MIR interpreter resolves members through it via `subscript_member`, and a later lowering
-    /// pass (for a real backend) materializes it as a member-table value. A *forwarded* subscript
-    /// (one a generic function received as an extra parameter) is instead represented by the
-    /// `Parameter` slot it arrives in, not by this variant.
+    /// MIR interpreter resolves members through it via `subscript_member`. Physical subscript
+    /// metadata will follow the same per-module catalog and whole-session linking model as
+    /// dictionaries. A *forwarded* subscript received as an extra parameter is instead represented
+    /// by the `Parameter` slot it arrives in, not by this variant.
     Subscript(SubscriptId),
 
     /// Recursively static hidden evidence, including closed dictionaries with captures.

@@ -8,6 +8,8 @@
 
 //! Physical MIR lowering and readiness verification.
 
+mod dictionary;
+
 use std::fmt;
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -31,11 +33,11 @@ use crate::{
         },
         role::{MirType, ValueRoles},
         terminator::{Terminator, TerminatorKind},
-        value::ConstantId,
+        value::{ConstantId, StaticEvidence},
     },
     module::{
-        FunctionId, LocalFunctionId, ModuleEnv, ModuleId, ProjectionIndex, ResolvedValueLayout,
-        id::Id,
+        DictionaryEntryEvidence, FunctionId, LocalFunctionId, LocalImplId, ModuleEnv, ModuleId,
+        ProjectionIndex, ResolvedValueLayout, TraitDictionaryId, id::Id,
     },
     std::{
         buffer::buffer_element_type,
@@ -53,10 +55,13 @@ use crate::{
     },
     types::{
         effects::no_effects,
-        r#trait::TraitAssociatedConstIndex,
+        r#trait::{TraitAssociatedConstIndex, TraitDictionaryEntryIndex},
         r#type::{CallImplType, CallResultConvention, FnType, Type},
     },
 };
+
+use dictionary::PhysicalDictionaryCatalog;
+pub(crate) use dictionary::{PhysicalDictionaryDefinition, PhysicalDictionaryEntry};
 
 /// A physical-lowering or readiness failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,6 +91,28 @@ pub(crate) enum BackendReadinessError {
         target: FunctionId,
         expected: usize,
         actual: usize,
+    },
+    InvalidDictionaryDefinition {
+        dictionary: TraitDictionaryId,
+    },
+    InvalidDictionaryEntry {
+        dictionary: TraitDictionaryId,
+        target: FunctionId,
+    },
+    UnresolvedDictionaryReference {
+        owner: FunctionId,
+        dictionary: TraitDictionaryId,
+    },
+    InvalidDictionaryCaptureCount {
+        owner: FunctionId,
+        dictionary: TraitDictionaryId,
+        expected: usize,
+        actual: usize,
+    },
+    InvalidDictionaryEntryIndex {
+        owner: FunctionId,
+        dictionary: TraitDictionaryId,
+        entry: TraitDictionaryEntryIndex,
     },
 }
 
@@ -135,6 +162,44 @@ impl fmt::Display for BackendReadinessError {
                 "physical call in m{}:f{} passes {actual} operands to m{}:f{}, which expects {expected}",
                 owner.module, owner.function, target.module, target.function
             ),
+            Self::InvalidDictionaryDefinition { dictionary } => write!(
+                f,
+                "physical dictionary m{}:i{} has invalid relocatable metadata",
+                dictionary.module_id, dictionary.impl_id
+            ),
+            Self::InvalidDictionaryEntry { dictionary, target } => write!(
+                f,
+                "physical dictionary m{}:i{} refers to unavailable entry m{}:f{}",
+                dictionary.module_id, dictionary.impl_id, target.module, target.function
+            ),
+            Self::UnresolvedDictionaryReference { owner, dictionary } => write!(
+                f,
+                "physical entry m{}:f{} refers to unavailable dictionary m{}:i{}",
+                owner.module, owner.function, dictionary.module_id, dictionary.impl_id
+            ),
+            Self::InvalidDictionaryCaptureCount {
+                owner,
+                dictionary,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "physical entry m{}:f{} closes dictionary m{}:i{} over {actual} captures, expected {expected}",
+                owner.module, owner.function, dictionary.module_id, dictionary.impl_id
+            ),
+            Self::InvalidDictionaryEntryIndex {
+                owner,
+                dictionary,
+                entry,
+            } => write!(
+                f,
+                "physical entry m{}:f{} projects missing entry {} from dictionary m{}:i{}",
+                owner.module,
+                owner.function,
+                entry.as_index(),
+                dictionary.module_id,
+                dictionary.impl_id
+            ),
         }
     }
 }
@@ -145,6 +210,7 @@ impl std::error::Error for BackendReadinessError {}
 pub(crate) struct BackendReadyMirArtifacts {
     module: ModuleId,
     entries: Vec<Option<Function>>,
+    dictionaries: PhysicalDictionaryCatalog,
 }
 
 impl BackendReadyMirArtifacts {
@@ -158,6 +224,29 @@ impl BackendReadyMirArtifacts {
 
     pub(crate) fn get(&self, id: LocalFunctionId) -> Option<&Function> {
         self.entries.get(id.as_index())?.as_ref()
+    }
+
+    pub(crate) fn dictionaries(&self) -> &[PhysicalDictionaryDefinition] {
+        self.dictionaries.definitions()
+    }
+
+    pub(crate) fn dictionary_imports(&self) -> &[TraitDictionaryId] {
+        self.dictionaries.imports()
+    }
+
+    pub(crate) fn dictionary(
+        &self,
+        id: TraitDictionaryId,
+    ) -> Option<&PhysicalDictionaryDefinition> {
+        self.dictionaries.definition(id)
+    }
+
+    pub(crate) fn dictionary_entry(
+        &self,
+        id: TraitDictionaryId,
+        entry: TraitDictionaryEntryIndex,
+    ) -> Option<&PhysicalDictionaryEntry> {
+        self.dictionary(id)?.entries().get(entry.as_index())
     }
 }
 
@@ -194,8 +283,13 @@ pub(crate) fn lower_physical_mir(
         }
     }
     entries.extend(lowerer.helpers.into_iter().map(Some));
-    let artifacts = BackendReadyMirArtifacts { module, entries };
-    verify_physical_mir(&artifacts, env)?;
+    let dictionaries = PhysicalDictionaryCatalog::from_module(module, env.current, &entries);
+    let artifacts = BackendReadyMirArtifacts {
+        module,
+        entries,
+        dictionaries,
+    };
+    verify_physical_mir(&artifacts)?;
     Ok(artifacts)
 }
 
@@ -2220,10 +2314,8 @@ fn int_unary(
     result
 }
 
-fn verify_physical_mir(
-    artifacts: &BackendReadyMirArtifacts,
-    _env: ModuleEnv<'_>,
-) -> Result<(), BackendReadinessError> {
+fn verify_physical_mir(artifacts: &BackendReadyMirArtifacts) -> Result<(), BackendReadinessError> {
+    verify_dictionary_catalog(artifacts)?;
     let module = artifacts.module;
     for index in 0..artifacts.entry_count() {
         let function = LocalFunctionId::from_index(index);
@@ -2231,6 +2323,7 @@ fn verify_physical_mir(
             continue;
         };
         let function_id = FunctionId::new(module, function);
+        let constructed_dictionaries = constructed_dictionary_definitions(body);
 
         #[cfg(any(debug_assertions, test, feature = "std-snapshot"))]
         {
@@ -2240,18 +2333,35 @@ fn verify_physical_mir(
         for block in body.blocks() {
             let block = body.block(block);
             for operation in block.operations() {
-                verify_physical_operation(artifacts, function_id, operation)?;
+                verify_physical_operation(
+                    artifacts,
+                    function_id,
+                    &constructed_dictionaries,
+                    operation,
+                )?;
             }
             match &block.terminator().kind {
                 TerminatorKind::Invoke { operation, .. } => {
-                    verify_physical_operation(artifacts, function_id, operation)?;
+                    verify_physical_operation(
+                        artifacts,
+                        function_id,
+                        &constructed_dictionaries,
+                        operation,
+                    )?;
                 }
                 _ => verify_local_function_operands(
                     module,
                     artifacts.entry_count(),
                     function_id,
                     block.terminator().operands().iter(),
-                )?,
+                )
+                .and_then(|_| {
+                    verify_dictionary_operands(
+                        artifacts,
+                        function_id,
+                        block.terminator().operands().iter(),
+                    )
+                })?,
             }
         }
     }
@@ -2261,6 +2371,7 @@ fn verify_physical_mir(
 fn verify_physical_operation(
     artifacts: &BackendReadyMirArtifacts,
     owner: FunctionId,
+    constructed_dictionaries: &FxHashMap<mir::ValueId, TraitDictionaryId>,
     operation: &Operation,
 ) -> Result<(), BackendReadinessError> {
     if let OperationKind::Subfield {
@@ -2282,10 +2393,206 @@ fn verify_physical_operation(
         owner,
         operation.operands.iter(),
     )?;
+    verify_dictionary_operation(artifacts, owner, constructed_dictionaries, operation)?;
     if let Some(target) = operation.kind.function_id() {
         verify_local_function_target(artifacts.module, artifacts.entry_count(), owner, target)?;
     }
     verify_direct_call(artifacts, owner, operation)
+}
+
+fn constructed_dictionary_definitions(
+    body: &Function,
+) -> FxHashMap<mir::ValueId, TraitDictionaryId> {
+    let mut definitions = FxHashMap::default();
+    for block in body.blocks() {
+        let block = body.block(block);
+        for operation in block.operations() {
+            record_constructed_dictionary(operation, &mut definitions);
+        }
+        if let TerminatorKind::Invoke { operation, .. } = &block.terminator().kind {
+            record_constructed_dictionary(operation, &mut definitions);
+        }
+    }
+    definitions
+}
+
+fn record_constructed_dictionary(
+    operation: &Operation,
+    definitions: &mut FxHashMap<mir::ValueId, TraitDictionaryId>,
+) {
+    if let OperationKind::BuildDictionary { definition, .. } = operation.kind {
+        let result = operation
+            .result_id()
+            .expect("build_dictionary produces a dictionary value");
+        assert!(definitions.insert(result, definition).is_none());
+    }
+}
+
+fn verify_dictionary_catalog(
+    artifacts: &BackendReadyMirArtifacts,
+) -> Result<(), BackendReadinessError> {
+    for (index, definition) in artifacts.dictionaries().iter().enumerate() {
+        let expected_id = TraitDictionaryId::new(artifacts.module, LocalImplId::from_index(index));
+        if definition.id() != expected_id {
+            return Err(BackendReadinessError::InvalidDictionaryDefinition {
+                dictionary: definition.id(),
+            });
+        }
+        for entry in definition.entries() {
+            let target = entry.function();
+            // Native entries legitimately occupy a function-table slot without a MIR body.
+            if target.module != artifacts.module
+                || target.function.as_index() >= artifacts.entry_count()
+            {
+                return Err(BackendReadinessError::InvalidDictionaryEntry {
+                    dictionary: definition.id(),
+                    target,
+                });
+            }
+            if entry.capture_mapping().iter().any(|mapping| {
+                matches!(mapping, DictionaryEntryEvidence::Capture(capture) if *capture >= definition.capture_schema().len())
+            }) {
+                return Err(BackendReadinessError::InvalidDictionaryDefinition {
+                    dictionary: definition.id(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn verify_dictionary_operation(
+    artifacts: &BackendReadyMirArtifacts,
+    owner: FunctionId,
+    constructed_dictionaries: &FxHashMap<mir::ValueId, TraitDictionaryId>,
+    operation: &Operation,
+) -> Result<(), BackendReadinessError> {
+    verify_dictionary_operands(artifacts, owner, operation.operands.iter())?;
+    if let OperationKind::BuildDictionary { definition, .. } = operation.kind {
+        verify_dictionary_reference(artifacts, owner, definition)?;
+        if let Some(metadata) = artifacts.dictionary(definition)
+            && operation.operands.len() != metadata.capture_schema().len()
+        {
+            return Err(BackendReadinessError::InvalidDictionaryCaptureCount {
+                owner,
+                dictionary: definition,
+                expected: metadata.capture_schema().len(),
+                actual: operation.operands.len(),
+            });
+        }
+    }
+    if let OperationKind::DictEntry { entry_index, .. } = operation.kind
+        && let Some(definition) = operation
+            .operands
+            .first()
+            .and_then(|value| static_dictionary_definition(value, constructed_dictionaries))
+        && artifacts.dictionary(definition).is_some()
+        && artifacts
+            .dictionary_entry(definition, entry_index)
+            .is_none()
+    {
+        return Err(BackendReadinessError::InvalidDictionaryEntryIndex {
+            owner,
+            dictionary: definition,
+            entry: entry_index,
+        });
+    }
+    Ok(())
+}
+
+fn verify_dictionary_operands<'a>(
+    artifacts: &BackendReadyMirArtifacts,
+    owner: FunctionId,
+    operands: impl Iterator<Item = &'a Value>,
+) -> Result<(), BackendReadinessError> {
+    for operand in operands {
+        verify_dictionary_value(artifacts, owner, operand)?;
+    }
+    Ok(())
+}
+
+fn verify_dictionary_value(
+    artifacts: &BackendReadyMirArtifacts,
+    owner: FunctionId,
+    value: &Value,
+) -> Result<(), BackendReadinessError> {
+    match value {
+        Value::Dictionary(definition) => {
+            verify_dictionary_reference(artifacts, owner, *definition)?;
+            if let Some(metadata) = artifacts.dictionary(*definition)
+                && !metadata.capture_schema().is_empty()
+            {
+                return Err(BackendReadinessError::InvalidDictionaryCaptureCount {
+                    owner,
+                    dictionary: *definition,
+                    expected: metadata.capture_schema().len(),
+                    actual: 0,
+                });
+            }
+        }
+        Value::Evidence(evidence) => verify_static_evidence(artifacts, owner, evidence)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn verify_static_evidence(
+    artifacts: &BackendReadyMirArtifacts,
+    owner: FunctionId,
+    evidence: &StaticEvidence,
+) -> Result<(), BackendReadinessError> {
+    let captures = match evidence {
+        StaticEvidence::Dictionary {
+            definition,
+            captures,
+        } => {
+            verify_dictionary_reference(artifacts, owner, *definition)?;
+            if let Some(metadata) = artifacts.dictionary(*definition)
+                && captures.len() != metadata.capture_schema().len()
+            {
+                return Err(BackendReadinessError::InvalidDictionaryCaptureCount {
+                    owner,
+                    dictionary: *definition,
+                    expected: metadata.capture_schema().len(),
+                    actual: captures.len(),
+                });
+            }
+            captures.as_ref()
+        }
+        StaticEvidence::Subscript { captures, .. } => captures.as_ref(),
+        StaticEvidence::VariantPayloadStorage(_) => return Ok(()),
+    };
+    for capture in captures {
+        verify_static_evidence(artifacts, owner, capture)?;
+    }
+    Ok(())
+}
+
+fn verify_dictionary_reference(
+    artifacts: &BackendReadyMirArtifacts,
+    owner: FunctionId,
+    dictionary: TraitDictionaryId,
+) -> Result<(), BackendReadinessError> {
+    if artifacts.dictionaries.contains_reference(dictionary) {
+        Ok(())
+    } else {
+        Err(BackendReadinessError::UnresolvedDictionaryReference { owner, dictionary })
+    }
+}
+
+fn static_dictionary_definition(
+    value: &Value,
+    constructed_dictionaries: &FxHashMap<mir::ValueId, TraitDictionaryId>,
+) -> Option<TraitDictionaryId> {
+    match value {
+        Value::Dictionary(definition) => Some(*definition),
+        Value::Evidence(evidence) => match evidence.as_ref() {
+            StaticEvidence::Dictionary { definition, .. } => Some(*definition),
+            _ => None,
+        },
+        Value::Register(register) => constructed_dictionaries.get(register).copied(),
+        _ => None,
+    }
 }
 
 fn verify_direct_call(
@@ -2350,7 +2657,7 @@ mod tests {
     use crate::{
         CompilerSession, ExecutionTarget,
         compiler::MirOptimization,
-        module::{ModuleEnv, Path},
+        module::{ModuleEnv, Path, TraitDictionaryEntry},
         std::ordering::ordering_type,
         types::type_like::TypeLike,
     };
@@ -2400,6 +2707,144 @@ mod tests {
         let (physical, _) = lower(&mut session, module).unwrap();
         assert_eq!(physical.module(), module);
         assert!(physical.get(identity).is_some());
+    }
+
+    #[test]
+    fn physical_module_owns_its_relocatable_dictionary_definitions() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            "struct Wrapper<A>(A)\nfn wrap<A>(value: A) -> Wrapper<A> { Wrapper(value) }",
+            "dictionary_catalog",
+        );
+        let (physical, _) = lower(&mut session, module).unwrap();
+        let source = session.expect_fresh_module(module);
+
+        assert_eq!(physical.dictionaries().len(), source.impl_count());
+        assert!(
+            physical
+                .dictionaries()
+                .iter()
+                .any(|definition| !definition.capture_schema().is_empty()),
+            "the generated Value<Wrapper<A>> dictionary closes over Value<A>"
+        );
+        for (index, definition) in physical.dictionaries().iter().enumerate() {
+            let impl_id = LocalImplId::from_index(index);
+            let semantic = &source.get_impl_data(impl_id).unwrap().dictionary_value;
+            assert_eq!(definition.id(), TraitDictionaryId::new(module, impl_id));
+            assert_eq!(definition.capture_schema(), semantic.capture_schema());
+            assert_eq!(definition.entries().len(), semantic.entry_count());
+            for (index, entry) in definition.entries().iter().enumerate() {
+                let index = TraitDictionaryEntryIndex::from_index(index);
+                let TraitDictionaryEntry::Function(function) = semantic.entry(index);
+                assert_eq!(entry.function(), FunctionId::new(module, function));
+                assert_eq!(
+                    entry.capture_mapping(),
+                    semantic.entry_capture_mapping(index)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn physical_module_records_foreign_dictionary_references() {
+        let mut session = CompilerSession::new();
+        let module = compile(&mut session, "fn anchor() {}", "dictionary_import");
+        let foreign = TraitDictionaryId::new(crate::std::STD_MODULE_ID, LocalImplId::from_index(0));
+        let nested_foreign =
+            TraitDictionaryId::new(crate::std::STD_MODULE_ID, LocalImplId::from_index(1));
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new(
+            ustr::ustr("foreign_dictionary"),
+            CallResultConvention::Value,
+        );
+        let entry = builder.add_block();
+        builder.append_operation(
+            entry,
+            Operation::dict_entry(
+                span,
+                Value::Evidence(Box::new(StaticEvidence::Dictionary {
+                    definition: foreign,
+                    captures: vec![StaticEvidence::bare_dictionary(nested_foreign)]
+                        .into_boxed_slice(),
+                })),
+                TraitDictionaryEntryIndex::from_index(0),
+                Type::unit(),
+            ),
+        );
+        builder.set_terminator(entry, Terminator::ret(span));
+        let entries = [Some(builder.finish_unverified())];
+        let dictionaries = PhysicalDictionaryCatalog::from_module(
+            module,
+            session.expect_fresh_module(module),
+            &entries,
+        );
+        let physical = BackendReadyMirArtifacts {
+            module,
+            entries: entries.into(),
+            dictionaries,
+        };
+        assert_eq!(physical.dictionary_imports(), &[foreign, nested_foreign]);
+    }
+
+    #[test]
+    fn constructed_dictionary_projection_checks_its_entry_index() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            "struct Wrapper<A>(A)\nfn wrap<A>(value: A) -> Wrapper<A> { Wrapper(value) }",
+            "constructed_dictionary_entry",
+        );
+        let (mut physical, _) = lower(&mut session, module).unwrap();
+        let definition = physical
+            .dictionaries()
+            .iter()
+            .find(|definition| !definition.capture_schema().is_empty())
+            .unwrap();
+        let definition_id = definition.id();
+        let capture_count = definition.capture_schema().len();
+        let invalid_entry = TraitDictionaryEntryIndex::from_index(definition.entries().len());
+        let dictionary_ty = session
+            .expect_fresh_module(module)
+            .get_impl_data(definition_id.impl_id)
+            .unwrap()
+            .dictionary_ty;
+
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new(
+            ustr::ustr("invalid_dictionary_entry"),
+            CallResultConvention::Value,
+        );
+        let block = builder.add_block();
+        let captures = (0..capture_count)
+            .map(|_| Value::Evidence(Box::new(StaticEvidence::VariantPayloadStorage(false))))
+            .collect();
+        let dictionary = builder
+            .append_operation(
+                block,
+                Operation::build_dictionary(span, definition_id, captures, dictionary_ty),
+            )
+            .unwrap();
+        builder.append_operation(
+            block,
+            Operation::dict_entry(span, dictionary, invalid_entry, Type::unit()),
+        );
+        builder.set_terminator(block, Terminator::ret(span));
+        physical.entries.push(Some(builder.finish_unverified()));
+        physical.dictionaries = PhysicalDictionaryCatalog::from_module(
+            module,
+            session.expect_fresh_module(module),
+            &physical.entries,
+        );
+
+        assert!(matches!(
+            verify_physical_mir(&physical),
+            Err(BackendReadinessError::InvalidDictionaryEntryIndex {
+                dictionary,
+                entry,
+                ..
+            }) if dictionary == definition_id && entry == invalid_entry
+        ));
     }
 
     fn invalid_shell_test_lowerer(

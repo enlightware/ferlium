@@ -275,6 +275,16 @@ their externally visible identity. Generated helpers are ordinary entries in the
 The lowerer builds a physical function table. The readiness verifier checks it and returns
 `BackendReadyMirArtifacts`. Both stages use the same MIR structures without a phase parameter.
 
+Each physical module also owns a relocatable dictionary catalog. A definition records its stable
+module-qualified identity, capture schema, entry functions, and entry-to-capture mappings. Concrete
+references to definitions owned by other modules form an explicit import list. The readiness
+verifier checks owned definitions against this catalog; the linker checks imported capture counts
+and entry indices after resolving their owning catalogs. Neither needs the semantic `Module` arenas.
+
+A target-independent whole-session link step combines these physical modules, resolves their
+imports, interns equivalent static evidence trees, and assigns any dense indexes required by the
+executor. It does not eagerly materialize a dictionary value for every definition.
+
 Backend-ready MIR may retain symbolic operands, `DictEntry`, variant construction, and
 `extract_tag`. Each executor supplies their target representation. Interpreter-only native calls
 and target-lowered value representations must be resolved.

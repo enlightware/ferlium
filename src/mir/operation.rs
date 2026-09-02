@@ -524,9 +524,9 @@ impl Operation {
     /// `dict` is a symbolic dictionary operand (a constant [`mir::Value::Dictionary`] or a forwarded
     /// dictionary `Parameter`). The operation yields the **place** of entry `entry_index` of that
     /// dictionary — a method function value, or an associated const — of type `ty`. `call`, `drop`,
-    /// and `memcpy` consume that place exactly as they consume a `subfield` result, so a later
-    /// tuple-lowering pass rewrites `dict_entry N from <symbolic dict>` to
-    /// `subfield N from <materialized witness-table tuple>` one-for-one.
+    /// and `memcpy` consume that place exactly as they consume a `subfield` result. Physical MIR
+    /// retains this projection together with relocatable metadata for the referenced definition;
+    /// the whole-session linker selects its target representation.
     pub fn dict_entry(
         span: Location,
         dict: mir::Value,
