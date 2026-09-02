@@ -33,6 +33,7 @@ struct SnapshotBlanketSubKey {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SnapshotTraitImpl {
+    trait_id: TraitId,
     output_tys: Vec<SnapshotTypeId>,
     output_effs: Vec<Vec<Effect>>,
     methods: Vec<LocalFunctionId>,
@@ -141,6 +142,7 @@ impl SnapshotTraitImpl {
         graph: &mut SnapshotTypeGraphBuilder<'_>,
     ) -> Result<Self, SnapshotError> {
         Ok(Self {
+            trait_id: value.trait_id,
             output_tys: capture_types(&value.output_tys, graph)?,
             output_effs: value.output_effs.iter().map(capture_effects).collect(),
             methods: value.methods.clone(),
@@ -179,6 +181,7 @@ impl SnapshotTraitImpl {
                     self.entry_capture_mappings.clone(),
                 );
         Ok(TraitImpl {
+            trait_id: self.trait_id,
             output_tys: live_types(&self.output_tys, types)?,
             output_effs: self
                 .output_effs

@@ -353,8 +353,11 @@ pub fn build_capturing_dictionary_value(
 }
 
 /// An implementation of a trait.
+#[allow(clippy::too_many_arguments)]
 #[derive(Debug, Clone, new)]
 pub struct TraitImpl {
+    /// The trait implemented by this dictionary.
+    pub trait_id: TraitId,
     /// The output types of the trait.
     pub output_tys: Vec<Type>,
     /// The output effects of the trait.
@@ -688,6 +691,7 @@ impl TraitImpls {
         let dictionary_type = Self::dictionary_ty(method_tys, associated_const_tys);
         let dictionary_value = build_dictionary_value(&methods, &associated_const_getters);
         let imp = TraitImpl::new(
+            trait_id,
             output_tys,
             output_effs,
             methods,
@@ -773,6 +777,7 @@ impl TraitImpls {
         let dictionary_type = Self::dictionary_ty(method_tys, associated_const_tys);
         let dictionary_value = build_dictionary_value(&methods, &associated_const_getters);
         let imp = TraitImpl::new(
+            trait_id,
             output_tys,
             output_effs,
             methods,
@@ -793,6 +798,7 @@ impl TraitImpls {
         key: ConcreteTraitImplKey,
         imp: TraitImpl,
     ) -> LocalImplId {
+        assert_eq!(imp.trait_id, key.trait_id);
         let id = LocalImplId::from_index(self.data.len());
         self.data.push(imp);
         self.concrete_key_to_id.insert(key, id);
@@ -936,6 +942,7 @@ impl TraitImpls {
         let dictionary_type = Self::dictionary_ty(method_tys, associated_const_tys);
         let dictionary_value = build_dictionary_value(&methods, &associated_const_getters);
         let imp = TraitImpl::new(
+            trait_id,
             output_tys,
             output_effs,
             methods,
@@ -952,6 +959,7 @@ impl TraitImpls {
 
     /// Add a blanket trait implementation structure, returning its local id.
     pub fn add_blanket_struct(&mut self, key: BlanketTraitImplKey, imp: TraitImpl) -> LocalImplId {
+        assert_eq!(imp.trait_id, key.trait_id);
         let id = LocalImplId::from_index(self.data.len());
         self.data.push(imp);
         self.blanket_key_to_id

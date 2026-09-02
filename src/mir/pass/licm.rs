@@ -520,6 +520,8 @@ fn record_writes(
         | OperationKind::SubscriptMember { .. }
         | OperationKind::Variant { .. }
         | OperationKind::ExtractTag
+        | OperationKind::ExtractPayloadIndirection
+        | OperationKind::IsInitialized
         | OperationKind::StackSave
         | OperationKind::StackRestore
         | OperationKind::CheckCallDepth

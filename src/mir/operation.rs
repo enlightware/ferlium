@@ -673,6 +673,34 @@ impl Operation {
         }
     }
 
+    /// Reads whether the active variant payload is stored through an owning pointer.
+    ///
+    /// This is a physical-MIR operation over the representation bit packed into the stored tag.
+    /// Unlike [`Self::extract_tag`], its result is an ordinary materialized `bool` suitable for
+    /// control flow inside generated payload addressors.
+    pub fn extract_payload_indirection(span: Location, variant: mir::Value) -> Self {
+        Operation {
+            result_id: None,
+            span,
+            operands: Box::new([variant]),
+            kind: OperationKind::ExtractPayloadIndirection,
+        }
+    }
+
+    /// Tests whether a physical place currently contains an initialized value.
+    ///
+    /// Dense executors implement this with the drop flag associated with the place. The operation
+    /// lets physical lowering spell conditional cleanup as ordinary control flow without exposing
+    /// the executor's flag storage layout in MIR.
+    pub fn is_initialized(span: Location, place: mir::Value) -> Self {
+        Operation {
+            result_id: None,
+            span,
+            operands: Box::new([place]),
+            kind: OperationKind::IsInitialized,
+        }
+    }
+
     /// Creates a `stack_save` operation, whose result is a marker for the current top of the
     /// stack.
     ///
@@ -1075,6 +1103,10 @@ pub enum OperationKind {
     BuildArray { element_ty: Type },
     /// Read a variant's semantic tag as an opaque MIR value.
     ExtractTag,
+    /// Read the physical indirection bit of a variant's stored tag.
+    ExtractPayloadIndirection,
+    /// Read the physical initialization flag associated with a place.
+    IsInitialized,
     /// Store a value into unoccupied place storage.
     Store,
     /// Mark place storage absent without semantic drop.
@@ -1143,6 +1175,8 @@ impl OperationKind {
             | Variant { .. }
             | BuildArray { .. }
             | ExtractTag
+            | ExtractPayloadIndirection
+            | IsInitialized
             | Store
             | Clear
             | Memcpy
@@ -1187,6 +1221,8 @@ impl OperationKind {
             | Variant { .. }
             | BuildArray { .. }
             | ExtractTag
+            | ExtractPayloadIndirection
+            | IsInitialized
             | Store
             | Clear
             | Memcpy
@@ -1286,6 +1322,8 @@ impl OperationKind {
             | CloneClosureEnv { ty } => OperationResult::Lowered(*ty),
             Variant { metadata, .. } => OperationResult::Lowered(metadata.ty),
             ExtractTag => OperationResult::VariantTag,
+            ExtractPayloadIndirection => OperationResult::Lowered(cached_primitive_ty!(bool)),
+            IsInitialized => OperationResult::Lowered(cached_primitive_ty!(bool)),
             StackSave => OperationResult::StackMarker,
             Call { .. }
             | BuildArray { .. }
@@ -1417,6 +1455,16 @@ impl OperationKind {
                 whole.operands.len(),
                 1,
                 "extract_tag takes exactly the variant place"
+            ),
+            ExtractPayloadIndirection => assert_eq!(
+                whole.operands.len(),
+                1,
+                "extract_payload_indirection takes exactly the variant place"
+            ),
+            IsInitialized => assert_eq!(
+                whole.operands.len(),
+                1,
+                "is_initialized takes exactly one place",
             ),
             Store => assert_eq!(
                 whole.operands.len(),
@@ -1638,6 +1686,12 @@ impl OperationKind {
                 write!(f, "] to {}", destination.format_with(env))
             }
             ExtractTag => write!(f, "extract_tag {}", whole.operands[0].format_with(env)),
+            ExtractPayloadIndirection => write!(
+                f,
+                "extract_payload_indirection {}",
+                whole.operands[0].format_with(env)
+            ),
+            IsInitialized => write!(f, "is_initialized {}", whole.operands[0].format_with(env)),
             Store => write!(
                 f,
                 "store {} to {}",

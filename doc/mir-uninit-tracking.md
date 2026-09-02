@@ -28,11 +28,20 @@ bitsets, while eliminating flags proved constant. The MIR interpreter instead us
 absent leaf. That interpreter detail is neither a MIR value kind nor part of the future dense-memory
 representation.
 
+Physical MIR can query the same state with `is_initialized`. The operation returns an ordinary
+`bool` but leaves the executor free to choose where flags live. Generated cleanup uses it to guard
+representation-only resources independently of semantic value state. In particular, an indirect
+variant-payload allocation can exist while its payload is absent; `is_initialized` distinguishes
+whether the shell and its owning pointer slot are currently present.
+
 ## Aggregate and empty storage
 
-The MIR lowering constructs, moves, and drops aggregates field by field. Consequently an aggregate
-slot can be partially initialized: some fields are present while others are absent. Initialization
-and cleanup are therefore recursive rather than one bit per whole aggregate.
+MIR addresses aggregate construction and generated `Value` implementations field by field, so an
+aggregate slot can be partially initialized: some fields are present while others are absent.
+Initialization and cleanup are therefore recursive rather than one bit per whole aggregate. A
+semantic `drop` or `move` nevertheless consumes the complete place named by that operation. A
+variant's generated `Value::drop` drops its complete payload place before physical lowering
+releases indirect payload storage; moving the variant transfers that storage unchanged.
 
 The interpreter calls storage with nothing left to drop a *husk*:
 

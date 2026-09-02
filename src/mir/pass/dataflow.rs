@@ -75,6 +75,7 @@ crate::define_id_type!(
 struct Place {
     root: Root,
     children: Vec<PlaceId>,
+    depth: usize,
 }
 
 /// Immutable register-to-storage structure.
@@ -122,6 +123,7 @@ impl PlaceBuilder {
         self.bindings.places.push(Place {
             root,
             children: Vec::new(),
+            depth: 0,
         });
         self.roots.insert(root, place);
         place
@@ -135,6 +137,7 @@ impl PlaceBuilder {
         self.bindings.places.push(Place {
             root: self.bindings.places[parent.as_index()].root,
             children: Vec::new(),
+            depth: self.bindings.places[parent.as_index()].depth + 1,
         });
         self.bindings.places[parent.as_index()].children.push(place);
         self.fields.insert((parent, index), place);
@@ -158,10 +161,24 @@ impl PlaceBindings {
         }
     }
 
-    fn root_of(&self, operand: &mir::Value) -> Option<Root> {
+    pub(crate) fn root_of(&self, operand: &mir::Value) -> Option<Root> {
         match operand {
             mir::Value::Register(id) => self.root_of_register(*id),
             mir::Value::Parameter(id) => Some(Root::Parameter(*id)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn depth_of(&self, operand: &mir::Value) -> Option<usize> {
+        match operand {
+            mir::Value::Register(id) => match self.registers.get(id)? {
+                PlaceBinding::Exact(place) => Some(self.places[place.as_index()].depth),
+                PlaceBinding::Root(_) => None,
+            },
+            mir::Value::Parameter(id) => self
+                .parameters
+                .get(id.as_index())
+                .map(|place| self.places[place.as_index()].depth),
             _ => None,
         }
     }
@@ -587,6 +604,12 @@ fn transfer(
             };
             state.registers.insert(result, fact);
         }
+        OperationKind::ExtractPayloadIndirection | OperationKind::IsInitialized => {
+            let Some(result) = operation.result_id() else {
+                return;
+            };
+            state.registers.insert(result, Fact::Unknown);
+        }
         // Derived immutable register-to-place bindings were discovered before the fixpoint.
         OperationKind::Subfield { .. }
         | OperationKind::AddressOffset { .. }
@@ -904,7 +927,9 @@ pub(crate) fn escaping_roots(
             OperationKind::Load
             | OperationKind::Clear
             | OperationKind::CompareEqual
-            | OperationKind::ExtractTag => {}
+            | OperationKind::ExtractTag
+            | OperationKind::ExtractPayloadIndirection
+            | OperationKind::IsInitialized => {}
             // Optional storage evidence is read without escaping its place.
             OperationKind::Variant { .. } => {}
             // Elements are borrowed and the trailing destination is modelled exactly.

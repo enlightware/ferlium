@@ -1066,6 +1066,7 @@ fn emit_module_contents(
             let dictionary_ty =
                 output.computer_dictionary_ty(&method_ids, associated_const_tys.iter().copied());
             let stub = TraitImpl::new(
+                trait_id,
                 output_tys,
                 output_effs,
                 method_ids.clone(),

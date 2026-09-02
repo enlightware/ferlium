@@ -1403,6 +1403,8 @@ fn writes_into(operation: &Operation, root: Root, register_places: &PlaceBinding
         OperationKind::Load
         | OperationKind::CompareEqual
         | OperationKind::ExtractTag
+        | OperationKind::ExtractPayloadIndirection
+        | OperationKind::IsInitialized
         | OperationKind::Subfield { .. }
         | OperationKind::AddressOffset { .. }
         | OperationKind::AddressOffsetPlace { .. }

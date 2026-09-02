@@ -608,6 +608,8 @@ fn note_operation(operation: &Operation, site: Site, uses: &mut FxHashMap<ValueI
         OperationKind::Load
         | OperationKind::CompareEqual
         | OperationKind::ExtractTag
+        | OperationKind::ExtractPayloadIndirection
+        | OperationKind::IsInitialized
         | OperationKind::RuntimeAlloc { .. } => {
             operation
                 .operands

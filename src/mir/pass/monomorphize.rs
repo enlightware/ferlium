@@ -1079,6 +1079,8 @@ fn substitute_in_operation(operation: &mut Operation, mapper: &mut impl TypeMapp
         | OperationKind::CompareEqual
         | OperationKind::Load
         | OperationKind::ExtractTag
+        | OperationKind::ExtractPayloadIndirection
+        | OperationKind::IsInitialized
         | OperationKind::Store
         | OperationKind::Clear
         | OperationKind::Memcpy

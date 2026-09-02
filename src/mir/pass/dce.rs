@@ -164,7 +164,11 @@ pub(crate) fn remove_dead_trivial_results(func: &Function) -> Option<Function> {
         for (index, operation) in basic_block.operations().iter().enumerate() {
             if matches!(
                 operation.kind,
-                OperationKind::CompareEqual | OperationKind::Load | OperationKind::ExtractTag
+                OperationKind::CompareEqual
+                    | OperationKind::Load
+                    | OperationKind::ExtractTag
+                    | OperationKind::ExtractPayloadIndirection
+                    | OperationKind::IsInitialized
             ) && let Some(result) = operation.result_id()
             {
                 debug_assert!(!operation.result_requires_consuming_use());
@@ -665,6 +669,8 @@ pub(super) fn may_leave_frame_storage(operation: &mir::Operation) -> bool {
         | OperationKind::Variant { .. }
         | OperationKind::BuildArray { .. }
         | OperationKind::ExtractTag
+        | OperationKind::ExtractPayloadIndirection
+        | OperationKind::IsInitialized
         | OperationKind::Store
         | OperationKind::Clear
         | OperationKind::Memcpy

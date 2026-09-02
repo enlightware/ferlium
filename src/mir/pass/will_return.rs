@@ -176,6 +176,8 @@ fn operation_returns(operation: &Operation, callee_returns: &impl Fn(FunctionId)
         | OperationKind::Variant { .. }
         | OperationKind::BuildArray { .. }
         | OperationKind::ExtractTag
+        | OperationKind::ExtractPayloadIndirection
+        | OperationKind::IsInitialized
         | OperationKind::Store
         | OperationKind::Clear
         | OperationKind::Memcpy

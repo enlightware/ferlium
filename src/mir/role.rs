@@ -218,7 +218,6 @@ impl ValueRole {
     }
 
     /// The pointee type reached by reading through this value as a place, if it is one.
-    #[cfg(any(debug_assertions, test, feature = "std-snapshot"))]
     pub(crate) fn place_pointee_type(&self) -> Option<MirType> {
         match self {
             Self::Place(ty) => Some(ty.clone()),
@@ -683,6 +682,8 @@ pub(crate) fn check_operand_roles(
             );
         }
         OperationKind::ExtractTag
+        | OperationKind::ExtractPayloadIndirection
+        | OperationKind::IsInitialized
         | OperationKind::Clear
         | OperationKind::DropClosureEnv
         | OperationKind::CloneClosureEnv { .. } => place(0),

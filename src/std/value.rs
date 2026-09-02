@@ -30,9 +30,10 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        self, ConcreteTraitImplKey, EvidenceBindingId, FunctionId, LocalDecl, LocalDeclId, Module,
-        ModuleEnv, PendingFunctionBody, PendingLocalDrop, PendingModuleFunction, ProjectionIndex,
-        ResolvedValueLayout, TraitId, TraitImpl, TraitImplId, TraitImpls, TypeDefId, id::Id,
+        self, ConcreteTraitImplKey, EvidenceBindingId, FunctionId, LocalDecl, LocalDeclId,
+        LocalImplId, Module, ModuleEnv, PendingFunctionBody, PendingLocalDrop,
+        PendingModuleFunction, ProjectionIndex, ResolvedValueLayout, TraitDictionaryEntry, TraitId,
+        TraitImpl, TraitImplId, TraitImpls, TypeDefId, id::Id,
     },
     std::{
         STD_MODULE_ID,
@@ -77,6 +78,49 @@ pub(crate) const VALUE_ALIGN_ASSOC_CONST_INDEX: TraitAssociatedConstIndex =
     TraitAssociatedConstIndex::new(1);
 pub(crate) const INSPECT_METHOD_INDEX: TraitMethodIndex = TraitMethodIndex::new(0);
 pub(crate) const NO_DERIVE_VALUE_ATTRIBUTE: &str = "no_derive_value";
+
+/// Whether `function` is a method (or dictionary entry wrapper) implementing `Value::drop`.
+pub(crate) fn is_value_drop_function(function: FunctionId, env: &ModuleEnv<'_>) -> bool {
+    let Some(module) = env.module_by_id(function.module) else {
+        return false;
+    };
+    let value_trait = env.expect_std_trait_id(VALUE_TRAIT_NAME);
+    let drop_entry = env
+        .trait_def(value_trait)
+        .dictionary_method_index(VALUE_DROP_METHOD_INDEX);
+    (0..module.impl_count()).any(|index| {
+        let impl_id = LocalImplId::from_index(index);
+        let implementation = module
+            .get_impl_data(impl_id)
+            .expect("implementation index came from this module");
+        if implementation.trait_id != value_trait {
+            return false;
+        }
+        implementation
+            .methods
+            .get(VALUE_DROP_METHOD_INDEX.as_index())
+            .is_some_and(|method| *method == function.function)
+            || matches!(
+                implementation.dictionary_value.entry(drop_entry),
+                TraitDictionaryEntry::Function(method) if method == function.function
+            )
+    })
+}
+
+const VARIANT_TAG_SIZE: u32 = mem::size_of::<u32>() as u32;
+const VARIANT_TAG_ALIGN: u32 = mem::align_of::<u32>() as u32;
+
+pub(crate) fn variant_tag_layout() -> ResolvedValueLayout {
+    ResolvedValueLayout {
+        size: VARIANT_TAG_SIZE,
+        align: VARIANT_TAG_ALIGN,
+    }
+}
+
+pub(crate) fn variant_payload_offset(payload_align: u32) -> u32 {
+    debug_assert!(payload_align.is_power_of_two());
+    VARIANT_TAG_SIZE.div_ceil(payload_align) * payload_align
+}
 
 /// Dictionary entry and callable surface of one `Value` layout getter.
 pub(crate) fn value_layout_getter_entry(
@@ -329,7 +373,11 @@ impl ValueLayoutFormula {
         payloads: impl IntoIterator<Item = Self>,
         span: Location,
     ) -> Result<Self, InternalCompilationError> {
-        let tag = Self::constant(ValueLayout::native::<u32>(), span)?;
+        let tag_layout = variant_tag_layout();
+        let tag = Self::constant(
+            ValueLayout::new(tag_layout.size as usize, tag_layout.align as usize),
+            span,
+        )?;
         let mut size = tag.size.clone();
         let mut align = tag.align.clone();
         for payload in payloads {
@@ -552,6 +600,63 @@ fn payload_storage_in_variant(
     ))
 }
 
+fn structural_variant(
+    variant_ty: Type,
+    env: &impl TypeLayoutEnv,
+) -> Option<(Type, Vec<(Ustr, Type)>)> {
+    let mut structural_ty = variant_ty;
+    let mut seen = FxHashSet::default();
+    loop {
+        if !seen.insert(structural_ty) {
+            return None;
+        }
+        // Drop the type-universe read guard before instantiating a named shape, which interns the
+        // resulting types through the write side of the same lock.
+        let data = structural_ty.data().clone();
+        match data {
+            TypeKind::Variant(cases) => return Some((structural_ty, cases)),
+            TypeKind::Named(named) => {
+                structural_ty = env
+                    .type_def(named.def)
+                    .instantiated_shape_with_effects(&named.params, &named.effect_params);
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Return the storage mode shared by occurrences of `payload_ty` in `variant_ty`.
+///
+/// Storage is a function of the structural variant and payload type, so the case tag does not
+/// participate. `None` means the variant remains open or does not contain that payload type.
+pub(crate) fn variant_payload_storage_for_payload_type(
+    variant_ty: Type,
+    payload_ty: Type,
+    env: &impl TypeLayoutEnv,
+) -> Option<VariantPayloadStorage> {
+    let (structural_ty, cases) = structural_variant(variant_ty, env)?;
+    cases
+        .iter()
+        .any(|(_, candidate)| *candidate == payload_ty)
+        .then(|| payload_storage_in_variant(structural_ty, payload_ty, env))
+}
+
+/// Return one indirect payload type when `variant_ty` owns recursive payload storage.
+///
+/// Every indirect case uses the same pointer-sized union slot, so one pointee type is sufficient
+/// for typed address calculation and representation cleanup.
+pub(crate) fn variant_indirect_payload_type(
+    variant_ty: Type,
+    env: &impl TypeLayoutEnv,
+) -> Option<Type> {
+    let (structural_ty, cases) = structural_variant(variant_ty, env)?;
+    cases.into_iter().find_map(|(_, payload_ty)| {
+        payload_storage_in_variant(structural_ty, payload_ty, env)
+            .is_indirect()
+            .then_some(payload_ty)
+    })
+}
+
 /// Return the canonical storage mode of `tag`'s payload in `variant_ty`.
 ///
 /// This is also the value carried as hidden evidence when `variant_ty` is an open generic type.
@@ -561,45 +666,25 @@ pub(crate) fn variant_payload_storage_for_type(
     span: Location,
     env: &impl TypeLayoutEnv,
 ) -> Result<VariantPayloadStorage, InternalCompilationError> {
-    let mut structural_ty = variant_ty;
-    let mut seen = FxHashSet::default();
-    loop {
-        if !seen.insert(structural_ty) {
-            return Err(internal_compilation_error!(Internal {
-                error: format!("cannot resolve variant representation for type {variant_ty:?}"),
+    let (structural_ty, cases) = structural_variant(variant_ty, env).ok_or_else(|| {
+        internal_compilation_error!(Internal {
+            error: format!("cannot resolve variant representation for type {variant_ty:?}"),
+            span,
+        })
+    })?;
+    let payload_ty = cases
+        .into_iter()
+        .find_map(|(case_tag, payload_ty)| (case_tag == tag).then_some(payload_ty))
+        .ok_or_else(|| {
+            internal_compilation_error!(Internal {
+                error: format!("variant type {variant_ty:?} has no case .{tag}"),
                 span,
-            }));
-        }
-        let data = structural_ty.data().clone();
-        match data {
-            TypeKind::Variant(cases) => {
-                let payload_ty = cases
-                    .into_iter()
-                    .find_map(|(case_tag, payload_ty)| (case_tag == tag).then_some(payload_ty))
-                    .ok_or_else(|| {
-                        internal_compilation_error!(Internal {
-                            error: format!("variant type {variant_ty:?} has no case .{tag}"),
-                            span,
-                        })
-                    })?;
-                if payload_ty == Type::unit() {
-                    return Ok(VariantPayloadStorage::Inline);
-                }
-                return Ok(payload_storage_in_variant(structural_ty, payload_ty, env));
-            }
-            TypeKind::Named(named) => {
-                structural_ty = env
-                    .type_def(named.def)
-                    .instantiated_shape_with_effects(&named.params, &named.effect_params);
-            }
-            _ => {
-                return Err(internal_compilation_error!(Internal {
-                    error: format!("cannot resolve variant representation for type {variant_ty:?}"),
-                    span,
-                }));
-            }
-        }
+            })
+        })?;
+    if payload_ty == Type::unit() {
+        return Ok(VariantPayloadStorage::Inline);
     }
+    Ok(payload_storage_in_variant(structural_ty, payload_ty, env))
 }
 
 impl TypeLayoutEnv for ModuleEnv<'_> {
@@ -2920,6 +3005,7 @@ fn derive_function_value_impl(
     let dictionary_ty = TraitImpls::dictionary_ty(tys, associated_const_tys);
     let dictionary_value = module::build_dictionary_value(&methods, &associated_const_getters);
     let imp = TraitImpl::new(
+        trait_id,
         Vec::new(),
         Vec::new(),
         methods,

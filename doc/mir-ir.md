@@ -169,8 +169,8 @@ The operation kind fixes operand arity, roles, and result shape. The main groups
 
 | Group | Operations | Contract |
 |---|---|---|
-| storage | `alloca`, `alloca_place`, `runtime_alloc`, `runtime_dealloc`, `load`, `store`, `clear`, `memcpy`, `move` | Stack storage follows stack regions; runtime storage has an explicit lifetime. `store` never drops; `memcpy` requires a concrete `TrivialCopy` pointee; `move` leaves its source absent. |
-| aggregates | `subfield`, `variant`, `extract_tag`, `build_array` | Aggregate construction and ownership remain field-addressable. Product `subfield` records its aggregate type and carries `Value` witnesses for direct members with open inline layouts. A variant operation first builds an uninitialized payload shell. Generic variant construction and payload-marked `subfield` operations carry the selected payload's `Value<B>` layout witness; projection reads inline/indirect classification from the stored tag. `extract_tag` yields an opaque semantic tag, not the raw ABI word. `build_array` initializes fresh canonical array storage from borrowed `TrivialCopy` elements. |
+| storage | `alloca`, `alloca_place`, `runtime_alloc`, `runtime_dealloc`, `is_initialized`, `load`, `store`, `clear`, `memcpy`, `move` | Stack storage follows stack regions; runtime storage has an explicit lifetime. `is_initialized` exposes a physical drop flag without fixing its storage layout. `store` never drops; `memcpy` requires a concrete `TrivialCopy` pointee; `move` leaves its source absent. |
+| aggregates | `subfield`, `variant`, `extract_tag`, `extract_payload_indirection`, `build_array` | Aggregate construction and ownership remain field-addressable. Product `subfield` records its aggregate type and carries `Value` witnesses for direct members with open inline layouts. A variant operation first builds an uninitialized payload shell. Generic variant construction and payload-marked `subfield` operations carry the selected payload's `Value<B>` layout witness; projection reads inline/indirect classification from the stored tag. `extract_tag` yields an opaque semantic tag, while physical `extract_payload_indirection` yields the representation bit as `bool`. `build_array` initializes fresh canonical array storage from borrowed `TrivialCopy` elements. |
 | evidence | `dict_entry`, `build_dictionary`, `subscript_member`, `build_subscript` | Evidence remains symbolic. Construction closes a definition over evidence operands; dictionary entries are closed function places. |
 | calls/projections | `call`, `project`, `end_project` | Proven source-infallible forms are ordinary operations. Potentially source-fallible forms occur only inside `invoke`. |
 | ownership | `clone`, `drop`, `build_closure`, `clone_closure_env`, `drop_closure_env` | Semantic ownership actions are explicit. `Value::clone` and `Value::drop` are source-infallible by contract. |
@@ -258,8 +258,8 @@ serialized standalone MIR format will need explicit normalized-layout/equality m
 
 ## Physical MIR stage
 
-> Status: canonical compact product byte-address lowering is implemented; variant payloads, the
-> remaining representations, and the unboxed interpreter are planned.
+> Status: canonical product and variant-payload byte-address lowering is implemented; the remaining
+> representations and the unboxed interpreter are planned.
 
 Physical lowering consumes the complete optimized `MirArtifacts`, including declared bodies and
 retained specializations. It resolves physical addresses, representations, callable environments,
@@ -326,9 +326,22 @@ retain the base allocation's provenance. Byte-offset expressions use ordinary ca
 Semantic MIR retains logical `subfield` operations through its ordinary optimization rounds. A
 product projection names the aggregate and carries the direct member `Value` witnesses required
 when an inline layout is open. Physical lowering replaces it with `address_offset`, emitting a
-closed addressor helper over open layout witnesses when needed. Variant payload lowering introduces
-indirection only for recursive payloads. Buffer call expansion uses the loaded backing pointer and
-element-size evidence.
+closed addressor helper over open layout witnesses when needed.
+
+Variant-payload addressors inspect the indirection bit stored in the active tag when the storage
+mode is not statically uniform. Inline payloads use their case-specific aligned byte offset.
+Storing an indirect variant shell allocates its payload storage from `Value<B>` size and alignment;
+payload projection only loads the resulting address. Payload initialization is independent of this
+allocation lifetime, so `clear` can leave an addressable but absent payload and a later `store` can
+reuse the allocation.
+
+Moving a complete variant transfers its owning pointer, while cloning constructs a new shell and
+therefore a new allocation. The selected generated `Value::drop` implementation first performs the
+semantic payload drop and releases the allocation before returning. A failed partial construction
+in caller-owned return storage uses guarded cleanup; nested allocations are released from inner to
+outer.
+
+Buffer call expansion uses the loaded backing pointer and element-size evidence.
 
 ### First-class subscript environments
 

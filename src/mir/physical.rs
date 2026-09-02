@@ -10,29 +10,44 @@
 
 use std::fmt;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use ustr::Ustr;
 
 use crate::{
     Location,
     compiler::MirArtifacts,
-    hir::{dictionary::DictionaryReq, function::ArgConvention, value::LiteralValue},
+    hir::{
+        dictionary::DictionaryReq,
+        function::ArgConvention,
+        value::{LiteralValue, VariantPayloadStorage},
+    },
     mir::{
         self, Function, Operation, OperationKind, ParameterKind, Value,
         builder::FunctionBuilder,
         edit::FunctionEdit,
-        pass::known_callee::KnownCallees,
+        pass::{
+            dataflow::{Root, escaping_roots},
+            known_callee::KnownCallees,
+        },
+        role::{MirType, ValueRoles},
         terminator::{Terminator, TerminatorKind},
+        value::ConstantId,
     },
-    module::{FunctionId, LocalFunctionId, ModuleEnv, ModuleId, ProjectionIndex, id::Id},
+    module::{
+        FunctionId, LocalFunctionId, ModuleEnv, ModuleId, ProjectionIndex, ResolvedValueLayout,
+        id::Id,
+    },
     std::{
         core_traits_names::VALUE_TRAIT_NAME,
+        logic::bool_type,
         math::int_type,
         ordering::{ORDERING_EQUAL, ORDERING_GREATER},
         value::{
             ProductLayoutOrder, ProductLayoutSpec, ProductMemberLayout,
-            VALUE_ALIGN_ASSOC_CONST_INDEX, VALUE_SIZE_ASSOC_CONST_INDEX, product_layout_spec,
-            value_layout_getter_entry,
+            VALUE_ALIGN_ASSOC_CONST_INDEX, VALUE_SIZE_ASSOC_CONST_INDEX, is_value_drop_function,
+            product_layout_spec, value_layout_for_type, value_layout_getter_entry,
+            variant_indirect_payload_type, variant_payload_offset,
+            variant_payload_storage_for_payload_type, variant_tag_layout,
         },
     },
     types::{
@@ -54,6 +69,12 @@ pub(crate) enum BackendReadinessError {
         operation: &'static str,
     },
     InvalidProductProjection {
+        function: FunctionId,
+    },
+    InvalidVariantPayloadProjection {
+        function: FunctionId,
+    },
+    InvalidVariantShellStore {
         function: FunctionId,
     },
     InvalidPhysicalCall {
@@ -83,6 +104,16 @@ impl fmt::Display for BackendReadinessError {
             Self::InvalidProductProjection { function } => write!(
                 f,
                 "physical entry m{}:f{} contains an invalid product projection",
+                function.module, function.function
+            ),
+            Self::InvalidVariantPayloadProjection { function } => write!(
+                f,
+                "physical entry m{}:f{} contains an invalid variant-payload projection",
+                function.module, function.function
+            ),
+            Self::InvalidVariantShellStore { function } => write!(
+                f,
+                "physical entry m{}:f{} does not store each variant shell exactly once",
                 function.module, function.function
             ),
             Self::InvalidPhysicalCall {
@@ -138,10 +169,13 @@ pub(crate) fn lower_physical_mir(
     let mut lowerer = PhysicalLowerer::new(helper_base, env, known);
     for (index, entry) in entries.iter_mut().enumerate() {
         if let Some(body) = entry.take() {
-            *entry = Some(lowerer.lower_body(
-                FunctionId::new(module, LocalFunctionId::from_index(index)),
-                body,
-            )?);
+            let local = LocalFunctionId::from_index(index);
+            let original = semantic
+                .specialization(local)
+                .map_or(FunctionId::new(module, local), |specialization| {
+                    specialization.original
+                });
+            *entry = Some(lowerer.lower_body(FunctionId::new(module, local), original, body)?);
         }
     }
     entries.extend(lowerer.helpers.into_iter().map(Some));
@@ -156,11 +190,51 @@ struct ProductAddressorKey {
     field_index: ProjectionIndex,
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum PhysicalHelperKey {
+    Product(ProductAddressorKey),
+    // Allocation follows the representation decision carried by the shell operation itself, so
+    // retain it in the key rather than assuming two otherwise-equal shell sites agree. Addressors
+    // recompute their decision canonically from the aggregate and payload types instead.
+    VariantPayloadAllocation {
+        variant_ty: Type,
+        payload_ty: Type,
+        storage: Option<VariantPayloadStorage>,
+    },
+    VariantPayloadAddressor {
+        variant_ty: Type,
+        payload_ty: Type,
+    },
+    VariantPayloadRelease {
+        variant_ty: Type,
+        payload_ty: Type,
+    },
+}
+
+#[derive(Clone)]
+struct VariantPayloadProjection {
+    block: mir::BlockId,
+    operation_index: usize,
+    operation: Operation,
+    variant_ty: Type,
+    storage: Option<VariantPayloadStorage>,
+}
+
+#[derive(Clone)]
+struct VariantAllocationCleanup {
+    active: Value,
+    base_slot: Value,
+    variant_ty: Type,
+    payload_ty: Type,
+    span: Location,
+    depth: usize,
+}
+
 struct PhysicalLowerer<'a> {
     helper_base: FunctionId,
     env: ModuleEnv<'a>,
     known: &'a KnownCallees,
-    helper_ids: FxHashMap<ProductAddressorKey, FunctionId>,
+    helper_ids: FxHashMap<PhysicalHelperKey, FunctionId>,
     helpers: Vec<Function>,
 }
 
@@ -178,9 +252,13 @@ impl<'a> PhysicalLowerer<'a> {
     fn lower_body(
         &mut self,
         function: FunctionId,
-        body: Function,
+        original: FunctionId,
+        mut body: Function,
     ) -> Result<Function, BackendReadinessError> {
-        let candidates = body
+        let (lowered, allocation_cleanups) =
+            self.lower_variant_shell_allocations(function, body)?;
+        body = lowered;
+        let product_candidates = body
             .blocks()
             .flat_map(|block| {
                 body.block(block)
@@ -199,13 +277,45 @@ impl<'a> PhysicalLowerer<'a> {
                     .map(move |(index, operation)| (block, index, operation.clone()))
             })
             .collect::<Vec<_>>();
-        if candidates.is_empty() {
-            return Ok(body);
+        let variant_candidates = variant_payload_projections(function, &body, self.env)?;
+
+        enum Projection {
+            Product(mir::BlockId, usize, Operation),
+            Variant(usize),
         }
+        let mut projections = product_candidates
+            .into_iter()
+            .map(|(block, index, operation)| Projection::Product(block, index, operation))
+            .chain((0..variant_candidates.len()).map(Projection::Variant))
+            .collect::<Vec<_>>();
+        projections.sort_by_key(|projection| match projection {
+            Projection::Product(block, index, _) => (block.as_index(), *index),
+            Projection::Variant(index) => {
+                let candidate = &variant_candidates[*index];
+                (candidate.block.as_index(), candidate.operation_index)
+            }
+        });
 
         let mut edit = FunctionEdit::new(body);
-        for (block, index, operation) in candidates.into_iter().rev() {
-            self.lower_product_projection(function, &mut edit, block, index, operation)?;
+        for projection in projections.into_iter().rev() {
+            match projection {
+                Projection::Product(block, index, operation) => {
+                    self.lower_product_projection(function, &mut edit, block, index, operation)?;
+                }
+                Projection::Variant(index) => self.lower_variant_payload_projection(
+                    function,
+                    &mut edit,
+                    &variant_candidates[index],
+                )?,
+            }
+        }
+        if let Some((base, variant_ty, payload_ty)) = value_drop_variant(original, &edit, self.env)
+        {
+            self.release_variant_on_value_drop_return(&mut edit, base, variant_ty, payload_ty);
+        }
+        self.lower_incomplete_variant_allocation_cleanup(&mut edit, &allocation_cleanups);
+        if !variant_candidates.is_empty() || !allocation_cleanups.is_empty() {
+            edit.reorder_blocks_in_reverse_postorder();
         }
         Ok(edit.finish_unverified())
     }
@@ -278,23 +388,923 @@ impl<'a> PhysicalLowerer<'a> {
         Ok(())
     }
 
+    fn lower_variant_payload_projection(
+        &mut self,
+        function: FunctionId,
+        edit: &mut FunctionEdit,
+        candidate: &VariantPayloadProjection,
+    ) -> Result<(), BackendReadinessError> {
+        let OperationKind::Subfield {
+            ty: payload_ty,
+            variant_payload: true,
+            has_layout_witness,
+            ..
+        } = candidate.operation.kind
+        else {
+            return Err(BackendReadinessError::InvalidVariantPayloadProjection { function });
+        };
+        let static_layout =
+            value_layout_for_type(payload_ty, candidate.operation.span, &self.env).ok();
+        if has_layout_witness != static_layout.is_none() {
+            return Err(BackendReadinessError::InvalidVariantPayloadProjection { function });
+        }
+        let result = candidate
+            .operation
+            .result_id()
+            .ok_or(BackendReadinessError::InvalidVariantPayloadProjection { function })?;
+        if candidate.storage == Some(VariantPayloadStorage::Inline)
+            && let Some(layout) = static_layout
+        {
+            let offset = isize::try_from(variant_payload_offset(layout.align))
+                .map_err(|_| BackendReadinessError::InvalidVariantPayloadProjection { function })?;
+            let offset = edit.add_constant(int_type(), LiteralValue::new_native(offset), &self.env);
+            let mut replacement = Operation::address_offset(
+                candidate.operation.span,
+                candidate.operation.operands[0].clone(),
+                Value::Constant(offset),
+                payload_ty,
+            );
+            replacement.assign_result_id(Some(result));
+            edit.replace_operation_sequence(
+                candidate.block,
+                candidate.operation_index,
+                [replacement],
+            );
+            return Ok(());
+        }
+        let helper = self.intern_variant_payload_addressor(
+            candidate.variant_ty,
+            payload_ty,
+            candidate.storage,
+            static_layout,
+        );
+        let mut out_operation = Operation::alloca_place(candidate.operation.span, payload_ty);
+        let out = edit
+            .assign_new_result(&mut out_operation)
+            .expect("alloca_place produces a place");
+        let mut arguments = candidate.operation.operands[2..].to_vec();
+        arguments.push(candidate.operation.operands[0].clone());
+        arguments.push(out.clone());
+        let call = Operation::call(
+            candidate.operation.span,
+            Value::Function(helper),
+            arguments,
+            variant_payload_addressor_call_type(candidate.variant_ty, payload_ty),
+        );
+        let mut load = Operation::load(candidate.operation.span, out);
+        load.assign_result_id(Some(result));
+        edit.replace_operation_sequence(
+            candidate.block,
+            candidate.operation_index,
+            [out_operation, call, load],
+        );
+        Ok(())
+    }
+
+    fn lower_variant_shell_allocations(
+        &mut self,
+        function: FunctionId,
+        body: Function,
+    ) -> Result<(Function, Vec<VariantAllocationCleanup>), BackendReadinessError> {
+        let variants = body
+            .blocks()
+            .flat_map(|block| body.block(block).operations())
+            .filter_map(|operation| {
+                let OperationKind::Variant { .. } = operation.kind else {
+                    return None;
+                };
+                Some((operation.result_id()?, operation.clone()))
+            })
+            .collect::<FxHashMap<_, _>>();
+        if variants.is_empty() {
+            return Ok((body, Vec::new()));
+        }
+
+        let mut stores = Vec::new();
+        let mut stored_shells = FxHashSet::default();
+        let mut inspect = |block, operation_index, operation: &Operation, allow_store| {
+            for (operand_index, operand) in operation.operands.iter().enumerate() {
+                let Value::Register(result) = operand else {
+                    continue;
+                };
+                let Some(shell) = variants.get(result) else {
+                    continue;
+                };
+                if allow_store
+                    && matches!(operation.kind, OperationKind::Store)
+                    && operand_index == 0
+                    && stored_shells.insert(*result)
+                {
+                    stores.push((block, operation_index, shell.clone(), operation.clone()));
+                } else {
+                    return Err(BackendReadinessError::InvalidVariantShellStore { function });
+                }
+            }
+            Ok(())
+        };
+        for block in body.blocks() {
+            for (index, operation) in body.block(block).operations().iter().enumerate() {
+                inspect(block, index, operation, true)?;
+            }
+            if let TerminatorKind::Invoke { operation, .. } = &body.block(block).terminator().kind {
+                // Variant shells are source-infallible values and must be transferred by an
+                // ordinary Store. Refuse an invoke operand instead of manufacturing an invalid
+                // operation index for the splice below.
+                inspect(block, 0, operation, false)?;
+            } else if body
+                .block(block)
+                .terminator()
+                .operands()
+                .iter()
+                .any(|operand| {
+                    matches!(operand, Value::Register(result) if variants.contains_key(result))
+                })
+            {
+                return Err(BackendReadinessError::InvalidVariantShellStore { function });
+            }
+        }
+        if stored_shells.len() != variants.len() {
+            return Err(BackendReadinessError::InvalidVariantShellStore { function });
+        }
+        let has_error_exit = body.blocks().any(|block| {
+            matches!(
+                body.block(block).terminator().kind,
+                TerminatorKind::PropagateError
+            )
+        });
+        let (_, bindings) = escaping_roots(&body, &|_| false);
+        let parameters = body.parameters().to_vec();
+        let mut edit = FunctionEdit::new(body);
+        let mut cleanups = Vec::new();
+        let mut cleanup_flag_values = None;
+
+        for (block, index, shell, store) in stores.into_iter().rev() {
+            let OperationKind::Variant {
+                metadata,
+                storage,
+                has_layout_witness,
+                ..
+            } = &shell.kind
+            else {
+                unreachable!()
+            };
+            if *storage == Some(VariantPayloadStorage::Inline) {
+                continue;
+            }
+            let static_layout =
+                value_layout_for_type(metadata.payload_ty, shell.span, &self.env).ok();
+            if *has_layout_witness != static_layout.is_none() {
+                return Err(BackendReadinessError::InvalidVariantPayloadProjection { function });
+            }
+            let helper = self.intern_variant_payload_allocation(
+                metadata.ty,
+                metadata.payload_ty,
+                *storage,
+                static_layout,
+            );
+            let base = store.operands[1].clone();
+            let mut operations = vec![store];
+            let mut result_operation = Operation::alloca(shell.span, Type::unit());
+            let result = edit
+                .assign_new_result(&mut result_operation)
+                .expect("alloca produces a place");
+            operations.push(result_operation);
+            let mut arguments = Vec::new();
+            if *has_layout_witness {
+                arguments.push(
+                    shell
+                        .operands
+                        .last()
+                        .cloned()
+                        .expect("layout witness is present"),
+                );
+            }
+            arguments.extend([base.clone(), result]);
+            operations.push(Operation::call(
+                shell.span,
+                Value::Function(helper),
+                arguments,
+                variant_payload_helper_call_type(metadata.ty),
+            ));
+
+            // An ordinary local's semantic cleanup calls its selected `Value::drop`, which owns
+            // representation release too. A return place belongs to the caller and is not part of
+            // the callee's local cleanup, so a partial construction records its allocation here.
+            if has_error_exit
+                && let Some(Root::Parameter(parameter)) = bindings.root_of(&base)
+                && parameters[parameter.as_index()].kind == ParameterKind::Return
+            {
+                let (false_value, true_value) = cleanup_flag_values.get_or_insert_with(|| {
+                    (
+                        Value::Constant(bool_constant(&mut edit, false, self.env)),
+                        Value::Constant(bool_constant(&mut edit, true, self.env)),
+                    )
+                });
+                let depth = bindings
+                    .depth_of(&base)
+                    .ok_or(BackendReadinessError::InvalidVariantPayloadProjection { function })?;
+                let mut active_operation = Operation::alloca(shell.span, bool_type());
+                let active = edit
+                    .assign_new_result(&mut active_operation)
+                    .expect("alloca produces a place");
+                let mut base_operation = Operation::alloca_place(shell.span, metadata.ty);
+                let base_slot = edit
+                    .assign_new_result(&mut base_operation)
+                    .expect("alloca_place produces a place");
+                edit.block_mut(edit.entry()).operations.splice(
+                    0..0,
+                    [
+                        active_operation,
+                        Operation::store(shell.span, false_value.clone(), active.clone()),
+                        base_operation,
+                    ],
+                );
+                operations.push(Operation::store(shell.span, base, base_slot.clone()));
+                operations.push(Operation::store(
+                    shell.span,
+                    true_value.clone(),
+                    active.clone(),
+                ));
+                cleanups.push(VariantAllocationCleanup {
+                    active,
+                    base_slot,
+                    variant_ty: metadata.ty,
+                    payload_ty: metadata.payload_ty,
+                    span: shell.span,
+                    depth,
+                });
+            }
+            // Keep allocation adjacent to the shell store. Once Store establishes the shell's drop
+            // flag, no failing operation can intervene before its representation resource exists;
+            // ordinary local cleanup can therefore always reach `Value::drop` and release it.
+            edit.block_mut(block)
+                .operations
+                .splice(index..=index, operations);
+        }
+        cleanups.sort_by_key(|cleanup| std::cmp::Reverse(cleanup.depth));
+        Ok((edit.finish_unverified(), cleanups))
+    }
+
+    fn release_variant_on_value_drop_return(
+        &mut self,
+        edit: &mut FunctionEdit,
+        base: Value,
+        variant_ty: Type,
+        payload_ty: Type,
+    ) {
+        let helper = self.intern_variant_payload_release(variant_ty, payload_ty);
+        let exits = edit
+            .blocks()
+            .filter(|block| matches!(edit.block(*block).terminator.kind, TerminatorKind::Return))
+            .collect::<Vec<_>>();
+        for block in exits {
+            let span = edit.block(block).terminator.span;
+            // Every semantic payload branch reaches this return after dropping the initialized
+            // payload. That drop clears the payload leaf, not the shell/tag initialization flag, so
+            // the release helper can still inspect the representation before the caller's whole-
+            // variant `drop` operation finally consumes the shell.
+            let operations =
+                variant_payload_release_call(edit, helper, base.clone(), variant_ty, span);
+            edit.block_mut(block).operations.extend(operations);
+        }
+    }
+
+    fn lower_incomplete_variant_allocation_cleanup(
+        &mut self,
+        edit: &mut FunctionEdit,
+        cleanups: &[VariantAllocationCleanup],
+    ) {
+        if cleanups.is_empty() {
+            return;
+        }
+        let exits = edit
+            .blocks()
+            .filter(|block| {
+                matches!(
+                    edit.block(*block).terminator.kind,
+                    TerminatorKind::PropagateError
+                )
+            })
+            .collect::<Vec<_>>();
+        let false_value = Value::Constant(bool_constant(edit, false, self.env));
+        for exit in exits {
+            let span = edit.block(exit).terminator.span;
+            let mut next = edit.add_block(Terminator::propagate_error(span));
+            // `cleanups` is deepest-first. Building the chain backwards preserves that execution
+            // order, so no containing allocation is freed before an address stored inside it.
+            for cleanup in cleanups.iter().rev() {
+                let release = edit.add_block(Terminator::goto(cleanup.span, next));
+                let base = append_edit_result(
+                    edit,
+                    release,
+                    Operation::load(cleanup.span, cleanup.base_slot.clone()),
+                );
+                let helper =
+                    self.intern_variant_payload_release(cleanup.variant_ty, cleanup.payload_ty);
+                let mut operations = variant_payload_release_call(
+                    edit,
+                    helper,
+                    base,
+                    cleanup.variant_ty,
+                    cleanup.span,
+                );
+                operations.push(Operation::store(
+                    cleanup.span,
+                    false_value.clone(),
+                    cleanup.active.clone(),
+                ));
+                edit.block_mut(release).operations.extend(operations);
+
+                let check = edit.add_block(Terminator::goto(cleanup.span, next));
+                let active = append_edit_result(
+                    edit,
+                    check,
+                    Operation::load(cleanup.span, cleanup.active.clone()),
+                );
+                edit.block_mut(check).terminator =
+                    Terminator::cond_br(cleanup.span, active, release, next);
+                next = check;
+            }
+            edit.block_mut(exit).terminator = Terminator::goto(span, next);
+        }
+    }
+
+    fn intern_variant_payload_allocation(
+        &mut self,
+        variant_ty: Type,
+        payload_ty: Type,
+        storage: Option<VariantPayloadStorage>,
+        static_layout: Option<ResolvedValueLayout>,
+    ) -> FunctionId {
+        let key = PhysicalHelperKey::VariantPayloadAllocation {
+            variant_ty,
+            payload_ty,
+            storage,
+        };
+        if let Some(id) = self.helper_ids.get(&key) {
+            return *id;
+        }
+        let id = self.next_helper_id();
+        let body = build_variant_payload_allocation(
+            variant_ty,
+            payload_ty,
+            storage,
+            static_layout,
+            self.helpers.len(),
+            self.env,
+        );
+        self.helpers.push(body);
+        self.helper_ids.insert(key, id);
+        id
+    }
+
+    fn intern_variant_payload_addressor(
+        &mut self,
+        variant_ty: Type,
+        payload_ty: Type,
+        storage: Option<VariantPayloadStorage>,
+        static_layout: Option<ResolvedValueLayout>,
+    ) -> FunctionId {
+        // Storage and static layout are canonical functions of the key's two types. They are
+        // passed only to avoid recomputing them while building a newly interned helper.
+        let key = PhysicalHelperKey::VariantPayloadAddressor {
+            variant_ty,
+            payload_ty,
+        };
+        if let Some(id) = self.helper_ids.get(&key) {
+            return *id;
+        }
+        let id = self.next_helper_id();
+        let body = build_variant_payload_addressor(
+            variant_ty,
+            payload_ty,
+            storage,
+            static_layout,
+            self.helpers.len(),
+            self.known,
+            self.env,
+        );
+        self.helpers.push(body);
+        self.helper_ids.insert(key, id);
+        id
+    }
+
+    fn intern_variant_payload_release(&mut self, variant_ty: Type, payload_ty: Type) -> FunctionId {
+        let key = PhysicalHelperKey::VariantPayloadRelease {
+            variant_ty,
+            payload_ty,
+        };
+        if let Some(id) = self.helper_ids.get(&key) {
+            return *id;
+        }
+        let id = self.next_helper_id();
+        let body =
+            build_variant_payload_release(variant_ty, payload_ty, self.helpers.len(), self.env);
+        self.helpers.push(body);
+        self.helper_ids.insert(key, id);
+        id
+    }
+
+    fn next_helper_id(&self) -> FunctionId {
+        FunctionId::new(
+            self.helper_base.module,
+            LocalFunctionId::from_index(self.helper_base.function.as_index() + self.helpers.len()),
+        )
+    }
+
     fn intern_product_addressor(
         &mut self,
         key: ProductAddressorKey,
         spec: &ProductLayoutSpec,
     ) -> FunctionId {
-        if let Some(id) = self.helper_ids.get(&key) {
+        let helper_key = PhysicalHelperKey::Product(key.clone());
+        if let Some(id) = self.helper_ids.get(&helper_key) {
             return *id;
         }
-        let id = FunctionId::new(
-            self.helper_base.module,
-            LocalFunctionId::from_index(self.helper_base.function.as_index() + self.helpers.len()),
-        );
+        let id = self.next_helper_id();
         let body = build_product_addressor(&key, spec, self.helpers.len(), self.known, self.env);
         self.helpers.push(body);
-        self.helper_ids.insert(key, id);
+        self.helper_ids.insert(helper_key, id);
         id
     }
+}
+
+fn variant_payload_projections(
+    function: FunctionId,
+    body: &Function,
+    env: ModuleEnv<'_>,
+) -> Result<Vec<VariantPayloadProjection>, BackendReadinessError> {
+    let candidates = body
+        .blocks()
+        .flat_map(|block| {
+            body.block(block)
+                .operations()
+                .iter()
+                .enumerate()
+                .filter(|(_, operation)| {
+                    matches!(
+                        operation.kind,
+                        OperationKind::Subfield {
+                            variant_payload: true,
+                            ..
+                        }
+                    )
+                })
+                .map(move |(operation_index, operation)| {
+                    (block, operation_index, operation.clone())
+                })
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let roles = ValueRoles::derive(body);
+    let mut projections = Vec::new();
+    for (block, operation_index, operation) in candidates {
+        operation
+            .result_id()
+            .ok_or(BackendReadinessError::InvalidVariantPayloadProjection { function })?;
+        let variant_ty = roles
+            .get(&operation.operands[0], body.constants())
+            .and_then(|role| role.place_pointee_type())
+            .and_then(|ty| match ty {
+                MirType::Lowered(ty) => Some(ty),
+                MirType::Pointer(_) => None,
+            })
+            .ok_or(BackendReadinessError::InvalidVariantPayloadProjection { function })?;
+        let payload_ty = match operation.kind {
+            OperationKind::Subfield { ty, .. } => ty,
+            _ => unreachable!(),
+        };
+        let storage = variant_payload_storage_for_payload_type(variant_ty, payload_ty, &env);
+        projections.push(VariantPayloadProjection {
+            block,
+            operation_index,
+            operation,
+            variant_ty,
+            storage,
+        });
+    }
+    Ok(projections)
+}
+
+fn value_drop_variant(
+    original: FunctionId,
+    body: &FunctionEdit,
+    env: ModuleEnv<'_>,
+) -> Option<(Value, Type, Type)> {
+    // `Value::drop` has exactly one visible argument, `&mut Self`; any other mutable-reference
+    // shape is not the trait method whose representation lifetime physical lowering owns.
+    let mut mutable_parameters = body
+        .parameters()
+        .iter()
+        .enumerate()
+        .filter(|(_, parameter)| {
+            matches!(
+                parameter.kind,
+                ParameterKind::Parameter(ArgConvention::MutableRef)
+            )
+        });
+    let (index, _) = mutable_parameters.next()?;
+    if mutable_parameters.next().is_some() {
+        return None;
+    }
+    let parameter = mir::ParameterId::from_index(index);
+    let variant_ty = body.parameters()[parameter.as_index()].ty;
+    let payload_ty = variant_indirect_payload_type(variant_ty, &env)?;
+    if !is_value_drop_function(original, &env) {
+        return None;
+    }
+    Some((Value::Parameter(parameter), variant_ty, payload_ty))
+}
+
+fn bool_constant(edit: &mut FunctionEdit, value: bool, env: ModuleEnv<'_>) -> ConstantId {
+    edit.add_constant(bool_type(), LiteralValue::new_native(value), &env)
+}
+
+fn append_edit_result(
+    edit: &mut FunctionEdit,
+    block: mir::BlockId,
+    mut operation: Operation,
+) -> Value {
+    let result = edit
+        .assign_new_result(&mut operation)
+        .expect("operation produces a result");
+    edit.block_mut(block).operations.push(operation);
+    result
+}
+
+fn variant_payload_addressor_call_type(variant_ty: Type, payload_ty: Type) -> CallImplType {
+    CallImplType::new(
+        FnType::new_mut_resolved([(variant_ty, true)], payload_ty, no_effects()),
+        CallResultConvention::ADDRESSOR_PLACE,
+    )
+}
+
+fn variant_payload_helper_call_type(variant_ty: Type) -> CallImplType {
+    CallImplType::value(FnType::new_mut_resolved(
+        [(variant_ty, true)],
+        Type::unit(),
+        no_effects(),
+    ))
+}
+
+fn variant_payload_release_call(
+    edit: &mut FunctionEdit,
+    helper: FunctionId,
+    base: Value,
+    variant_ty: Type,
+    span: Location,
+) -> Vec<Operation> {
+    let mut result_operation = Operation::alloca(span, Type::unit());
+    let result = edit
+        .assign_new_result(&mut result_operation)
+        .expect("alloca produces a place");
+    let call = Operation::call(
+        span,
+        Value::Function(helper),
+        [base, result],
+        variant_payload_helper_call_type(variant_ty),
+    );
+    vec![result_operation, call]
+}
+
+fn build_variant_payload_allocation(
+    variant_ty: Type,
+    payload_ty: Type,
+    storage: Option<VariantPayloadStorage>,
+    static_layout: Option<ResolvedValueLayout>,
+    helper_index: usize,
+    env: ModuleEnv<'_>,
+) -> Function {
+    debug_assert_ne!(storage, Some(VariantPayloadStorage::Inline));
+    let span = Location::new_synthesized();
+    let name = Ustr::from(&format!(
+        "#physical:variant_payload_allocation:{helper_index}"
+    ));
+    let mut builder = FunctionBuilder::new(name, CallResultConvention::Value);
+    let witness = static_layout.is_none().then(|| {
+        let value_trait = env.expect_std_trait_id(VALUE_TRAIT_NAME);
+        let requirement =
+            DictionaryReq::new_trait_impl(value_trait, vec![payload_ty], vec![], vec![]);
+        Value::Parameter(builder.add_parameter(
+            requirement.to_dict_type_in_env(&env),
+            ParameterKind::Dictionary,
+        ))
+    });
+    let base = Value::Parameter(builder.add_parameter(
+        variant_ty,
+        ParameterKind::Parameter(ArgConvention::MutableRef),
+    ));
+    let destination = Value::Parameter(builder.add_parameter(Type::unit(), ParameterKind::Return));
+    let entry = builder.add_block();
+    let done = builder.add_block();
+    let allocate = if storage == Some(VariantPayloadStorage::Indirect) {
+        entry
+    } else {
+        let allocate = builder.add_block();
+        let indirection = append_result(
+            &mut builder,
+            entry,
+            Operation::extract_payload_indirection(span, base.clone()),
+        );
+        builder.set_terminator(
+            entry,
+            Terminator::cond_br(span, indirection, allocate, done),
+        );
+        allocate
+    };
+    let size = payload_layout_place(
+        &mut builder,
+        allocate,
+        static_layout,
+        witness.as_ref(),
+        VALUE_SIZE_ASSOC_CONST_INDEX,
+        span,
+        env,
+    );
+    let align = payload_layout_place(
+        &mut builder,
+        allocate,
+        static_layout,
+        witness.as_ref(),
+        VALUE_ALIGN_ASSOC_CONST_INDEX,
+        span,
+        env,
+    );
+    let size = append_result(&mut builder, allocate, Operation::load(span, size));
+    let align = append_result(&mut builder, allocate, Operation::load(span, align));
+    let allocation = append_result(
+        &mut builder,
+        allocate,
+        Operation::runtime_alloc(span, payload_ty, size, align),
+    );
+    let pointer_layout = ResolvedValueLayout::native::<usize>();
+    let slot_offset = isize::try_from(variant_payload_offset(pointer_layout.align)).unwrap();
+    let slot_offset = int_constant_value(&mut builder, allocate, slot_offset, span, env);
+    let slot = append_result(
+        &mut builder,
+        allocate,
+        Operation::address_offset_place(span, base, slot_offset, payload_ty),
+    );
+    builder.append_operation(allocate, Operation::store(span, allocation, slot));
+    builder.set_terminator(allocate, Terminator::goto(span, done));
+    finish_unit_result(&mut builder, done, destination, span, env);
+    builder.finish_unverified()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_variant_payload_addressor(
+    variant_ty: Type,
+    payload_ty: Type,
+    storage: Option<VariantPayloadStorage>,
+    static_layout: Option<ResolvedValueLayout>,
+    helper_index: usize,
+    known: &KnownCallees,
+    env: ModuleEnv<'_>,
+) -> Function {
+    let span = Location::new_synthesized();
+    let name = Ustr::from(&format!(
+        "#physical:variant_payload_addressor:{helper_index}"
+    ));
+    let mut builder = FunctionBuilder::new(name, CallResultConvention::ADDRESSOR_PLACE);
+    let witness = static_layout.is_none().then(|| {
+        let value_trait = env.expect_std_trait_id(VALUE_TRAIT_NAME);
+        let requirement =
+            DictionaryReq::new_trait_impl(value_trait, vec![payload_ty], vec![], vec![]);
+        Value::Parameter(builder.add_parameter(
+            requirement.to_dict_type_in_env(&env),
+            ParameterKind::Dictionary,
+        ))
+    });
+    let base = Value::Parameter(builder.add_parameter(
+        variant_ty,
+        ParameterKind::Parameter(ArgConvention::MutableRef),
+    ));
+    let destination = Value::Parameter(builder.add_parameter(payload_ty, ParameterKind::Return));
+    let entry = builder.add_block();
+    let (inline, indirect) = match storage {
+        Some(VariantPayloadStorage::Inline) => (Some(entry), None),
+        Some(VariantPayloadStorage::Indirect) => (None, Some(entry)),
+        None => {
+            let inline = builder.add_block();
+            let indirect = builder.add_block();
+            let indirection = append_result(
+                &mut builder,
+                entry,
+                Operation::extract_payload_indirection(span, base.clone()),
+            );
+            builder.set_terminator(
+                entry,
+                Terminator::cond_br(span, indirection, indirect, inline),
+            );
+            (Some(inline), Some(indirect))
+        }
+    };
+
+    if let Some(inline) = inline {
+        let inline_offset = variant_payload_offset_place(
+            &mut builder,
+            inline,
+            static_layout,
+            witness.as_ref(),
+            known,
+            span,
+            env,
+        );
+        let inline_offset =
+            append_result(&mut builder, inline, Operation::load(span, inline_offset));
+        let inline_address = append_result(
+            &mut builder,
+            inline,
+            Operation::address_offset(span, base.clone(), inline_offset, payload_ty),
+        );
+        builder.append_operation(
+            inline,
+            Operation::store(span, inline_address, destination.clone()),
+        );
+        builder.set_terminator(inline, Terminator::ret(span));
+    }
+
+    if let Some(indirect) = indirect {
+        let pointer_layout = ResolvedValueLayout::native::<usize>();
+        let slot_offset = isize::try_from(variant_payload_offset(pointer_layout.align)).unwrap();
+        let slot_offset = int_constant_value(&mut builder, indirect, slot_offset, span, env);
+        let slot = append_result(
+            &mut builder,
+            indirect,
+            Operation::address_offset_place(span, base, slot_offset, payload_ty),
+        );
+        let address = append_result(&mut builder, indirect, Operation::load(span, slot));
+        builder.append_operation(indirect, Operation::store(span, address, destination));
+        builder.set_terminator(indirect, Terminator::ret(span));
+    }
+    builder.finish_unverified()
+}
+
+fn finish_unit_result(
+    builder: &mut FunctionBuilder,
+    block: mir::BlockId,
+    destination: Value,
+    span: Location,
+    env: ModuleEnv<'_>,
+) {
+    let unit = builder.add_constant(Type::unit(), LiteralValue::new_native(()), &env);
+    builder.append_operation(
+        block,
+        Operation::store(span, Value::Constant(unit), destination),
+    );
+    builder.set_terminator(block, Terminator::ret(span));
+}
+
+fn build_variant_payload_release(
+    variant_ty: Type,
+    payload_ty: Type,
+    helper_index: usize,
+    env: ModuleEnv<'_>,
+) -> Function {
+    let span = Location::new_synthesized();
+    let name = Ustr::from(&format!("#physical:variant_payload_release:{helper_index}"));
+    let mut builder = FunctionBuilder::new(name, CallResultConvention::Value);
+    let base = Value::Parameter(builder.add_parameter(
+        variant_ty,
+        ParameterKind::Parameter(ArgConvention::MutableRef),
+    ));
+    let destination = Value::Parameter(builder.add_parameter(Type::unit(), ParameterKind::Return));
+    let entry = builder.add_block();
+    let done = builder.add_block();
+    let storage_check = builder.add_block();
+    let base_initialized = append_result(
+        &mut builder,
+        entry,
+        Operation::is_initialized(span, base.clone()),
+    );
+    builder.set_terminator(
+        entry,
+        Terminator::cond_br(span, base_initialized, storage_check, done),
+    );
+    // A whole variant can mix inline and indirect cases. Release therefore reads the active tag's
+    // representation bit rather than specializing on the one pointee type used to type its slot.
+    let indirect_check = builder.add_block();
+    let indirection = append_result(
+        &mut builder,
+        storage_check,
+        Operation::extract_payload_indirection(span, base.clone()),
+    );
+    builder.set_terminator(
+        storage_check,
+        Terminator::cond_br(span, indirection, indirect_check, done),
+    );
+
+    let pointer_layout = ResolvedValueLayout::native::<usize>();
+    let offset = isize::try_from(variant_payload_offset(pointer_layout.align)).unwrap();
+    let offset = int_constant_value(&mut builder, indirect_check, offset, span, env);
+    let slot = append_result(
+        &mut builder,
+        indirect_check,
+        Operation::address_offset_place(span, base, offset, payload_ty),
+    );
+    let release = builder.add_block();
+    let slot_initialized = append_result(
+        &mut builder,
+        indirect_check,
+        Operation::is_initialized(span, slot.clone()),
+    );
+    builder.set_terminator(
+        indirect_check,
+        Terminator::cond_br(span, slot_initialized, release, done),
+    );
+    let address = append_result(&mut builder, release, Operation::load(span, slot.clone()));
+    builder.append_operation(release, Operation::runtime_dealloc(span, address));
+    builder.append_operation(release, Operation::clear(span, slot));
+    builder.set_terminator(release, Terminator::goto(span, done));
+
+    let unit = builder.add_constant(Type::unit(), LiteralValue::new_native(()), &env);
+    builder.append_operation(
+        done,
+        Operation::store(span, Value::Constant(unit), destination),
+    );
+    builder.set_terminator(done, Terminator::ret(span));
+    builder.finish_unverified()
+}
+
+fn variant_payload_offset_place(
+    builder: &mut FunctionBuilder,
+    block: mir::BlockId,
+    static_layout: Option<ResolvedValueLayout>,
+    witness: Option<&Value>,
+    known: &KnownCallees,
+    span: Location,
+    env: ModuleEnv<'_>,
+) -> Value {
+    if let Some(layout) = static_layout {
+        return int_constant_place(
+            builder,
+            block,
+            isize::try_from(variant_payload_offset(layout.align)).unwrap(),
+            span,
+            env,
+        );
+    }
+    let tag_size = int_constant_place(
+        builder,
+        block,
+        isize::try_from(variant_tag_layout().size).unwrap(),
+        span,
+        env,
+    );
+    let align = payload_layout_place(
+        builder,
+        block,
+        None,
+        witness,
+        VALUE_ALIGN_ASSOC_CONST_INDEX,
+        span,
+        env,
+    );
+    align_up_place(builder, block, tag_size, align, known, span, env)
+}
+
+fn payload_layout_place(
+    builder: &mut FunctionBuilder,
+    block: mir::BlockId,
+    static_layout: Option<ResolvedValueLayout>,
+    witness: Option<&Value>,
+    associated_const: TraitAssociatedConstIndex,
+    span: Location,
+    env: ModuleEnv<'_>,
+) -> Value {
+    if let Some(layout) = static_layout {
+        let value = if associated_const == VALUE_SIZE_ASSOC_CONST_INDEX {
+            layout.size
+        } else {
+            debug_assert_eq!(associated_const, VALUE_ALIGN_ASSOC_CONST_INDEX);
+            layout.align
+        };
+        return int_constant_place(builder, block, isize::try_from(value).unwrap(), span, env);
+    }
+    value_layout_place(
+        builder,
+        block,
+        witness
+            .expect("an open payload has Value layout evidence")
+            .clone(),
+        associated_const,
+        span,
+        env,
+    )
+}
+
+fn int_constant_value(
+    builder: &mut FunctionBuilder,
+    block: mir::BlockId,
+    value: isize,
+    span: Location,
+    env: ModuleEnv<'_>,
+) -> Value {
+    let place = int_constant_place(builder, block, value, span, env);
+    append_result(builder, block, Operation::load(span, place))
 }
 
 fn constant_index(value: &Value, edit: &FunctionEdit) -> Option<ProjectionIndex> {
@@ -803,16 +1813,17 @@ fn verify_physical_operation(
     owner: FunctionId,
     operation: &Operation,
 ) -> Result<(), BackendReadinessError> {
-    if matches!(
-        operation.kind,
-        OperationKind::Subfield {
-            variant_payload: false,
-            ..
-        }
-    ) {
+    if let OperationKind::Subfield {
+        variant_payload, ..
+    } = operation.kind
+    {
         return Err(BackendReadinessError::UnresolvedPhysicalOperation {
             function: owner,
-            operation: "subfield",
+            operation: if variant_payload {
+                "variant_payload"
+            } else {
+                "subfield"
+            },
         });
     }
     verify_local_function_operands(
@@ -938,6 +1949,103 @@ mod tests {
         let (physical, _) = lower(&mut session, module).unwrap();
         assert_eq!(physical.module(), module);
         assert!(physical.get(identity).is_some());
+    }
+
+    fn invalid_shell_test_lowerer(
+        session: &CompilerSession,
+        module: ModuleId,
+    ) -> PhysicalLowerer<'_> {
+        let helper_base = FunctionId::new(module, LocalFunctionId::from_index(0));
+        PhysicalLowerer::new(
+            helper_base,
+            ModuleEnv::new(session.expect_fresh_module(module), session.raw_modules()),
+            session.known_callees(),
+        )
+    }
+
+    fn append_test_variant_shell(
+        builder: &mut FunctionBuilder,
+        block: mir::BlockId,
+        variant_ty: Type,
+    ) -> Value {
+        builder
+            .append_operation(
+                block,
+                Operation::variant(
+                    Location::new_synthesized(),
+                    ustr::ustr("Only"),
+                    variant_ty,
+                    Type::unit(),
+                    Some(VariantPayloadStorage::Inline),
+                    None,
+                    None,
+                ),
+            )
+            .expect("variant produces a shell")
+    }
+
+    #[test]
+    fn a_variant_shell_must_be_stored_exactly_once() {
+        let mut session = CompilerSession::new();
+        let module = compile(&mut session, "fn anchor() {}", "duplicate_shell_store");
+        let span = Location::new_synthesized();
+        let variant_ty = Type::variant([(ustr::ustr("Only"), Type::unit())]);
+        let mut builder =
+            FunctionBuilder::new(ustr::ustr("duplicate"), CallResultConvention::Value);
+        let destination =
+            Value::Parameter(builder.add_parameter(variant_ty, ParameterKind::Return));
+        let entry = builder.add_block();
+        let shell = append_test_variant_shell(&mut builder, entry, variant_ty);
+        builder.append_operation(
+            entry,
+            Operation::store(span, shell.clone(), destination.clone()),
+        );
+        builder.append_operation(entry, Operation::store(span, shell, destination));
+        builder.set_terminator(entry, Terminator::ret(span));
+
+        let result = invalid_shell_test_lowerer(&session, module).lower_variant_shell_allocations(
+            FunctionId::new(module, LocalFunctionId::from_index(0)),
+            builder.finish_unverified(),
+        );
+        assert!(matches!(
+            result,
+            Err(BackendReadinessError::InvalidVariantShellStore { .. })
+        ));
+    }
+
+    #[test]
+    fn a_variant_shell_cannot_be_stored_by_an_invoke() {
+        let mut session = CompilerSession::new();
+        let module = compile(&mut session, "fn anchor() {}", "invoked_shell_store");
+        let span = Location::new_synthesized();
+        let variant_ty = Type::variant([(ustr::ustr("Only"), Type::unit())]);
+        let mut builder = FunctionBuilder::new(ustr::ustr("invoked"), CallResultConvention::Value);
+        let destination =
+            Value::Parameter(builder.add_parameter(variant_ty, ParameterKind::Return));
+        let entry = builder.add_block();
+        let normal = builder.add_block();
+        let error = builder.add_block();
+        let shell = append_test_variant_shell(&mut builder, entry, variant_ty);
+        builder.set_terminator(
+            entry,
+            Terminator::invoke(
+                span,
+                Operation::store(span, shell, destination),
+                normal,
+                error,
+            ),
+        );
+        builder.set_terminator(normal, Terminator::ret(span));
+        builder.set_terminator(error, Terminator::propagate_error(span));
+
+        let result = invalid_shell_test_lowerer(&session, module).lower_variant_shell_allocations(
+            FunctionId::new(module, LocalFunctionId::from_index(0)),
+            builder.finish_unverified(),
+        );
+        assert!(matches!(
+            result,
+            Err(BackendReadinessError::InvalidVariantShellStore { .. })
+        ));
     }
 
     #[test]
@@ -1155,5 +2263,235 @@ mod tests {
             1,
             "field zero has a constant offset and the second open member needs an addressor"
         );
+    }
+
+    #[test]
+    fn recursive_variant_payloads_allocate_address_and_release_owned_storage() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            "enum List { Nil, Cons(int, List) }\n\
+             fn make(value: int) -> List { List::Cons(value, List::Nil) }\n\
+             fn tail(value: List) -> List {\n\
+                 match value { Cons(head, tail) => tail, Nil => List::Nil }\n\
+             }",
+            "recursive_variant_payload",
+        );
+        let (physical, first_helper) = lower(&mut session, module).unwrap();
+        assert!(
+            (first_helper.as_index()..physical.entry_count()).any(|index| {
+                let helper = physical.get(LocalFunctionId::from_index(index)).unwrap();
+                let kinds = helper
+                    .blocks()
+                    .flat_map(|block| helper.block(block).operations())
+                    .map(|operation| &operation.kind)
+                    .collect::<Vec<_>>();
+                kinds
+                    .iter()
+                    .any(|kind| matches!(kind, OperationKind::RuntimeAlloc { .. }))
+                    && kinds
+                        .iter()
+                        .any(|kind| matches!(kind, OperationKind::AddressOffsetPlace { .. }))
+            })
+        );
+        let release = (first_helper.as_index()..physical.entry_count())
+            .find_map(|index| {
+                let helper = physical.get(LocalFunctionId::from_index(index)).unwrap();
+                helper
+                    .blocks()
+                    .flat_map(|block| helper.block(block).operations())
+                    .any(|operation| matches!(operation.kind, OperationKind::RuntimeDealloc))
+                    .then_some(FunctionId::new(module, LocalFunctionId::from_index(index)))
+            })
+            .expect("recursive payload lowering generates a release helper");
+        let env = ModuleEnv::new(session.expect_fresh_module(module), session.raw_modules());
+        assert!(
+            (0..first_helper.as_index()).any(|index| {
+                let id = FunctionId::new(module, LocalFunctionId::from_index(index));
+                let original = session.hir_identity_of(id, MirOptimization::Enabled);
+                if !is_value_drop_function(original, &env) {
+                    return false;
+                }
+                let Some(body) = physical.get(LocalFunctionId::from_index(index)) else {
+                    return false;
+                };
+                body.blocks().any(|block| {
+                    body.block(block).operations().iter().any(|operation| {
+                        matches!(
+                            operation.operands.first(),
+                            Some(Value::Function(function)) if *function == release
+                        )
+                    }) && matches!(body.block(block).terminator().kind, TerminatorKind::Return)
+                })
+            }),
+            "the selected Value::drop implementation releases representation storage"
+        );
+        assert!(!(0..physical.entry_count()).any(|index| {
+            let Some(body) = physical.get(LocalFunctionId::from_index(index)) else {
+                return false;
+            };
+            body.blocks().any(|block| {
+                body.block(block)
+                    .operations()
+                    .iter()
+                    .any(|operation| matches!(operation.kind, OperationKind::Subfield { .. }))
+            })
+        }));
+    }
+
+    #[test]
+    fn fallible_recursive_payload_initialization_releases_its_allocation() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            "enum List { Nil, Cons(int, List) }\n\
+             fn make(value: int) -> List {\n\
+                 List::Cons(if value == 0 { panic(\"x\") } else { value }, List::Nil)\n\
+             }",
+            "fallible_recursive_variant_payload",
+        );
+        let (physical, first_helper) = lower(&mut session, module).unwrap();
+        let release = (first_helper.as_index()..physical.entry_count())
+            .find_map(|index| {
+                let body = physical.get(LocalFunctionId::from_index(index))?;
+                body.blocks()
+                    .flat_map(|block| body.block(block).operations())
+                    .any(|operation| matches!(operation.kind, OperationKind::RuntimeDealloc))
+                    .then(|| FunctionId::new(module, LocalFunctionId::from_index(index)))
+            })
+            .expect("recursive payload lowering generates a release helper");
+        let make = (0..first_helper.as_index())
+            .find_map(|index| {
+                let body = physical.get(LocalFunctionId::from_index(index))?;
+                (body.name.as_str() == "make").then_some(body)
+            })
+            .expect("compiled source contains make");
+
+        assert!(make.blocks().any(|block| {
+            let block = make.block(block);
+            block.operations().iter().any(|operation| {
+                matches!(
+                    operation.operands.first(),
+                    Some(Value::Function(function)) if *function == release
+                )
+            })
+        }));
+        assert!(make.blocks().any(|block| {
+            matches!(
+                make.block(block).terminator().kind,
+                TerminatorKind::PropagateError
+            )
+        }));
+        let release_body = physical.get(release.function).unwrap();
+        assert!(
+            release_body
+                .blocks()
+                .flat_map(|block| release_body.block(block).operations())
+                .filter(|operation| matches!(operation.kind, OperationKind::IsInitialized))
+                .count()
+                >= 2,
+            "release checks both the variant shell and its owning pointer slot"
+        );
+    }
+
+    #[test]
+    fn inline_variant_payloads_do_not_introduce_runtime_allocation() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            "enum MaybeInt { None, Some(int) }\n\
+             fn unwrap(value: MaybeInt) -> int {\n\
+                 match value { Some(value) => value, None => 0 }\n\
+             }",
+            "inline_variant_payload",
+        );
+        let (physical, first_helper) = lower(&mut session, module).unwrap();
+
+        assert!(!(0..physical.entry_count()).any(|index| {
+            let Some(body) = physical.get(LocalFunctionId::from_index(index)) else {
+                return false;
+            };
+            body.blocks().any(|block| {
+                body.block(block).operations().iter().any(|operation| {
+                    matches!(
+                        operation.kind,
+                        OperationKind::RuntimeAlloc { .. } | OperationKind::RuntimeDealloc
+                    )
+                })
+            })
+        }));
+        let unwrap = (0..first_helper.as_index())
+            .find_map(|index| {
+                let body = physical.get(LocalFunctionId::from_index(index))?;
+                (body.name.as_str() == "unwrap").then_some(body)
+            })
+            .expect("compiled source contains unwrap");
+        assert!(unwrap.blocks().any(|block| {
+            unwrap
+                .block(block)
+                .operations()
+                .iter()
+                .any(|operation| matches!(operation.kind, OperationKind::AddressOffset { .. }))
+        }));
+        assert!(
+            !unwrap.blocks().any(|block| {
+                unwrap.block(block).operations().iter().any(|operation| {
+                    matches!(
+                        operation.operands.first(),
+                        Some(Value::Function(function))
+                            if function.module == module
+                                && function.function.as_index() >= first_helper.as_index()
+                    )
+                })
+            }),
+            "a static inline payload uses no addressor helper"
+        );
+    }
+
+    #[test]
+    fn open_variant_payload_allocation_and_addressing_share_the_stored_representation_bit() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            "fn wrap(x) { Some(x) }\n\
+             fn unwrap_or(value, fallback) {\n\
+                 match value { Some(value) => value, None => fallback }\n\
+             }",
+            "open_variant_payload",
+        );
+        let (physical, first_helper) = lower(&mut session, module).unwrap();
+
+        let helpers = (first_helper.as_index()..physical.entry_count())
+            .map(|index| physical.get(LocalFunctionId::from_index(index)).unwrap())
+            .collect::<Vec<_>>();
+        let allocation = helpers
+            .iter()
+            .find(|helper| helper.name.as_str().contains("payload_allocation"))
+            .expect("an open construction uses an allocation helper");
+        let addressor = helpers
+            .iter()
+            .find(|helper| helper.name.as_str().contains("payload_addressor"))
+            .expect("an open projection uses an addressor helper");
+        for helper in [allocation, addressor] {
+            assert!(helper.blocks().any(|block| {
+                helper.block(block).operations().iter().any(|operation| {
+                    matches!(operation.kind, OperationKind::ExtractPayloadIndirection)
+                })
+            }));
+        }
+        assert!(allocation.blocks().any(|block| {
+            allocation
+                .block(block)
+                .operations()
+                .iter()
+                .any(|operation| matches!(operation.kind, OperationKind::RuntimeAlloc { .. }))
+        }));
+        assert!(!addressor.blocks().any(|block| {
+            addressor
+                .block(block)
+                .operations()
+                .iter()
+                .any(|operation| matches!(operation.kind, OperationKind::RuntimeAlloc { .. }))
+        }));
     }
 }

@@ -2354,6 +2354,7 @@ impl<'a> TraitSolver<'a> {
         let dictionary_ty = TraitImpls::dictionary_ty(tys, associated_const_tys);
         let dictionary_value = build_dictionary_value(&methods, &associated_const_getters);
         let imp = TraitImpl::new(
+            trait_id,
             output_types.to_vec(),
             output_effs.to_vec(),
             methods,
@@ -2818,6 +2819,7 @@ impl<'a> TraitSolver<'a> {
             entry_capture_mappings,
         );
         let imp = TraitImpl::new(
+            trait_id,
             Vec::new(),
             Vec::new(),
             methods,
@@ -3171,6 +3173,7 @@ impl<'a> TraitSolver<'a> {
                 *id
             } else {
                 let imp = TraitImpl {
+                    trait_id,
                     output_tys: vec![output_ty],
                     output_effs: vec![],
                     methods: vec![],
@@ -3484,6 +3487,7 @@ impl<'a> TraitSolver<'a> {
                         entry_capture_mappings,
                     );
                     let imp = TraitImpl::new(
+                        trait_id,
                         output_tys,
                         output_effs,
                         methods,

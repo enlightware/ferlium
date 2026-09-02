@@ -124,7 +124,12 @@ impl MirInstructionKind {
                 | Op::SubscriptMember
                 | Op::BuildSubscript,
             ) => Cost::Addressing,
-            Self::Operation(Op::CompareEqual | Op::ExtractTag) => Cost::Scalar,
+            Self::Operation(
+                Op::CompareEqual
+                | Op::ExtractTag
+                | Op::ExtractPayloadIndirection
+                | Op::IsInitialized,
+            ) => Cost::Scalar,
             Self::Operation(
                 Op::StackSave | Op::StackRestore | Op::CheckCallDepth | Op::CheckFuel,
             ) => Cost::Scaffolding,

@@ -1748,6 +1748,7 @@ impl Module {
         let dictionary_value =
             build_dictionary_value(&emit_output.functions, &associated_const_getters);
         let imp = TraitImpl::new(
+            trait_id,
             emit_output.output_tys,
             emit_output.output_effs,
             emit_output.functions,

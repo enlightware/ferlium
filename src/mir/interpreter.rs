@@ -36,20 +36,14 @@ use crate::{
     },
     mir::{self, BlockId, Operation, OperationKind, terminator::TerminatorKind},
     module::{
-        FunctionId, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, id::Id,
-        trait_impl::TraitDictionaryEntry,
+        FunctionId, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, TraitDictionaryEntry,
+        id::Id,
     },
-    std::{array::array_value_from_vec, buffer},
+    std::{array::array_value_from_vec, buffer, value::is_value_drop_function},
     types::{
         r#trait::TraitDictionaryEntryIndex,
         r#type::{Type, TypeKind},
     },
-};
-
-#[cfg(debug_assertions)]
-use crate::{
-    module::LocalImplId,
-    std::{core_traits_names::VALUE_TRAIT_NAME, value::VALUE_DROP_METHOD_INDEX},
 };
 
 /// A key uniquely identifying a function across modules.
@@ -507,30 +501,7 @@ impl<'a> Interpreter<'a> {
         }
         let module = self.session.expect_fresh_module(semantic.module);
         let env = ModuleEnv::new(module, self.session.raw_modules());
-        let value_trait = env.expect_std_trait_id(VALUE_TRAIT_NAME);
-        let drop_entry = env
-            .trait_def(value_trait)
-            .dictionary_method_index(VALUE_DROP_METHOD_INDEX);
-        let is_drop = (0..module.impl_count()).any(|index| {
-            let impl_id = LocalImplId::from_index(index);
-            let Some(key) = module.get_impl_trait_key_by_id(impl_id) else {
-                return false;
-            };
-            if key.trait_id() != value_trait {
-                return false;
-            }
-            let implementation = module
-                .get_impl_data(impl_id)
-                .expect("implementation index came from this module");
-            implementation
-                .methods
-                .get(VALUE_DROP_METHOD_INDEX.as_index())
-                .is_some_and(|function| *function == semantic.function)
-                || matches!(
-                    implementation.dictionary_value.entry(drop_entry),
-                    TraitDictionaryEntry::Function(function) if function == semantic.function
-                )
-        });
+        let is_drop = is_value_drop_function(semantic, &env);
         self.value_drop_functions.insert(semantic, is_drop);
         is_drop
     }
@@ -749,8 +720,11 @@ impl<'a> Interpreter<'a> {
                 let place = self.alloc_cell(Value::uninit(), span)?;
                 Self::bind(slots, def.unwrap(), Binding::Place(place));
             }
-            OperationKind::RuntimeAlloc { .. } | OperationKind::RuntimeDealloc => {
-                panic!("runtime allocation operations require the physical MIR interpreter")
+            OperationKind::RuntimeAlloc { .. }
+            | OperationKind::RuntimeDealloc
+            | OperationKind::ExtractPayloadIndirection
+            | OperationKind::IsInitialized => {
+                panic!("physical storage operations require the physical MIR interpreter")
             }
             OperationKind::Subfield { .. } => {
                 self.exec_subfield(func, slots, &operation.operands, def.unwrap());
