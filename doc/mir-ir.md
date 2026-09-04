@@ -384,4 +384,7 @@ Calls recognized by shared physical lowering remain ordinary calls throughout se
 optimization rounds. The lowerer resolves their exact function identities through a session table,
 as existing MIR passes do with `KnownCallees`. Other native calls retain their `FunctionId` and use
 the matching Rust `export ferlium` entry. Backend-readiness verification requires every native call
-to have been lowered or have a compatible entry for the selected target.
+to have been lowered or have a compatible entry for the selected target. A retained native entry
+must also have the closed, monomorphic Ferlium signature required by [abi.md](abi.md); physical
+lowering rejects an unresolved type variable at any depth in its parameters or result. Generic
+Buffer calls satisfy this rule by disappearing before verification.

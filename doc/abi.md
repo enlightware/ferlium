@@ -535,6 +535,13 @@ identity or implementation catalog is required. A target-dependent scalar parame
 transparent Rust adapter whose representation is the value on scalar targets and a reference
 otherwise.
 
+Every native callable retained at the compiled boundary has a closed, monomorphic Ferlium
+signature: no unresolved type variable may occur anywhere in a visible or hidden parameter or in
+the result, including beneath a structural product or variant. A generic native callable must be
+specialized to a closed exported entry, recognized and eliminated by shared physical lowering, or
+given an explicit polymorphic ABI. The initial compiled boundary supports only the first two
+choices.
+
 This is a build-coupled contract, like Rust-native value layout. Target tests must link every
 `export ferlium` entry against its derived signature and exercise the argument, result, and
 source-failure conventions. An `export C` entry instead follows the platform C ABI and requires
