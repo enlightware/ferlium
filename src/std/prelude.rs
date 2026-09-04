@@ -95,8 +95,9 @@ pub fn add_ferlium_serialization_prelude(
     module_id: ModuleId,
 ) -> Module {
     let codes = [
+        // Defines serialize/deserialize, which the JSON wrappers below use.
         prelude!("serde_impl.fer"),
-        // Json depends on data-value object helpers being available.
+        // JSON defines shared lexical helpers used by data text below.
         prelude!("json.fer"),
         prelude!("data_text.fer"),
     ];

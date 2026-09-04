@@ -23,7 +23,6 @@ pub mod default;
 pub mod empty;
 pub mod flow;
 pub mod hash;
-mod json;
 pub mod logic;
 pub mod math;
 pub mod mem;
@@ -89,7 +88,6 @@ pub(crate) fn build_std(loader: &mut impl StdSourceLoader) -> Module {
     module = loader.add_core(module);
     data_value::set_data_value_type_def(data_value::find_data_value_type_def(&module));
     serde::add_to_module(&mut module);
-    json::add_to_module(&mut module);
     loader.add_serialization(module)
 }
 

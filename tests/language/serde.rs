@@ -298,6 +298,17 @@ fn json_serialization_roundtrip() {
         ),
         string(r#"{"quoted key":"hello \"world\"\n"}"#)
     );
+    // Duplicate object keys remain distinct DataValue record entries.
+    assert_val_eq!(
+        session.run(r#"parse_json("{\"a\":1,\"a\":2}")"#),
+        variant_t1(
+            "Record",
+            array![
+                tuple!(string("a"), variant_t1("Int", int(1))),
+                tuple!(string("a"), variant_t1("Int", int(2)))
+            ]
+        )
+    );
     // array of ints
     assert_val_eq!(
         session.run("(json_decode(json_encode([1, 2, 3])): [int])"),
@@ -367,6 +378,123 @@ fn json_rejects_non_finite_float() {
     assert_eq!(
         session.fail_run(r#"json_decode("1e999")"#),
         SourceFailureKind::InvalidArgument("Invalid number in JSON: 1e999".into())
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn json_parses_standard_string_escapes() {
+    let mut session = TestSession::new();
+    let escaped = r#""\"\\\/\b\f\n\r\t""#;
+    assert_val_eq!(
+        session.run(&format!("(json_decode({escaped:?}): string)")),
+        string("\"\\/\u{8}\u{c}\n\r\t")
+    );
+    assert_val_eq!(
+        session.run(&format!("to_json(parse_json({escaped:?}))")),
+        string(r#""\"\\/\b\f\n\r\t""#)
+    );
+
+    let controls = r#""\u0001\u007f\u009f""#;
+    assert_val_eq!(
+        session.run(&format!("to_json(parse_json({controls:?}))")),
+        string(controls)
+    );
+
+    let surrogate_pair = r#""\uD834\uDD1E""#;
+    assert_val_eq!(
+        session.run(&format!("(json_decode({surrogate_pair:?}): string)")),
+        string("𝄞")
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn json_parses_standard_numbers() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(r#"parse_json("-0")"#),
+        variant_t1("Int", int(0))
+    );
+    assert_val_eq!(
+        session.run(r#"parse_json("1e2")"#),
+        variant_t1("Float", float(100.0))
+    );
+    assert_val_eq!(
+        session.run(r#"parse_json("-2.5E-1")"#),
+        variant_t1("Float", float(-0.25))
+    );
+    // Integers outside the target int range retain the native parser's float fallback.
+    assert_val_eq!(
+        session.run(r#"parse_json("9223372036854775808")"#),
+        variant_t1("Float", float(9_223_372_036_854_776_000.0))
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn json_rejects_non_json_syntax() {
+    let mut session = TestSession::new();
+    let invalid_inputs = [
+        "",
+        "+1",
+        "-",
+        "-.1",
+        "01",
+        "1.",
+        "1e",
+        "1e+",
+        "[1,]",
+        r#"{"a": 1,}"#,
+        "truex",
+        "\"\n\"",
+        r#""\x""#,
+        r#""\uD800""#,
+        r#""\uDC00""#,
+        "\u{a0}null",
+    ];
+    for input in invalid_inputs {
+        assert!(
+            matches!(
+                session.fail_run(&format!("parse_json({input:?})")),
+                SourceFailureKind::InvalidArgument(_)
+            ),
+            "accepted invalid JSON input {input:?}"
+        );
+    }
+
+    assert_eq!(
+        session.fail_run(r#"parse_json("1.x")"#),
+        SourceFailureKind::InvalidArgument("Invalid number in JSON: 1.x".into())
+    );
+    assert_eq!(
+        session.fail_run(r#"parse_json("-.1")"#),
+        SourceFailureKind::InvalidArgument("Invalid number in JSON: -.1".into())
+    );
+
+    let long_invalid_number = format!("1.{}", "x".repeat(64));
+    assert_eq!(
+        session.fail_run(&format!("parse_json({long_invalid_number:?})")),
+        SourceFailureKind::InvalidArgument(format!(
+            "Invalid number in JSON: 1.{}...",
+            "x".repeat(32)
+        ))
+    );
+
+    let nested = format!("{}0{}", "[".repeat(16), "]".repeat(16));
+    assert_eq!(
+        session.fail_run(&format!("parse_json({nested:?})")),
+        SourceFailureKind::InvalidArgument("JSON nesting limit exceeded".into())
+    );
+
+    let nested_value = format!(
+        "{}DataValue::Int(0){}",
+        "DataValue::Array([".repeat(16),
+        "])".repeat(16)
+    );
+    assert_eq!(
+        session.fail_run(&format!("to_json({nested_value})")),
+        SourceFailureKind::InvalidArgument("JSON nesting limit exceeded".into())
     );
 }
 

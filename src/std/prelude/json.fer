@@ -1,78 +1,554 @@
-fn sequence_to_json(a: [DataValue]) -> string {
-	let mut result = "[";
-	for i in 0..array_len(a) {
-		string_push_str(result, to_json(a[i]));
-		if i < array_len(a) - 1 {
-			string_push_str(result, ",");
+fn text_hex_digit_text(value: int) -> string {
+	match (value) {
+		0 => "0",
+		1 => "1",
+		2 => "2",
+		3 => "3",
+		4 => "4",
+		5 => "5",
+		6 => "6",
+		7 => "7",
+		8 => "8",
+		9 => "9",
+		10 => "a",
+		11 => "b",
+		12 => "c",
+		13 => "d",
+		14 => "e",
+		15 => "f",
+		_ => panic("Hexadecimal digit out of range"),
+	}
+}
+
+fn text_hex_digit_value(scalar: int) -> int {
+	if 0x30 <= scalar and scalar <= 0x39 {
+		scalar - 0x30
+	} else if 0x61 <= scalar and scalar <= 0x66 {
+		scalar - 0x61 + 10
+	} else if 0x41 <= scalar and scalar <= 0x46 {
+		scalar - 0x41 + 10
+	} else {
+		-1
+	}
+}
+
+fn text_is_ascii_digit(scalar: int) -> bool {
+	0x30 <= scalar and scalar <= 0x39
+}
+
+fn text_unicode_scalar_byte_len(scalar: int) -> int {
+	if scalar <= 0x7f { 1 }
+	else if scalar <= 0x7ff { 2 }
+	else if scalar <= 0xffff { 3 }
+	else { 4 }
+}
+
+fn json_push_unicode_escape(target: &mut string, scalar: int) {
+	string_push_str(target, "\\u");
+	string_push_str(target, text_hex_digit_text(bit_and(shift_right(scalar, 12), 0xf)));
+	string_push_str(target, text_hex_digit_text(bit_and(shift_right(scalar, 8), 0xf)));
+	string_push_str(target, text_hex_digit_text(bit_and(shift_right(scalar, 4), 0xf)));
+	string_push_str(target, text_hex_digit_text(bit_and(scalar, 0xf)));
+}
+
+fn escape_json_string(value: string) -> string {
+	let mut result = "\"";
+	let mut scalars = string_unicode_scalar_iter(value);
+	loop {
+		match string_unicode_scalar_iterator_next(scalars) {
+			Some(scalar) => {
+				if scalar == 0x22 {
+					string_push_str(result, "\\\"");
+				} else if scalar == 0x5c {
+					string_push_str(result, "\\\\");
+				} else if scalar == 0x0a {
+					string_push_str(result, "\\n");
+				} else if scalar == 0x0d {
+					string_push_str(result, "\\r");
+				} else if scalar == 0x09 {
+					string_push_str(result, "\\t");
+				} else if scalar == 0x08 {
+					string_push_str(result, "\\b");
+				} else if scalar == 0x0c {
+					string_push_str(result, "\\f");
+				} else if (0 <= scalar and scalar <= 0x1f)
+					or (0x7f <= scalar and scalar <= 0x9f)
+				{
+					json_push_unicode_escape(result, scalar);
+				} else {
+					string_push_unicode_scalar(result, scalar);
+				}
+			},
+			None => break,
 		}
 	};
-	string_push_str(result, "]");
+	string_push_str(result, "\"");
 	result
 }
 
-/// Convert a DataValue to a JSON string.
-pub fn to_json(v: DataValue) -> string {
+fn json_check_depth(depth: int) {
+	// A 16-node limit leaves headroom: 32 nested nodes overflow the boxed debug interpreter.
+	if depth >= 16 {
+		invalid_argument("JSON nesting limit exceeded");
+	}
+}
+
+fn append_json_sequence(target: &mut string, a: [DataValue], child_depth: int) {
+	string_push_str(target, "[");
+	for i in 0..array_len(a) {
+		append_json_value(target, a[i], child_depth);
+		if i < array_len(a) - 1 {
+			string_push_str(target, ",");
+		}
+	};
+	string_push_str(target, "]");
+}
+
+fn append_json_value(target: &mut string, v: DataValue, depth: int) {
+	json_check_depth(depth);
+	let child_depth = depth + 1;
 	match (v) {
-		DataValue::Null => "null",
-		DataValue::Unit => "null",
-		DataValue::Bool(b) => if b { "true" } else { "false" },
-		DataValue::Int(i) => to_string(i),
-		DataValue::Float(f) => to_string(f),
-		DataValue::String(s) => escape_json_string(s),
-		DataValue::Array(a) => sequence_to_json(a),
-		DataValue::Tuple(a) => sequence_to_json(a),
+		DataValue::Null => string_push_str(target, "null"),
+		DataValue::Unit => string_push_str(target, "null"),
+		DataValue::Bool(b) => string_push_str(target, if b { "true" } else { "false" }),
+		DataValue::Int(i) => string_push_str(target, to_string(i)),
+		DataValue::Float(f) => string_push_str(target, to_string(f)),
+		DataValue::String(s) => string_push_str(target, escape_json_string(s)),
+		DataValue::Array(a) => append_json_sequence(target, a, child_depth),
+		DataValue::Tuple(a) => append_json_sequence(target, a, child_depth),
 		DataValue::Record(o) => {
-			let mut result = "{";
+			string_push_str(target, "{");
 			for i in 0..array_len(o) {
 				let entry = o[i];
 				let name = entry.0;
-				let value = to_json(entry.1);
-				string_push_str(result, escape_json_string(name));
-				string_push_str(result, f":{value}");
+				string_push_str(target, escape_json_string(name));
+				string_push_str(target, ":");
+				append_json_value(target, entry.1, child_depth);
 				if i < array_len(o) - 1 {
-					string_push_str(result, ",");
+					string_push_str(target, ",");
 				}
 			};
-			string_push_str(result, "}");
-			result
+			string_push_str(target, "}");
 		},
-		DataValue::Set(a) => sequence_to_json(a),
+		DataValue::Set(a) => append_json_sequence(target, a, child_depth),
 		DataValue::Map(m) => {
-			let mut result = "[";
+			string_push_str(target, "[");
 			for i in 0..array_len(m) {
+				// Each map entry is encoded as an additional JSON array node.
+				json_check_depth(child_depth);
 				let entry = m[i];
-				string_push_str(result, "[");
-				string_push_str(result, to_json(entry.0));
-				string_push_str(result, ",");
-				string_push_str(result, to_json(entry.1));
-				string_push_str(result, "]");
+				string_push_str(target, "[");
+				append_json_value(target, entry.0, child_depth + 1);
+				string_push_str(target, ",");
+				append_json_value(target, entry.1, child_depth + 1);
+				string_push_str(target, "]");
 				if i < array_len(m) - 1 {
-					string_push_str(result, ",");
+					string_push_str(target, ",");
 				}
 			};
-			string_push_str(result, "]");
-			result
+			string_push_str(target, "]");
 		},
 		DataValue::Variant { name, payload } => {
-			let mut result = "{\"type\":";
-			string_push_str(result, to_json(DataValue::String(name)));
+			string_push_str(target, "{\"type\":");
+			append_json_value(target, DataValue::String(name), child_depth);
 			if payload != DataValue::Unit {
-				string_push_str(result, ",\"data\":");
-				string_push_str(result, to_json(payload));
+				string_push_str(target, ",\"data\":");
+				append_json_value(target, payload, child_depth);
 			};
-			string_push_str(result, "}");
-			result
+			string_push_str(target, "}");
 		},
 	}
 }
 
+/// Convert a DataValue to a JSON string.
+///
+/// JSON nesting is limited to 16 value nodes, including the root.
+///
+/// Ferlium strings are NFC-normalized. A JSON spelling whose syntax changes under NFC
+/// cannot be represented by this string-based API. In that edge case, the current encoder
+/// silently returns NFC-changed, potentially invalid JSON rather than reporting an error.
+pub fn to_json(v: DataValue) -> string {
+	let mut result = "";
+	append_json_value(result, v, 0);
+	result
+}
+
+struct JsonParser {
+	scalars: string_unicode_scalar_iterator,
+	current: Option<int>,
+	byte_position: int,
+	depth: int,
+}
+
+fn json_parser_bump(parser: &mut JsonParser) -> Option<int> {
+	match parser.current {
+		Some(scalar) => {
+			parser.byte_position += text_unicode_scalar_byte_len(scalar);
+			parser.current = string_unicode_scalar_iterator_next(parser.scalars);
+			Some(scalar)
+		},
+		None => None,
+	}
+}
+
+fn json_parser_fail(byte_position: int, message: string) {
+	invalid_argument(f"{message} at byte {byte_position}")
+}
+
+fn json_parser_consume(parser: &mut JsonParser, expected: int) -> bool {
+	match parser.current {
+		Some(scalar) => {
+			if scalar == expected {
+				json_parser_bump(parser);
+				true
+			} else {
+				false
+			}
+		},
+		None => false,
+	}
+}
+
+fn json_parser_expect(parser: &mut JsonParser, expected: int) {
+	if not json_parser_consume(parser, expected) {
+		json_parser_fail(parser.byte_position, "Unexpected character");
+	}
+}
+
+fn json_parser_skip_whitespace(parser: &mut JsonParser) {
+	loop {
+		match parser.current {
+			Some(scalar) => {
+				if scalar == 0x20 or scalar == 0x09 or scalar == 0x0a or scalar == 0x0d {
+					json_parser_bump(parser);
+				} else {
+					break;
+				}
+			},
+			None => break,
+		}
+	}
+}
+
+fn json_parser_parse_hex_quad(parser: &mut JsonParser) -> int {
+	let mut value = 0;
+	for ignored in 0..4 {
+		match json_parser_bump(parser) {
+			Some(scalar) => {
+				let digit = text_hex_digit_value(scalar);
+				if digit < 0 {
+					json_parser_fail(parser.byte_position, "Invalid JSON unicode escape");
+				};
+				value = value * 16 + digit;
+			},
+			None => json_parser_fail(parser.byte_position, "Incomplete JSON unicode escape"),
+		}
+	};
+	value
+}
+
+fn json_parser_parse_unicode_escape(parser: &mut JsonParser) -> int {
+	let first = json_parser_parse_hex_quad(parser);
+	if 0xd800 <= first and first <= 0xdbff {
+		if not json_parser_consume(parser, 0x5c) or not json_parser_consume(parser, 0x75) {
+			json_parser_fail(parser.byte_position, "Expected low surrogate after high surrogate");
+		};
+		let second = json_parser_parse_hex_quad(parser);
+		if second < 0xdc00 or 0xdfff < second {
+			json_parser_fail(parser.byte_position, "Invalid low surrogate");
+		};
+		0x10000 + (first - 0xd800) * 0x400 + second - 0xdc00
+	} else if 0xdc00 <= first and first <= 0xdfff {
+		json_parser_fail(parser.byte_position, "Unexpected low surrogate")
+	} else {
+		first
+	}
+}
+
+fn json_parser_parse_escape(parser: &mut JsonParser, target: &mut string) {
+	match json_parser_bump(parser) {
+		Some(scalar) => {
+			if scalar == 0x22 or scalar == 0x5c or scalar == 0x2f {
+				string_push_unicode_scalar(target, scalar);
+			} else if scalar == 0x62 {
+				string_push_unicode_scalar(target, 0x08);
+			} else if scalar == 0x66 {
+				string_push_unicode_scalar(target, 0x0c);
+			} else if scalar == 0x6e {
+				string_push_unicode_scalar(target, 0x0a);
+			} else if scalar == 0x72 {
+				string_push_unicode_scalar(target, 0x0d);
+			} else if scalar == 0x74 {
+				string_push_unicode_scalar(target, 0x09);
+			} else if scalar == 0x75 {
+				string_push_unicode_scalar(target, json_parser_parse_unicode_escape(parser));
+			} else {
+				json_parser_fail(parser.byte_position, "Invalid JSON escape");
+			}
+		},
+		None => json_parser_fail(parser.byte_position, "Unterminated JSON escape"),
+	}
+}
+
+fn json_parser_parse_string(parser: &mut JsonParser) -> string {
+	json_parser_expect(parser, 0x22);
+	let mut result = "";
+	loop {
+		match json_parser_bump(parser) {
+			Some(scalar) => {
+				if scalar == 0x22 {
+					return result;
+				} else if scalar == 0x5c {
+					json_parser_parse_escape(parser, result);
+				} else if scalar <= 0x1f {
+					json_parser_fail(parser.byte_position, "Unescaped control character in JSON string");
+				} else {
+					string_push_unicode_scalar(result, scalar);
+				}
+			},
+			None => json_parser_fail(parser.byte_position, "Unterminated JSON string"),
+		}
+	}
+}
+
+fn json_parser_parse_digits(parser: &mut JsonParser, target: &mut string) {
+	loop {
+		match parser.current {
+			Some(scalar) => {
+				if not text_is_ascii_digit(scalar) {
+					break;
+				};
+				string_push_unicode_scalar(target, scalar);
+				json_parser_bump(parser);
+			},
+			None => break,
+		}
+	}
+}
+
+fn json_parser_invalid_number(parser: &mut JsonParser, text: &mut string) -> DataValue {
+	// Complete a bounded excerpt so diagnostics stay useful without copying an arbitrarily long
+	// malformed suffix into the source failure.
+	let mut remaining = 32;
+	loop {
+		match parser.current {
+			Some(scalar) => {
+				if scalar == 0x20 or scalar == 0x09 or scalar == 0x0a or scalar == 0x0d
+					or scalar == 0x2c or scalar == 0x5d or scalar == 0x7d
+				{
+					break;
+				};
+				if remaining == 0 {
+					string_push_str(text, "...");
+					break;
+				};
+				string_push_unicode_scalar(text, scalar);
+				remaining -= 1;
+				json_parser_bump(parser);
+			},
+			None => break,
+		}
+	};
+	invalid_argument(f"Invalid number in JSON: {text}")
+}
+
+fn json_parser_parse_number(parser: &mut JsonParser) -> DataValue {
+	let mut text = "";
+	if json_parser_consume(parser, 0x2d) {
+		string_push_str(text, "-");
+	};
+	match parser.current {
+		Some(scalar) => {
+			if scalar == 0x30 {
+				string_push_str(text, "0");
+				json_parser_bump(parser);
+				match parser.current {
+					Some(next) => if text_is_ascii_digit(next) {
+						json_parser_fail(parser.byte_position, "Leading zero in JSON number");
+					} else { () },
+					None => (),
+				}
+			} else if 0x31 <= scalar and scalar <= 0x39 {
+				json_parser_parse_digits(parser, text);
+			} else {
+				return json_parser_invalid_number(parser, text);
+			}
+		},
+		None => return json_parser_invalid_number(parser, text),
+	};
+	let mut is_float = false;
+	if json_parser_consume(parser, 0x2e) {
+		is_float = true;
+		string_push_str(text, ".");
+		match parser.current {
+			Some(scalar) => if not text_is_ascii_digit(scalar) {
+				return json_parser_invalid_number(parser, text);
+			} else { () },
+			None => return json_parser_invalid_number(parser, text),
+		};
+		json_parser_parse_digits(parser, text);
+	};
+	match parser.current {
+		Some(scalar) => if scalar == 0x65 or scalar == 0x45 {
+			is_float = true;
+			string_push_unicode_scalar(text, scalar);
+			json_parser_bump(parser);
+			match parser.current {
+				Some(sign) => if sign == 0x2b or sign == 0x2d {
+					string_push_unicode_scalar(text, sign);
+					json_parser_bump(parser);
+				} else { () },
+				None => (),
+			};
+			match parser.current {
+				Some(digit) => if not text_is_ascii_digit(digit) {
+					return json_parser_invalid_number(parser, text);
+				} else { () },
+				None => return json_parser_invalid_number(parser, text),
+			};
+			json_parser_parse_digits(parser, text);
+		} else { () },
+		None => (),
+	};
+	if is_float {
+		match parse_float(text) {
+			Some(value) => DataValue::Float(value),
+			None => json_parser_invalid_number(parser, text),
+		}
+	} else {
+		match parse_int(text) {
+			Some(value) => DataValue::Int(value),
+			None => match parse_float(text) {
+				Some(value) => DataValue::Float(value),
+				None => json_parser_invalid_number(parser, text),
+			},
+		}
+	}
+}
+
+fn json_parser_parse_array(parser: &mut JsonParser) -> DataValue {
+	json_parser_expect(parser, 0x5b);
+	let mut values: [DataValue] = [];
+	json_parser_skip_whitespace(parser);
+	if json_parser_consume(parser, 0x5d) {
+		return DataValue::Array(values);
+	};
+	loop {
+		array_append(values, json_parser_parse_value(parser));
+		json_parser_skip_whitespace(parser);
+		if json_parser_consume(parser, 0x5d) {
+			return DataValue::Array(values);
+		};
+		json_parser_expect(parser, 0x2c);
+		json_parser_skip_whitespace(parser);
+	}
+}
+
+fn json_parser_parse_object(parser: &mut JsonParser) -> DataValue {
+	json_parser_expect(parser, 0x7b);
+	let mut entries: [(string, DataValue)] = [];
+	json_parser_skip_whitespace(parser);
+	if json_parser_consume(parser, 0x7d) {
+		return DataValue::Record(entries);
+	};
+	loop {
+		match parser.current {
+			Some(scalar) => if scalar != 0x22 {
+				json_parser_fail(parser.byte_position, "Expected JSON object key");
+			} else { () },
+			None => json_parser_fail(parser.byte_position, "Expected JSON object key"),
+		};
+		let name = json_parser_parse_string(parser);
+		json_parser_skip_whitespace(parser);
+		json_parser_expect(parser, 0x3a);
+		json_parser_skip_whitespace(parser);
+		let value = json_parser_parse_value(parser);
+		array_append(entries, (name, value));
+		json_parser_skip_whitespace(parser);
+		if json_parser_consume(parser, 0x7d) {
+			return DataValue::Record(entries);
+		};
+		json_parser_expect(parser, 0x2c);
+		json_parser_skip_whitespace(parser);
+	}
+}
+
+fn json_parser_parse_value(parser: &mut JsonParser) -> DataValue {
+	json_check_depth(parser.depth);
+	parser.depth += 1;
+	json_parser_skip_whitespace(parser);
+	let result = match parser.current {
+		Some(scalar) => {
+			if scalar == 0x22 {
+				DataValue::String(json_parser_parse_string(parser))
+			} else if scalar == 0x5b {
+				json_parser_parse_array(parser)
+			} else if scalar == 0x7b {
+				json_parser_parse_object(parser)
+			} else if scalar == 0x2d or text_is_ascii_digit(scalar) {
+				json_parser_parse_number(parser)
+			} else if scalar == 0x6e {
+				json_parser_expect(parser, 0x6e);
+				json_parser_expect(parser, 0x75);
+				json_parser_expect(parser, 0x6c);
+				json_parser_expect(parser, 0x6c);
+				DataValue::Null
+			} else if scalar == 0x74 {
+				json_parser_expect(parser, 0x74);
+				json_parser_expect(parser, 0x72);
+				json_parser_expect(parser, 0x75);
+				json_parser_expect(parser, 0x65);
+				DataValue::Bool(true)
+			} else if scalar == 0x66 {
+				json_parser_expect(parser, 0x66);
+				json_parser_expect(parser, 0x61);
+				json_parser_expect(parser, 0x6c);
+				json_parser_expect(parser, 0x73);
+				json_parser_expect(parser, 0x65);
+				DataValue::Bool(false)
+			} else {
+				json_parser_fail(parser.byte_position, "Expected JSON value")
+			}
+		},
+		None => json_parser_fail(parser.byte_position, "Expected JSON value"),
+	};
+	parser.depth -= 1;
+	result
+}
+
+/// Parse JSON into a data value.
+///
+/// JSON nesting is limited to 16 value nodes, including the root.
+///
+/// `text` has already been NFC-normalized. Some otherwise valid raw JSON documents are
+/// changed by NFC and cannot be passed losslessly through this string-based API.
+pub fn parse_json(text: string) -> DataValue {
+	let mut scalars = string_unicode_scalar_iter(text);
+	let current = string_unicode_scalar_iterator_next(scalars);
+	let mut parser = JsonParser {
+		scalars,
+		current,
+		byte_position: 0,
+		depth: 0,
+	};
+	let result = json_parser_parse_value(parser);
+	json_parser_skip_whitespace(parser);
+	match parser.current {
+		Some(ignored) => json_parser_fail(parser.byte_position, "Expected end of JSON input"),
+		None => (),
+	};
+	result
+}
+
 /// Encode a value to a JSON string. The value must implement the Serialize trait.
+/// This function has the same nesting and NFC limitations as `to_json`.
 pub fn json_encode(v) -> string {
 	to_json(serialize(v))
 }
 
 /// Decode a JSON string to a value of any type that implements the Deserialize trait.
-/// Panics if the string is not valid JSON or if the JSON does not match the expected type.
+/// This function has the same nesting and NFC limitations as `parse_json`.
+/// It fails if the string is not valid JSON or does not match the expected type.
 pub fn json_decode(s) {
 	deserialize(parse_json(s))
 }
