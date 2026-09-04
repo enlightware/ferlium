@@ -954,8 +954,12 @@ impl CompilerSession {
     }
 
     /// Register a module without Ferlium source in this compilation session and return its id.
+    ///
+    /// Modules defining named representations referenced by native signatures must be registered
+    /// first, so registration can validate those native ABI contracts against a complete type.
     pub fn register_module(&mut self, path: module::Path, module: Module) -> ModuleId {
         log::trace!("Registering module {path}");
+        module.validate_native_optional_results(ModuleEnv::new(&module, self.raw_modules()));
         let module_id = self
             .modules
             .insert(path, ModuleEntry::new_fresh_raw(module));
@@ -1543,7 +1547,53 @@ impl Default for CompilerSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::module::function::CallableOrigin;
+    use crate::{
+        hir::function::{UnaryNativeFnNV, UnaryNativeOptionalFnN},
+        module::function::CallableOrigin,
+        std::{math::int_type, option::native_optional_payload_contract_with},
+        types::{
+            effects::no_effects,
+            r#type::{TypeDef, variant_type},
+            type_scheme::TypeScheme,
+        },
+    };
+
+    fn some_int_impl(value: isize) -> Option<isize> {
+        Some(value)
+    }
+
+    crate::native_optional_entry!(
+        fn some_int_entry(value: isize) -> isize = some_int_impl
+    );
+
+    fn session_with_named_option() -> (CompilerSession, module::TypeDefId) {
+        let mut session = CompilerSession::new();
+        let module_id = session.modules().next_id();
+        let path = Path::single_str("named_option_owner");
+        let mut module = Module::new(module_id, path.clone());
+        let name = ustr::ustr("NamedOption");
+        let generic = Type::variable_id(0);
+        let definition = TypeDef {
+            name,
+            doc: None,
+            generic_params: vec![(ustr::ustr("T"), Location::new_synthesized())],
+            generic_effect_params: Vec::new(),
+            shape: TypeScheme {
+                ty_quantifiers: vec![crate::types::r#type::TypeVar::new(0)],
+                eff_quantifiers: FxHashSet::default(),
+                ty: variant_type([("None", Type::unit()), ("Some", Type::tuple([generic]))]),
+                constraints: Vec::new(),
+            },
+            shape_docs: crate::types::r#type::TypeDefShapeDocs::Enum(Vec::new()),
+            span: Location::new_synthesized(),
+            attributes: Vec::new(),
+            default_variant: None,
+            has_custom_value_impl: false,
+        };
+        let definition = module.add_type_def(name, definition);
+        assert_eq!(session.register_module(path, module), module_id);
+        (session, definition)
+    }
 
     #[test]
     fn every_published_std_callable_has_snapshot_provenance() {
@@ -1562,6 +1612,76 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn every_std_native_option_repr_has_the_lower_optional_entry() {
+        let session = CompilerSession::new();
+        let module = session.std_module();
+        let env = ModuleEnv::new(module, session.raw_modules());
+        for function in &module.functions {
+            if !matches!(function.origin, CallableOrigin::Native { .. }) {
+                continue;
+            }
+            let result = native_optional_payload_contract_with(
+                function.definition.ty_scheme.ty.ret,
+                function.code.native_optional_payload_type(),
+                |named| {
+                    env.try_type_def(named.def).map(|definition| {
+                        definition
+                            .instantiated_shape_with_effects(&named.params, &named.effect_params)
+                    })
+                },
+            );
+            assert!(
+                result.is_ok(),
+                "native optional-result registration diverged for {:?}: {result:?}",
+                function.origin
+            );
+        }
+    }
+
+    #[test]
+    fn registration_accepts_a_native_option_with_a_cross_module_named_repr() {
+        let (mut session, option) = session_with_named_option();
+        let module_id = session.modules().next_id();
+        let path = Path::single_str("named_option_consumer");
+        let mut module = Module::new(module_id, path.clone());
+        module.add_function(
+            ustr::ustr("some_int"),
+            UnaryNativeOptionalFnN::description_with_ty(
+                some_int_entry,
+                ["value"],
+                "test",
+                int_type(),
+                Type::named(option, [int_type()]),
+                no_effects(),
+            ),
+        );
+
+        assert_eq!(session.register_module(path, module), module_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Option-shaped result representation")]
+    fn registration_rejects_a_boxed_cross_module_named_option() {
+        let (mut session, option) = session_with_named_option();
+        let module_id = session.modules().next_id();
+        let path = Path::single_str("boxed_named_option_consumer");
+        let mut module = Module::new(module_id, path.clone());
+        module.add_function(
+            ustr::ustr("some_int"),
+            UnaryNativeFnNV::description_with_ty(
+                |value: isize| Value::tuple_variant(ustr::ustr("Some"), [Value::native(value)]),
+                ["value"],
+                "test",
+                int_type(),
+                Type::named(option, [int_type()]),
+                no_effects(),
+            ),
+        );
+
+        session.register_module(path, module);
     }
 
     #[test]

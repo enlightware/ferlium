@@ -26,8 +26,8 @@ use crate::{
     hir::function::{
         BinaryNativeFnMNFN, BinaryNativeFnMRN, BinaryNativeFnRMN, BinaryNativeFnRRFN,
         BinaryNativeFnRRN, BinaryNativeFnRRV, Function, NativeTrivialCopy, NullaryNativeFnN,
-        TernaryNativeFnRNNN, TernaryNativeFnRRRN, UnaryNativeFnMV, UnaryNativeFnNFN,
-        UnaryNativeFnNN, UnaryNativeFnRN, UnaryNativeFnRV, trivial_copy_private,
+        TernaryNativeFnRNNN, TernaryNativeFnRRRN, UnaryNativeFnNFN, UnaryNativeFnNN,
+        UnaryNativeFnRN, UnaryNativeOptionalFnM, UnaryNativeOptionalFnR, trivial_copy_private,
     },
     hir::value::{NativeDisplay, NativeValueType, Value},
     module::{Module, ModuleFunction, Visibility},
@@ -38,7 +38,7 @@ use crate::{
         },
         hash::Hasher,
         logic::bool_type,
-        math::{float_type, float_value, int_type, int_value},
+        math::{Float, float_type, int_type},
         ordering::compare,
         value::{
             native_layout_associated_consts, native_value_clone_function,
@@ -50,7 +50,7 @@ use crate::{
     types::type_scheme::TypeScheme,
 };
 
-use super::option::{none, option_type, some};
+use super::option::option_type;
 
 pub(crate) const STRING_FROM_STATIC_FUNCTION_NAME: &str = "string_from_static";
 pub(crate) const STRING_PUSH_STR_FUNCTION_NAME: &str = "string_push_str";
@@ -301,19 +301,17 @@ impl String {
         haystack.as_ref().contains(needle.as_ref())
     }
 
-    fn parse_int(value: &Self) -> Value {
-        value
-            .as_ref()
-            .parse::<isize>()
-            .ok()
-            .map(int_value)
-            .map(some)
-            .unwrap_or_else(none)
+    fn parse_int_impl(value: &Self) -> Option<isize> {
+        value.as_ref().parse::<isize>().ok()
     }
 
+    crate::native_optional_entry!(
+        fn parse_int_ferlium(value: &Self) -> isize = Self::parse_int_impl
+    );
+
     fn parse_int_descr() -> ModuleFunction {
-        UnaryNativeFnRV::description_with_ty(
-            Self::parse_int,
+        UnaryNativeOptionalFnR::description_with_ty(
+            Self::parse_int_ferlium,
             ["value"],
             "Parses `value` as a decimal integer, returning `Some` on success and `None` otherwise.",
             string_type(),
@@ -322,20 +320,18 @@ impl String {
         )
     }
 
-    fn parse_float(value: &Self) -> Value {
-        value
-            .as_ref()
-            .parse::<f64>()
-            .ok()
-            .filter(|value| value.is_finite())
-            .map(float_value)
-            .map(some)
-            .unwrap_or_else(none)
+    fn parse_float_impl(value: &Self) -> Option<Float> {
+        // Float::from_str rejects NaN and infinities through Float::new.
+        value.as_ref().parse::<Float>().ok()
     }
 
+    crate::native_optional_entry!(
+        fn parse_float_ferlium(value: &Self) -> Float = Self::parse_float_impl
+    );
+
     fn parse_float_descr() -> ModuleFunction {
-        UnaryNativeFnRV::description_with_ty(
-            Self::parse_float,
+        UnaryNativeOptionalFnR::description_with_ty(
+            Self::parse_float_ferlium,
             ["value"],
             "Parses `value` as a finite floating-point number, returning `Some` on success and `None` otherwise.",
             string_type(),
@@ -344,17 +340,21 @@ impl String {
         )
     }
 
-    fn parse_bool(value: &Self) -> Value {
+    fn parse_bool_impl(value: &Self) -> Option<bool> {
         match value.as_ref() {
-            "true" => some(Value::native(true)),
-            "false" => some(Value::native(false)),
-            _ => none(),
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
         }
     }
 
+    crate::native_optional_entry!(
+        fn parse_bool_ferlium(value: &Self) -> bool = Self::parse_bool_impl
+    );
+
     fn parse_bool_descr() -> ModuleFunction {
-        UnaryNativeFnRV::description_with_ty(
-            Self::parse_bool,
+        UnaryNativeOptionalFnR::description_with_ty(
+            Self::parse_bool_ferlium,
             ["value"],
             "Parses `value` as a boolean, accepting only `true` and `false`.",
             string_type(),
@@ -529,16 +529,17 @@ pub(crate) struct StringUnicodeScalarIterator {
 impl NativeValueType for StringUnicodeScalarIterator {}
 
 impl StringUnicodeScalarIterator {
-    fn next_value(&mut self) -> Value {
-        match self.next() {
-            Some(value) => some(Value::native(value)),
-            None => none(),
-        }
+    fn next_value_impl(&mut self) -> Option<isize> {
+        self.next()
     }
 
+    crate::native_optional_entry!(
+        fn next_value_ferlium(iterator: &mut Self) -> isize = Self::next_value_impl
+    );
+
     fn next_value_descr() -> ModuleFunction {
-        UnaryNativeFnMV::description_with_ty_scheme(
-            Self::next_value,
+        UnaryNativeOptionalFnM::description_with_ty_scheme(
+            Self::next_value_ferlium,
             ["iterator"],
             "Gets the next Unicode scalar value.",
             TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
@@ -572,12 +573,13 @@ pub struct StringIterator {
 impl NativeValueType for StringIterator {}
 
 impl StringIterator {
-    pub fn next_value(&mut self) -> Value {
-        match self.next() {
-            Some(value) => some(Value::native(value)),
-            None => none(),
-        }
+    fn next_value_impl(&mut self) -> Option<String> {
+        self.next()
     }
+
+    crate::native_optional_entry!(
+        fn next_value_ferlium(iterator: &mut Self) -> String = Self::next_value_impl
+    );
 
     fn next_value_descr() -> ModuleFunction {
         let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
@@ -585,8 +587,8 @@ impl StringIterator {
             option_type(string_type()),
             no_effects(),
         ));
-        UnaryNativeFnMV::description_with_ty_scheme(
-            Self::next_value,
+        UnaryNativeOptionalFnM::description_with_ty_scheme(
+            Self::next_value_ferlium,
             ["iterator"],
             "Gets the next character of the string iterator.",
             ty_scheme,
@@ -654,12 +656,13 @@ impl StringSplitIterator {
         None
     }
 
-    pub fn next_value(&mut self) -> Value {
-        match self.next() {
-            Some(value) => some(Value::native(value)),
-            None => none(),
-        }
+    fn next_value_impl(&mut self) -> Option<String> {
+        self.next()
     }
+
+    crate::native_optional_entry!(
+        fn next_value_ferlium(iterator: &mut Self) -> String = Self::next_value_impl
+    );
 
     fn next_value_descr() -> ModuleFunction {
         let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
@@ -667,8 +670,8 @@ impl StringSplitIterator {
             option_type(string_type()),
             no_effects(),
         ));
-        UnaryNativeFnMV::description_with_ty_scheme(
-            Self::next_value,
+        UnaryNativeOptionalFnM::description_with_ty_scheme(
+            Self::next_value_ferlium,
             ["iterator"],
             "Gets the next part of the string split iterator.",
             ty_scheme,

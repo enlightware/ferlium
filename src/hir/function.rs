@@ -10,6 +10,7 @@ use std::{
     fmt::{self, Debug},
     hash::DefaultHasher,
     marker::PhantomData,
+    mem::MaybeUninit,
 };
 
 use dyn_clone::DynClone;
@@ -406,6 +407,14 @@ pub trait Callable: DynClone {
     /// Passing convention for source-visible callee parameters only.
     fn visible_parameter_passing(&self) -> Option<&[ArgConvention]> {
         self.runtime_argument_passing()
+    }
+    /// Concrete Rust payload type written by an output-last native optional-result entry.
+    ///
+    /// The Ferlium result convention is deliberately not duplicated here. Registration and
+    /// physical lowering derive it from the result type's resolved `Repr` and verify that this
+    /// payload type matches its `Some((T,))` member.
+    fn native_optional_payload_type(&self) -> Option<Type> {
+        None
     }
     fn as_script_mut(&mut self) -> Option<&mut ScriptFunction> {
         // Default implementation, which is reimplemented in `ScriptFunction`.
@@ -1227,6 +1236,177 @@ impl<O: OutputBuilder + 'static> NullaryNativeFn<O> {
 
 n_ary_native_fn!(UnaryNativeFn, A0);
 declare_native_fn_aliases!(1);
+
+/// Native unary callable whose one executor-facing Rust entry writes an optional payload into its
+/// final argument and returns whether that argument was initialized.
+///
+/// The entry must return `true` exactly when it initialized `output`. All executors call this lower
+/// entry; the boxed adapter below merely converts the protocol into the interpreter's structural
+/// variant representation.
+pub struct UnaryNativeOptionalFn<A0: ArgExtractor + 'static, O: NativeOutput + 'static>(
+    for<'a> unsafe fn(A0::Output<'a>, *mut MaybeUninit<O>) -> bool,
+    PhantomData<(A0, O)>,
+);
+
+impl<A0: ArgExtractor + 'static, O: NativeOutput + 'static> Clone for UnaryNativeOptionalFn<A0, O> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<A0: ArgExtractor + 'static, O: NativeOutput + 'static> Copy for UnaryNativeOptionalFn<A0, O> {}
+
+impl<A0: ArgExtractor + 'static, O: NativeOutput + 'static> Debug for UnaryNativeOptionalFn<A0, O> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "UnaryNativeOptionalFn @ {:p}", &self.0)
+    }
+}
+
+impl<A0: ArgExtractor + 'static, O: NativeOutput + 'static> UnaryNativeOptionalFn<A0, O> {
+    pub fn description_with_ty_scheme(
+        f: for<'a> unsafe fn(A0::Output<'a>, *mut MaybeUninit<O>) -> bool,
+        arg_names: [&'static str; 1],
+        doc: &'static str,
+        ty_scheme: TypeScheme<FnType>,
+    ) -> ModuleFunction {
+        ModuleFunction::new(
+            CallableDefinition::new(
+                ty_scheme,
+                arg_names.into_iter().map(Ustr::from).collect(),
+                Some(String::from(doc)),
+            ),
+            Box::new(Self(f, PhantomData)),
+            None,
+            Vec::new(),
+        )
+    }
+
+    pub fn description_with_ty(
+        f: for<'a> unsafe fn(A0::Output<'a>, *mut MaybeUninit<O>) -> bool,
+        arg_names: [&'static str; 1],
+        doc: &'static str,
+        a0_ty: Type,
+        result_ty: Type,
+        effects: EffType,
+    ) -> ModuleFunction {
+        Self::description_with_ty_scheme(
+            f,
+            arg_names,
+            doc,
+            TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
+                [(a0_ty, A0::PASSING == ArgConvention::MutableRef)],
+                result_ty,
+                effects,
+            )),
+        )
+    }
+}
+
+impl<A0: ArgExtractor + 'static, O: NativeOutput + 'static> Callable
+    for UnaryNativeOptionalFn<A0, O>
+{
+    fn call(
+        &self,
+        args: Vec<ValOrMut>,
+        ctx: &mut CallCtx,
+        _locals: &[ELocalDecl],
+    ) -> EvalControlFlowResult {
+        let args = CallArgsStorageGuard::new(args);
+        let arg = A0::extract(
+            args.iter()
+                .next()
+                .expect("unary native argument should exist"),
+            ctx,
+        )
+        .map_err(RuntimeError::new_native)?;
+        let mut output = MaybeUninit::uninit();
+        // SAFETY: native registration is unsafe-by-contract: `true` promises that the lower entry
+        // initialized the output exactly once.
+        let is_some = unsafe { (self.0)(arg, &mut output) };
+        if is_some {
+            // SAFETY: guaranteed by the lower optional-entry contract above.
+            let payload = unsafe { output.assume_init() };
+            cont(Value::tuple_variant(
+                Ustr::from("Some"),
+                [Value::native(payload)],
+            ))
+        } else {
+            cont(Value::unit_variant(Ustr::from("None")))
+        }
+    }
+
+    fn runtime_argument_passing(&self) -> Option<&[ArgConvention]> {
+        Some(&[A0::PASSING])
+    }
+
+    fn native_optional_payload_type(&self) -> Option<Type> {
+        Some(Type::primitive::<O>())
+    }
+
+    fn format_ind(
+        &self,
+        f: &mut fmt::Formatter,
+        _locals: &[ELocalDecl],
+        _env: &ModuleEnv<'_>,
+        spacing: usize,
+        indent: usize,
+    ) -> fmt::Result {
+        let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
+        writeln!(f, "{indent_str}UnaryNativeOptionalFn @ {:p}", &self.0)
+    }
+}
+
+pub type UnaryNativeOptionalFnR<A0, O> = UnaryNativeOptionalFn<NatRef<A0>, O>;
+pub type UnaryNativeOptionalFnM<A0, O> = UnaryNativeOptionalFn<NatMut<A0>, O>;
+pub type UnaryNativeOptionalFnN<A0, O> = UnaryNativeOptionalFn<NatVal<A0>, O>;
+
+/// Implements the output-last portion of a lower native optional entry.
+///
+/// # Safety
+///
+/// `output` must point to valid, aligned storage for one `MaybeUninit<T>`. When `value` is `Some`,
+/// that storage must be available for initialization.
+pub unsafe fn write_native_optional_output<T>(
+    value: Option<T>,
+    output: *mut MaybeUninit<T>,
+) -> bool {
+    let Some(value) = value else {
+        return false;
+    };
+    // SAFETY: required by this function's contract. `MaybeUninit::write` does not read or drop the
+    // previous bytes.
+    unsafe { (*output).write(value) };
+    true
+}
+
+/// Define the one executor-facing, output-last native entry for a Rust implementation returning
+/// `Option<T>`.
+///
+/// The generated entry is unsafe because callers outside the boxed adapter must provide valid,
+/// aligned, uninitialized payload storage. Native registration verifies its Ferlium result `Repr`.
+/// A hand-written entry must never initialize that storage and then return `false`; doing so loses
+/// ownership of the payload without giving the caller an opportunity to drop it.
+#[macro_export]
+macro_rules! native_optional_entry {
+    (
+        $(#[$meta:meta])*
+        $vis:vis fn $entry:ident($($arg:ident : $arg_ty:ty),* $(,)?)
+            -> $payload:ty = $implementation:path
+    ) => {
+        $(#[$meta])*
+        $vis unsafe fn $entry(
+            $($arg: $arg_ty,)*
+            output: *mut ::std::mem::MaybeUninit<$payload>,
+        ) -> bool {
+            let result: Option<$payload> = $implementation($($arg),*);
+            // SAFETY: this generated entry forwards the native caller's output-storage contract;
+            // the helper writes before returning `true` and leaves storage untouched for `None`.
+            unsafe {
+                $crate::hir::function::write_native_optional_output(result, output)
+            }
+        }
+    };
+}
 
 n_ary_native_fn!(BinaryNativeFn, A0, A1);
 declare_native_fn_aliases!(2);

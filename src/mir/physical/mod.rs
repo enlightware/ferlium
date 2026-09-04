@@ -40,15 +40,16 @@ use crate::{
         value::{ConstantId, StaticEvidence},
     },
     module::{
-        DictionaryEntryEvidence, FunctionId, LocalFunctionId, LocalImplId, LocalSubscriptId,
-        ModuleEnv, ModuleId, ProjectionIndex, ResolvedValueLayout, SubscriptId, TraitDictionaryId,
-        id::Id,
+        CallableOrigin, DictionaryEntryEvidence, FunctionId, LocalFunctionId, LocalImplId,
+        LocalSubscriptId, ModuleEnv, ModuleId, ProjectionIndex, ResolvedValueLayout, SubscriptId,
+        TraitDictionaryId, id::Id,
     },
     std::{
         buffer::buffer_element_type,
         core_traits_names::VALUE_TRAIT_NAME,
         logic::bool_type,
         math::int_type,
+        option::{NativeOptionalContractError, native_optional_payload_contract_with},
         ordering::{ORDERING_EQUAL, ORDERING_GREATER},
         value::{
             ProductLayoutOrder, ProductLayoutSpec, ProductMemberLayout,
@@ -93,6 +94,10 @@ pub(crate) enum BackendReadinessError {
     },
     InvalidBufferCall {
         function: FunctionId,
+    },
+    InvalidNativeOptionalResult {
+        function: FunctionId,
+        error: NativeOptionalContractError,
     },
     InvalidPhysicalCall {
         owner: FunctionId,
@@ -181,6 +186,11 @@ impl fmt::Display for BackendReadinessError {
                 f,
                 "physical entry m{}:f{} contains an invalid Buffer call",
                 function.module, function.function
+            ),
+            Self::InvalidNativeOptionalResult { function, error } => write!(
+                f,
+                "native entry m{}:f{} has an invalid optional-result contract: {error:?}",
+                function.module, function.function,
             ),
             Self::InvalidPhysicalCall {
                 owner,
@@ -278,6 +288,9 @@ impl std::error::Error for BackendReadinessError {}
 pub(crate) struct BackendReadyMirArtifacts {
     module: ModuleId,
     entries: Vec<Option<Function>>,
+    /// Derived after every physical transformation. Any later pass that changes function or
+    /// evidence-catalog references must rebuild this map before execution.
+    native_optional_results: FxHashMap<FunctionId, Type>,
     dictionaries: PhysicalDictionaryCatalog,
     subscripts: PhysicalSubscriptCatalog,
 }
@@ -293,6 +306,10 @@ impl BackendReadyMirArtifacts {
 
     pub(crate) fn get(&self, id: LocalFunctionId) -> Option<&Function> {
         self.entries.get(id.as_index())?.as_ref()
+    }
+
+    pub(crate) fn native_optional_payload(&self, function: FunctionId) -> Option<Type> {
+        self.native_optional_results.get(&function).copied()
     }
 
     pub(crate) fn dictionaries(&self) -> &[PhysicalDictionaryDefinition] {
@@ -375,14 +392,84 @@ pub(crate) fn lower_physical_mir(
     let references = PhysicalEvidenceReferences::collect(&entries);
     let dictionaries = PhysicalDictionaryCatalog::from_module(module, env.current, &references);
     let subscripts = PhysicalSubscriptCatalog::from_module(module, env.current, env, &references);
+    let native_optional_results =
+        collect_native_optional_results(&entries, &dictionaries, &subscripts, env)?;
     let artifacts = BackendReadyMirArtifacts {
         module,
         entries,
+        native_optional_results,
         dictionaries,
         subscripts,
     };
     verify_physical_mir(&artifacts)?;
     Ok(artifacts)
+}
+
+/// Capture the representation-derived optional-result contract for every native function
+/// referenced by this artifact. The physical artifact must not need the semantic module registry
+/// when an executor later selects the output-last native ABI.
+fn collect_native_optional_results(
+    entries: &[Option<Function>],
+    dictionaries: &PhysicalDictionaryCatalog,
+    subscripts: &PhysicalSubscriptCatalog,
+    env: ModuleEnv<'_>,
+) -> Result<FxHashMap<FunctionId, Type>, BackendReadinessError> {
+    let mut referenced = FxHashSet::default();
+    let mut visit = |value: &Value| {
+        if let Value::Function(function) = value {
+            referenced.insert(*function);
+        }
+    };
+    for body in entries.iter().flatten() {
+        for block in body.blocks() {
+            let block = body.block(block);
+            for operation in block.operations() {
+                operation.operands.iter().for_each(&mut visit);
+            }
+            block.terminator().operands().iter().for_each(&mut visit);
+        }
+    }
+    for dictionary in dictionaries.definitions() {
+        for entry in dictionary.entries() {
+            referenced.insert(entry.function());
+        }
+    }
+    for subscript in subscripts.definitions() {
+        for mut_member in [false, true] {
+            if let Some(member) = subscript.member(mut_member) {
+                referenced.insert(member.function());
+            }
+        }
+    }
+
+    let mut results = FxHashMap::default();
+    let mut referenced = referenced.into_iter().collect::<Vec<_>>();
+    referenced.sort_by_key(|function| (function.module.as_index(), function.function.as_index()));
+    for function in referenced {
+        let Some(module) = env.module_by_id(function.module) else {
+            continue;
+        };
+        let Some(native) = module.get_function_by_id(function.function) else {
+            continue;
+        };
+        if !matches!(native.origin, CallableOrigin::Native { .. }) {
+            continue;
+        }
+        let payload = native_optional_payload_contract_with(
+            native.definition.ty_scheme.ty.ret,
+            native.code.native_optional_payload_type(),
+            |named| {
+                env.try_type_def(named.def).map(|definition| {
+                    definition.instantiated_shape_with_effects(&named.params, &named.effect_params)
+                })
+            },
+        )
+        .map_err(|error| BackendReadinessError::InvalidNativeOptionalResult { function, error })?;
+        if let Some(payload) = payload {
+            results.insert(function, payload);
+        }
+    }
+    Ok(results)
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -2982,11 +3069,18 @@ fn verify_local_function_target(
 
 #[cfg(test)]
 mod tests {
+    use std::mem::MaybeUninit;
+
     use crate::{
         CompilerSession, ExecutionTarget,
         compiler::MirOptimization,
-        module::{ModuleEnv, Path, TraitDictionaryEntry},
-        std::ordering::ordering_type,
+        hir::function::{UnaryNativeOptionalFnN, write_native_optional_output},
+        module::{
+            Module, ModuleEnv, Path, SubscriptDefinition, SubscriptMember, SubscriptSignature,
+            TraitDictionaryEntry, Visibility, YieldProvenance,
+        },
+        std::{math::int_type, option::option_type, ordering::ordering_type},
+        types::effects::no_effects,
         types::{r#type::SubscriptType, type_like::TypeLike},
     };
 
@@ -3019,6 +3113,68 @@ mod tests {
         Ok((physical, first_helper))
     }
 
+    #[test]
+    fn native_optional_contract_is_carried_by_function_identity() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            "fn parse(value: string) { parse_int(value) }",
+            "native_optional",
+        );
+        let (physical, _) = lower(&mut session, module).unwrap();
+        let std = session.std_module();
+        let parse_int = FunctionId::new(
+            std.module_id(),
+            std.get_local_function_id(ustr::ustr("parse_int"))
+                .expect("parse_int should be registered"),
+        );
+
+        assert_eq!(
+            physical.native_optional_payload(parse_int),
+            Some(int_type())
+        );
+    }
+
+    unsafe fn optional_int(value: isize, output: *mut MaybeUninit<isize>) -> bool {
+        // SAFETY: the native optional adapter supplies uninitialized `isize` storage.
+        unsafe { write_native_optional_output(Some(value), output) }
+    }
+
+    #[test]
+    fn native_optional_contract_includes_evidence_catalog_functions() {
+        let mut session = CompilerSession::new();
+        let module_id = session.modules().next_id();
+        let path = Path::single_str("native_optional_evidence");
+        let mut module = Module::new(module_id, path.clone());
+        let function = UnaryNativeOptionalFnN::description_with_ty(
+            optional_int,
+            ["value"],
+            "test optional subscript member",
+            int_type(),
+            option_type(int_type()),
+            no_effects(),
+        );
+        let signature = SubscriptSignature::from_callable_definition(&function.definition);
+        let function = module.add_function(ustr::ustr("optional_member"), function);
+        let mut subscript = SubscriptDefinition::resolved(signature);
+        subscript.ref_member = Some(SubscriptMember {
+            function,
+            provenance: YieldProvenance::YieldedOnce,
+        });
+        module.add_subscript(
+            ustr::ustr("optional_subscript"),
+            subscript,
+            Visibility::Module,
+        );
+        assert_eq!(session.register_module(path, module), module_id);
+
+        let (physical, _) = lower(&mut session, module_id).unwrap();
+        assert_eq!(
+            physical.native_optional_payload(FunctionId::new(module_id, function)),
+            Some(int_type())
+        );
+    }
+
     fn rebuild_evidence_catalogs(
         session: &CompilerSession,
         artifacts: &mut BackendReadyMirArtifacts,
@@ -3030,6 +3186,13 @@ mod tests {
             PhysicalDictionaryCatalog::from_module(artifacts.module, source, &references);
         artifacts.subscripts =
             PhysicalSubscriptCatalog::from_module(artifacts.module, source, env, &references);
+        artifacts.native_optional_results = collect_native_optional_results(
+            &artifacts.entries,
+            &artifacts.dictionaries,
+            &artifacts.subscripts,
+            env,
+        )
+        .expect("test evidence-catalog rebuild should preserve native optional contracts");
     }
 
     #[test]
@@ -3465,6 +3628,7 @@ mod tests {
         let physical = BackendReadyMirArtifacts {
             module,
             entries: entries.into(),
+            native_optional_results: FxHashMap::default(),
             dictionaries,
             subscripts,
         };

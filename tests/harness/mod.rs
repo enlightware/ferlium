@@ -14,7 +14,8 @@ use ferlium::{
     hir::function::{
         ArgConvention, BinaryNativeFnNNV, BinaryNativeFnRMN, BinaryNativeFnRRN, Callable,
         CallableDefinition, Function, NullaryNativeFnN, NullaryNativeFnV, UnaryNativeFnMN,
-        UnaryNativeFnNN, UnaryNativeFnNV, UnaryNativeFnRN, UnaryNativeFnVN, UnaryNativeFnVV,
+        UnaryNativeFnNN, UnaryNativeFnRN, UnaryNativeFnVN, UnaryNativeFnVV, UnaryNativeOptionalFnN,
+        write_native_optional_output,
     },
     hir::value::{LiteralValue, NativeValueType, Value},
     hir::{ENodeArena, ENodeId, NodeKind},
@@ -38,7 +39,7 @@ use ferlium::{
     types::type_scheme::{PubTypeConstraint, TypeScheme},
 };
 use regex::Regex;
-use std::{cell::RefCell, fmt, sync::LazyLock, sync::atomic::AtomicIsize};
+use std::{cell::RefCell, fmt, mem::MaybeUninit, sync::LazyLock, sync::atomic::AtomicIsize};
 use ustr::ustr;
 
 #[derive(Debug)]
@@ -860,6 +861,16 @@ impl Callable for ConstrainedNativeProbe {
     }
 }
 
+unsafe fn some_int_ferlium(value: isize, output: *mut MaybeUninit<isize>) -> bool {
+    // SAFETY: the optional native adapter supplies uninitialized `isize` storage.
+    unsafe { write_native_optional_output(Some(value), output) }
+}
+
+unsafe fn some_bool_ferlium(value: bool, output: *mut MaybeUninit<bool>) -> bool {
+    // SAFETY: the optional native adapter supplies uninitialized `bool` storage.
+    unsafe { write_native_optional_output(Some(value), output) }
+}
+
 fn testing_module(
     module_id: ModuleId,
     iterator_trait: TraitId,
@@ -1071,8 +1082,8 @@ fn testing_module(
     );
     module.add_function(
         "some_int".into(),
-        UnaryNativeFnNV::description_with_ty(
-            |v: isize| Value::tuple_variant(ustr("Some"), [Value::native(v)]),
+        UnaryNativeOptionalFnN::description_with_ty(
+            some_int_ferlium,
             ["option"],
             "Wraps an integer into an Option variant.",
             int_type(),
@@ -1082,8 +1093,8 @@ fn testing_module(
     );
     module.add_function(
         "some_bool".into(),
-        UnaryNativeFnNV::description_with_ty(
-            |v: bool| Value::tuple_variant(ustr("Some"), [Value::native(v)]),
+        UnaryNativeOptionalFnN::description_with_ty(
+            some_bool_ferlium,
             ["option"],
             "Wraps a boolean into an Option variant.",
             bool_type(),

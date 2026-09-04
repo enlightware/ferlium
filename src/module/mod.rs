@@ -51,7 +51,12 @@ use crate::{
     },
     internal_compilation_error,
     module::id::{Id, NamedIndexed},
-    std::core_traits_names::{TRIVIAL_COPY_TRAIT_NAME, VALUE_TRAIT_NAME},
+    std::{
+        core_traits_names::{TRIVIAL_COPY_TRAIT_NAME, VALUE_TRAIT_NAME},
+        option::{
+            NativeOptionalContractError, ReprResolutionError, native_optional_payload_contract_with,
+        },
+    },
     types::{
         mutability::MutType,
         r#trait::Trait,
@@ -60,6 +65,7 @@ use crate::{
             SubscriptResultConvention, SubscriptType, Type, TypeAliasEntry, TypeAliases, TypeDef,
             TypeDefSlot, TypeDisplayEnv, TypeKind, TypeVar,
         },
+        type_like::TypeLike,
         type_scheme::{PubTypeConstraint, TypeScheme},
     },
 };
@@ -705,11 +711,88 @@ impl Module {
         visibility: Visibility,
     ) -> LocalFunctionId {
         function.assign_canonical_name(name);
-        let id = LocalFunctionId::from_index(self.functions.len());
-        self.functions.push(function);
+        let id = self.add_function_anonymous(function);
         self.def_table
             .insert(name, Def::new(DefKind::Function(id), visibility));
         id
+    }
+
+    fn validate_native_optional_result(&self, function: &ModuleFunction) {
+        if !matches!(function.origin, CallableOrigin::Native { .. }) {
+            return;
+        }
+        let result = native_optional_payload_contract_with(
+            function.definition.ty_scheme.ty.ret,
+            function.code.native_optional_payload_type(),
+            |named| {
+                self.try_type_def(named.def).map(|definition| {
+                    definition.instantiated_shape_with_effects(&named.params, &named.effect_params)
+                })
+            },
+        );
+        if matches!(
+            result,
+            Err(NativeOptionalContractError::ReprResolution(
+                ReprResolutionError::Unavailable(definition)
+            )) if definition.module != self.module_id()
+        ) {
+            // Cross-module representations are checked once this module is registered in a
+            // CompilerSession and a complete ModuleEnv is available.
+            return;
+        }
+        self.assert_native_optional_result(function, result);
+    }
+
+    pub(crate) fn validate_native_optional_results(&self, env: ModuleEnv<'_>) {
+        assert_eq!(env.current.module_id(), self.module_id());
+        for function in &self.functions {
+            if !matches!(function.origin, CallableOrigin::Native { .. }) {
+                continue;
+            }
+            let result = native_optional_payload_contract_with(
+                function.definition.ty_scheme.ty.ret,
+                function.code.native_optional_payload_type(),
+                |named| {
+                    env.try_type_def(named.def).map(|definition| {
+                        definition
+                            .instantiated_shape_with_effects(&named.params, &named.effect_params)
+                    })
+                },
+            );
+            self.assert_native_optional_result(function, result);
+        }
+    }
+
+    fn assert_native_optional_result(
+        &self,
+        function: &ModuleFunction,
+        result: Result<Option<Type>, NativeOptionalContractError>,
+    ) {
+        let name = match function.origin {
+            CallableOrigin::Native {
+                canonical_name: Some(name),
+            } => name,
+            _ => ustr("<anonymous>"),
+        };
+        match result {
+            Ok(None) => {}
+            Ok(Some(_)) => assert!(
+                function.definition.ty_scheme.ty.is_constant(),
+                "native function `{name}` has a generic optional-result signature; native signatures must be closed"
+            ),
+            Err(NativeOptionalContractError::MissingLowerEntry) => panic!(
+                "native function `{name}` has an Option-shaped result representation but does not expose an output-last optional entry"
+            ),
+            Err(NativeOptionalContractError::UnexpectedLowerEntry) => panic!(
+                "native function `{name}` exposes an output-last optional entry but its result representation is not None(()) | Some((T,))"
+            ),
+            Err(NativeOptionalContractError::PayloadMismatch { ferlium, rust }) => panic!(
+                "native function `{name}` Rust Option payload does not match the Ferlium result representation: Rust {rust:?}, Ferlium {ferlium:?}"
+            ),
+            Err(NativeOptionalContractError::ReprResolution(error)) => panic!(
+                "native function `{name}` has an unresolved optional-result representation: {error:?}"
+            ),
+        }
     }
 
     /// Add a private unsafe function whose use is controlled by compiler policy.
@@ -766,6 +849,7 @@ impl Module {
     /// Add an anonymous function to this module, returning its ID.
     /// The function can be named later using `name_function`.
     pub(crate) fn add_function_anonymous(&mut self, function: ModuleFunction) -> LocalFunctionId {
+        self.validate_native_optional_result(&function);
         let id = LocalFunctionId::from_index(self.functions.len());
         self.functions.push(function);
         id
@@ -857,20 +941,9 @@ impl Module {
 
     /// Add collected final functions from a FunctionCollector to this module.
     pub fn add_collected_functions(&mut self, collector: FunctionCollector) {
-        let start_id = self.functions.len();
-        let functions =
-            collector
-                .new_elements
-                .into_iter()
-                .enumerate()
-                .map(|(i, (name, mut function))| {
-                    let local_id = LocalFunctionId::from_index(start_id + i);
-                    function.assign_canonical_name(name);
-                    self.def_table
-                        .insert(name, Def::public(DefKind::Function(local_id)));
-                    function
-                });
-        self.functions.extend(functions);
+        for (name, function) in collector.new_elements {
+            self.add_function(name, function);
+        }
     }
 
     /// Check if a local function name is unique in this module.
@@ -2498,7 +2571,21 @@ pub(crate) fn fmt_ordered_quantifiers(f: &mut fmt::Formatter<'_>, count: u32) ->
 
 #[cfg(test)]
 mod tests {
+    use std::mem::MaybeUninit;
+
+    use crate::{
+        hir::function::{UnaryNativeFnNV, UnaryNativeOptionalFnN, write_native_optional_output},
+        hir::value::Value,
+        std::{logic::bool_type, math::int_type, option::option_type},
+        types::effects::no_effects,
+    };
+
     use super::*;
+
+    unsafe fn optional_int(value: isize, output: *mut MaybeUninit<isize>) -> bool {
+        // SAFETY: the native optional adapter supplies uninitialized `isize` storage.
+        unsafe { write_native_optional_output(Some(value), output) }
+    }
 
     #[test]
     fn unique_generated_name_adds_collision_suffixes() {
@@ -2515,6 +2602,71 @@ mod tests {
             unique_generated_name(ustr("generated#impl:12345678"), |name| existing
                 .contains(&name)),
             ustr("generated#impl:12345678-2")
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Option-shaped result representation")]
+    fn registration_rejects_boxed_native_option_construction() {
+        let mut module = Module::new(ModuleId::new(91), Path::single_str("boxed-option"));
+        module.add_function(
+            ustr("boxed_option"),
+            UnaryNativeFnNV::description_with_ty(
+                |value: isize| Value::tuple_variant(ustr("Some"), [Value::native(value)]),
+                ["value"],
+                "test",
+                int_type(),
+                option_type(int_type()),
+                no_effects(),
+            ),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Option-shaped result representation")]
+    fn anonymous_registration_rejects_boxed_native_option_construction() {
+        let mut module = Module::new(ModuleId::new(94), Path::single_str("anonymous-option"));
+        module.add_function_anonymous(UnaryNativeFnNV::description_with_ty(
+            |value: isize| Value::tuple_variant(ustr("Some"), [Value::native(value)]),
+            ["value"],
+            "test",
+            int_type(),
+            option_type(int_type()),
+            no_effects(),
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "result representation is not None(()) | Some((T,))")]
+    fn registration_rejects_optional_entry_for_a_non_option_result() {
+        let mut module = Module::new(ModuleId::new(92), Path::single_str("not-option"));
+        module.add_function(
+            ustr("not_option"),
+            UnaryNativeOptionalFnN::description_with_ty(
+                optional_int,
+                ["value"],
+                "test",
+                int_type(),
+                int_type(),
+                no_effects(),
+            ),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Rust Option payload does not match")]
+    fn registration_rejects_a_mismatched_optional_payload() {
+        let mut module = Module::new(ModuleId::new(93), Path::single_str("wrong-option"));
+        module.add_function(
+            ustr("wrong_option"),
+            UnaryNativeOptionalFnN::description_with_ty(
+                optional_int,
+                ["value"],
+                "test",
+                int_type(),
+                option_type(bool_type()),
+                no_effects(),
+            ),
         );
     }
 }

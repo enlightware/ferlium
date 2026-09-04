@@ -542,6 +542,33 @@ specialized to a closed exported entry, recognized and eliminated by shared phys
 given an explicit polymorphic ABI. The initial compiled boundary supports only the first two
 choices.
 
+## Native optional results
+
+A native Rust function returning `Option<R>` may implement a Ferlium result type `F` when the
+resolved `Repr` of `F` is exactly `None(()) | Some((T,))` and the representation of `R` matches
+`T`. This contract depends on the representation rather than the identity of the current
+`Option<T>` alias, so a future named or newtype Option remains compatible while it retains that
+`Repr`.
+
+The executor-facing Rust entry uses an output-last protocol:
+
+```text
+unsafe fn(arguments..., output: *mut MaybeUninit<R>) -> bool
+```
+
+It returns `true` exactly when it initializes `output` once with the `Some` payload. It returns
+`false` for `None` and leaves `output` uninitialized. The payload pointer is last even though the
+ordinary Ferlium aggregate-result pointer precedes source arguments: this is a lower native-result
+protocol from which the caller constructs the Ferlium variant, not the public Ferlium function
+ABI. Rust's own `Option<R>` memory layout is never exposed or assumed.
+
+All executors use this same lower native entry. The boxed HIR and MIR adapter supplies a local
+`MaybeUninit<R>` and constructs its structural `Value`; physical lowering records the inferred
+payload contract by `FunctionId`. The phase-2 unboxed executor will use that contract to construct
+the canonical variant tag and payload in Ferlium storage. Registration rejects an Option-shaped
+native result without this entry, an entry whose result does not have the canonical optional
+`Repr`, a payload representation mismatch, or a non-closed signature.
+
 This is a build-coupled contract, like Rust-native value layout. Target tests must link every
 `export ferlium` entry against its derived signature and exercise the argument, result, and
 source-failure conventions. An `export C` entry instead follows the platform C ABI and requires
