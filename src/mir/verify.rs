@@ -1283,6 +1283,67 @@ impl<'a> Verifier<'a> {
         }
     }
 
+    /// Computes which saved stack-frontier registers may be read at each instruction before that
+    /// static register is defined again.
+    ///
+    /// A `stack_save` inside a loop defines a fresh dynamic marker on every iteration. Once all
+    /// uses of the current value are past, retaining its snapshot in [`AnalysisState`] only keeps
+    /// dead history distinct at later joins. In particular, a marker whose snapshot depends on
+    /// several earlier branches can otherwise multiply ownership alternatives on every trip
+    /// around the loop. Ordinary backwards liveness proves exactly when that history is dead while
+    /// preserving markers which are restored more than once.
+    fn stack_marker_live_in(&self) -> Option<Vec<FxHashSet<mir::ValueId>>> {
+        let node_count = self.node_order.len();
+        if !self.node_order.iter().any(|&node| {
+            self.operation(node)
+                .is_some_and(|operation| matches!(operation.kind, OperationKind::StackSave))
+        }) {
+            return None;
+        }
+        let mut predecessors = vec![Vec::new(); node_count];
+        for &node in &self.node_order {
+            let index = self.node_index[&node];
+            for (successor, _) in self.successors(node) {
+                predecessors[self.node_index[&successor]].push(index);
+            }
+        }
+
+        let mut live_in = vec![FxHashSet::default(); node_count];
+        let mut pending = VecDeque::from_iter((0..node_count).rev());
+        let mut queued = vec![true; node_count];
+        while let Some(index) = pending.pop_front() {
+            queued[index] = false;
+            let node = self.node_order[index];
+            let mut live = FxHashSet::default();
+            for (successor, _) in self.successors(node) {
+                live.extend(live_in[self.node_index[&successor]].iter().copied());
+            }
+            if let Some(operation) = self.operation(node) {
+                if matches!(operation.kind, OperationKind::StackSave)
+                    && let Some(mir::Value::Register(marker)) = self.definition(node)
+                {
+                    live.remove(&marker);
+                }
+                if matches!(operation.kind, OperationKind::StackRestore)
+                    && let Some(mir::Value::Register(marker)) = operation.operands.first()
+                {
+                    live.insert(*marker);
+                }
+            }
+            if live == live_in[index] {
+                continue;
+            }
+            live_in[index] = live;
+            for &predecessor in &predecessors[index] {
+                if !queued[predecessor] {
+                    queued[predecessor] = true;
+                    pending.push_back(predecessor);
+                }
+            }
+        }
+        Some(live_in)
+    }
+
     fn operand_consumes_value(&self, node: &crate::mir::Operation, index: usize) -> bool {
         matches!(
             node.kind,
@@ -1296,6 +1357,13 @@ impl<'a> Verifier<'a> {
     }
 
     fn verify_storage_ownership(&mut self) {
+        self.verify_storage_ownership_max_alternatives();
+    }
+
+    /// Runs ownership verification and returns the largest number of relational states retained
+    /// at one instruction. The count lets structural tests guard against accidentally bypassing
+    /// state pruning without relying on wall-clock timing.
+    fn verify_storage_ownership_max_alternatives(&mut self) -> usize {
         let roots = self
             .roots
             .iter()
@@ -1317,8 +1385,11 @@ impl<'a> Verifier<'a> {
         // Keep different allocation frontiers and stack-marker snapshots as separate alternatives.
         // Merging either correlation would make it impossible to verify what a later
         // `stack_restore` reclaims. Within one alternative, ordinary ownership states still join to
-        // a fixed point.
+        // a fixed point. Liveness prevents dead marker history from multiplying around loops, but
+        // the number of states remains worst-case exponential in simultaneously live, correlated
+        // frontiers.
         let mut inputs: Vec<Vec<AnalysisState>> = vec![vec![]; self.node_order.len()];
+        let marker_live_in = self.stack_marker_live_in();
         let entry = self.block_first[&self.func.entry()];
         inputs[self.node_index[&entry]].push(initial);
         let mut worklist = VecDeque::from([(entry, 0)]);
@@ -1327,8 +1398,18 @@ impl<'a> Verifier<'a> {
             let index = self.node_index[&node];
             let input = inputs[index][alternative].clone();
             let edges = self.transfer(node, &input);
-            for (target, state) in edges {
+            for (target, mut state) in edges {
                 let target_index = self.node_index[&target];
+                if let Some(marker_live_in) = &marker_live_in {
+                    state.markers.retain(|marker, _| {
+                        let mir::Value::Register(marker) = marker else {
+                            // Stack saves currently define registers exclusively. Preserve any
+                            // future marker form conservatively instead of silently pruning it.
+                            return true;
+                        };
+                        marker_live_in[target_index].contains(marker)
+                    });
+                }
                 let alternatives = &mut inputs[target_index];
                 let (alternative, changed) = match alternatives.iter().position(|existing| {
                     existing.markers == state.markers
@@ -1351,6 +1432,8 @@ impl<'a> Verifier<'a> {
                 }
             }
         }
+
+        inputs.iter().map(Vec::len).max().unwrap_or(0)
     }
 
     fn transfer(&mut self, node: NodeId, input: &AnalysisState) -> Vec<(NodeId, AnalysisState)> {
@@ -2002,6 +2085,7 @@ mod tests {
         std::{logic::bool_type, math::int_type, string::string_type},
         types::{
             effects::{PrimitiveEffect, effect, no_effects},
+            trait_solver::TraitSolverProbe,
             r#type::{CallImplType, CallResultConvention, FnType, Type},
         },
     };
@@ -2536,6 +2620,108 @@ mod tests {
         append(&mut f, block, Operation::stack_restore(span, marker));
         terminate_return(&mut f, block, span);
         verify(f);
+    }
+
+    #[test]
+    fn stack_marker_liveness_drops_an_inner_marker_before_its_loop_redefinition() {
+        let span = Location::new_synthesized();
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let mut f = FunctionBuilder::new("loop_stack_markers".into(), Default::default());
+        let entry = f.add_block();
+        let loop_header = f.add_block();
+        let restore = f.add_block();
+
+        let outer = append_result(&mut f, entry, Operation::stack_save(span));
+        f.set_terminator(entry, Terminator::goto(span, loop_header));
+        let inner = append_result(&mut f, loop_header, Operation::stack_save(span));
+        f.set_terminator(loop_header, Terminator::goto(span, restore));
+        append(
+            &mut f,
+            restore,
+            Operation::stack_restore(span, inner.clone()),
+        );
+        append(
+            &mut f,
+            restore,
+            Operation::stack_restore(span, outer.clone()),
+        );
+        f.set_terminator(restore, Terminator::goto(span, loop_header));
+
+        let function = f.finish_unverified();
+        let solver = TraitSolverProbe::from_module(env.current, env.modules);
+        let mut verifier = super::Verifier::new(&function, env, solver);
+        verifier.verify_structure();
+        let live_in = verifier
+            .stack_marker_live_in()
+            .expect("function has markers");
+        let marker = |value| match value {
+            Value::Register(marker) => marker,
+            _ => unreachable!("stack_save defines a register"),
+        };
+        let live_at = |block| &live_in[verifier.node_index[&verifier.block_first[&block]]];
+
+        assert_eq!(live_at(loop_header).len(), 1);
+        assert!(live_at(loop_header).contains(&marker(outer)));
+        assert!(!live_at(loop_header).contains(&marker(inner.clone())));
+        assert!(live_at(restore).contains(&marker(inner)));
+    }
+
+    #[test]
+    fn storage_verifier_does_not_retain_dead_marker_histories_around_a_loop() {
+        let span = Location::new_synthesized();
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let mut f = FunctionBuilder::new("loop_marker_histories".into(), Default::default());
+        let condition = f.add_constant(bool_type(), LiteralValue::new_native(true), &env);
+        let entry = f.add_block();
+        let choose_first = f.add_block();
+        let allocate_first = f.add_block();
+        let skip_first = f.add_block();
+        let choose_second = f.add_block();
+        let allocate_second = f.add_block();
+        let skip_second = f.add_block();
+        let save_inner = f.add_block();
+        let restore = f.add_block();
+
+        let outer = append_result(&mut f, entry, Operation::stack_save(span));
+        f.set_terminator(entry, Terminator::goto(span, choose_first));
+        f.set_terminator(
+            choose_first,
+            Terminator::cond_br(span, Value::Constant(condition), allocate_first, skip_first),
+        );
+        append(&mut f, allocate_first, Operation::alloca(span, int_type()));
+        f.set_terminator(allocate_first, Terminator::goto(span, choose_second));
+        f.set_terminator(skip_first, Terminator::goto(span, choose_second));
+        f.set_terminator(
+            choose_second,
+            Terminator::cond_br(
+                span,
+                Value::Constant(condition),
+                allocate_second,
+                skip_second,
+            ),
+        );
+        append(&mut f, allocate_second, Operation::alloca(span, int_type()));
+        f.set_terminator(allocate_second, Terminator::goto(span, save_inner));
+        f.set_terminator(skip_second, Terminator::goto(span, save_inner));
+        let inner = append_result(&mut f, save_inner, Operation::stack_save(span));
+        f.set_terminator(save_inner, Terminator::goto(span, restore));
+        append(&mut f, restore, Operation::stack_restore(span, inner));
+        append(&mut f, restore, Operation::stack_restore(span, outer));
+        f.set_terminator(restore, Terminator::goto(span, choose_first));
+
+        let function = f.finish_unverified();
+        let solver = TraitSolverProbe::from_module(env.current, env.modules);
+        let mut verifier = super::Verifier::new(&function, env, solver);
+        verifier.verify_structure();
+        verifier.collect_value_information();
+        let max_alternatives = verifier.verify_storage_ownership_max_alternatives();
+
+        // The two independent branches need four live frontier states. If the dead inner marker
+        // snapshot survives the backedge, those histories cross with the next iteration's
+        // frontiers and this rises beyond four.
+        assert_eq!(max_alternatives, 4);
     }
 
     #[test]
