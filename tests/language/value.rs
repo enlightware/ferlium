@@ -25,6 +25,98 @@ use ustr::ustr;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
 
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn native_drop_destroys_aggregate_members_once() {
+    let mut session = TestSession::new();
+    // Exact lifecycle counts are instrumentation, not observable Value semantics.
+    session.without_optimized_mode();
+    assert_val_eq!(
+        session.run(
+            r#"
+            testing::reset_native_drops();
+            {
+                let pair = (testing::make_clone_tracked(), testing::make_clone_tracked());
+                testing::clone_tracked_payload(pair.0);
+                testing::clone_tracked_payload(pair.1);
+            };
+            testing::native_drop_count()
+            "#,
+        ),
+        int(2)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn native_drop_destroys_replaced_values_before_scope_exit() {
+    let mut session = TestSession::new();
+    session.without_optimized_mode();
+    assert_val_eq!(
+        session.run(
+            r#"
+            testing::reset_native_drops();
+            let during = {
+                let mut value = testing::make_clone_tracked();
+                value = testing::make_clone_tracked();
+                testing::clone_tracked_payload(value);
+                testing::native_drop_count()
+            };
+            during * 10 + testing::native_drop_count()
+            "#,
+        ),
+        int(12)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn native_drop_destroys_values_once_on_source_failure() {
+    for mode in [RunMode::Hir, RunMode::Mir] {
+        let mut session = TestSession::new();
+        session.run_modes([mode]);
+        assert!(
+            session
+                .try_run(
+                    r#"
+                    testing::reset_native_drops();
+                    let value = testing::make_clone_tracked();
+                    testing::clone_tracked_payload(value);
+                    idiv(1, 0)
+                    "#,
+                )
+                .is_err()
+        );
+        assert_val_eq!(session.run("testing::native_drop_count()"), int(1));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn native_drop_through_generic_value_dictionary() {
+    let mut session = TestSession::new();
+    // Keep the shared generic body's dictionary dispatch and its owned clone/drop pair.
+    session.without_optimized_mode();
+    assert_val_eq!(
+        session.run(
+            r#"
+            fn scoped<T>(value: T) where T: Value {
+                let mut owned = value;
+                ();
+            }
+            testing::reset_native_drops();
+            scoped(testing::make_clone_tracked());
+            scoped(1);
+            scoped(2.0);
+            scoped(true);
+            scoped(());
+            testing::native_drop_count()
+            "#,
+        ),
+        int(2)
+    );
+}
+
 fn tracked_probe_value_impl() -> &'static str {
     // Deliberately violates the `Value` ownership laws: `drop` records an observable event, so
     // replacing `clone(x); drop(x)` with a move changes the log. Tests using the log to count exact

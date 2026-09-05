@@ -93,10 +93,16 @@ These operations have separate contracts:
 
 The boxed reference interpreters currently reclaim known environment, register, closure-temporary,
 and suspended-frame roots explicitly. This is bounded host logic, but `Value` uses `ManuallyDrop`,
-so a forgotten owning root could still leak. A compiled runtime should instead make reclamation a
-property of its runtime-owned allocation domain, while a take-once registry owns external
-capabilities. Poisoning revokes the registry and resets the allocation domain without executing
-Ferlium code. Memory accounting and allocator requirements are specified in
+so a forgotten owning root could still leak. Rust `Buffer::drop` also reclaims any remaining boxed
+slot payloads, recursively, without invoking Ferlium semantic cleanup. This closes the live-array
+element leak on poisoning but remains a temporary mechanism for the boxed interpreters.
+
+A compiled runtime should instead make reclamation a property of its runtime-owned allocation
+domain, while a take-once registry owns external capabilities. Poisoning revokes the registry and
+resets the allocation domain without executing
+Ferlium code. The domain must cover allocations owned by both Ferlium representations and native
+Rust values, including their backing allocations; resetting linear memory alone cannot revoke
+external Rust-owned resources. Memory accounting and allocator requirements are specified in
 [runtime-memory-limits.md](runtime-memory-limits.md).
 
 ## Candli integration

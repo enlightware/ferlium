@@ -444,6 +444,93 @@ impl Debug for dyn Callable {
 
 dyn_clone::clone_trait_object!(Callable);
 
+/// Native destructor adapter for the compiler-owned `Value::drop(&mut T)` method.
+///
+/// Unlike an ordinary mutable native argument, the target becomes uninitialized. The boxed
+/// interpreters detach its payload before calling the Rust entry, so later storage reclamation
+/// cannot destroy it again. The pointer is a Rust transport detail, not a Ferlium pointer type.
+///
+/// The entry must be invoked only after invalidating the target slot and detaching its payload,
+/// with no borrow of that slot held across the callback. Host re-entry therefore cannot recover
+/// or destroy the original payload through the target place; ordinary drop guards see it absent.
+pub struct NativeDropFn<T: 'static> {
+    function: unsafe fn(*mut T),
+}
+
+impl<T: 'static> Clone for NativeDropFn<T> {
+    fn clone(&self) -> Self {
+        Self {
+            function: self.function,
+        }
+    }
+}
+
+impl<T: 'static> NativeDropFn<T> {
+    /// Register a Rust entry that destroys an initialized `T` without freeing its storage.
+    ///
+    /// # Safety
+    ///
+    /// `function` must destroy its pointee exactly once, must not retain the pointer, and must
+    /// leave the storage uninitialized. Register this adapter only as `Value::drop` for `T`;
+    /// ordinary mutable Ferlium parameters must remain initialized after a call.
+    pub unsafe fn new(function: unsafe fn(*mut T)) -> Self {
+        Self { function }
+    }
+}
+
+impl<T: 'static> Callable for NativeDropFn<T> {
+    fn call(
+        &self,
+        args: Vec<ValOrMut>,
+        ctx: &mut CallCtx,
+        _locals: &[ELocalDecl],
+    ) -> EvalControlFlowResult {
+        let args = CallArgsStorageGuard::new(args);
+        assert_eq!(args.args.len(), 1, "native drop takes one mutable target");
+        let target = args.args[0]
+            .as_place()
+            .target_mut(ctx)
+            .map_err(RuntimeError::new_native)?;
+        assert!(
+            target
+                .as_native()
+                .is_some_and(|native| NativeValue::as_any(native.as_ref()).is::<T>()),
+            "native drop target must contain an initialized {}",
+            std::any::type_name::<T>(),
+        );
+        let value = std::mem::replace(target, Value::uninit());
+        let native = value
+            .into_native()
+            .expect("validated native drop target")
+            .into_any()
+            .downcast::<T>()
+            .expect("validated native drop type");
+        // Moving out of the box reclaims its allocation. MaybeUninit keeps the detached payload
+        // from being dropped again, including if the Rust destructor unwinds.
+        let mut storage = MaybeUninit::new(*native);
+        // SAFETY: storage contains one initialized T with its required alignment and exclusive
+        // ownership. Registration guarantees that the entry consumes that initialization only.
+        unsafe { (self.function)(storage.as_mut_ptr()) };
+        cont(Value::unit())
+    }
+
+    fn runtime_argument_passing(&self) -> Option<&[ArgConvention]> {
+        Some(&[ArgConvention::MutableRef])
+    }
+
+    fn format_ind(
+        &self,
+        f: &mut fmt::Formatter,
+        _locals: &[ELocalDecl],
+        _env: &ModuleEnv<'_>,
+        spacing: usize,
+        indent: usize,
+    ) -> fmt::Result {
+        let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
+        write!(f, "{indent_str}NativeDropFn @ {:p}", self.function)
+    }
+}
+
 /// Owns prepared call arguments until they are borrowed or transferred into a frame.
 struct CallArgsStorageGuard {
     args: Vec<ValOrMut>,
@@ -1486,6 +1573,117 @@ mod tests {
         value.discard_storage();
 
         assert_eq!(NATIVE_ARG_DROP_COUNT.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    fn native_drop_consumes_the_slot_before_storage_reclamation() {
+        use std::{cell::Cell, rc::Rc};
+
+        #[derive(Debug)]
+        struct DropTracked(Rc<Cell<usize>>);
+        impl NativeValueType for DropTracked {}
+        impl Drop for DropTracked {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+
+        let count = Rc::new(Cell::new(0));
+        let session = CompilerSession::new();
+        let mut ctx = EvalCtx::new(ModuleId::from_index(0), &session);
+        ctx.environment.push(ValOrMut::Val(Value::tuple([
+            Value::native(DropTracked(count.clone())),
+            Value::native(42isize),
+        ])));
+        let function = crate::std::value::native_value_drop_function::<DropTracked>();
+        assert_eq!(
+            function.runtime_argument_passing(),
+            Some(&[ArgConvention::MutableRef][..]),
+        );
+        let place = crate::eval::Place {
+            root: 0,
+            path: vec![0],
+        };
+        function
+            .call(vec![ValOrMut::Mut(place.clone())], &mut ctx, &[])
+            .unwrap()
+            .into_value()
+            .discard_storage();
+
+        assert_eq!(count.get(), 1, "destruction must run during Value::drop");
+        assert!(matches!(place.target_mut(&mut ctx).unwrap(), Value::Uninit));
+        let sibling = crate::eval::Place {
+            root: 0,
+            path: vec![1],
+        };
+        assert_eq!(
+            sibling.target_ref(&ctx).unwrap().as_primitive_ty::<isize>(),
+            Some(&42),
+        );
+        ctx.environment.pop().unwrap().discard_storage();
+        assert_eq!(count.get(), 1, "storage reclamation must not destroy twice");
+    }
+
+    #[test]
+    #[should_panic(expected = "native drop target must contain an initialized")]
+    fn native_drop_diagnoses_an_uninitialized_target() {
+        let session = CompilerSession::new();
+        let mut ctx = EvalCtx::new(ModuleId::from_index(0), &session);
+        ctx.environment.push(ValOrMut::Val(Value::uninit()));
+        let function = crate::std::value::native_value_drop_function::<isize>();
+        let _ = function.call(
+            vec![ValOrMut::Mut(crate::eval::Place {
+                root: 0,
+                path: vec![],
+            })],
+            &mut ctx,
+            &[],
+        );
+    }
+
+    #[test]
+    #[cfg(all(not(target_arch = "wasm32"), panic = "unwind"))]
+    fn native_drop_unwinding_does_not_repeat_destruction() {
+        use std::{cell::Cell, panic::AssertUnwindSafe, rc::Rc};
+
+        #[derive(Debug)]
+        struct PanickingDrop(Rc<Cell<usize>>);
+        impl NativeValueType for PanickingDrop {}
+        impl Drop for PanickingDrop {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+                panic!("test native destructor panic");
+            }
+        }
+
+        let count = Rc::new(Cell::new(0));
+        let session = CompilerSession::new();
+        let mut ctx = EvalCtx::new(ModuleId::from_index(0), &session);
+        ctx.environment
+            .push(ValOrMut::Val(Value::native(PanickingDrop(count.clone()))));
+        let function = crate::std::value::native_value_drop_function::<PanickingDrop>();
+        let place = crate::eval::Place {
+            root: 0,
+            path: vec![],
+        };
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            function.call(vec![ValOrMut::Mut(place.clone())], &mut ctx, &[])
+        }));
+        assert!(result.is_err());
+        assert_eq!(count.get(), 1);
+        assert_eq!(
+            Rc::strong_count(&count),
+            1,
+            "Rust must still drop the fields"
+        );
+        assert!(matches!(place.target_mut(&mut ctx).unwrap(), Value::Uninit));
+        ctx.environment.pop().unwrap().discard_storage();
+        assert_eq!(
+            count.get(),
+            1,
+            "reclamation must not retry a panicking drop"
+        );
     }
 
     /// A native's hidden dictionary parameters are prepended to its runtime argument passing and

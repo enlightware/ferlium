@@ -50,6 +50,17 @@ pub struct Buffer {
 
 impl NativeValueType for Buffer {}
 
+impl Drop for Buffer {
+    fn drop(&mut self) {
+        // Normal Array cleanup has already consumed its elements. Poisoning skips that cleanup,
+        // so any remaining boxed payloads must be reclaimed here without running Ferlium code.
+        // Value contains ManuallyDrop payloads: dropping Vec<Value> alone would leak them.
+        for value in self.slots.drain(..) {
+            value.discard_storage();
+        }
+    }
+}
+
 /// The compiled representation of a `Buffer<T>`: one owning pointer to the element storage.
 ///
 /// This is the single source of truth for the compiled Buffer layout. Both the ABI identity
@@ -476,4 +487,44 @@ pub fn add_to_module(to: &mut Module) {
     to.add_private_unsafe_function(ustr("buffer_move"), buffer_move_descr());
     to.add_private_unsafe_function(ustr("buffer_move_into"), buffer_move_into_descr());
     to.add_private_unsafe_function(ustr("buffer_take"), buffer_take_descr());
+}
+
+#[cfg(test)]
+mod reclamation_tests {
+    use super::*;
+    use std::{cell::Cell, rc::Rc};
+
+    #[derive(Debug)]
+    struct DropTracked(Rc<Cell<usize>>);
+    impl NativeValueType for DropTracked {}
+    impl Drop for DropTracked {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    fn buffer_reclamation_preserves_moved_values_and_skips_cleared_slots() {
+        let count = Rc::new(Cell::new(0));
+        let mut buffer = Buffer::from_vec(
+            (0..3)
+                .map(|_| Value::native(DropTracked(count.clone())))
+                .collect(),
+        );
+        let moved = buffer.take(0).unwrap();
+        buffer.take(1).unwrap().discard_storage();
+        assert_eq!(count.get(), 1);
+
+        drop(buffer);
+        assert_eq!(count.get(), 2, "only the remaining live slot is reclaimed");
+        assert!(moved.as_primitive_ty::<DropTracked>().is_some());
+        moved.discard_storage();
+        assert_eq!(
+            count.get(),
+            3,
+            "the moved payload remains independently owned"
+        );
+        assert_eq!(Rc::strong_count(&count), 1);
+    }
 }

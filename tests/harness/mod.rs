@@ -13,7 +13,7 @@ use ferlium::{
     eval::{EvalControlFlowResult, EvalCtx, EvalResult, RuntimeError, ValOrMut, cont},
     hir::function::{
         ArgConvention, BinaryNativeFnNNV, BinaryNativeFnRMN, BinaryNativeFnRRN, Callable,
-        CallableDefinition, Function, NullaryNativeFnN, NullaryNativeFnV, UnaryNativeFnMN,
+        CallableDefinition, Function, NativeDropFn, NullaryNativeFnN, NullaryNativeFnV,
         UnaryNativeFnNN, UnaryNativeFnRN, UnaryNativeFnVN, UnaryNativeFnVV, UnaryNativeOptionalFnN,
         write_native_optional_output,
     },
@@ -747,11 +747,18 @@ fn witnessed_type_def(test_assoc_trait: TraitId) -> TypeDef {
 
 static TRACKED_CLONES: AtomicIsize = AtomicIsize::new(0);
 static TRACKED_DROPS: AtomicIsize = AtomicIsize::new(0);
+static TRACKED_NATIVE_DROPS: AtomicIsize = AtomicIsize::new(0);
 
 #[derive(Debug)]
 pub struct CloneTrackedNative(isize);
 
 impl NativeValueType for CloneTrackedNative {}
+
+impl Drop for CloneTrackedNative {
+    fn drop(&mut self) {
+        TRACKED_NATIVE_DROPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
 
 impl Clone for CloneTrackedNative {
     fn clone(&self) -> Self {
@@ -792,14 +799,26 @@ fn clone_clone_tracked(source: &CloneTrackedNative) -> CloneTrackedNative {
     source.clone()
 }
 
-fn drop_clone_tracked(_target: &mut CloneTrackedNative) {}
+unsafe fn drop_clone_tracked(target: *mut CloneTrackedNative) {
+    // SAFETY: the destructor adapter supplies one exclusively owned, initialized native value.
+    unsafe { target.drop_in_place() };
+}
+
+fn reset_native_drops() {
+    TRACKED_NATIVE_DROPS.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn native_drop_count() -> isize {
+    TRACKED_NATIVE_DROPS.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 fn clone_tracked_value_clone_function() -> Function {
     Box::new(UnaryNativeFnRN::new(clone_clone_tracked)) as Function
 }
 
 fn clone_tracked_value_drop_function() -> Function {
-    Box::new(UnaryNativeFnMN::new(drop_clone_tracked)) as Function
+    // SAFETY: this Value::drop entry destroys its native pointee exactly once without freeing it.
+    Box::new(unsafe { NativeDropFn::new(drop_clone_tracked) }) as Function
 }
 
 fn record_tracked_drop(value: isize) {
@@ -1150,6 +1169,24 @@ fn testing_module(
             clone_tracked_clone_count,
             [],
             "Returns the clone counter for clone-counting native test values.",
+            effect(PrimitiveEffect::Read),
+        ),
+    );
+    module.add_function(
+        "reset_native_drops".into(),
+        NullaryNativeFnN::description_with_default_ty(
+            reset_native_drops,
+            [],
+            "Resets the Rust destructor counter for native test values.",
+            effect(PrimitiveEffect::Write),
+        ),
+    );
+    module.add_function(
+        "native_drop_count".into(),
+        NullaryNativeFnN::description_with_default_ty(
+            native_drop_count,
+            [],
+            "Returns the Rust destructor counter for native test values.",
             effect(PrimitiveEffect::Read),
         ),
     );

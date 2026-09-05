@@ -113,6 +113,11 @@ After local storage resolution, cleanup is a no-op for non-owning locals.
 For owned locals it applies the resolved `LocalDrop`: `Skip` reclaims only storage, while static and dictionary modes call `Value::drop` before discarding storage.
 Once a semantic-drop action starts, the target lifetime has ended even if a sandbox violation stops execution before or during the drop body; the target is invalidated and must not be observed or retried.
 
+Opaque native `Value::drop` methods use a consuming Rust adapter. It replaces the boxed target
+with `Uninit` and runs the Rust destructor on the detached payload during the call. Subsequent
+storage reclamation cannot destroy that payload again. This keeps the ordinary Ferlium
+`&mut T` method signature; the Rust pointer entry is specified in [abi.md](abi.md).
+
 Assignments to initialized storage carry an optional `Assignment::drop`.
 If present, the old destination lifetime ends before the new value replaces it; the resolved mode may be `Skip`.
 Assignments to uninitialized storage use `assignment_mode == InitializeStorage` and must not drop the destination first.

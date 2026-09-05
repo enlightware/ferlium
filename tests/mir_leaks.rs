@@ -24,7 +24,14 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicIsize, Ordering};
 
-use ferlium::{CompilerSession, ExecutionTarget, MirOptimization, module::Path, ustr};
+use ferlium::{
+    CompilerSession, ExecutionTarget, MirOptimization,
+    execution::ReferenceInterpreterLimits,
+    hir::value::Value,
+    module::Path,
+    std::{array::array_value_from_vec, string::String as NativeString},
+    ustr,
+};
 
 static LIVE_ALLOCATIONS: AtomicIsize = AtomicIsize::new(0);
 
@@ -128,4 +135,75 @@ fn repeated_optimized_mir_execution_does_not_leak() {
         growth, 0,
         "50 identical optimized executions grew the live allocation count by {growth}"
     );
+}
+
+fn poisoned_arrays_do_not_leak(target: ExecutionTarget, optimization: MirOptimization) {
+    let mut session = CompilerSession::new();
+    session.set_mir_optimization(optimization);
+    let module_id = session
+        .compile_for(
+            target,
+            "fn main(values: [[string]]) { loop {} }",
+            "poisoned_arrays",
+            Path::single_str("poisoned_arrays"),
+        )
+        .unwrap()
+        .module_id;
+    let main = session
+        .expect_fresh_module(module_id)
+        .get_local_function_id(ustr("main"))
+        .unwrap();
+    let mut execute = || {
+        // Supply live arrays from the host so optimization cannot eliminate their allocations.
+        let array = array_value_from_vec(
+            (0..2)
+                .map(|_| {
+                    array_value_from_vec(vec![
+                        Value::native(NativeString::new("first owned array element")),
+                        Value::native(NativeString::new("second owned array element")),
+                    ])
+                })
+                .collect(),
+        );
+        let error = session
+            .run_entry_with_limits(
+                target,
+                module_id,
+                main,
+                vec![array],
+                ReferenceInterpreterLimits::default().with_fuel_limit(Some(100)),
+            )
+            .expect_err("the loop must exhaust its fuel");
+        assert!(
+            error.is_poisoning(),
+            "the test must bypass semantic cleanup"
+        );
+    };
+    for _ in 0..3 {
+        execute();
+    }
+    let before = live();
+    for _ in 0..20 {
+        execute();
+    }
+    assert_eq!(
+        live() - before,
+        0,
+        "poisoned arrays must reclaim live elements"
+    );
+}
+
+#[test]
+fn buffer_reclamation_after_hir_poisoning_does_not_leak() {
+    poisoned_arrays_do_not_leak(ExecutionTarget::Hir, MirOptimization::Disabled);
+}
+
+#[test]
+fn buffer_reclamation_after_mir_poisoning_does_not_leak() {
+    poisoned_arrays_do_not_leak(ExecutionTarget::Mir, MirOptimization::Disabled);
+}
+
+#[test]
+fn buffer_reclamation_after_optimized_mir_poisoning_does_not_leak() {
+    poisoned_arrays_do_not_leak(ExecutionTarget::Mir, MirOptimization::Enabled);
 }

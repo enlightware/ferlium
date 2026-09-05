@@ -20,7 +20,7 @@ use crate::{
         self, CallArgument, NodeArena, NodeId,
         emit_value_impl::function_value_method,
         function::{
-            CallableDefinition, Function, PendingScriptFunction, UnaryNativeFnMN, UnaryNativeFnRN,
+            CallableDefinition, Function, NativeDropFn, PendingScriptFunction, UnaryNativeFnRN,
         },
         value::{LiteralValue, NativeValue, VariantPayloadStorage},
         value_dispatch::{
@@ -154,10 +154,19 @@ pub(crate) fn native_value_clone_function<T: Clone + NativeValue>() -> Function 
     b(UnaryNativeFnRN::new(native_value_clone::<T>)) as Function
 }
 
-pub(crate) fn native_value_drop<T>(_target: &mut T) {}
+/// Destroy an initialized native value, leaving its storage uninitialized and still allocated.
+///
+/// # Safety
+/// `target` must point to an exclusively owned, initialized, correctly aligned `T`.
+pub(crate) unsafe fn native_value_drop<T>(target: *mut T) {
+    // SAFETY: the caller supplies an initialized T and ends all access to it after this call.
+    unsafe { target.drop_in_place() };
+}
 
 pub(crate) fn native_value_drop_function<T: 'static>() -> Function {
-    b(UnaryNativeFnMN::new(native_value_drop::<T>)) as Function
+    // SAFETY: this entry destroys exactly one T without deallocating its storage. This helper
+    // registers only the compiler-owned Value::drop method for that native type.
+    b(unsafe { NativeDropFn::new(native_value_drop::<T>) }) as Function
 }
 
 #[derive(Debug, Clone, Copy)]

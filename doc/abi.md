@@ -204,7 +204,24 @@ On ordinary execution paths, the target glue preserves Rust initialization and R
 - cloning invokes the registered Rust clone operation and initializes distinct destination storage;
 - moving relocates the value into uninitialized destination storage and leaves the source absent;
 - replacement destroys an initialized destination before writing its replacement; and
-- final storage destruction invokes the registered Rust drop glue exactly once.
+- opaque native `Value::drop` invokes the registered Rust destructor exactly once and leaves the
+  target uninitialized; subsequent reclamation releases only its storage.
+
+Opaque native destructor registration uses a dedicated consuming adapter. Its Ferlium signature
+remains `Value::drop(&mut T) -> ()`; the Rust entry takes `*mut T` to initialized storage and destroys the
+pointee without freeing that storage. Both boxed interpreters replace the target slot with
+`Value::Uninit`, detach its native payload, and invoke the entry on that payload. They reclaim its
+box without invoking the destructor a second time. Ordinary mutable native argument adapters keep
+their existing contract that the target remains initialized after the call. This pointer transport
+does not introduce a pointer type or another parameter convention into the Ferlium type system.
+
+Interpreter storage reclamation can still destroy opaque native payloads whose semantic cleanup
+did not run, for example while reclaiming roots after poisoning. A successfully consumed native slot is
+already `Uninit`, so that fallback cannot repeat its destructor.
+
+These destructor rules concern types stored as their actual Rust representation. The interpreter's
+private `Buffer<T>` uses a separate representation and cleanup path, described in the
+[Arrays section](#arrays); it does not use this consuming native destructor adapter.
 
 Generated code may allocate, move and pass a native value using its registered layout, but it must
 not inspect private fields or synthesize byte patterns unless the native registration separately
@@ -451,7 +468,11 @@ that later grow are reallocated by `array_ensure_capacity`, which passes the tru
 layout, so no slot is ever addressed with the placeholder.
 
 The interpreter's native `buffer_drop` remains a no-op because the subsequent interpreter storage
-discard drops the Rust `Vec`. Compiled lowering replaces that semantic Buffer drop with
+discard runs Rust `Buffer::drop`, which reclaims any remaining slot payloads through
+`Value::discard_storage` before releasing the `Vec`. Normal Array cleanup has already emptied the
+live slots; after poisoning this fallback reclaims their boxed storage without running Ferlium
+semantic cleanup. This is an interpreter reclamation mechanism, not the final compiled runtime's
+allocation-domain design. Compiled lowering replaces that semantic Buffer drop with
 `dealloc(buffer.ptr)` followed by clearing the pointer. The runtime exposes pointer-only
 deallocation and retains any allocator-specific layout metadata internally; a capacity-0 buffer is
 deallocated by the same path as any other. Whole-buffer moves must use the same cleanup when
