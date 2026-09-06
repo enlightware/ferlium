@@ -83,6 +83,14 @@ jobs:
       - name: Install wasm-pack
         run: cargo install wasm-pack
 
+      - name: Install WABT for native ABI probes
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y wabt
+
+      - name: Check Rust native entry Wasm signatures
+        if: runner.os == 'Linux'
+        run: python3 tests/native_abi/check_wasm.py
+
       - name: Run WASM tests (${{ matrix.browser }})
         # The language test binary is large enough that loading its full DWARF data can leave Chrome's renderer unresponsive to WebDriver.
         # Keep debug assertions, but omit debuginfo from the Wasm test artifact.

@@ -188,7 +188,9 @@ the status; they do not use multi-value results for `(status, value)`.
 ## Native
 
 Use the target C calling convention with the explicit scalar/pointer transport above. Detailed
-target lowering remains to be verified.
+lowering is target-specific: pointers and `usize`/`isize` follow the target width, while status
+remains `u32`. Wasm32 probes and native-host calls validate the initial transport; additional
+targets, including Wasm64 and future native code generators, require equivalent checks.
 
 # Scalar Representation
 
@@ -569,8 +571,8 @@ resulting ephemeral MIR value and its lifetime.
 # Native-function boundary
 
 A Rust native callable used by compiled code exposes an `unsafe extern "C" fn` entry with explicit
-scalar/pointer transport. This replaces the former `export ferlium` placeholder; signature probes
-and registration migration remain to be implemented. Export naming and retention are separate
+scalar/pointer transport. This replaces the former `export ferlium` placeholder; registration
+migration remains to be implemented. Export naming and retention are separate
 from the calling convention. All executors use the same entry under the existing `FunctionId`;
 boxed adapters marshal interpreter values, while compiled calls invoke the entry directly.
 
@@ -622,6 +624,12 @@ This is a build-coupled contract, like Rust-native value layout. Target tests mu
 Rust entry against its derived signature and exercise the argument, result, and source-failure
 conventions. Sandbox violations and lower-level runtime aborts use the non-returning path in
 [runtime-sandboxing.md](runtime-sandboxing.md).
+
+`make test-native-abi` runs native transport tests and checks the same standalone Rust entries'
+Wasm32 signatures at optimization levels 0 and 3. It requires Python 3, WABT (`wasm2wat`), and the
+`wasm32-unknown-unknown` Rust target. The fixtures cover scalar/pointer transport, managed outputs,
+destruction, optional results, and source failure; their failure state is a test fixture, not the
+production runtime protocol. These checks do not yet validate generated Ferlium callers or browser linkage.
 
 # Compiled runtime boundary
 
