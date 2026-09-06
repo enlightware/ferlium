@@ -99,8 +99,8 @@ element leak on poisoning but remains a temporary mechanism for the boxed interp
 
 A compiled runtime should instead make reclamation a property of its runtime-owned allocation
 domain, while a take-once registry owns external capabilities. Poisoning revokes the registry and
-resets the allocation domain without executing
-Ferlium code. The domain must cover allocations owned by both Ferlium representations and native
+resets the allocation domain without executing Ferlium code. The domain must cover allocations
+owned by both Ferlium representations and native
 Rust values, including their backing allocations; resetting linear memory alone cannot revoke
 external Rust-owned resources. Memory accounting and allocator requirements are specified in
 [runtime-memory-limits.md](runtime-memory-limits.md).
@@ -125,3 +125,7 @@ The shared compiled/interpreted runtime still needs:
 - an accounted allocator or resettable arena covering native-value allocations;
 - an eager shadow call stack for non-unwinding violations; and
 - an explicit poisoning/revocation domain shared by all execution backends.
+
+Boxed reclamation currently invokes Rust `Drop` even when Ferlium cleanup was skipped. The final
+poisoning policy must define which Rust destructors or registered revocation operations may run,
+including their handling of external resources, partial initialization, re-entry, and panics.

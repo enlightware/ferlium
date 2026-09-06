@@ -42,3 +42,7 @@ The environment-cell guard remains useful alongside byte accounting, but must no
 general storage limit. A process-global allocator hook is also unsuitable: Ferlium is embeddable,
 and global or thread-local interception cannot reliably distinguish runtime-owned allocations from
 host engine allocations.
+
+Allocation domains must cover both Ferlium storage and Rust-owned backing allocations. Reclaiming
+that memory does not by itself release external resources; their destruction or revocation follows
+the poisoning policy in [runtime-sandboxing.md](runtime-sandboxing.md).
