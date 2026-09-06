@@ -274,6 +274,8 @@ their externally visible identity. Generated helpers are ordinary entries in the
 
 The lowerer builds a physical function table. The readiness verifier checks it and returns
 `BackendReadyMirArtifacts`. Both stages use the same MIR structures without a phase parameter.
+Shared operations retain their meaning. Partially lowered bodies remain internal to the lowerer;
+only verified artifacts are exposed to physical executors.
 
 Each physical module owns relocatable dictionary and subscript catalogs. A dictionary definition
 records its stable identity, capture schema, entry functions, and entry-to-capture mappings. A
@@ -292,6 +294,15 @@ subscript definition.
 Backend-ready MIR may retain symbolic operands, `DictEntry`, variant construction, and
 `extract_tag`. Each executor supplies their target representation. Interpreter-only native calls
 and target-lowered value representations must be resolved.
+
+### Physical failure transport
+
+Physical MIR retains `Invoke` and its success-only result initialization contract. The leading
+failure-state pointer is recorded in physical ABI signature metadata, not in MIR call operands.
+Executors supply the current invocation's state; readiness verification checks the signature
+against call fallibility, including indirect calls. Machine lowering implements `Invoke` with
+status handling without expanding it into a call and branch in shared MIR. The diagnostic layout
+remains opaque; its ownership and lifetime are specified in [abi.md](abi.md#source-failure-diagnostics).
 
 ### Physical call results
 

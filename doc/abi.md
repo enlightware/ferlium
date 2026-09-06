@@ -130,7 +130,7 @@ There are three return value classes:
 - **Direct value**: concrete values with a direct scalar ABI representation
 - **Caller-allocated value**: aggregates, address-only values, and polymorphic results
 
-The calling convention for return values is:
+Generated Ferlium functions and Rust native entries initially share this return convention:
 
 | May return language failure? | Return value kind      | ABI return form                                                | Out-pointer needed? |
 |------------------------------|------------------------|----------------------------------------------------------------|---------------------|
@@ -138,10 +138,31 @@ The calling convention for return values is:
 | No                           | Direct value           | Returns the value directly                                     | No                  |
 | No                           | Caller-allocated value | Returns `()`; callee writes result to out-pointer              | Yes                 |
 | Yes                          | No value               | Returns status                                                 | No                  |
-| Yes                          | Direct value           | Returns status plus the direct value                           | No                  |
+| Yes                          | Direct value           | Returns status; callee writes result to out-pointer on success | Yes                 |
 | Yes                          | Caller-allocated value | Returns status; callee writes result to out-pointer on success | Yes                 |
 
-For a `Fallible` function, status is 0 on success and non-zero on language failure.
+Status is an unsigned 32-bit integer (`u32` in Rust): 0 on success and non-zero on source failure.
+On failure, result storage contains no live result; the callee must clean up any partial construction.
+
+Physical parameter order is: failure-state pointer (when the function may fail), other hidden
+parameters, source arguments, then result out-pointer (when required). Output pointers are explicit
+parameters, not implicit C aggregate-return parameters.
+Physical MIR records failure-pointer transport in ABI signature metadata and retains `Invoke`;
+executors supply the pointer without adding a MIR call operand. See [mir-ir.md](mir-ir.md#physical-failure-transport).
+
+### Source-failure diagnostics
+
+The execution harness creates one empty, opaque failure state per invocation and passes its
+pointer through calls that may fail, including calls with unresolved effect variables. Calls
+share this state without allocating one per frame; diagnostic storage is allocated only as needed.
+A failing callee records its diagnostic, then callers follow semantic cleanup and propagate status.
+The Rust runtime owns the diagnostic, including messages and backtraces; generated code accesses
+it only through runtime operations. The harness takes the diagnostic when execution ends.
+
+Nested host-initiated invocations use separate states. A second failure during cleanup preserves
+both causes and triggers harness cancellation; poisoning is not another return status. Diagnostic
+storage must survive guest-domain reclamation. This protocol is planned; boxed interpreters
+currently propagate Rust `RuntimeError` values.
 
 ### Sandbox violations
 
@@ -157,16 +178,17 @@ Failures raised by Ferlium's accounted runtime use this defined path; exhaustion
 
 ## Wasm
 
-The Wasm backend maps direct values and status values to Wasm value types (`i32`, `i64`, `f32`, `f64`) following the scalar-slot rules.
+The Wasm backend maps direct values to Wasm value types (`i32`, `i64`, `f32`, `f64`) following the scalar-slot rules.
+The `u32` status maps to Wasm `i32`, whose type does not encode signedness.
 Shared references, mutable references, and caller-allocated result pointers are represented as pointers in linear memory using the selected backend profile.
 
-Parameters are passed to Wasm functions in the order of their definitions.
-Caller-allocated return pointers, when needed, are passed before source-level parameters.
-For fallible direct-value returns, Wasm uses multi-value results for `(status, value)`.
+Parameters follow the physical order above, with result storage last. Fallible calls return only
+the status; they do not use multi-value results for `(status, value)`.
 
 ## Native
 
-To be defined later, possibly per platform.
+Use the target C calling convention with the explicit scalar/pointer transport above. Detailed
+target lowering remains to be verified.
 
 # Scalar Representation
 
@@ -546,10 +568,16 @@ resulting ephemeral MIR value and its lifetime.
 
 # Native-function boundary
 
-A Rust native callable used by compiled code is marked `export ferlium`. This promises that the
-matching rustc and target lower its Rust signature to the Ferlium convention defined above. The
-same Rust function implements interpreted and compiled calls; interpreter adapters provide boxed
-arguments, while compiled calls use its lowered entry directly.
+A Rust native callable used by compiled code exposes an `unsafe extern "C" fn` entry with explicit
+scalar/pointer transport. This replaces the former `export ferlium` placeholder; signature probes
+and registration migration remain to be implemented. Export naming and retention are separate
+from the calling convention. All executors use the same entry under the existing `FunctionId`;
+boxed adapters marshal interpreter values, while compiled calls invoke the entry directly.
+
+A fallible entry may adapt a Rust `Result<T, SourceFailureKind>` implementation: write `T` to the
+trailing output pointer on success, or record the error through the leading failure-state pointer
+on failure, then return status. Rust error layouts never cross the ABI. Rust panics must not unwind
+across the `extern "C"` boundary; they are not source failures.
 
 Native callables are resolved by their existing `FunctionId`. No additional compiled-function
 identity or implementation catalog is required. A target-dependent scalar parameter may use a
@@ -574,14 +602,14 @@ resolved `Repr` of `F` is exactly `None(()) | Some((T,))` and the representation
 The executor-facing Rust entry uses an output-last protocol:
 
 ```text
-unsafe fn(arguments..., output: *mut MaybeUninit<R>) -> bool
+unsafe extern "C" fn(arguments..., output: *mut MaybeUninit<R>) -> bool
 ```
 
 It returns `true` exactly when it initializes `output` once with the `Some` payload. It returns
-`false` for `None` and leaves `output` uninitialized. The payload pointer is last even though the
-ordinary Ferlium aggregate-result pointer precedes source arguments: this is a lower native-result
-protocol from which the caller constructs the Ferlium variant, not the public Ferlium function
-ABI. Rust's own `Option<R>` memory layout is never exposed or assumed.
+`false` for `None` and leaves `output` uninitialized. This infallible lower native-result protocol
+lets the caller construct the Ferlium variant; `None` is not a source failure. Rust's own
+`Option<R>` memory layout is never exposed or assumed. Existing boxed entries use the Rust calling
+convention pending migration to `extern "C"`.
 
 All executors use this same lower native entry. The boxed HIR and MIR adapter supplies a local
 `MaybeUninit<R>` and constructs its structural `Value`; physical lowering records the inferred
@@ -591,10 +619,8 @@ native result without this entry, an entry whose result does not have the canoni
 `Repr`, a payload representation mismatch, or a non-closed signature.
 
 This is a build-coupled contract, like Rust-native value layout. Target tests must link every
-`export ferlium` entry against its derived signature and exercise the argument, result, and
-source-failure conventions. An `export C` entry instead follows the platform C ABI and requires
-explicit adaptation when that differs from the Ferlium convention. Sandbox violations and
-lower-level runtime aborts use the non-returning path in
+Rust entry against its derived signature and exercise the argument, result, and source-failure
+conventions. Sandbox violations and lower-level runtime aborts use the non-returning path in
 [runtime-sandboxing.md](runtime-sandboxing.md).
 
 # Compiled runtime boundary
