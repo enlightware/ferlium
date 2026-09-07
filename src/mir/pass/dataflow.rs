@@ -6,7 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-//! What the folding pass knows at each point of a function: which storage slots hold which
+//! What value analysis knows at each point of a function: which storage slots hold which
 //! compile-time constants or bounded sets of possible outcomes.
 //!
 //! Analysis only — nothing here rewrites MIR. It answers one question for the folding pass: at this
@@ -29,8 +29,8 @@
 //! is an unfolded call. The set of *modelled* operations is the whitelist; everything else escapes
 //! its place operands.
 //!
-//! The folding pass that consumes this is the next deliverable, so the items here are exercised
-//! only by the tests below.
+//! Folding and finite-domain branch simplification consume the same facts. An unreachable block
+//! or edge is distinct from a reachable state with no known values and contributes nothing at joins.
 #![allow(dead_code)]
 
 use std::{borrow::Cow, cmp::Reverse, collections::BinaryHeap};
@@ -242,6 +242,7 @@ pub(crate) enum Fact {
     /// The slot holds this constant.
     Known(Const),
     /// A bounded set of possible integer values or semantic variant tags.
+    /// Must include every possible runtime outcome: consumers may eliminate excluded branches.
     Outcomes(std::rc::Rc<[Outcome]>),
 }
 
@@ -360,6 +361,7 @@ impl State {
 
 /// The result of analysing a function: the state on entry to each block.
 pub(crate) struct Analysis {
+    /// `None` is unreachable (the bottom of the flow lattice), not an unknown value fact.
     entry_states: Vec<Option<State>>,
     escaped: FxHashSet<Root>,
     /// Immutable structural bindings, discovered once before the fixpoint rather than copied into
@@ -461,7 +463,7 @@ impl Outcome {
         }
     }
 
-    fn pattern(value: &LiteralValue) -> Option<Self> {
+    pub(crate) fn pattern(value: &LiteralValue) -> Option<Self> {
         value
             .as_variant_tag()
             .copied()
@@ -469,7 +471,7 @@ impl Outcome {
             .or_else(|| value.as_primitive_ty::<Int>().copied().map(Self::Int))
     }
 
-    fn constant(&self) -> Const {
+    pub(crate) fn constant(&self) -> Const {
         match self {
             Self::Int(value) => Const::Literal(LiteralValue::new_native(*value)),
             Self::Tag(tag) => Const::VariantTag(*tag),
@@ -489,7 +491,7 @@ impl Fact {
         }))
     }
     /// Read a domain without allocating, including the singleton represented by `Known`.
-    fn outcomes(&self) -> Option<impl Iterator<Item = Outcome> + Clone + '_> {
+    pub(crate) fn outcomes(&self) -> Option<impl Iterator<Item = Outcome> + Clone + '_> {
         let (one, many) = match self {
             Self::Known(value) => (Some(Outcome::from_const(value)?), &[][..]),
             Self::Outcomes(values) => (None, values.as_ref()),
@@ -576,38 +578,54 @@ impl State {
         None
     }
 
-    fn restrict(&mut self, subject: Subject, keep: impl Fn(&Outcome) -> bool) {
+    /// Compute the restriction before copying state: impossible edges return `None`, unchanged
+    /// edges stay borrowed, and only a genuinely narrowed domain requires an owned state.
+    fn restrict(&self, subject: Subject, keep: impl Fn(&Outcome) -> bool) -> Option<Cow<'_, Self>> {
         let fact = match subject {
-            Subject::Place(place) => self.places.get_mut(&place),
-            Subject::Register(id) => self.registers.get_mut(&id),
+            Subject::Place(place) => self.places.get(&place),
+            Subject::Register(id) => self.registers.get(&id),
         };
-        let Some(fact) = fact else { return };
+        let Some(fact) = fact else {
+            return Some(Cow::Borrowed(self));
+        };
         let Some(values) = fact.outcomes() else {
-            return;
+            return Some(Cow::Borrowed(self));
         };
         let count = values.clone().count();
         let restricted: SmallVec<[Outcome; MAX_OUTCOMES]> = values.filter(keep).collect();
-        // Empty means the edge is impossible, not that the value became unknown. This analysis
-        // conservatively still visits that edge, but must not weaken any of its existing facts.
-        if restricted.is_empty() || restricted.len() == count {
-            return;
+        if restricted.is_empty() {
+            return None;
         }
-        *fact = Fact::from_outcomes(restricted);
-        let fact = fact.clone();
-        // Materialized copies of this still-current value carry the same restriction.
-        for (id, origin) in &self.origins {
-            if *origin == subject {
-                self.registers.insert(*id, fact.clone());
+        if restricted.len() == count {
+            return Some(Cow::Borrowed(self));
+        }
+        let fact = Fact::from_outcomes(restricted);
+        let mut state = self.clone();
+        match subject {
+            Subject::Place(place) => {
+                state.places.insert(place, fact.clone());
+            }
+            Subject::Register(id) => {
+                state.registers.insert(id, fact.clone());
             }
         }
+        // Materialized copies of this still-current value carry the same restriction.
+        for (id, origin) in &state.origins {
+            if *origin == subject {
+                state.registers.insert(*id, fact.clone());
+            }
+        }
+        Some(Cow::Owned(state))
     }
 
+    /// An infeasible edge contributes bottom (`None`), not `State::default()` (unknown facts).
+    /// Later widening at a loop header can make this edge reachable and enqueue it normally.
     fn on_edge<'a>(
         &'a self,
         terminator: &TerminatorKind,
         successor: BlockId,
         bindings: &PlaceBindings,
-    ) -> Cow<'a, Self> {
+    ) -> Option<Cow<'a, Self>> {
         let mut state = Cow::Borrowed(self);
         match terminator {
             TerminatorKind::CondBr {
@@ -615,10 +633,16 @@ impl State {
                 then_target,
                 else_target,
             } if then_target != else_target => {
+                if let Some(Fact::Known(Const::Literal(value))) = self.register(*id)
+                    && let Some(taken) = value.as_primitive_ty::<bool>()
+                    && *taken != (successor == *then_target)
+                {
+                    return None;
+                }
                 if let Some(test) = self.tests.get(id) {
-                    state.to_mut().restrict(test.subject, |value| {
+                    state = self.restrict(test.subject, |value| {
                         (value == &test.pattern) == (successor == *then_target)
-                    });
+                    })?;
                 }
             }
             TerminatorKind::SwitchVariant {
@@ -627,7 +651,7 @@ impl State {
                 default,
             } => {
                 if let Some(subject) = self.subject(tag, bindings) {
-                    state.to_mut().restrict(subject, |value| {
+                    state = self.restrict(subject, |value| {
                         let Outcome::Tag(tag) = value else {
                             return true;
                         };
@@ -636,7 +660,7 @@ impl State {
                             .find_map(|(case, target)| (case == tag).then_some(*target))
                             .unwrap_or(*default)
                             == successor
-                    });
+                    })?;
                 }
             }
             TerminatorKind::Invoke {
@@ -651,7 +675,7 @@ impl State {
             }
             _ => {}
         }
-        state
+        Some(state)
     }
 }
 
@@ -794,7 +818,10 @@ pub(crate) fn analyze(func: &Function, env: ModuleEnv<'_>) -> Analysis {
             transfer(operation, func, env, &escaped, &register_places, &mut state);
         }
         for successor in block.terminator().successors() {
-            let edge = state.on_edge(&block.terminator().kind, successor, &register_places);
+            let Some(edge) = state.on_edge(&block.terminator().kind, successor, &register_places)
+            else {
+                continue;
+            };
             let successor = successor.as_index();
             let updated = match &entry_states[successor] {
                 Some(existing) => existing.join(&edge),
@@ -1911,14 +1938,14 @@ mod tests {
             else_target: no,
         };
         assert_eq!(
-            state.on_edge(&branch, no, &bindings).place(place),
+            state.on_edge(&branch, no, &bindings).unwrap().place(place),
             Fact::Outcomes([Outcome::Int(0), Outcome::Int(1)].into())
         );
         state.set_place(place, Fact::from_outcomes(vec![Outcome::Int(2)]), &bindings);
         assert!(state.tests.is_empty());
         assert!(state.origins.is_empty());
         assert_eq!(
-            state.on_edge(&branch, yes, &bindings).place(place),
+            state.on_edge(&branch, yes, &bindings).unwrap().place(place),
             Fact::from_outcomes(vec![Outcome::Int(2)])
         );
         // The old loaded value remains usable, but a test of it only refines that snapshot.
@@ -1929,7 +1956,7 @@ mod tests {
                 pattern: Outcome::Int(-1),
             },
         );
-        let edge = state.on_edge(&branch, yes, &bindings);
+        let edge = state.on_edge(&branch, yes, &bindings).unwrap();
         assert_eq!(
             edge.registers[&read],
             Fact::from_outcomes(vec![Outcome::Int(-1)])
@@ -1944,7 +1971,7 @@ mod tests {
     }
 
     #[test]
-    fn impossible_restrictions_preserve_facts_at_joins() {
+    fn impossible_restrictions_mark_the_edge_unreachable() {
         let place = PlaceId::from_index(0);
         let read = ValueId::from_index(1);
         let less = Outcome::Tag(ustr::ustr("Less"));
@@ -1953,11 +1980,125 @@ mod tests {
         state.places.insert(place, fact.clone());
         state.registers.insert(read, fact.clone());
         state.origins.insert(read, Subject::Place(place));
-        let mut impossible = state.clone();
-        impossible.restrict(Subject::Place(place), |value| *value != less);
-        assert_eq!(impossible, state);
-        assert_eq!(state.join(&impossible).place(place), fact);
-        assert_eq!(state.join(&impossible).register(read), Some(&fact));
+        assert!(
+            state
+                .restrict(Subject::Place(place), |value| *value != less)
+                .is_none()
+        );
+        let yes = BlockId::from_index(1);
+        let no = BlockId::from_index(2);
+        let branch = TerminatorKind::SwitchVariant {
+            tag: mir::Value::Register(read),
+            cases: vec![(ustr::ustr("Less"), yes)],
+            default: no,
+        };
+        assert!(
+            state
+                .on_edge(&branch, no, &PlaceBindings::default())
+                .is_none()
+        );
+        assert!(matches!(
+            state.on_edge(&branch, yes, &PlaceBindings::default()),
+            Some(Cow::Borrowed(_))
+        ));
+    }
+
+    #[test]
+    fn unreachable_predecessors_do_not_weaken_join_facts() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new("unreachable_join".into(), Default::default());
+        let root = builder.add_block();
+        let dead = builder.add_block();
+        let join = builder.add_block();
+        let slot = builder
+            .append_operation(root, Operation::alloca(span, int_type()))
+            .unwrap();
+        let one = mir::Value::Constant(builder.add_constant(
+            int_type(),
+            LiteralValue::new_native(1isize),
+            &env,
+        ));
+        let two = mir::Value::Constant(builder.add_constant(
+            int_type(),
+            LiteralValue::new_native(2isize),
+            &env,
+        ));
+        builder.append_operation(root, Operation::store(span, one, slot.clone()));
+        let test = builder
+            .append_operation(
+                root,
+                Operation::compare_eq(
+                    span,
+                    slot.clone(),
+                    mir::Value::Pattern(Box::new(LiteralValue::new_native(1isize))),
+                ),
+            )
+            .unwrap();
+        builder.set_terminator(root, Terminator::cond_br(span, test, join, dead));
+        builder.append_operation(dead, Operation::store(span, two, slot.clone()));
+        builder.set_terminator(dead, Terminator::goto(span, join));
+        builder.set_terminator(join, Terminator::ret(span));
+        let func = builder.finish(env);
+        let analysis = analyze(&func, env);
+        assert!(analysis.entry_states[dead.as_index()].is_none());
+        assert_eq!(
+            analysis
+                .entry_state(join)
+                .place(analysis.place_of(&slot).unwrap()),
+            Fact::Known(Const::Literal(LiteralValue::new_native(1isize)))
+        );
+    }
+
+    #[test]
+    fn loop_widening_can_make_an_initially_impossible_edge_reachable() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new("widening_edge".into(), Default::default());
+        let root = builder.add_block();
+        let header = builder.add_block();
+        let body = builder.add_block();
+        let exit = builder.add_block();
+        let slot = builder
+            .append_operation(root, Operation::alloca(span, int_type()))
+            .unwrap();
+        let zero = mir::Value::Constant(builder.add_constant(
+            int_type(),
+            LiteralValue::new_native(0isize),
+            &env,
+        ));
+        let one = mir::Value::Constant(builder.add_constant(
+            int_type(),
+            LiteralValue::new_native(1isize),
+            &env,
+        ));
+        builder.append_operation(root, Operation::store(span, zero, slot.clone()));
+        builder.set_terminator(root, Terminator::goto(span, header));
+        let test = builder
+            .append_operation(
+                header,
+                Operation::compare_eq(
+                    span,
+                    slot.clone(),
+                    mir::Value::Pattern(Box::new(LiteralValue::new_native(0isize))),
+                ),
+            )
+            .unwrap();
+        builder.set_terminator(header, Terminator::cond_br(span, test, body, exit));
+        builder.append_operation(body, Operation::store(span, one, slot.clone()));
+        builder.set_terminator(body, Terminator::goto(span, header));
+        builder.set_terminator(exit, Terminator::ret(span));
+        let func = builder.finish(env);
+        let analysis = analyze(&func, env);
+        assert!(analysis.entry_states[exit.as_index()].is_some());
+        assert_eq!(
+            analysis
+                .entry_state(exit)
+                .place(analysis.place_of(&slot).unwrap()),
+            Fact::Known(Const::Literal(LiteralValue::new_native(1isize)))
+        );
     }
 
     #[test]
@@ -1968,10 +2109,36 @@ mod tests {
         state.registers.insert(read, codes());
         state.origins.insert(read, Subject::Place(place));
         let original = state.clone();
-        state.restrict(Subject::Place(place), |_| true);
-        assert_eq!(state, original);
+        let edge = state.restrict(Subject::Place(place), |_| true).unwrap();
+        assert!(matches!(edge, Cow::Borrowed(_)));
+        assert_eq!(*edge, original);
         state.places.insert(place, Fact::Unknown);
-        state.restrict(Subject::Place(place), |_| true);
+        let edge = state.restrict(Subject::Place(place), |_| true).unwrap();
+        assert!(matches!(edge, Cow::Borrowed(_)));
+        assert_eq!(edge.register(read), Some(&codes()));
+    }
+
+    #[test]
+    fn restrictions_copy_only_when_the_domain_narrows() {
+        let place = PlaceId::from_index(0);
+        let read = ValueId::from_index(1);
+        let mut state = State::default();
+        state.places.insert(place, codes());
+        state.registers.insert(read, codes());
+        state.origins.insert(read, Subject::Place(place));
+        assert!(matches!(
+            state.restrict(Subject::Place(place), |_| true),
+            Some(Cow::Borrowed(_))
+        ));
+        assert!(state.restrict(Subject::Place(place), |_| false).is_none());
+        let narrowed = state
+            .restrict(Subject::Place(place), |value| *value == Outcome::Int(0))
+            .unwrap();
+        assert!(matches!(narrowed, Cow::Owned(_)));
+        let zero = Fact::from_outcomes([Outcome::Int(0)]);
+        assert_eq!(narrowed.place(place), zero);
+        assert_eq!(narrowed.register(read), Some(&zero));
+        assert_eq!(state.place(place), codes());
         assert_eq!(state.register(read), Some(&codes()));
     }
 

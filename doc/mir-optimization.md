@@ -142,7 +142,7 @@ Four rules, each of which cost a measurement to establish. They apply to any new
 ## Folding
 
 Runs a forward dataflow analysis to fixpoint and replaces calls it can evaluate at compile time.
-Lattice per register and per `(place root, field path)`: `Unknown | Known(Const) | Uninit`, where a
+Lattice per register and per `(place root, field path)`: `Unknown | Known(Const) | Outcomes | Uninit`, where a
 root is an `alloca`, a parameter, or a `dict_entry`'s cell. `Const` includes scalar/tuple literals,
 symbolic functions, recursive static evidence, closed functions and variant tags, plus a constructive array recipe of known
 `TrivialCopy` elements; the latter is not a mutable array stored in the constant pool.
@@ -220,6 +220,25 @@ often than it calls through one.
 Inlining can expose one last `dict_entry`/dispatch pair after the final fold round. A final
 devirtualization sweep catches only those known dictionary-entry callees before DCE, so the now
 unread entries are removed without reopening the fold/specialize/inline loop.
+
+## Finite-domain analysis and branch simplification
+
+Knowledge of a call's result domain is separate from knowledge of its operands. A native adapter
+may guarantee a finite set of result codes; a variant type likewise guarantees its possible cases.
+These facts support branch simplification for any producer, including third-party host functions,
+without implying purity, termination, or ordering laws. Stronger numeric reasoning uses the known
+semantics of exact standard-library functions. Comparison wrappers may therefore inline normally:
+integer relational reasoning understands both semantic `Ordering` results and their native codes,
+including the standard conversion between them when it remains a call. Partial inlining must not
+discard an established comparison relation merely because an optimization budget runs out.
+
+Finite domains are flow facts, not new types or runtime representations. Every producer of these
+facts must include all possible runtime outcomes: an over-approximation costs precision, but an
+under-approximation can cause miscompilation by eliminating a live branch. Branches narrow their
+possible outcomes; joins take their union, excluding provably unreachable edges. A decision chain
+may test the complement of several cases with one equality when the domain proves those cases
+exhaustive. Such rewrites must preserve the tested value and all intervening effects and cleanup;
+they neither duplicate the producer nor infer additional laws about it.
 
 ## Specialization
 

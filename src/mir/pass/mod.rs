@@ -51,6 +51,7 @@ pub(crate) mod known_callee;
 pub(crate) mod licm;
 pub(crate) mod monomorphize;
 pub(crate) mod negation;
+pub(crate) mod outcome_branch;
 pub(crate) mod owned_arguments;
 pub(crate) mod peephole;
 pub(crate) mod provenance;
@@ -469,6 +470,19 @@ pub(crate) fn optimize_function(
             } else {
                 simplified.body
             });
+            changed = true;
+        }
+        // Tail merging exposes equality chains with shared destinations. Analyze after it, so
+        // we do not pay for a fixpoint on the same chain before its destinations are shared.
+        let source = current.as_ref().unwrap_or(function);
+        if let Some(simplified) = outcome_branch::simplify_outcome_branches(source, env) {
+            current = Some(cleanup_dead_representation_chains(
+                simplified,
+                env,
+                context,
+                specializations,
+                &will_return,
+            ));
             changed = true;
         }
         // Merging forwarding blocks can expose equivalent complete tails; collecting a dead
