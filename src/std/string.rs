@@ -23,18 +23,18 @@ use crate::{
     cached_primitive_ty, cached_ty,
     compiler::error::SourceFailureKind,
     containers::b,
-    hir::function::{
-        BinaryNativeFnMNFN, BinaryNativeFnMRN, BinaryNativeFnRMN, BinaryNativeFnRRFN,
-        BinaryNativeFnRRN, BinaryNativeFnRRV, Function, NativeTrivialCopy, NullaryNativeFnN,
-        TernaryNativeFnRNNN, TernaryNativeFnRRRN, UnaryNativeFnNFN, UnaryNativeFnNN,
-        UnaryNativeFnRN, UnaryNativeOptionalFnM, UnaryNativeOptionalFnR, trivial_copy_private,
+    hir::function::{Function, NativeTrivialCopy, trivial_copy_private},
+    hir::native_functions::{
+        NativeFallibleFnMN, NativeFallibleOutFnN, NativeFallibleOutFnR, NativeFallibleOutFnRR,
+        NativeFnMR, NativeFnR, NativeFnRM, NativeFnRR, NativeOptionalFnM, NativeOptionalFnR,
+        NativeOutFn0, NativeOutFnR, NativeOutFnRNN, NativeOutFnRR, NativeOutFnRRR,
     },
     hir::value::{NativeDisplay, NativeValueType, Value},
     module::{Module, ModuleFunction, Visibility},
     std::{
         core_traits_names::{
-            DEFAULT_TRAIT_NAME, EMPTY_TRAIT_NAME, INSPECT_TRAIT_NAME, ORD_TRAIT_NAME,
-            TRIVIAL_COPY_TRAIT_NAME, VALUE_TRAIT_NAME,
+            DEFAULT_TRAIT_NAME, EMPTY_TRAIT_NAME, INSPECT_TRAIT_NAME, TRIVIAL_COPY_TRAIT_NAME,
+            VALUE_TRAIT_NAME,
         },
         hash::Hasher,
         logic::bool_type,
@@ -151,7 +151,7 @@ impl String {
     /// is a builder append of the same standing and carries the same obligations. The optimization
     /// does not rely on this `Rc` representation, but a change to any of those contracts must
     /// review that pass and `doc/mir-optimization.md`.
-    pub fn push_str(&mut self, value: &Self) {
+    pub extern "C" fn push_str(&mut self, value: &Self) {
         self.push_normalized(value.0.as_str());
     }
 
@@ -175,7 +175,7 @@ impl String {
     /// points therefore share one body: `push_str(&String::from_static(literal))` and
     /// `push_static_str(literal)` are required to produce identical values, and
     /// `mir::pass::string_accumulate` relies on that equality.
-    pub(crate) fn push_static_str(&mut self, value: &StaticStr) {
+    pub(crate) extern "C" fn push_static_str(&mut self, value: &StaticStr) {
         self.push_normalized(value.as_str());
     }
 
@@ -238,7 +238,7 @@ impl String {
         self.0.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub extern "C" fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
@@ -289,15 +289,15 @@ impl String {
         Self(Rc::new(self.0.trim().to_owned()))
     }
 
-    fn starts_with(value: &Self, prefix: &Self) -> bool {
+    extern "C" fn starts_with(value: &Self, prefix: &Self) -> bool {
         value.as_ref().starts_with(prefix.as_ref())
     }
 
-    fn ends_with(value: &Self, suffix: &Self) -> bool {
+    extern "C" fn ends_with(value: &Self, suffix: &Self) -> bool {
         value.as_ref().ends_with(suffix.as_ref())
     }
 
-    fn contains_substring(haystack: &Self, needle: &Self) -> bool {
+    extern "C" fn contains_substring(haystack: &Self, needle: &Self) -> bool {
         haystack.as_ref().contains(needle.as_ref())
     }
 
@@ -305,17 +305,10 @@ impl String {
         value.as_ref().parse::<isize>().ok()
     }
 
-    crate::native_optional_entry!(
-        fn parse_int_ferlium(value: &Self) -> isize = Self::parse_int_impl
-    );
-
     fn parse_int_descr() -> ModuleFunction {
-        UnaryNativeOptionalFnR::description_with_ty(
-            Self::parse_int_ferlium,
+        NativeOptionalFnR::from_rust(Self::parse_int_impl, option_type(int_type())).description(
             ["value"],
             "Parses `value` as a decimal integer, returning `Some` on success and `None` otherwise.",
-            string_type(),
-            option_type(int_type()),
             no_effects(),
         )
     }
@@ -325,17 +318,10 @@ impl String {
         value.as_ref().parse::<Float>().ok()
     }
 
-    crate::native_optional_entry!(
-        fn parse_float_ferlium(value: &Self) -> Float = Self::parse_float_impl
-    );
-
     fn parse_float_descr() -> ModuleFunction {
-        UnaryNativeOptionalFnR::description_with_ty(
-            Self::parse_float_ferlium,
+        NativeOptionalFnR::from_rust(Self::parse_float_impl, option_type(float_type())).description(
             ["value"],
             "Parses `value` as a finite floating-point number, returning `Some` on success and `None` otherwise.",
-            string_type(),
-            option_type(float_type()),
             no_effects(),
         )
     }
@@ -348,17 +334,10 @@ impl String {
         }
     }
 
-    crate::native_optional_entry!(
-        fn parse_bool_ferlium(value: &Self) -> bool = Self::parse_bool_impl
-    );
-
     fn parse_bool_descr() -> ModuleFunction {
-        UnaryNativeOptionalFnR::description_with_ty(
-            Self::parse_bool_ferlium,
+        NativeOptionalFnR::from_rust(Self::parse_bool_impl, option_type(bool_type())).description(
             ["value"],
             "Parses `value` as a boolean, accepting only `true` and `false`.",
-            string_type(),
-            option_type(bool_type()),
             no_effects(),
         )
     }
@@ -414,8 +393,7 @@ impl String {
             string_iter_type(),
             no_effects(),
         ));
-        UnaryNativeFnRN::description_with_ty_scheme(
-            Self::iter,
+        NativeOutFnR::from_rust(String::iter).description_with_ty_scheme(
             ["string"],
             "Creates an iterator over the characters of the string.",
             ty_scheme,
@@ -423,26 +401,18 @@ impl String {
     }
 
     fn unicode_scalar_iter_descr() -> ModuleFunction {
-        UnaryNativeFnRN::description_with_ty(
-            Self::unicode_scalar_iter,
+        NativeOutFnR::from_rust(String::unicode_scalar_iter).description(
             ["string"],
             "Creates an iterator over the Unicode scalar values of `string`.",
-            string_type(),
-            unicode_scalar_iter_type(),
             no_effects(),
         )
     }
 
     fn split_iter_descr() -> ModuleFunction {
-        BinaryNativeFnRRFN::description_with_ty_scheme(
-            Self::split_iterator,
+        NativeFallibleOutFnRR::from_rust(Self::split_iterator).description(
             ["value", "separator"],
             "Creates an iterator over the parts of `value` separated by `separator`.",
-            TypeScheme::new_just_type(FnType::new_by_val(
-                [string_type(), string_type()],
-                string_split_iter_type(),
-                effect(PrimitiveEffect::Fallible),
-            )),
+            effect(PrimitiveEffect::Fallible),
         )
     }
 }
@@ -457,19 +427,21 @@ fn unicode_scalar(value: isize) -> Result<char, SourceFailureKind> {
 }
 
 fn unicode_scalar_is_letter(value: isize) -> Result<bool, SourceFailureKind> {
-    let value = unicode_scalar(value)?;
-    let mut encoded = [0; 4];
-    Ok(SINGLE_UNICODE_LETTER.is_match(value.encode_utf8(&mut encoded)))
+    unicode_scalar(value).map(|value| {
+        let mut encoded = [0; 4];
+        SINGLE_UNICODE_LETTER.is_match(value.encode_utf8(&mut encoded))
+    })
 }
 
 fn unicode_scalar_is_decimal_digit(value: isize) -> Result<bool, SourceFailureKind> {
-    let value = unicode_scalar(value)?;
-    let mut encoded = [0; 4];
-    Ok(SINGLE_UNICODE_DECIMAL_DIGIT.is_match(value.encode_utf8(&mut encoded)))
+    unicode_scalar(value).map(|value| {
+        let mut encoded = [0; 4];
+        SINGLE_UNICODE_DECIMAL_DIGIT.is_match(value.encode_utf8(&mut encoded))
+    })
 }
 
 fn unicode_scalar_is_whitespace(value: isize) -> Result<bool, SourceFailureKind> {
-    Ok(unicode_scalar(value)?.is_whitespace())
+    unicode_scalar(value).map(|value| value.is_whitespace())
 }
 
 impl FromStr for String {
@@ -533,20 +505,11 @@ impl StringUnicodeScalarIterator {
         self.next()
     }
 
-    crate::native_optional_entry!(
-        fn next_value_ferlium(iterator: &mut Self) -> isize = Self::next_value_impl
-    );
-
     fn next_value_descr() -> ModuleFunction {
-        UnaryNativeOptionalFnM::description_with_ty_scheme(
-            Self::next_value_ferlium,
+        NativeOptionalFnM::from_rust(Self::next_value_impl, option_type(int_type())).description(
             ["iterator"],
             "Gets the next Unicode scalar value.",
-            TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
-                [(unicode_scalar_iter_type(), true)],
-                option_type(int_type()),
-                no_effects(),
-            )),
+            no_effects(),
         )
     }
 }
@@ -577,21 +540,11 @@ impl StringIterator {
         self.next()
     }
 
-    crate::native_optional_entry!(
-        fn next_value_ferlium(iterator: &mut Self) -> String = Self::next_value_impl
-    );
-
     fn next_value_descr() -> ModuleFunction {
-        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
-            [(string_iter_type(), true)],
-            option_type(string_type()),
-            no_effects(),
-        ));
-        UnaryNativeOptionalFnM::description_with_ty_scheme(
-            Self::next_value_ferlium,
+        NativeOptionalFnM::from_rust(Self::next_value_impl, option_type(string_type())).description(
             ["iterator"],
             "Gets the next character of the string iterator.",
-            ty_scheme,
+            no_effects(),
         )
     }
 }
@@ -660,21 +613,11 @@ impl StringSplitIterator {
         self.next()
     }
 
-    crate::native_optional_entry!(
-        fn next_value_ferlium(iterator: &mut Self) -> String = Self::next_value_impl
-    );
-
     fn next_value_descr() -> ModuleFunction {
-        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
-            [(string_split_iter_type(), true)],
-            option_type(string_type()),
-            no_effects(),
-        ));
-        UnaryNativeOptionalFnM::description_with_ty_scheme(
-            Self::next_value_ferlium,
+        NativeOptionalFnM::from_rust(Self::next_value_impl, option_type(string_type())).description(
             ["iterator"],
             "Gets the next part of the string split iterator.",
-            ty_scheme,
+            no_effects(),
         )
     }
 }
@@ -726,15 +669,15 @@ pub fn string_value(s: &str) -> Value {
     Value::native(String::from_str(s).unwrap())
 }
 
-fn hash_string(value: &String, state: &mut Hasher) {
+extern "C" fn hash_string(value: &String, state: &mut Hasher) {
     state.write_bytes(value.as_ref().as_bytes());
 }
 
-fn equal_string(lhs: &String, rhs: &String) -> bool {
+extern "C" fn equal_string(lhs: &String, rhs: &String) -> bool {
     lhs == rhs
 }
 
-fn equal_unicode_scalar_iterator(
+extern "C" fn equal_unicode_scalar_iterator(
     lhs: &StringUnicodeScalarIterator,
     rhs: &StringUnicodeScalarIterator,
 ) -> bool {
@@ -748,12 +691,15 @@ fn unicode_scalar_iterator_to_string(value: &StringUnicodeScalarIterator) -> Str
     ))
 }
 
-fn hash_unicode_scalar_iterator(value: &StringUnicodeScalarIterator, state: &mut Hasher) {
+extern "C" fn hash_unicode_scalar_iterator(
+    value: &StringUnicodeScalarIterator,
+    state: &mut Hasher,
+) {
     state.write_bytes(value.string.as_bytes());
     state.write_isize(value.byte_position as isize);
 }
 
-fn equal_string_iterator(lhs: &StringIterator, rhs: &StringIterator) -> bool {
+extern "C" fn equal_string_iterator(lhs: &StringIterator, rhs: &StringIterator) -> bool {
     lhs == rhs
 }
 
@@ -764,12 +710,15 @@ fn string_iterator_to_string(value: &StringIterator) -> String {
     ))
 }
 
-fn hash_string_iterator(value: &StringIterator, state: &mut Hasher) {
+extern "C" fn hash_string_iterator(value: &StringIterator, state: &mut Hasher) {
     state.write_bytes(value.string.as_bytes());
     state.write_isize(value.position as isize);
 }
 
-fn equal_string_split_iterator(lhs: &StringSplitIterator, rhs: &StringSplitIterator) -> bool {
+extern "C" fn equal_string_split_iterator(
+    lhs: &StringSplitIterator,
+    rhs: &StringSplitIterator,
+) -> bool {
     lhs == rhs
 }
 
@@ -780,7 +729,7 @@ fn string_split_iterator_to_string(value: &StringSplitIterator) -> String {
     ))
 }
 
-fn hash_string_split_iterator(value: &StringSplitIterator, state: &mut Hasher) {
+extern "C" fn hash_string_split_iterator(value: &StringSplitIterator, state: &mut Hasher) {
     state.write_bytes(value.string.as_bytes());
     state.write_bytes(value.separator.as_bytes());
     state.write_isize(value.separator_grapheme_len as isize);
@@ -788,7 +737,7 @@ fn hash_string_split_iterator(value: &StringSplitIterator, state: &mut Hasher) {
     state.write_bool(value.finished);
 }
 
-fn compare_string(lhs: &String, rhs: &String) -> Value {
+extern "C" fn compare_string(lhs: &String, rhs: &String) -> isize {
     compare(lhs, rhs)
 }
 
@@ -810,10 +759,17 @@ fn inspect_string(value: &String) -> String {
     String::new(&output)
 }
 
+extern "C" fn string_len(source: &String) -> isize {
+    source.grapheme_count() as isize
+}
+
+extern "C" fn string_byte_len(source: &String) -> isize {
+    source.byte_len() as isize
+}
+
 pub fn add_to_module(to: &mut Module) {
     let value_trait_id = to.expect_std_trait_id_in_current_module(VALUE_TRAIT_NAME);
     let inspect_trait_id = to.expect_std_trait_id_in_current_module(INSPECT_TRAIT_NAME);
-    let ord_trait_id = to.expect_std_trait_id_in_current_module(ORD_TRAIT_NAME);
     let default_trait_id = to.expect_std_trait_id_in_current_module(DEFAULT_TRAIT_NAME);
     let empty_trait_id = to.expect_std_trait_id_in_current_module(EMPTY_TRAIT_NAME);
     let trivial_copy_trait_id = to.expect_std_trait_id_in_current_module(TRIVIAL_COPY_TRAIT_NAME);
@@ -837,12 +793,9 @@ pub fn add_to_module(to: &mut Module) {
     to.add_native_concrete_impl(trivial_copy_trait_id, [static_str_type()], [], []);
     to.add_function_with_visibility(
         ustr(STRING_FROM_STATIC_FUNCTION_NAME),
-        UnaryNativeFnNN::description_with_ty(
-            String::from_static,
+        NativeOutFnR::from_rust(|value: &StaticStr| String::from_static(*value)).description(
             ["literal"],
             "Materializes an owned string from compiler constant data.",
-            static_str_type(),
-            string_type(),
             no_effects(),
         ),
         Visibility::Module,
@@ -854,9 +807,10 @@ pub fn add_to_module(to: &mut Module) {
         [],
         native_layout_associated_consts::<String>(),
         [
-            b(BinaryNativeFnRRN::new(equal_string)) as Function,
-            b(UnaryNativeFnRN::new(String::clone)) as Function,
-            b(BinaryNativeFnRMN::new(hash_string)) as Function,
+            b(NativeFnRR::new(equal_string)) as Function,
+            // A string's textual representation is the string itself.
+            b(NativeOutFnR::from_rust(String::clone)) as Function,
+            b(NativeFnRM::new(hash_string)) as Function,
             native_value_clone_function::<String>(),
             native_value_drop_function::<String>(),
         ],
@@ -866,7 +820,7 @@ pub fn add_to_module(to: &mut Module) {
         [string_type()],
         [],
         [],
-        [b(UnaryNativeFnRN::new(inspect_string)) as Function],
+        [b(NativeFallibleOutFnR::from_rust_infallible(inspect_string)) as Function],
     );
     to.add_concrete_impl_no_locals(
         value_trait_id,
@@ -874,9 +828,9 @@ pub fn add_to_module(to: &mut Module) {
         [],
         native_layout_associated_consts::<StringUnicodeScalarIterator>(),
         [
-            b(BinaryNativeFnRRN::new(equal_unicode_scalar_iterator)) as Function,
-            b(UnaryNativeFnRN::new(unicode_scalar_iterator_to_string)) as Function,
-            b(BinaryNativeFnRMN::new(hash_unicode_scalar_iterator)) as Function,
+            b(NativeFnRR::new(equal_unicode_scalar_iterator)) as Function,
+            b(NativeOutFnR::from_rust(unicode_scalar_iterator_to_string)) as Function,
+            b(NativeFnRM::new(hash_unicode_scalar_iterator)) as Function,
             native_value_clone_function::<StringUnicodeScalarIterator>(),
             native_value_drop_function::<StringUnicodeScalarIterator>(),
         ],
@@ -886,7 +840,9 @@ pub fn add_to_module(to: &mut Module) {
         [unicode_scalar_iter_type()],
         [],
         [],
-        [b(UnaryNativeFnRN::new(unicode_scalar_iterator_to_string)) as Function],
+        [b(NativeFallibleOutFnR::from_rust_infallible(
+            unicode_scalar_iterator_to_string,
+        )) as Function],
     );
     to.add_concrete_impl_no_locals(
         value_trait_id,
@@ -894,9 +850,9 @@ pub fn add_to_module(to: &mut Module) {
         [],
         native_layout_associated_consts::<StringIterator>(),
         [
-            b(BinaryNativeFnRRN::new(equal_string_iterator)) as Function,
-            b(UnaryNativeFnRN::new(string_iterator_to_string)) as Function,
-            b(BinaryNativeFnRMN::new(hash_string_iterator)) as Function,
+            b(NativeFnRR::new(equal_string_iterator)) as Function,
+            b(NativeOutFnR::from_rust(string_iterator_to_string)) as Function,
+            b(NativeFnRM::new(hash_string_iterator)) as Function,
             native_value_clone_function::<StringIterator>(),
             native_value_drop_function::<StringIterator>(),
         ],
@@ -906,7 +862,9 @@ pub fn add_to_module(to: &mut Module) {
         [string_iter_type()],
         [],
         [],
-        [b(UnaryNativeFnRN::new(string_iterator_to_string)) as Function],
+        [b(NativeFallibleOutFnR::from_rust_infallible(
+            string_iterator_to_string,
+        )) as Function],
     );
     to.add_concrete_impl_no_locals(
         value_trait_id,
@@ -914,9 +872,9 @@ pub fn add_to_module(to: &mut Module) {
         [],
         native_layout_associated_consts::<StringSplitIterator>(),
         [
-            b(BinaryNativeFnRRN::new(equal_string_split_iterator)) as Function,
-            b(UnaryNativeFnRN::new(string_split_iterator_to_string)) as Function,
-            b(BinaryNativeFnRMN::new(hash_string_split_iterator)) as Function,
+            b(NativeFnRR::new(equal_string_split_iterator)) as Function,
+            b(NativeOutFnR::from_rust(string_split_iterator_to_string)) as Function,
+            b(NativeFnRM::new(hash_string_split_iterator)) as Function,
             native_value_clone_function::<StringSplitIterator>(),
             native_value_drop_function::<StringSplitIterator>(),
         ],
@@ -926,33 +884,37 @@ pub fn add_to_module(to: &mut Module) {
         [string_split_iter_type()],
         [],
         [],
-        [b(UnaryNativeFnRN::new(string_split_iterator_to_string)) as Function],
+        [b(NativeFallibleOutFnR::from_rust_infallible(
+            string_split_iterator_to_string,
+        )) as Function],
     );
-    to.add_native_concrete_impl(
-        ord_trait_id,
-        [string_type()],
-        [],
-        [b(BinaryNativeFnRRV::new(compare_string)) as Function],
+    to.add_function_with_visibility(
+        ustr("compare_string_code"),
+        NativeFnRR::new(compare_string).description(
+            ["left", "right"],
+            "Internal comparison code.",
+            no_effects(),
+        ),
+        crate::module::Visibility::Module,
     );
     to.add_native_concrete_impl(
         default_trait_id,
         [string_type()],
         [],
-        [b(NullaryNativeFnN::new(String::default)) as Function],
+        [b(NativeOutFn0::from_rust(String::default)) as Function],
     );
     to.add_native_concrete_impl(
         empty_trait_id,
         [string_type()],
         [],
-        [b(NullaryNativeFnN::new(String::default)) as Function],
+        [b(NativeOutFn0::from_rust(String::default)) as Function],
     );
     to.add_function(ustr("parse_int"), String::parse_int_descr());
     to.add_function(ustr("parse_float"), String::parse_float_descr());
     to.add_function(ustr("parse_bool"), String::parse_bool_descr());
     to.add_function(
         ustr(STRING_PUSH_STR_FUNCTION_NAME),
-        BinaryNativeFnMRN::description_with_default_ty(
-            String::push_str,
+        NativeFnMR::new(String::push_str).description(
             ["target", "suffix"],
             "Appends `suffix` to the end of `target`.",
             no_effects(),
@@ -960,8 +922,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function_with_visibility(
         ustr("string_push_unicode_scalar"),
-        BinaryNativeFnMNFN::description_with_default_ty(
-            String::push_unicode_scalar,
+        NativeFallibleFnMN::from_rust(String::push_unicode_scalar).description(
             ["target", "scalar"],
             "Appends a Unicode scalar value to a string.",
             effect(PrimitiveEffect::Fallible),
@@ -970,8 +931,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function_with_visibility(
         ustr("unicode_scalar_is_letter"),
-        UnaryNativeFnNFN::description_with_default_ty(
-            unicode_scalar_is_letter,
+        NativeFallibleOutFnN::from_rust(unicode_scalar_is_letter).description(
             ["scalar"],
             "Whether a Unicode scalar belongs to the general Letter category.",
             effect(PrimitiveEffect::Fallible),
@@ -980,8 +940,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function_with_visibility(
         ustr("unicode_scalar_is_decimal_digit"),
-        UnaryNativeFnNFN::description_with_default_ty(
-            unicode_scalar_is_decimal_digit,
+        NativeFallibleOutFnN::from_rust(unicode_scalar_is_decimal_digit).description(
             ["scalar"],
             "Whether a Unicode scalar belongs to the Decimal_Number category.",
             effect(PrimitiveEffect::Fallible),
@@ -990,8 +949,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function_with_visibility(
         ustr("unicode_scalar_is_whitespace"),
-        UnaryNativeFnNFN::description_with_default_ty(
-            unicode_scalar_is_whitespace,
+        NativeFallibleOutFnN::from_rust(unicode_scalar_is_whitespace).description(
             ["scalar"],
             "Whether a Unicode scalar is whitespace.",
             effect(PrimitiveEffect::Fallible),
@@ -1014,19 +972,15 @@ pub fn add_to_module(to: &mut Module) {
     // so no source expression can produce the second argument.
     to.add_function(
         ustr(STRING_PUSH_STATIC_STR_FUNCTION_NAME),
-        BinaryNativeFnMRN::description_with_in_ty(
-            String::push_static_str,
+        NativeFnMR::new(String::push_static_str).description(
             ["target", "literal"],
             "Appends the compiler constant `literal` to the end of `target`.",
-            string_type(),
-            static_str_type(),
             no_effects(),
         ),
     );
     to.add_function(
         ustr("string_concat"),
-        BinaryNativeFnRRN::description_with_default_ty(
-            String::concat,
+        NativeOutFnRR::from_rust(String::concat).description(
             ["left", "right"],
             "Concatenates `left` and `right` strings.",
             no_effects(),
@@ -1034,8 +988,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("contains_substring"),
-        BinaryNativeFnRRN::description_with_default_ty(
-            String::contains_substring,
+        NativeFnRR::new(String::contains_substring).description(
             ["haystack", "needle"],
             "Returns `true` if `haystack` contains `needle` as a substring.",
             no_effects(),
@@ -1043,8 +996,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("string_trim"),
-        UnaryNativeFnRN::description_with_default_ty(
-            String::trim,
+        NativeOutFnR::from_rust(String::trim).description(
             ["string"],
             "Returns `string` with leading and trailing whitespace removed.",
             no_effects(),
@@ -1052,8 +1004,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("string_starts_with"),
-        BinaryNativeFnRRN::description_with_default_ty(
-            String::starts_with,
+        NativeFnRR::new(String::starts_with).description(
             ["string", "prefix"],
             "Returns `true` if `string` starts with `prefix`.",
             no_effects(),
@@ -1061,8 +1012,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("string_ends_with"),
-        BinaryNativeFnRRN::description_with_default_ty(
-            String::ends_with,
+        NativeFnRR::new(String::ends_with).description(
             ["string", "suffix"],
             "Returns `true` if `string` ends with `suffix`.",
             no_effects(),
@@ -1070,8 +1020,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("string_len"),
-        UnaryNativeFnRN::description_with_default_ty(
-            |a: &String| a.grapheme_count() as isize,
+        NativeFnR::new(string_len).description(
             ["string"],
             "Returns the number of characters in the string.",
             no_effects(),
@@ -1079,8 +1028,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("string_byte_len"),
-        UnaryNativeFnRN::description_with_default_ty(
-            |a: &String| a.byte_len() as isize,
+        NativeFnR::new(string_byte_len).description(
             ["string"],
             "Returns the length of the string in bytes.",
             no_effects(),
@@ -1088,8 +1036,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("string_is_empty"),
-        UnaryNativeFnRN::description_with_default_ty(
-            |a: &String| a.is_empty(),
+        NativeFnR::new(String::is_empty).description(
             ["string"],
             "Returns `true` if the string is empty, otherwise `false`.",
             no_effects(),
@@ -1097,8 +1044,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("string_replace"),
-        TernaryNativeFnRRRN::description_with_default_ty(
-            String::replace,
+        NativeOutFnRRR::from_rust(String::replace).description(
             ["string", "from", "to"],
             "Returns a new string with all occurrences of `from` replaced by `to`.",
             no_effects(),
@@ -1106,8 +1052,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("string_slice"),
-        TernaryNativeFnRNNN::description_with_default_ty(
-            String::slice,
+        NativeOutFnRNN::from_rust(String::slice).description(
             ["string", "start", "end"],
             "Returns the slice of `string` from character index `start` to index `end`. Negative indices count from the end.",
             no_effects(),
@@ -1115,8 +1060,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("uppercase"),
-        UnaryNativeFnRN::description_with_default_ty(
-            String::uppercase,
+        NativeOutFnR::from_rust(String::uppercase).description(
             ["string"],
             "Returns the uppercase equivalent of this string.",
             no_effects(),
@@ -1124,8 +1068,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("lowercase"),
-        UnaryNativeFnRN::description_with_default_ty(
-            String::lowercase,
+        NativeOutFnR::from_rust(String::lowercase).description(
             ["string"],
             "Returns the lowercase equivalent of this string.",
             no_effects(),
@@ -1154,15 +1097,18 @@ mod tests {
         let expected =
             SourceFailureKind::InvalidArgument("Invalid Unicode scalar value: 55296".to_string());
         assert_eq!(unicode_scalar(0xd800), Err(expected.clone()));
-        assert_eq!(unicode_scalar_is_letter(0xd800), Err(expected.clone()));
-        assert_eq!(
-            unicode_scalar_is_decimal_digit(0xd800),
-            Err(expected.clone())
-        );
-        assert_eq!(unicode_scalar_is_whitespace(0xd800), Err(expected.clone()));
-
+        for predicate in [
+            unicode_scalar_is_letter,
+            unicode_scalar_is_decimal_digit,
+            unicode_scalar_is_whitespace,
+        ] {
+            assert_eq!(predicate(0xd800), Err(expected.clone()));
+        }
         let mut value = String::new("unchanged");
-        assert_eq!(value.push_unicode_scalar(0xd800), Err(expected));
+        assert_eq!(
+            String::push_unicode_scalar(&mut value, 0xd800),
+            Err(expected)
+        );
         assert_eq!(value.as_ref(), "unchanged");
     }
 }

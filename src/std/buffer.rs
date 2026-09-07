@@ -19,9 +19,7 @@ use crate::{
     },
     hir::{
         function::{
-            ArgConvention, BinaryNativeFnRMN, BinaryNativeFnRRN, Callable, CallableDefinition,
-            ContextNativeFn, Function, UnaryNativeFnMN, UnaryNativeFnRN,
-            extract_trivial_native_input,
+            ArgConvention, Callable, CallableDefinition, Function, extract_trivial_native_input,
         },
         value::{NativeValueType, Value},
     },
@@ -156,21 +154,87 @@ pub(crate) fn buffer_element_type(ty: Type) -> Option<Type> {
     }
 }
 
-fn buffer_eq(_: &Buffer, _: &Buffer) -> bool {
-    false
+/// Boxed execution of private Buffer operations. These are compiler primitives, not Rust
+/// host entries: physical lowering replaces storage operations with MIR instructions.
+#[derive(Clone, Copy, Debug)]
+enum BufferPrimitive {
+    Slot,
+    WithCapacity,
+    MoveInto,
+    Move,
+    Take,
+    Equal,
+    ToString,
+    Hash,
+    Clone,
+    Drop,
 }
 
-fn buffer_to_string(_: &Buffer) -> super::string::String {
-    super::string::String::new("<buffer>")
+impl Callable for BufferPrimitive {
+    fn call(
+        &self,
+        args: Vec<ValOrMut>,
+        ctx: &mut EvalCtx,
+        _: &[crate::module::ELocalDecl],
+    ) -> EvalControlFlowResult {
+        let mut args = ValOrMutArgs::new(args);
+        match self {
+            Self::Slot => buffer_slot(args, ctx),
+            Self::WithCapacity => {
+                let capacity = int_from_arg(
+                    args.next().unwrap(),
+                    ctx,
+                    "buffer capacity should be an int",
+                );
+                let _size = int_from_arg(
+                    args.next().unwrap(),
+                    ctx,
+                    "buffer element size should be an int",
+                );
+                let _align = int_from_arg(
+                    args.next().unwrap(),
+                    ctx,
+                    "buffer alignment should be an int",
+                );
+                cont(Value::native(buffer_with_capacity(capacity)))
+            }
+            Self::MoveInto => buffer_move_into(args, ctx),
+            Self::Move => buffer_move(args, ctx),
+            Self::Take => buffer_take(args, ctx),
+            Self::Equal => cont(Value::native(false)),
+            Self::ToString => cont(Value::native(super::string::String::new("<buffer>"))),
+            Self::Hash | Self::Drop => cont(Value::unit()),
+            Self::Clone => panic!("Buffer values are std-internal and cannot be cloned directly"),
+        }
+    }
+    fn runtime_argument_passing(&self) -> Option<&[ArgConvention]> {
+        Some(match self {
+            Self::Slot | Self::Take => &[MUTABLE_REF, LET, LET],
+            Self::WithCapacity => &[LET, LET, LET],
+            Self::MoveInto => &[MUTABLE_REF, LET, MUTABLE_REF, LET, LET],
+            Self::Move => &[MUTABLE_REF, MUTABLE_REF],
+            Self::Equal => &[LET, LET],
+            Self::ToString | Self::Clone => &[LET],
+            Self::Hash => &[LET, MUTABLE_REF],
+            Self::Drop => &[MUTABLE_REF],
+        })
+    }
+    fn format_ind(
+        &self,
+        f: &mut std::fmt::Formatter,
+        _: &[crate::module::ELocalDecl],
+        _: &crate::module::ModuleEnv,
+        spacing: usize,
+        indent: usize,
+    ) -> std::fmt::Result {
+        write!(
+            f,
+            "{}{}Buffer::{self:?}",
+            "  ".repeat(spacing),
+            "⎸ ".repeat(indent)
+        )
+    }
 }
-
-fn buffer_hash(_: &Buffer, _: &mut super::hash::Hasher) {}
-
-fn buffer_clone(_: &Buffer) -> Buffer {
-    panic!("Buffer values are std-internal and cannot be cloned directly")
-}
-
-fn buffer_drop(_: &mut Buffer) {}
 
 fn native_function(
     ty: FnType,
@@ -260,12 +324,7 @@ fn buffer_slot_descr() -> ModuleFunction {
         .with_result_rooted_in(0)
         // Computing a slot neither mutates the buffer nor consults external state.
         .with_repeatable_addressor(),
-        Box::new(ContextNativeFn::new(
-            "buffer_slot",
-            &[],
-            &[MUTABLE_REF, LET, LET],
-            buffer_slot,
-        )),
+        Box::new(BufferPrimitive::Slot),
         None,
         Vec::new(),
     )
@@ -290,29 +349,7 @@ fn buffer_with_capacity_descr() -> ModuleFunction {
         [],
         ["capacity", "element_size", "element_align"],
         "Creates fixed-size uninitialized storage.",
-        ContextNativeFn::new(
-            "buffer_with_capacity",
-            &[],
-            &[LET, LET, LET],
-            |mut args: ValOrMutArgs, ctx: &mut EvalCtx| {
-                let capacity = int_from_arg(
-                    args.next().unwrap(),
-                    ctx,
-                    "buffer capacity should be an int",
-                );
-                let _element_size = int_from_arg(
-                    args.next().unwrap(),
-                    ctx,
-                    "buffer element size should be an int",
-                );
-                let _element_align = int_from_arg(
-                    args.next().unwrap(),
-                    ctx,
-                    "buffer element alignment should be an int",
-                );
-                cont(Value::native(buffer_with_capacity(capacity)))
-            },
-        ),
+        BufferPrimitive::WithCapacity,
     )
 }
 
@@ -372,12 +409,7 @@ fn buffer_move_into_descr() -> ModuleFunction {
             "element_size",
         ],
         "Moves a buffer slot into an uninitialized slot of another buffer.",
-        ContextNativeFn::new(
-            "buffer_move_into",
-            &[],
-            &[MUTABLE_REF, LET, MUTABLE_REF, LET, LET],
-            buffer_move_into,
-        ),
+        BufferPrimitive::MoveInto,
     )
 }
 
@@ -405,7 +437,7 @@ fn buffer_move_descr() -> ModuleFunction {
         [],
         ["source", "target"],
         "Moves a whole buffer into another buffer.",
-        ContextNativeFn::new("buffer_move", &[], &[MUTABLE_REF, MUTABLE_REF], buffer_move),
+        BufferPrimitive::Move,
     )
 }
 
@@ -440,7 +472,7 @@ fn buffer_take_descr() -> ModuleFunction {
         [],
         ["source", "index", "element_size"],
         "Moves a value out of a buffer slot.",
-        ContextNativeFn::new("buffer_take", &[], &[MUTABLE_REF, LET, LET], buffer_take),
+        BufferPrimitive::Take,
     )
 }
 
@@ -463,11 +495,11 @@ pub fn add_to_module(to: &mut Module) {
         // ABI identity so the two agree by construction.
         native_layout_associated_consts::<BufferRepr>(),
         [
-            Box::new(BinaryNativeFnRRN::new(buffer_eq)) as Function,
-            Box::new(UnaryNativeFnRN::new(buffer_to_string)) as Function,
-            Box::new(BinaryNativeFnRMN::new(buffer_hash)) as Function,
-            Box::new(UnaryNativeFnRN::new(buffer_clone)) as Function,
-            Box::new(UnaryNativeFnMN::new(buffer_drop)) as Function,
+            Box::new(BufferPrimitive::Equal) as Function,
+            Box::new(BufferPrimitive::ToString) as Function,
+            Box::new(BufferPrimitive::Hash) as Function,
+            Box::new(BufferPrimitive::Clone) as Function,
+            Box::new(BufferPrimitive::Drop) as Function,
         ],
     );
     to.add_blanket_impl_no_locals(
@@ -480,7 +512,7 @@ pub fn add_to_module(to: &mut Module) {
         },
         [],
         [],
-        [Box::new(UnaryNativeFnRN::new(buffer_to_string)) as Function],
+        [Box::new(BufferPrimitive::ToString) as Function],
     );
     to.add_private_unsafe_addressor_subscript(ustr("buffer_slot"), buffer_slot_descr());
     to.add_private_unsafe_function(ustr("buffer_with_capacity"), buffer_with_capacity_descr());

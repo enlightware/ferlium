@@ -41,6 +41,51 @@ use wasm_bindgen_test::*;
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn typed_native_entries_through_interpreters_and_dictionaries() {
+    let mut session = TestSession::new();
+    for name in [
+        "string_trim",
+        "string_concat",
+        "string_push_str",
+        "round",
+        "not",
+    ] {
+        let module = session.session().std_module();
+        let function = module
+            .get_function_by_id(module.get_local_function_id(ustr(name)).unwrap())
+            .unwrap();
+        let entry = function.code.native_entry().expect("migrated std entry");
+        entry.signature().validate(&function.definition).unwrap();
+    }
+    assert_val_eq!(
+        session.run(
+            r#"
+            fn apply(f, value) { f(value) }
+            fn duplicate<T>(value: T) where T: Value { (value, value) }
+            let mut original = " ab ";
+            let trimmed = apply(string_trim, original);
+            string_push_str(original, trimmed);
+            let (left, right) = duplicate(trimmed);
+            let mut parts = ("a", "b");
+            string_push_str(parts.0, parts.1);
+            (string_concat(left, right), original, not(false), round(1.6), 1.25 + 2.5,
+             string_concat(trimmed, trimmed), parts)
+        "#
+        ),
+        crate::harness::expected_tuple(vec![
+            string("abab"),
+            string(" ab ab"),
+            bool(true),
+            int(2),
+            float(3.75),
+            string("abab"),
+            crate::harness::expected_tuple(vec![string("ab"), string("b")]),
+        ])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn print_std_formats_empty_associated_effect_bindings() {
     let session = TestSession::new();
     let rendered = session
@@ -2735,4 +2780,21 @@ fn init_place_builtin_is_rejected_in_user_code() {
         }
         other => panic!("expected UnsafeFeatureUseNotAllowed error, got {other:?}"),
     }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn native_integer_extremes_and_fallible_first_class_calls() {
+    let mut session = TestSession::new();
+    assert_val_eq!(session.run(&format!(
+        "let minimum = -{} - 1; (idiv(minimum, -1) == minimum, idiv_euclid(minimum, -1) == minimum, rem(minimum, -1), mod(minimum, -1), abs(minimum) == minimum)", isize::MAX
+    )), crate::harness::expected_tuple(vec![bool(true), bool(true), int(0), int(0), bool(true)]));
+    assert_val_eq!(
+        session.run("fn apply(f, a, b) { f(a, b) } apply(idiv, 9, 2)"),
+        int(4)
+    );
+    assert_eq!(
+        session.fail_run("fn apply(f, a, b) { f(a, b) } apply(idiv, 9, 0)"),
+        SourceFailureKind::DivisionByZero
+    );
 }

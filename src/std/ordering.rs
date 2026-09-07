@@ -7,11 +7,8 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use ustr::ustr;
-
 use crate::{
     cached_ty,
-    hir::value::Value,
     types::r#type::{Type, variant_type},
 };
 
@@ -27,14 +24,7 @@ pub fn ordering_type() -> Type {
     ]))
 }
 
-pub(crate) fn compare<T>(lhs: T, rhs: T) -> Value
-where
-    T: std::cmp::Ord,
-{
-    use std::cmp::Ordering::*;
-    match lhs.cmp(&rhs) {
-        Less => Value::unit_variant(ustr(ORDERING_LESS)),
-        Equal => Value::unit_variant(ustr(ORDERING_EQUAL)),
-        Greater => Value::unit_variant(ustr(ORDERING_GREATER)),
-    }
+/// Compare Rust values without exposing Rust enums or session-local Ferlium variant tags.
+pub(crate) extern "C" fn compare<T: Ord>(lhs: T, rhs: T) -> isize {
+    lhs.cmp(&rhs) as isize
 }

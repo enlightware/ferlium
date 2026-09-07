@@ -736,8 +736,9 @@ impl Module {
                 ReprResolutionError::Unavailable(definition)
             )) if definition.module != self.module_id()
         ) {
-            // Cross-module representations are checked once this module is registered in a
-            // CompilerSession and a complete ModuleEnv is available.
+            // This standalone module cannot inspect a dependency module's type definitions.
+            // CompilerSession::register_module validates their representations using a complete
+            // ModuleEnv before inserting this module.
             return;
         }
         self.assert_native_optional_result(function, result);
@@ -849,6 +850,17 @@ impl Module {
     /// Add an anonymous function to this module, returning its ID.
     /// The function can be named later using `name_function`.
     pub(crate) fn add_function_anonymous(&mut self, function: ModuleFunction) -> LocalFunctionId {
+        if let Some(entry) = function.code.native_entry() {
+            entry
+                .signature()
+                .validate(&function.definition)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "invalid typed native registration: {error}: {:?}",
+                        function.definition.ty_scheme.ty
+                    )
+                });
+        }
         self.validate_native_optional_result(&function);
         let id = LocalFunctionId::from_index(self.functions.len());
         self.functions.push(function);
@@ -2570,21 +2582,78 @@ pub(crate) fn fmt_ordered_quantifiers(f: &mut fmt::Formatter<'_>, count: u32) ->
 }
 
 #[cfg(test)]
-mod tests {
-    use std::mem::MaybeUninit;
+pub(crate) mod tests {
+    use crate::hir::native_functions::NativeOptionalFnN;
 
     use crate::{
-        hir::function::{UnaryNativeFnNV, UnaryNativeOptionalFnN, write_native_optional_output},
         hir::value::Value,
         std::{logic::bool_type, math::int_type, option::option_type},
-        types::effects::no_effects,
+        types::{effects::no_effects, r#type::FnType},
     };
 
     use super::*;
 
-    unsafe fn optional_int(value: isize, output: *mut MaybeUninit<isize>) -> bool {
-        // SAFETY: the native optional adapter supplies uninitialized `isize` storage.
-        unsafe { write_native_optional_output(Some(value), output) }
+    /// Deliberately lacks the optional C protocol: registration must reject its boxed result.
+    #[derive(Clone)]
+    struct OptionalWithoutNativeEntry;
+
+    impl crate::hir::function::Callable for OptionalWithoutNativeEntry {
+        fn call(
+            &self,
+            args: Vec<crate::eval::ValOrMut>,
+            _: &mut crate::eval::EvalCtx,
+            _: &[ELocalDecl],
+        ) -> crate::eval::EvalControlFlowResult {
+            for arg in args {
+                arg.discard_storage();
+            }
+            crate::eval::cont(Value::unit_variant(ustr("None")))
+        }
+        fn runtime_argument_passing(&self) -> Option<&[crate::hir::function::ArgConvention]> {
+            Some(&[])
+        }
+        fn format_ind(
+            &self,
+            f: &mut std::fmt::Formatter,
+            _: &[ELocalDecl],
+            _: &ModuleEnv,
+            _: usize,
+            _: usize,
+        ) -> std::fmt::Result {
+            f.write_str("OptionalWithoutNativeEntry")
+        }
+    }
+
+    pub(crate) fn optional_without_native_entry_fixture(result: Type) -> ModuleFunction {
+        ModuleFunction::new(
+            crate::hir::function::CallableDefinition::new_infer_quantifiers(
+                FnType::new_by_val([], result, no_effects()),
+                [],
+                "test",
+            ),
+            Box::new(OptionalWithoutNativeEntry),
+            None,
+            vec![],
+        )
+    }
+
+    #[test]
+    #[should_panic(expected = "Option-shaped result representation")]
+    fn registration_rejects_boxed_native_option_construction() {
+        let mut module = Module::new(ModuleId::new(91), Path::single_str("boxed-option"));
+        module.add_function(
+            ustr("boxed_option"),
+            optional_without_native_entry_fixture(option_type(int_type())),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Option-shaped result representation")]
+    fn anonymous_registration_rejects_boxed_native_option_construction() {
+        let mut module = Module::new(ModuleId::new(94), Path::single_str("anonymous-option"));
+        module.add_function_anonymous(optional_without_native_entry_fixture(option_type(
+            int_type(),
+        )));
     }
 
     #[test]
@@ -2606,48 +2675,14 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Option-shaped result representation")]
-    fn registration_rejects_boxed_native_option_construction() {
-        let mut module = Module::new(ModuleId::new(91), Path::single_str("boxed-option"));
-        module.add_function(
-            ustr("boxed_option"),
-            UnaryNativeFnNV::description_with_ty(
-                |value: isize| Value::tuple_variant(ustr("Some"), [Value::native(value)]),
-                ["value"],
-                "test",
-                int_type(),
-                option_type(int_type()),
-                no_effects(),
-            ),
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "Option-shaped result representation")]
-    fn anonymous_registration_rejects_boxed_native_option_construction() {
-        let mut module = Module::new(ModuleId::new(94), Path::single_str("anonymous-option"));
-        module.add_function_anonymous(UnaryNativeFnNV::description_with_ty(
-            |value: isize| Value::tuple_variant(ustr("Some"), [Value::native(value)]),
-            ["value"],
-            "test",
-            int_type(),
-            option_type(int_type()),
-            no_effects(),
-        ));
-    }
-
-    #[test]
     #[should_panic(expected = "result representation is not None(()) | Some((T,))")]
     fn registration_rejects_optional_entry_for_a_non_option_result() {
         let mut module = Module::new(ModuleId::new(92), Path::single_str("not-option"));
         module.add_function(
             ustr("not_option"),
-            UnaryNativeOptionalFnN::description_with_ty(
-                optional_int,
+            NativeOptionalFnN::from_rust(Some::<isize>, int_type()).description(
                 ["value"],
                 "test",
-                int_type(),
-                int_type(),
                 no_effects(),
             ),
         );
@@ -2659,12 +2694,9 @@ mod tests {
         let mut module = Module::new(ModuleId::new(93), Path::single_str("wrong-option"));
         module.add_function(
             ustr("wrong_option"),
-            UnaryNativeOptionalFnN::description_with_ty(
-                optional_int,
+            NativeOptionalFnN::from_rust(Some::<isize>, option_type(bool_type())).description(
                 ["value"],
                 "test",
-                int_type(),
-                option_type(bool_type()),
                 no_effects(),
             ),
         );

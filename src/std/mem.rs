@@ -18,6 +18,5 @@
 // pub fn add_to_module(to: &mut Module) {
 //     to.functions.insert(
 //         ustr("swap"),
-//         BinaryNativeFnMMP::description_gen0_gen0(swap),
 //     );
 // }

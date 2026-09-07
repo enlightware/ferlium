@@ -11,11 +11,10 @@ use ferlium::{
     SourceTable,
     compiler::error::{CompilationError, SourceFailureKind},
     eval::{EvalControlFlowResult, EvalCtx, EvalResult, RuntimeError, ValOrMut, cont},
-    hir::function::{
-        ArgConvention, BinaryNativeFnNNV, BinaryNativeFnRMN, BinaryNativeFnRRN, Callable,
-        CallableDefinition, Function, NativeDropFn, NullaryNativeFnN, NullaryNativeFnV,
-        UnaryNativeFnNN, UnaryNativeFnRN, UnaryNativeFnVN, UnaryNativeFnVV, UnaryNativeOptionalFnN,
-        write_native_optional_output,
+    hir::function::{ArgConvention, Callable, CallableDefinition, Function},
+    hir::native_functions::{
+        NativeDropFn, NativeFn0, NativeFnN, NativeFnR, NativeFnRM, NativeFnRR, NativeOptionalFnN,
+        NativeOutFn0, NativeOutFnN, NativeOutFnR,
     },
     hir::value::{LiteralValue, NativeValueType, Value},
     hir::{ENodeArena, ENodeId, NodeKind},
@@ -39,7 +38,7 @@ use ferlium::{
     types::type_scheme::{PubTypeConstraint, TypeScheme},
 };
 use regex::Regex;
-use std::{cell::RefCell, fmt, mem::MaybeUninit, sync::LazyLock, sync::atomic::AtomicIsize};
+use std::{cell::RefCell, fmt, sync::LazyLock, sync::atomic::AtomicIsize};
 use ustr::ustr;
 
 #[derive(Debug)]
@@ -771,19 +770,19 @@ fn make_clone_tracked() -> CloneTrackedNative {
     CloneTrackedNative(7)
 }
 
-fn clone_tracked_payload(value: &CloneTrackedNative) -> isize {
+extern "C" fn clone_tracked_payload(value: &CloneTrackedNative) -> isize {
     value.0
 }
 
-fn reset_clone_tracked_clones() {
+extern "C" fn reset_clone_tracked_clones() {
     TRACKED_CLONES.store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
-fn clone_tracked_clone_count() -> isize {
+extern "C" fn clone_tracked_clone_count() -> isize {
     TRACKED_CLONES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-fn equal_clone_tracked(left: &CloneTrackedNative, right: &CloneTrackedNative) -> bool {
+extern "C" fn equal_clone_tracked(left: &CloneTrackedNative, right: &CloneTrackedNative) -> bool {
     left.0 == right.0
 }
 
@@ -791,29 +790,28 @@ fn clone_tracked_to_string(value: &CloneTrackedNative) -> ferlium::std::string::
     ferlium::std::string::String::new(&format!("clone_tracked({})", value.0))
 }
 
-fn hash_clone_tracked(value: &CloneTrackedNative, state: &mut ferlium::std::hash::Hasher) {
+extern "C" fn hash_clone_tracked(
+    value: &CloneTrackedNative,
+    state: &mut ferlium::std::hash::Hasher,
+) {
     state.write_isize(value.0);
 }
 
-fn clone_clone_tracked(source: &CloneTrackedNative) -> CloneTrackedNative {
-    source.clone()
-}
-
-unsafe fn drop_clone_tracked(target: *mut CloneTrackedNative) {
+unsafe extern "C" fn drop_clone_tracked(target: *mut CloneTrackedNative) {
     // SAFETY: the destructor adapter supplies one exclusively owned, initialized native value.
     unsafe { target.drop_in_place() };
 }
 
-fn reset_native_drops() {
+extern "C" fn reset_native_drops() {
     TRACKED_NATIVE_DROPS.store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
-fn native_drop_count() -> isize {
+extern "C" fn native_drop_count() -> isize {
     TRACKED_NATIVE_DROPS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 fn clone_tracked_value_clone_function() -> Function {
-    Box::new(UnaryNativeFnRN::new(clone_clone_tracked)) as Function
+    Box::new(NativeOutFnR::from_rust(CloneTrackedNative::clone)) as Function
 }
 
 fn clone_tracked_value_drop_function() -> Function {
@@ -821,7 +819,7 @@ fn clone_tracked_value_drop_function() -> Function {
     Box::new(unsafe { NativeDropFn::new(drop_clone_tracked) }) as Function
 }
 
-fn record_tracked_drop(value: isize) {
+extern "C" fn record_tracked_drop(value: isize) {
     // Wrapping arithmetic: the log accumulates across every test of the process until a test
     // resets it (wasm runs the whole suite in one process), so an unread log can exceed `isize`
     // — 32-bit on wasm. Tests that assert the log reset it first, and their short logs are exact.
@@ -834,11 +832,11 @@ fn record_tracked_drop(value: isize) {
         .unwrap();
 }
 
-fn reset_tracked_drops() {
+extern "C" fn reset_tracked_drops() {
     TRACKED_DROPS.store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
-fn tracked_drop_log() -> isize {
+extern "C" fn tracked_drop_log() -> isize {
     TRACKED_DROPS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
@@ -880,16 +878,6 @@ impl Callable for ConstrainedNativeProbe {
     }
 }
 
-unsafe fn some_int_ferlium(value: isize, output: *mut MaybeUninit<isize>) -> bool {
-    // SAFETY: the optional native adapter supplies uninitialized `isize` storage.
-    unsafe { write_native_optional_output(Some(value), output) }
-}
-
-unsafe fn some_bool_ferlium(value: bool, output: *mut MaybeUninit<bool>) -> bool {
-    // SAFETY: the optional native adapter supplies uninitialized `bool` storage.
-    unsafe { write_native_optional_output(Some(value), output) }
-}
-
 fn testing_module(
     module_id: ModuleId,
     iterator_trait: TraitId,
@@ -911,7 +899,7 @@ fn testing_module(
         [int_type()],
         [],
         [
-            Box::new(UnaryNativeFnRN::new(|_: &ferlium::std::string::String| {
+            Box::new(NativeFnR::from_rust(|_: &ferlium::std::string::String| {
                 0isize
             })) as Function,
         ],
@@ -921,7 +909,7 @@ fn testing_module(
         [bool_type()],
         [string_type()],
         [],
-        [Box::new(UnaryNativeFnNN::new(|value: bool| {
+        [Box::new(NativeOutFnN::from_rust(|value: bool| {
             ferlium::std::string::String::new(if value { "true" } else { "false" })
         })) as Function],
     );
@@ -947,7 +935,7 @@ fn testing_module(
         },
         vec![Type::variable_id(1)],
         [],
-        [Box::new(UnaryNativeFnVV::new(|_value: &Value| Value::unit())) as Function],
+        [Box::new(InterpreterFixture::Ignore) as Function],
     );
     // Test trait with an output effect slot: a pure impl for int, an impl with
     // the read effect for bool, and a blanket impl over Option<T> forwarding
@@ -959,7 +947,7 @@ fn testing_module(
         [int_type()],
         [no_effects()],
         [],
-        [Box::new(UnaryNativeFnNN::new(|v: isize| v * 2)) as Function],
+        [Box::new(NativeFnN::from_rust(|v: isize| v * 2)) as Function],
     );
     module.add_concrete_impl_with_effects_no_locals(
         test_eff_trait_id,
@@ -967,7 +955,7 @@ fn testing_module(
         [int_type()],
         [effect(PrimitiveEffect::Read)],
         [],
-        [Box::new(UnaryNativeFnNN::new(
+        [Box::new(NativeFnN::from_rust(
             |v: bool| {
                 if v { 1isize } else { 0isize }
             },
@@ -980,7 +968,7 @@ fn testing_module(
         [effect(PrimitiveEffect::Write)],
         [],
         [
-            Box::new(UnaryNativeFnRN::new(|_: &ferlium::std::string::String| {
+            Box::new(NativeFnR::from_rust(|_: &ferlium::std::string::String| {
                 0isize
             })) as Function,
         ],
@@ -1002,7 +990,7 @@ fn testing_module(
         vec![Type::variable_id(1)],
         vec![EffType::single_variable_id(0)],
         [],
-        [Box::new(UnaryNativeFnVV::new(|_value: &Value| Value::unit())) as Function],
+        [Box::new(InterpreterFixture::Ignore) as Function],
     );
     // Test trait with two output effect slots: the bool impl has different
     // effects in each slot, so any slot transposition swaps the methods'
@@ -1018,12 +1006,12 @@ fn testing_module(
         ],
         [],
         [
-            Box::new(UnaryNativeFnNN::new(
+            Box::new(NativeFnN::from_rust(
                 |v: bool| {
                     if v { 1isize } else { 0isize }
                 },
             )) as Function,
-            Box::new(UnaryNativeFnNN::new(
+            Box::new(NativeFnN::from_rust(
                 |v: bool| {
                     if v { 2isize } else { 0isize }
                 },
@@ -1057,7 +1045,7 @@ fn testing_module(
         [],
         [EffType::single_variable_id(1).union(&EffType::single_variable_id(2))],
         [],
-        [Box::new(UnaryNativeFnVN::new(|_value: &Value| 0isize)) as Function],
+        [Box::new(InterpreterFixture::Zero) as Function],
     );
     module.add_concrete_impl_for_trait_def_no_locals(
         value_trait_id,
@@ -1069,9 +1057,9 @@ fn testing_module(
             LiteralValue::new_native(std::mem::align_of::<CloneTrackedNative>() as isize),
         ],
         [
-            Box::new(BinaryNativeFnRRN::new(equal_clone_tracked)) as Function,
-            Box::new(UnaryNativeFnRN::new(clone_tracked_to_string)) as Function,
-            Box::new(BinaryNativeFnRMN::new(hash_clone_tracked)) as Function,
+            Box::new(NativeFnRR::new(equal_clone_tracked)) as Function,
+            Box::new(NativeOutFnR::from_rust(clone_tracked_to_string)) as Function,
+            Box::new(NativeFnRM::new(hash_clone_tracked)) as Function,
             clone_tracked_value_clone_function(),
             clone_tracked_value_drop_function(),
         ],
@@ -1101,45 +1089,34 @@ fn testing_module(
     );
     module.add_function(
         "some_int".into(),
-        UnaryNativeOptionalFnN::description_with_ty(
-            some_int_ferlium,
-            ["option"],
-            "Wraps an integer into an Option variant.",
-            int_type(),
-            Type::named(option_type_def_id, [int_type()]),
-            no_effects(),
-        ),
+        NativeOptionalFnN::from_rust(Some::<isize>, Type::named(option_type_def_id, [int_type()]))
+            .description(
+                ["option"],
+                "Wraps an integer into an Option variant.",
+                no_effects(),
+            ),
     );
     module.add_function(
         "some_bool".into(),
-        UnaryNativeOptionalFnN::description_with_ty(
-            some_bool_ferlium,
-            ["option"],
-            "Wraps a boolean into an Option variant.",
-            bool_type(),
-            Type::named(option_type_def_id, [bool_type()]),
-            no_effects(),
-        ),
+        NativeOptionalFnN::from_rust(Some::<bool>, Type::named(option_type_def_id, [bool_type()]))
+            .description(
+                ["option"],
+                "Wraps a boolean into an Option variant.",
+                no_effects(),
+            ),
     );
     let pair_variant_type = variant_type([("Pair", Type::tuple([int_type(), int_type()]))]);
     module.add_function(
         "pair".into(),
-        BinaryNativeFnNNV::description_with_ty(
-            |a: isize, b: isize| {
-                Value::tuple_variant(ustr("Pair"), [Value::native(a), Value::native(b)])
-            },
+        InterpreterFixture::Pair.description(
             ["first", "second"],
             "Creates a Pair variant from two integers.",
-            int_type(),
-            int_type(),
-            pair_variant_type,
-            no_effects(),
+            FnType::new_by_val([int_type(), int_type()], pair_variant_type, no_effects()),
         ),
     );
     module.add_function(
         "make_clone_tracked".into(),
-        NullaryNativeFnN::description_with_default_ty(
-            make_clone_tracked,
+        NativeOutFn0::from_rust(make_clone_tracked).description(
             [],
             "Creates a clone-counting native test value.",
             no_effects(),
@@ -1147,8 +1124,7 @@ fn testing_module(
     );
     module.add_function(
         "clone_tracked_payload".into(),
-        UnaryNativeFnRN::description_with_default_ty(
-            clone_tracked_payload,
+        NativeFnR::new(clone_tracked_payload).description(
             ["value"],
             "Returns the payload of a clone-counting native test value.",
             no_effects(),
@@ -1156,8 +1132,7 @@ fn testing_module(
     );
     module.add_function(
         "reset_clone_tracked_clones".into(),
-        NullaryNativeFnN::description_with_default_ty(
-            reset_clone_tracked_clones,
+        NativeFn0::new(reset_clone_tracked_clones).description(
             [],
             "Resets the clone counter for clone-counting native test values.",
             effect(PrimitiveEffect::Write),
@@ -1165,8 +1140,7 @@ fn testing_module(
     );
     module.add_function(
         "clone_tracked_clone_count".into(),
-        NullaryNativeFnN::description_with_default_ty(
-            clone_tracked_clone_count,
+        NativeFn0::new(clone_tracked_clone_count).description(
             [],
             "Returns the clone counter for clone-counting native test values.",
             effect(PrimitiveEffect::Read),
@@ -1174,8 +1148,7 @@ fn testing_module(
     );
     module.add_function(
         "reset_native_drops".into(),
-        NullaryNativeFnN::description_with_default_ty(
-            reset_native_drops,
+        NativeFn0::new(reset_native_drops).description(
             [],
             "Resets the Rust destructor counter for native test values.",
             effect(PrimitiveEffect::Write),
@@ -1183,8 +1156,7 @@ fn testing_module(
     );
     module.add_function(
         "native_drop_count".into(),
-        NullaryNativeFnN::description_with_default_ty(
-            native_drop_count,
+        NativeFn0::new(native_drop_count).description(
             [],
             "Returns the Rust destructor counter for native test values.",
             effect(PrimitiveEffect::Read),
@@ -1192,20 +1164,16 @@ fn testing_module(
     );
     module.add_function(
         "record_tracked_drop".into(),
-        UnaryNativeFnNN::description_with_default_ty(
-            record_tracked_drop,
+        // Declared pure because Value::drop has no effects. Unit calls are not folded away.
+        NativeFnN::new(record_tracked_drop).description(
             ["value"],
-            // Declared pure because `Value::drop` is: the trait's method carries no effects, so an
-            // impl that records the drop cannot declare one either. The folding pass does not
-            // remove unit-returning calls, which is what keeps this instrumentation observable.
             "Records a dropped test value in the drop log.",
             no_effects(),
         ),
     );
     module.add_function(
         "reset_tracked_drops".into(),
-        NullaryNativeFnN::description_with_default_ty(
-            reset_tracked_drops,
+        NativeFn0::new(reset_tracked_drops).description(
             [],
             "Resets the tracked drop log.",
             effect(PrimitiveEffect::Write),
@@ -1213,8 +1181,7 @@ fn testing_module(
     );
     module.add_function(
         "tracked_drop_log".into(),
-        NullaryNativeFnN::description_with_default_ty(
-            tracked_drop_log,
+        NativeFn0::new(tracked_drop_log).description(
             [],
             "Returns the tracked drop log.",
             effect(PrimitiveEffect::Read),
@@ -1232,8 +1199,7 @@ fn test_effect_module(module_id: ModuleId) -> Module {
     let mut module = Module::new(module_id, Path::single_str("effects"));
     module.add_function(
         "read".into(),
-        NullaryNativeFnN::description_with_default_ty(
-            || (),
+        NativeFn0::from_rust(|| ()).description(
             [],
             "Performs a read effect.",
             effect(PrimitiveEffect::Read),
@@ -1241,8 +1207,7 @@ fn test_effect_module(module_id: ModuleId) -> Module {
     );
     module.add_function(
         "write".into(),
-        NullaryNativeFnN::description_with_default_ty(
-            || (),
+        NativeFn0::from_rust(|| ()).description(
             [],
             "Performs a write effect.",
             effect(PrimitiveEffect::Write),
@@ -1250,8 +1215,7 @@ fn test_effect_module(module_id: ModuleId) -> Module {
     );
     module.add_function(
         "read_write".into(),
-        NullaryNativeFnN::description_with_default_ty(
-            || (),
+        NativeFn0::from_rust(|| ()).description(
             [],
             "Performs both read and write effects.",
             effects(&[PrimitiveEffect::Read, PrimitiveEffect::Write]),
@@ -1259,16 +1223,18 @@ fn test_effect_module(module_id: ModuleId) -> Module {
     );
     module.add_function(
         "take_read".into(),
-        UnaryNativeFnVN::description_with_in_ty(
-            |_value: &Value| (),
+        InterpreterFixture::Ignore.description(
             ["value"],
             "Takes a first-class function that performs a read effect, and fake call it.",
-            Type::function_type(FnType::new(
-                vec![],
+            FnType::new_by_val(
+                [Type::function_type(FnType::new(
+                    vec![],
+                    Type::unit(),
+                    effect(PrimitiveEffect::Read),
+                ))],
                 Type::unit(),
                 effect(PrimitiveEffect::Read),
-            )),
-            effect(PrimitiveEffect::Read),
+            ),
         ),
     );
     module
@@ -1276,11 +1242,11 @@ fn test_effect_module(module_id: ModuleId) -> Module {
 
 static INT_PROPERTY_VALUE: AtomicIsize = AtomicIsize::new(0);
 
-pub fn set_property_value(value: isize) {
+pub extern "C" fn set_property_value(value: isize) {
     INT_PROPERTY_VALUE.store(value, std::sync::atomic::Ordering::Relaxed);
 }
 
-pub fn get_property_value() -> isize {
+pub extern "C" fn get_property_value() -> isize {
     INT_PROPERTY_VALUE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
@@ -1365,8 +1331,7 @@ fn test_property_module(module_id: ModuleId) -> Module {
     let mut module = Module::new(module_id, Path::single_str("props"));
     module.add_function(
         "@get my_scope.my_var".into(),
-        NullaryNativeFnN::description_with_default_ty(
-            get_property_value,
+        NativeFn0::new(get_property_value).description(
             [],
             "Gets the value of my_scope.my_var.",
             effect(PrimitiveEffect::Read),
@@ -1374,8 +1339,7 @@ fn test_property_module(module_id: ModuleId) -> Module {
     );
     module.add_function(
         "@set my_scope.my_var".into(),
-        UnaryNativeFnNN::description_with_default_ty(
-            set_property_value,
+        NativeFnN::new(set_property_value).description(
             ["value"],
             "Sets the value of my_scope.my_var.",
             effect(PrimitiveEffect::Write),
@@ -1383,22 +1347,22 @@ fn test_property_module(module_id: ModuleId) -> Module {
     );
     module.add_function(
         "@get my_scope.my_array".into(),
-        NullaryNativeFnV::description_with_ty(
-            get_array_property_value_value,
+        InterpreterFixture::GetArray.description(
             [],
             "Gets the value of my_scope.my_array.",
-            array_type(int_type()),
-            effect(PrimitiveEffect::Read),
+            FnType::new_by_val([], array_type(int_type()), effect(PrimitiveEffect::Read)),
         ),
     );
     module.add_function(
         "@set my_scope.my_array".into(),
-        UnaryNativeFnVN::description_with_in_ty(
-            set_array_property_value_value_ref,
+        InterpreterFixture::SetArray.description(
             ["value"],
             "Sets the value of my_scope.my_array.",
-            array_type(int_type()),
-            effect(PrimitiveEffect::Write),
+            FnType::new_by_val(
+                [array_type(int_type())],
+                Type::unit(),
+                effect(PrimitiveEffect::Write),
+            ),
         ),
     );
     module
@@ -2031,4 +1995,80 @@ macro_rules! array {
             $crate::harness::expected_array_infer(values)
         }
     };
+}
+
+/// Synthetic interpreter operations for compiler tests involving unresolved generic/structural
+/// types. Host-native ABI tests use typed C entries above; these fixtures carry no native entry.
+#[derive(Clone, Copy, Debug)]
+enum InterpreterFixture {
+    Ignore,
+    Zero,
+    Pair,
+    GetArray,
+    SetArray,
+}
+impl InterpreterFixture {
+    fn description(
+        self,
+        names: impl IntoIterator<Item = &'static str>,
+        doc: &'static str,
+        ty: FnType,
+    ) -> ModuleFunction {
+        ModuleFunction::new(
+            CallableDefinition::new(
+                TypeScheme::new_infer_quantifiers(ty),
+                names.into_iter().map(ustr).collect(),
+                Some(doc.into()),
+            ),
+            Box::new(self),
+            None,
+            Vec::new(),
+        )
+    }
+}
+impl Callable for InterpreterFixture {
+    fn call(
+        &self,
+        args: Vec<ValOrMut>,
+        ctx: &mut EvalCtx,
+        _: &[ELocalDecl],
+    ) -> EvalControlFlowResult {
+        let result = match self {
+            Self::Ignore => Value::unit(),
+            Self::Zero => Value::native(0isize),
+            Self::Pair => {
+                let a = *args[0].as_primitive::<isize>(ctx).unwrap().unwrap();
+                let b = *args[1].as_primitive::<isize>(ctx).unwrap().unwrap();
+                Value::tuple_variant(ustr("Pair"), [Value::native(a), Value::native(b)])
+            }
+            Self::GetArray => get_array_property_value_value(),
+            Self::SetArray => {
+                set_array_property_value_value_ref(args[0].as_value_ref(ctx).unwrap());
+                Value::unit()
+            }
+        };
+        for arg in args {
+            if let ValOrMut::Val(value) = arg {
+                value.discard_storage();
+            }
+        }
+        cont(result)
+    }
+    fn runtime_argument_passing(&self) -> Option<&[ArgConvention]> {
+        Some(match self {
+            Self::GetArray => &[],
+            Self::Pair => &[ArgConvention::Let, ArgConvention::Let],
+            _ => &[ArgConvention::Let],
+        })
+    }
+    fn format_ind(
+        &self,
+        f: &mut std::fmt::Formatter,
+        _: &[ELocalDecl],
+        _: &ModuleEnv,
+        _: usize,
+        _: usize,
+    ) -> std::fmt::Result {
+        write!(f, "InterpreterFixture::{self:?}")
+    }
 }

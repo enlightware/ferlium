@@ -1,3 +1,22 @@
+// Build semantic tags in Ferlium: their numeric identities belong to the compilation session.
+fn ordering_from_code(code: int) -> Ordering {
+    match code { -1 => Less, 0 => Equal, _ => Greater }
+}
+
+// Keep the known comparison identity available to MIR bounds and branch analysis.
+impl Ord {
+    #[inline(never)]
+    fn cmp(left: int, right: int) -> Ordering { ordering_from_code(compare_int_code(left, right)) }
+}
+impl Ord {
+    #[inline(never)]
+    fn cmp(left: float, right: float) -> Ordering { ordering_from_code(compare_float_code(left, right)) }
+}
+impl Ord {
+    #[inline(never)]
+    fn cmp(left: string, right: string) -> Ordering { ordering_from_code(compare_string_code(left, right)) }
+}
+
 /// Returns `true` if `left` is NOT equal to `right`, otherwise `false`.
 pub fn ne(left, right) {
 	not eq(left, right)

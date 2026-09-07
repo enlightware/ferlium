@@ -9,8 +9,6 @@
 use std::{
     fmt::{self, Debug},
     hash::DefaultHasher,
-    marker::PhantomData,
-    mem::MaybeUninit,
 };
 
 use dyn_clone::DynClone;
@@ -18,21 +16,20 @@ use dyn_clone::DynClone;
 use derive_new::new;
 use ustr::Ustr;
 
-use ferlium_macros::declare_native_fn_aliases;
+use super::native_functions::NativeEntry;
 
 use crate::{
     Location,
     ast::{Attribute, MetaItem, UstrSpan},
     compiler::error::SourceFailureKind,
     eval::{
-        ControlFlow, EvalControlFlowResult, EvalCtx, PlaceResult, RuntimeError, ValOrMut,
-        ValOrMutArgs, cont, drop_frame_owned_locals_on_error, eval_node_with_ctx,
+        ControlFlow, EvalControlFlowResult, EvalCtx, PlaceResult, RuntimeError, ValOrMut, cont,
+        drop_frame_owned_locals_on_error, eval_node_with_ctx,
     },
     format::{FormatWith, escape_identifier, format_generic_param_list, write_identifier},
-    hir::value::{LiteralNativeValue, LiteralValue, NativeValue, Value},
+    hir::value::{LiteralNativeValue, LiteralValue, Value},
     hir::{self, ENodeId, UNodeArena, UNodeId},
-    module::{ELocalDecl, ModuleEnv, ModuleFunction, ProjectionIndex, ULocalDecl},
-    types::effects::EffType,
+    module::{ELocalDecl, ModuleEnv, ProjectionIndex, ULocalDecl},
     types::r#type::{
         CallImplType, CallResultConvention, FnArgType, FnType, Type,
         fmt_call_impl_type_with_arg_names,
@@ -390,6 +387,13 @@ type CallCtx<'a> = EvalCtx<'a>;
 
 /// A function that can be called
 pub trait Callable: DynClone {
+    /// Native entry address and ABI contract, when available.
+    ///
+    /// Backend lowering retains the contract; runtime linking resolves the address.
+    /// Interpreter-only callbacks provide no native entry.
+    fn native_entry(&self) -> Option<&NativeEntry> {
+        None
+    }
     fn call(
         &self,
         args: Vec<ValOrMut>,
@@ -444,105 +448,14 @@ impl Debug for dyn Callable {
 
 dyn_clone::clone_trait_object!(Callable);
 
-/// Native destructor adapter for the compiler-owned `Value::drop(&mut T)` method.
-///
-/// Unlike an ordinary mutable native argument, the target becomes uninitialized. The boxed
-/// interpreters detach its payload before calling the Rust entry, so later storage reclamation
-/// cannot destroy it again. The pointer is a Rust transport detail, not a Ferlium pointer type.
-///
-/// The entry must be invoked only after invalidating the target slot and detaching its payload,
-/// with no borrow of that slot held across the callback. Host re-entry therefore cannot recover
-/// or destroy the original payload through the target place; ordinary drop guards see it absent.
-pub struct NativeDropFn<T: 'static> {
-    function: unsafe fn(*mut T),
-}
-
-impl<T: 'static> Clone for NativeDropFn<T> {
-    fn clone(&self) -> Self {
-        Self {
-            function: self.function,
-        }
-    }
-}
-
-impl<T: 'static> NativeDropFn<T> {
-    /// Register a Rust entry that destroys an initialized `T` without freeing its storage.
-    ///
-    /// # Safety
-    ///
-    /// `function` must destroy its pointee exactly once, must not retain the pointer, and must
-    /// leave the storage uninitialized. Register this adapter only as `Value::drop` for `T`;
-    /// ordinary mutable Ferlium parameters must remain initialized after a call.
-    pub unsafe fn new(function: unsafe fn(*mut T)) -> Self {
-        Self { function }
-    }
-}
-
-impl<T: 'static> Callable for NativeDropFn<T> {
-    fn call(
-        &self,
-        args: Vec<ValOrMut>,
-        ctx: &mut CallCtx,
-        _locals: &[ELocalDecl],
-    ) -> EvalControlFlowResult {
-        let args = CallArgsStorageGuard::new(args);
-        assert_eq!(args.args.len(), 1, "native drop takes one mutable target");
-        let target = args.args[0]
-            .as_place()
-            .target_mut(ctx)
-            .map_err(RuntimeError::new_native)?;
-        assert!(
-            target
-                .as_native()
-                .is_some_and(|native| NativeValue::as_any(native.as_ref()).is::<T>()),
-            "native drop target must contain an initialized {}",
-            std::any::type_name::<T>(),
-        );
-        let value = std::mem::replace(target, Value::uninit());
-        let native = value
-            .into_native()
-            .expect("validated native drop target")
-            .into_any()
-            .downcast::<T>()
-            .expect("validated native drop type");
-        // Moving out of the box reclaims its allocation. MaybeUninit keeps the detached payload
-        // from being dropped again, including if the Rust destructor unwinds.
-        let mut storage = MaybeUninit::new(*native);
-        // SAFETY: storage contains one initialized T with its required alignment and exclusive
-        // ownership. Registration guarantees that the entry consumes that initialization only.
-        unsafe { (self.function)(storage.as_mut_ptr()) };
-        cont(Value::unit())
-    }
-
-    fn runtime_argument_passing(&self) -> Option<&[ArgConvention]> {
-        Some(&[ArgConvention::MutableRef])
-    }
-
-    fn format_ind(
-        &self,
-        f: &mut fmt::Formatter,
-        _locals: &[ELocalDecl],
-        _env: &ModuleEnv<'_>,
-        spacing: usize,
-        indent: usize,
-    ) -> fmt::Result {
-        let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
-        write!(f, "{indent_str}NativeDropFn @ {:p}", self.function)
-    }
-}
-
 /// Owns prepared call arguments until they are borrowed or transferred into a frame.
-struct CallArgsStorageGuard {
-    args: Vec<ValOrMut>,
+pub(super) struct CallArgsStorageGuard {
+    pub(super) args: Vec<ValOrMut>,
 }
 
 impl CallArgsStorageGuard {
-    fn new(args: Vec<ValOrMut>) -> Self {
+    pub(super) fn new(args: Vec<ValOrMut>) -> Self {
         Self { args }
-    }
-
-    fn iter(&self) -> std::slice::Iter<'_, ValOrMut> {
-        self.args.iter()
     }
 
     fn into_vec(mut self) -> Vec<ValOrMut> {
@@ -775,75 +688,6 @@ impl PartialEq for Box<ScriptFunction> {
 
 impl Eq for Box<ScriptFunction> {}
 
-/// Native callable wrapper for primitives that need direct access to the evaluation context.
-///
-/// Context-native functions take ownership of their argument vector. Unlike the
-/// generated native wrappers below, they must consume or explicitly discard any
-/// `ValOrMut::Val` they remove from that vector.
-#[derive(Debug, Clone)]
-pub struct ContextNativeFn {
-    /// Debug name used when formatting the native callable.
-    name: &'static str,
-    /// Runtime adapter passing, including hidden evidence followed by visible parameters.
-    runtime_argument_passing: Vec<ArgConvention>,
-    /// Visible Ferlium parameter passing, excluding hidden runtime evidence.
-    visible_parameter_passing: &'static [ArgConvention],
-    /// Rust callback implementing the context-native operation.
-    function: for<'a> fn(ValOrMutArgs, &mut CallCtx<'a>) -> EvalControlFlowResult,
-}
-
-impl ContextNativeFn {
-    pub(crate) fn new(
-        name: &'static str,
-        hidden_argument_passing: &'static [ArgConvention],
-        visible_parameter_passing: &'static [ArgConvention],
-        function: for<'a> fn(ValOrMutArgs, &mut CallCtx<'a>) -> EvalControlFlowResult,
-    ) -> Self {
-        let runtime_argument_passing = hidden_argument_passing
-            .iter()
-            .chain(visible_parameter_passing)
-            .copied()
-            .collect();
-        Self {
-            name,
-            runtime_argument_passing,
-            visible_parameter_passing,
-            function,
-        }
-    }
-}
-
-impl Callable for ContextNativeFn {
-    fn call(
-        &self,
-        args: Vec<ValOrMut>,
-        ctx: &mut CallCtx,
-        _locals: &[ELocalDecl],
-    ) -> EvalControlFlowResult {
-        (self.function)(ValOrMutArgs::new(args), ctx)
-    }
-
-    fn runtime_argument_passing(&self) -> Option<&[ArgConvention]> {
-        Some(&self.runtime_argument_passing)
-    }
-
-    fn visible_parameter_passing(&self) -> Option<&[ArgConvention]> {
-        Some(self.visible_parameter_passing)
-    }
-
-    fn format_ind(
-        &self,
-        f: &mut std::fmt::Formatter,
-        _locals: &[ELocalDecl],
-        _env: &ModuleEnv<'_>,
-        spacing: usize,
-        indent: usize,
-    ) -> std::fmt::Result {
-        let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
-        write!(f, "{}{} @ {:p}", indent_str, self.name, self.function)
-    }
-}
-
 /// Compiler-generated addressor for a structural projection with a fixed field index.
 #[derive(Debug, Clone)]
 pub struct StructuralFieldAddressor {
@@ -916,28 +760,6 @@ impl Callable for StructuralFieldAddressor {
         let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
         write!(f, "{}structural field addressor {}", indent_str, self.index)
     }
-}
-
-// Helper traits and structs for defining native functions
-
-/// A trait that must be satisfied by the output of a native function.
-/// This is used to ensure that the output can be converted to a `Value`.
-pub trait NativeOutput: NativeValue {}
-impl<T: NativeValue> NativeOutput for T {}
-
-/// Marker selecting owned Rust-value extraction for a native `Let` argument.
-pub struct NatVal<T> {
-    _marker: PhantomData<T>,
-}
-
-/// Marker selecting shared Rust-reference extraction for a native `Let` argument.
-pub struct NatRef<T> {
-    _marker: PhantomData<T>,
-}
-
-/// Marker selecting mutable Rust-reference extraction for a native `MutableRef` argument.
-pub struct NatMut<T> {
-    _marker: PhantomData<T>,
 }
 
 pub(crate) mod trivial_copy_private {
@@ -1027,488 +849,6 @@ pub fn extract_native_ref<'m, T: 'static>(
     }
 }
 
-/// A trait that can extract an argument from a `ValOrMut` and a `CallCtx`.
-/// This is necessary due to the lack of specialization in stable Rust.
-pub trait ArgExtractor {
-    type Output<'a>;
-    const PASSING: ArgConvention;
-    fn extract<'m>(
-        arg: &'m ValOrMut,
-        ctx: &'m mut CallCtx,
-    ) -> Result<Self::Output<'m>, SourceFailureKind>;
-    fn default_ty() -> Type;
-}
-
-impl ArgExtractor for Value {
-    type Output<'a> = &'a Value;
-    const PASSING: ArgConvention = ArgConvention::Let;
-    fn extract<'m>(
-        arg: &'m ValOrMut,
-        ctx: &'m mut CallCtx,
-    ) -> Result<Self::Output<'m>, SourceFailureKind> {
-        arg.as_value_ref(ctx)
-    }
-    fn default_ty() -> Type {
-        Type::variable_id(0)
-    }
-}
-
-impl ArgExtractor for &'_ mut Value {
-    type Output<'a> = &'a mut Value;
-    const PASSING: ArgConvention = ArgConvention::MutableRef;
-    fn extract<'m>(
-        arg: &'m ValOrMut,
-        ctx: &'m mut CallCtx,
-    ) -> Result<Self::Output<'m>, SourceFailureKind> {
-        arg.as_place().target_mut(ctx)
-    }
-    fn default_ty() -> Type {
-        Type::variable_id(0)
-    }
-}
-
-impl<T: NativeTrivialCopy> ArgExtractor for NatVal<T> {
-    type Output<'a> = T;
-    const PASSING: ArgConvention = ArgConvention::Let;
-    fn extract<'m>(
-        arg: &'m ValOrMut,
-        ctx: &'m mut CallCtx,
-    ) -> Result<Self::Output<'m>, SourceFailureKind> {
-        extract_trivial_native_input(arg, ctx)
-    }
-    fn default_ty() -> Type {
-        Type::primitive::<T>()
-    }
-}
-
-impl<T: 'static> ArgExtractor for NatRef<T> {
-    type Output<'a> = &'a T;
-    const PASSING: ArgConvention = ArgConvention::Let;
-    fn extract<'m>(
-        arg: &'m ValOrMut,
-        ctx: &'m mut CallCtx,
-    ) -> Result<Self::Output<'m>, SourceFailureKind> {
-        extract_native_ref(arg, ctx)
-    }
-    fn default_ty() -> Type {
-        Type::primitive::<T>()
-    }
-}
-
-impl<T: 'static> ArgExtractor for NatMut<T> {
-    type Output<'a> = &'a mut T;
-    const PASSING: ArgConvention = ArgConvention::MutableRef;
-    fn extract<'m>(
-        arg: &'m ValOrMut,
-        ctx: &'m mut CallCtx,
-    ) -> Result<Self::Output<'m>, SourceFailureKind> {
-        Ok(arg.as_mut_primitive::<T>(ctx)?.unwrap())
-    }
-    fn default_ty() -> Type {
-        Type::primitive::<T>()
-    }
-}
-
-/// Marker struct to declare the output of a native function as a fallible value.
-pub struct Fallible<T> {
-    _marker: PhantomData<T>,
-}
-
-/// A trait to dispatch over the fallibility of a native function
-pub trait OutputBuilder {
-    type Input;
-    fn build(result: Self::Input) -> EvalControlFlowResult;
-    fn default_ty() -> Type;
-}
-
-impl<O: NativeOutput> OutputBuilder for NatVal<O> {
-    type Input = O;
-    fn build(result: Self::Input) -> EvalControlFlowResult {
-        cont(Value::native(result))
-    }
-    fn default_ty() -> Type {
-        Type::primitive::<O>()
-    }
-}
-
-impl<O: NativeOutput> OutputBuilder for Fallible<NatVal<O>> {
-    type Input = Result<O, SourceFailureKind>;
-    fn build(result: Self::Input) -> EvalControlFlowResult {
-        cont(Value::native(result.map_err(RuntimeError::new_native)?))
-    }
-    fn default_ty() -> Type {
-        Type::primitive::<O>()
-    }
-}
-
-impl OutputBuilder for Value {
-    type Input = Value;
-    fn build(result: Self::Input) -> EvalControlFlowResult {
-        cont(result)
-    }
-    fn default_ty() -> Type {
-        Type::variable_id(0)
-    }
-}
-
-impl OutputBuilder for Fallible<Value> {
-    type Input = Result<Value, SourceFailureKind>;
-    fn build(result: Self::Input) -> EvalControlFlowResult {
-        cont(result.map_err(RuntimeError::new_native)?)
-    }
-    fn default_ty() -> Type {
-        Type::variable_id(0)
-    }
-}
-
-// Native functions of various arities
-
-macro_rules! count {
-    () => (0usize);
-    ( $x:tt $($xs:tt)* ) => (1usize + count!($($xs)*));
-}
-
-macro_rules! n_ary_native_fn {
-    // Entry point for generating n-ary function structures
-    ($struct_name:ident $(, $arg:ident)*) => {
-        #[allow(unused_parens)]
-        pub struct $struct_name<
-            $($arg: ArgExtractor + 'static,)*
-            O: OutputBuilder + 'static,
-        >(
-            for<'a> fn($($arg::Output<'a>),*) -> O::Input,
-            PhantomData<($($arg,)* O)>,
-        );
-
-        impl<
-            $($arg: ArgExtractor + 'static,)*
-            O: OutputBuilder + 'static,
-        > Clone for $struct_name<$($arg,)* O>
-        {
-            fn clone(&self) -> Self {
-                *self
-            }
-        }
-
-        impl<
-            $($arg: ArgExtractor + 'static,)*
-            O: OutputBuilder + 'static,
-        > Copy for $struct_name<$($arg,)* O> {}
-
-        impl<
-            $($arg: ArgExtractor + 'static,)*
-            O: OutputBuilder + 'static,
-        > std::fmt::Debug for $struct_name<$($arg,)* O>
-        {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "{} @ {:p}", stringify!($struct_name), &self.0)
-            }
-        }
-
-        impl<
-            $($arg: ArgExtractor + 'static,)*
-            O: OutputBuilder + 'static,
-        > $struct_name<$($arg,)* O>
-        {
-            pub fn new(f: for<'a> fn($($arg::Output<'a>),*) -> O::Input) -> Self {
-                $struct_name(f, PhantomData)
-            }
-
-            pub fn description_with_ty_scheme(f: for<'a> fn($($arg::Output<'a>),*) -> O::Input, arg_names: [&'static str; count!($($arg)*)], doc: &'static str, ty_scheme: TypeScheme<FnType>) -> ModuleFunction {
-                ModuleFunction::new(
-                    CallableDefinition::new(
-                        ty_scheme,
-                        arg_names.into_iter().map(Ustr::from).collect(),
-                        Some(String::from(doc)),
-                    ),
-                    Box::new(Self::new(f)),
-                    None,
-                    Vec::new(),
-                )
-            }
-
-            paste::paste! {
-            #[allow(clippy::too_many_arguments)]
-            pub fn description_with_ty(f: for<'a> fn($($arg::Output<'a>),*) -> O::Input, arg_names: [&'static str; count!($($arg)*)], doc: &'static str, $([<$arg:lower _ty>]: Type,)* o_ty: Type, effects: EffType) -> ModuleFunction {
-                let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
-                    [$(([<$arg:lower _ty>], $arg::PASSING == ArgConvention::MutableRef)), *],
-                    o_ty,
-                    effects,
-                ));
-                Self::description_with_ty_scheme(f, arg_names, doc, ty_scheme)
-            }
-            }
-
-            paste::paste! {
-                #[allow(clippy::too_many_arguments)]
-                pub fn description_with_in_ty(f: for<'a> fn($($arg::Output<'a>),*) -> O::Input, arg_names: [&'static str; count!($($arg)*)], doc: &'static str, $([<$arg:lower _ty>]: Type,)* effects: EffType) -> ModuleFunction {
-                    let o_ty = O::default_ty();
-                    Self::description_with_ty(f, arg_names, doc, $([<$arg:lower _ty>],)* o_ty, effects)
-                }
-                }
-
-            pub fn description_with_default_ty(f: for<'a> fn($($arg::Output<'a>),*) -> O::Input, arg_names: [&'static str; count!($($arg)*)], doc: &'static str, effects: EffType) -> ModuleFunction {
-                Self::description_with_in_ty(f, arg_names, doc, $($arg::default_ty(),)* effects)
-            }
-        }
-
-        impl<$($arg,)* O> Callable for $struct_name<$($arg,)* O>
-        where
-            $($arg: ArgExtractor + 'static,)*
-            O: OutputBuilder + 'static,
-        {
-            paste::paste! {
-            #[allow(unused_variables)]
-            fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx, _locals: &[ELocalDecl]) -> EvalControlFlowResult {
-                let args = CallArgsStorageGuard::new(args);
-                // Extract arguments by applying repetition for each ArgExtractor
-                #[allow(unused_variables, unused_mut)]
-                let mut args_iter = args.iter();
-                $(
-                    let [<$arg:lower>] = args_iter.next().unwrap();
-                    // SAFETY: the borrow checker ensures that all mutable references are disjoint
-                    let arg_ctx = unsafe { &mut *(ctx as *mut CallCtx) };
-                    let [<$arg:lower>] = $arg::extract([<$arg:lower>], arg_ctx).map_err(RuntimeError::new_native)?;
-                )*
-
-                // Call the function using the extracted arguments
-                O::build((self.0)($([<$arg:lower>]),*))
-            }
-            }
-
-            fn runtime_argument_passing(&self) -> Option<&[ArgConvention]> {
-                Some(&[$($arg::PASSING),*])
-            }
-
-            fn format_ind(
-                &self,
-                f: &mut std::fmt::Formatter,
-                _locals: &[ELocalDecl],
-                _env: &ModuleEnv<'_>,
-                spacing: usize,
-                indent: usize,
-            ) -> std::fmt::Result {
-                let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
-                writeln!(f, "{}{} @ {:p}", indent_str, stringify!($struct_name), &self.0)
-            }
-        }
-    };
-}
-
-// Declare aliases for native functions of various arities
-
-// Shorthand names for native functions type aliases:
-// arguments:
-// - N: Val<T> (native value)
-// - M: Mut<T> (native mutable reference)
-// - V: Value (generic value)
-// - W: &mut Value (mutable reference to a runtime value slot)
-// outputs:
-// - N: native
-// - V: value
-// - FN: native, fallible
-// - FV: value, fallible
-
-// Note: the proc macro declare_native_fn_aliases defined in ferlium_macros generates
-// typedefs with the combinations of aliases.
-
-n_ary_native_fn!(NullaryNativeFn);
-declare_native_fn_aliases!(0);
-
-impl<O: OutputBuilder + 'static> NullaryNativeFn<O> {
-    pub fn description(f: fn() -> O::Input, doc: &'static str, effects: EffType) -> ModuleFunction {
-        Self::description_with_in_ty(f, [], doc, effects)
-    }
-}
-
-n_ary_native_fn!(UnaryNativeFn, A0);
-declare_native_fn_aliases!(1);
-
-/// Native unary callable whose one executor-facing Rust entry writes an optional payload into its
-/// final argument and returns whether that argument was initialized.
-///
-/// The entry must return `true` exactly when it initialized `output`. All executors call this lower
-/// entry; the boxed adapter below merely converts the protocol into the interpreter's structural
-/// variant representation.
-pub struct UnaryNativeOptionalFn<A0: ArgExtractor + 'static, O: NativeOutput + 'static>(
-    for<'a> unsafe fn(A0::Output<'a>, *mut MaybeUninit<O>) -> bool,
-    PhantomData<(A0, O)>,
-);
-
-impl<A0: ArgExtractor + 'static, O: NativeOutput + 'static> Clone for UnaryNativeOptionalFn<A0, O> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<A0: ArgExtractor + 'static, O: NativeOutput + 'static> Copy for UnaryNativeOptionalFn<A0, O> {}
-
-impl<A0: ArgExtractor + 'static, O: NativeOutput + 'static> Debug for UnaryNativeOptionalFn<A0, O> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "UnaryNativeOptionalFn @ {:p}", &self.0)
-    }
-}
-
-impl<A0: ArgExtractor + 'static, O: NativeOutput + 'static> UnaryNativeOptionalFn<A0, O> {
-    pub fn description_with_ty_scheme(
-        f: for<'a> unsafe fn(A0::Output<'a>, *mut MaybeUninit<O>) -> bool,
-        arg_names: [&'static str; 1],
-        doc: &'static str,
-        ty_scheme: TypeScheme<FnType>,
-    ) -> ModuleFunction {
-        ModuleFunction::new(
-            CallableDefinition::new(
-                ty_scheme,
-                arg_names.into_iter().map(Ustr::from).collect(),
-                Some(String::from(doc)),
-            ),
-            Box::new(Self(f, PhantomData)),
-            None,
-            Vec::new(),
-        )
-    }
-
-    pub fn description_with_ty(
-        f: for<'a> unsafe fn(A0::Output<'a>, *mut MaybeUninit<O>) -> bool,
-        arg_names: [&'static str; 1],
-        doc: &'static str,
-        a0_ty: Type,
-        result_ty: Type,
-        effects: EffType,
-    ) -> ModuleFunction {
-        Self::description_with_ty_scheme(
-            f,
-            arg_names,
-            doc,
-            TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
-                [(a0_ty, A0::PASSING == ArgConvention::MutableRef)],
-                result_ty,
-                effects,
-            )),
-        )
-    }
-}
-
-impl<A0: ArgExtractor + 'static, O: NativeOutput + 'static> Callable
-    for UnaryNativeOptionalFn<A0, O>
-{
-    fn call(
-        &self,
-        args: Vec<ValOrMut>,
-        ctx: &mut CallCtx,
-        _locals: &[ELocalDecl],
-    ) -> EvalControlFlowResult {
-        let args = CallArgsStorageGuard::new(args);
-        let arg = A0::extract(
-            args.iter()
-                .next()
-                .expect("unary native argument should exist"),
-            ctx,
-        )
-        .map_err(RuntimeError::new_native)?;
-        let mut output = MaybeUninit::uninit();
-        // SAFETY: native registration is unsafe-by-contract: `true` promises that the lower entry
-        // initialized the output exactly once.
-        let is_some = unsafe { (self.0)(arg, &mut output) };
-        if is_some {
-            // SAFETY: guaranteed by the lower optional-entry contract above.
-            let payload = unsafe { output.assume_init() };
-            cont(Value::tuple_variant(
-                Ustr::from("Some"),
-                [Value::native(payload)],
-            ))
-        } else {
-            cont(Value::unit_variant(Ustr::from("None")))
-        }
-    }
-
-    fn runtime_argument_passing(&self) -> Option<&[ArgConvention]> {
-        Some(&[A0::PASSING])
-    }
-
-    fn native_optional_payload_type(&self) -> Option<Type> {
-        Some(Type::primitive::<O>())
-    }
-
-    fn format_ind(
-        &self,
-        f: &mut fmt::Formatter,
-        _locals: &[ELocalDecl],
-        _env: &ModuleEnv<'_>,
-        spacing: usize,
-        indent: usize,
-    ) -> fmt::Result {
-        let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
-        writeln!(f, "{indent_str}UnaryNativeOptionalFn @ {:p}", &self.0)
-    }
-}
-
-pub type UnaryNativeOptionalFnR<A0, O> = UnaryNativeOptionalFn<NatRef<A0>, O>;
-pub type UnaryNativeOptionalFnM<A0, O> = UnaryNativeOptionalFn<NatMut<A0>, O>;
-pub type UnaryNativeOptionalFnN<A0, O> = UnaryNativeOptionalFn<NatVal<A0>, O>;
-
-/// Implements the output-last portion of a lower native optional entry.
-///
-/// # Safety
-///
-/// `output` must point to valid, aligned storage for one `MaybeUninit<T>`. When `value` is `Some`,
-/// that storage must be available for initialization.
-pub unsafe fn write_native_optional_output<T>(
-    value: Option<T>,
-    output: *mut MaybeUninit<T>,
-) -> bool {
-    let Some(value) = value else {
-        return false;
-    };
-    // SAFETY: required by this function's contract. `MaybeUninit::write` does not read or drop the
-    // previous bytes.
-    unsafe { (*output).write(value) };
-    true
-}
-
-/// Define the one executor-facing, output-last native entry for a Rust implementation returning
-/// `Option<T>`.
-///
-/// The generated entry is unsafe because callers outside the boxed adapter must provide valid,
-/// aligned, uninitialized payload storage. Native registration verifies its Ferlium result `Repr`.
-/// A hand-written entry must never initialize that storage and then return `false`; doing so loses
-/// ownership of the payload without giving the caller an opportunity to drop it.
-#[macro_export]
-macro_rules! native_optional_entry {
-    (
-        $(#[$meta:meta])*
-        $vis:vis fn $entry:ident($($arg:ident : $arg_ty:ty),* $(,)?)
-            -> $payload:ty = $implementation:path
-    ) => {
-        $(#[$meta])*
-        $vis unsafe fn $entry(
-            $($arg: $arg_ty,)*
-            output: *mut ::std::mem::MaybeUninit<$payload>,
-        ) -> bool {
-            let result: Option<$payload> = $implementation($($arg),*);
-            // SAFETY: this generated entry forwards the native caller's output-storage contract;
-            // the helper writes before returning `true` and leaves storage untouched for `None`.
-            unsafe {
-                $crate::hir::function::write_native_optional_output(result, output)
-            }
-        }
-    };
-}
-
-n_ary_native_fn!(BinaryNativeFn, A0, A1);
-declare_native_fn_aliases!(2);
-
-n_ary_native_fn!(TernaryNativeFn, A0, A1, A2);
-declare_native_fn_aliases!(3);
-
-// Beyond size 3, we do not define aliases
-
-n_ary_native_fn!(QuaternaryNativeFn, A0, A1, A2, A3);
-n_ary_native_fn!(QuinaryNativeFn, A0, A1, A2, A3, A4);
-n_ary_native_fn!(SenaryNativeFn, A0, A1, A2, A3, A4, A5);
-n_ary_native_fn!(SeptenaryNativeFn, A0, A1, A2, A3, A4, A5, A6);
-n_ary_native_fn!(OctonaryNativeFn, A0, A1, A2, A3, A4, A5, A6, A7);
-
 #[cfg(test)]
 mod tests {
     use std::mem::size_of;
@@ -1536,7 +876,7 @@ mod tests {
         }
     }
 
-    fn observe_value(_: &Value) {}
+    extern "C" fn observe_value(_: &NativeArgDropTracked) {}
 
     #[test]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
@@ -1554,11 +894,11 @@ mod tests {
     }
 
     #[test]
-    fn generated_native_wrapper_discards_owned_argument_storage() {
+    fn native_adapter_discards_owned_argument_storage() {
         NATIVE_ARG_DROP_COUNT.store(0, Ordering::Relaxed);
         let session = CompilerSession::new();
         let mut ctx = EvalCtx::new(ModuleId::from_index(0), &session);
-        let function = UnaryNativeFnVN::new(observe_value);
+        let function = crate::hir::native_functions::NativeFnR::new(observe_value);
 
         let result = function
             .call(
@@ -1573,148 +913,5 @@ mod tests {
         value.discard_storage();
 
         assert_eq!(NATIVE_ARG_DROP_COUNT.load(Ordering::Relaxed), 1);
-    }
-
-    #[test]
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    fn native_drop_consumes_the_slot_before_storage_reclamation() {
-        use std::{cell::Cell, rc::Rc};
-
-        #[derive(Debug)]
-        struct DropTracked(Rc<Cell<usize>>);
-        impl NativeValueType for DropTracked {}
-        impl Drop for DropTracked {
-            fn drop(&mut self) {
-                self.0.set(self.0.get() + 1);
-            }
-        }
-
-        let count = Rc::new(Cell::new(0));
-        let session = CompilerSession::new();
-        let mut ctx = EvalCtx::new(ModuleId::from_index(0), &session);
-        ctx.environment.push(ValOrMut::Val(Value::tuple([
-            Value::native(DropTracked(count.clone())),
-            Value::native(42isize),
-        ])));
-        let function = crate::std::value::native_value_drop_function::<DropTracked>();
-        assert_eq!(
-            function.runtime_argument_passing(),
-            Some(&[ArgConvention::MutableRef][..]),
-        );
-        let place = crate::eval::Place {
-            root: 0,
-            path: vec![0],
-        };
-        function
-            .call(vec![ValOrMut::Mut(place.clone())], &mut ctx, &[])
-            .unwrap()
-            .into_value()
-            .discard_storage();
-
-        assert_eq!(count.get(), 1, "destruction must run during Value::drop");
-        assert!(matches!(place.target_mut(&mut ctx).unwrap(), Value::Uninit));
-        let sibling = crate::eval::Place {
-            root: 0,
-            path: vec![1],
-        };
-        assert_eq!(
-            sibling.target_ref(&ctx).unwrap().as_primitive_ty::<isize>(),
-            Some(&42),
-        );
-        ctx.environment.pop().unwrap().discard_storage();
-        assert_eq!(count.get(), 1, "storage reclamation must not destroy twice");
-    }
-
-    #[test]
-    #[should_panic(expected = "native drop target must contain an initialized")]
-    fn native_drop_diagnoses_an_uninitialized_target() {
-        let session = CompilerSession::new();
-        let mut ctx = EvalCtx::new(ModuleId::from_index(0), &session);
-        ctx.environment.push(ValOrMut::Val(Value::uninit()));
-        let function = crate::std::value::native_value_drop_function::<isize>();
-        let _ = function.call(
-            vec![ValOrMut::Mut(crate::eval::Place {
-                root: 0,
-                path: vec![],
-            })],
-            &mut ctx,
-            &[],
-        );
-    }
-
-    #[test]
-    #[cfg(all(not(target_arch = "wasm32"), panic = "unwind"))]
-    fn native_drop_unwinding_does_not_repeat_destruction() {
-        use std::{cell::Cell, panic::AssertUnwindSafe, rc::Rc};
-
-        #[derive(Debug)]
-        struct PanickingDrop(Rc<Cell<usize>>);
-        impl NativeValueType for PanickingDrop {}
-        impl Drop for PanickingDrop {
-            fn drop(&mut self) {
-                self.0.set(self.0.get() + 1);
-                panic!("test native destructor panic");
-            }
-        }
-
-        let count = Rc::new(Cell::new(0));
-        let session = CompilerSession::new();
-        let mut ctx = EvalCtx::new(ModuleId::from_index(0), &session);
-        ctx.environment
-            .push(ValOrMut::Val(Value::native(PanickingDrop(count.clone()))));
-        let function = crate::std::value::native_value_drop_function::<PanickingDrop>();
-        let place = crate::eval::Place {
-            root: 0,
-            path: vec![],
-        };
-        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            function.call(vec![ValOrMut::Mut(place.clone())], &mut ctx, &[])
-        }));
-        assert!(result.is_err());
-        assert_eq!(count.get(), 1);
-        assert_eq!(
-            Rc::strong_count(&count),
-            1,
-            "Rust must still drop the fields"
-        );
-        assert!(matches!(place.target_mut(&mut ctx).unwrap(), Value::Uninit));
-        ctx.environment.pop().unwrap().discard_storage();
-        assert_eq!(
-            count.get(),
-            1,
-            "reclamation must not retry a panicking drop"
-        );
-    }
-
-    /// A native's hidden dictionary parameters are prepended to its runtime argument passing and
-    /// absent from its visible one — the two lists are not the same list.
-    ///
-    /// Tested on a directly built native rather than on a standard-library specimen. It used to be
-    /// asserted of `buffer_drop_at`, which is gone: no std native takes a dictionary any more, which
-    /// is the invariant the buffer rework establishes rather than an accident to work around. The
-    /// mechanism it exercises is still here, so the test moved to where the mechanism is.
-    #[test]
-    fn hidden_dictionary_arguments_are_prepended_to_runtime_argument_passing() {
-        fn unreachable_native(_: ValOrMutArgs, _: &mut CallCtx<'_>) -> EvalControlFlowResult {
-            unreachable!("the conventions are inspected, never the body")
-        }
-        let native = ContextNativeFn::new(
-            "hidden_dictionary_probe",
-            &[ArgConvention::Let],
-            &[ArgConvention::MutableRef, ArgConvention::Let],
-            unreachable_native,
-        );
-        assert_eq!(
-            native.runtime_argument_passing().unwrap(),
-            &[
-                ArgConvention::Let,
-                ArgConvention::MutableRef,
-                ArgConvention::Let
-            ][..],
-        );
-        assert_eq!(
-            native.visible_parameter_passing().unwrap(),
-            &[ArgConvention::MutableRef, ArgConvention::Let][..],
-        );
     }
 }

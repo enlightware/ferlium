@@ -96,6 +96,9 @@ Physical argument passing is derived from the lowered parameter type:
 | Other concrete `Let` | Shared reference/pointer to storage containing the observed value |
 | Generic `Let` | Shared reference/pointer to storage containing the observed value |
 
+Unit has no scalar representation: a concrete `Let` unit argument is indirect, while a unit
+result is omitted from the machine return.
+
 Generic `Let` parameters are physically indirect, even if they have a `T: TrivialCopy` constraint.
 This gives every generic function one stable ABI independent of later concrete instantiations.
 
@@ -161,8 +164,10 @@ it only through runtime operations. The harness takes the diagnostic when execut
 
 Nested host-initiated invocations use separate states. A second failure during cleanup preserves
 both causes and triggers harness cancellation; poisoning is not another return status. Diagnostic
-storage must survive guest-domain reclamation. This protocol is planned; boxed interpreters
-currently propagate Rust `RuntimeError` values.
+storage must survive guest-domain reclamation. Both boxed interpreters own one `NativeFailureState`
+per `EvalCtx`. Their C adapters take each diagnostic into the existing `RuntimeError` cleanup and
+backtrace flow, leaving the cell empty for cleanup calls; script-to-script propagation still uses
+`RuntimeError`. Compiled executors will propagate status through the shared state.
 
 ### Sandbox violations
 
@@ -199,7 +204,7 @@ This section applies once the backend profile is selected.
 - All scalars are stored in **little‑endian** format.
 - Alignment must be respected.
 - Memory is byte-addressable.
-- Floating-point values are forbidden to be NaN.
+- Floating-point values must be finite (neither NaN nor infinity).
 
 # Rust-native values
 
@@ -231,13 +236,14 @@ On ordinary execution paths, the target glue preserves Rust initialization and R
 - opaque native `Value::drop` invokes the registered Rust destructor exactly once and leaves the
   target uninitialized; subsequent reclamation releases only its storage.
 
-Opaque native destructor registration uses a dedicated consuming adapter. Its Ferlium signature
-remains `Value::drop(&mut T) -> ()`; the Rust entry takes `*mut T` to initialized storage and destroys the
+Opaque native destructor registration uses a typed consuming adapter. Its Ferlium signature
+remains `Value::drop(&mut T) -> ()`; the `unsafe extern "C"` entry takes `*mut T` to initialized storage and destroys the
 pointee without freeing that storage. Both boxed interpreters replace the target slot with
 `Value::Uninit`, detach its native payload, and invoke the entry on that payload. They reclaim its
 box without invoking the destructor a second time. Ordinary mutable native argument adapters keep
 their existing contract that the target remains initialized after the call. This pointer transport
 does not introduce a pointer type or another parameter convention into the Ferlium type system.
+Entry metadata distinguishes consuming storage from an ordinary mutable borrow.
 
 Interpreter storage reclamation can still destroy opaque native payloads whose semantic cleanup
 did not run, for example while reclaiming roots after poisoning. A successfully consumed native slot is
@@ -570,66 +576,62 @@ resulting ephemeral MIR value and its lifetime.
 
 # Native-function boundary
 
-A Rust native callable used by compiled code exposes an `unsafe extern "C" fn` entry with explicit
-scalar/pointer transport. This replaces the former `export ferlium` placeholder; registration
-migration remains to be implemented. Export naming and retention are separate
-from the calling convention. All executors use the same entry under the existing `FunctionId`;
-boxed adapters marshal interpreter values, while compiled calls invoke the entry directly.
+A native callable used by compiled code exposes one typed `extern "C"` entry, shared with
+interpreters under its existing `FunctionId`. Boxing belongs only to interpreter marshalling; it
+is not part of the ABI. Export naming and retention are separate from the calling convention.
 
-A fallible entry may adapt a Rust `Result<T, SourceFailureKind>` implementation: write `T` to the
-trailing output pointer on success, or record the error through the leading failure-state pointer
-on failure, then return status. Rust error layouts never cross the ABI. Rust panics must not unwind
-across the `extern "C"` boundary; they are not source failures.
+The entry contract specifies parameter representations, pointee layouts, mutability, and the result
+protocol. Typed registration derives this contract from the Rust signature and rejects incompatible
+Ferlium declarations. Like [Rust-native layouts](#rust-native-values), it is build-coupled: generated
+callers and the runtime must agree on the contract for their target.
 
-Native callables are resolved by their existing `FunctionId`. No additional compiled-function
-identity or implementation catalog is required. A target-dependent scalar parameter may use a
-transparent Rust adapter whose representation is the value on scalar targets and a reference
-otherwise.
+Every native signature retained at the compiled boundary must be closed and monomorphic, including
+all nested types in visible parameters, hidden parameters, and results. Generic native calls must
+be specialized to closed entries or eliminated by physical lowering; a polymorphic native ABI is
+not yet defined. Callbacks without a typed entry remain interpreter-only unless eliminated by
+lowering.
 
-Every native callable retained at the compiled boundary has a closed, monomorphic Ferlium
-signature: no unresolved type variable may occur anywhere in a visible or hidden parameter or in
-the result, including beneath a structural product or variant. A generic native callable must be
-specialized to a closed exported entry, recognized and eliminated by shared physical lowering, or
-given an explicit polymorphic ABI. The initial compiled boundary supports only the first two
-choices.
+## Value transport and safety
+
+Entries follow the [calling conventions](#calling-conventions) above:
+
+- Concrete `int` and `float` use `isize` and `f64` transport. Opaque Rust values remain indirect,
+  even when small; size alone does not determine transport.
+- Borrowed inputs use `&T` or `&mut T`, and output storage uses `&mut MaybeUninit<T>`, all transported
+  as pointers. The caller guarantees valid, aligned storage and call-scoped borrowing. Consuming
+  destructors follow the separate [ownership contract](#rust-native-values).
+- Output storage is initialized exactly once when a result is produced and contains no live result
+  on failure or absence. Safe adapters enforce this; registering handwritten output entries
+  requires an unsafe guarantee.
+- Fallible entries return status and record diagnostics through the leading failure-state pointer.
+  Rust `Result` and error layouts never cross the ABI. Rust panics are not source failures and must
+  not unwind across the C boundary.
+
+Floating-point values must satisfy Ferlium's finite-value contract before crossing the boundary.
+Rust `Float` has the layout and ABI of `f64`: raw `f64` inputs are allowed, but results must use
+`Float`, including optional and fallible payloads. This protects the invariant independently of
+interpreter boxing. Native implementations must preserve language semantics without panicking on
+valid Ferlium inputs.
+
+Native entries must not embed session-local variant tags. They return transport-level values, such
+as scalar comparison codes, from which the caller constructs Ferlium variants.
 
 ## Native optional results
 
-A native Rust function returning `Option<R>` may implement a Ferlium result type `F` when the
-resolved `Repr` of `F` is exactly `None(()) | Some((T,))` and the representation of `R` matches
-`T`. This contract depends on the representation rather than the identity of the current
-`Option<T>` alias, so a future named or newtype Option remains compatible while it retains that
-`Repr`.
+A Rust `Option<R>` result is supported when the Ferlium result's resolved `Repr` is exactly
+`None(()) | Some((T,))` and `R` has the representation of `T`. Compatibility depends on this
+representation, not on the identity of the `Option<T>` alias.
 
-The executor-facing Rust entry uses an output-last protocol:
+The entry uses a presence flag and trailing payload storage:
 
 ```text
-unsafe extern "C" fn(arguments..., output: *mut MaybeUninit<R>) -> bool
+extern "C" fn(arguments..., output: &mut MaybeUninit<R>) -> bool
 ```
 
-It returns `true` exactly when it initializes `output` once with the `Some` payload. It returns
-`false` for `None` and leaves `output` uninitialized. This infallible lower native-result protocol
-lets the caller construct the Ferlium variant; `None` is not a source failure. Rust's own
-`Option<R>` memory layout is never exposed or assumed. Existing boxed entries use the Rust calling
-convention pending migration to `extern "C"`.
-
-All executors use this same lower native entry. The boxed HIR and MIR adapter supplies a local
-`MaybeUninit<R>` and constructs its structural `Value`; physical lowering records the inferred
-payload contract by `FunctionId`. The phase-2 unboxed executor will use that contract to construct
-the canonical variant tag and payload in Ferlium storage. Registration rejects an Option-shaped
-native result without this entry, an entry whose result does not have the canonical optional
-`Repr`, a payload representation mismatch, or a non-closed signature.
-
-This is a build-coupled contract, like Rust-native value layout. Target tests must link every
-Rust entry against its derived signature and exercise the argument, result, and source-failure
-conventions. Sandbox violations and lower-level runtime aborts use the non-returning path in
-[runtime-sandboxing.md](runtime-sandboxing.md).
-
-`make test-native-abi` runs native transport tests and checks the same standalone Rust entries'
-Wasm32 signatures at optimization levels 0 and 3. It requires Python 3, WABT (`wasm2wat`), and the
-`wasm32-unknown-unknown` Rust target. The fixtures cover scalar/pointer transport, managed outputs,
-destruction, optional results, and source failure; their failure state is a test fixture, not the
-production runtime protocol. These checks do not yet validate generated Ferlium callers or browser linkage.
+It returns `true` after initializing `output` exactly once with the `Some` payload, or `false` for
+`None` with no live output. The caller constructs the canonical Ferlium variant; Rust's `Option<R>`
+layout never crosses the ABI. This protocol is infallible: absence is not a source failure.
+Registration requires this protocol for optional results and rejects representation mismatches.
 
 # Compiled runtime boundary
 

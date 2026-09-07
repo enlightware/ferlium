@@ -12,46 +12,7 @@ use quote::quote;
 
 use crate::ptr::FERLIUM_PTR_SIZE;
 
-mod native_fn_aliases;
 mod ptr;
-
-#[proc_macro]
-pub fn declare_native_fn_aliases(input: TokenStream) -> TokenStream {
-    use native_fn_aliases::*;
-    use syn::*;
-
-    let n = parse_macro_input!(input as LitInt);
-    let arity = n.base10_parse::<usize>().unwrap();
-
-    let arg_codes = ["N", "R", "M", "V", "W"];
-    let output_codes = ["N", "V", "FN", "FV"];
-
-    let mut generated = quote! {};
-
-    let arg_combinations = generate_combinations(&arg_codes, arity);
-
-    for arg_combo in arg_combinations {
-        for output_code in &output_codes {
-            let alias_name = generate_alias_name(arity, &arg_combo, output_code);
-            let (fn_type, need_lifetime) = generate_fn_type(arity, &arg_combo, output_code);
-
-            let generic_params = generate_generic_params(&arg_combo, output_code);
-            let alias = if need_lifetime {
-                quote! {
-                    pub type #alias_name<'a, #(#generic_params),*> = #fn_type;
-                }
-            } else {
-                quote! {
-                    pub type #alias_name<#(#generic_params),*> = #fn_type;
-                }
-            };
-
-            generated.extend(alias);
-        }
-    }
-
-    generated.into()
-}
 
 /// Attribute macro for Ferlium FFI record layout.
 /// Usage:

@@ -7,7 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::mem;
+use std::{any::TypeId, mem};
 
 use ustr::{Ustr, ustr};
 
@@ -19,9 +19,8 @@ use crate::{
     hir::{
         self, CallArgument, NodeArena, NodeId,
         emit_value_impl::function_value_method,
-        function::{
-            CallableDefinition, Function, NativeDropFn, PendingScriptFunction, UnaryNativeFnRN,
-        },
+        function::{CallableDefinition, Function, PendingScriptFunction},
+        native_functions::{NativeDropFn, NativeFnN, NativeFnR, NativeOutFnR},
         value::{LiteralValue, NativeValue, VariantPayloadStorage},
         value_dispatch::{
             materialize_static_string, prepare_generated_call_arguments_with_locals,
@@ -42,7 +41,7 @@ use crate::{
         },
         hash::hasher_type,
         logic::bool_type,
-        math::int_type,
+        math::{Float, int_type},
         ordering::ORDERING_GREATER,
         string::{static_str_type, string_type},
     },
@@ -60,7 +59,7 @@ use crate::{
     },
 };
 
-pub(crate) fn equal<T>(lhs: T, rhs: T) -> bool
+pub(crate) extern "C" fn equal<T>(lhs: T, rhs: T) -> bool
 where
     T: std::cmp::Eq,
 {
@@ -146,19 +145,29 @@ pub(crate) fn native_layout_associated_consts<T>() -> Vec<LiteralValue> {
     values.into_iter().map(LiteralValue::new_native).collect()
 }
 
-pub(crate) fn native_value_clone<T: Clone + NativeValue>(source: &T) -> T {
-    source.clone()
+extern "C" fn native_scalar_clone<T: Copy>(source: T) -> T {
+    source
 }
 
+extern "C" fn native_unit_clone(_: &()) {}
+
 pub(crate) fn native_value_clone_function<T: Clone + NativeValue>() -> Function {
-    b(UnaryNativeFnRN::new(native_value_clone::<T>)) as Function
+    // Concrete scalar clones use the same direct transport as ordinary scalar entries.
+    // Unit has no scalar representation: its input stays indirect and its result is omitted.
+    match TypeId::of::<T>() {
+        id if id == TypeId::of::<bool>() => b(NativeFnN::new(native_scalar_clone::<bool>)),
+        id if id == TypeId::of::<isize>() => b(NativeFnN::new(native_scalar_clone::<isize>)),
+        id if id == TypeId::of::<Float>() => b(NativeFnN::new(native_scalar_clone::<Float>)),
+        id if id == TypeId::of::<()>() => b(NativeFnR::new(native_unit_clone)),
+        _ => b(NativeOutFnR::from_rust(T::clone)),
+    }
 }
 
 /// Destroy an initialized native value, leaving its storage uninitialized and still allocated.
 ///
 /// # Safety
 /// `target` must point to an exclusively owned, initialized, correctly aligned `T`.
-pub(crate) unsafe fn native_value_drop<T>(target: *mut T) {
+pub(crate) unsafe extern "C" fn native_value_drop<T>(target: *mut T) {
     // SAFETY: the caller supplies an initialized T and ends all access to it after this call.
     unsafe { target.drop_in_place() };
 }

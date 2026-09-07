@@ -5,7 +5,13 @@ Ferlium has two numeric types: `int` for whole numbers and `float` for floating-
 ## The two numeric types
 
 `int` is a signed integer using the machine word width (typically 64 bits).
-`float` is a finite [IEEE 754](https://en.wikipedia.org/wiki/IEEE_754) double-precision number. It excludes `NaN` and infinities, so equality and ordering on `float` always behave consistently.
+`float` is a finite [IEEE 754](https://en.wikipedia.org/wiki/IEEE_754) double-precision number. It excludes `NaN` and infinities. Excluding `NaN` makes equality and ordering consistent.
+
+Floating-point arithmetic saturates on overflow: a result beyond the finite range becomes the
+largest finite positive or negative value. Addition, subtraction, and multiplication therefore
+remain infallible. Invalid domains, such as division by zero or the square root of a negative
+number, report a runtime error. Saturation keeps values finite but can hide overflow; it does not
+preserve the accuracy of a calculation that exceeds the range.
 
 ```ferlium
 let i: int = 42;

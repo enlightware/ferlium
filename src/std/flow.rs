@@ -10,68 +10,50 @@ use ustr::ustr;
 
 use crate::{
     compiler::error::SourceFailureKind,
-    hir::function::{NullaryNativeFnFN, UnaryNativeFnRFN},
+    hir::native_functions::{NativeFallibleFn0, NativeFallibleFnR},
     module::Module,
     std::string::String as Str,
-    types::effects::{PrimitiveEffect, effect},
-    types::r#type::{FnType, Type},
-    types::type_scheme::TypeScheme,
+    types::{
+        effects::{PrimitiveEffect, effect},
+        never::Never,
+    },
 };
 
-use super::string::string_type;
-
-fn abort() -> Result<(), SourceFailureKind> {
+fn abort() -> Result<Never, SourceFailureKind> {
     Err(SourceFailureKind::Aborted(None))
 }
 
-fn panic(msg: &Str) -> Result<(), SourceFailureKind> {
+fn panic(msg: &Str) -> Result<Never, SourceFailureKind> {
     Err(SourceFailureKind::Aborted(Some(msg.as_ref().to_string())))
 }
 
-fn invalid_argument(msg: &Str) -> Result<(), SourceFailureKind> {
+fn invalid_argument(msg: &Str) -> Result<Never, SourceFailureKind> {
     Err(SourceFailureKind::InvalidArgument(msg.as_ref().to_string()))
 }
 
 pub fn add_to_module(to: &mut Module) {
-    // Control flow operation
-    // Note: we use no_effects() for now as non-termination is modelled purely in the return type
     to.add_function(
         ustr("abort"),
-        NullaryNativeFnFN::description_with_ty_scheme(
-            abort,
+        NativeFallibleFn0::from_rust_never(abort).description(
             [],
             "Aborts the program.",
-            TypeScheme::new_just_type(FnType::new_by_val(
-                [],
-                Type::never(),
-                effect(PrimitiveEffect::Fallible),
-            )),
+            effect(PrimitiveEffect::Fallible),
         ),
     );
     to.add_function(
         ustr("panic"),
-        UnaryNativeFnRFN::description_with_ty_scheme(
-            panic,
+        NativeFallibleFnR::from_rust_never(panic).description(
             ["msg"],
             "Aborts the program with a message.",
-            TypeScheme::new_just_type(FnType::new_by_val(
-                [string_type()],
-                Type::never(),
-                effect(PrimitiveEffect::Fallible),
-            )),
+            effect(PrimitiveEffect::Fallible),
         ),
     );
     to.add_function(
         ustr("invalid_argument"),
-        UnaryNativeFnRFN::description_with_ty_scheme(
-            invalid_argument,
+        NativeFallibleFnR::from_rust_never(invalid_argument).description(
             ["msg"],
             "Aborts the program with an invalid argument error.",
-            TypeScheme::new_just_type(FnType::new_by_val(
-                [string_type()],
-                Type::never(),
-                effect(PrimitiveEffect::Fallible),
-            )),
+            effect(PrimitiveEffect::Fallible),
         ),
     );
 }

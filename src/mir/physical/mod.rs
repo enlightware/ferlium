@@ -25,6 +25,7 @@ use crate::{
     hir::{
         dictionary::DictionaryReq,
         function::ArgConvention,
+        native_functions::{NativeContractError, NativeResult, NativeSignature},
         value::{LiteralValue, VariantPayloadStorage},
     },
     mir::{
@@ -98,6 +99,10 @@ pub(crate) enum BackendReadinessError {
     InvalidNativeOptionalResult {
         function: FunctionId,
         error: NativeOptionalContractError,
+    },
+    InvalidNativeEntry {
+        function: FunctionId,
+        error: NativeContractError,
     },
     InvalidPhysicalCall {
         owner: FunctionId,
@@ -190,6 +195,11 @@ impl fmt::Display for BackendReadinessError {
             Self::InvalidNativeOptionalResult { function, error } => write!(
                 f,
                 "native entry m{}:f{} has an invalid optional-result contract: {error:?}",
+                function.module, function.function,
+            ),
+            Self::InvalidNativeEntry { function, error } => write!(
+                f,
+                "native entry m{}:f{} has an invalid typed contract: {error}",
                 function.module, function.function,
             ),
             Self::InvalidPhysicalCall {
@@ -290,7 +300,7 @@ pub(crate) struct BackendReadyMirArtifacts {
     entries: Vec<Option<Function>>,
     /// Derived after every physical transformation. Any later pass that changes function or
     /// evidence-catalog references must rebuild this map before execution.
-    native_optional_results: FxHashMap<FunctionId, Type>,
+    native_signatures: FxHashMap<FunctionId, NativeSignature>,
     dictionaries: PhysicalDictionaryCatalog,
     subscripts: PhysicalSubscriptCatalog,
 }
@@ -309,7 +319,14 @@ impl BackendReadyMirArtifacts {
     }
 
     pub(crate) fn native_optional_payload(&self, function: FunctionId) -> Option<Type> {
-        self.native_optional_results.get(&function).copied()
+        match self.native_signatures.get(&function)?.result {
+            NativeResult::Optional { payload, .. } => Some(payload.ty),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn native_signature(&self, function: FunctionId) -> Option<&NativeSignature> {
+        self.native_signatures.get(&function)
     }
 
     pub(crate) fn dictionaries(&self) -> &[PhysicalDictionaryDefinition] {
@@ -392,12 +409,11 @@ pub(crate) fn lower_physical_mir(
     let references = PhysicalEvidenceReferences::collect(&entries);
     let dictionaries = PhysicalDictionaryCatalog::from_module(module, env.current, &references);
     let subscripts = PhysicalSubscriptCatalog::from_module(module, env.current, env, &references);
-    let native_optional_results =
-        collect_native_optional_results(&entries, &dictionaries, &subscripts, env)?;
+    let native_signatures = collect_native_signatures(&entries, &dictionaries, &subscripts, env)?;
     let artifacts = BackendReadyMirArtifacts {
         module,
         entries,
-        native_optional_results,
+        native_signatures,
         dictionaries,
         subscripts,
     };
@@ -405,15 +421,17 @@ pub(crate) fn lower_physical_mir(
     Ok(artifacts)
 }
 
-/// Capture the representation-derived optional-result contract for every native function
-/// referenced by this artifact. The physical artifact must not need the semantic module registry
-/// when an executor later selects the output-last native ABI.
-fn collect_native_optional_results(
+/// Capture typed entries and representation-derived optional results for every referenced native,
+/// including evidence entries and first-class references. Runtime addresses stay with Callable;
+/// the physical artifact retains the existing FunctionId and the required transport/layouts.
+// TODO: Target readiness must also reject remaining interpreter-only entries and verify compiled
+// indirect-call failure transport once script-function machine signatures are available.
+fn collect_native_signatures(
     entries: &[Option<Function>],
     dictionaries: &PhysicalDictionaryCatalog,
     subscripts: &PhysicalSubscriptCatalog,
     env: ModuleEnv<'_>,
-) -> Result<FxHashMap<FunctionId, Type>, BackendReadinessError> {
+) -> Result<FxHashMap<FunctionId, NativeSignature>, BackendReadinessError> {
     let mut referenced = FxHashSet::default();
     let mut visit = |value: &Value| {
         if let Value::Function(function) = value {
@@ -455,7 +473,7 @@ fn collect_native_optional_results(
         if !matches!(native.origin, CallableOrigin::Native { .. }) {
             continue;
         }
-        let payload = native_optional_payload_contract_with(
+        native_optional_payload_contract_with(
             native.definition.ty_scheme.ty.ret,
             native.code.native_optional_payload_type(),
             |named| {
@@ -465,8 +483,22 @@ fn collect_native_optional_results(
             },
         )
         .map_err(|error| BackendReadinessError::InvalidNativeOptionalResult { function, error })?;
-        if let Some(payload) = payload {
-            results.insert(function, payload);
+        let signature = native
+            .code
+            .native_entry()
+            .map(|entry| {
+                entry
+                    .signature()
+                    .validate(&native.definition)
+                    .map_err(|error| BackendReadinessError::InvalidNativeEntry {
+                        function,
+                        error,
+                    })?;
+                Ok(entry.signature().clone())
+            })
+            .transpose()?;
+        if let Some(signature) = signature {
+            results.insert(function, signature);
         }
     }
     Ok(results)
@@ -3069,12 +3101,11 @@ fn verify_local_function_target(
 
 #[cfg(test)]
 mod tests {
-    use std::mem::MaybeUninit;
+    use crate::hir::native_functions::NativeOptionalFnN;
 
     use crate::{
         CompilerSession, ExecutionTarget,
         compiler::MirOptimization,
-        hir::function::{UnaryNativeOptionalFnN, write_native_optional_output},
         module::{
             Module, ModuleEnv, Path, SubscriptDefinition, SubscriptMember, SubscriptSignature,
             TraitDictionaryEntry, Visibility, YieldProvenance,
@@ -3114,6 +3145,115 @@ mod tests {
     }
 
     #[test]
+    fn typed_native_contracts_survive_direct_and_first_class_lowering() {
+        use crate::hir::native_functions::{
+            NativeLayout, NativeParameter, NativeResult, NativeScalar,
+        };
+        use crate::std::string::String as NativeString;
+
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            "fn size(value: string) { string_len(value) } fn callable() { string_concat }",
+            "typed_native",
+        );
+        let (physical, _) = lower(&mut session, module).unwrap();
+        let std = session.std_module();
+        let id = |name| {
+            FunctionId::new(
+                std.module_id(),
+                std.get_local_function_id(ustr::ustr(name)).unwrap(),
+            )
+        };
+        let size = physical
+            .native_signature(id("string_len"))
+            .expect("direct entry contract");
+        assert_eq!(
+            size.parameters,
+            [NativeParameter::Shared(NativeLayout::of::<NativeString>())]
+        );
+        assert_eq!(
+            size.result,
+            NativeResult::Scalar(NativeLayout::of::<isize>(), NativeScalar::Int)
+        );
+        let concat = physical
+            .native_signature(id("string_concat"))
+            .expect("first-class entry contract");
+        assert_eq!(
+            concat.parameters,
+            vec![NativeParameter::Shared(NativeLayout::of::<NativeString>()); 2]
+        );
+        assert_eq!(
+            concat.result,
+            NativeResult::Output(NativeLayout::of::<NativeString>())
+        );
+    }
+
+    #[test]
+    fn typed_native_failure_transport_survives_direct_and_first_class_lowering() {
+        use crate::hir::native_functions::{NativeFailureConvention, NativeLayout, NativeResult};
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            "fn quotient(a: int, b: int) { idiv(a, b) } fn callable() { idiv_euclid }",
+            "native_failure",
+        );
+        let (physical, _) = lower(&mut session, module).unwrap();
+        let std = session.std_module();
+        for name in ["idiv", "idiv_euclid"] {
+            let id = FunctionId::new(
+                std.module_id(),
+                std.get_local_function_id(ustr::ustr(name)).unwrap(),
+            );
+            let signature = physical
+                .native_signature(id)
+                .expect("fallible entry contract");
+            assert_eq!(signature.failure, NativeFailureConvention::StatusWithState);
+            assert_eq!(
+                signature.result,
+                NativeResult::Output(NativeLayout::of::<isize>())
+            );
+            assert_eq!(
+                signature.parameters.len(),
+                2,
+                "failure state is metadata, not a source argument"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_native_lifecycle_contracts_survive_physical_lowering() {
+        use crate::hir::native_functions::{NativeLayout, NativeParameter, NativeResult};
+        use crate::std::string::String as NativeString;
+
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            "fn repeated_len(value: string) { let mut repeated = value; string_push_str(repeated, value); string_len(repeated) }",
+            "native_lifecycle",
+        );
+        let (physical, _) = lower(&mut session, module).unwrap();
+        let layout = NativeLayout::of::<NativeString>();
+        let has_signature = |parameters, result| {
+            physical
+                .native_signatures
+                .values()
+                .any(|signature| signature.parameters == parameters && signature.result == result)
+        };
+        assert!(
+            has_signature(
+                vec![NativeParameter::Shared(layout)],
+                NativeResult::Output(layout)
+            ),
+            "physical calls must retain the managed clone contract"
+        );
+        assert!(
+            has_signature(vec![NativeParameter::Consuming(layout)], NativeResult::Unit),
+            "physical cleanup must retain the consuming drop contract"
+        );
+    }
+
+    #[test]
     fn native_optional_contract_is_carried_by_function_identity() {
         let mut session = CompilerSession::new();
         let module = compile(
@@ -3135,25 +3275,14 @@ mod tests {
         );
     }
 
-    unsafe fn optional_int(value: isize, output: *mut MaybeUninit<isize>) -> bool {
-        // SAFETY: the native optional adapter supplies uninitialized `isize` storage.
-        unsafe { write_native_optional_output(Some(value), output) }
-    }
-
     #[test]
     fn native_optional_contract_includes_evidence_catalog_functions() {
         let mut session = CompilerSession::new();
         let module_id = session.modules().next_id();
         let path = Path::single_str("native_optional_evidence");
         let mut module = Module::new(module_id, path.clone());
-        let function = UnaryNativeOptionalFnN::description_with_ty(
-            optional_int,
-            ["value"],
-            "test optional subscript member",
-            int_type(),
-            option_type(int_type()),
-            no_effects(),
-        );
+        let function = NativeOptionalFnN::from_rust(Some::<isize>, option_type(int_type()))
+            .description(["value"], "test optional subscript member", no_effects());
         let signature = SubscriptSignature::from_callable_definition(&function.definition);
         let function = module.add_function(ustr::ustr("optional_member"), function);
         let mut subscript = SubscriptDefinition::resolved(signature);
@@ -3186,7 +3315,7 @@ mod tests {
             PhysicalDictionaryCatalog::from_module(artifacts.module, source, &references);
         artifacts.subscripts =
             PhysicalSubscriptCatalog::from_module(artifacts.module, source, env, &references);
-        artifacts.native_optional_results = collect_native_optional_results(
+        artifacts.native_signatures = collect_native_signatures(
             &artifacts.entries,
             &artifacts.dictionaries,
             &artifacts.subscripts,
@@ -3628,7 +3757,7 @@ mod tests {
         let physical = BackendReadyMirArtifacts {
             module,
             entries: entries.into(),
-            native_optional_results: FxHashMap::default(),
+            native_signatures: FxHashMap::default(),
             dictionaries,
             subscripts,
         };

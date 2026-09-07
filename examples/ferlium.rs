@@ -18,7 +18,7 @@ use ferlium::compiler::error::{
     CompilationError, CompilationErrorImpl, LocatedError, MutabilityMustBeWhat,
 };
 use ferlium::format::FormatWith;
-use ferlium::hir::function::UnaryNativeFnRN;
+use ferlium::hir::native_functions::NativeFnR;
 use ferlium::ide::{AnnotationData, Compiler as IdeCompiler};
 use ferlium::module::id::Id;
 use ferlium::module::{
@@ -491,7 +491,7 @@ fn print_mir(session: &mut CompilerSession, module_id: ModuleId) {
     println!("Module MIR (optimized):\n{optimized}");
 }
 
-fn console_print(message: &FerliumString) {
+extern "C" fn console_print(message: &FerliumString) {
     println!("{}", message.as_ref());
 }
 
@@ -499,8 +499,7 @@ fn console_module(module_id: ModuleId) -> Module {
     let mut module = new_module_using_std(module_id, Path::single_str("$console"));
     module.add_function(
         ustr("print"),
-        UnaryNativeFnRN::description_with_default_ty(
-            console_print,
+        NativeFnR::new(console_print).description(
             ["message"],
             "Prints `message` to the REPL console.",
             effect(PrimitiveEffect::Write),

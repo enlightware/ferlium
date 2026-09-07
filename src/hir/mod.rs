@@ -18,6 +18,7 @@ pub(crate) mod emit_value_impl;
 pub mod function;
 pub(crate) mod hir_syn;
 pub(crate) mod r#match;
+pub mod native_functions;
 pub mod value;
 pub(crate) mod value_dispatch;
 

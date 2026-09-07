@@ -295,14 +295,22 @@ Backend-ready MIR may retain symbolic operands, `DictEntry`, variant constructio
 `extract_tag`. Each executor supplies their target representation. Interpreter-only native calls
 and target-lowered value representations must be resolved.
 
+Physical artifacts retain native ABI contracts under the existing `FunctionId`, including native
+dependencies reached through evidence catalogs and first-class values. This lets executors lower
+calls without reconstructing transport from semantic types or introducing another function identity.
+Contracts describe transport and storage requirements; entry addresses belong to the matching
+runtime, so artifacts remain relocatable. The protocols are specified in
+[abi.md](abi.md#native-function-boundary).
+
 ### Physical failure transport
 
 Physical MIR retains `Invoke` and its success-only result initialization contract. The leading
 failure-state pointer is recorded in physical ABI signature metadata, not in MIR call operands.
-Executors supply the current invocation's state; readiness verification checks the signature
-against call fallibility, including indirect calls. Machine lowering implements `Invoke` with
-status handling without expanding it into a call and branch in shared MIR. The diagnostic layout
-remains opaque; its ownership and lifetime are specified in [abi.md](abi.md#source-failure-diagnostics).
+Executors supply the current invocation's state. Signature verification must establish agreement
+between call fallibility and failure transport, including for indirect calls. Machine lowering
+implements `Invoke` with status handling without expanding it into a call and branch in shared MIR.
+The diagnostic layout remains opaque; its ownership and lifetime are specified in
+[abi.md](abi.md#source-failure-diagnostics).
 
 ### Physical call results
 
@@ -394,7 +402,7 @@ temporary required by Ferlium's stateless callable semantics.
 Calls recognized by shared physical lowering remain ordinary calls throughout semantic MIR and its
 optimization rounds. The lowerer resolves their exact function identities through a session table,
 as existing MIR passes do with `KnownCallees`. Other native calls retain their `FunctionId` and use
-the matching Rust `export ferlium` entry. Backend-readiness verification requires every native call
+the matching Rust `extern "C"` entry. Backend-readiness verification requires every native call
 to have been lowered or have a compatible entry for the selected target. A retained native entry
 must also have the closed, monomorphic Ferlium signature required by [abi.md](abi.md); physical
 lowering rejects an unresolved type variable at any depth in its parameters or result. Generic

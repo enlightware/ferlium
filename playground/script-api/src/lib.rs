@@ -10,7 +10,7 @@ use wasm_bindgen::prelude::*;
 
 use ferlium::ide::PositionEncoding;
 use ferlium::{
-    hir::function::UnaryNativeFnRN,
+    hir::native_functions::NativeFnR,
     module::{Module, ModuleId, UseData, Uses},
     std::string::String as FerliumString,
     types::effects::effect_write,
@@ -98,7 +98,7 @@ pub fn set_panic_hook() {
     console_error_panic_hook::set_once();
 }
 
-fn console_print(message: &FerliumString) {
+extern "C" fn console_print(message: &FerliumString) {
     append_to_playground_console(message.as_ref());
 }
 
@@ -106,8 +106,7 @@ fn console_module(module_id: ModuleId) -> Module {
     let mut module = Module::new(module_id, Path::single_str("console"));
     module.add_function(
         ustr("print"),
-        UnaryNativeFnRN::description_with_default_ty(
-            console_print,
+        NativeFnR::new(console_print).description(
             ["message"],
             "Prints `message` to the playground console.",
             effect_write(),

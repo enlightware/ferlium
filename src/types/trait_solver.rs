@@ -4143,7 +4143,7 @@ mod tests {
     use super::*;
     use crate::{
         CompilerSession,
-        hir::function::{Function, UnaryNativeFnNN},
+        hir::function::Function,
         module::{BlanketTraitImplSubKey, Path},
         std::{core_traits_names::VALUE_TRAIT_NAME, math::int_type, new_module_using_std},
         types::{
@@ -4151,6 +4151,34 @@ mod tests {
             r#type::FnType,
         },
     };
+
+    /// Type-solver fixture with an unresolved effect, not an executable host entry.
+    #[derive(Clone)]
+    struct UnexecutedEffectMethod;
+
+    impl crate::hir::function::Callable for UnexecutedEffectMethod {
+        fn call(
+            &self,
+            _: Vec<crate::eval::ValOrMut>,
+            _: &mut crate::eval::EvalCtx,
+            _: &[crate::module::ELocalDecl],
+        ) -> crate::eval::EvalControlFlowResult {
+            unreachable!("the effect-cache test only queries method types")
+        }
+        fn runtime_argument_passing(&self) -> Option<&[crate::hir::function::ArgConvention]> {
+            Some(&[crate::hir::function::ArgConvention::Let])
+        }
+        fn format_ind(
+            &self,
+            f: &mut std::fmt::Formatter,
+            _: &[crate::module::ELocalDecl],
+            _: &ModuleEnv,
+            _: usize,
+            _: usize,
+        ) -> std::fmt::Result {
+            f.write_str("UnexecutedEffectMethod")
+        }
+    }
 
     #[test]
     fn open_generated_value_dictionaries_ignore_caller_local_variable_numbers() {
@@ -4269,7 +4297,8 @@ mod tests {
             [int_type()],
             [EffType::single_variable_id(0)],
             [],
-            [Box::new(UnaryNativeFnNN::new(|value: isize| value)) as Function],
+            // This solver fixture has unresolved effects and is never executed.
+            [Box::new(UnexecutedEffectMethod) as Function],
         );
 
         let current_functions = current_function_map(&module.def_table);

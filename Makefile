@@ -53,7 +53,12 @@ test-wasm:
 test: test-local test-wasm
 
 test-miri:
-	cargo +nightly miri test hir::value::tests::discard_storage_recursively_reclaims_runtime_payloads --lib
+	# Focus on provenance and ownership; native fixtures avoid compiling std under Miri.
+	cargo +nightly miri test --lib -- \
+		hir::value::tests::discard_storage_recursively_reclaims_runtime_payloads \
+		hir::native_functions::tests::native_adapter_borrows_disjoint_places_during_failure \
+		hir::native_functions::tests::native_failure_preserves_output_ownership_and_reuses_state \
+		hir::native_functions::tests::native_drop_consumes_the_slot_before_storage_reclamation
 
 check-valgrind:
 	@version=$$("$(VALGRIND)" --version 2>/dev/null | sed -n 's/^valgrind-\([0-9][0-9.]*\).*$$/\1/p'); \

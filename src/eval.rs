@@ -10,6 +10,7 @@ use std::{collections::VecDeque, mem};
 
 use enum_as_inner::EnumAsInner;
 
+use crate::hir::native_functions::NativeFailureState;
 use crate::module::id::Id;
 use crate::std::array::array_value_from_vec;
 use crate::std::value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX};
@@ -207,6 +208,8 @@ pub struct EvalCtx<'a> {
     fuel_remaining: Option<usize>,
     /// Whether this executor can still safely run Ferlium code.
     execution_state: ExecutionState,
+    /// One diagnostic cell for all native calls in this host invocation.
+    pub(crate) native_failure: NativeFailureState,
     /// id of the current module for import slot resolution
     pub module_id: ModuleId,
     /// whether the current function returns a place result
@@ -397,6 +400,7 @@ impl<'a> EvalCtx<'a> {
             environment_cell_limit: limits.environment_cell_limit,
             fuel_remaining: limits.execution.fuel_limit,
             execution_state: ExecutionState::Running,
+            native_failure: Default::default(),
             module_id: module,
             returns_place: false,
             trivial_copy_layout_cache: FxHashMap::default(),
@@ -4300,8 +4304,9 @@ mod tests {
         },
         hir::{
             self, CallArgument, ENode, ENodeArena, Elaborated, LoopId, NodeKind,
-            function::{ArgConvention, CallableDefinition, NullaryNativeFnN, ScriptFunction},
+            function::{ArgConvention, CallableDefinition, ScriptFunction},
             hir_syn,
+            native_functions::NativeOutFn0,
             value::{LiteralValue, NativeDisplay, Value},
         },
         module::{
@@ -4348,8 +4353,7 @@ mod tests {
     }
 
     fn eval_drop_tracked_function() -> ModuleFunction {
-        NullaryNativeFnN::description_with_default_ty(
-            make_eval_drop_tracked,
+        NativeOutFn0::from_rust(make_eval_drop_tracked).description(
             [],
             "Creates a drop-tracked interpreter test value.",
             EffType::empty(),

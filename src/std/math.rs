@@ -7,7 +7,6 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use std::{
-    convert::identity,
     fmt,
     hash::{Hash, Hasher as StdHasher},
     str::FromStr,
@@ -22,17 +21,18 @@ use crate::{
     cached_primitive_ty,
     compiler::error::SourceFailureKind,
     containers::b,
-    hir::function::{
-        BinaryNativeFnNMN, BinaryNativeFnNNFN, BinaryNativeFnNNN, BinaryNativeFnNNV, Function,
-        NullaryNativeFnN, UnaryNativeFnNFN, UnaryNativeFnNN,
+    hir::function::Function,
+    hir::native_functions::{
+        NativeFallibleOutFnN, NativeFallibleOutFnNN, NativeFn0, NativeFnN, NativeFnNM, NativeFnNN,
+        NativeOutFnN,
     },
     hir::value::{LiteralValue, NativeDisplay, Value},
     module::Module,
     std::{
         core_traits_names::{
             BITS_TRAIT_NAME, CAST_TRAIT_NAME, DEFAULT_TRAIT_NAME, DIV_TRAIT_NAME,
-            INSPECT_TRAIT_NAME, NUM_TRAIT_NAME, ORD_TRAIT_NAME, REAL_TRAIT_NAME,
-            TRIVIAL_COPY_TRAIT_NAME, VALUE_TRAIT_NAME,
+            INSPECT_TRAIT_NAME, NUM_TRAIT_NAME, REAL_TRAIT_NAME, TRIVIAL_COPY_TRAIT_NAME,
+            VALUE_TRAIT_NAME,
         },
         hash::Hasher,
         ordering::compare,
@@ -70,7 +70,10 @@ pub fn float_value(value: f64) -> Value {
     Value::native(Float::new(value).unwrap())
 }
 
+/// A finite floating-point value. The private NotNan field supplies ordering; constructors also
+/// exclude infinities. Native arithmetic saturates overflow and reports invalid domains separately.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(transparent)]
 pub struct Float(NotNan<f64>);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -173,8 +176,8 @@ fn saturated_real_result(value: f64) -> Float {
     Float::new_saturating(value)
 }
 
-fn isize_to_float(value: isize) -> Float {
-    // Safe because an `isize` always converts to a finite `f64`.
+extern "C" fn isize_to_float(value: isize) -> Float {
+    // An isize always converts to a finite f64.
     Float::new(value as f64).expect("Conversion from isize to Float should not fail")
 }
 
@@ -226,7 +229,7 @@ fn clamped_negated_shift_to_u32(shift: Int) -> u32 {
     clamp_to_u32(shift)
 }
 
-fn shift_left(value: Int, shift: Int) -> Int {
+extern "C" fn shift_left(value: Int, shift: Int) -> Int {
     if shift < 0 {
         let shift = clamped_negated_shift_to_u32(shift);
         value.wrapping_shr(shift)
@@ -236,7 +239,7 @@ fn shift_left(value: Int, shift: Int) -> Int {
     }
 }
 
-fn shift_right(value: Int, shift: Int) -> Int {
+extern "C" fn shift_right(value: Int, shift: Int) -> Int {
     if shift < 0 {
         let shift = clamped_negated_shift_to_u32(shift);
         value.wrapping_shl(shift)
@@ -246,7 +249,7 @@ fn shift_right(value: Int, shift: Int) -> Int {
     }
 }
 
-fn rotate_left(value: Int, shift: Int) -> Int {
+extern "C" fn rotate_left(value: Int, shift: Int) -> Int {
     if shift < 0 {
         let shift = clamped_negated_shift_to_u32(shift);
         value.rotate_right(shift)
@@ -256,7 +259,7 @@ fn rotate_left(value: Int, shift: Int) -> Int {
     }
 }
 
-fn rotate_right(value: Int, shift: Int) -> Int {
+extern "C" fn rotate_right(value: Int, shift: Int) -> Int {
     if shift < 0 {
         let shift = clamped_negated_shift_to_u32(shift);
         value.rotate_left(shift)
@@ -266,15 +269,15 @@ fn rotate_right(value: Int, shift: Int) -> Int {
     }
 }
 
-fn count_ones(value: Int) -> Int {
+extern "C" fn count_ones(value: Int) -> Int {
     value.count_ones() as Int
 }
 
-fn count_zeros(value: Int) -> Int {
+extern "C" fn count_zeros(value: Int) -> Int {
     value.count_zeros() as Int
 }
 
-fn bit(position: Int) -> Int {
+extern "C" fn bit(position: Int) -> Int {
     if position < 0 {
         return 0;
     }
@@ -282,63 +285,61 @@ fn bit(position: Int) -> Int {
     (1 as Int).checked_shl(position).unwrap_or(0)
 }
 
-fn set_bit(value: Int, position: Int) -> Int {
+extern "C" fn set_bit(value: Int, position: Int) -> Int {
     value | bit(position)
 }
 
-fn clear_bit(value: Int, position: Int) -> Int {
+extern "C" fn clear_bit(value: Int, position: Int) -> Int {
     value & !bit(position)
 }
 
-fn test_bit(value: Int, position: Int) -> bool {
+extern "C" fn test_bit(value: Int, position: Int) -> bool {
     (value & bit(position)) != 0
 }
 
-fn hash_int(value: Int, state: &mut Hasher) {
+fn int_to_string(value: Int) -> String {
+    String::new(&value.to_string())
+}
+
+extern "C" fn hash_int(value: Int, state: &mut Hasher) {
     state.write_isize(value);
 }
 
-fn hash_float(value: Float, state: &mut Hasher) {
+extern "C" fn hash_float(value: Float, state: &mut Hasher) {
     state.write_u64(value.into_inner().to_bits());
 }
 
-fn equal_float(lhs: Float, rhs: Float) -> bool {
-    lhs == rhs
-}
-
-fn compare_float(lhs: Float, rhs: Float) -> Value {
-    compare(lhs, rhs)
-}
-
-fn add_float(lhs: Float, rhs: Float) -> Float {
+extern "C" fn add_float(lhs: Float, rhs: Float) -> Float {
     Float::new_saturating(lhs.into_inner() + rhs.into_inner())
 }
 
-fn sub_float(lhs: Float, rhs: Float) -> Float {
+extern "C" fn sub_float(lhs: Float, rhs: Float) -> Float {
     Float::new_saturating(lhs.into_inner() - rhs.into_inner())
 }
 
-fn mul_float(lhs: Float, rhs: Float) -> Float {
+extern "C" fn mul_float(lhs: Float, rhs: Float) -> Float {
     Float::new_saturating(lhs.into_inner() * rhs.into_inner())
 }
 
 fn div_float(lhs: Float, rhs: Float) -> Result<Float, SourceFailureKind> {
-    if rhs.into_inner() == 0.0 {
+    let lhs = lhs.into_inner();
+    let rhs = rhs.into_inner();
+    if rhs == 0.0 {
         Err(SourceFailureKind::DivisionByZero)
     } else {
-        Ok(Float::new_saturating(lhs.into_inner() / rhs.into_inner()))
+        Ok(Float::new_saturating(lhs / rhs))
     }
 }
 
-fn sin_float(value: Float) -> Float {
+extern "C" fn sin_float(value: Float) -> Float {
     saturated_real_result(value.into_inner().sin())
 }
 
-fn cos_float(value: Float) -> Float {
+extern "C" fn cos_float(value: Float) -> Float {
     saturated_real_result(value.into_inner().cos())
 }
 
-fn tan_float(value: Float) -> Float {
+extern "C" fn tan_float(value: Float) -> Float {
     saturated_real_result(value.into_inner().tan())
 }
 
@@ -360,27 +361,27 @@ fn acos_float(value: Float) -> Result<Float, SourceFailureKind> {
     })
 }
 
-fn atan_float(value: Float) -> Float {
+extern "C" fn atan_float(value: Float) -> Float {
     saturated_real_result(value.into_inner().atan())
 }
 
-fn atan2_float(y: Float, x: Float) -> Float {
+extern "C" fn atan2_float(y: Float, x: Float) -> Float {
     saturated_real_result(y.into_inner().atan2(x.into_inner()))
 }
 
-fn sinh_float(value: Float) -> Float {
+extern "C" fn sinh_float(value: Float) -> Float {
     saturated_real_result(value.into_inner().sinh())
 }
 
-fn cosh_float(value: Float) -> Float {
+extern "C" fn cosh_float(value: Float) -> Float {
     saturated_real_result(value.into_inner().cosh())
 }
 
-fn tanh_float(value: Float) -> Float {
+extern "C" fn tanh_float(value: Float) -> Float {
     saturated_real_result(value.into_inner().tanh())
 }
 
-fn asinh_float(value: Float) -> Float {
+extern "C" fn asinh_float(value: Float) -> Float {
     saturated_real_result(value.into_inner().asinh())
 }
 
@@ -402,7 +403,7 @@ fn atanh_float(value: Float) -> Result<Float, SourceFailureKind> {
     })
 }
 
-fn exp_float(value: Float) -> Float {
+extern "C" fn exp_float(value: Float) -> Float {
     saturated_real_result(value.into_inner().exp())
 }
 
@@ -437,27 +438,19 @@ fn sqrt_float(value: Float) -> Result<Float, SourceFailureKind> {
     })
 }
 
-fn neg_float(value: Float) -> Float {
+extern "C" fn neg_float(value: Float) -> Float {
     Float::new(-value.into_inner()).expect("negating a finite float should stay finite")
 }
 
-fn abs_float(value: Float) -> Float {
-    value.abs()
-}
-
-fn signum_float(value: Float) -> Float {
-    value.signum()
-}
-
-fn round_float(value: Float) -> Int {
+extern "C" fn round_float(value: Float) -> Int {
     value.round() as Int
 }
 
-fn floor_float(value: Float) -> Int {
+extern "C" fn floor_float(value: Float) -> Int {
     value.floor() as Int
 }
 
-fn ceil_float(value: Float) -> Int {
+extern "C" fn ceil_float(value: Float) -> Int {
     value.ceil() as Int
 }
 
@@ -465,13 +458,43 @@ fn float_to_string(value: Float) -> String {
     String::new(&value.to_string())
 }
 
+fn idiv(lhs: isize, rhs: isize) -> Result<isize, SourceFailureKind> {
+    if rhs == 0 {
+        Err(SourceFailureKind::DivisionByZero)
+    } else {
+        Ok(lhs.wrapping_div(rhs))
+    }
+}
+
+fn idiv_euclid(lhs: isize, rhs: isize) -> Result<isize, SourceFailureKind> {
+    if rhs == 0 {
+        Err(SourceFailureKind::DivisionByZero)
+    } else {
+        Ok(lhs.wrapping_div_euclid(rhs))
+    }
+}
+
+fn rem(lhs: isize, rhs: isize) -> Result<isize, SourceFailureKind> {
+    if rhs == 0 {
+        Err(SourceFailureKind::RemainderByZero)
+    } else {
+        Ok(lhs.wrapping_rem(rhs))
+    }
+}
+
+fn modulo(lhs: isize, rhs: isize) -> Result<isize, SourceFailureKind> {
+    if rhs == 0 {
+        Err(SourceFailureKind::RemainderByZero)
+    } else {
+        Ok(lhs.wrapping_rem_euclid(rhs))
+    }
+}
+
 pub fn add_to_module(to: &mut Module) {
-    use SourceFailureKind::*;
     let value_trait_id = to.expect_std_trait_id_in_current_module(VALUE_TRAIT_NAME);
     let inspect_trait_id = to.expect_std_trait_id_in_current_module(INSPECT_TRAIT_NAME);
     let num_trait_id = to.expect_std_trait_id_in_current_module(NUM_TRAIT_NAME);
     let bits_trait_id = to.expect_std_trait_id_in_current_module(BITS_TRAIT_NAME);
-    let ord_trait_id = to.expect_std_trait_id_in_current_module(ORD_TRAIT_NAME);
     let default_trait_id = to.expect_std_trait_id_in_current_module(DEFAULT_TRAIT_NAME);
     let trivial_copy_trait_id = to.expect_std_trait_id_in_current_module(TRIVIAL_COPY_TRAIT_NAME);
     let div_trait_id = to.expect_std_trait_id_in_current_module(DIV_TRAIT_NAME);
@@ -482,9 +505,6 @@ pub fn add_to_module(to: &mut Module) {
     // Note: aliases are added in core.rs
 
     // Trait implementations
-    use BinaryNativeFnNNN as BinaryFn;
-    use UnaryNativeFnNN as UnaryFn;
-    use std::ops;
 
     // int
     to.add_concrete_impl_no_locals(
@@ -493,9 +513,9 @@ pub fn add_to_module(to: &mut Module) {
         [],
         native_layout_associated_consts::<Int>(),
         [
-            b(BinaryFn::new(equal::<Int>)) as Function,
-            b(UnaryFn::new(|value: Int| String::new(&value.to_string()))) as Function,
-            b(BinaryNativeFnNMN::new(hash_int)) as Function,
+            b(NativeFnNN::new(equal::<Int>)) as Function,
+            b(NativeOutFnN::from_rust(int_to_string)) as Function,
+            b(NativeFnNM::new(hash_int)) as Function,
             native_value_clone_function::<Int>(),
             native_value_drop_function::<Int>(),
         ],
@@ -505,20 +525,20 @@ pub fn add_to_module(to: &mut Module) {
         [int_type()],
         [],
         [],
-        [b(UnaryFn::new(|value: Int| String::new(&value.to_string()))) as Function],
+        [b(NativeFallibleOutFnN::from_rust_infallible(int_to_string)) as Function],
     );
     to.add_native_concrete_impl(
         num_trait_id,
         [int_type()],
         [],
         [
-            b(BinaryFn::new(Int::wrapping_add)) as Function,
-            b(BinaryFn::new(Int::wrapping_sub)) as Function,
-            b(BinaryFn::new(Int::wrapping_mul)) as Function,
-            b(UnaryFn::new(Int::wrapping_neg)) as Function,
-            b(UnaryFn::new(Int::abs)) as Function,
-            b(UnaryFn::new(Int::signum)) as Function,
-            b(UnaryFn::new(identity::<Int>)) as Function,
+            b(NativeFnNN::from_rust(Int::wrapping_add)) as Function,
+            b(NativeFnNN::from_rust(Int::wrapping_sub)) as Function,
+            b(NativeFnNN::from_rust(Int::wrapping_mul)) as Function,
+            b(NativeFnN::from_rust(Int::wrapping_neg)) as Function,
+            b(NativeFnN::from_rust(Int::wrapping_abs)) as Function,
+            b(NativeFnN::from_rust(Int::signum)) as Function,
+            b(NativeFnN::from_rust(std::convert::identity::<Int>)) as Function,
         ],
     );
     to.add_native_concrete_impl(
@@ -526,33 +546,36 @@ pub fn add_to_module(to: &mut Module) {
         [int_type()],
         [],
         [
-            b(BinaryFn::new(<Int as ops::BitAnd>::bitand)) as Function,
-            b(BinaryFn::new(<Int as ops::BitOr>::bitor)) as Function,
-            b(BinaryFn::new(<Int as ops::BitXor>::bitxor)) as Function,
-            b(UnaryFn::new(<Int as ops::Not>::not)) as Function,
-            b(BinaryFn::new(shift_left)) as Function,
-            b(BinaryFn::new(shift_right)) as Function,
-            b(BinaryFn::new(rotate_left)) as Function,
-            b(BinaryFn::new(rotate_right)) as Function,
-            b(UnaryFn::new(count_ones)) as Function,
-            b(UnaryFn::new(count_zeros)) as Function,
-            b(UnaryFn::new(bit)) as Function,
-            b(BinaryFn::new(set_bit)) as Function,
-            b(BinaryFn::new(clear_bit)) as Function,
-            b(BinaryFn::new(test_bit)) as Function,
+            b(NativeFnNN::from_rust(<Int as std::ops::BitAnd>::bitand)) as Function,
+            b(NativeFnNN::from_rust(<Int as std::ops::BitOr>::bitor)) as Function,
+            b(NativeFnNN::from_rust(<Int as std::ops::BitXor>::bitxor)) as Function,
+            b(NativeFnN::from_rust(<Int as std::ops::Not>::not)) as Function,
+            b(NativeFnNN::new(shift_left)) as Function,
+            b(NativeFnNN::new(shift_right)) as Function,
+            b(NativeFnNN::new(rotate_left)) as Function,
+            b(NativeFnNN::new(rotate_right)) as Function,
+            b(NativeFnN::new(count_ones)) as Function,
+            b(NativeFnN::new(count_zeros)) as Function,
+            b(NativeFnN::new(bit)) as Function,
+            b(NativeFnNN::new(set_bit)) as Function,
+            b(NativeFnNN::new(clear_bit)) as Function,
+            b(NativeFnNN::new(test_bit)) as Function,
         ],
     );
-    to.add_native_concrete_impl(
-        ord_trait_id,
-        [int_type()],
-        [],
-        [b(BinaryNativeFnNNV::new(compare::<Int>)) as Function],
+    to.add_function_with_visibility(
+        ustr("compare_int_code"),
+        NativeFnNN::new(compare::<Int>).description(
+            ["left", "right"],
+            "Internal comparison code.",
+            no_effects(),
+        ),
+        crate::module::Visibility::Module,
     );
     to.add_native_concrete_impl(
         default_trait_id,
         [int_type()],
         [],
-        [b(NullaryNativeFnN::new(|| 0isize)) as Function],
+        [b(NativeFn0::from_rust(|| 0isize)) as Function],
     );
     to.add_native_concrete_impl(
         trivial_copy_trait_id,
@@ -562,14 +585,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("idiv"),
-        BinaryNativeFnNNFN::description_with_default_ty(
-            |lhs: isize, rhs: isize| {
-                if rhs == 0 {
-                    Err(DivisionByZero)
-                } else {
-                    Ok(lhs / rhs)
-                }
-            },
+        NativeFallibleOutFnNN::from_rust(idiv).description(
             ["left", "right"],
             "Divides `left` by `right` and truncates the result.",
             effect(PrimitiveEffect::Fallible),
@@ -577,14 +593,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("idiv_euclid"),
-        BinaryNativeFnNNFN::description_with_default_ty(
-            |lhs: isize, rhs: isize| {
-                if rhs == 0 {
-                    Err(DivisionByZero)
-                } else {
-                    Ok(lhs.div_euclid(rhs))
-                }
-            },
+        NativeFallibleOutFnNN::from_rust(idiv_euclid).description(
             ["left", "right"],
             "Calculates the quotient of the Euclidean division of `left` by `right`.",
             effect(PrimitiveEffect::Fallible),
@@ -592,14 +601,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("rem"),
-        BinaryNativeFnNNFN::description_with_default_ty(
-            |lhs: isize, rhs: isize| {
-                if rhs == 0 {
-                    Err(RemainderByZero)
-                } else {
-                    Ok(ops::Rem::rem(lhs, rhs))
-                }
-            },
+        NativeFallibleOutFnNN::from_rust(rem).description(
             ["left", "right"],
             "Calculates the remainder of the division of `left` by `right`.",
             effect(PrimitiveEffect::Fallible),
@@ -607,14 +609,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("mod"),
-        BinaryNativeFnNNFN::description_with_default_ty(
-            |lhs: isize, rhs: isize| {
-                if rhs == 0 {
-                    Err(RemainderByZero)
-                } else {
-                    Ok(lhs.rem_euclid(rhs))
-                }
-            },
+        NativeFallibleOutFnNN::from_rust(modulo).description(
             ["left", "right"],
             "Calculates the modulo of the division of `left` by `right`.",
             effect(PrimitiveEffect::Fallible),
@@ -628,9 +623,9 @@ pub fn add_to_module(to: &mut Module) {
         [],
         native_layout_associated_consts::<Float>(),
         [
-            b(BinaryNativeFnNNN::new(equal_float)) as Function,
-            b(UnaryNativeFnNN::new(float_to_string)) as Function,
-            b(BinaryNativeFnNMN::new(hash_float)) as Function,
+            b(NativeFnNN::new(equal::<Float>)) as Function,
+            b(NativeOutFnN::from_rust(float_to_string)) as Function,
+            b(NativeFnNM::new(hash_float)) as Function,
             native_value_clone_function::<Float>(),
             native_value_drop_function::<Float>(),
         ],
@@ -640,33 +635,36 @@ pub fn add_to_module(to: &mut Module) {
         [float_type()],
         [],
         [],
-        [b(UnaryNativeFnNN::new(float_to_string)) as Function],
+        [b(NativeFallibleOutFnN::from_rust_infallible(float_to_string)) as Function],
     );
     to.add_native_concrete_impl(
         num_trait_id,
         [float_type()],
         [],
         [
-            b(BinaryNativeFnNNN::new(add_float)) as Function,
-            b(BinaryNativeFnNNN::new(sub_float)) as Function,
-            b(BinaryNativeFnNNN::new(mul_float)) as Function,
-            b(UnaryNativeFnNN::new(neg_float)) as Function,
-            b(UnaryNativeFnNN::new(abs_float)) as Function,
-            b(UnaryNativeFnNN::new(signum_float)) as Function,
-            b(UnaryFn::new(isize_to_float)) as Function,
+            b(NativeFnNN::new(add_float)) as Function,
+            b(NativeFnNN::new(sub_float)) as Function,
+            b(NativeFnNN::new(mul_float)) as Function,
+            b(NativeFnN::new(neg_float)) as Function,
+            b(NativeFnN::from_rust(Float::abs)) as Function,
+            b(NativeFnN::from_rust(Float::signum)) as Function,
+            b(NativeFnN::new(isize_to_float)) as Function,
         ],
     );
-    to.add_native_concrete_impl(
-        ord_trait_id,
-        [float_type()],
-        [],
-        [b(BinaryNativeFnNNV::new(compare_float)) as Function],
+    to.add_function_with_visibility(
+        ustr("compare_float_code"),
+        NativeFnNN::new(compare::<Float>).description(
+            ["left", "right"],
+            "Internal comparison code.",
+            no_effects(),
+        ),
+        crate::module::Visibility::Module,
     );
     to.add_native_concrete_impl(
         div_trait_id,
         [float_type()],
         [],
-        [b(BinaryNativeFnNNFN::new(div_float)) as Function],
+        [b(NativeFallibleOutFnNN::from_rust(div_float)) as Function],
     );
     to.add_native_concrete_impl(
         trivial_copy_trait_id,
@@ -684,35 +682,34 @@ pub fn add_to_module(to: &mut Module) {
             LiteralValue::new_native(Float::new(std::f64::consts::E).unwrap()),
         ],
         [
-            b(UnaryNativeFnNN::new(sin_float)) as Function,
-            b(UnaryNativeFnNN::new(cos_float)) as Function,
-            b(UnaryNativeFnNN::new(tan_float)) as Function,
-            b(UnaryNativeFnNFN::new(asin_float)) as Function,
-            b(UnaryNativeFnNFN::new(acos_float)) as Function,
-            b(UnaryNativeFnNN::new(atan_float)) as Function,
-            b(BinaryNativeFnNNN::new(atan2_float)) as Function,
-            b(UnaryNativeFnNN::new(sinh_float)) as Function,
-            b(UnaryNativeFnNN::new(cosh_float)) as Function,
-            b(UnaryNativeFnNN::new(tanh_float)) as Function,
-            b(UnaryNativeFnNN::new(asinh_float)) as Function,
-            b(UnaryNativeFnNFN::new(acosh_float)) as Function,
-            b(UnaryNativeFnNFN::new(atanh_float)) as Function,
-            b(UnaryNativeFnNN::new(exp_float)) as Function,
-            b(UnaryNativeFnNFN::new(log_float)) as Function,
-            b(BinaryNativeFnNNFN::new(pow_float)) as Function,
-            b(UnaryNativeFnNFN::new(sqrt_float)) as Function,
+            b(NativeFnN::new(sin_float)) as Function,
+            b(NativeFnN::new(cos_float)) as Function,
+            b(NativeFnN::new(tan_float)) as Function,
+            b(NativeFallibleOutFnN::from_rust(asin_float)) as Function,
+            b(NativeFallibleOutFnN::from_rust(acos_float)) as Function,
+            b(NativeFnN::new(atan_float)) as Function,
+            b(NativeFnNN::new(atan2_float)) as Function,
+            b(NativeFnN::new(sinh_float)) as Function,
+            b(NativeFnN::new(cosh_float)) as Function,
+            b(NativeFnN::new(tanh_float)) as Function,
+            b(NativeFnN::new(asinh_float)) as Function,
+            b(NativeFallibleOutFnN::from_rust(acosh_float)) as Function,
+            b(NativeFallibleOutFnN::from_rust(atanh_float)) as Function,
+            b(NativeFnN::new(exp_float)) as Function,
+            b(NativeFallibleOutFnN::from_rust(log_float)) as Function,
+            b(NativeFallibleOutFnNN::from_rust(pow_float)) as Function,
+            b(NativeFallibleOutFnN::from_rust(sqrt_float)) as Function,
         ],
     );
     to.add_native_concrete_impl(
         default_trait_id,
         [float_type()],
         [],
-        [b(NullaryNativeFnN::new(|| Float::new(0.0).unwrap())) as Function],
+        [b(NativeFn0::from_rust(|| Float::new(0.0).unwrap())) as Function],
     );
     to.add_function(
         ustr("round"),
-        UnaryNativeFnNN::description_with_default_ty(
-            round_float,
+        NativeFnN::new(round_float).description(
             ["value"],
             "Rounds a number to the nearest integer, saturating if necessary.",
             no_effects(),
@@ -720,8 +717,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("floor"),
-        UnaryNativeFnNN::description_with_default_ty(
-            floor_float,
+        NativeFnN::new(floor_float).description(
             ["value"],
             "Rounds a number down to the nearest integer, saturating if necessary.",
             no_effects(),
@@ -729,8 +725,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("ceil"),
-        UnaryNativeFnNN::description_with_default_ty(
-            ceil_float,
+        NativeFnN::new(ceil_float).description(
             ["value"],
             "Rounds a number up to the nearest integer, saturating if necessary.",
             no_effects(),
@@ -742,12 +737,99 @@ pub fn add_to_module(to: &mut Module) {
         cast_trait_id,
         [int_type(), float_type()],
         [],
-        [b(UnaryNativeFnNN::new(saturating_cast_int_to_float::<Int>)) as Function],
+        [b(NativeFallibleOutFnN::from_rust_infallible(
+            saturating_cast_int_to_float::<Int>,
+        )) as Function],
     );
     to.add_native_concrete_impl(
         cast_trait_id,
         [float_type(), int_type()],
         [],
-        [b(UnaryNativeFnNN::new(saturating_trunc::<Int>)) as Function],
+        [b(NativeFallibleOutFnN::from_rust_infallible(
+            saturating_trunc::<Int>,
+        )) as Function],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    fn float_native_bodies_preserve_finiteness_at_boundaries() {
+        // Include both signed zeros, subnormals, domain boundaries and their neighbors,
+        // transcendental overflow inputs, and the largest finite values. A panic in a C body
+        // aborts this test process, so this also exercises the native no-panic contract.
+        let values: Vec<_> = [
+            0.0,
+            f64::from_bits(1),
+            f64::MIN_POSITIVE,
+            0.5,
+            1.0_f64.next_down(),
+            1.0,
+            1.0_f64.next_up(),
+            std::f64::consts::FRAC_PI_2,
+            2.0,
+            1000.0,
+            f64::MAX,
+        ]
+        .into_iter()
+        .flat_map(|value| [-value, value])
+        .map(|value| Float::new(value).unwrap())
+        .collect();
+        let unary: [(_, extern "C" fn(Float) -> Float); 10] = [
+            ("sin", sin_float),
+            ("cos", cos_float),
+            ("tan", tan_float),
+            ("atan", atan_float),
+            ("sinh", sinh_float),
+            ("cosh", cosh_float),
+            ("tanh", tanh_float),
+            ("asinh", asinh_float),
+            ("exp", exp_float),
+            ("neg", neg_float),
+        ];
+        let binary: [(_, extern "C" fn(Float, Float) -> Float); 4] = [
+            ("add", add_float),
+            ("sub", sub_float),
+            ("mul", mul_float),
+            ("atan2", atan2_float),
+        ];
+        type CheckedUnary = fn(Float) -> Result<Float, SourceFailureKind>;
+        let checked: [(_, CheckedUnary); 6] = [
+            ("asin", asin_float),
+            ("acos", acos_float),
+            ("acosh", acosh_float),
+            ("atanh", atanh_float),
+            ("log", log_float),
+            ("sqrt", sqrt_float),
+        ];
+        for &value in &values {
+            for (name, function) in unary {
+                assert!(function(value).into_inner().is_finite(), "{name}({value})");
+            }
+            for (name, function) in checked {
+                if let Ok(result) = function(value) {
+                    assert!(result.into_inner().is_finite(), "{name}({value})");
+                }
+            }
+            assert!(value.abs().into_inner().is_finite());
+            assert!(value.signum().into_inner().is_finite());
+            for &other in &values {
+                for (name, function) in binary {
+                    assert!(
+                        function(value, other).into_inner().is_finite(),
+                        "{name}({value}, {other})"
+                    );
+                }
+                for result in [div_float(value, other), pow_float(value, other)]
+                    .into_iter()
+                    .flatten()
+                {
+                    assert!(result.into_inner().is_finite(), "{value}, {other}");
+                }
+            }
+        }
+    }
 }

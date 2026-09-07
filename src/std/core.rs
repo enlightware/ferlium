@@ -9,8 +9,9 @@
 
 use crate::{
     containers::b,
-    hir::function::{
-        BinaryNativeFnNMN, BinaryNativeFnNNN, Function, NullaryNativeFnN, UnaryNativeFnNN,
+    hir::function::Function,
+    hir::native_functions::{
+        NativeFallibleOutFnR, NativeFn0, NativeFnRM, NativeFnRR, NativeOutFnR,
     },
     module::Module,
     std::{
@@ -21,7 +22,7 @@ use crate::{
         hash::Hasher,
         logic::bool_type,
         math::{float_type, int_type},
-        string::string_type,
+        string::{String, string_type},
         value::{
             native_layout_associated_consts, native_value_clone_function,
             native_value_drop_function,
@@ -50,11 +51,11 @@ fn trivial_copy_trait() -> Trait {
     .with_native_impl_only()
 }
 
-fn unit_to_string(_: ()) -> crate::std::string::String {
-    crate::std::string::String::new("()")
+fn unit_to_string(_: &()) -> String {
+    String::new("()")
 }
 
-fn unit_hash(_: (), _: &mut Hasher) {}
+extern "C" fn unit_hash(_: &(), _: &mut Hasher) {}
 
 pub fn add_to_module(to: &mut Module) {
     // Add aliases for basic types
@@ -91,9 +92,9 @@ pub fn add_to_module(to: &mut Module) {
         [],
         native_layout_associated_consts::<()>(),
         [
-            b(BinaryNativeFnNNN::new(|_: (), _: ()| true)) as Function,
-            b(UnaryNativeFnNN::new(unit_to_string)) as Function,
-            b(BinaryNativeFnNMN::new(unit_hash)) as Function,
+            b(NativeFnRR::from_rust(<() as PartialEq>::eq)) as Function,
+            b(NativeOutFnR::from_rust(unit_to_string)) as Function,
+            b(NativeFnRM::new(unit_hash)) as Function,
             native_value_clone_function::<()>(),
             native_value_drop_function::<()>(),
         ],
@@ -103,14 +104,14 @@ pub fn add_to_module(to: &mut Module) {
         [Type::unit()],
         [],
         [],
-        [b(UnaryNativeFnNN::new(unit_to_string)) as Function],
+        [b(NativeFallibleOutFnR::from_rust_infallible(unit_to_string)) as Function],
     );
     let default_trait_id = to.expect_std_trait_id_in_current_module(DEFAULT_TRAIT_NAME);
     to.add_native_concrete_impl(
         default_trait_id,
         [Type::unit()],
         [],
-        [b(NullaryNativeFnN::new(|| ())) as Function],
+        [b(NativeFn0::from_rust(|| ())) as Function],
     );
     to.add_native_concrete_impl(
         trivial_copy_trait_id,

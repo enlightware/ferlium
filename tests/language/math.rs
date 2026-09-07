@@ -183,6 +183,22 @@ fn math_conversions() {
 fn float_arithmetic_saturates_to_finite_bounds() {
     let mut session = TestSession::new();
     assert_val_eq!(
+        session.run(r#"match parse_float("1e308") { Some(x) => x + x, None => 0.0 }"#),
+        float(f64::MAX)
+    );
+    assert_val_eq!(
+        session.run(r#"match parse_float("-1e308") { Some(x) => x + x, None => 0.0 }"#),
+        float(-f64::MAX)
+    );
+    assert_val_eq!(
+        session.run(r#"match parse_float("1e308") { Some(x) => x - -x, None => 0.0 }"#),
+        float(f64::MAX)
+    );
+    assert_val_eq!(
+        session.run(r#"match parse_float("-1e308") { Some(x) => x - -x, None => 0.0 }"#),
+        float(-f64::MAX)
+    );
+    assert_val_eq!(
         session.run(r#"match parse_float("1e308") { Some(x) => x * x, None => 0.0 }"#),
         float(f64::MAX)
     );

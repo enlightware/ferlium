@@ -16,7 +16,8 @@ use ferlium::{
     format::FormatWith,
     hir::{
         ENodeArena, ENodeId, NodeKind,
-        function::{ArgConvention, CallableDefinition, Function, UnaryNativeFnNN},
+        function::{ArgConvention, CallableDefinition, Function},
+        native_functions::NativeFnR,
         value::LiteralValue,
     },
     module::{Module, ModuleId, Path, TraitDictionaryEntry, TraitId},
@@ -878,9 +879,7 @@ fn parent_trait_constraints_are_not_trait_use_entailment() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn concrete_impl_stores_associated_const_values() {
-    fn unit_identity(value: ()) {
-        value
-    }
+    extern "C" fn unit_identity(_: &()) {}
 
     let method = CallableDefinition::new_infer_quantifiers(
         FnType::new_by_val([Type::variable_id(0)], Type::variable_id(0), no_effects()),
@@ -909,7 +908,7 @@ fn concrete_impl_stores_associated_const_values() {
             LiteralValue::new_native(1isize),
         ],
         [(
-            Box::new(UnaryNativeFnNN::new(unit_identity)) as Function,
+            Box::new(NativeFnR::new(unit_identity)) as Function,
             Vec::new(),
         )],
     );

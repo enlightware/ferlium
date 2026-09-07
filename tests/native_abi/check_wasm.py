@@ -14,6 +14,7 @@ EXPECTED = {
     "probe_integer": ("i64", "i64"),
     "probe_boolean": ("i32", "i32"),
     "probe_unit": ("", ""),
+    "probe_unit_clone": ("i32", ""),
     "probe_borrow": ("i32", "i32"),
     "probe_mutate": ("i32 i32", ""),
     "probe_clone": ("i32 i32", ""),

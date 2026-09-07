@@ -597,6 +597,19 @@ impl InitialSessionState {
 }
 
 impl CompilerSession {
+    /// Native adapter tests need an EvalCtx but no standard-library compilation or execution.
+    #[cfg(test)]
+    pub(crate) fn new_empty_for_tests() -> Self {
+        InitialSessionState {
+            source_table: SourceTable::default(),
+            std_revision: Rc::new(ModuleRevision::new(Module::new(
+                STD_MODULE_ID,
+                module::Path::single_str("std"),
+            ))),
+        }
+        .new_session()
+    }
+
     /// Resolve the standard-library callable catalog once for this session.
     ///
     /// Its identities depend only on std and the target profile, never on subsequently registered
@@ -1547,8 +1560,8 @@ impl Default for CompilerSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hir::native_functions::NativeOptionalFnN;
     use crate::{
-        hir::function::{UnaryNativeFnNV, UnaryNativeOptionalFnN},
         module::function::CallableOrigin,
         std::{math::int_type, option::native_optional_payload_contract_with},
         types::{
@@ -1557,14 +1570,6 @@ mod tests {
             type_scheme::TypeScheme,
         },
     };
-
-    fn some_int_impl(value: isize) -> Option<isize> {
-        Some(value)
-    }
-
-    crate::native_optional_entry!(
-        fn some_int_entry(value: isize) -> isize = some_int_impl
-    );
 
     fn session_with_named_option() -> (CompilerSession, module::TypeDefId) {
         let mut session = CompilerSession::new();
@@ -1649,14 +1654,8 @@ mod tests {
         let mut module = Module::new(module_id, path.clone());
         module.add_function(
             ustr::ustr("some_int"),
-            UnaryNativeOptionalFnN::description_with_ty(
-                some_int_entry,
-                ["value"],
-                "test",
-                int_type(),
-                Type::named(option, [int_type()]),
-                no_effects(),
-            ),
+            NativeOptionalFnN::from_rust(Some::<isize>, Type::named(option, [int_type()]))
+                .description(["value"], "test", no_effects()),
         );
 
         assert_eq!(session.register_module(path, module), module_id);
@@ -1670,17 +1669,14 @@ mod tests {
         let path = Path::single_str("boxed_named_option_consumer");
         let mut module = Module::new(module_id, path.clone());
         module.add_function(
-            ustr::ustr("some_int"),
-            UnaryNativeFnNV::description_with_ty(
-                |value: isize| Value::tuple_variant(ustr::ustr("Some"), [Value::native(value)]),
-                ["value"],
-                "test",
-                int_type(),
-                Type::named(option, [int_type()]),
-                no_effects(),
-            ),
+            ustr::ustr("boxed_option"),
+            crate::module::tests::optional_without_native_entry_fixture(Type::named(
+                option,
+                [int_type()],
+            )),
         );
-
+        // The session can look up the return type in its defining module and reject
+        // this function's missing optional-result ABI adapter before adding the module.
         session.register_module(path, module);
     }
 

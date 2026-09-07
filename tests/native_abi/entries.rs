@@ -38,29 +38,22 @@ pub extern "C" fn probe_boolean(value: bool) -> bool {
 #[unsafe(no_mangle)]
 pub extern "C" fn probe_unit() {}
 
-/// # Safety
-/// `source` must point to a live, shared String for the duration of the call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn probe_borrow(source: *const String) -> usize {
-    let source = unsafe { &*source };
+pub extern "C" fn probe_unit_clone(_: &()) {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn probe_borrow(source: &String) -> usize {
     source.len()
 }
 
-/// # Safety
-/// Both strings must be live; `target` must be exclusively accessible and disjoint from `source`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn probe_mutate(target: *mut String, source: *const String) {
-    let target = unsafe { &mut *target };
-    target.push_str(unsafe { &*source });
+pub extern "C" fn probe_mutate(target: &mut String, source: &String) {
+    target.push_str(source);
 }
 
-/// # Safety
-/// `source` must be live; `output` must be writable, aligned, and disjoint result storage
-/// with no live value requiring destruction.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn probe_clone(source: *const String, output: *mut MaybeUninit<String>) {
-    let source = unsafe { &*source };
-    unsafe { (*output).write(source.clone()) };
+pub extern "C" fn probe_clone(source: &String, output: &mut MaybeUninit<String>) {
+    output.write(source.clone());
 }
 
 /// # Safety
@@ -70,14 +63,12 @@ pub unsafe extern "C" fn probe_drop(target: *mut Tracked) {
     unsafe { target.drop_in_place() };
 }
 
-/// # Safety
-/// `output` must point to writable, aligned result storage.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn probe_optional(value: i64, output: *mut MaybeUninit<i64>) -> bool {
+pub extern "C" fn probe_optional(value: i64, output: &mut MaybeUninit<i64>) -> bool {
     if value < 0 {
         return false;
     }
-    unsafe { (*output).write(value) };
+    output.write(value);
     true
 }
 
@@ -87,52 +78,44 @@ fn parse(source: &str) -> Result<i64, String> {
         .map_err(|_| format!("invalid integer: {source}"))
 }
 
-/// # Safety
-/// `failure` must be live and exclusively accessible, `source` live and shared, and `output`
-/// writable and aligned. All three must be disjoint. Failure consumes no result storage.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn probe_fallible(
-    failure: *mut FailureState,
-    source: *const String,
-    output: *mut MaybeUninit<i64>,
+pub extern "C" fn probe_fallible(
+    failure: &mut FailureState,
+    source: &String,
+    output: &mut MaybeUninit<i64>,
 ) -> u32 {
-    match parse(unsafe { &*source }) {
+    match parse(source) {
         Ok(value) => {
-            unsafe { (*output).write(value) };
+            output.write(value);
             0
         }
         Err(message) => {
-            unsafe { (*failure).message = Some(message) };
+            failure.message = Some(message);
             1
         }
     }
 }
 
-/// # Safety
-/// `failure` must be live and exclusively accessible; `output` must be writable, aligned,
-/// disjoint result storage with no live value requiring destruction.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn probe_fallible_string(
-    failure: *mut FailureState,
+pub extern "C" fn probe_fallible_string(
+    failure: &mut FailureState,
     value: i64,
-    output: *mut MaybeUninit<String>,
+    output: &mut MaybeUninit<String>,
 ) -> u32 {
     if value < 0 {
-        unsafe { (*failure).message = Some(format!("negative value: {value}")) };
+        failure.message = Some(format!("negative value: {value}"));
         return 1;
     }
-    unsafe { (*output).write(value.to_string()) };
+    output.write(value.to_string());
     0
 }
 
-/// # Safety
-/// `failure` must point to a live, exclusively accessible failure state.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn probe_fallible_unit(failure: *mut FailureState, succeed: bool) -> u32 {
+pub extern "C" fn probe_fallible_unit(failure: &mut FailureState, succeed: bool) -> u32 {
     if succeed {
         0
     } else {
-        unsafe { (*failure).message = Some("unit failure".to_owned()) };
+        failure.message = Some("unit failure".to_owned());
         1
     }
 }
