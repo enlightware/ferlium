@@ -156,6 +156,10 @@ fn remove_dead_results(
 
 /// Removes unread results of representation-only operations.
 ///
+/// An unread `stack_save` is only a discarded frontier snapshot, not a storage lifetime boundary:
+/// any surviving restore would be a use and keep it alive. This also collects markers whose final
+/// restores were removed by stack canonicalization or control-flow cleanup.
+///
 /// This is the narrow non-call half needed after tail merging makes a predicate dead. Calls require
 /// the stronger total/speculatable contract below; stores and allocations are handled as complete
 /// local-storage lifetimes by [`remove_dead_storage`]. A backwards use-count worklist removes a
@@ -172,6 +176,7 @@ pub(crate) fn remove_dead_trivial_results(func: &Function) -> Option<Function> {
                     | OperationKind::ExtractTag
                     | OperationKind::ExtractPayloadIndirection
                     | OperationKind::IsInitialized
+                    | OperationKind::StackSave
             ) && let Some(result) = operation.result_id()
             {
                 debug_assert!(!operation.result_requires_consuming_use());
@@ -1406,6 +1411,66 @@ mod tests {
             !caller.contains("stack_save") && !caller.contains("stack_restore"),
             "an allocation-free inline region needs no stack bracket:\n{caller}"
         );
+    }
+
+    #[test]
+    fn unused_stack_snapshots_are_dead_but_live_restoration_is_preserved() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new("stack_snapshots".into(), Default::default());
+        let block = builder.add_block();
+        let unused = builder
+            .append_operation(block, Operation::stack_save(span))
+            .unwrap();
+        let live = builder
+            .append_operation(block, Operation::stack_save(span))
+            .unwrap();
+        builder.append_operation(block, Operation::alloca(span, int_type()));
+        builder.append_operation(block, Operation::stack_restore(span, live.clone()));
+        builder.set_terminator(block, Terminator::ret(span));
+        let function = builder.finish(env);
+        let cleaned = super::remove_dead_trivial_results(&function).unwrap();
+        let cleaned = crate::mir::edit::FunctionEdit::new(cleaned).finish(env);
+        let operations = cleaned.block(cleaned.entry()).operations();
+        assert!(!operations.iter().any(|operation| operation.result_id().map(Value::Register) == Some(unused.clone())));
+        assert!(
+            operations
+                .iter()
+                .any(|operation| operation.result_id().map(Value::Register) == Some(live.clone()))
+        );
+        assert!(
+            operations
+                .iter()
+                .any(|operation| operation.kind == crate::mir::OperationKind::StackRestore)
+        );
+        assert!(
+            operations.iter().any(|operation| matches!(
+                operation.kind,
+                crate::mir::OperationKind::Alloca { .. }
+            ))
+        );
+    }
+
+    #[test]
+    fn stack_canonicalization_can_leave_a_dead_snapshot() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new("empty_snapshots".into(), Default::default());
+        let block = builder.add_block();
+        builder.append_operation(block, Operation::stack_save(span));
+        let inner = builder
+            .append_operation(block, Operation::stack_save(span))
+            .unwrap();
+        builder.append_operation(block, Operation::stack_restore(span, inner));
+        builder.set_terminator(block, Terminator::ret(span));
+        let function = builder.finish(env);
+        let canonical =
+            super::super::stack_region::remove_redundant_stack_markers(&function).unwrap();
+        let cleaned = super::remove_dead_trivial_results(&canonical).unwrap();
+        let cleaned = crate::mir::edit::FunctionEdit::new(cleaned).finish(env);
+        assert!(cleaned.block(cleaned.entry()).operations().is_empty());
     }
 
     /// A normal call owns and reclaims its own frame. It does not make an otherwise empty inline

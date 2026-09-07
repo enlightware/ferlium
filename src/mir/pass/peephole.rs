@@ -160,7 +160,7 @@ fn single_bool_store(func: &Function, block: BlockId) -> Option<BoolStore> {
     })
 }
 
-fn bool_value(func: &Function, value: &mir::Value) -> Option<bool> {
+pub(super) fn bool_value(func: &Function, value: &mir::Value) -> Option<bool> {
     let literal = match value {
         mir::Value::Constant(id) => &func.constant(*id).representation,
         mir::Value::Pattern(literal) => literal,

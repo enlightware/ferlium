@@ -436,6 +436,13 @@ pub(crate) fn optimize_function(
     if let Some(canonicalized) = stack_region::remove_redundant_stack_markers(source) {
         current = Some(canonicalized);
     }
+    // Collect unread representation results once here, including stack saves stranded by
+    // canonicalization and dead comparisons, loads, tags, payload indirections and initialization
+    // tests. Successful branch rewrites below already run this same trivial-result cleanup.
+    let source = current.as_ref().unwrap_or(function);
+    if let Some(cleaned) = dce::remove_dead_trivial_results(source) {
+        current = Some(cleaned);
+    }
     // Cleanup can make mutually exclusive branch arms alpha-equivalent by removing lowering
     // scaffolding that differed between them. Merge complete equivalent blocks without moving
     // their operations, collapse a conditional whose two edges now agree, and fold shared empty

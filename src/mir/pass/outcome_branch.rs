@@ -15,6 +15,12 @@
 //! Only empty forwarding blocks and single equality tests whose result has no other users may
 //! be bypassed. Everything else, including stack restoration, is a destination rather than an
 //! operation to hoist or discard. Thus calls, ownership, failure and cleanup retain their order.
+//!
+//! A returned/stored Boolean can instead end in a literal store on one arm and a computed
+//! predicate store on the other. Evaluate those small tails over the same domain, then materialize
+//! the singleton predicate (and, if necessary, its Boolean negation) without branching. Both tails
+//! must have identical stores/cleanup/continuations and no other incoming edges. No calls or writes
+//! except the one Boolean store are crossed, and no computed result may escape its original tail.
 
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -22,16 +28,18 @@ use smallvec::SmallVec;
 use crate::{
     hir::value::LiteralValue,
     mir::{
-        self, BlockId, Function, OperationKind,
+        self, BlockId, Function, Operation, OperationKind,
         edit::FunctionEdit,
         terminator::{Terminator, TerminatorKind},
     },
     module::ModuleEnv,
+    std::logic::bool_type,
 };
 
 use super::{
-    budget::OUTCOME_BRANCH_BLOCKS,
+    budget::{OUTCOME_BOOLEAN_OPERATIONS, OUTCOME_BRANCH_BLOCKS},
     dataflow::{self, Const, Outcome},
+    peephole::bool_value,
 };
 
 struct Test<'a> {
@@ -73,6 +81,9 @@ fn test(func: &Function, block: BlockId) -> Option<Test<'_>> {
 fn has_chain(func: &Function) -> bool {
     func.blocks().any(|block| {
         test(func, block).is_some_and(|first| {
+            if is_boolean_tail(func, first.yes) && is_boolean_tail(func, first.no) {
+                return true;
+            }
             [first.yes, first.no].into_iter().any(|mut successor| {
                 // Match the forwarding blocks destination can cross, independently of whether
                 // another pass has already removed them. The same bound also stops empty cycles.
@@ -89,6 +100,191 @@ fn has_chain(func: &Function) -> bool {
             })
         })
     })
+}
+
+/// Only comparisons, stack restoration, and one Boolean store are candidates. Comparisons must
+/// precede the store; the semantic evaluator below checks their actual operands and stored value.
+fn is_boolean_tail(func: &Function, block: BlockId) -> bool {
+    let body = func.block(block);
+    if !matches!(
+        body.terminator().kind,
+        TerminatorKind::Goto { .. } | TerminatorKind::Return
+    ) || body.operations().len() > OUTCOME_BOOLEAN_OPERATIONS
+    {
+        return false;
+    }
+    let mut store = false;
+    for operation in body.operations() {
+        match operation.kind {
+            OperationKind::CompareEqual if !store => {}
+            OperationKind::StackRestore => {}
+            OperationKind::Store if !store => {
+                store = true;
+            }
+            _ => return false,
+        }
+    }
+    store
+}
+
+enum BooleanResult {
+    Constant(bool),
+    Predicate { outcome: Outcome, positive: bool },
+}
+
+struct BooleanRewrite {
+    block: BlockId,
+    template: BlockId,
+    result: BooleanResult,
+}
+
+/// Removing the comparisons must leave precisely the same operations and continuation. Source
+/// spans may differ; stack marker identities, destination storage and their order must not.
+fn same_boolean_tail(func: &Function, left: BlockId, right: BlockId) -> bool {
+    let left = func.block(left);
+    let right = func.block(right);
+    let retained = |operation: &&Operation| operation.kind != OperationKind::CompareEqual;
+    let mut left_ops = left.operations().iter().filter(retained);
+    let mut right_ops = right.operations().iter().filter(retained);
+    loop {
+        match (left_ops.next(), right_ops.next()) {
+            (Some(a), Some(b)) if a.kind == b.kind => {
+                let same = if a.kind == OperationKind::Store {
+                    a.operands[1] == b.operands[1]
+                } else {
+                    a.operands == b.operands
+                };
+                if !same {
+                    return false;
+                }
+            }
+            (None, None) => return left.terminator().kind == right.terminator().kind,
+            _ => return false,
+        }
+    }
+}
+
+fn tail_results_are_local(
+    func: &Function,
+    block: BlockId,
+    uses: &FxHashMap<mir::ValueId, usize>,
+) -> bool {
+    let body = func.block(block);
+    body.operations()
+        .iter()
+        .filter_map(Operation::result_id)
+        .all(|id| {
+            let local = body
+                .operations()
+                .iter()
+                .flat_map(|op| op.operands.iter())
+                .filter(|operand| **operand == mir::Value::Register(id))
+                .count();
+            uses.get(&id).copied().unwrap_or(0) == local
+        })
+}
+
+fn boolean_tail_value(
+    func: &Function,
+    block: BlockId,
+    operand: &mir::Value,
+    outcome: Outcome,
+) -> Option<bool> {
+    let mut values: SmallVec<[(mir::ValueId, bool); 4]> = SmallVec::new();
+    let mut result = None;
+    let value = |operand: &mir::Value, values: &[(mir::ValueId, bool)]| {
+        bool_value(func, operand).or_else(|| {
+            let mir::Value::Register(id) = operand else {
+                return None;
+            };
+            values
+                .iter()
+                .rev()
+                .find_map(|(known, value)| (*known == *id).then_some(*value))
+        })
+    };
+    for operation in func.block(block).operations() {
+        match operation.kind {
+            OperationKind::CompareEqual => {
+                let mir::Value::Pattern(pattern) = &operation.operands[1] else {
+                    return None;
+                };
+                let equal = if &operation.operands[0] == operand {
+                    outcome == Outcome::pattern(pattern)?
+                } else {
+                    value(&operation.operands[0], &values)? == *pattern.as_primitive_ty::<bool>()?
+                };
+                values.push((operation.result_id()?, equal));
+            }
+            OperationKind::Store => {
+                result = Some(value(&operation.operands[0], &values)?);
+            }
+            OperationKind::StackRestore => {}
+            _ => return None,
+        }
+    }
+    result
+}
+
+fn plan_boolean_result(
+    func: &Function,
+    block: BlockId,
+    test: &Test<'_>,
+    outcomes: impl Iterator<Item = Outcome>,
+    uses: &FxHashMap<mir::ValueId, usize>,
+    incoming: &FxHashMap<BlockId, usize>,
+) -> Option<BooleanRewrite> {
+    if test.yes == test.no || [test.yes, test.no].contains(&block) {
+        return None;
+    }
+    for tail in [test.yes, test.no] {
+        // Do not copy a tail shared with another caller into this root.
+        if !is_boolean_tail(func, tail)
+            || incoming.get(&tail) != Some(&1)
+            || !tail_results_are_local(func, tail, uses)
+        {
+            return None;
+        }
+    }
+    if !same_boolean_tail(func, test.yes, test.no) {
+        return None;
+    }
+    let values: Option<SmallVec<[_; 8]>> = outcomes
+        .map(|outcome| {
+            let tail = if outcome == test.pattern {
+                test.yes
+            } else {
+                test.no
+            };
+            boolean_tail_value(func, tail, test.operand, outcome).map(|value| (outcome, value))
+        })
+        .collect();
+    let values = values?;
+    let &(_, first) = values.first()?;
+    let result = if values.iter().all(|(_, value)| *value == first) {
+        BooleanResult::Constant(first)
+    } else {
+        // Prefer a positive singleton: its complement needs one extra Boolean negation.
+        let (outcome, positive) = [true, false].into_iter().find_map(|positive| {
+            let mut selected = values.iter().filter(|(_, value)| *value == positive);
+            let &(outcome, _) = selected.next()?;
+            selected.next().is_none().then_some((outcome, positive))
+        })?;
+        BooleanResult::Predicate { outcome, positive }
+    };
+    Some(BooleanRewrite {
+        block,
+        template: test.yes,
+        result,
+    })
+}
+
+fn outcome_pattern(outcome: Outcome) -> LiteralValue {
+    match outcome.constant() {
+        Const::Literal(value) => value,
+        Const::VariantTag(tag) => LiteralValue::new_variant_tag(tag),
+        _ => unreachable!("outcomes are integers or tags"),
+    }
 }
 
 fn empty_forwarding_target(func: &Function, block: BlockId) -> Option<BlockId> {
@@ -144,8 +340,12 @@ pub(crate) fn simplify_outcome_branches(func: &Function, env: ModuleEnv<'_>) -> 
     }
     let analysis = dataflow::analyze(func, env);
     let mut uses = FxHashMap::default();
+    let mut incoming = FxHashMap::default();
     for block in func.blocks() {
         let body = func.block(block);
+        for successor in body.terminator().successors() {
+            *incoming.entry(successor).or_insert(0) += 1;
+        }
         for operand in body
             .operations()
             .iter()
@@ -158,6 +358,7 @@ pub(crate) fn simplify_outcome_branches(func: &Function, env: ModuleEnv<'_>) -> 
         }
     }
     let mut rewrites = Vec::new();
+    let mut booleans = Vec::new();
     for block in func.blocks() {
         let Some(first) = test(func, block) else {
             continue;
@@ -188,6 +389,12 @@ pub(crate) fn simplify_outcome_branches(func: &Function, env: ModuleEnv<'_>) -> 
         let Some(outcomes) = fact.outcomes() else {
             continue;
         };
+        if let Some(rewrite) =
+            plan_boolean_result(func, block, &first, outcomes.clone(), &uses, &incoming)
+        {
+            booleans.push(rewrite);
+            continue;
+        }
         let destinations: Option<SmallVec<[_; 8]>> = outcomes
             .map(|outcome| {
                 let target = if outcome == first.pattern {
@@ -221,7 +428,7 @@ pub(crate) fn simplify_outcome_branches(func: &Function, env: ModuleEnv<'_>) -> 
             }
         }
     }
-    if rewrites.is_empty() {
+    if rewrites.is_empty() && booleans.is_empty() {
         return None;
     }
     let mut edit = FunctionEdit::new(func.clone());
@@ -230,11 +437,7 @@ pub(crate) fn simplify_outcome_branches(func: &Function, env: ModuleEnv<'_>) -> 
         let terminator = if yes == no {
             Terminator::goto(span, yes)
         } else {
-            let pattern = match outcome.constant() {
-                Const::Literal(value) => value,
-                Const::VariantTag(tag) => LiteralValue::new_variant_tag(tag),
-                _ => unreachable!("outcomes are integers or tags"),
-            };
+            let pattern = outcome_pattern(outcome);
             let comparison = edit.block_mut(block).operations.last_mut().unwrap();
             debug_assert_eq!(comparison.operands[0], operand);
             comparison.operands[1] = mir::Value::Pattern(Box::new(pattern));
@@ -242,6 +445,48 @@ pub(crate) fn simplify_outcome_branches(func: &Function, env: ModuleEnv<'_>) -> 
             Terminator::cond_br(span, condition, yes, no)
         };
         edit.block_mut(block).terminator = terminator;
+    }
+    for rewrite in booleans {
+        let span = edit.block(rewrite.block).terminator.span;
+        let value = match rewrite.result {
+            BooleanResult::Constant(value) => mir::Value::Constant(edit.add_constant(
+                bool_type(),
+                LiteralValue::new_native(value),
+                &env,
+            )),
+            BooleanResult::Predicate { outcome, positive } => {
+                let comparison = edit.block_mut(rewrite.block).operations.last_mut().unwrap();
+                comparison.operands[1] = mir::Value::Pattern(Box::new(outcome_pattern(outcome)));
+                let value = mir::Value::Register(comparison.result_id().unwrap());
+                if positive {
+                    value
+                } else {
+                    let mut negate = Operation::compare_eq(
+                        span,
+                        value,
+                        mir::Value::Pattern(Box::new(LiteralValue::new_native(false))),
+                    );
+                    let value = edit.assign_new_result(&mut negate).unwrap();
+                    edit.block_mut(rewrite.block).operations.push(negate);
+                    value
+                }
+            }
+        };
+        // Read the immutable original template: plans may overlap in the original CFG, but no
+        // rewrite can change which cleanup sequence or storage this proof selected.
+        let template = func.block(rewrite.template);
+        let block = edit.block_mut(rewrite.block);
+        for operation in template.operations() {
+            if operation.kind == OperationKind::CompareEqual {
+                continue;
+            }
+            let mut operation = operation.clone();
+            if operation.kind == OperationKind::Store {
+                operation.operands[0] = value.clone();
+            }
+            block.operations.push(operation);
+        }
+        block.terminator = template.terminator().clone();
     }
     edit.remove_unreachable_blocks();
     edit.merge_blocks_into_predecessors();
@@ -504,7 +749,10 @@ mod tests {
         fn ordinary(a: int, b: int) -> bool {
             match host::ordinary(a, b) { -1 => true, 0 => true, _ => false }
         }
-        fn main() { (classify(9, 2), classify(2, 9), classify(3, 3), ordinary(1, 9)) }";
+        fn predicate(a: int, b: int) -> bool {
+            match host::compare(a, b) { -1 => true, 0 => true, _ => false }
+        }
+        fn main() { (classify(9, 2), classify(2, 9), classify(3, 3), ordinary(1, 9), predicate(9, 2), predicate(2, 9), predicate(3, 3)) }";
         let module = session
             .compile_for(
                 ExecutionTarget::Mir,
@@ -532,11 +780,20 @@ mod tests {
             .next()
             .unwrap();
         assert_eq!(body.matches("comp_eq ").count(), 2, "{body}");
+        let body = mir
+            .split("fn predicate(")
+            .nth(1)
+            .unwrap()
+            .split("\nfn ")
+            .next()
+            .unwrap();
+        assert!(!body.contains("condbr "), "{body}");
+        assert_eq!(body.matches("call host::compare(").count(), 1, "{body}");
         let optimized = session.eval_mir("optimized_chains", source);
         session.set_mir_optimization(MirOptimization::Disabled);
         let raw = session.eval_mir("raw_chains", source);
         assert_eq!(optimized, raw);
-        assert_eq!(optimized, "(7, 9, 7, false)");
+        assert_eq!(optimized, "(7, 9, 7, false, true, false, true)");
     }
 
     #[test]
@@ -562,5 +819,278 @@ mod tests {
         session.set_mir_optimization(MirOptimization::Disabled);
         assert_eq!(optimized, session.eval_mir("raw_std_chains", source));
         assert_eq!(optimized, "(9, 7, 7, 9)");
+    }
+
+    #[derive(Clone, Copy)]
+    enum BooleanShape {
+        Positive,
+        Negative,
+        Constant,
+        DifferentCleanup,
+        DifferentOperand,
+        ExtraWrite,
+        SharedTail,
+    }
+
+    fn boolean_result_chain(session: &CompilerSession, shape: BooleanShape) -> Function {
+        let span = Location::new_synthesized();
+        let env = session.module_env();
+        let mut builder = FunctionBuilder::new("boolean_tail".into(), Default::default());
+        let input = mir::Value::Parameter(builder.add_parameter(
+            ordering_type(),
+            ParameterKind::Parameter(ArgConvention::Let),
+        ));
+        let other = mir::Value::Parameter(builder.add_parameter(
+            ordering_type(),
+            ParameterKind::Parameter(ArgConvention::Let),
+        ));
+        let flag = mir::Value::Parameter(
+            builder.add_parameter(bool_type(), ParameterKind::Parameter(ArgConvention::Let)),
+        );
+        let destination =
+            mir::Value::Parameter(builder.add_parameter(bool_type(), ParameterKind::Return));
+        let entry = builder.add_block();
+        let root = builder.add_block();
+        let yes = builder.add_block();
+        let no = builder.add_block();
+        let tag = builder
+            .append_operation(entry, Operation::extract_tag(span, input))
+            .unwrap();
+        let other_tag = builder
+            .append_operation(entry, Operation::extract_tag(span, other))
+            .unwrap();
+        let marker = builder
+            .append_operation(entry, Operation::stack_save(span))
+            .unwrap();
+        let scratch = builder
+            .append_operation(entry, Operation::alloca(span, bool_type()))
+            .unwrap();
+        let later_marker = builder
+            .append_operation(entry, Operation::stack_save(span))
+            .unwrap();
+        if matches!(shape, BooleanShape::SharedTail) {
+            let flag = builder
+                .append_operation(entry, Operation::load(span, flag))
+                .unwrap();
+            builder.set_terminator(entry, Terminator::cond_br(span, flag, root, yes));
+        } else {
+            builder.set_terminator(entry, Terminator::goto(span, root));
+        }
+        let first = builder
+            .append_operation(
+                root,
+                Operation::compare_eq(
+                    span,
+                    tag.clone(),
+                    mir::Value::Pattern(Box::new(LiteralValue::new_variant_tag("Less".into()))),
+                ),
+            )
+            .unwrap();
+        builder.set_terminator(root, Terminator::cond_br(span, first, yes, no));
+        let literal = builder.add_constant(
+            bool_type(),
+            LiteralValue::new_native(!matches!(
+                shape,
+                BooleanShape::Positive | BooleanShape::Constant
+            )),
+            &env,
+        );
+        if matches!(shape, BooleanShape::ExtraWrite) {
+            builder.append_operation(
+                yes,
+                Operation::store(span, mir::Value::Constant(literal), scratch),
+            );
+        }
+        builder.append_operation(yes, Operation::stack_restore(span, marker.clone()));
+        builder.append_operation(
+            yes,
+            Operation::store(span, mir::Value::Constant(literal), destination.clone()),
+        );
+        builder.set_terminator(yes, Terminator::ret(span));
+        let result = builder
+            .append_operation(
+                no,
+                Operation::compare_eq(
+                    span,
+                    if matches!(shape, BooleanShape::DifferentOperand) {
+                        other_tag
+                    } else {
+                        tag
+                    },
+                    mir::Value::Pattern(Box::new(LiteralValue::new_variant_tag(
+                        if matches!(shape, BooleanShape::Constant) {
+                            "Less"
+                        } else {
+                            "Equal"
+                        }
+                        .into(),
+                    ))),
+                ),
+            )
+            .unwrap();
+        builder.append_operation(
+            no,
+            Operation::stack_restore(
+                span,
+                if matches!(shape, BooleanShape::DifferentCleanup) {
+                    later_marker
+                } else {
+                    marker
+                },
+            ),
+        );
+        builder.append_operation(no, Operation::store(span, result, destination));
+        builder.set_terminator(no, Terminator::ret(span));
+        builder.finish(env)
+    }
+
+    #[test]
+    fn materializes_boolean_domains_and_preserves_real_cleanup() {
+        let session = CompilerSession::new();
+        for (shape, comparisons) in [
+            (BooleanShape::Positive, 1),
+            (BooleanShape::Negative, 2),
+            (BooleanShape::Constant, 0),
+        ] {
+            let original = boolean_result_chain(&session, shape);
+            let simplified = simplify_outcome_branches(&original, session.module_env()).unwrap();
+            let simplified =
+                super::super::dce::remove_dead_trivial_results(&simplified).unwrap_or(simplified);
+            let simplified = FunctionEdit::new(simplified).finish(session.module_env());
+            assert!(simplified.blocks().all(|block| !matches!(
+                simplified.block(block).terminator().kind,
+                TerminatorKind::CondBr { .. }
+            )));
+            let operations: Vec<_> = simplified
+                .blocks()
+                .flat_map(|block| simplified.block(block).operations())
+                .collect();
+            assert_eq!(
+                operations
+                    .iter()
+                    .filter(|operation| operation.kind == OperationKind::CompareEqual)
+                    .count(),
+                comparisons
+            );
+            assert_eq!(
+                operations
+                    .iter()
+                    .filter(|operation| operation.kind == OperationKind::Store)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                operations
+                    .iter()
+                    .filter(|operation| operation.kind == OperationKind::StackRestore)
+                    .count(),
+                1
+            );
+            assert!(
+                operations
+                    .iter()
+                    .any(|operation| matches!(operation.kind, OperationKind::Alloca { .. }))
+            );
+            assert!(simplified.operation_count() <= original.operation_count());
+        }
+    }
+
+    #[test]
+    fn boolean_results_reject_unrelated_values_writes_cleanup_and_shared_tails() {
+        let session = CompilerSession::new();
+        for shape in [
+            BooleanShape::DifferentCleanup,
+            BooleanShape::DifferentOperand,
+            BooleanShape::ExtraWrite,
+            BooleanShape::SharedTail,
+        ] {
+            assert!(
+                simplify_outcome_branches(
+                    &boolean_result_chain(&session, shape),
+                    session.module_env()
+                )
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn boolean_planner_rejects_extra_writes_without_the_structural_gate() {
+        let session = CompilerSession::new();
+        // The positive control ensures the census and domain actually permit a rewrite; the
+        // extra-write case must be rejected by the planner itself, independently of has_chain.
+        for (shape, accepted) in [
+            (BooleanShape::Positive, true),
+            (BooleanShape::ExtraWrite, false),
+        ] {
+            let function = boolean_result_chain(&session, shape);
+            let (root, first) = function
+                .blocks()
+                .find_map(|block| test(&function, block).map(|first| (block, first)))
+                .unwrap();
+            let mut uses = FxHashMap::default();
+            let mut incoming = FxHashMap::default();
+            for block in function.blocks() {
+                let body = function.block(block);
+                for successor in body.terminator().successors() {
+                    *incoming.entry(successor).or_insert(0) += 1;
+                }
+                for operand in body
+                    .operations()
+                    .iter()
+                    .flat_map(|operation| operation.operands.iter())
+                    .chain(body.terminator().operands())
+                {
+                    if let mir::Value::Register(id) = operand {
+                        *uses.entry(*id).or_insert(0) += 1;
+                    }
+                }
+            }
+            let outcomes = ["Less", "Equal", "Greater"]
+                .into_iter()
+                .map(|tag| Outcome::Tag(tag.into()));
+            assert_eq!(
+                plan_boolean_result(&function, root, &first, outcomes, &uses, &incoming).is_some(),
+                accepted
+            );
+        }
+    }
+
+    #[test]
+    fn native_boolean_wrappers_are_branchless_without_changing_results() {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let source = "fn le(a: int, b: int) -> bool { a <= b }
+            fn ge(a: int, b: int) -> bool { a >= b }
+            fn float_le(a: float, b: float) -> bool { a <= b }
+            fn main() { (le(1, 2), le(2, 1), le(1, 1), ge(1, 2), ge(2, 1), ge(1, 1), float_le(-0.0, 0.0), float_le(2.0, 1.0)) }";
+        let mir = session.emit_mir("boolean_values", source);
+        for name in ["le", "ge", "float_le"] {
+            let body = mir
+                .split(&format!("fn {name}("))
+                .nth(1)
+                .unwrap()
+                .split("\nfn ")
+                .next()
+                .unwrap();
+            assert!(!body.contains("condbr "), "{body}");
+            // This bracket reclaims the native comparison's real result storage.
+            assert_eq!(body.matches("stack_save").count(), 1, "{body}");
+            assert_eq!(body.matches("stack_restore").count(), 1, "{body}");
+            assert_eq!(
+                body.lines()
+                    .filter(|line| line.trim_start().starts_with("store "))
+                    .count(),
+                1,
+                "{body}"
+            );
+        }
+        let optimized = session.eval_mir("optimized_boolean_values", source);
+        session.set_mir_optimization(MirOptimization::Disabled);
+        assert_eq!(optimized, session.eval_mir("raw_boolean_values", source));
+        assert_eq!(
+            optimized,
+            "(true, false, true, false, true, true, true, false)"
+        );
     }
 }

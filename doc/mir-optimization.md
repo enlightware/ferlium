@@ -52,7 +52,9 @@ dead proven calls // remove unused chains of known-total numeric or proved-retur
 dead stores       // remove unread initialization overwritten on every following path
 dce               // on every body, not only a changed one
 stack markers     // drop a mark duplicating one already held, and restores that pop nothing
+dead snapshots    // collect stack saves whose last restore disappeared
 tail merge        // hash-cons equivalent tails, collapse equal edges, and fold empty blocks
+finite domains    // collapse exhaustive tests; materialize Boolean results with identical cleanup
 dead proven + dce // after tail sharing/equal-edge folding, collect its newly dead predicate
 finish            // restores canonical form without exposing the intermediate body
 ```
@@ -239,6 +241,15 @@ possible outcomes; joins take their union, excluding provably unreachable edges.
 may test the complement of several cases with one equality when the domain proves those cases
 exhaustive. Such rewrites must preserve the tested value and all intervening effects and cleanup;
 they neither duplicate the producer nor infer additional laws about it.
+
+The same domain can simplify a first-class Boolean result, not just a branch destination. When
+both arms store to the same Boolean place and have identical cleanup and continuation, evaluate
+their small comparison-only computations over the possible outcomes. A constant result becomes a
+constant store; a singleton or its complement becomes an equality or its Boolean negation. Negation
+uses the existing `comp_eq predicate false` representation, not a native call. This extends the
+finite-domain pass alongside the existing peephole for opposite constant stores. Shared tails,
+escaping intermediate results, other writes and calls are excluded; real stack restoration is
+retained in its original order relative to the store.
 
 ## Specialization
 
@@ -769,6 +780,9 @@ Deliberately narrow, and intra-function only.
 - A properly nested same-block `stack_save`/`stack_restore` pair with one restore goes when no
   surviving operation inside may leave current-frame storage allocated. The paired rule runs after
   the other removals, so storage cleanup can make a region empty first.
+- An unread `stack_save` goes independently: taking a snapshot does not allocate or reclaim
+  storage. Any surviving restore reads its marker and prevents this removal. Trivial-result DCE
+  collects snapshots stranded by stack canonicalization and final control-flow cleanup.
 
 Constants left unreferenced are pruned from the pool, explicitly, since that renumbers every
 `ConstantId`.
@@ -813,7 +827,9 @@ Merging a tail or collapsing a branch can make its predicate or tag dead. Only i
 driver run a small cleanup fixed point: unread `comp_eq`, `load`, and `extract_tag` results;
 explicitly total/speculatable calls; and their local storage lifetimes. Folding only an empty exit
 cannot make a value dead and does not buy that cleanup. Unchanged bodies pay neither the fixed point
-nor a second storage-DCE scan.
+nor a second storage-DCE scan. A narrower trivial-result cleanup runs once after stack
+canonicalization to collect unread snapshots even without a branch rewrite; successful branch
+rewrites already repeat that cleanup as part of their fixed point.
 
 ## Redundant stack markers
 

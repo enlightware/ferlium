@@ -701,10 +701,12 @@ mod tests {
 
     #[test]
     fn hoists_an_invariant_pure_call_before_the_loop_stack_marker() {
+        // The extra addition leaves a loop-local temporary, so the marker still delimits real
+        // storage after LICM and final DCE; an unread marker is no longer retained as scaffolding.
         let module = optimized(
             "fn invariant(x: int, y: int, n: int) {\n\
                  let mut total = 0;\n\
-                 for i in 0..n { total = total + x * y };\n\
+                 for i in 0..n { total = total + x * y + i };\n\
                  total\n\
              }",
         );
@@ -827,9 +829,9 @@ mod tests {
         let call = body
             .find("call licm::large_sum")
             .expect("the large script callee must remain a call");
-        let marker = body.find("stack_save").expect("the loop has a marker");
+        let header = body.find("check_fuel").expect("the loop checks fuel");
         assert!(
-            call < marker,
+            call < header,
             "a generic will-return proof, not native identity, permits hoisting:\n{body}"
         );
     }
@@ -910,9 +912,9 @@ mod tests {
         let call = body
             .find("call std::Num<std::int>::mul")
             .expect("the multiplication remains a call");
-        let marker = body.find("stack_save").expect("the loop has a marker");
+        let header = body.find("check_fuel").expect("the loop checks fuel");
         assert!(
-            marker < call,
+            header < call,
             "a call whose result root escapes the loop must remain inside it:\n{body}"
         );
     }
@@ -930,20 +932,19 @@ mod tests {
         let multiply = body
             .find("call std::Num<std::float>::mul")
             .expect("the invariant float multiplication remains a call");
-        let marker = body
-            .find("stack_save")
-            .expect("the loop has a stack marker");
+        let header = body.find("check_fuel").expect("the loop checks fuel");
         assert!(
-            multiply < marker,
+            multiply < header,
             "LICM must be generic over concrete TrivialCopy result types:\n{body}"
         );
     }
 
     #[test]
     fn hoisted_storage_survives_iteration_restores_and_zero_trip_execution() {
+        // Keep a varying intermediate result inside the loop, forcing real iteration restores.
         let source = "fn invariant(x: int, y: int, n: int) {\n\
                           let mut total = 0;\n\
-                          for i in 0..n { total = total + x * y };\n\
+                          for i in 0..n { total = total + x * y + i };\n\
                           total\n\
                       }\n\
                       fn main() { invariant(6, 7, 4) + invariant(6, 7, 0) }";
@@ -951,6 +952,7 @@ mod tests {
         let body = body_of(&module, "invariant");
         let (_, result_alloca) = call_and_result_alloca(body, "call std::Num<std::int>::mul");
         let marker = body.find("stack_save").expect("the loop has a marker");
+        assert!(body.contains("stack_restore"), "{body}");
         assert!(
             result_alloca < marker,
             "this execution test must exercise the loop-local alloca moved with its call:\n{body}"
@@ -958,6 +960,6 @@ mod tests {
 
         let mut session = CompilerSession::new();
         session.set_mir_optimization(MirOptimization::Enabled);
-        assert_eq!(session.eval_mir("licm_run", source), "168");
+        assert_eq!(session.eval_mir("licm_run", source), "174");
     }
 }

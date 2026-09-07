@@ -79,6 +79,9 @@ pub const FORWARD_BOOLEAN_REPLAYED_OPERATIONS: usize = 8;
 /// Maximum blocks followed per possible outcome when simplifying one equality decision chain.
 pub const OUTCOME_BRANCH_BLOCKS: usize = 16;
 
+/// Maximum operations in either Boolean-result tail examined by finite-domain simplification.
+pub const OUTCOME_BOOLEAN_OPERATIONS: usize = 16;
+
 /// Minimum number of specialized bodies one module's optimization may create.
 ///
 /// Specialization cascades by design: monomorphizing a caller makes the dictionaries it forwards
