@@ -24,7 +24,7 @@ pub fn ordering_type() -> Type {
     ]))
 }
 
-/// Compare Rust values without exposing Rust enums or session-local Ferlium variant tags.
-pub(crate) extern "C" fn compare<T: Ord>(lhs: T, rhs: T) -> isize {
-    lhs.cmp(&rhs) as isize
+/// Rust body; the typed adapter encodes its result without exposing enums or Ferlium tags.
+pub(crate) fn compare<T: Ord>(lhs: T, rhs: T) -> std::cmp::Ordering {
+    lhs.cmp(&rhs)
 }

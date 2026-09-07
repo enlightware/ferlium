@@ -615,6 +615,8 @@ valid Ferlium inputs.
 
 Native entries must not embed session-local variant tags. They return transport-level values, such
 as scalar comparison codes, from which the caller constructs Ferlium variants.
+An ordering-code adapter returns exactly `-1`, `0`, or `1` for Rust `Less`, `Equal`, or `Greater`.
+Its result-domain metadata is independent of ABI transport and asserts no ordering laws or effects.
 
 ## Native optional results
 

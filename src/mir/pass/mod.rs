@@ -440,19 +440,44 @@ pub(crate) fn optimize_function(
     // their operations, collapse a conditional whose two edges now agree, and fold shared empty
     // exits into their predecessors. Only the first two can make computations dead; revisit
     // proven-total calls and storage for those, while an exit-only rewrite pays no second cleanup.
-    let source = current.as_ref().unwrap_or(function);
-    if let Some(simplified) = tail_merge::simplify_tails(source) {
-        current = Some(if simplified.exposed_dead_code {
-            cleanup_dead_representation_chains(
-                simplified.body,
+    loop {
+        let source = current.as_ref().unwrap_or(function);
+        let before = source.operation_count() + source.blocks().count();
+        let mut changed = false;
+        // Variant forwarding and dead-storage cleanup can expose a boolean diamond only now:
+        // for example a comparison wrapper followed by negation. Forward its result directly.
+        if let Some(forwarded) = branch_forward::forward_boolean_branches(source) {
+            current = Some(cleanup_dead_representation_chains(
+                forwarded,
                 env,
                 context,
                 specializations,
                 &will_return,
-            )
-        } else {
-            simplified.body
-        });
+            ));
+            changed = true;
+        }
+        let source = current.as_ref().unwrap_or(function);
+        if let Some(simplified) = tail_merge::simplify_tails(source) {
+            current = Some(if simplified.exposed_dead_code {
+                cleanup_dead_representation_chains(
+                    simplified.body,
+                    env,
+                    context,
+                    specializations,
+                    &will_return,
+                )
+            } else {
+                simplified.body
+            });
+            changed = true;
+        }
+        // Merging forwarding blocks can expose equivalent complete tails; collecting a dead
+        // predicate can expose another merge. Repeat only while this shrink-only cleanup makes
+        // structural progress, so empty cycles cannot keep the sweep alive.
+        let result = current.as_ref().unwrap_or(function);
+        if !changed || result.operation_count() + result.blocks().count() >= before {
+            break;
+        }
     }
     // Final artifact verification covers unchanged functions too, so cloning is the identity here.
     match current {
@@ -534,7 +559,7 @@ mod tests {
         );
         let caller = body_of(&module, "use_it");
         assert!(
-            caller.contains("switch_variant"),
+            caller.contains("condbr"),
             "the branch must survive an unknown condition:\n{caller}"
         );
         assert!(

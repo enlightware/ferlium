@@ -564,7 +564,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function_with_visibility(
         ustr("compare_int_code"),
-        NativeFnNN::new(compare::<Int>).description(
+        NativeFnNN::from_rust_ordering_code(compare::<Int>).description(
             ["left", "right"],
             "Internal comparison code.",
             no_effects(),
@@ -653,7 +653,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function_with_visibility(
         ustr("compare_float_code"),
-        NativeFnNN::new(compare::<Float>).description(
+        NativeFnNN::from_rust_ordering_code(compare::<Float>).description(
             ["left", "right"],
             "Internal comparison code.",
             no_effects(),

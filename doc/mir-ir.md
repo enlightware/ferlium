@@ -195,6 +195,15 @@ reference. A `clone` initializes its destination and gives it the drop obligatio
 When devirtualization resolves a closed dictionary entry, `call`, `clone`, and `drop` name the
 function directly and place its recursively static hidden evidence immediately after the callee.
 
+Knowledge of a call's result domain is separate from knowledge of its operands. A native adapter
+may guarantee a finite set of result codes; a variant type likewise guarantees its possible cases.
+These facts support branch simplification for any producer, including third-party host functions,
+without implying purity, termination, or ordering laws. Stronger numeric reasoning uses the known
+semantics of exact standard-library functions. Comparison wrappers may therefore inline normally:
+integer relational reasoning understands both semantic `Ordering` results and their native codes,
+including the standard conversion between them when it remains a call. Partial inlining must not
+discard an established comparison relation merely because an optimization budget runs out.
+
 `build_dictionary<Definition> [capture0, ...]` is pure, effect-free and idempotent. Its operands all
 have the evidence role and follow the definition's canonical capture schema. A capture-free
 dictionary remains a symbolic constant; an entirely static construction folds to recursive static

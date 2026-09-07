@@ -732,11 +732,15 @@ impl ModuleFunction {
     }
 
     pub fn new(
-        definition: CallableDefinition,
+        mut definition: CallableDefinition,
         code: Function,
         spans: Option<ModuleFunctionSpans>,
         locals: Vec<ULocalDecl>,
     ) -> Self {
+        definition.native_result_knowledge = code
+            .native_entry()
+            .map(|entry| entry.result_knowledge())
+            .unwrap_or_default();
         let locals = locals
             .into_iter()
             .map(ULocalDecl::into_elaborated)
@@ -759,11 +763,15 @@ impl ModuleFunction {
 
     /// Constructs a function whose debug info will be populated by a later `refresh_debug_info` call after locals have reached their final form.
     pub fn new_without_debug_info(
-        definition: CallableDefinition,
+        mut definition: CallableDefinition,
         code: Function,
         spans: Option<ModuleFunctionSpans>,
         locals: Vec<ULocalDecl>,
     ) -> Self {
+        definition.native_result_knowledge = code
+            .native_entry()
+            .map(|entry| entry.result_knowledge())
+            .unwrap_or_default();
         let locals = locals
             .into_iter()
             .map(ULocalDecl::into_elaborated)

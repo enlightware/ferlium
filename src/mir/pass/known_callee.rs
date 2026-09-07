@@ -96,9 +96,14 @@ pub(crate) enum KnownCallee {
     IntFromInt,
     /// `Ord<int>::cmp(left, right)` — `Less`, `Equal` or `Greater`.
     ///
-    /// This is the whole of integer comparison in MIR: a source-level `<` lowers to this call plus
-    /// an `extract_tag` and a `comp_eq` against one tag.
+    /// Before wrapper inlining, a source-level `<` uses this call and a semantic tag test.
+    /// After inlining, `IntCmpCode` supplies the same operand relation through native codes.
     IntCmp,
+    /// The native integer comparison, returning -1, 0, or 1 rather than an Ordering variant.
+    IntCmpCode,
+    /// `ordering_from_code(code)` — `Less` for -1, `Equal` for 0, `Greater` otherwise.
+    /// Preserves an established operand relation when comparison wrappers are partially inlined.
+    OrderingFromCode,
     /// `Num<float>::add(left, right)` — finite, saturating `left + right`.
     FloatAdd,
     /// `Num<float>::sub(left, right)` — finite, saturating `left - right`.
@@ -111,6 +116,8 @@ pub(crate) enum KnownCallee {
     ///
     /// Ferlium floats are finite and ordered, rather than IEEE values admitting NaN and infinity.
     FloatCmp,
+    /// The native finite-float comparison, returning -1, 0, or 1.
+    FloatCmpCode,
     /// `not(value)` — the logical negation of a boolean.
     ///
     /// MIR has no negation of its own, but `comp_eq value false` computes exactly this, which is
@@ -165,8 +172,8 @@ impl KnownCallee {
     ///
     /// This is deliberately stronger than an empty effect row. A pure script function may diverge,
     /// so purity alone never permits dead-call removal or motion out of a zero-trip loop. These
-    /// entries name concrete native operations whose implementations always terminate and do not
-    /// fail for values inhabiting their Ferlium types.
+    /// entries name concrete std operations, including their thin script wrappers, whose
+    /// implementations always terminate and do not fail for values inhabiting their Ferlium types.
     pub(crate) fn is_total_and_speculatable(self) -> bool {
         matches!(
             self,
@@ -176,11 +183,14 @@ impl KnownCallee {
                 | Self::IntNeg
                 | Self::IntFromInt
                 | Self::IntCmp
+                | Self::IntCmpCode
+                | Self::OrderingFromCode
                 | Self::FloatAdd
                 | Self::FloatSub
                 | Self::FloatMul
                 | Self::FloatNeg
                 | Self::FloatCmp
+                | Self::FloatCmpCode
                 | Self::BoolNot
         )
     }
@@ -291,6 +301,18 @@ impl KnownCallees {
                 KnownCallee::IntFromInt,
             ),
             (int_cmp, KnownCallee::IntCmp),
+            (
+                resolver.function("ordering_from_code"),
+                KnownCallee::OrderingFromCode,
+            ),
+            (
+                resolver.function("compare_int_code"),
+                KnownCallee::IntCmpCode,
+            ),
+            (
+                resolver.function("compare_float_code"),
+                KnownCallee::FloatCmpCode,
+            ),
             (
                 resolver.method(NUM_TRAIT_NAME, float_type(), "add"),
                 KnownCallee::FloatAdd,
@@ -650,7 +672,7 @@ mod tests {
         let session = CompilerSession::new();
         assert_eq!(
             known_callees(&session).by_id.len(),
-            25,
+            28,
             "two known callees resolved to the same function id"
         );
     }

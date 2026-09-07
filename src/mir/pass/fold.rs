@@ -890,11 +890,7 @@ fn plan_folds_with(
                 cases,
                 default,
             } => {
-                if let Some(actual) = known_variant_tag(tag, &state) {
-                    let target = cases
-                        .iter()
-                        .find_map(|(case, target)| (*case == actual).then_some(*target))
-                        .unwrap_or(*default);
+                if let Some(target) = known_variant_target(tag, cases, *default, &state) {
                     plan.warrants_another_round = true;
                     plan.branches.push((block, target));
                 }
@@ -1026,7 +1022,10 @@ fn partial_call_outcome(
     };
     let zero = || {
         let representation = match known {
-            KnownCallee::IntSub | KnownCallee::IntMul => LiteralValue::new_native(0isize),
+            KnownCallee::IntSub
+            | KnownCallee::IntMul
+            | KnownCallee::IntCmpCode
+            | KnownCallee::FloatCmpCode => LiteralValue::new_native(0isize),
             KnownCallee::FloatSub | KnownCallee::FloatMul => {
                 LiteralValue::new_native(Float::new(0.0).expect("zero is a finite float"))
             }
@@ -1049,6 +1048,7 @@ fn partial_call_outcome(
         KnownCallee::IntMul if int_is(0, 1) => copy(1),
         KnownCallee::IntMul if int_is(1, 1) => copy(0),
         KnownCallee::IntCmp if same_argument(0, 1) => Some(CallRewrite::EqualOrdering),
+        KnownCallee::IntCmpCode | KnownCallee::FloatCmpCode if same_argument(0, 1) => zero(),
         // The two rewrites below name their whole argument rather than a literal one, so both step
         // aside for a *known* argument: evaluating the call outright produces a constant, which is
         // better than copying the cell that held it or comparing it at run time.
@@ -1196,7 +1196,7 @@ fn why_argument_unknown(
         Fact::Known(_) => NotFoldable::ArgumentNotLiteral,
         // An uninitialized slot is not an analysis gap; it is a slot with nothing in it.
         Fact::Uninit => NotFoldable::ArgumentStorageNotModelled,
-        Fact::Unknown => match root {
+        Fact::Unknown | Fact::Outcomes(_) => match root {
             Root::Parameter(_) => NotFoldable::ArgumentIsParameter,
             Root::DictEntry(_) => NotFoldable::ArgumentNotLiteral,
             Root::Alloca(id) if refusal.call_destinations.contains(&id) => {
@@ -1275,15 +1275,25 @@ fn known_condition(condition: &mir::Value, state: &State) -> Option<bool> {
     }
 }
 
-/// The symbolic identity of a variant tag, when dataflow knows it.
-fn known_variant_tag(tag: &mir::Value, state: &State) -> Option<Ustr> {
+/// A switch is decided when every possible semantic tag selects the same successor.
+fn known_variant_target(
+    tag: &mir::Value,
+    cases: &[(Ustr, BlockId)],
+    default: BlockId,
+    state: &State,
+) -> Option<BlockId> {
     let mir::Value::Register(id) = tag else {
         return None;
     };
-    match state.register(*id)? {
-        Fact::Known(Const::VariantTag(tag)) => Some(*tag),
-        _ => None,
-    }
+    let tags = state.register(*id)?.variant_tags()?;
+    let mut targets = tags.map(|tag| {
+        cases
+            .iter()
+            .find_map(|(case, target)| (*case == tag).then_some(*target))
+            .unwrap_or(default)
+    });
+    let first = targets.next()?;
+    targets.all(|target| target == first).then_some(first)
 }
 
 /// Evaluates one call site at compile time and expresses the result as a constant, or explains why

@@ -737,7 +737,7 @@ extern "C" fn hash_string_split_iterator(value: &StringSplitIterator, state: &mu
     state.write_bool(value.finished);
 }
 
-extern "C" fn compare_string(lhs: &String, rhs: &String) -> isize {
+fn compare_string(lhs: &String, rhs: &String) -> std::cmp::Ordering {
     compare(lhs, rhs)
 }
 
@@ -890,7 +890,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function_with_visibility(
         ustr("compare_string_code"),
-        NativeFnRR::new(compare_string).description(
+        NativeFnRR::from_rust_ordering_code(compare_string).description(
             ["left", "right"],
             "Internal comparison code.",
             no_effects(),

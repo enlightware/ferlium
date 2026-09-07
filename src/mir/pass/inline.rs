@@ -940,7 +940,7 @@ mod tests {
             "the branching callee must be inlined:\n{caller}"
         );
         assert!(
-            caller.contains("switch_variant"),
+            caller.contains("condbr"),
             "its branch must arrive in the caller:\n{caller}"
         );
     }

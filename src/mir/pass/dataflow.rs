@@ -7,10 +7,11 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 //! What the folding pass knows at each point of a function: which storage slots hold which
-//! compile-time constants.
+//! compile-time constants or bounded sets of possible outcomes.
 //!
 //! Analysis only — nothing here rewrites MIR. It answers one question for the folding pass: at this
-//! call site, is every argument place fully known?
+//! call site, is every argument place fully known? Finite outcome domains also let it answer
+//! which branches remain possible without evaluating opaque native functions.
 //!
 //! The model has two layers, because MIR is storage-explicit:
 //!
@@ -32,14 +33,16 @@
 //! only by the tests below.
 #![allow(dead_code)]
 
-use std::{cmp::Reverse, collections::BinaryHeap};
+use std::{borrow::Cow, cmp::Reverse, collections::BinaryHeap};
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use smallvec::SmallVec;
 use ustr::Ustr;
 
 use crate::{
     hir::{
         function::{ArgConvention, arg_conventions_for_args},
+        native_functions::NativeResultKnowledge,
         value::LiteralValue,
     },
     mir::{
@@ -50,8 +53,9 @@ use crate::{
     module::{
         FunctionId, ModuleEnv, ProjectionIndex, TraitDictionaryEntry, TraitDictionaryId, id::Id,
     },
+    std::math::Int,
     types::r#trait::TraitDictionaryEntryIndex,
-    types::r#type::{CallImplType, Type},
+    types::r#type::{CallImplType, Type, TypeKind},
 };
 
 /// A root of addressable storage the analysis can track.
@@ -226,8 +230,8 @@ pub(crate) enum Const {
 
 /// What is known about one storage slot, or about a materialized value.
 ///
-/// The lattice is `Uninit` and `Known(_)` below `Unknown`: joining two disagreeing facts yields
-/// `Unknown`, which is the safe answer everywhere.
+/// Known integer values and variant tags may join into bounded sets of outcomes; exceeding the
+/// bound yields `Unknown`. Other disagreeing facts, including `Uninit`, join to `Unknown`.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub(crate) enum Fact {
     /// Nothing is known; the slot may hold anything.
@@ -237,12 +241,16 @@ pub(crate) enum Fact {
     Uninit,
     /// The slot holds this constant.
     Known(Const),
+    /// A bounded set of possible integer values or semantic variant tags.
+    Outcomes(std::rc::Rc<[Outcome]>),
 }
 
 impl Fact {
     fn join(&self, other: &Fact) -> Fact {
         if self == other {
             self.clone()
+        } else if let (Some(ours), Some(theirs)) = (self.outcomes(), other.outcomes()) {
+            Self::from_outcomes(ours.chain(theirs))
         } else {
             Fact::Unknown
         }
@@ -263,6 +271,8 @@ pub(crate) struct State {
     /// Flow-dependent facts for registers that hold materialized values. Registers that name
     /// places are structural and live once in [`Analysis::register_places`].
     registers: FxHashMap<ValueId, Fact>,
+    tests: FxHashMap<ValueId, EqualityTest>,
+    origins: FxHashMap<ValueId, Subject>,
 }
 
 impl State {
@@ -292,6 +302,10 @@ impl State {
     }
 
     fn forget_within(&mut self, place: PlaceId, bindings: &PlaceBindings) {
+        // Conservatively invalidate all predicates/reads rooted in this storage. A materialized
+        // value keeps its own domain, but must no longer refine the overwritten place.
+        let root = bindings.root_of_place(place);
+        self.invalidate_subjects(|subject| matches!(subject, Subject::Place(place) if bindings.root_of_place(place) == root));
         fn remove_subtree(
             facts: &mut FxHashMap<PlaceId, Fact>,
             bindings: &PlaceBindings,
@@ -323,7 +337,24 @@ impl State {
                 registers.insert(*id, fact.join(theirs));
             }
         }
-        State { places, registers }
+        let tests = self
+            .tests
+            .iter()
+            .filter(|(id, test)| other.tests.get(id) == Some(test))
+            .map(|(id, test)| (*id, test.clone()))
+            .collect();
+        let origins = self
+            .origins
+            .iter()
+            .filter(|(id, subject)| other.origins.get(id) == Some(subject))
+            .map(|(id, subject)| (*id, *subject))
+            .collect();
+        State {
+            places,
+            registers,
+            tests,
+            origins,
+        }
     }
 }
 
@@ -407,18 +438,313 @@ impl Analysis {
     }
 }
 
+// --- Finite outcome domains ---
+
+// Native adapters seed domains, not comparison laws. Branches restrict domains, copies retain
+// them, and joins take their union. Predicates refer only to unmodified storage or materialized
+// registers; writes invalidate their provenance, including across loop iterations.
+
+const MAX_OUTCOMES: usize = 8;
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub(crate) enum Outcome {
+    Int(Int),
+    Tag(Ustr),
+}
+
+impl Outcome {
+    fn from_const(value: &Const) -> Option<Self> {
+        match value {
+            Const::Literal(value) => value.as_primitive_ty::<Int>().copied().map(Self::Int),
+            Const::VariantTag(tag) => Some(Self::Tag(*tag)),
+            _ => None,
+        }
+    }
+
+    fn pattern(value: &LiteralValue) -> Option<Self> {
+        value
+            .as_variant_tag()
+            .copied()
+            .map(Self::Tag)
+            .or_else(|| value.as_primitive_ty::<Int>().copied().map(Self::Int))
+    }
+
+    fn constant(&self) -> Const {
+        match self {
+            Self::Int(value) => Const::Literal(LiteralValue::new_native(*value)),
+            Self::Tag(tag) => Const::VariantTag(*tag),
+        }
+    }
+}
+
+impl Fact {
+    pub(crate) fn variant_tags(&self) -> Option<impl Iterator<Item = Ustr> + '_> {
+        let values = self.outcomes()?;
+        if !values.clone().all(|value| matches!(value, Outcome::Tag(_))) {
+            return None;
+        }
+        Some(values.map(|value| match value {
+            Outcome::Tag(tag) => tag,
+            _ => unreachable!("the domain contains only tags"),
+        }))
+    }
+    /// Read a domain without allocating, including the singleton represented by `Known`.
+    fn outcomes(&self) -> Option<impl Iterator<Item = Outcome> + Clone + '_> {
+        let (one, many) = match self {
+            Self::Known(value) => (Some(Outcome::from_const(value)?), &[][..]),
+            Self::Outcomes(values) => (None, values.as_ref()),
+            _ => return None,
+        };
+        Some(one.into_iter().chain(many.iter().copied()))
+    }
+
+    fn from_outcomes(values: impl IntoIterator<Item = Outcome>) -> Self {
+        // Temporary inline storage does not enlarge Fact. Immutable shared domains make the
+        // much more frequent state copies and place reads independent of the set's size.
+        let mut values: SmallVec<[Outcome; MAX_OUTCOMES]> = values.into_iter().collect();
+        values.sort_unstable();
+        values.dedup();
+        match values.as_slice() {
+            [value] => Self::Known(value.constant()),
+            [] => Self::Unknown, // No domain supplied; restrictions handle impossible edges first.
+            _ if values.len() <= MAX_OUTCOMES => Self::Outcomes(values.as_slice().into()),
+            _ => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Subject {
+    Place(PlaceId),
+    Register(ValueId),
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct EqualityTest {
+    subject: Subject,
+    pattern: Outcome,
+}
+
+impl State {
+    fn subject(&self, value: &mir::Value, bindings: &PlaceBindings) -> Option<Subject> {
+        if let Some(place) = bindings.place_of(value) {
+            return Some(Subject::Place(place));
+        }
+        let mir::Value::Register(id) = value else {
+            return None;
+        };
+        Some(
+            self.origins
+                .get(id)
+                .copied()
+                .unwrap_or(Subject::Register(*id)),
+        )
+    }
+
+    fn invalidate_subjects(&mut self, invalid: impl Fn(Subject) -> bool) {
+        self.tests.retain(|_, test| !invalid(test.subject));
+        self.origins.retain(|_, subject| !invalid(*subject));
+    }
+
+    fn remember_read(&mut self, result: ValueId, source: &mir::Value, bindings: &PlaceBindings) {
+        if let Some(subject) = self.subject(source, bindings) {
+            self.origins.insert(result, subject);
+        }
+    }
+
+    fn compare_outcomes(
+        &mut self,
+        result: ValueId,
+        operation: &Operation,
+        scrutinee: &Fact,
+        bindings: &PlaceBindings,
+    ) -> Option<Fact> {
+        let mir::Value::Pattern(pattern) = &operation.operands[1] else {
+            return None;
+        };
+        let pattern = Outcome::pattern(pattern)?;
+        let values = scrutinee.outcomes()?;
+        let contains = values.clone().any(|value| value == pattern);
+        if !contains || values.clone().count() == 1 {
+            return Some(Fact::Known(Const::Literal(LiteralValue::new_native(
+                contains,
+            ))));
+        }
+        if let Some(subject) = self.subject(&operation.operands[0], bindings) {
+            self.tests.insert(result, EqualityTest { subject, pattern });
+        }
+        None
+    }
+
+    fn restrict(&mut self, subject: Subject, keep: impl Fn(&Outcome) -> bool) {
+        let fact = match subject {
+            Subject::Place(place) => self.places.get_mut(&place),
+            Subject::Register(id) => self.registers.get_mut(&id),
+        };
+        let Some(fact) = fact else { return };
+        let Some(values) = fact.outcomes() else {
+            return;
+        };
+        let count = values.clone().count();
+        let restricted: SmallVec<[Outcome; MAX_OUTCOMES]> = values.filter(keep).collect();
+        // Empty means the edge is impossible, not that the value became unknown. This analysis
+        // conservatively still visits that edge, but must not weaken any of its existing facts.
+        if restricted.is_empty() || restricted.len() == count {
+            return;
+        }
+        *fact = Fact::from_outcomes(restricted);
+        let fact = fact.clone();
+        // Materialized copies of this still-current value carry the same restriction.
+        for (id, origin) in &self.origins {
+            if *origin == subject {
+                self.registers.insert(*id, fact.clone());
+            }
+        }
+    }
+
+    fn on_edge<'a>(
+        &'a self,
+        terminator: &TerminatorKind,
+        successor: BlockId,
+        bindings: &PlaceBindings,
+    ) -> Cow<'a, Self> {
+        let mut state = Cow::Borrowed(self);
+        match terminator {
+            TerminatorKind::CondBr {
+                condition: mir::Value::Register(id),
+                then_target,
+                else_target,
+            } if then_target != else_target => {
+                if let Some(test) = self.tests.get(id) {
+                    state.to_mut().restrict(test.subject, |value| {
+                        (value == &test.pattern) == (successor == *then_target)
+                    });
+                }
+            }
+            TerminatorKind::SwitchVariant {
+                tag,
+                cases,
+                default,
+            } => {
+                if let Some(subject) = self.subject(tag, bindings) {
+                    state.to_mut().restrict(subject, |value| {
+                        let Outcome::Tag(tag) = value else {
+                            return true;
+                        };
+                        cases
+                            .iter()
+                            .find_map(|(case, target)| (case == tag).then_some(*target))
+                            .unwrap_or(*default)
+                            == successor
+                    });
+                }
+            }
+            TerminatorKind::Invoke {
+                operation, error, ..
+            } if successor == *error => {
+                if let OperationKind::Call { ty, .. } = &operation.kind
+                    && let Some(call) = call_operands(&operation.operands, ty)
+                    && let Some(place) = bindings.place_of(call.result)
+                {
+                    state.to_mut().set_place(place, Fact::Unknown, bindings);
+                }
+            }
+            _ => {}
+        }
+        state
+    }
+}
+
+/// A variant's closed case set is guaranteed by its type, regardless of who produces it.
+fn type_fact(mut ty: Type, env: ModuleEnv<'_>) -> Fact {
+    let mut visited = FxHashSet::default();
+    loop {
+        let named = {
+            let kind = ty.data();
+            match &*kind {
+                TypeKind::Named(named) => named.clone(),
+                TypeKind::Variant(cases) if cases.len() <= MAX_OUTCOMES => {
+                    return Fact::from_outcomes(cases.iter().map(|(tag, _)| Outcome::Tag(*tag)));
+                }
+                _ => return Fact::Unknown,
+            }
+        };
+        if !visited.insert(ty) {
+            break;
+        }
+        ty = named.instantiated_shape(&env);
+    }
+    Fact::Unknown
+}
+
+/// Seed only unconditional parameter-type invariants, never facts specific to the first visit.
+/// `analyze` also uses this state directly for a one-block function with a self back-edge.
+fn entry_state(
+    func: &Function,
+    env: ModuleEnv<'_>,
+    bindings: &PlaceBindings,
+    escaped: &FxHashSet<Root>,
+) -> State {
+    let mut state = State::default();
+    for (index, parameter) in func.parameters().iter().enumerate() {
+        if matches!(
+            parameter.kind,
+            crate::mir::function::ParameterKind::Parameter(_)
+                | crate::mir::function::ParameterKind::Owned
+        ) {
+            let place = bindings.parameters[index];
+            if !escaped.contains(&bindings.root_of_place(place)) {
+                let fact = type_fact(parameter.ty, env);
+                if fact != Fact::Unknown {
+                    state.places.insert(place, fact);
+                }
+            }
+        }
+    }
+    state
+}
+
+/// Metadata is resolved from the actual module function, not a list of std identities.
+fn native_result_fact(callee: &mir::Value, env: ModuleEnv<'_>) -> Fact {
+    let mir::Value::Function(callee) = callee else {
+        return Fact::Unknown;
+    };
+    let knowledge = env
+        .module_by_id(callee.module)
+        .and_then(|module| module.get_function_by_id(callee.function))
+        .and_then(|function| {
+            // Descriptions can be cloned or replaced by host code. Only trust a guarantee
+            // still backed by the actual typed entry, not metadata copied from another callable.
+            let declared = function.definition.native_result_knowledge();
+            if declared == NativeResultKnowledge::Unknown {
+                // The common case needs no virtual entry lookup to confirm absence of a proof.
+                return None;
+            }
+            (function.code.native_entry()?.result_knowledge() == declared).then_some(declared)
+        });
+    match knowledge {
+        Some(NativeResultKnowledge::OrderingCode) => {
+            Fact::from_outcomes([Outcome::Int(-1), Outcome::Int(0), Outcome::Int(1)])
+        }
+        _ => Fact::Unknown,
+    }
+}
+
+// --- Dataflow solver ---
+
 /// Runs the analysis to fixpoint over `func`.
 pub(crate) fn analyze(func: &Function, env: ModuleEnv<'_>) -> Analysis {
     let (escaped, register_places) = escaping_roots(func, &|_| false);
+    let initial = entry_state(func, env, &register_places, &escaped);
 
     let block_count = func.blocks().count();
     // The consumer replays operations from each settled entry. A one-block function's only entry
-    // is always the empty function-entry state, even when its terminator loops back to itself: the
-    // external entry contributes Unknown and therefore absorbs every back-edge fact at the join.
+    // contains only parameter-type guarantees, even when its terminator loops back to itself:
+    // no back-edge fact can strengthen those unconditional entry guarantees.
     // There is no successor state for the solver to discover, so avoid duplicating that replay.
     if block_count == 1 {
         return Analysis {
-            entry_states: vec![Some(State::default())],
+            entry_states: vec![Some(initial)],
             escaped,
             register_places,
         };
@@ -447,7 +773,7 @@ pub(crate) fn analyze(func: &Function, env: ModuleEnv<'_>) -> Analysis {
     }
 
     let mut entry_states = vec![None; block_count];
-    entry_states[entry] = Some(State::default());
+    entry_states[entry] = Some(initial);
     let mut queued = vec![false; block_count];
     queued[entry] = true;
     let mut worklist = BinaryHeap::from([Reverse((reverse_postorder[entry], entry))]);
@@ -468,10 +794,11 @@ pub(crate) fn analyze(func: &Function, env: ModuleEnv<'_>) -> Analysis {
             transfer(operation, func, env, &escaped, &register_places, &mut state);
         }
         for successor in block.terminator().successors() {
+            let edge = state.on_edge(&block.terminator().kind, successor, &register_places);
             let successor = successor.as_index();
             let updated = match &entry_states[successor] {
-                Some(existing) => existing.join(&state),
-                None => state.clone(),
+                Some(existing) => existing.join(&edge),
+                None => edge.into_owned(),
             };
             if entry_states[successor].as_ref() == Some(&updated) {
                 continue;
@@ -505,6 +832,11 @@ fn transfer(
 ) {
     let place_of = |operand| register_places.place_of(operand);
     let tracked = |place| !escaped.contains(&register_places.root_of_place(place));
+    if let Some(result) = operation.result_id() {
+        state.invalidate_subjects(|subject| subject == Subject::Register(result));
+        state.tests.remove(&result);
+        state.origins.remove(&result);
+    }
     match &operation.kind {
         OperationKind::Alloca { .. } | OperationKind::RuntimeAlloc { .. } => {
             let Some(result) = operation.result_id() else {
@@ -582,6 +914,7 @@ fn transfer(
                 _ => Fact::Unknown,
             };
             state.registers.insert(result, fact);
+            state.remember_read(result, &operation.operands[0], register_places);
         }
         OperationKind::Variant { tag, .. } => {
             let Some(result) = operation.result_id() else {
@@ -597,12 +930,14 @@ fn transfer(
             };
             let fact = match place_of(&operation.operands[0]) {
                 Some(place) if tracked(place) => match state.place(place) {
-                    Fact::Known(Const::VariantTag(tag)) => Fact::Known(Const::VariantTag(tag)),
+                    fact @ Fact::Known(Const::VariantTag(_)) => fact,
+                    fact @ Fact::Outcomes(_) => fact,
                     _ => Fact::Unknown,
                 },
                 _ => Fact::Unknown,
             };
             state.registers.insert(result, fact);
+            state.remember_read(result, &operation.operands[0], register_places);
         }
         OperationKind::ExtractPayloadIndirection | OperationKind::IsInitialized => {
             let Some(result) = operation.result_id() else {
@@ -647,28 +982,32 @@ fn transfer(
                 Some(_) => Fact::Unknown,
                 None => value_operand_fact(&operation.operands[0], func, state),
             };
-            let fact = match (scrutinee.known(), &operation.operands[1]) {
-                (Some(Const::VariantTag(actual)), mir::Value::Pattern(pattern))
-                    if pattern.as_variant_tag().is_some() =>
-                {
-                    Fact::Known(Const::Literal(LiteralValue::new_native(
-                        pattern.as_variant_tag() == Some(actual),
-                    )))
-                }
-                (Some(Const::Literal(literal)), mir::Value::Pattern(pattern)) => {
-                    // Compared exactly as the interpreter does, rather than by comparing literal
-                    // trees: pattern matching has representation rules of its own (a `StaticStr`
-                    // pattern matches a `String` value), and this must not disagree with them.
-                    let value = literal.clone().into_value();
-                    let equal = pattern.try_matches_runtime_value(&value);
-                    value.discard_storage();
-                    match equal {
-                        Ok(equal) => Fact::Known(Const::Literal(LiteralValue::new_native(equal))),
-                        Err(_) => Fact::Unknown,
+            let outcomes = state.compare_outcomes(result, operation, &scrutinee, register_places);
+            let fact =
+                outcomes.unwrap_or_else(|| match (scrutinee.known(), &operation.operands[1]) {
+                    (Some(Const::VariantTag(actual)), mir::Value::Pattern(pattern))
+                        if pattern.as_variant_tag().is_some() =>
+                    {
+                        Fact::Known(Const::Literal(LiteralValue::new_native(
+                            pattern.as_variant_tag() == Some(actual),
+                        )))
                     }
-                }
-                _ => Fact::Unknown,
-            };
+                    (Some(Const::Literal(literal)), mir::Value::Pattern(pattern)) => {
+                        // Compared exactly as the interpreter does, rather than by comparing literal
+                        // trees: pattern matching has representation rules of its own (a `StaticStr`
+                        // pattern matches a `String` value), and this must not disagree with them.
+                        let value = literal.clone().into_value();
+                        let equal = pattern.try_matches_runtime_value(&value);
+                        value.discard_storage();
+                        match equal {
+                            Ok(equal) => {
+                                Fact::Known(Const::Literal(LiteralValue::new_native(equal)))
+                            }
+                            Err(_) => Fact::Unknown,
+                        }
+                    }
+                    _ => Fact::Unknown,
+                });
             state.registers.insert(result, fact);
         }
         OperationKind::DictEntry { entry_index, .. } => {
@@ -697,14 +1036,17 @@ fn transfer(
             state.places.insert(place, fact);
         }
         OperationKind::Call { ty, .. } => {
-            // The callee writes its result through the trailing out-pointer, so whatever was known
-            // about that slot no longer holds. The folding pass is what replaces a call with a
-            // store of a known constant; until it does, the result is unknown.
+            // The callee replaces its result slot. Only the type or adapter's result-domain
+            // contract is known without evaluating it; no effects or operand laws follow.
             if let Some(call) = call_operands(&operation.operands, ty)
                 && let Some(place) = place_of(call.result)
                 && tracked(place)
             {
-                state.set_place(place, Fact::Unknown, register_places);
+                let fact = match native_result_fact(&operation.operands[0], env) {
+                    Fact::Unknown => type_fact(ty.ret(), env),
+                    fact => fact,
+                };
+                state.set_place(place, fact, register_places);
             }
         }
         // A clone writes its destination through the callee, so that slot is unknown afterwards —
@@ -1085,11 +1427,11 @@ mod tests {
         CompilerSession, ExecutionTarget, Location,
         compiler::MirOptimization,
         containers::b,
-        hir::value::VariantPayloadStorage,
+        hir::{native_functions::NativeFnNN, value::VariantPayloadStorage},
         mir::{Operation, builder::FunctionBuilder, terminator::Terminator},
-        module::Path,
+        module::{Module, Path},
         std::math::int_type,
-        types::r#type::Type,
+        types::{effects::no_effects, r#type::Type},
         ustr,
     };
 
@@ -1508,6 +1850,274 @@ mod tests {
         let analysis = analyze(&func, env);
         let state = analysis.entry_state(header);
         let key = analysis.place_of(&slot).expect("the alloca names a place");
-        assert_eq!(state.place(key), Fact::Unknown);
+        assert_eq!(
+            state.place(key),
+            Fact::Outcomes([Outcome::Int(1), Outcome::Int(2)].into())
+        );
+    }
+
+    // --- Finite outcome domains ---
+
+    fn codes() -> Fact {
+        Fact::from_outcomes(vec![Outcome::Int(-1), Outcome::Int(0), Outcome::Int(1)])
+    }
+
+    #[test]
+    fn outcome_joins_are_bounded_unions() {
+        let one = Fact::from_outcomes(vec![Outcome::Int(1)]);
+        let zero = Fact::from_outcomes(vec![Outcome::Int(0)]);
+        assert_eq!(
+            one.join(&zero),
+            Fact::Outcomes([Outcome::Int(0), Outcome::Int(1)].into())
+        );
+        assert_eq!(codes().join(&Fact::Unknown), Fact::Unknown);
+        assert_eq!(codes().join(&Fact::Uninit), Fact::Unknown);
+        let wide = (0..MAX_OUTCOMES as isize).map(Outcome::Int);
+        assert_eq!(
+            Fact::from_outcomes(wide).join(&Fact::from_outcomes(vec![Outcome::Int(99)])),
+            Fact::Unknown
+        );
+    }
+
+    #[test]
+    fn outcome_predicates_do_not_follow_overwritten_storage() {
+        let place = PlaceId::from_index(0);
+        let slot = ValueId::from_index(0);
+        let read = ValueId::from_index(1);
+        let test = ValueId::from_index(2);
+        let mut bindings = PlaceBindings::default();
+        bindings.places.push(Place {
+            root: Root::Alloca(slot),
+            children: vec![],
+            depth: 0,
+        });
+        bindings.registers.insert(slot, PlaceBinding::Exact(place));
+        let mut state = State::default();
+        state.places.insert(place, codes());
+        state.registers.insert(read, codes());
+        state.remember_read(read, &mir::Value::Register(slot), &bindings);
+        state.tests.insert(
+            test,
+            EqualityTest {
+                subject: Subject::Place(place),
+                pattern: Outcome::Int(-1),
+            },
+        );
+        let yes = BlockId::from_index(1);
+        let no = BlockId::from_index(2);
+        let branch = TerminatorKind::CondBr {
+            condition: mir::Value::Register(test),
+            then_target: yes,
+            else_target: no,
+        };
+        assert_eq!(
+            state.on_edge(&branch, no, &bindings).place(place),
+            Fact::Outcomes([Outcome::Int(0), Outcome::Int(1)].into())
+        );
+        state.set_place(place, Fact::from_outcomes(vec![Outcome::Int(2)]), &bindings);
+        assert!(state.tests.is_empty());
+        assert!(state.origins.is_empty());
+        assert_eq!(
+            state.on_edge(&branch, yes, &bindings).place(place),
+            Fact::from_outcomes(vec![Outcome::Int(2)])
+        );
+        // The old loaded value remains usable, but a test of it only refines that snapshot.
+        state.tests.insert(
+            test,
+            EqualityTest {
+                subject: Subject::Register(read),
+                pattern: Outcome::Int(-1),
+            },
+        );
+        let edge = state.on_edge(&branch, yes, &bindings);
+        assert_eq!(
+            edge.registers[&read],
+            Fact::from_outcomes(vec![Outcome::Int(-1)])
+        );
+        assert_eq!(
+            edge.place(place),
+            Fact::from_outcomes(vec![Outcome::Int(2)])
+        );
+        // Re-executing a register definition in a loop invalidates tests of its previous value.
+        state.invalidate_subjects(|subject| subject == Subject::Register(read));
+        assert!(state.tests.is_empty());
+    }
+
+    #[test]
+    fn impossible_restrictions_preserve_facts_at_joins() {
+        let place = PlaceId::from_index(0);
+        let read = ValueId::from_index(1);
+        let less = Outcome::Tag(ustr::ustr("Less"));
+        let fact = Fact::from_outcomes([less]);
+        let mut state = State::default();
+        state.places.insert(place, fact.clone());
+        state.registers.insert(read, fact.clone());
+        state.origins.insert(read, Subject::Place(place));
+        let mut impossible = state.clone();
+        impossible.restrict(Subject::Place(place), |value| *value != less);
+        assert_eq!(impossible, state);
+        assert_eq!(state.join(&impossible).place(place), fact);
+        assert_eq!(state.join(&impossible).register(read), Some(&fact));
+    }
+
+    #[test]
+    fn untracked_subjects_do_not_clobber_materialized_facts() {
+        let place = PlaceId::from_index(0);
+        let read = ValueId::from_index(1);
+        let mut state = State::default();
+        state.registers.insert(read, codes());
+        state.origins.insert(read, Subject::Place(place));
+        let original = state.clone();
+        state.restrict(Subject::Place(place), |_| true);
+        assert_eq!(state, original);
+        state.places.insert(place, Fact::Unknown);
+        state.restrict(Subject::Place(place), |_| true);
+        assert_eq!(state.register(read), Some(&codes()));
+    }
+
+    fn host_session() -> CompilerSession {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let path = Path::single_str("host_ordering");
+        let mut host = Module::new(session.modules().next_id(), path.clone());
+        // Deliberately not a std identity, and ordered in the opposite direction.
+        let compare = host.add_function(
+            ustr::ustr("compare"),
+            NativeFnNN::from_rust_ordering_code(|a: isize, b: isize| b.cmp(&a)).description(
+                ["a", "b"],
+                "Host comparison",
+                no_effects(),
+            ),
+        );
+        host.add_function(
+            ustr::ustr("ordinary"),
+            NativeFnNN::from_rust(isize::wrapping_sub).description(
+                ["a", "b"],
+                "Unrestricted result",
+                no_effects(),
+            ),
+        );
+        let mut copied_description = NativeFnNN::from_rust(isize::wrapping_sub).description(
+            ["a", "b"],
+            "Copied description",
+            no_effects(),
+        );
+        copied_description.definition =
+            host.get_function_by_id(compare).unwrap().definition.clone();
+        host.add_function(ustr::ustr("copied_description"), copied_description);
+        host.add_function(
+            ustr::ustr("not_reflexive"),
+            NativeFnNN::from_rust_ordering_code(|_: isize, _: isize| std::cmp::Ordering::Less)
+                .description(["a", "b"], "No ordering laws", no_effects()),
+        );
+        let id = session.register_module(path, host);
+        assert!(
+            session
+                .known_callees()
+                .resolve(
+                    FunctionId {
+                        module: id,
+                        function: compare
+                    },
+                    |_| None
+                )
+                .is_none()
+        );
+        session
+    }
+
+    fn optimized(session: &mut CompilerSession, source: &str) -> String {
+        let id = session
+            .compile_for(
+                ExecutionTarget::Mir,
+                source,
+                "outcomes",
+                Path::single_str("outcomes"),
+            )
+            .expect("comparison fixture compiles")
+            .module_id;
+        session.emit_mir_module(id)
+    }
+
+    #[test]
+    fn host_ordering_metadata_eliminates_impossible_code_cases() {
+        let mut session = host_session();
+        let body = optimized(
+            &mut session,
+            "fn classify(a: int, b: int) -> int {
+            match host_ordering::compare(a, b) { -1 => 10, 0 => 20, 1 => 30, _ => 987654 }
+        }",
+        );
+        assert!(
+            body.contains("call host_ordering::compare"),
+            "the opaque call remains:\n{body}"
+        );
+        assert!(
+            !body.contains("987654"),
+            "only the impossible result arm disappears:\n{body}"
+        );
+
+        let body = optimized(
+            &mut session,
+            "fn classify(a: int, b: int) -> int {
+            match host_ordering::ordinary(a, b) { -1 => 10, 0 => 20, 1 => 30, _ => 987654 }
+        }",
+        );
+        assert!(
+            body.contains("987654"),
+            "ordinary integer results remain unrestricted:\n{body}"
+        );
+        let body = optimized(&mut session, "fn classify(a: int, b: int) -> int {
+            match host_ordering::copied_description(a, b) { -1 => 10, 0 => 20, 1 => 30, _ => 987654 }
+        }");
+        assert!(
+            body.contains("987654"),
+            "a copied description cannot confer the adapter's guarantee:\n{body}"
+        );
+    }
+
+    #[test]
+    fn semantic_ordering_outcomes_do_not_depend_on_the_producer() {
+        let mut session = host_session();
+        let body = optimized(
+            &mut session,
+            "fn classify(value: Ordering) -> int {
+            match value { Less => 10, _ => match value { Less => 987654, _ => 20 } }
+        }",
+        );
+        assert!(
+            !body.contains("987654"),
+            "an excluded variant remains excluded:\n{body}"
+        );
+    }
+
+    #[test]
+    fn host_ordering_wrappers_inline_without_assuming_ordering_laws() {
+        let mut session = host_session();
+        let source = "fn ordering(code: int) -> Ordering {
+            match code { -1 => Less, 0 => Equal, _ => Greater }
+        }
+        fn compare(a: int, b: int) -> Ordering { ordering(host_ordering::compare(a, b)) }
+        fn below(a: int, b: int) -> bool { match compare(a, b) { Less => true, _ => false } }
+        fn reflexive(a: int) -> Ordering { ordering(host_ordering::not_reflexive(a, a)) }
+        fn main() { (below(9, 2), below(2, 9), below(3, 3), reflexive(5)) }";
+        let body = optimized(&mut session, source);
+        let below = body
+            .split("fn below(")
+            .nth(1)
+            .unwrap()
+            .split("\nfn ")
+            .next()
+            .unwrap();
+        assert!(below.contains("call host_ordering::compare"), "{below}");
+        assert!(
+            !below.contains("extract_tag") && !below.contains("variant "),
+            "no temporary Ordering is needed:\n{below}"
+        );
+        let optimized = session.eval_mir("run_optimized_outcomes", source);
+        session.set_mir_optimization(MirOptimization::Disabled);
+        let raw = session.eval_mir("run_raw_outcomes", source);
+        assert_eq!(optimized, raw);
+        assert_eq!(optimized, "(true, false, false, Less)");
     }
 }

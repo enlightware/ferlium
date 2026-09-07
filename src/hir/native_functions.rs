@@ -31,6 +31,13 @@
 //! let _ = NativeFnNN::from_rust(<bool as std::ops::BitAnd>::bitand);
 //! let _ = NativeOutFnR::from_rust(String::trim);
 //! ```
+//! `from_rust_ordering_code` accepts a Rust `Ordering` result and returns an `int` code
+//! (-1, 0, or 1). Its description carries that result-domain guarantee for optimization,
+//! including in third-party host modules. It does not assert any ordering laws or effects:
+//! ```
+//! use ferlium::hir::native_functions::NativeFnNN;
+//! let _ = NativeFnNN::from_rust_ordering_code(|a: isize, b: isize| a.cmp(&b));
+//! ```
 //! Output, fallible, and optional families adapt ordinary `T`, `Result<T, SourceFailureKind>`,
 //! and `Option<T>` results to their C protocols. All bodies execute inside the C boundary and
 //! must not panic. `native_fn!` remains useful for bodies that need conversions or several steps.
@@ -371,14 +378,39 @@ impl NativeSignature {
     }
 }
 
+/// Guaranteed values of a native result on normal return, independent of ABI transport.
+///
+/// This does not assert purity, termination, or any ordering laws relating the arguments.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum NativeResultKnowledge {
+    #[default]
+    Unknown,
+    /// Exactly -1, 0, or 1, encoding Rust's Less, Equal, or Greater respectively.
+    OrderingCode,
+}
+
 /// Address and contract of the existing callable's entry, not a second function identity.
 #[derive(Clone, Debug)]
 pub struct NativeEntry {
     address: *const (),
     signature: NativeSignature,
+    result_knowledge: NativeResultKnowledge,
 }
 
 impl NativeEntry {
+    fn new(address: *const (), signature: NativeSignature) -> Self {
+        Self {
+            address,
+            signature,
+            result_knowledge: NativeResultKnowledge::Unknown,
+        }
+    }
+
+    /// Result knowledge guaranteed by the typed adapter, not a claim about its operands.
+    pub fn result_knowledge(&self) -> NativeResultKnowledge {
+        self.result_knowledge
+    }
     /// The entry's code pointer in the matching runtime, including a table pointer on Wasm.
     pub fn address(&self) -> *const () {
         self.address
@@ -719,6 +751,20 @@ unsafe fn stateless_rust_function<F: Copy>() -> F {
 macro_rules! entries {
     ($direct:ident, $output:ident $(, $arg:ident : $value:ident : $index:tt)*) => {
         pub struct $direct<$($arg: NativeArgument,)* R: NativeDirectResult>(for<'a> extern "C" fn($($arg::Borrowed<'a>),*) -> R);
+        impl<$($arg: NativeArgument,)*> $direct<$($arg,)* isize> {
+            /// Adapt a Rust `Ordering` result to an integer code (-1, 0, or 1).
+            ///
+            /// The entry records this finite result domain for optimization. No ordering laws,
+            /// purity, or termination are inferred from the Rust result type.
+            pub fn from_rust_ordering_code<F>(function: F) -> NativeCallable<Self>
+            where F: for<'a> Fn($($arg::Borrowed<'a>),*) -> std::cmp::Ordering + Copy + 'static {
+                let mut callable = Self::from_rust(move |$($value: $arg::Borrowed<'_>),*| {
+                    function($($value),*) as isize
+                });
+                callable.entry.result_knowledge = NativeResultKnowledge::OrderingCode;
+                callable
+            }
+        }
         impl<$($arg: NativeArgument,)* R: NativeDirectResult> Clone for $direct<$($arg,)* R> {
             fn clone(&self) -> Self { Self(self.0) }
         }
@@ -746,10 +792,10 @@ macro_rules! entries {
         impl<$($arg: NativeArgument,)* R: NativeDirectResult> sealed::Entry for $direct<$($arg,)* R> {}
         impl<$($arg: NativeArgument,)* R: NativeDirectResult> EntryFunction for $direct<$($arg,)* R> {
             fn entry(&self) -> NativeEntry {
-                NativeEntry { address: self.0 as *const (), signature: NativeSignature {
+                NativeEntry::new(self.0 as *const (), NativeSignature {
                     failure: NativeFailureConvention::Infallible,
                     parameters: vec![$($arg::parameter()),*], result: R::result(),
-                }}
+                })
             }
             #[allow(unused_variables)]
             fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalControlFlowResult {
@@ -794,10 +840,10 @@ macro_rules! entries {
         impl<$($arg: NativeArgument,)* O: NativeStoredResult> sealed::Entry for $output<$($arg,)* O> {}
         impl<$($arg: NativeArgument,)* O: NativeStoredResult> EntryFunction for $output<$($arg,)* O> {
             fn entry(&self) -> NativeEntry {
-                NativeEntry { address: self.0 as *const (), signature: NativeSignature {
+                NativeEntry::new(self.0 as *const (), NativeSignature {
                     failure: NativeFailureConvention::Infallible,
                     parameters: vec![$($arg::parameter()),*], result: NativeResult::Output(O::layout()),
-                }}
+                })
             }
             #[allow(unused_variables)]
             fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalControlFlowResult {
@@ -881,10 +927,10 @@ macro_rules! fallible_entries {
         impl<$($arg: NativeArgument),*> sealed::Entry for $unit<$($arg),*> {}
         impl<$($arg: NativeArgument),*> EntryFunction for $unit<$($arg),*> {
             fn entry(&self) -> NativeEntry {
-                NativeEntry { address: self.function as *const (), signature: NativeSignature {
+                NativeEntry::new(self.function as *const (), NativeSignature {
                     failure: NativeFailureConvention::StatusWithState,
                     parameters: vec![$($arg::parameter()),*], result: self.result,
-                } }
+                })
             }
             fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalControlFlowResult {
                 let _ = args;
@@ -940,10 +986,10 @@ macro_rules! fallible_entries {
         impl<$($arg: NativeArgument,)* O: NativeStoredResult> sealed::Entry for $output<$($arg,)* O> {}
         impl<$($arg: NativeArgument,)* O: NativeStoredResult> EntryFunction for $output<$($arg,)* O> {
             fn entry(&self) -> NativeEntry {
-                NativeEntry { address: self.0 as *const (), signature: NativeSignature {
+                NativeEntry::new(self.0 as *const (), NativeSignature {
                     failure: NativeFailureConvention::StatusWithState,
                     parameters: vec![$($arg::parameter()),*], result: NativeResult::Output(O::layout()),
-                } }
+                })
             }
             fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalControlFlowResult {
                 let _ = args;
@@ -1023,14 +1069,14 @@ impl<T: 'static> NativeDropFn<T> {
 impl<T: 'static> sealed::Entry for NativeDropFn<T> {}
 impl<T: 'static> EntryFunction for NativeDropFn<T> {
     fn entry(&self) -> NativeEntry {
-        NativeEntry {
-            address: self.0 as *const (),
-            signature: NativeSignature {
+        NativeEntry::new(
+            self.0 as *const (),
+            NativeSignature {
                 failure: NativeFailureConvention::Infallible,
                 parameters: vec![NativeParameter::Consuming(NativeLayout::of::<T>())],
                 result: NativeResult::Unit,
             },
-        }
+        )
     }
 
     fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalControlFlowResult {
@@ -1173,9 +1219,9 @@ impl<A: NativeArgument, O: NativeStoredResult> NativeOptionalFn1<A, O> {
 impl<A: NativeArgument, O: NativeStoredResult> sealed::Entry for NativeOptionalFn1<A, O> {}
 impl<A: NativeArgument, O: NativeStoredResult> EntryFunction for NativeOptionalFn1<A, O> {
     fn entry(&self) -> NativeEntry {
-        NativeEntry {
-            address: self.function as *const (),
-            signature: NativeSignature {
+        NativeEntry::new(
+            self.function as *const (),
+            NativeSignature {
                 failure: NativeFailureConvention::Infallible,
                 parameters: vec![A::parameter()],
                 result: NativeResult::Optional {
@@ -1183,7 +1229,7 @@ impl<A: NativeArgument, O: NativeStoredResult> EntryFunction for NativeOptionalF
                     ty: self.result_ty,
                 },
             },
-        }
+        )
     }
     fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalControlFlowResult {
         let mut arg = A::extract(&args[0], ctx).map_err(RuntimeError::new_native)?;
@@ -1222,6 +1268,57 @@ mod tests {
         types::effects::{effect, no_effects},
     };
     use std::{cell::Cell, rc::Rc};
+
+    #[test]
+    fn native_ordering_codes_share_the_typed_c_entry_and_description() {
+        #[derive(Debug)]
+        struct HostU32(u32);
+        impl NativeValueType for HostU32 {}
+        fn compare(a: &HostU32, b: &HostU32) -> std::cmp::Ordering {
+            a.0.cmp(&b.0)
+        }
+        let native = NativeFnRR::from_rust_ordering_code(compare);
+        assert_eq!(
+            native.entry.result_knowledge(),
+            NativeResultKnowledge::OrderingCode
+        );
+        assert_eq!(
+            native.entry.signature().result,
+            NativeResult::Scalar(NativeLayout::of::<isize>(), NativeScalar::Int)
+        );
+        let session = CompilerSession::new_empty_for_tests();
+        let mut ctx = EvalCtx::new(ModuleId::from_index(0), &session);
+        for (a, b, expected) in [(0, u32::MAX, -1), (17, 17, 0), (u32::MAX, 0, 1)] {
+            // The same typed C function is callable directly, without interpreter boxing.
+            assert_eq!((native.function.0)(&HostU32(a), &HostU32(b)), expected);
+            let value = native
+                .call(
+                    vec![
+                        ValOrMut::Val(Value::native(HostU32(a))),
+                        ValOrMut::Val(Value::native(HostU32(b))),
+                    ],
+                    &mut ctx,
+                    &[],
+                )
+                .unwrap()
+                .into_value()
+                .into_primitive_ty::<isize>()
+                .unwrap();
+            assert_eq!(value, expected);
+        }
+        let description = native.description(["left", "right"], "Host comparison", no_effects());
+        assert_eq!(
+            description.definition.native_result_knowledge(),
+            NativeResultKnowledge::OrderingCode
+        );
+        assert_eq!(description.definition.ty_scheme.ty.ret, int_type());
+        let ordinary =
+            NativeFn0::from_rust(|| 0isize).description([], "Ordinary integer", no_effects());
+        assert_eq!(
+            ordinary.definition.native_result_knowledge(),
+            NativeResultKnowledge::Unknown
+        );
+    }
 
     #[test]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

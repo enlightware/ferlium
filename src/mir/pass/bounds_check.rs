@@ -548,9 +548,32 @@ mod tests {
     }
 
     /// The whole-accessor rewrite needs one extra step: read the array's length, materialize
-    /// `len + i`, then retarget the checked addressor to `array_offset_unchecked`. The unrelated
-    /// accesses deliberately spend the fixed inline-growth budget so the final accessor remains
-    /// whole; their checks are not the subject of this assertion.
+    /// `len + i`, then retarget the checked addressor to `array_offset_unchecked`. Open element
+    /// types keep the accessor whole without depending on the inliner's remaining growth budget.
+    #[test]
+    fn a_proved_whole_generic_negative_array_index_becomes_unchecked() {
+        let module = optimized(
+            "fn from_end_generic(x, y, z, i: int) {\n\
+                 let a = [x, y, z];\n\
+                 if i < 0 {\n\
+                     if 3 + i >= 0 {\n\
+                         a[i]\n\
+                     } else { panic(\"bad index\") }\n\
+                 } else {\n\
+                     panic(\"not a negative index\")\n\
+                 }\n\
+             }",
+        );
+        let body = body_of(&module, "from_end_generic");
+        assert_eq!(
+            body.matches("call std::array_offset_unchecked").count(),
+            1,
+            "the final whole accessor must use its proved normalized offset:\n{body}"
+        );
+    }
+
+    /// Concrete storage also needs the whole-accessor rewrite when earlier accesses spend the
+    /// inline budget. In particular, partially inlined comparison guards must retain their facts.
     #[test]
     fn a_proved_whole_negative_array_index_becomes_unchecked() {
         let module = optimized(
@@ -571,7 +594,11 @@ mod tests {
         assert_eq!(
             body.matches("call std::array_offset_unchecked").count(),
             1,
-            "the final whole accessor must use its proved normalized offset:\n{body}"
+            "the final concrete whole accessor must use its proved normalized offset:\n{body}"
+        );
+        assert!(
+            body.contains("call std::ordering_from_code"),
+            "the fixture must exercise a partially inlined comparison guard:\n{body}"
         );
     }
 

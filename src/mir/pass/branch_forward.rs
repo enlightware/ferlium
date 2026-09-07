@@ -666,16 +666,16 @@ mod tests {
             .unwrap()
     }
 
-    /// An integer comparison used only for control flow remains a semantic variant switch.
-    /// Inlining and cleanup must retain that switch and restore the inlined frame on both paths
+    /// An integer comparison used only for control flow directly tests its native code.
+    /// Inlining and cleanup must retain that branch and restore the inlined frame on both paths
     /// without materializing an intermediate boolean.
     #[test]
-    fn an_ordering_switch_needs_no_materialized_boolean() {
+    fn an_integer_comparison_needs_no_materialized_boolean() {
         let module = optimized("fn choose(x: int) -> int { if x < 10 { 1 } else { 2 } }");
         let body = body_of(&module, "choose");
 
         assert_eq!(
-            body.matches("switch_variant").count(),
+            body.matches("condbr").count(),
             1,
             "the ordering must dispatch exactly once:\n{body}"
         );
@@ -689,15 +689,15 @@ mod tests {
         );
     }
 
-    /// A short-circuit `or` over two integer comparisons needs only their two ordering switches.
+    /// A short-circuit `or` over two integer comparisons needs only their two code tests.
     /// The composed boolean remains control flow rather than becoming a stored flag.
     #[test]
-    fn short_circuit_ordering_switches_need_no_materialized_boolean() {
+    fn short_circuit_integer_comparisons_need_no_materialized_boolean() {
         let module = optimized("fn f(i: int, n: int) { if i < 0 or i >= n { 1 } else { 2 } }");
         let body = body_of(&module, "f");
 
         assert_eq!(
-            body.matches("switch_variant").count(),
+            body.matches("condbr").count(),
             2,
             "only the two ordering dispatches must remain:\n{body}"
         );
@@ -707,8 +707,8 @@ mod tests {
         );
         assert_eq!(
             body.matches("comp_eq").count(),
-            0,
-            "ordering tags must not be lowered back into equality comparisons:\n{body}"
+            2,
+            "each native code is tested once, without a boolean retest:\n{body}"
         );
         assert!(
             body.matches("stack_restore").count() >= 3,

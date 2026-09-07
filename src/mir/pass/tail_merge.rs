@@ -608,7 +608,7 @@ mod tests {
             "the common tail must be retained once:\n{body}"
         );
         assert!(
-            !body.contains("Ord<std::int>::cmp#impl"),
+            !body.contains("compare_int_code"),
             "proven-call DCE must collect the dead predicate:\n{body}"
         );
     }
@@ -617,7 +617,7 @@ mod tests {
     fn different_branch_arms_are_not_merged() {
         let body = optimized_body("fn f(x: int) -> int { if x > 0 { x + 1 } else { x + 2 } }");
         assert!(
-            body.contains("switch_variant"),
+            body.contains("condbr"),
             "different computations must retain their branch:\n{body}"
         );
         assert_eq!(
