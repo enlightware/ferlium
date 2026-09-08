@@ -2184,6 +2184,24 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    fn replace_value_into(
+        &mut self,
+        span: Location,
+        replacement: mir::Value,
+        destination: mir::Value,
+        ty: Type,
+    ) {
+        let witness = (!self.is_statically_sized(ty)).then(|| {
+            self.value_dictionary(ty).unwrap_or_else(|| {
+                panic!(
+                    "no Value dictionary witnesses the layout of the generic replacement of type {}",
+                    self.show(ty)
+                )
+            })
+        });
+        self.insert(Operation::replace(span, replacement, destination, witness));
+    }
+
     /// Projects the function reference out of `n`'s dictionary place and lowers the call's runtime
     /// arguments to their place operands. Returns `(function, arguments)` ready
     /// to be completed with a result out-pointer and emitted as a `call`.
@@ -2416,8 +2434,8 @@ impl<'a> Emitter<'a> {
             }
 
             K::Assign(n) => {
-                // Mirror the interpreter's `eval_assign` ordering: evaluate the right-hand side,
-                // then drop the destination's previous value, then store the new one.
+                // Prepare the replacement before installing it and dropping the detached old
+                // value. A borrowed destination stays initialized even during destructor calls.
                 //
                 // The right-hand side may read any part of the destination it overwrites. It must be
                 // completed in fresh storage even when the old value needs no semantic drop: direct
@@ -2434,12 +2452,13 @@ impl<'a> Emitter<'a> {
                     return;
                 }
                 if let Some(spec) = n.drop.and_then(|drop| self.resolve_drop(drop)) {
-                    self.emit_drop(node.span, place.clone(), dropped_ty, spec);
+                    self.replace_value_into(node.span, temp.clone(), place, value_ty);
+                    // HIR assignment compatibility lets this slot hold the RHS and then the
+                    // displaced destination value; destruction uses the destination's type.
+                    self.emit_drop(node.span, temp, dropped_ty, spec);
+                } else {
+                    self.move_value_into(node.span, temp, place, value_ty);
                 }
-                // The fresh temporary is consumed, not copied. A move is shape-agnostic, so it
-                // works for a generic `value_ty` too; `move_value_into` carries a run-time layout
-                // witness when the type is not statically sized.
-                self.move_value_into(node.span, temp, place, value_ty);
                 // `Assign` yields `()`; in value/tail position initialize the destination slot.
                 self.store_unit_result(node.span, destination);
             }

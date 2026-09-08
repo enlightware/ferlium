@@ -872,6 +872,27 @@ impl Operation {
         }
     }
 
+    /// Install an owned replacement without exposing an intermediate absent destination.
+    /// The replacement's storage receives the displaced old value (possibly absent) for cleanup.
+    /// This is an ownership transition, not a prescribed byte-swap algorithm; it runs no callbacks
+    /// and cannot fail partway through the transition.
+    /// A third operand, when present, witnesses a dynamic layout as for `move_dynamic`.
+    pub fn replace(
+        span: Location,
+        replacement: mir::Value,
+        destination: mir::Value,
+        witness: Option<mir::Value>,
+    ) -> Self {
+        let mut operands = vec![replacement, destination];
+        operands.extend(witness);
+        Operation {
+            result_id: None,
+            span,
+            operands: operands.into_boxed_slice(),
+            kind: OperationKind::Replace,
+        }
+    }
+
     /// Creates a physical ownership transfer of one initialized `ty` value using an explicit byte
     /// extent. The source becomes absent and the previously absent destination becomes initialized.
     pub fn move_bytes(
@@ -1185,6 +1206,8 @@ pub enum OperationKind {
     Memcpy,
     /// Transfer ownership between places, optionally using a run-time layout witness.
     Move,
+    /// Install a replacement, retaining the displaced value without an initialization gap.
+    Replace,
     /// Transfer ownership between places using an explicit physical byte extent.
     MoveBytes { ty: Type },
     /// Save the current stack top.
@@ -1257,6 +1280,7 @@ impl OperationKind {
             | Clear
             | Memcpy
             | Move
+            | Replace
             | MoveBytes { .. }
             | StackSave
             | StackRestore
@@ -1308,6 +1332,7 @@ impl OperationKind {
             | Clear
             | Memcpy
             | Move
+            | Replace
             | MoveBytes { .. }
             | StackSave
             | StackRestore
@@ -1421,6 +1446,7 @@ impl OperationKind {
             | Clear
             | Memcpy
             | Move
+            | Replace
             | MoveBytes { .. }
             | RuntimeDealloc
             | StackRestore
@@ -1592,9 +1618,9 @@ impl OperationKind {
                 2,
                 "memcpy is a pure copy of a statically-sized TrivialCopy pointee: source and destination only"
             ),
-            Move => assert!(
+            Move | Replace => assert!(
                 matches!(whole.operands.len(), 2 | 3),
-                "move takes source and destination places, plus the layout witness iff dynamic"
+                "move/replace takes two places, plus the layout witness iff dynamic"
             ),
             MoveBytes { .. } => assert_eq!(
                 whole.operands.len(),
@@ -1844,10 +1870,15 @@ impl OperationKind {
                 whole.operands[0].format_with(env),
                 whole.operands[1].format_with(env)
             ),
-            Move => {
+            Move | Replace => {
                 write!(
                     f,
-                    "move {} to {}",
+                    "{} {} to {}",
+                    if matches!(self, Replace) {
+                        "replace"
+                    } else {
+                        "move"
+                    },
                     whole.operands[0].format_with(env),
                     whole.operands[1].format_with(env)
                 )?;

@@ -639,7 +639,7 @@ fn note_operation(operation: &Operation, site: Site, uses: &mut FxHashMap<ValueI
             read(&operation.operands[0], uses);
             write(&operation.operands[1], uses);
         }
-        OperationKind::Move => {
+        OperationKind::Move | OperationKind::Replace => {
             write(&operation.operands[0], uses);
             write(&operation.operands[1], uses);
             operation

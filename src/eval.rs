@@ -1076,7 +1076,36 @@ impl Place {
     /// Get a mutable reference to the target value
     pub fn target_mut<'c>(&self, ctx: &'c mut EvalCtx) -> Result<&'c mut Value, SourceFailureKind> {
         let (path, index) = self.resolved_path_and_index(ctx);
-        let mut target = ctx.environment[index].as_val_mut().unwrap();
+        self.project_mut(ctx.environment[index].as_val_mut().unwrap(), &path)
+    }
+
+    /// Install a prepared whole-slot replacement, leaving the displaced value in that slot.
+    pub(crate) fn replace_from_owned_slot(
+        &self,
+        ctx: &mut EvalCtx,
+        replacement: &Place,
+    ) -> Result<(), SourceFailureKind> {
+        assert!(
+            replacement.path.is_empty(),
+            "replacement must be a whole owned slot"
+        );
+        let (path, index) = self.resolved_path_and_index(ctx);
+        let [destination, replacement] = ctx
+            .environment
+            .get_disjoint_mut([index, replacement.root])
+            .expect("replacement and destination must be distinct allocated slots");
+        let replacement = replacement.as_val_mut().expect("replacement must be owned");
+        // Resolve the destination before changing either slot; projection can report failure.
+        let destination = self.project_mut(destination.as_val_mut().unwrap(), &path)?;
+        std::mem::swap(replacement, destination);
+        Ok(())
+    }
+
+    fn project_mut<'v>(
+        &self,
+        mut target: &'v mut Value,
+        path: &VecDeque<isize>,
+    ) -> Result<&'v mut Value, SourceFailureKind> {
         for &index in path.iter() {
             use Value::*;
             target = match target {
@@ -3838,13 +3867,35 @@ fn eval_assign(
     let value = eval_or_return!(eval_node_with_ctx(arena, assignment.value, ctx, locals));
     let span = arena[node_id].span;
     if let Some(drop) = &assignment.drop
-        && let Err(err) =
-            drop_value_at_place_if_initialized(ctx, resolved_local_drop(drop), place.clone(), span)
+        && *drop != ResolvedLocalDrop::Skip
     {
-        value.discard_storage();
-        return Err(err);
+        // Reserve the detached old value's slot before touching the destination. The destination
+        // then remains initialized throughout semantic destruction, including poisoned exits.
+        let old_index = ctx.environment.len();
+        if let Err(error) = ctx.check_environment_cell_limit(old_index, Some(span)) {
+            value.discard_storage();
+            return Err(error);
+        }
+        let target = match place.target_mut(ctx) {
+            Ok(target) => target,
+            Err(error) => {
+                value.discard_storage();
+                return Err(RuntimeError::new(error, Some(span)));
+            }
+        };
+        let old_value = mem::replace(target, value);
+        ctx.environment.push(ValOrMut::Val(old_value));
+        let old_place = Place {
+            root: old_index,
+            path: Vec::new(),
+        };
+        let result =
+            drop_value_at_place_if_initialized(ctx, resolved_local_drop(drop), old_place, span);
+        ctx.truncate_environment_storage(old_index);
+        result?;
+    } else {
+        replace_value_storage_at_place(ctx, &place, value, span)?;
     }
-    replace_value_storage_at_place(ctx, &place, value, span)?;
     cont(Value::unit())
 }
 
@@ -4391,6 +4442,100 @@ mod tests {
         let registered = session.register_module(path, module);
         assert_eq!(registered, module_id);
         (session, module_id)
+    }
+
+    #[test]
+    fn assignment_keeps_destination_initialized_during_drop_and_poisoning() {
+        #[derive(Clone)]
+        struct ObserveDrop {
+            poison: bool,
+        }
+        impl crate::hir::function::Callable for ObserveDrop {
+            fn runtime_argument_passing(&self) -> Option<&[ArgConvention]> {
+                Some(&[ArgConvention::MutableRef])
+            }
+            fn format_ind(
+                &self,
+                f: &mut fmt::Formatter,
+                _: &[crate::module::ELocalDecl],
+                _: &crate::module::ModuleEnv<'_>,
+                _: usize,
+                _: usize,
+            ) -> fmt::Result {
+                f.write_str("ObserveDrop")
+            }
+            fn call(
+                &self,
+                args: Vec<super::ValOrMut>,
+                ctx: &mut EvalCtx,
+                _: &[crate::module::ELocalDecl],
+            ) -> super::EvalControlFlowResult {
+                // Test-only inspection of caller storage: destruction receives the detached old
+                // value while the original destination already holds its replacement.
+                assert_eq!(args[0].as_primitive::<isize>(ctx).unwrap(), Some(&1));
+                assert_eq!(
+                    ctx.environment[0].as_primitive::<isize>(ctx).unwrap(),
+                    Some(&2)
+                );
+                if self.poison {
+                    Err(ctx.environment_cell_limit_error(None))
+                } else {
+                    cont(Value::unit())
+                }
+            }
+        }
+        for poison in [false, true] {
+            let mut session = CompilerSession::new();
+            let module_id = session.raw_modules().next_id();
+            let path = Path::single_str("$replacement_test");
+            let mut module = Module::new(module_id, path.clone());
+            let definition = function_definition(
+                FnType::new_mut_resolved([(int_type(), true)], Type::unit(), EffType::empty()),
+                ["target"],
+            );
+            let drop = module.add_function(
+                ustr("observe_drop"),
+                ModuleFunction::new(definition, b(ObserveDrop { poison }), None, Vec::new()),
+            );
+            session.register_module(path, module);
+
+            let span = Location::new_synthesized();
+            let mut arena = ENodeArena::default();
+            let place = node(
+                &mut arena,
+                hir_syn::load_local(LocalDeclId::from_index(0)),
+                int_type(),
+                span,
+            );
+            let value = node(&mut arena, hir_syn::native(2isize), int_type(), span);
+            let assignment = hir::Assignment {
+                place,
+                value,
+                drop: Some(ResolvedLocalDrop::Static(crate::module::FunctionId::new(
+                    module_id, drop,
+                ))),
+            };
+            let assignment_node = node(
+                &mut arena,
+                NodeKind::Assign(assignment.clone()),
+                Type::unit(),
+                span,
+            );
+            let mut locals = [owned_local("target", MutType::mutable(), int_type(), span)];
+            LocalDecl::assign_sequential_slots(&mut locals);
+            let locals = locals.map(LocalDecl::into_elaborated);
+            let mut ctx = EvalCtx::new(module_id, &session);
+            ctx.environment
+                .push(super::ValOrMut::from_primitive(1isize));
+            let result =
+                super::eval_assign(&arena, assignment_node, &assignment, &mut ctx, &locals);
+            assert_eq!(result.is_err(), poison);
+            assert_eq!(ctx.environment.len(), 1);
+            assert_eq!(
+                ctx.environment[0].as_primitive::<isize>(&ctx).unwrap(),
+                Some(&2)
+            );
+        }
     }
 
     fn test_module_id() -> ModuleId {

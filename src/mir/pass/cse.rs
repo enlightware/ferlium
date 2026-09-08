@@ -846,11 +846,12 @@ fn transfer(
         OperationKind::Clear => forget_write(state, origins, &operation.operands[0]),
         OperationKind::Memcpy
         | OperationKind::Move
+        | OperationKind::Replace
         | OperationKind::MoveBytes { .. }
         | OperationKind::Clone { .. } => {
             if matches!(
                 operation.kind,
-                OperationKind::Move | OperationKind::MoveBytes { .. }
+                OperationKind::Move | OperationKind::MoveBytes { .. } | OperationKind::Replace
             ) {
                 forget_write(state, origins, &operation.operands[0]);
             }

@@ -987,7 +987,7 @@ impl<'a> Verifier<'a> {
                     );
                 }
             }
-            OperationKind::Memcpy | OperationKind::Move => {
+            OperationKind::Memcpy | OperationKind::Move | OperationKind::Replace => {
                 if let (Some(source_ty), Some(destination_ty)) = (
                     self.place_pointee_type(&operands[0]),
                     self.place_pointee_type(&operands[1]),
@@ -1468,6 +1468,9 @@ impl<'a> Verifier<'a> {
                 OperationKind::Move => {
                     self.transfer_copy_or_move(&operands[0], &operands[1], true, &mut normal);
                 }
+                OperationKind::Replace => {
+                    self.transfer_replace(&operands[0], &operands[1], &mut normal);
+                }
                 OperationKind::MoveBytes { .. } => {
                     self.transfer_copy_or_move(&operands[0], &operands[1], true, &mut normal);
                 }
@@ -1689,6 +1692,57 @@ impl<'a> Verifier<'a> {
         {
             state.roots[root].set_path_all(&path, LeafState::ABSENT);
         }
+    }
+
+    fn transfer_replace(
+        &mut self,
+        replacement: &mir::Value,
+        destination: &mir::Value,
+        state: &mut AnalysisState,
+    ) {
+        let LocalPlace::Root {
+            root,
+            path: Some(path),
+        } = self.local_place(replacement)
+        else {
+            panic!(
+                "MIR function `{}`: replace requires an owned replacement",
+                self.func.name
+            );
+        };
+        assert!(
+            path.is_empty(),
+            "replace replacement must be a whole owned value"
+        );
+        let new_value = state.roots[root].clone();
+        assert!(
+            new_value.state.is_definitely_live(),
+            "MIR function `{}`: replace replacement is not initialized",
+            self.func.name
+        );
+        let old_value = match self.local_place(destination) {
+            LocalPlace::Root {
+                root: target,
+                path: Some(target_path),
+            } => {
+                assert_ne!(root, target, "replace replacement aliases its destination");
+                if let Some(old_value) = state.roots[target].at_path(&target_path).cloned() {
+                    // Only the replacement must be fully live. The displaced value retains any
+                    // absent fields, so subsequent cleanup observes the old initialization state.
+                    assert!(
+                        !old_value.state.may_be_unallocated(),
+                        "replace destination is unallocated"
+                    );
+                    state.roots[target].replace_path(&target_path, &new_value);
+                    old_value
+                } else {
+                    self.mark_opaque_projection_live(target, &target_path, state);
+                    self.live_state_for_type(new_value.ty)
+                }
+            }
+            _ => self.live_state_for_type(new_value.ty),
+        };
+        state.roots[root].replace_path(&[], &old_value);
     }
 
     fn transfer_clear(&self, destination: &mir::Value, state: &mut AnalysisState) {
@@ -2117,6 +2171,178 @@ mod tests {
     /// is load-bearing: a sum type with only trivial inline payloads has no drop obligation.
     fn managed_variant_ty() -> Type {
         Type::variant([(ustr::ustr("A"), string_type())])
+    }
+
+    fn replace_body(initialized: bool, aliases: bool) -> FunctionBuilder {
+        let session = CompilerSession::new();
+        let span = Location::new_synthesized();
+        let mut f = FunctionBuilder::new("replace_test".into(), Default::default());
+        let destination = Value::Parameter(f.add_parameter(
+            int_type(),
+            ParameterKind::Parameter(crate::hir::function::ArgConvention::MutableRef),
+        ));
+        let block = f.add_block();
+        let replacement = append_result(&mut f, block, Operation::alloca(span, int_type()));
+        if initialized {
+            let value = f.add_constant(
+                int_type(),
+                LiteralValue::new_native(7isize),
+                &session.module_env(),
+            );
+            append(
+                &mut f,
+                block,
+                Operation::store(span, Value::Constant(value), replacement.clone()),
+            );
+        }
+        let destination = if aliases {
+            replacement.clone()
+        } else {
+            destination
+        };
+        append(
+            &mut f,
+            block,
+            Operation::replace(span, replacement, destination, None),
+        );
+        terminate_return(&mut f, block, span);
+        f
+    }
+
+    #[test]
+    fn replace_accepts_a_prepared_owned_replacement() {
+        verify(replace_body(true, false));
+    }
+
+    #[test]
+    fn replace_accepts_absent_and_partially_initialized_destinations() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let ty = Type::tuple([int_type(), int_type()]);
+        for initialized_fields in 0..=1 {
+            let mut f = FunctionBuilder::new("partial_replace".into(), Default::default());
+            let replacement = Value::Parameter(f.add_parameter(ty, ParameterKind::Owned));
+            let result = Value::Parameter(f.add_parameter(ty, ParameterKind::Return));
+            let block = f.add_block();
+            let destination = append_result(&mut f, block, Operation::alloca(span, ty));
+            let zero =
+                Value::Constant(f.add_constant(int_type(), LiteralValue::new_native(0isize), &env));
+            for _ in 0..initialized_fields {
+                let field = append_result(
+                    &mut f,
+                    block,
+                    Operation::product_subfield(
+                        span,
+                        destination.clone(),
+                        zero.clone(),
+                        int_type(),
+                        ty,
+                        [],
+                    ),
+                );
+                append(&mut f, block, Operation::store(span, zero.clone(), field));
+            }
+            append(
+                &mut f,
+                block,
+                Operation::replace(span, replacement.clone(), destination.clone(), None),
+            );
+            // The destination is now fully live, even though its previous state was not.
+            append(
+                &mut f,
+                block,
+                Operation::move_value(span, destination, result),
+            );
+            if initialized_fields == 1 {
+                let old_field = append_result(
+                    &mut f,
+                    block,
+                    Operation::product_subfield(
+                        span,
+                        replacement.clone(),
+                        zero,
+                        int_type(),
+                        ty,
+                        [],
+                    ),
+                );
+                let scratch = append_result(&mut f, block, Operation::alloca(span, int_type()));
+                append(
+                    &mut f,
+                    block,
+                    Operation::move_value(span, old_field, scratch),
+                );
+            }
+            append(&mut f, block, Operation::clear(span, replacement));
+            terminate_return(&mut f, block, span);
+            f.finish(env);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "move reads storage that is not definitely initialized")]
+    fn replace_preserves_the_displaced_values_absence() {
+        let span = Location::new_synthesized();
+        let mut f = FunctionBuilder::new("absent_displaced_value".into(), Default::default());
+        let replacement = Value::Parameter(f.add_parameter(int_type(), ParameterKind::Owned));
+        let block = f.add_block();
+        let destination = append_result(&mut f, block, Operation::alloca(span, int_type()));
+        append(
+            &mut f,
+            block,
+            Operation::replace(span, replacement.clone(), destination.clone(), None),
+        );
+        // The new destination is live, but the displaced value is absent, not invented data.
+        append(
+            &mut f,
+            block,
+            Operation::move_value(span, replacement, destination),
+        );
+        terminate_return(&mut f, block, span);
+        verify(f);
+    }
+
+    #[test]
+    #[should_panic(expected = "replace replacement is not initialized")]
+    fn replace_rejects_an_uninitialized_replacement() {
+        verify(replace_body(false, false));
+    }
+
+    #[test]
+    #[should_panic(expected = "replace replacement aliases its destination")]
+    fn replace_rejects_aliasing_storage() {
+        verify(replace_body(true, true));
+    }
+
+    #[test]
+    #[should_panic(expected = "replace requires an owned replacement")]
+    fn replace_rejects_a_borrowed_replacement() {
+        let span = Location::new_synthesized();
+        let mut f = FunctionBuilder::new("borrowed_replace".into(), Default::default());
+        let kind = ParameterKind::Parameter(crate::hir::function::ArgConvention::MutableRef);
+        let first = Value::Parameter(f.add_parameter(int_type(), kind));
+        let second = Value::Parameter(f.add_parameter(int_type(), kind));
+        let block = f.add_block();
+        append(&mut f, block, Operation::replace(span, first, second, None));
+        terminate_return(&mut f, block, span);
+        verify(f);
+    }
+
+    #[test]
+    #[should_panic(expected = "without consuming owned parameter")]
+    fn replace_retains_the_old_values_drop_obligation() {
+        let span = Location::new_synthesized();
+        let mut f = FunctionBuilder::new("leaked_replace".into(), Default::default());
+        let first = Value::Parameter(f.add_parameter(string_type(), ParameterKind::Owned));
+        let second = Value::Parameter(f.add_parameter(
+            string_type(),
+            ParameterKind::Parameter(crate::hir::function::ArgConvention::MutableRef),
+        ));
+        let block = f.add_block();
+        append(&mut f, block, Operation::replace(span, first, second, None));
+        terminate_return(&mut f, block, span);
+        verify(f);
     }
 
     #[test]

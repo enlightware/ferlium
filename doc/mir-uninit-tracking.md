@@ -15,6 +15,9 @@ This is an ownership property of storage, not a source-language `Option<T>`, and
 - `memcpy` preserves its source and initializes its destination;
 - `move` initializes its destination and makes its source absent;
 - `move_bytes` performs the same transition using an explicit physical byte extent;
+- `replace` installs an owned replacement and retains the displaced value in its source storage,
+  without a callback or failure during the transition. Its source is a fully initialized whole
+  owned root; its destination must be allocated but may be a projection, absent, or partially initialized;
 - `drop` acts only on present storage and then makes it absent;
 - `clear` makes storage with no live semantic drop obligation absent without running semantic drop.
 

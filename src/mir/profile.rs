@@ -113,6 +113,7 @@ impl MirInstructionKind {
             Self::Operation(
                 Op::Memcpy
                 | Op::Move
+                | Op::Replace
                 | Op::MoveBytes
                 | Op::BuildSubscript
                 | Op::BuildClosure

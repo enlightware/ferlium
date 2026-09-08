@@ -488,7 +488,7 @@ fn record_writes(
         OperationKind::Store | OperationKind::Memcpy | OperationKind::Clone { .. } => {
             write(&operation.operands[1]);
         }
-        OperationKind::Move | OperationKind::MoveBytes { .. } => {
+        OperationKind::Move | OperationKind::MoveBytes { .. } | OperationKind::Replace => {
             write(&operation.operands[0]);
             write(&operation.operands[1]);
         }

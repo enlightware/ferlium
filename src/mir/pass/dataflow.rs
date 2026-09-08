@@ -998,6 +998,21 @@ fn transfer(
                 state.set_place(place, Fact::Uninit, register_places);
             }
         }
+        OperationKind::Replace => {
+            let source = place_of(&operation.operands[0]).filter(|place| tracked(*place));
+            let destination = place_of(&operation.operands[1]).filter(|place| tracked(*place));
+            // Read both facts before either write invalidates storage and its read provenance.
+            let new_value = source.map(|place| state.place(place)).unwrap_or_default();
+            let old_value = destination
+                .map(|place| state.place(place))
+                .unwrap_or_default();
+            if let Some(place) = destination {
+                state.set_place(place, new_value, register_places);
+            }
+            if let Some(place) = source {
+                state.set_place(place, old_value, register_places);
+            }
+        }
         OperationKind::CompareEqual => {
             let Some(result) = operation.result_id() else {
                 return;
@@ -1324,7 +1339,7 @@ pub(crate) fn escaping_roots(
                 // The destination is modelled, but storing a *pointer* lets it reach anywhere.
                 escape_operand(&operation.operands[0], escaped);
             }
-            OperationKind::Memcpy | OperationKind::Move => {
+            OperationKind::Memcpy | OperationKind::Move | OperationKind::Replace => {
                 // Both places are modelled; a dynamic move additionally reads a witness place.
                 for operand in operation.operands.iter().skip(2) {
                     escape_operand(operand, escaped);
@@ -1730,6 +1745,81 @@ mod tests {
         let (analysis, state) = entry_block_exit(&func, env);
         let source_key = analysis.place_of(&source).expect("a tracked source place");
         assert_eq!(state.place(source_key), Fact::Uninit);
+    }
+
+    #[test]
+    fn replace_transfers_both_values_before_invalidating_either() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new("replace_facts".into(), Default::default());
+        let block = builder.add_block();
+        let mut places = Vec::new();
+        for value in [1isize, 2] {
+            let place = builder
+                .append_operation(block, Operation::alloca(span, int_type()))
+                .unwrap();
+            let constant = builder.add_constant(int_type(), LiteralValue::new_native(value), &env);
+            builder.append_operation(
+                block,
+                Operation::store(span, mir::Value::Constant(constant), place.clone()),
+            );
+            places.push(place);
+        }
+        builder.append_operation(
+            block,
+            Operation::replace(span, places[0].clone(), places[1].clone(), None),
+        );
+        builder.set_terminator(block, Terminator::ret(span));
+        let func = builder.finish(env);
+        let (analysis, state) = entry_block_exit(&func, env);
+        for (place, expected) in places.iter().zip([2isize, 1]) {
+            assert_eq!(
+                state.place(analysis.place_of(place).unwrap()),
+                Fact::Known(Const::Literal(LiteralValue::new_native(expected)))
+            );
+        }
+    }
+
+    #[test]
+    fn a_managed_array_assignment_preserves_its_known_length() {
+        let mut session = CompilerSession::new();
+        // BuildArray storage stays tracked through drop; arbitrary managed slots are deliberately
+        // still excluded by the separate escape census.
+        let source = "fn choose() -> int {\n\
+                let mut value = [1];\n\
+                value = [2, 3];\n\
+                if len(value) == 2 { 20 } else { 10 }\n\
+            }";
+        let module = compile(&mut session, source);
+        let raw = body(&session, module, "choose");
+        assert!(raw.blocks().any(|block| {
+            raw.block(block)
+                .operations()
+                .iter()
+                .any(|op| matches!(op.kind, OperationKind::Replace))
+        }));
+        session.set_mir_optimization(MirOptimization::Enabled);
+        session.prepare_execution_target(ExecutionTarget::Mir, module);
+        let id = session
+            .expect_fresh_module(module)
+            .get_local_function_id(ustr("choose"))
+            .unwrap();
+        let optimized = session
+            .mir_artifacts_for(module, MirOptimization::Enabled)
+            .unwrap()
+            .get(id)
+            .unwrap();
+        assert!(optimized.blocks().all(|block| !matches!(
+            optimized.block(block).terminator().kind,
+            TerminatorKind::SwitchVariant { .. } | TerminatorKind::CondBr { .. }
+        )));
+        assert!(
+            optimized
+                .constants()
+                .iter()
+                .any(|constant| constant.representation == LiteralValue::new_native(20isize))
+        );
     }
 
     /// An entry of a *constant* dictionary is a known function — the fact devirtualization reads.

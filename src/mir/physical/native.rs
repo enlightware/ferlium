@@ -409,6 +409,7 @@ fn operation_types(kind: &OperationKind, types: &mut Vec<Type>) {
         | Clear
         | Memcpy
         | Move
+        | Replace
         | StackSave
         | StackRestore
         | CheckCallDepth

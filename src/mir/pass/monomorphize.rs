@@ -697,11 +697,17 @@ fn redirect_recursion(edit: &mut FunctionEdit, original: FunctionId, own: Functi
 /// (`live_state_for_type` consults the same trivial-copy predicate), so a destination of a
 /// trivially-copyable type never carried an obligation, and removing its drop strands nothing.
 fn elide_trivial_ownership_operations(edit: &mut FunctionEdit, env: ModuleEnv<'_>) {
+    let mut trivial_temporaries = FxHashSet::default();
+    let mut has_replace = false;
     for block_id in edit.blocks().collect::<Vec<_>>() {
         let block = edit.block_mut(block_id);
         let mut dead_drops = Vec::new();
         for (index, operation) in block.operations.iter_mut().enumerate() {
             match &operation.kind {
+                OperationKind::Alloca { ty } if concrete_type_is_trivial_copy(*ty, &env) => {
+                    trivial_temporaries.insert(operation.result_id().expect("alloca has a result"));
+                }
+                OperationKind::Replace => has_replace = true,
                 OperationKind::Clone { ty } if concrete_type_is_trivial_copy(*ty, &env) => {
                     let source = operation.operands[0].clone();
                     let destination = operation.operands[1].clone();
@@ -718,11 +724,58 @@ fn elide_trivial_ownership_operations(edit: &mut FunctionEdit, env: ModuleEnv<'_
             block.operations.remove(index);
         }
     }
+    if !has_replace || trivial_temporaries.is_empty() {
+        return;
+    }
+
+    // A trivial drop is gone, but replacement still preserves the displaced value. Turn it into
+    // a move only when that value (including its initialization state) is never observed: the
+    // source must be an unaliased local used solely for initialization and one replacement.
+    // Existing copy forwarding can then eliminate the temporary altogether.
+    let mut replacements = FxHashSet::default();
+    for block_id in edit.blocks() {
+        let block = edit.block(block_id);
+        for operation in &block.operations {
+            for (position, operand) in operation.operands.iter().enumerate() {
+                let mir::Value::Register(root) = operand else {
+                    continue;
+                };
+                if !trivial_temporaries.contains(root) {
+                    continue;
+                }
+                let allowed = match operation.kind {
+                    OperationKind::Store | OperationKind::Memcpy | OperationKind::Move => {
+                        position == 1
+                    }
+                    OperationKind::Replace => position == 0 && replacements.insert(*root),
+                    _ => false,
+                };
+                if !allowed {
+                    trivial_temporaries.remove(root);
+                }
+            }
+        }
+        for operand in block.terminator.operands() {
+            if let mir::Value::Register(root) = operand {
+                trivial_temporaries.remove(root);
+            }
+        }
+    }
+    for block_id in edit.blocks().collect::<Vec<_>>() {
+        for operation in &mut edit.block_mut(block_id).operations {
+            if matches!(operation.kind, OperationKind::Replace)
+                && let mir::Value::Register(root) = &operation.operands[0]
+                && trivial_temporaries.contains(root)
+            {
+                operation.kind = OperationKind::Move;
+            }
+        }
+    }
 }
 
 /// Drops `Value` dictionary layout witnesses that substitution made redundant.
 ///
-/// `alloca`, `move`, variant construction, variant-payload projection, and product projection carry
+/// `alloca`, `move`, `replace`, variant construction, and variant/product projection carry
 /// them when the relevant layout is only known at run time. Substitution can make all or only some
 /// of those layouts static. A witness the generic body needed is then dead weight: for this type the
 /// emitter would have chosen the static form. Left in place it is a live use of the dictionary, and
@@ -750,7 +803,7 @@ fn drop_redundant_layout_witnesses(edit: &mut FunctionEdit, env: ModuleEnv<'_>) 
                 }
                 // `move` records no type, so the witnessed type is read back from the `Value<T>`
                 // dictionary that witnesses it.
-                OperationKind::Move => {
+                OperationKind::Move | OperationKind::Replace => {
                     if operation.operands.len() == 3
                         && let Some(ty) = witnessed_type(&operation.operands[2], env)
                         && type_has_static_layout(ty, span, &env)
@@ -1090,6 +1143,7 @@ fn substitute_in_operation(operation: &mut Operation, mapper: &mut impl TypeMapp
         | OperationKind::Clear
         | OperationKind::Memcpy
         | OperationKind::Move
+        | OperationKind::Replace
         | OperationKind::StackSave
         | OperationKind::StackRestore
         | OperationKind::CheckCallDepth
@@ -1394,7 +1448,7 @@ fn worth_specializing<Ty: TypeLike>(
                 {
                     return true;
                 }
-                OperationKind::Move
+                OperationKind::Move | OperationKind::Replace
                     if operation.operands.len() == 3
                         && operation.operands.get(2).is_some_and(|witness| {
                             let mir::Value::Parameter(parameter) = witness else {
@@ -2216,12 +2270,76 @@ mod tests {
             specialized.contains("memcpy"),
             "a clone of a now-trivially-copyable type becomes a representation copy:\n{specialized}"
         );
-        for spelling in ["clone int ", "drop int ", "dict_entry"] {
+        for spelling in ["clone int ", "drop int ", "dict_entry", "replace "] {
             assert!(
                 !specialized.contains(spelling),
                 "no `{spelling}` may survive for a type that owns nothing:\n{specialized}"
             );
         }
+    }
+
+    #[test]
+    fn specialized_assignment_matches_direct_trivial_assignment() {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let module = session.emit_mir(
+            "assignment",
+            "fn set<A>(a: &mut A, b: A) { a = b }\n\
+             fn ints(a: &mut int, b: int) { set(a, b) }\n\
+             fn direct(a: &mut int, b: int) { a = b }\n\
+             fn strings(a: &mut string, b: string) { set(a, b) }",
+        );
+        let body = |name: &str| {
+            module
+                .split(&format!("fn {name}("))
+                .nth(1)
+                .expect("function exists")
+                .split("\nfn ")
+                .next()
+                .unwrap()
+                .trim()
+        };
+        assert_eq!(body("ints"), body("direct"));
+        assert!(body("ints").contains("memcpy %p1 to %p0"));
+        let managed = body("strings");
+        assert!(managed.find("replace ").unwrap() < managed.find("drop string ").unwrap());
+    }
+
+    #[test]
+    fn specialization_preserves_an_observed_displaced_value() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            "fn set<A>(a: &mut A, b: A) { a = b }\n\
+             fn ints(a: &mut int, b: int) { set(a, b) }",
+        );
+        let mut site = site(&session, module, "ints", "set");
+        let mut edit = FunctionEdit::new(site.body);
+        let block = edit.blocks().next().unwrap();
+        let (index, replacement) = edit
+            .block(block)
+            .operations
+            .iter()
+            .enumerate()
+            .find(|(_, op)| matches!(op.kind, OperationKind::Replace))
+            .map(|(index, op)| (index, op.clone()))
+            .unwrap();
+        // Even an initialization-state observation distinguishes replace from move.
+        let mut observation =
+            Operation::is_initialized(replacement.span, replacement.operands[0].clone());
+        edit.assign_new_result(&mut observation);
+        edit.block_mut(block)
+            .operations
+            .insert(index + 1, observation);
+        site.body = edit.finish(session.module_env());
+        let specialized = site.specialize(session.module_env());
+        assert!(specialized.blocks().any(|block| {
+            specialized
+                .block(block)
+                .operations()
+                .iter()
+                .any(|op| matches!(op.kind, OperationKind::Replace))
+        }));
     }
 
     /// The point of `builtin::init_place`: with a container's element copy expressed in MIR rather

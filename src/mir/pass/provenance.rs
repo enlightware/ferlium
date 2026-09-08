@@ -476,6 +476,16 @@ fn derive_repeatable(
                         return false;
                     }
                 }
+                OperationKind::Replace => {
+                    if operation
+                        .operands
+                        .iter()
+                        .take(2)
+                        .any(|operand| root_of(operand, &roots).is_some())
+                    {
+                        return false;
+                    }
+                }
                 OperationKind::Clone { .. } => {
                     if root_of(&operation.operands[1], &roots).is_some() {
                         return false;

@@ -119,7 +119,8 @@ storage reclamation cannot destroy that payload again. This keeps the ordinary F
 `&mut T` method signature; the Rust pointer entry is specified in [abi.md](abi.md).
 
 Assignments to initialized storage carry an optional `Assignment::drop`.
-If present, the old destination lifetime ends before the new value replaces it; the resolved mode may be `Skip`.
+For a semantic drop, the prepared replacement is installed in the destination before the detached
+old value is dropped. The destination remains initialized throughout cleanup; the resolved mode may be `Skip`.
 Assignments to uninitialized storage use `assignment_mode == InitializeStorage` and must not drop the destination first.
 
 Final-HIR evaluation and lowering must preserve this cleanup behavior on all exits:

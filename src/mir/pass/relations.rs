@@ -524,6 +524,12 @@ pub(crate) enum Fact {
     },
 }
 
+/// Captured before a storage transfer invalidates either place's current definitions.
+struct PlaceContents {
+    value: Option<Fact>,
+    fields: Vec<(Vec<ProjectionIndex>, Fact)>,
+}
+
 /// The relational state at one program point.
 #[derive(Clone, PartialEq, Eq, Default, Debug)]
 pub(crate) struct State {
@@ -543,6 +549,48 @@ pub(crate) struct State {
 }
 
 impl State {
+    fn place_contents(&mut self, place: Option<PlaceId>, interner: &mut Interner) -> PlaceContents {
+        let value = place.map(|place| self.place_value_fact(place, interner));
+        let fields = place
+            .map(|place| {
+                self.within(place, interner.places())
+                    .into_iter()
+                    .map(|inner| {
+                        let fact = self.place_value_fact(inner, interner);
+                        (interner.places().path_from(place, inner), fact)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        PlaceContents { value, fields }
+    }
+
+    fn place_value_fact(&mut self, place: PlaceId, interner: &mut Interner) -> Fact {
+        let symbol = self.symbol_of(place, interner);
+        self.fact(symbol)
+            .cloned()
+            .unwrap_or_else(|| Fact::Value(Affine::symbol(symbol)))
+    }
+
+    fn define_contents(
+        &mut self,
+        place: PlaceId,
+        def: DefSite,
+        interner: &mut Interner,
+        mut contents: PlaceContents,
+    ) {
+        self.define(place, def, interner, contents.value);
+        // A parent definition forgets its children, so install shallowest fields first.
+        contents.fields.sort_by_key(|(path, _)| path.len());
+        for (path, fact) in contents.fields {
+            let mut inner = place;
+            for index in path {
+                inner = interner.place_field(inner, index);
+            }
+            self.define(inner, def, interner, Some(fact));
+        }
+    }
+
     /// The symbol a place's current contents are.
     pub(crate) fn symbol_of(&self, place: PlaceId, interner: &mut Interner) -> SymbolId {
         match self.current.get(&place) {
@@ -1775,47 +1823,14 @@ fn transfer(
         OperationKind::AddressOffset { .. } | OperationKind::AddressOffsetPlace { .. } => {}
         OperationKind::Memcpy | OperationKind::Move | OperationKind::MoveBytes { .. } => {
             let source = tracked_place(state, &operation.operands[0], escaped, interner);
-            let fact = source.map(|place| {
-                let symbol = state.symbol_of(place, interner);
-                state
-                    .fact(symbol)
-                    .cloned()
-                    .unwrap_or_else(|| Fact::Value(Affine::symbol(symbol)))
-            });
             if let Some(destination) =
                 tracked_place(state, &operation.operands[1], escaped, interner)
             {
                 // The fields travel too, and separately from the whole: a struct's own fact says
                 // nothing about its fields, and a range is built field by field and then copied
                 // into its iterator in one go. Losing the fields there loses the loop's bounds.
-                let fields: Vec<_> = source
-                    .map(|place| {
-                        state
-                            .within(place, interner.places())
-                            .into_iter()
-                            .map(|inner| {
-                                let symbol = state.symbol_of(inner, interner);
-                                let fact = state
-                                    .fact(symbol)
-                                    .cloned()
-                                    .unwrap_or_else(|| Fact::Value(Affine::symbol(symbol)));
-                                (interner.places().path_from(place, inner), fact)
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                state.define(destination, def, interner, fact);
-                // Shallowest first: defining a place forgets the slots inside it, so a deeper field
-                // written before its parent would be wiped by the parent's own definition.
-                let mut fields = fields;
-                fields.sort_by_key(|(path, _)| path.len());
-                for (path, fact) in fields {
-                    let mut inner = destination;
-                    for index in path {
-                        inner = interner.place_field(inner, index);
-                    }
-                    state.define(inner, def, interner, Some(fact));
-                }
+                let contents = state.place_contents(source, interner);
+                state.define_contents(destination, def, interner, contents);
             }
             // A move leaves its source holding nothing nameable; a memcpy preserves it.
             if matches!(
@@ -1829,6 +1844,18 @@ fn transfer(
         OperationKind::Clear | OperationKind::Drop { .. } => {
             if let Some(place) = tracked_place(state, &operation.operands[0], escaped, interner) {
                 state.define(place, def, interner, None);
+            }
+        }
+        OperationKind::Replace => {
+            let source = tracked_place(state, &operation.operands[0], escaped, interner);
+            let destination = tracked_place(state, &operation.operands[1], escaped, interner);
+            let new_value = state.place_contents(source, interner);
+            let old_value = state.place_contents(destination, interner);
+            if let Some(place) = destination {
+                state.define_contents(place, def, interner, new_value);
+            }
+            if let Some(place) = source {
+                state.define_contents(place, def, interner, old_value);
             }
         }
         OperationKind::ExtractTag => {
@@ -2177,6 +2204,80 @@ mod tests {
         CompilerSession, ExecutionTarget, MirOptimization,
         module::{ModuleId, Path},
     };
+
+    #[test]
+    fn replace_preserves_field_relations_on_both_sides() {
+        use crate::{
+            Location,
+            hir::value::LiteralValue,
+            mir::{builder::FunctionBuilder, terminator::Terminator},
+            std::math::int_type,
+        };
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let ty = Type::tuple([int_type(), int_type()]);
+        let mut builder = FunctionBuilder::new("replace_fields".into(), Default::default());
+        let block = builder.add_block();
+        let mut places = Vec::new();
+        let mut fields = Vec::new();
+        for base in [10isize, 20] {
+            let place = builder
+                .append_operation(block, Operation::alloca(span, ty))
+                .unwrap();
+            for index in 0..2isize {
+                let offset =
+                    builder.add_constant(int_type(), LiteralValue::new_native(index), &env);
+                let field = builder
+                    .append_operation(
+                        block,
+                        Operation::product_subfield(
+                            span,
+                            place.clone(),
+                            mir::Value::Constant(offset),
+                            int_type(),
+                            ty,
+                            [],
+                        ),
+                    )
+                    .unwrap();
+                let value =
+                    builder.add_constant(int_type(), LiteralValue::new_native(base + index), &env);
+                builder.append_operation(
+                    block,
+                    Operation::store(span, mir::Value::Constant(value), field.clone()),
+                );
+                fields.push(field);
+            }
+            places.push(place);
+        }
+        builder.append_operation(
+            block,
+            Operation::replace(span, places[0].clone(), places[1].clone(), None),
+        );
+        let loaded: Vec<_> = fields
+            .into_iter()
+            .map(|field| {
+                builder
+                    .append_operation(block, Operation::load(span, field))
+                    .unwrap()
+            })
+            .collect();
+        builder.set_terminator(block, Terminator::ret(span));
+        let func = builder.finish(env);
+        let mut analysis = analyze(&func, session.known_callees(), &|_| None);
+        let state = analysis.exit_state(block).unwrap().clone();
+        for (loaded, expected) in loaded.into_iter().zip([20, 21, 10, 11]) {
+            let mir::Value::Register(register) = loaded else {
+                unreachable!()
+            };
+            let symbol = analysis.interner.symbol(Symbol::Register(register));
+            assert_eq!(
+                state.fact(symbol),
+                Some(&Fact::Value(Affine::constant(expected)))
+            );
+        }
+    }
 
     /// Analyses one function of a compiled module and hands the result to `check`.
     ///

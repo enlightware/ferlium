@@ -774,7 +774,7 @@ pub(crate) fn check_operand_roles(
             );
             place(1);
         }
-        OperationKind::Memcpy | OperationKind::Move => {
+        OperationKind::Memcpy | OperationKind::Move | OperationKind::Replace => {
             place(0);
             place(1);
             if operands.len() == 3 {

@@ -807,6 +807,13 @@ impl<'a> Interpreter<'a> {
             OperationKind::Move => {
                 self.exec_move(slots, &operation.operands)?;
             }
+            OperationKind::Replace => {
+                let replacement = self.place_operand(slots, &operation.operands[0]);
+                let destination = self.place_operand(slots, &operation.operands[1]);
+                destination
+                    .replace_from_owned_slot(&mut self.ctx, &replacement)
+                    .map_err(|error| RuntimeError::new(error, Some(span)))?;
+            }
             OperationKind::MoveBytes { .. } => {
                 panic!("move_bytes requires the physical MIR interpreter")
             }

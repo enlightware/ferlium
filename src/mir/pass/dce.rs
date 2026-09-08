@@ -543,8 +543,14 @@ fn remove_dead_storage_impl(
     let constructed = census.dead_constructed_values();
     let clone_pairs = census.dead_same_block_clone_drop_pairs();
     let mut dead = census.dead_allocas();
-    for (block, operations) in constructed.into_iter().chain(clone_pairs) {
+    for (block, operations) in constructed {
         dead.operations.entry(block).or_default().extend(operations);
+    }
+    for pair in &clone_pairs {
+        dead.operations
+            .entry(pair.block)
+            .or_default()
+            .extend([pair.clone, pair.drop]);
     }
     let dead_places = census.unread_derived_places(func, &dead.operations);
     for (block, index) in dead_places {
@@ -556,6 +562,13 @@ fn remove_dead_storage_impl(
     }
 
     let mut edit = FunctionEdit::new(func.clone());
+    // Cancelling the displaced clone and its drop leaves the destination absent, so replacement
+    // becomes a direct move.
+    for pair in &clone_pairs {
+        if let Some(replace) = pair.replace {
+            edit.block_mut(pair.block).operations[replace.as_index()].kind = OperationKind::Move;
+        }
+    }
     for block in func.blocks() {
         let removed: &FxHashSet<OperationIndex> = match dead.operations.get(&block) {
             Some(indices) => indices,
@@ -706,6 +719,7 @@ pub(super) fn may_leave_frame_storage(
         | OperationKind::Clear
         | OperationKind::Memcpy
         | OperationKind::Move
+        | OperationKind::Replace
         | OperationKind::MoveBytes { .. }
         | OperationKind::StackSave
         | OperationKind::StackRestore
@@ -758,6 +772,7 @@ struct CloneDropPair {
     block: BlockId,
     clone: OperationIndex,
     drop: OperationIndex,
+    replace: Option<OperationIndex>,
 }
 
 impl AllocationUses {
@@ -814,6 +829,21 @@ impl DceCensus {
             for (index, operation) in basic_block.operations().iter().enumerate() {
                 let index = OperationIndex::from_index(index);
                 if has_clone {
+                    if matches!(operation.kind, OperationKind::Replace)
+                        && let mir::Value::Register(target) = &operation.operands[1]
+                        && let Some(&(clone, ty)) = pending_clones.get(target)
+                        && let Some(drop) = basic_block.operations().get(index.as_index() + 1)
+                        && matches!(drop.kind, OperationKind::Drop { ty: dropped } if dropped == ty)
+                        && drop.operands.first() == operation.operands.first()
+                    {
+                        census.same_block_clone_drop_pairs.push(CloneDropPair {
+                            allocation: *target,
+                            block,
+                            clone,
+                            drop: OperationIndex::from_index(index.as_index() + 1),
+                            replace: Some(index),
+                        });
+                    }
                     census.note_same_block_clone_drop_pair(
                         block,
                         index,
@@ -901,6 +931,7 @@ impl DceCensus {
                         block,
                         clone,
                         drop: index,
+                        replace: None,
                     });
                 }
             }
@@ -1018,16 +1049,12 @@ impl DceCensus {
         removed
     }
 
-    fn dead_same_block_clone_drop_pairs(&self) -> FxHashMap<BlockId, FxHashSet<OperationIndex>> {
-        let mut removed = FxHashMap::<BlockId, FxHashSet<OperationIndex>>::default();
-        for pair in &self.same_block_clone_drop_pairs {
-            if self.allocations[&pair.allocation].invalid_clone_pair_use {
-                continue;
-            }
-            removed.entry(pair.block).or_default().insert(pair.clone);
-            removed.entry(pair.block).or_default().insert(pair.drop);
-        }
-        removed
+    fn dead_same_block_clone_drop_pairs(&self) -> Vec<CloneDropPair> {
+        self.same_block_clone_drop_pairs
+            .iter()
+            .filter(|pair| !self.allocations[&pair.allocation].invalid_clone_pair_use)
+            .cloned()
+            .collect()
     }
 
     fn dead_allocas(&self) -> Dead {
@@ -1125,11 +1152,12 @@ impl DceCensus {
     }
 }
 
-/// Whether this operand role can neither observe an initialized lifetime nor retain an alias to it.
+/// Whether this operand role permits exact clone-lifetime cancellation without retaining an alias.
 ///
 /// The same-block rule removes only a clone and the drop ending that particular lifetime. Other
 /// whole-place writes and drops may belong to later lifetimes in the same allocation and therefore
-/// remain. Any read, projection, call argument, or unmodelled role rejects every pair for the root.
+/// remain. A replacement needs the separately checked drop of its detached old value. Any other read,
+/// projection, call argument, or unmodelled role rejects every pair for the root.
 fn is_exact_clone_lifetime_role(operation: &mir::Operation, position: usize) -> bool {
     match &operation.kind {
         OperationKind::Clone { .. } => position == 1,
@@ -1137,6 +1165,7 @@ fn is_exact_clone_lifetime_role(operation: &mir::Operation, position: usize) -> 
         OperationKind::Store
         | OperationKind::Memcpy
         | OperationKind::Move
+        | OperationKind::Replace
         | OperationKind::MoveBytes { .. } => position == 1,
         OperationKind::BuildArray { .. } => position + 1 == operation.operands.len(),
         OperationKind::Call { ty, .. } => {

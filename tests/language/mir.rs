@@ -2467,11 +2467,8 @@ fn reassign_array_element_from_param() {
 
 #[test]
 fn reassign_generic() {
-    // Evaluate the new value (cloning `b` through `Value::clone` into a fresh temporary), then drop
-    // the destination's old value through `Value::drop`, then move the temporary into the
-    // destination. Mirrors the interpreter's `eval_assign` order (value, drop, store): the new value
-    // is materialized before the old one is dropped, so a right-hand side that reads the destination
-    // (e.g. `a = a / 2`) never observes dropped storage.
+    // Prepare and install the replacement, then drop the detached old value.
+    // This applies to generic mutable parameters too: the destination may be a native Rust member.
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn set<A>(a: &mut A, b: A) { a = b }"),
@@ -2481,9 +2478,9 @@ fn reassign_generic() {
     %r0: place A = alloca A using %p0
     %r1: place ((A) -> A) = dict_entry 3 from %p0
     clone A %p2 to %r0 via %r1
+    replace %r0 to %p1 using %p0
     %r2: place ((&mut A) -> ()) = dict_entry 4 from %p0
-    drop A %p1 via %r2
-    move %r0 to %p1 using %p0
+    drop A %r0 via %r2
     store @c0 to %p3
     ret
 "#

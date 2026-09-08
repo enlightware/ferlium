@@ -395,7 +395,7 @@ fn dictionary_reads(func: &Function) -> usize {
         .filter(|operation| match operation.kind {
             OperationKind::DictEntry { .. } => true,
             OperationKind::Alloca { .. } => operation.operands.len() == 1,
-            OperationKind::Move => operation.operands.len() == 3,
+            OperationKind::Move | OperationKind::Replace => operation.operands.len() == 3,
             _ => false,
         })
         .count()

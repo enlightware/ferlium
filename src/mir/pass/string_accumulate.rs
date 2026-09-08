@@ -327,7 +327,7 @@ struct Forward {
     rendered_drop: OperationIndex,
     builder_move: OperationIndex,
     builder_drop: OperationIndex,
-    accumulator_drop: OperationIndex,
+    displaced_drop: OperationIndex,
     commit: OperationIndex,
     accumulator: ValueId,
     builder: ValueId,
@@ -387,7 +387,7 @@ pub(crate) fn forward_string_accumulation(
             forward.rendered_drop,
             forward.builder_move,
             forward.builder_drop,
-            forward.accumulator_drop,
+            forward.displaced_drop,
         ]);
     }
 
@@ -578,24 +578,28 @@ fn plan_forward(
         return None;
     }
 
-    let accumulator_drop = OperationSite {
+    let commit = OperationSite {
         block: initialize_builder.block,
         index: OperationIndex::from_index(builder_drop.index.as_index() + 1),
     };
-    let commit = OperationSite {
+    let displaced_drop = OperationSite {
         block: initialize_builder.block,
         index: OperationIndex::from_index(builder_drop.index.as_index() + 2),
     };
     if !is_string_drop(
-        operations.get(accumulator_drop.index.as_index())?,
+        operations.get(displaced_drop.index.as_index())?,
         functions.drop,
-        *accumulator,
-    ) || !is_move(
+        *temporary,
+    ) || !is_replace(
         operations.get(commit.index.as_index())?,
         *temporary,
         *accumulator,
     ) || census.uses.get(temporary)?.as_slice()
-        != [operation_use(builder_move, 1), operation_use(commit, 0)]
+        != [
+            operation_use(builder_move, 1),
+            operation_use(commit, 0),
+            operation_use(displaced_drop, 0),
+        ]
     {
         return None;
     }
@@ -606,9 +610,7 @@ fn plan_forward(
     let self_use = operation_use(self_to_string, 1);
     let position = census.position(*accumulator, self_use)?;
     let accumulator_uses = census.uses.get(accumulator)?;
-    if accumulator_uses.get(position + 1) != Some(&operation_use(accumulator_drop, 0))
-        || accumulator_uses.get(position + 2) != Some(&operation_use(commit, 1))
-    {
+    if accumulator_uses.get(position + 1) != Some(&operation_use(commit, 1)) {
         return None;
     }
 
@@ -620,7 +622,7 @@ fn plan_forward(
         rendered_drop: rendered_drop.index,
         builder_move: builder_move.index,
         builder_drop: builder_drop.index,
-        accumulator_drop: accumulator_drop.index,
+        displaced_drop: displaced_drop.index,
         commit: commit.index,
         accumulator: *accumulator,
         builder: *builder,
@@ -710,8 +712,8 @@ fn is_string_drop(operation: &Operation, callee: FunctionId, target: ValueId) ->
         )
 }
 
-fn is_move(operation: &Operation, source: ValueId, destination: ValueId) -> bool {
-    matches!(operation.kind, OperationKind::Move)
+fn is_replace(operation: &Operation, source: ValueId, destination: ValueId) -> bool {
+    matches!(operation.kind, OperationKind::Replace)
         && matches!(
             operation.operands.as_ref(),
             [mir::Value::Register(from), mir::Value::Register(to)]

@@ -232,7 +232,7 @@ On ordinary execution paths, the target glue preserves Rust initialization and R
   duration of the runtime call, but the reference may not escape that access;
 - cloning invokes the registered Rust clone operation and initializes distinct destination storage;
 - moving relocates the value into uninitialized destination storage and leaves the source absent;
-- replacement destroys an initialized destination before writing its replacement; and
+- replacement installs the prepared new value before destroying the detached old value; and
 - opaque native `Value::drop` invokes the registered Rust destructor exactly once and leaves the
   target uninitialized; subsequent reclamation releases only its storage.
 
