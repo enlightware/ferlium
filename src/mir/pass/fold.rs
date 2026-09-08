@@ -899,7 +899,8 @@ fn plan_folds_with(
             | TerminatorKind::Yield { .. }
             | TerminatorKind::Return
             | TerminatorKind::PropagateError
-            | TerminatorKind::FailureDuringCleanup => {}
+            | TerminatorKind::FailureDuringCleanup
+            | TerminatorKind::InvariantFailure { .. } => {}
         }
     }
     plan

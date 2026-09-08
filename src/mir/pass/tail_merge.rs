@@ -136,6 +136,10 @@ fn block_fingerprint(
         TerminatorKind::Return => 4u8.hash(&mut state),
         TerminatorKind::PropagateError => 5u8.hash(&mut state),
         TerminatorKind::FailureDuringCleanup => 6u8.hash(&mut state),
+        TerminatorKind::InvariantFailure { message } => {
+            7u8.hash(&mut state);
+            message.hash(&mut state);
+        }
     }
     Some(state.finish())
 }
@@ -267,6 +271,10 @@ fn blocks_alpha_equivalent(
         (TerminatorKind::Return, TerminatorKind::Return)
         | (TerminatorKind::PropagateError, TerminatorKind::PropagateError)
         | (TerminatorKind::FailureDuringCleanup, TerminatorKind::FailureDuringCleanup) => true,
+        (
+            TerminatorKind::InvariantFailure { message: left },
+            TerminatorKind::InvariantFailure { message: right },
+        ) => left == right,
         _ => false,
     }
 }
@@ -301,6 +309,7 @@ fn is_operand_free_terminal(kind: &TerminatorKind) -> bool {
         TerminatorKind::Return
             | TerminatorKind::PropagateError
             | TerminatorKind::FailureDuringCleanup
+            | TerminatorKind::InvariantFailure { .. }
     )
 }
 
@@ -384,7 +393,8 @@ fn fold_empty_forwarding_blocks(edit: &mut FunctionEdit) -> bool {
             TerminatorKind::Yield { resume, .. } => *resume = next(),
             TerminatorKind::Return
             | TerminatorKind::PropagateError
-            | TerminatorKind::FailureDuringCleanup => {}
+            | TerminatorKind::FailureDuringCleanup
+            | TerminatorKind::InvariantFailure { .. } => {}
         }
         if let TerminatorKind::CondBr {
             then_target,
@@ -541,7 +551,8 @@ pub(crate) fn simplify_tails(function: &Function) -> Option<SimplifiedTails> {
             }
             TerminatorKind::Return
             | TerminatorKind::PropagateError
-            | TerminatorKind::FailureDuringCleanup => {}
+            | TerminatorKind::FailureDuringCleanup
+            | TerminatorKind::InvariantFailure { .. } => {}
         }
         if let TerminatorKind::CondBr {
             then_target,
@@ -611,6 +622,42 @@ mod tests {
             !body.contains("compare_int_code"),
             "proven-call DCE must collect the dead predicate:\n{body}"
         );
+    }
+
+    #[test]
+    fn invariant_failure_tails_merge_only_with_the_same_diagnostic() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        for same in [true, false] {
+            let mut builder = FunctionBuilder::new("fatal_tails".into(), Default::default());
+            let condition = builder.add_constant(bool_type(), LiteralValue::new_native(true), &env);
+            let entry = builder.add_block();
+            let yes = builder.add_block();
+            let no = builder.add_block();
+            builder.set_terminator(
+                entry,
+                Terminator::cond_br(span, crate::mir::Value::Constant(condition), yes, no),
+            );
+            builder.set_terminator(yes, Terminator::invariant_failure(span, "first".into()));
+            builder.set_terminator(
+                no,
+                Terminator::invariant_failure(span, if same { "first" } else { "second" }.into()),
+            );
+            let body = builder.finish(env);
+            let body = simplify_tails(&body).map_or(body, |result| result.body);
+            crate::mir::verify::verify_function(&body, env);
+            assert_eq!(body.blocks().count(), if same { 1 } else { 3 });
+            let messages: Vec<_> = body
+                .blocks()
+                .filter_map(|block| match body.block(block).terminator().kind {
+                    TerminatorKind::InvariantFailure { message } => Some(message),
+                    _ => None,
+                })
+                .collect();
+            assert!(messages.contains(&ustr::ustr("first")));
+            assert_eq!(messages.contains(&ustr::ustr("second")), !same);
+        }
     }
 
     #[test]

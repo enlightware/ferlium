@@ -114,6 +114,13 @@ impl Terminator {
         }
     }
 
+    pub fn invariant_failure(span: Location, message: Ustr) -> Self {
+        Self {
+            span,
+            kind: TerminatorKind::InvariantFailure { message },
+        }
+    }
+
     /// Whether two terminators are the same, with the operands of an invoked operation compared by
     /// `operand_eq` rather than directly. See [`Operation::eq_by_operands`].
     ///
@@ -161,7 +168,8 @@ impl Terminator {
             TerminatorKind::Goto { .. }
             | TerminatorKind::Return
             | TerminatorKind::PropagateError
-            | TerminatorKind::FailureDuringCleanup => &[],
+            | TerminatorKind::FailureDuringCleanup
+            | TerminatorKind::InvariantFailure { .. } => &[],
         }
     }
 
@@ -209,6 +217,11 @@ pub enum TerminatorKind {
     PropagateError,
     /// Poison execution after a cleanup action raised while another source failure was in flight.
     FailureDuringCleanup,
+    /// Fatal compiler/runtime invariant violation. Executors must trap or terminate, never
+    /// assume this path is unreachable. No source failure, cleanup, poisoning or resumption.
+    InvariantFailure {
+        message: Ustr,
+    },
 }
 
 impl TerminatorKind {
@@ -224,7 +237,10 @@ impl TerminatorKind {
             Self::SwitchVariant { cases, default, .. } => (cases, [Some(*default), None]),
             Self::Invoke { normal, error, .. } => (&[], [Some(*normal), Some(*error)]),
             Self::Yield { resume, .. } => (&[], [Some(*resume), None]),
-            Self::Return | Self::PropagateError | Self::FailureDuringCleanup => (&[], [None, None]),
+            Self::Return
+            | Self::PropagateError
+            | Self::FailureDuringCleanup
+            | Self::InvariantFailure { .. } => (&[], [None, None]),
         };
         cases
             .iter()
@@ -279,6 +295,9 @@ impl FormatWith<ModuleEnv<'_>> for Terminator {
             TerminatorKind::Return => write!(f, "ret"),
             TerminatorKind::PropagateError => write!(f, "propagate_error"),
             TerminatorKind::FailureDuringCleanup => write!(f, "failure_during_cleanup"),
+            TerminatorKind::InvariantFailure { message } => {
+                write!(f, "invariant_failure {message:?}")
+            }
         }
     }
 }

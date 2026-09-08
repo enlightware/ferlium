@@ -70,6 +70,9 @@ fn fingerprint(
 }
 
 fn main() {
+    // File watches below cover edits; directory watches also catch added source/schema files.
+    println!("cargo::rerun-if-changed=src");
+    println!("cargo::rerun-if-changed=ferlium_macros/src");
     let std_source_fingerprint = fingerprint(files_below(Path::new("src/std"), "fer"), []);
     println!("cargo::rustc-env=FERLIUM_STD_SOURCE_FINGERPRINT={std_source_fingerprint}");
 
@@ -91,7 +94,12 @@ fn main() {
                 || name.starts_with("CARGO_FEATURE_")
                 || matches!(
                     name.as_str(),
-                    "TARGET" | "HOST" | "PROFILE" | "OPT_LEVEL" | "DEBUG"
+                    "TARGET"
+                        | "HOST"
+                        | "PROFILE"
+                        | "OPT_LEVEL"
+                        | "DEBUG"
+                        | "CARGO_ENCODED_RUSTFLAGS"
                 )
         })
         .collect::<Vec<_>>();

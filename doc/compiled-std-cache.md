@@ -16,9 +16,11 @@ The portable DTO and Postcard encoding layer is the separate `std-snapshot` feat
 enables it and adds the native filesystem backend. This separation leaves room for browser storage
 without coupling snapshot serialization to filesystem availability.
 
-The cache is compiler-owned internal data, not a stable public format. Its header contains a
-numeric schema version, a build-generated hash of every embedded `.fer` std source, a conservative
-hash of the Rust compiler/runtime sources and active target/build configuration, and the exact
+The cache is compiler-owned internal data, not a stable public format. Compatibility relies on
+fingerprints, not manually maintained schema versions. Its header contains a build-generated hash
+of every embedded `.fer` std source, a conservative hash of the Rust compiler/runtime sources
+(including snapshot schemas), macro sources, dependency manifests/lockfile, compiler identity and
+active target/build configuration (including Rust flags), and the exact
 sorted sets of canonical native type and callable names. A mismatch, decoding error, missing native
 type/callable, or detected invalid type/HIR reference is treated as a cache miss and falls back to
 compilation. The format is trusted compiler-owned cache data rather than a hardened untrusted-input

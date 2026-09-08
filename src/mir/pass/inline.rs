@@ -828,6 +828,9 @@ impl Copier<'_> {
             }
             // Poisoning hands the frame to runtime reclamation, so there is nothing to restore.
             TerminatorKind::FailureDuringCleanup => Terminator::failure_during_cleanup(span),
+            TerminatorKind::InvariantFailure { message } => {
+                Terminator::invariant_failure(span, *message)
+            }
             TerminatorKind::Yield { .. } => {
                 unreachable!("a callee containing a yield is not inlined")
             }
@@ -858,6 +861,67 @@ mod tests {
             .split(&format!("fn {name}"))
             .nth(1)
             .unwrap_or_else(|| panic!("module has no `{name}`:\n{module}"))
+    }
+
+    #[test]
+    fn inlining_invariant_failure_discards_the_normal_continuation() {
+        use super::*;
+        use crate::{
+            mir::{ParameterKind, builder::FunctionBuilder},
+            types::{
+                effects::no_effects,
+                r#type::{CallImplType, FnType},
+            },
+        };
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let mut callee = FunctionBuilder::new("fatal".into(), Default::default());
+        callee.add_parameter(Type::unit(), ParameterKind::Return);
+        let block = callee.add_block();
+        callee.set_terminator(
+            block,
+            Terminator::invariant_failure(span, "broken invariant".into()),
+        );
+        let callee = callee.finish(env);
+
+        let mut caller = FunctionBuilder::new("caller".into(), Default::default());
+        let result = caller.add_parameter(Type::unit(), ParameterKind::Return);
+        let block = caller.add_block();
+        caller.append_operation(
+            block,
+            Operation::call(
+                span,
+                mir::Value::Function(FunctionId::new(
+                    crate::std::STD_MODULE_ID,
+                    crate::module::LocalFunctionId::from_index(0),
+                )),
+                [mir::Value::Parameter(result)],
+                CallImplType::value(FnType::new_by_val([], Type::unit(), no_effects())),
+            ),
+        );
+        caller.set_terminator(block, Terminator::ret(span));
+        let mut edit = FunctionEdit::new(caller.finish_unverified());
+        inline_at(
+            &mut edit,
+            &callee,
+            Site::Operation {
+                block,
+                index: OperationIndex::from_index(0),
+            },
+            env,
+        );
+        edit.remove_unreachable_blocks();
+        let body = edit.finish(env);
+        assert!(body.blocks().any(|block| matches!(body.block(block).terminator().kind,
+            TerminatorKind::InvariantFailure { message } if message.as_str() == "broken invariant"
+        )));
+        assert!(
+            body.blocks().all(|block| !matches!(
+                body.block(block).terminator().kind,
+                TerminatorKind::Return
+            ))
+        );
     }
 
     /// What inlining is for: the callee's body arrives with the caller's operands substituted in,

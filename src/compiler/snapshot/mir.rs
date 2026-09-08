@@ -24,10 +24,6 @@ use super::{
 use crate::compiler::artifacts::{MirArtifacts, Specialization};
 use crate::mir::{operation::VariantMetadata, pass::OptimizationStats};
 
-// The semantic build fingerprint also changes when this source changes. The explicit version is a
-// schema guard for decoded data, not the cache filename's primary invalidation mechanism.
-pub(crate) const STD_MIR_SNAPSHOT_FORMAT_VERSION: u32 = 1;
-
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MirSnapshotStage {
@@ -38,7 +34,6 @@ pub(crate) enum MirSnapshotStage {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone)]
 pub(crate) struct CompiledStdMirSnapshot {
-    format_version: u32,
     stage: MirSnapshotStage,
     std_source_fingerprint: String,
     semantic_build_fingerprint: String,
@@ -63,7 +58,6 @@ impl CompiledStdMirSnapshot {
         artifacts: &MirArtifacts,
     ) -> Result<Self, SnapshotError> {
         Ok(Self {
-            format_version: STD_MIR_SNAPSHOT_FORMAT_VERSION,
             stage,
             std_source_fingerprint: env!("FERLIUM_STD_SOURCE_FINGERPRINT").to_owned(),
             semantic_build_fingerprint: env!("FERLIUM_SEMANTIC_BUILD_FINGERPRINT").to_owned(),
@@ -85,8 +79,7 @@ impl CompiledStdMirSnapshot {
         stage: MirSnapshotStage,
         parent_checksum: &[u8; 32],
     ) -> bool {
-        self.format_version == STD_MIR_SNAPSHOT_FORMAT_VERSION
-            && self.stage == stage
+        self.stage == stage
             && self.std_source_fingerprint == env!("FERLIUM_STD_SOURCE_FINGERPRINT")
             && self.semantic_build_fingerprint == env!("FERLIUM_SEMANTIC_BUILD_FINGERPRINT")
             && &self.parent_checksum == parent_checksum
@@ -382,6 +375,9 @@ enum SnapshotTerminatorKind {
     Return,
     PropagateError,
     FailureDuringCleanup,
+    InvariantFailure {
+        message: String,
+    },
 }
 
 impl SnapshotMirArtifacts {
@@ -1189,6 +1185,9 @@ impl SnapshotTerminator {
                 Source::Return => Stored::Return,
                 Source::PropagateError => Stored::PropagateError,
                 Source::FailureDuringCleanup => Stored::FailureDuringCleanup,
+                Source::InvariantFailure { message } => Stored::InvariantFailure {
+                    message: message.to_string(),
+                },
             },
         })
     }
@@ -1238,6 +1237,9 @@ impl SnapshotTerminator {
                 Stored::Return => Runtime::Return,
                 Stored::PropagateError => Runtime::PropagateError,
                 Stored::FailureDuringCleanup => Runtime::FailureDuringCleanup,
+                Stored::InvariantFailure { message } => Runtime::InvariantFailure {
+                    message: message.as_str().into(),
+                },
             },
         })
     }
@@ -1271,6 +1273,22 @@ mod tests {
     };
 
     #[test]
+    fn invariant_failure_round_trips_its_diagnostic() {
+        let terminator = Terminator::invariant_failure(
+            crate::Location::new_synthesized(),
+            ustr::ustr("broken invariant"),
+        );
+        let mut graph = SnapshotTypeGraphBuilder::new(&|_| None);
+        let stored = SnapshotTerminator::capture(&terminator, &mut graph).unwrap();
+        let bytes = postcard::to_allocvec(&stored).unwrap();
+        let decoded: SnapshotTerminator = postcard::from_bytes(&bytes).unwrap();
+        let restored = decoded.materialize(&[]).unwrap();
+        assert!(restored == terminator);
+        assert!(restored.operands().is_empty());
+        assert_eq!(restored.successors().count(), 0);
+    }
+
+    #[test]
     fn std_raw_and_optimized_mir_round_trip() {
         let session = CompilerSession::new();
         ensure_mir_artifacts(session.raw_modules(), STD_MODULE_ID);
@@ -1290,6 +1308,19 @@ mod tests {
             decoded.validate_lineage(MirSnapshotStage::Raw, &[8; 32]),
             Err(SnapshotError::StaleSnapshot)
         );
+        for source_fingerprint in [true, false] {
+            let mut stale = decoded.clone();
+            let fingerprint = if source_fingerprint {
+                &mut stale.std_source_fingerprint
+            } else {
+                &mut stale.semantic_build_fingerprint
+            };
+            fingerprint.push_str("-stale");
+            assert_eq!(
+                stale.validate_lineage(MirSnapshotStage::Raw, &[7; 32]),
+                Err(SnapshotError::StaleSnapshot)
+            );
+        }
         let restored_raw = decoded
             .restore_raw_verified(module, session.raw_modules())
             .unwrap();

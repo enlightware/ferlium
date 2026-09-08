@@ -775,8 +775,12 @@ fn build_panic(
         locals,
         solver,
         function,
-        [(build_string, string_type())],
-        Type::never(),
+        [build_string],
+        FnType::new_by_val(
+            [string_type()],
+            Type::never(),
+            EffType::single_primitive(PrimitiveEffect::Fallible),
+        ),
         span,
     )
 }
@@ -856,8 +860,12 @@ fn build_data_value_to_x(
         locals,
         solver,
         function,
-        [(data_value_node, data_value_type())],
-        ret_ty,
+        [data_value_node],
+        FnType::new_by_val(
+            [data_value_type()],
+            ret_ty,
+            EffType::single_primitive(PrimitiveEffect::Fallible),
+        ),
         span,
     )
 }
@@ -887,8 +895,12 @@ fn build_expect_data_value_record_entry(
         locals,
         solver,
         function,
-        [(fields, payload_ty), (name_node, string_type())],
-        data_value_type(),
+        [fields, name_node],
+        FnType::new_by_val(
+            [payload_ty, string_type()],
+            data_value_type(),
+            EffType::single_primitive(PrimitiveEffect::Fallible),
+        ),
         span,
     )
 }

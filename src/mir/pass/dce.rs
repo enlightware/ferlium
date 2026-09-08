@@ -996,7 +996,8 @@ impl DceCensus {
             TerminatorKind::Goto { .. }
             | TerminatorKind::Return
             | TerminatorKind::PropagateError
-            | TerminatorKind::FailureDuringCleanup => {}
+            | TerminatorKind::FailureDuringCleanup
+            | TerminatorKind::InvariantFailure { .. } => {}
         }
     }
 

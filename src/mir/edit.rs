@@ -577,7 +577,8 @@ fn visit_terminator_operands(terminator: &Terminator, visit: &mut impl FnMut(&mi
         TerminatorKind::Goto { .. }
         | TerminatorKind::Return
         | TerminatorKind::PropagateError
-        | TerminatorKind::FailureDuringCleanup => {}
+        | TerminatorKind::FailureDuringCleanup
+        | TerminatorKind::InvariantFailure { .. } => {}
     }
 }
 
@@ -593,7 +594,8 @@ fn visit_terminator_operands_mut(
         TerminatorKind::Goto { .. }
         | TerminatorKind::Return
         | TerminatorKind::PropagateError
-        | TerminatorKind::FailureDuringCleanup => {}
+        | TerminatorKind::FailureDuringCleanup
+        | TerminatorKind::InvariantFailure { .. } => {}
     }
 }
 
@@ -614,7 +616,8 @@ fn successors_mut(terminator: &mut Terminator) -> Vec<&mut BlockId> {
         TerminatorKind::Yield { resume, .. } => vec![resume],
         TerminatorKind::Return
         | TerminatorKind::PropagateError
-        | TerminatorKind::FailureDuringCleanup => Vec::new(),
+        | TerminatorKind::FailureDuringCleanup
+        | TerminatorKind::InvariantFailure { .. } => Vec::new(),
     }
 }
 

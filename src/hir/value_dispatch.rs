@@ -66,8 +66,8 @@ pub(crate) fn materialize_static_string(
         locals,
         trait_solver,
         function,
-        [(representation, static_str_type())],
-        string_type(),
+        [representation],
+        FnType::new_by_val([static_str_type()], string_type(), no_effects()),
         span,
     )
 }
@@ -197,17 +197,21 @@ pub(crate) fn resolve_local_drop(
 
 /// Build a generated static call, materializing non-place indirect `Let`
 /// arguments as explicit owned locals scoped to a cleanup block.
+/// The caller supplies the full signature: mutation and source failure must not be erased when
+/// constructing compiler-generated calls, even if their runtime callee is already known.
 pub(crate) fn static_apply_generated_with_locals(
     arena: &mut NodeArena,
     locals: &mut Vec<LocalDecl>,
     trait_solver: &mut TraitSolver<'_>,
     function: FunctionId,
-    arguments: impl IntoIterator<Item = (NodeId, Type)>,
-    ret_ty: Type,
+    arguments: impl IntoIterator<Item = NodeId>,
+    fn_ty: FnType,
     span: Location,
 ) -> Result<NodeId, InternalCompilationError> {
-    let (mut arguments, args_tys): (Vec<_>, Vec<_>) = arguments.into_iter().unzip();
-    let fn_ty = FnType::new_by_val(args_tys, ret_ty, EffType::empty());
+    let mut arguments = arguments.into_iter().collect::<Vec<_>>();
+    let ret_ty = fn_ty.ret;
+    let effects = fn_ty.effects.clone();
+    assert_eq!(arguments.len(), fn_ty.args.len());
     let prepared = prepare_generated_call_arguments_with_locals(
         arena,
         locals,
@@ -225,7 +229,7 @@ pub(crate) fn static_apply_generated_with_locals(
             span,
         ),
         ret_ty,
-        EffType::empty(),
+        effects,
         span,
     ));
 

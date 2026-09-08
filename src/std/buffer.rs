@@ -40,6 +40,9 @@ const MUTABLE_REF: ArgConvention = ArgConvention::MutableRef;
 
 use super::value::native_layout_associated_consts;
 
+pub(crate) const INVALID_BUFFER_CLONE: &str =
+    "Buffer::clone should never be called; arrays must clone their initialized elements";
+
 /// Fixed-size typed storage block used by the Ferlium `Array<T>` implementation.
 #[derive(Debug)]
 pub struct Buffer {
@@ -204,7 +207,7 @@ impl Callable for BufferPrimitive {
             Self::Equal => cont(Value::native(false)),
             Self::ToString => cont(Value::native(super::string::String::new("<buffer>"))),
             Self::Hash | Self::Drop => cont(Value::unit()),
-            Self::Clone => panic!("Buffer values are std-internal and cannot be cloned directly"),
+            Self::Clone => panic!("{INVALID_BUFFER_CLONE}"),
         }
     }
     fn runtime_argument_passing(&self) -> Option<&[ArgConvention]> {

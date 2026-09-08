@@ -589,7 +589,8 @@ Every native signature retained at the compiled boundary must be closed and mono
 all nested types in visible parameters, hidden parameters, and results. Generic native calls must
 be specialized to closed entries or eliminated by physical lowering; a polymorphic native ABI is
 not yet defined. Callbacks without a typed entry remain interpreter-only unless eliminated by
-lowering.
+lowering. Physical lowering treats every native declared in the module as an entry root, even if
+unused internally; one unsupported callback therefore prevents physical lowering of that module.
 
 ## Value transport and safety
 

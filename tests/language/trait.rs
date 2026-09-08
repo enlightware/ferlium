@@ -289,31 +289,41 @@ fn generic_trait_method_function_argument_keeps_source_place_passing() {
         run(Probe(42))
     "#});
 
-    let mut saw_method_store = false;
+    let method_locals = module
+        .hir_arena
+        .iter()
+        .filter_map(|(_, node)| {
+            if let NodeKind::StoreLocal(store) = &node.kind
+                && store_value_materializes_dictionary_method(&module.hir_arena, store.value)
+            {
+                Some(store.id)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    let apply = module.get_local_function_id(ustr("apply")).unwrap();
     let mut saw_let_local_arg = false;
     for (_, node) in module.hir_arena.iter() {
-        if let NodeKind::StoreLocal(store) = &node.kind
-            && store_value_materializes_dictionary_method(&module.hir_arena, store.value)
-        {
-            saw_method_store = true;
-        }
         let NodeKind::StaticApply(app) = &node.kind else {
             continue;
         };
-        if matches!(
-            app.arguments.first(),
-            Some(argument)
-                if matches!(
-                    argument.passing,
-                    ArgConvention::Let
-                ) && matches!(module.hir_arena[argument.value].kind, NodeKind::LoadLocal(_))
-        ) {
-            saw_let_local_arg = true;
+        if app.function.module != module.module_id() || app.function.function != apply {
+            continue;
         }
+        let argument = app.arguments.first().unwrap();
+        // Materialization is scoped in an argument block. Check its final place read and the
+        // exact local holding the method, not an unrelated generated string/hash call.
+        let value = match &module.hir_arena[argument.value].kind {
+            NodeKind::Block(block) => *block.body.last().unwrap(),
+            _ => argument.value,
+        };
+        saw_let_local_arg |= argument.passing == ArgConvention::Let
+            && matches!(&module.hir_arena[value].kind, NodeKind::LoadLocal(load) if method_locals.contains(&load.id));
     }
 
     assert!(
-        saw_method_store,
+        !method_locals.is_empty(),
         "generic trait method values passed as arguments should be materialized explicitly",
     );
     assert!(

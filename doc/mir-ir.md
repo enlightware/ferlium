@@ -29,8 +29,12 @@ Operations never carry intra-function successors. The terminators are:
 - `invoke <operation> -> bN error bM`, for a source-fallible operation;
 - `yield place -> resume`, which suspends a scoped accessor;
 - `return`;
-- `propagate_error`, which returns the pending source failure; and
-- `failure_during_cleanup`, which poisons execution after a second source failure.
+- `propagate_error`, which returns the pending source failure;
+- `failure_during_cleanup`, which poisons execution after a second source failure; and
+- `invariant_failure "message"`, which fatally terminates execution on a compiler/runtime bug.
+
+`invariant_failure` requires a fatal trap, not an unchecked unreachability assumption. It has no
+continuation and does not use source-failure cleanup or poisoning.
 
 The first block is the entry block. Every target is a `BlockId` in the same function. Missing
 terminators and forward-declared block bodies exist only in the private `FunctionBuilder`; they
@@ -298,8 +302,17 @@ and target-lowered value representations must be resolved.
 Physical artifacts retain native ABI contracts under the existing `FunctionId`, including native
 dependencies reached through evidence catalogs and first-class values. This lets executors lower
 calls without reconstructing transport from semantic types or introducing another function identity.
-Contracts describe transport and storage requirements; entry addresses belong to the matching
-runtime, so artifacts remain relocatable. The protocols are specified in
+Contracts describe transport and storage requirements. Native representations are opaque leaves:
+their Rust identity and layout must agree with their typed entries and registered `Value` layout
+and clone/drop operations. Unsupported native type constructors with Ferlium arguments are rejected;
+`Buffer<T>` uses its explicit physical representation instead. These checks run after expansion,
+and include declared native roots and local or imported evidence entries, not only direct calls.
+
+MIR references remain symbolic. The current in-memory artifacts also retain process-local native
+bindings for runtime validation, including code identity and result-domain guarantees. Construction
+checks the current environment; revalidation when binding an executor is not yet integrated. These
+are not portable ABI fingerprints: equal size and alignment do not establish compatibility with an
+independently built Rust runtime. The protocols are specified in
 [abi.md](abi.md#native-function-boundary).
 
 ### Physical failure transport
@@ -406,4 +419,10 @@ the matching Rust `extern "C"` entry. Backend-readiness verification requires ev
 to have been lowered or have a compatible entry for the selected target. A retained native entry
 must also have the closed, monomorphic Ferlium signature required by [abi.md](abi.md); physical
 lowering rejects an unresolved type variable at any depth in its parameters or result. Generic
-Buffer calls satisfy this rule by disappearing before verification.
+Buffer storage calls are expanded locally; retained Buffer dictionary, subscript and first-class
+entries receive physical MIR bodies under their existing identities. Generated structural field
+addressors likewise receive bodies using the shared product-layout rules. Program assembly requires
+an actual body or verified native entry, not merely an occupied function-table slot.
+
+Buffer's internal `Value::clone` lowers to `invariant_failure`: only the surrounding array has
+the information needed for element-wise cloning.

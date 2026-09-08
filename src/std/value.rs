@@ -1814,8 +1814,15 @@ pub(crate) fn function_value_method_function(
                 &mut locals,
                 solver,
                 hasher_write_static_str,
-                [(state, hasher_ty), (marker, static_str_type())],
-                unit_ty,
+                [state, marker],
+                FnType::new(
+                    vec![
+                        FnArgType::new(hasher_ty, MutType::mutable()),
+                        FnArgType::new_by_val(static_str_type()),
+                    ],
+                    unit_ty,
+                    EffType::empty(),
+                ),
                 span,
             )?;
             let unit = alloc_synth_node(&mut arena, native(()), unit_ty);
@@ -1937,8 +1944,15 @@ fn derive_structural_text_body(
                     locals,
                     solver,
                     string_push_static_str,
-                    [(target, string_type()), (piece, static_str_type())],
-                    Type::unit(),
+                    [target, piece],
+                    FnType::new(
+                        vec![
+                            FnArgType::new(string_type(), MutType::mutable()),
+                            FnArgType::new_by_val(static_str_type()),
+                        ],
+                        Type::unit(),
+                        EffType::empty(),
+                    ),
                     span,
                 )?,
                 TextPiece::String(piece) => static_apply_generated_with_locals(
@@ -1946,8 +1960,15 @@ fn derive_structural_text_body(
                     locals,
                     solver,
                     string_push_str,
-                    [(target, string_type()), (piece, string_type())],
-                    Type::unit(),
+                    [target, piece],
+                    FnType::new(
+                        vec![
+                            FnArgType::new(string_type(), MutType::mutable()),
+                            FnArgType::new_by_val(string_type()),
+                        ],
+                        Type::unit(),
+                        EffType::empty(),
+                    ),
                     span,
                 )?,
             };
@@ -2511,8 +2532,15 @@ fn derive_value_hash_body(
             locals,
             solver,
             hasher_write_static_str,
-            [(state, hasher_ty), (value, static_str_type())],
-            unit_ty,
+            [state, value],
+            FnType::new(
+                vec![
+                    FnArgType::new(hasher_ty, MutType::mutable()),
+                    FnArgType::new_by_val(static_str_type()),
+                ],
+                unit_ty,
+                EffType::empty(),
+            ),
             span,
         )
     };

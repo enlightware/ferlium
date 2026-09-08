@@ -134,8 +134,11 @@ fn derive(
                 }
             }
             // Yield suspends rather than completing the invocation. Proving that a scoped accessor
-            // reaches its yield and later finishes needs a separate summary.
-            TerminatorKind::Yield { .. } => return WillReturn::Unknown,
+            // reaches its yield and later finishes needs a separate summary. A fatal invariant
+            // failure never returns control to the caller and must not be speculated or erased.
+            TerminatorKind::Yield { .. } | TerminatorKind::InvariantFailure { .. } => {
+                return WillReturn::Unknown;
+            }
             TerminatorKind::Goto { .. }
             | TerminatorKind::CondBr { .. }
             | TerminatorKind::SwitchVariant { .. }
@@ -288,6 +291,30 @@ mod tests {
         );
         assert_eq!(summaries.summary(id("leaf")), WillReturn::Proven);
         assert_eq!(summaries.summary(id("caller")), WillReturn::Proven);
+    }
+
+    #[test]
+    fn invariant_failure_is_not_a_returning_call() {
+        use crate::{
+            mir::{builder::FunctionBuilder, terminator::Terminator},
+            types::r#type::CallResultConvention,
+        };
+        let mut builder = FunctionBuilder::new(ustr("fatal"), CallResultConvention::Value);
+        let block = builder.add_block();
+        builder.set_terminator(
+            block,
+            Terminator::invariant_failure(
+                crate::Location::new_synthesized(),
+                ustr("broken invariant"),
+            ),
+        );
+        let body = builder.finish_unverified();
+        assert_eq!(
+            derive(&body, crate::std::STD_MODULE_ID, &[], &|_| {
+                WillReturn::Proven
+            }),
+            WillReturn::Unknown
+        );
     }
 
     #[test]

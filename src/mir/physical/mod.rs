@@ -8,8 +8,10 @@
 
 //! Physical MIR lowering, readiness verification, and whole-program resolution.
 
+mod buffer;
 mod dictionary;
 mod evidence;
+mod native;
 pub(crate) mod program;
 mod subscript;
 mod subscript_lifecycle;
@@ -104,6 +106,7 @@ pub(crate) enum BackendReadinessError {
         function: FunctionId,
         error: NativeContractError,
     },
+    NativeRequirement(native::NativeRequirementError),
     InvalidPhysicalCall {
         owner: FunctionId,
         target: FunctionId,
@@ -159,6 +162,7 @@ pub(crate) enum BackendReadinessError {
 impl fmt::Display for BackendReadinessError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::NativeRequirement(error) => error.fmt(f),
             Self::InvalidPhysicalEntry { owner, target } => write!(
                 f,
                 "physical entry m{}:f{} refers to unavailable entry m{}:f{}",
@@ -300,7 +304,7 @@ pub(crate) struct BackendReadyMirArtifacts {
     entries: Vec<Option<Function>>,
     /// Derived after every physical transformation. Any later pass that changes function or
     /// evidence-catalog references must rebuild this map before execution.
-    native_signatures: FxHashMap<FunctionId, NativeSignature>,
+    native_requirements: native::NativeRequirements,
     dictionaries: PhysicalDictionaryCatalog,
     subscripts: PhysicalSubscriptCatalog,
 }
@@ -319,14 +323,25 @@ impl BackendReadyMirArtifacts {
     }
 
     pub(crate) fn native_optional_payload(&self, function: FunctionId) -> Option<Type> {
-        match self.native_signatures.get(&function)?.result {
+        match self.native_signature(function)?.result {
             NativeResult::Optional { payload, .. } => Some(payload.ty),
             _ => None,
         }
     }
 
     pub(crate) fn native_signature(&self, function: FunctionId) -> Option<&NativeSignature> {
-        self.native_signatures.get(&function)
+        self.native_requirements.signature(function)
+    }
+
+    /// Recheck bindings when an executor attaches a runtime. Artifact construction validates
+    /// its current environment; executor integration of this later check is still pending.
+    pub(crate) fn validate_native_runtime(
+        &self,
+        env: ModuleEnv<'_>,
+    ) -> Result<(), BackendReadinessError> {
+        self.native_requirements
+            .validate_runtime(env)
+            .map_err(BackendReadinessError::NativeRequirement)
     }
 
     pub(crate) fn dictionaries(&self) -> &[PhysicalDictionaryDefinition] {
@@ -388,11 +403,68 @@ pub(crate) fn lower_physical_mir(
     let mut entries = semantic.cloned_entries();
     let helper_base = FunctionId::new(module, LocalFunctionId::from_index(entries.len()));
     let mut lowerer = PhysicalLowerer::new(helper_base, env, known);
+    let buffer_entries = buffer::entries(env, known);
     for (index, specialization) in semantic.specializations().iter().enumerate() {
         let local = LocalFunctionId::from_index(semantic.len() + index);
         lowerer
             .originals
             .insert(FunctionId::new(module, local), specialization.original);
+    }
+    // Populate retained addressors first so later projections reuse their original identities.
+    for (index, entry) in entries.iter_mut().enumerate() {
+        if entry.is_some() {
+            continue;
+        }
+        if let Some(source) = env
+            .current
+            .get_function_by_id(LocalFunctionId::from_index(index))
+            && let CallableOrigin::StructuralFieldAddressor { field_index } = source.origin
+        {
+            let function = FunctionId::new(module, LocalFunctionId::from_index(index));
+            let signature = &source.definition.ty_scheme.ty;
+            let [receiver] = signature.args.as_slice() else {
+                return Err(BackendReadinessError::InvalidProductProjection { function });
+            };
+            let spec = product_layout_spec(receiver.ty, Location::new_synthesized(), &env)
+                .ok_or(BackendReadinessError::InvalidProductProjection { function })?;
+            if spec
+                .members
+                .get(field_index.as_index())
+                .is_none_or(|member| member.ty != signature.ret)
+            {
+                return Err(BackendReadinessError::InvalidProductProjection { function });
+            }
+            let key = ProductAddressorKey {
+                aggregate_ty: receiver.ty,
+                field_index,
+            };
+            let mut body = build_product_addressor(&key, &spec, index, known, env);
+            body.name = env
+                .current
+                .get_function_name_by_id(function.function)
+                .unwrap();
+            let requirements = source
+                .definition
+                .ty_scheme
+                .extra_parameters(env)
+                .requirements;
+            if body.parameters().len() != requirements.len() + 2
+                || !body
+                    .parameters()
+                    .iter()
+                    .zip(&requirements)
+                    .all(|(parameter, requirement)| {
+                        parameter.ty == requirement.to_dict_type_in_env(&env)
+                    })
+            {
+                return Err(BackendReadinessError::InvalidProductProjection { function });
+            }
+            lowerer
+                .helper_ids
+                .entry(PhysicalHelperKey::Product(key))
+                .or_insert(function);
+            *entry = Some(body);
+        }
     }
     for (index, entry) in entries.iter_mut().enumerate() {
         if let Some(body) = entry.take() {
@@ -403,17 +475,28 @@ pub(crate) fn lower_physical_mir(
                     specialization.original
                 });
             *entry = Some(lowerer.lower_body(FunctionId::new(module, local), original, body)?);
+        } else if let Some(&kind) =
+            buffer_entries.get(&FunctionId::new(module, LocalFunctionId::from_index(index)))
+        {
+            *entry = Some(lowerer.lower_buffer_entry(
+                FunctionId::new(module, LocalFunctionId::from_index(index)),
+                kind,
+            )?);
         }
     }
     entries.extend(lowerer.helpers.into_iter().map(Some));
     let references = PhysicalEvidenceReferences::collect(&entries);
     let dictionaries = PhysicalDictionaryCatalog::from_module(module, env.current, &references);
     let subscripts = PhysicalSubscriptCatalog::from_module(module, env.current, env, &references);
-    let native_signatures = collect_native_signatures(&entries, &dictionaries, &subscripts, env)?;
+    let native_signatures =
+        collect_native_signatures(&entries, &dictionaries, &subscripts, env, &buffer_entries)?;
+    let native_requirements =
+        native::NativeRequirements::collect(&entries, &native_signatures, env)
+            .map_err(BackendReadinessError::NativeRequirement)?;
     let artifacts = BackendReadyMirArtifacts {
         module,
         entries,
-        native_signatures,
+        native_requirements,
         dictionaries,
         subscripts,
     };
@@ -421,31 +504,31 @@ pub(crate) fn lower_physical_mir(
     Ok(artifacts)
 }
 
-/// Capture typed entries and representation-derived optional results for every referenced native,
-/// including evidence entries and first-class references. Runtime addresses stay with Callable;
-/// the physical artifact retains the existing FunctionId and the required transport/layouts.
-// TODO: Target readiness must also reject remaining interpreter-only entries and verify compiled
-// indirect-call failure transport once script-function machine signatures are available.
+/// Collect transport/layout contracts under the original IDs for declared and referenced natives,
+/// including evidence entries and first-class references. NativeRequirements separately captures
+/// their matching runtime bindings.
+// TODO: Verify indirect script-call failure transport once machine signatures are available.
 fn collect_native_signatures(
     entries: &[Option<Function>],
     dictionaries: &PhysicalDictionaryCatalog,
     subscripts: &PhysicalSubscriptCatalog,
     env: ModuleEnv<'_>,
+    buffer_entries: &FxHashMap<FunctionId, buffer::BufferEntry>,
 ) -> Result<FxHashMap<FunctionId, NativeSignature>, BackendReadinessError> {
     let mut referenced = FxHashSet::default();
-    let mut visit = |value: &Value| {
-        if let Value::Function(function) = value {
-            referenced.insert(*function);
+    // Declared entries remain artifact roots: an embedder can call them even without a MIR use.
+    for (index, function) in env.current.functions.iter().enumerate() {
+        if matches!(function.origin, CallableOrigin::Native { .. }) {
+            referenced.insert(FunctionId::new(
+                env.current.module_id(),
+                LocalFunctionId::from_index(index),
+            ));
         }
-    };
+    }
     for body in entries.iter().flatten() {
-        for block in body.blocks() {
-            let block = body.block(block);
-            for operation in block.operations() {
-                operation.operands.iter().for_each(&mut visit);
-            }
-            block.terminator().operands().iter().for_each(&mut visit);
-        }
+        body.visit_function_ids(|function| {
+            referenced.insert(function);
+        });
     }
     for dictionary in dictionaries.definitions() {
         for entry in dictionary.entries() {
@@ -459,11 +542,51 @@ fn collect_native_signatures(
             }
         }
     }
+    // Imported evidence is not an opaque escape hatch for an incompatible native entry.
+    for dictionary in dictionaries.imports() {
+        if let Some(implementation) = env
+            .module_by_id(dictionary.module_id)
+            .and_then(|module| module.get_impl_data(dictionary.impl_id))
+        {
+            for index in 0..implementation.dictionary_value.entry_count() {
+                let crate::module::TraitDictionaryEntry::Function(function) = implementation
+                    .dictionary_value
+                    .entry(TraitDictionaryEntryIndex::from_index(index));
+                referenced.insert(FunctionId::new(dictionary.module_id, function));
+            }
+        }
+    }
+    for subscript in subscripts.imports() {
+        if let Some(definition) = env
+            .module_by_id(subscript.module)
+            .and_then(|module| module.get_subscript_by_id(subscript.subscript))
+        {
+            for member in [&definition.ref_member, &definition.mut_member]
+                .into_iter()
+                .flatten()
+            {
+                referenced.insert(FunctionId::new(subscript.module, member.function));
+            }
+        }
+    }
 
     let mut results = FxHashMap::default();
     let mut referenced = referenced.into_iter().collect::<Vec<_>>();
     referenced.sort_by_key(|function| (function.module.as_index(), function.function.as_index()));
     for function in referenced {
+        // These identities have physical bodies in their owning module. Program assembly must
+        // resolve them to those bodies, never fall back to the boxed callback.
+        if buffer_entries.contains_key(&function) {
+            if function.module == env.current.module_id()
+                && entries
+                    .get(function.function.as_index())
+                    .and_then(Option::as_ref)
+                    .is_none()
+            {
+                return Err(BackendReadinessError::InvalidBufferCall { function });
+            }
+            continue;
+        }
         let Some(module) = env.module_by_id(function.module) else {
             continue;
         };
@@ -483,23 +606,20 @@ fn collect_native_signatures(
             },
         )
         .map_err(|error| BackendReadinessError::InvalidNativeOptionalResult { function, error })?;
-        let signature = native
+        let entry = native
             .code
             .native_entry()
-            .map(|entry| {
-                entry
-                    .signature()
-                    .validate(&native.definition)
-                    .map_err(|error| BackendReadinessError::InvalidNativeEntry {
-                        function,
-                        error,
-                    })?;
-                Ok(entry.signature().clone())
-            })
-            .transpose()?;
-        if let Some(signature) = signature {
-            results.insert(function, signature);
-        }
+            .ok_or(BackendReadinessError::NativeRequirement(
+                native::NativeRequirementError::MissingEntry(function),
+            ))?;
+        let signature = {
+            entry
+                .signature()
+                .validate(&native.definition)
+                .map_err(|error| BackendReadinessError::InvalidNativeEntry { function, error })?;
+            entry.signature().clone()
+        };
+        results.insert(function, signature);
     }
     Ok(results)
 }
@@ -2731,6 +2851,12 @@ fn verify_dictionary_catalog(
         }
         for entry in definition.entries() {
             let target = entry.function();
+            if artifacts.native_signature(target).is_some() && !entry.capture_mapping().is_empty() {
+                return Err(BackendReadinessError::InvalidDictionaryEntry {
+                    dictionary: definition.id(),
+                    target,
+                });
+            }
             // Native entries legitimately occupy a function-table slot without a MIR body.
             if target.module != artifacts.module
                 || target.function.as_index() >= artifacts.entry_count()
@@ -3047,12 +3173,37 @@ fn verify_direct_call(
     owner: FunctionId,
     operation: &Operation,
 ) -> Result<(), BackendReadinessError> {
-    if !matches!(operation.kind, OperationKind::Call { .. }) {
+    let OperationKind::Call { ty, .. } = &operation.kind else {
         return Ok(());
-    }
+    };
     let Some(Value::Function(target)) = operation.operands.first() else {
         return Ok(());
     };
+    if let Some(signature) = artifacts.native_signature(*target) {
+        let expected = signature.parameters.len() + 1;
+        let actual = operation.operands.len() - 1;
+        if actual != expected {
+            return Err(BackendReadinessError::InvalidPhysicalCall {
+                owner,
+                target: *target,
+                expected,
+                actual,
+            });
+        }
+        let mut definition = crate::hir::function::CallableDefinition::new_infer_quantifiers(
+            ty.fn_ty.clone(),
+            [],
+            "physical native call",
+        );
+        definition.result_convention = ty.result_convention;
+        signature.validate(&definition).map_err(|error| {
+            BackendReadinessError::InvalidNativeEntry {
+                function: *target,
+                error,
+            }
+        })?;
+        return Ok(());
+    }
     if target.module != artifacts.module {
         return Ok(());
     }
@@ -3190,6 +3341,85 @@ mod tests {
     }
 
     #[test]
+    fn retained_native_roots_require_entries_and_recheck_their_declarations() {
+        use crate::hir::native_functions::NativeFnN;
+        let session = CompilerSession::new();
+        let module_id = session.modules().next_id();
+        let mut module = Module::new(module_id, Path::single_str("native_roots"));
+        let local = module.add_function(
+            ustr::ustr("identity"),
+            NativeFnN::from_rust(std::convert::identity::<isize>).description(
+                ["value"],
+                "",
+                no_effects(),
+            ),
+        );
+        let function = FunctionId::new(module_id, local);
+        let collect = |module: &Module| {
+            let env = ModuleEnv::new(module, session.raw_modules());
+            let references = PhysicalEvidenceReferences::default();
+            let dictionaries =
+                PhysicalDictionaryCatalog::from_module(module_id, module, &references);
+            let subscripts =
+                PhysicalSubscriptCatalog::from_module(module_id, module, env, &references);
+            collect_native_signatures(
+                &[None],
+                &dictionaries,
+                &subscripts,
+                env,
+                &buffer::entries(env, session.known_callees()),
+            )
+        };
+        assert!(
+            collect(&module).unwrap().contains_key(&function),
+            "an unreferenced declared native is still an artifact root"
+        );
+        module.functions[local.as_index()]
+            .definition
+            .ty_scheme
+            .ty
+            .ret = bool_type();
+        assert!(matches!(
+            collect(&module),
+            Err(BackendReadinessError::InvalidNativeEntry {
+                error: NativeContractError::ResultType,
+                ..
+            })
+        ));
+        module.functions[local.as_index()]
+            .definition
+            .ty_scheme
+            .ty
+            .ret = int_type();
+        module.functions[local.as_index()]
+            .definition
+            .ty_scheme
+            .ty
+            .args[0]
+            .ty = Type::variable_id(0);
+        assert!(matches!(
+            collect(&module),
+            Err(BackendReadinessError::InvalidNativeEntry {
+                error: NativeContractError::NotClosed,
+                ..
+            })
+        ));
+
+        // Copy a boxed compiler callback under an unrelated host identity. Its std identity,
+        // not its signature or name, is what authorizes Buffer expansion.
+        let boxed = session
+            .std_module()
+            .get_function(ustr::ustr("buffer_with_capacity"))
+            .unwrap();
+        module.functions[local.as_index()].code = dyn_clone::clone_box(&*boxed.code);
+        assert!(
+            matches!(collect(&module), Err(BackendReadinessError::NativeRequirement(
+            native::NativeRequirementError::MissingEntry(id)
+        )) if id == function)
+        );
+    }
+
+    #[test]
     fn typed_native_failure_transport_survives_direct_and_first_class_lowering() {
         use crate::hir::native_functions::{NativeFailureConvention, NativeLayout, NativeResult};
         let mut session = CompilerSession::new();
@@ -3236,8 +3466,8 @@ mod tests {
         let layout = NativeLayout::of::<NativeString>();
         let has_signature = |parameters, result| {
             physical
-                .native_signatures
-                .values()
+                .native_requirements
+                .signatures()
                 .any(|signature| signature.parameters == parameters && signature.result == result)
         };
         assert!(
@@ -3315,13 +3545,17 @@ mod tests {
             PhysicalDictionaryCatalog::from_module(artifacts.module, source, &references);
         artifacts.subscripts =
             PhysicalSubscriptCatalog::from_module(artifacts.module, source, env, &references);
-        artifacts.native_signatures = collect_native_signatures(
+        let signatures = collect_native_signatures(
             &artifacts.entries,
             &artifacts.dictionaries,
             &artifacts.subscripts,
             env,
+            &buffer::entries(env, session.known_callees()),
         )
         .expect("test evidence-catalog rebuild should preserve native optional contracts");
+        artifacts.native_requirements =
+            native::NativeRequirements::collect(&artifacts.entries, &signatures, env)
+                .expect("test evidence-catalog rebuild should preserve native requirements");
     }
 
     #[test]
@@ -3757,7 +3991,7 @@ mod tests {
         let physical = BackendReadyMirArtifacts {
             module,
             entries: entries.into(),
-            native_signatures: FxHashMap::default(),
+            native_requirements: native::NativeRequirements::default(),
             dictionaries,
             subscripts,
         };
@@ -3977,6 +4211,45 @@ mod tests {
                 .iter()
                 .any(|operation| matches!(operation.kind, OperationKind::AddressOffset { .. }))
         }));
+    }
+
+    #[test]
+    fn dynamic_projections_reuse_a_retained_structural_addressor() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            "fn direct<A>(record: { x: int, y: A }) -> A { record.y }\n\
+             fn get_y<T>(record: T) { record.y }\n\
+             fn forward<A>(record: { x: int, y: A }) -> A { get_y(record) }",
+            "retained_addressor",
+        );
+        let source = session.expect_fresh_module(module);
+        let retained = source
+            .functions
+            .iter()
+            .enumerate()
+            .find_map(|(index, function)| {
+                matches!(
+                    function.origin,
+                    CallableOrigin::StructuralFieldAddressor { .. }
+                )
+                .then_some(LocalFunctionId::from_index(index))
+            })
+            .expect("generic projection evidence must retain a structural addressor");
+        let direct = source.get_local_function_id(ustr::ustr("direct")).unwrap();
+        let (physical, first_helper) = lower(&mut session, module).unwrap();
+        assert!(physical.get(retained).is_some());
+        assert_eq!(
+            physical.entry_count(),
+            first_helper.as_index(),
+            "reuse the retained body instead of generating a duplicate helper"
+        );
+        let mut referenced = Vec::new();
+        physical
+            .get(direct)
+            .unwrap()
+            .visit_function_ids(|id| referenced.push(id));
+        assert!(referenced.contains(&FunctionId::new(module, retained)));
     }
 
     #[test]
@@ -4427,6 +4700,37 @@ mod tests {
     fn std_buffer_moves_keep_open_element_types() {
         let mut session = CompilerSession::new();
         let (physical, _) = lower(&mut session, crate::std::STD_MODULE_ID).unwrap();
+
+        let env = ModuleEnv::new(session.std_module(), session.raw_modules());
+        let entries = buffer::entries(env, session.known_callees());
+        assert_eq!(
+            entries.len(),
+            11,
+            "all storage, Value and Inspect Buffer entries have lowering"
+        );
+        for id in entries.keys() {
+            assert!(
+                physical.get(id.function).is_some(),
+                "retained Buffer entry {id:?} needs a physical body"
+            );
+            assert!(
+                physical.native_signature(*id).is_none(),
+                "do not dispatch back to a boxed primitive"
+            );
+        }
+        let clone_id = entries
+            .iter()
+            .find_map(|(id, kind)| matches!(kind, buffer::BufferEntry::Clone).then_some(*id))
+            .unwrap();
+        let clone = physical.get(clone_id.function).unwrap();
+        assert_eq!(clone.blocks().count(), 1);
+        assert!(clone.block(clone.entry()).operations().is_empty());
+        assert!(matches!(
+            clone.block(clone.entry()).terminator().kind,
+            TerminatorKind::InvariantFailure { message }
+                if message.as_str() == crate::std::buffer::INVALID_BUFFER_CLONE
+        ));
+        physical.validate_native_runtime(env).unwrap();
 
         let operations = (0..physical.entry_count())
             .filter_map(|index| physical.get(LocalFunctionId::from_index(index)))

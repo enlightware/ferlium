@@ -859,7 +859,7 @@ fn site_dominates_exits(function: &Function, site: Site) -> bool {
                 pending.push(*error);
             }
             TerminatorKind::Yield { resume, .. } => pending.push(*resume),
-            TerminatorKind::FailureDuringCleanup => {}
+            TerminatorKind::FailureDuringCleanup | TerminatorKind::InvariantFailure { .. } => {}
         }
     }
     true

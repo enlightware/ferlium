@@ -1395,7 +1395,8 @@ pub(crate) fn escaping_roots(
             TerminatorKind::Goto { .. }
             | TerminatorKind::Return
             | TerminatorKind::PropagateError
-            | TerminatorKind::FailureDuringCleanup => {}
+            | TerminatorKind::FailureDuringCleanup
+            | TerminatorKind::InvariantFailure { .. } => {}
         }
     }
     (escaped, register_places)

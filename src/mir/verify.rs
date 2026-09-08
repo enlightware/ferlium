@@ -583,6 +583,7 @@ impl<'a> Verifier<'a> {
                     );
                     vec![]
                 }
+                TerminatorKind::InvariantFailure { .. } => vec![],
             };
 
             for (successor, successor_state) in successors {
@@ -1571,6 +1572,9 @@ impl<'a> Verifier<'a> {
             Some(TerminatorKind::FailureDuringCleanup) => {
                 // Poisoning transfers remaining ownership to runtime reclamation.
             }
+            Some(TerminatorKind::InvariantFailure { .. }) => {
+                // Fatal termination has no observable frame/result or ownership obligations.
+            }
             _ => {}
         }
 
@@ -2054,7 +2058,8 @@ impl<'a> Verifier<'a> {
             Some(
                 TerminatorKind::Return
                 | TerminatorKind::PropagateError
-                | TerminatorKind::FailureDuringCleanup,
+                | TerminatorKind::FailureDuringCleanup
+                | TerminatorKind::InvariantFailure { .. },
             ) => {}
             None => {
                 let index = self.node_index[&node];
@@ -2112,6 +2117,37 @@ mod tests {
     /// is load-bearing: a sum type with only trivial inline payloads has no drop obligation.
     fn managed_variant_ty() -> Type {
         Type::variant([(ustr::ustr("A"), string_type())])
+    }
+
+    #[test]
+    fn invariant_failure_allows_live_storage_and_an_uninitialized_result() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let mut f = FunctionBuilder::new(ustr::ustr("fatal"), CallResultConvention::Value);
+        f.add_parameter(string_type(), ParameterKind::Return);
+        let block = f.add_block();
+        let variant_ty = managed_variant_ty();
+        let place = append_result(&mut f, block, Operation::alloca(span, variant_ty));
+        let value = append_result(
+            &mut f,
+            block,
+            Operation::variant(
+                span,
+                ustr::ustr("A"),
+                variant_ty,
+                string_type(),
+                Some(crate::hir::value::VariantPayloadStorage::Inline),
+                None,
+                None,
+            ),
+        );
+        append(&mut f, block, Operation::store(span, value, place));
+        f.set_terminator(
+            block,
+            Terminator::invariant_failure(span, ustr::ustr("broken invariant")),
+        );
+        f.finish(env);
     }
 
     #[test]

@@ -251,7 +251,8 @@ pub(crate) fn forward_redundant_storage(func: &Function, env: ModuleEnv<'_>) -> 
             | TerminatorKind::Invoke { .. }
             | TerminatorKind::Return
             | TerminatorKind::PropagateError
-            | TerminatorKind::FailureDuringCleanup => {}
+            | TerminatorKind::FailureDuringCleanup
+            | TerminatorKind::InvariantFailure { .. } => {}
         }
     }
 

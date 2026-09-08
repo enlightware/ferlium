@@ -153,7 +153,8 @@ impl MirInstructionKind {
                 | Term::Yield
                 | Term::Return
                 | Term::PropagateError
-                | Term::FailureDuringCleanup,
+                | Term::FailureDuringCleanup
+                | Term::InvariantFailure,
             ) => Cost::Scalar,
             // Calls are refined into DirectCall or IndirectCall when recorded.
             Self::Operation(Op::Call) => Cost::Semantic,

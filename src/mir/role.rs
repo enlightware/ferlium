@@ -880,7 +880,8 @@ pub(crate) fn check_terminator_operand_roles(
         TerminatorKind::Goto { .. }
         | TerminatorKind::Return
         | TerminatorKind::PropagateError
-        | TerminatorKind::FailureDuringCleanup => {}
+        | TerminatorKind::FailureDuringCleanup
+        | TerminatorKind::InvariantFailure { .. } => {}
     }
 }
 

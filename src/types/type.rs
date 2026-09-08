@@ -115,6 +115,11 @@ impl FromIndex for TypeVar {
 pub type TyVarKey = TypeVar;
 
 pub trait BareNativeType: DynClone + DynEq + Send + Sync {
+    /// Concrete Rust payload identity, distinct from this descriptor's `type_id`.
+    /// Compiler-defined representations (such as Buffer) use their explicit lowering instead.
+    fn value_type_id(&self) -> Option<TypeId> {
+        None
+    }
     fn type_id(&self) -> TypeId {
         TypeId::of::<Self>()
     }
@@ -196,6 +201,9 @@ impl<T> PartialEq for BareNativeTypeImpl<T> {
 impl<T> Eq for BareNativeTypeImpl<T> {}
 
 impl<T: 'static> BareNativeType for BareNativeTypeImpl<T> {
+    fn value_type_id(&self) -> Option<TypeId> {
+        Some(TypeId::of::<T>())
+    }
     // fn type_id(&self) -> TypeId {
     //     TypeId::of::<T>()
     // }

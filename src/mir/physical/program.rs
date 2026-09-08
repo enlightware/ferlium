@@ -533,9 +533,9 @@ fn verify_function(
 }
 
 fn has_function(program: &ResolvedPhysicalProgram, target: FunctionId) -> bool {
-    program
-        .module(target.module)
-        .is_some_and(|module| target.function.as_index() < module.entry_count())
+    program.module(target.module).is_some_and(|module| {
+        module.get(target.function).is_some() || module.native_signature(target).is_some()
+    })
 }
 
 fn expect_dictionary(

@@ -295,7 +295,8 @@ impl Function {
                 TerminatorKind::Goto { .. }
                 | TerminatorKind::Return
                 | TerminatorKind::PropagateError
-                | TerminatorKind::FailureDuringCleanup => {}
+                | TerminatorKind::FailureDuringCleanup
+                | TerminatorKind::InvariantFailure { .. } => {}
             }
         }
         for block in &self.blocks {

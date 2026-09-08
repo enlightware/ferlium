@@ -22,8 +22,7 @@ impl StdSnapshotHeader {
     }
 }
 
-/// Versioned envelope for compiled std data. The payload is deliberately named `StdSnapshot`,
-/// rather than baking the schema version into the Rust type name.
+/// Fingerprint-validated envelope for compiler-owned std data.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StdSnapshot<T> {

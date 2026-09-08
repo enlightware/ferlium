@@ -681,6 +681,17 @@ impl<'a> Interpreter<'a> {
                     self.discard_bindings_after_poisoning(slots);
                     return Err(error);
                 }
+                TerminatorKind::InvariantFailure { message } => {
+                    // Even catch_unwind must not turn this exit into resumable execution.
+                    // Ignore diagnostic I/O errors so they cannot cause a Rust unwind instead.
+                    use std::io::Write;
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "Ferlium invariant failure at {:?}: {message}",
+                        current.terminator().span
+                    );
+                    std::process::abort();
+                }
                 TerminatorKind::Yield { place, resume } => {
                     assert!(
                         pending.is_none(),
@@ -2991,6 +3002,63 @@ fn husk_like(v: &Value) -> Value {
     match v {
         Value::Tuple(fields) => aggregate_husk(fields.iter().map(husk_like).collect::<Vec<_>>()),
         _ => Value::uninit(),
+    }
+}
+
+#[cfg(test)]
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+mod fatal_exit_tests {
+    use super::*;
+
+    #[test]
+    fn invariant_failure_aborts_without_unwinding() {
+        use std::{os::unix::process::ExitStatusExt, process::Command};
+        const CHILD: &str = "FERLIUM_MIR_INVARIANT_FAILURE_CHILD";
+        const MESSAGE: &str = "test fatal MIR invariant";
+        if std::env::var_os(CHILD).is_some() {
+            let session = CompilerSession::new();
+            let mut builder = mir::builder::FunctionBuilder::new(
+                ustr::ustr("fatal"),
+                crate::types::r#type::CallResultConvention::Value,
+            );
+            // Fatal exit is valid even though the caller's result is never initialized.
+            builder.add_parameter(Type::unit(), mir::ParameterKind::Return);
+            let block = builder.add_block();
+            builder.set_terminator(
+                block,
+                mir::terminator::Terminator::invariant_failure(
+                    Location::new_synthesized(),
+                    ustr::ustr(MESSAGE),
+                ),
+            );
+            let body = builder.finish(session.module_env());
+            let key = FunctionKey {
+                module: crate::std::STD_MODULE_ID,
+                identity: LocalFunctionId::from_index(0),
+            };
+            let mut interpreter = Interpreter::new(key.module, &session);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                interpreter.run_loop(key, &body, FxHashMap::default(), body.entry())
+            }));
+            // Neither normal/error return nor a catchable Rust panic satisfies the contract.
+            std::process::exit(77);
+        }
+        let (_, module) = module_path!().split_once("::").unwrap();
+        let test = format!("{module}::invariant_failure_aborts_without_unwinding");
+        let output = Command::new("sh")
+            .args(["-c", "ulimit -c 0; exec \"$@\"", "mir-fatal-exit-test"])
+            .arg(std::env::current_exe().unwrap())
+            .args(["--exact", &test, "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.signal().is_some(),
+            "expected abort, got {}: {stderr}",
+            output.status
+        );
+        assert!(stderr.contains(MESSAGE), "{stderr}");
     }
 }
 
