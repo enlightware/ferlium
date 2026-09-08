@@ -1858,6 +1858,282 @@ fn experimental_session() -> TestSession {
     session
 }
 
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn custom_addressor_indices_do_not_prove_disjoint_mutable_arguments() {
+    // Include a name matching std: only the resolved std member identity carries the law.
+    for name in ["slot", "array_index"] {
+        let source = format!(
+            r#"
+                subscript {name}(values: &mut [int], index: int) -> int {{
+                    ref mut {{ return values[0] }}
+                }}
+                fn write(left: &mut int, right: &mut int) {{ left = 1; right = 2 }}
+                let mut values = [0, 0];
+                write(values->[{name}](0), values->[{name}](1));
+                values
+            "#
+        );
+        experimental_session()
+            .fail_compilation(&source)
+            .expect_mutable_paths_overlap();
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn custom_addressor_overlaps_direct_array_index() {
+    experimental_session()
+        .fail_compilation(
+            r#"
+            subscript slot(values: &mut [int], index: int) -> int {
+                ref mut { return values[0] }
+            }
+            fn write(left: &mut int, right: &mut int) { left = 1; right = 2 }
+            let mut values = [0, 0];
+            write(values->[slot](1), values[0]);
+            values
+        "#,
+        )
+        .expect_mutable_paths_overlap();
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn custom_addressor_boolean_selectors_remain_opaque() {
+    experimental_session()
+        .fail_compilation(
+            r#"
+            subscript slot(values: &mut [int], index: bool) -> int {
+                ref mut { return values[0] }
+            }
+            fn write(left: &mut int, right: &mut int) { left = 1; right = 2 }
+            let mut values = [0];
+            write(values->[slot](false), values->[slot](true));
+            values
+        "#,
+        )
+        .expect_mutable_paths_overlap();
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn custom_addressor_shared_argument_is_snapshotted_before_mutation() {
+    let value = run_experimental_subscript_source(
+        r#"
+        subscript slot(values: &mut [int], index: int) -> int {
+            ref mut { return values[0] }
+        }
+        fn update(observed: int, target: &mut int) -> int {
+            target = 9;
+            observed
+        }
+        let mut values = [3, 4];
+        update(values->[slot](0), values->[slot](1))
+    "#,
+    );
+    assert_val_eq!(value, int(3));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn custom_addressor_managed_shared_argument_owns_its_snapshot() {
+    let value = run_experimental_subscript_source(
+        r#"
+        subscript slot(values: &mut [string], index: int) -> string {
+            ref mut { return values[0] }
+        }
+        fn update(observed: string, target: &mut string) -> string {
+            target = "new";
+            observed
+        }
+        let mut values = ["old"];
+        update(values->[slot](0), values->[slot](1))
+    "#,
+    );
+    assert_val_eq!(value, string("old"));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn custom_addressor_shared_argument_is_snapshotted_before_later_argument_write() {
+    let value = run_experimental_subscript_source(
+        r#"
+        subscript slot(values: &mut [int], index: int) -> int {
+            ref mut { return values[0] }
+        }
+        fn first(observed: int, ignored: int) -> int { observed }
+        let mut values = [3];
+        first(values->[slot](0), { values->[slot](1) = 9; 0 })
+    "#,
+    );
+    assert_val_eq!(value, int(3));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_addressor_shared_argument_is_snapshotted_before_later_argument_write() {
+    // Array address calculation borrows its receiver immutably: the write footprint must come
+    // from the assignment through the scoped binding, not from the accessor's arguments.
+    let value = run_experimental_subscript_source(
+        r#"
+        fn first(observed: int, ignored: int) -> int { observed }
+        let mut values = [3];
+        first(values[0], { values[0] = 9; 0 })
+    "#,
+    );
+    assert_val_eq!(value, int(3));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn custom_addressors_on_disjoint_structural_receivers_remain_usable() {
+    let value = run_experimental_subscript_source(
+        r#"
+        subscript slot(values: &mut [int], index: int) -> int {
+            ref mut { return values[0] }
+        }
+        fn write(left: &mut int, right: &mut int) { left = 1; right = 2 }
+        let mut values = ([0], [0]);
+        write(values.0->[slot](0), values.1->[slot](1));
+        (values.0[0], values.1[0])
+    "#,
+    );
+    assert_val_eq!(value, expected_tuple(vec![int(1), int(2)]));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_array_indices_preserve_disjoint_mutable_access() {
+    let value = run_experimental_subscript_source(
+        r#"
+        fn swap<A>(left: &mut A, right: &mut A) {
+            let old = left;
+            left = right;
+            right = old
+        }
+        fn swap_first_two<A>(values: &mut [A]) { swap(values[0], values[1]) }
+        let mut values = [1, 2];
+        swap_first_two(values);
+        values
+    "#,
+    );
+    assert_val_eq!(value, expected_array_infer([int(2), int(1)]));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn disjoint_named_structural_fields_do_not_snapshot_managed_arguments() {
+    let source = r#"
+        struct Pair<A> { a: A, b: int }
+        fn observe(a: string, b: &mut int) -> int { b = 9; len(a) }
+        fn access(value: &mut Pair<string>) -> int { observe(value.a, value.b) }
+        fn access_record(value: &mut { a: string, b: int }) -> int { observe(value.a, value.b) }
+        fn inferred() -> int {
+            let mut value = Pair { a: "hello", b: 0 };
+            observe(value.a, value.b)
+        }
+        let mut value = Pair { a: "hello", b: 0 };
+        (access(value) + inferred(), value.b)
+    "#;
+    let mir = experimental_session().emit_mir(source);
+    for name in ["access", "access_record", "inferred"] {
+        let header = format!("fn {name}(");
+        let body = mir
+            .split(&header)
+            .nth(1)
+            .expect("access body")
+            .split("\nfn ")
+            .next()
+            .unwrap();
+        assert!(
+            !body.contains("clone "),
+            "disjoint fields must be borrowed directly:\n{body}"
+        );
+    }
+    assert_val_eq!(
+        run_experimental_subscript_source(source),
+        expected_tuple([int(10), int(9)])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn custom_addressor_nested_fields_do_not_restore_disjointness() {
+    experimental_session()
+        .fail_compilation(
+            r#"
+            subscript slot(values: &mut [(int, int)], index: int) -> (int, int) {
+                ref mut { return values[0] }
+            }
+            fn write(left: &mut int, right: &mut int) { left = 1; right = 2 }
+            let mut values = [(0, 0)];
+            write(values->[slot](0).0, values->[slot](1).1);
+            values
+        "#,
+        )
+        .expect_mutable_paths_overlap();
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn custom_addressor_first_class_subscript_keeps_receiver_aliasing() {
+    experimental_session()
+        .fail_compilation(
+            r#"
+            subscript slot(values: &mut [int], index: int) -> int {
+                ref mut { return values[0] }
+            }
+            fn write(left: &mut int, right: &mut int) { left = 1; right = 2 }
+            let accessor = slot;
+            let mut values = [0, 0];
+            write(values->[accessor](0), values->[accessor](1));
+            values
+        "#,
+        )
+        .expect_mutable_paths_overlap();
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn custom_addressor_field_names_do_not_prove_disjointness() {
+    experimental_session()
+        .fail_compilation(
+            r#"
+            fn write(left: &mut int, right: &mut int) { left = 1; right = 2 }
+            fn update(value: &mut Pair) { write(value.left, value.right) }
+
+            #[private_repr]
+            struct Pair { item: int }
+            subscript Pair.left(self) -> int { ref mut { self.item } }
+            subscript Pair.right(self) -> int { ref mut { self.item } }
+            let mut value = Pair { item: 0 };
+            update(value);
+            value.item
+        "#,
+        )
+        .expect_mutable_paths_overlap();
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn custom_addressor_shared_field_is_snapshotted() {
+    let value = run_experimental_subscript_source(
+        r#"
+        fn update(observed: int, target: &mut int) -> int { target = 9; observed }
+        fn observe(value: &mut Pair) -> int { update(value.left, value.right) }
+
+        #[private_repr]
+        struct Pair { item: int }
+        subscript Pair.left(self) -> int { ref mut { self.item } }
+        subscript Pair.right(self) -> int { ref mut { self.item } }
+        let mut value = Pair { item: 3 };
+        observe(value)
+    "#,
+    );
+    assert_val_eq!(value, int(3));
+}
+
 fn assert_experimental_compile_error(src: &str) {
     assert!(experimental_session().try_compile(src).is_err());
 }

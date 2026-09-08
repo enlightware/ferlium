@@ -506,7 +506,7 @@ fn emit_expr_unsafe_inner(
     )?;
     let evidence_bindings = ctx.evidence_bindings.clone();
     let expr = elaborated.root;
-    check_elaborated_borrows(&module.hir_arena, expr)?;
+    check_elaborated_borrows(&module.hir_arena, expr, others)?;
     for lambda_id in lambda_functions.iter() {
         let function_slot = &mut module.functions[lambda_id.as_index()];
         borrow_check_and_elaborate_pending_function(

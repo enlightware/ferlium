@@ -10,7 +10,7 @@ use smallvec::smallvec;
 use ustr::Ustr;
 
 use crate::{
-    FxHashSet, Location,
+    FxHashMap, FxHashSet, Location, Modules,
     compiler::error::{
         InternalCompilationError, InvalidSubscriptDefinitionKind, InvalidYieldKind,
         SubscriptDefinitionSubject,
@@ -18,11 +18,12 @@ use crate::{
     containers::SVec4,
     format::FormatWith,
     hir::{
-        CallArgument, ENodeArena, ENodeId, Elaborated, NodeArena, NodeId, NodeKind,
-        function::ArgConvention, node_is_place_reference, value::LiteralValue,
+        CallArgument, ENodeArena, ENodeId, Elaborated, HirPhase, NodeArena, NodeId, NodeKind,
+        Unelaborated, function::ArgConvention, node_is_place_reference, value::LiteralValue,
     },
     internal_compilation_error,
-    module::{ELocalDecl, LocalDeclId, id::Id},
+    module::{ELocalDecl, FunctionId, LocalDeclId, id::Id},
+    std::STD_MODULE_ID,
     types::{
         trait_solver::TraitSolver,
         r#type::{Type, TypeKind},
@@ -32,68 +33,170 @@ use crate::{
 
 enum PathPart {
     Projection(usize),
-    FieldAccess(Ustr),
     IndexStatic(usize),
-    IndexDynamic,
+    /// An unknown selection within the receiver; later fields cannot prove disjointness.
+    OpaqueProjection,
+}
+
+/// Only the actual std array index member guarantees that distinct non-negative indices select
+/// disjoint elements. Neither an addressor's argument values nor its result-root/repeatability
+/// metadata establishes that law. In particular, custom and indirect addressors stay opaque.
+fn array_index_members(modules: &Modules) -> [Option<FunctionId>; 2] {
+    let subscript = modules
+        .get(STD_MODULE_ID)
+        .and_then(|module| module.module()?.get_subscript(Ustr::from("array_index")));
+    subscript.map_or([None; 2], |subscript| {
+        [&subscript.ref_member, &subscript.mut_member].map(|member| {
+            member
+                .as_ref()
+                .map(|member| FunctionId::new(STD_MODULE_ID, member.function))
+        })
+    })
+}
+
+/// Lexically active place bindings are aliases, not independent storage roots.
+pub(crate) struct BorrowContext<'a, P: HirPhase = Unelaborated> {
+    array_index_members: [Option<FunctionId>; 2],
+    aliases: AliasScope<'a, P>,
+}
+
+/// Temporary scopes in the write-footprint walk overlay the active bindings without copying
+/// their map. Dropping the overlay restores the previous scope automatically.
+enum AliasScope<'a, P: HirPhase> {
+    Active(&'a FxHashMap<LocalDeclId, NodeId<P>>),
+    Binding {
+        binding: LocalDeclId,
+        source: NodeId<P>,
+        parent: &'a AliasScope<'a, P>,
+    },
+}
+
+impl<P: HirPhase> AliasScope<'_, P> {
+    fn get(&self, id: LocalDeclId) -> Option<NodeId<P>> {
+        let mut scope = self;
+        loop {
+            match scope {
+                Self::Active(aliases) => return aliases.get(&id).copied(),
+                Self::Binding {
+                    binding,
+                    source,
+                    parent,
+                } => {
+                    if *binding == id {
+                        return Some(*source);
+                    }
+                    scope = parent;
+                }
+            }
+        }
+    }
+}
+
+impl<'a, P: HirPhase> BorrowContext<'a, P> {
+    pub fn new(modules: &Modules, aliases: &'a FxHashMap<LocalDeclId, NodeId<P>>) -> Self {
+        Self {
+            array_index_members: array_index_members(modules),
+            aliases: AliasScope::Active(aliases),
+        }
+    }
+
+    fn is_array_index(&self, function: FunctionId) -> bool {
+        self.array_index_members.contains(&Some(function))
+    }
+
+    fn with_alias(&self, binding: LocalDeclId, source: NodeId<P>) -> BorrowContext<'_, P> {
+        BorrowContext {
+            array_index_members: self.array_index_members,
+            aliases: AliasScope::Binding {
+                binding,
+                source,
+                parent: &self.aliases,
+            },
+        }
+    }
 }
 
 /// A path to a place in memory.
 struct Path {
-    variable: usize,
+    /// Unknown provenance overlaps every root, including other unknown places.
+    variable: Option<usize>,
     parts: Vec<PathPart>,
 }
 
 impl Path {
     fn from_local(id: LocalDeclId) -> Self {
         Self {
-            variable: id.as_index(),
+            variable: Some(id.as_index()),
+            parts: Vec::new(),
+        }
+    }
+
+    fn unknown() -> Self {
+        Self {
+            variable: None,
             parts: Vec::new(),
         }
     }
 
     /// Builds a caller-storage path when `node_id` is rooted in an existing local.
     ///
-    /// `None` for anything else: a plain value, or a place-shaped node rooted in a temporary.
-    /// Neither can alias an earlier caller place, so callers skip it rather than treating it as an
-    /// error — the analyses here run before the mutability check, so both shapes reach them.
-    fn try_from_node(arena: &NodeArena, node_id: NodeId) -> Option<Self> {
+    /// Plain values (including structural projections of fresh temporaries) have no caller path.
+    /// A borrowed result or alias with missing provenance instead has an unknown root, which must
+    /// overlap every caller path. These queries also run before mutability/type checking finishes.
+    fn try_from_node(
+        arena: &NodeArena,
+        node_id: NodeId,
+        context: &BorrowContext<'_>,
+    ) -> Option<Self> {
         let node = &arena[node_id];
         use NodeKind::*;
         match &node.kind {
             Project(project) => {
-                let mut path = Self::try_from_node(arena, project.value)?;
+                let mut path = Self::try_from_node(arena, project.value, context)?;
                 path.parts
                     .push(PathPart::Projection(project.index.as_index()));
                 Some(path)
             }
             FieldAccess(field_access) => {
-                let mut path = Self::try_from_node(arena, field_access.value)?;
-                path.parts.push(PathPart::FieldAccess(field_access.field));
+                let mut path = Self::try_from_node(arena, field_access.value, context)?;
+                // Unresolved field evidence may select an arbitrary projection subscript.
+                // Concrete structural fields use `Project` and retain field disjointness.
+                path.parts.push(PathPart::OpaqueProjection);
                 Some(path)
             }
-            StaticApply(app) if app.ty.returns_place() => {
-                Self::from_addressor_place_arguments(arena, &app.arguments)
+            StaticApply(app) if app.ty.result_convention.returns_borrow() => {
+                Self::from_addressor_place_arguments(
+                    arena,
+                    &app.arguments,
+                    context,
+                    context.is_array_index(app.function),
+                )
             }
-            FunctionApply(app) if app.ty.returns_place() => {
-                Self::from_addressor_place_arguments(arena, &app.arguments)
+            FunctionApply(app) if app.ty.result_convention.returns_borrow() => {
+                Self::from_addressor_place_arguments(arena, &app.arguments, context, false)
             }
-            TraitMethodApply(app) if app.ty.returns_place() => {
-                Self::from_addressor_place_arguments(arena, &app.arguments)
+            TraitMethodApply(app) if app.ty.result_convention.returns_borrow() => {
+                Self::from_addressor_place_arguments(arena, &app.arguments, context, false)
             }
-            CallDictionaryFunction(call) if call.ty.returns_place() => {
-                Self::from_addressor_place_arguments(arena, &call.arguments)
+            CallDictionaryFunction(call) if call.ty.result_convention.returns_borrow() => {
+                Self::from_addressor_place_arguments(arena, &call.arguments, context, false)
             }
-            SubscriptApply(app) if app.ty.returns_place() => {
-                Self::from_addressor_place_arguments(arena, &app.arguments)
+            SubscriptApply(app) if app.ty.result_convention.returns_borrow() => {
+                Self::from_addressor_place_arguments(arena, &app.arguments, context, false)
             }
             Block(block) => {
                 let tail = block
                     .tail_node()
                     .expect("place block should have a tail expression");
-                Self::try_from_node(arena, tail)
+                Self::try_from_node(arena, tail, context)
             }
-            WithPlace(node) => Self::try_from_node(arena, node.place),
-            LoadLocal(node) => Some(Self::from_local(node.id)),
+            WithPlace(node) => Self::try_from_node(arena, node.place, context),
+            LoadLocal(node) => match context.aliases.get(node.id) {
+                Some(source) => {
+                    Some(Self::try_from_node(arena, source, context).unwrap_or_else(Self::unknown))
+                }
+                None => Some(Self::from_local(node.id)),
+            },
             _ => None,
         }
     }
@@ -101,16 +204,23 @@ impl Path {
     fn from_addressor_place_arguments(
         arena: &NodeArena,
         arguments: &[CallArgument],
+        context: &BorrowContext<'_>,
+        disjoint_indices: bool,
     ) -> Option<Self> {
-        let base_index = arguments
+        let Some(base_index) = arguments
             .iter()
             .position(|argument| !is_evidence_node(&arena[argument.value].kind))
-            .expect("addressor-place application should have a base argument");
-        let mut path = Self::try_from_node(arena, arguments[base_index].value)?;
-        if let Some(index) = arguments.get(base_index + 1) {
+        else {
+            // A yielded accessor need not have a receiver. Without caller provenance its
+            // returned storage cannot establish disjointness.
+            return Some(Self::unknown());
+        };
+        let mut path = Self::try_from_node(arena, arguments[base_index].value, context)
+            .unwrap_or_else(Self::unknown);
+        if disjoint_indices && let Some(index) = arguments.get(base_index + 1) {
             path.parts.push(Self::index_part(arena, index.value));
         } else {
-            path.parts.push(PathPart::IndexDynamic);
+            path.parts.push(PathPart::OpaqueProjection);
         }
         Some(path)
     }
@@ -125,7 +235,7 @@ impl Path {
         {
             return PathPart::IndexStatic(index as usize);
         }
-        PathPart::IndexDynamic
+        PathPart::OpaqueProjection
     }
 }
 
@@ -147,13 +257,39 @@ fn call_arguments(kind: &NodeKind) -> Option<&[CallArgument]> {
 /// call-lifetime planning the local write footprint that ordinary effect types intentionally do
 /// not carry. Keep this query on unelaborated HIR: both type inference and final HIR elaboration
 /// need to make the same semantic snapshot decision from the original argument expressions.
-fn evaluation_may_write_path(arena: &NodeArena, node_id: NodeId, observed: &Path) -> bool {
+fn evaluation_may_write_path(
+    arena: &NodeArena,
+    node_id: NodeId,
+    observed: &Path,
+    context: &BorrowContext<'_>,
+) -> bool {
     let node = &arena[node_id];
+
+    // A later argument can open its own projection scope. Its binding is an alias just like
+    // bindings already active around the outer call, not an unrelated local write.
+    let binding = match &node.kind {
+        NodeKind::WithPlace(node) => Some((node.binding, node.place, node.body)),
+        NodeKind::WithYielded(node) => Some((node.binding, node.accessor, node.body)),
+        _ => None,
+    };
+    if let Some((binding, source, body)) = binding {
+        if evaluation_may_write_path(arena, source, observed, context) {
+            return true;
+        }
+        return evaluation_may_write_path(
+            arena,
+            body,
+            observed,
+            &context.with_alias(binding, source),
+        );
+    }
 
     match &node.kind {
         NodeKind::Assign(assign) => {
+            // Yielded calls are not directly usable places; WithYielded supplies the scoped
+            // binding handled above. Provenance analysis also understands their accessor source.
             if node_is_place_reference(arena, assign.place) {
-                match Path::try_from_node(arena, assign.place) {
+                match Path::try_from_node(arena, assign.place, context) {
                     Some(written) if do_paths_overlap(&written, observed) => return true,
                     // A place-shaped destination without a caller-storage path is rooted in a
                     // temporary and cannot alias `observed`.
@@ -172,13 +308,13 @@ fn evaluation_may_write_path(arena: &NodeArena, node_id: NodeId, observed: &Path
             }
         }
         NodeKind::DropClosureEnv(drop) if node_is_place_reference(arena, drop.target) => {
-            match Path::try_from_node(arena, drop.target) {
+            match Path::try_from_node(arena, drop.target, context) {
                 Some(written) if do_paths_overlap(&written, observed) => return true,
                 Some(_) | None => {}
             }
         }
         NodeKind::DropSubscriptValue(drop) if node_is_place_reference(arena, drop.target) => {
-            match Path::try_from_node(arena, drop.target) {
+            match Path::try_from_node(arena, drop.target, context) {
                 Some(written) if do_paths_overlap(&written, observed) => return true,
                 Some(_) | None => {}
             }
@@ -189,7 +325,7 @@ fn evaluation_may_write_path(arena: &NodeArena, node_id: NodeId, observed: &Path
     if call_arguments(&node.kind).is_some_and(|arguments| {
         arguments.iter().any(|argument| {
             argument.passing == ArgConvention::MutableRef
-                && Path::try_from_node(arena, argument.value)
+                && Path::try_from_node(arena, argument.value, context)
                     .is_some_and(|written| do_paths_overlap(&written, observed))
         })
     }) {
@@ -199,7 +335,7 @@ fn evaluation_may_write_path(arena: &NodeArena, node_id: NodeId, observed: &Path
     node.kind
         .child_node_ids()
         .into_iter()
-        .any(|child| evaluation_may_write_path(arena, child, observed))
+        .any(|child| evaluation_may_write_path(arena, child, observed, context))
 }
 
 /// Return each `Let` place whose observed value may be changed while a later argument is
@@ -212,6 +348,7 @@ fn evaluation_may_write_path(arena: &NodeArena, node_id: NodeId, observed: &Path
 pub(crate) fn let_arguments_overlapping_later_argument_writes(
     arena: &NodeArena,
     arguments: &[CallArgument],
+    context: &BorrowContext<'_>,
 ) -> Vec<(usize, usize)> {
     arguments
         .iter()
@@ -222,14 +359,17 @@ pub(crate) fn let_arguments_overlapping_later_argument_writes(
                 && !matches!(arena[argument.value].kind, NodeKind::GetTraitMethod(_))
         })
         .filter_map(|(let_index, argument)| {
-            Path::try_from_node(arena, argument.value).map(|observed| (let_index, observed))
+            Path::try_from_node(arena, argument.value, context)
+                .map(|observed| (let_index, observed))
         })
         .flat_map(|(let_index, observed)| {
             arguments
                 .iter()
                 .enumerate()
                 .skip(let_index + 1)
-                .filter(move |(_, later)| evaluation_may_write_path(arena, later.value, &observed))
+                .filter(move |(_, later)| {
+                    evaluation_may_write_path(arena, later.value, &observed, context)
+                })
                 .map(move |(writing_index, _)| (let_index, writing_index))
         })
         .collect()
@@ -245,18 +385,20 @@ pub(crate) fn callee_overlaps_argument_writes(
     arena: &NodeArena,
     callee: NodeId,
     arguments: &[CallArgument],
+    context: &BorrowContext<'_>,
 ) -> bool {
+    // A yielded accessor is not a callable place until its WithYielded driver binds the result.
     if !node_is_place_reference(arena, callee) {
         return false;
     }
-    let Some(observed) = Path::try_from_node(arena, callee) else {
+    let Some(observed) = Path::try_from_node(arena, callee, context) else {
         return false;
     };
 
     arguments.iter().any(|argument| {
-        evaluation_may_write_path(arena, argument.value, &observed)
+        evaluation_may_write_path(arena, argument.value, &observed, context)
             || argument.passing == ArgConvention::MutableRef
-                && Path::try_from_node(arena, argument.value)
+                && Path::try_from_node(arena, argument.value, context)
                     .is_some_and(|written| do_paths_overlap(&written, &observed))
     })
 }
@@ -274,6 +416,9 @@ fn is_evidence_node(kind: &NodeKind) -> bool {
 /// Returns whether the two nodes' path to memory are overlapping.
 /// This assumes the nodes are path in the first place.
 fn do_paths_overlap(a: &Path, b: &Path) -> bool {
+    if a.variable.is_none() || b.variable.is_none() {
+        return true;
+    }
     if a.variable != b.variable {
         return false;
     }
@@ -281,11 +426,6 @@ fn do_paths_overlap(a: &Path, b: &Path) -> bool {
         use PathPart::*;
         match (a, b) {
             (Projection(a), Projection(b)) => {
-                if a != b {
-                    return false;
-                }
-            }
-            (FieldAccess(a), FieldAccess(b)) => {
                 if a != b {
                     return false;
                 }
@@ -310,13 +450,14 @@ fn do_paths_overlap(a: &Path, b: &Path) -> bool {
 pub(crate) fn let_arguments_overlapping_mutable(
     arena: &NodeArena,
     arguments: &[CallArgument],
+    context: &BorrowContext<'_>,
 ) -> Vec<(usize, usize)> {
     let mutable_paths = arguments
         .iter()
         .enumerate()
         .filter(|(_, argument)| argument.passing == ArgConvention::MutableRef)
         .filter_map(|(index, argument)| {
-            Path::try_from_node(arena, argument.value).map(|path| (index, path))
+            Path::try_from_node(arena, argument.value, context).map(|path| (index, path))
         })
         .collect::<Vec<_>>();
 
@@ -331,7 +472,7 @@ pub(crate) fn let_arguments_overlapping_mutable(
                 && !matches!(arena[argument.value].kind, NodeKind::GetTraitMethod(_))
         })
         .filter_map(|(let_index, argument)| {
-            Path::try_from_node(arena, argument.value).map(|path| (let_index, path))
+            Path::try_from_node(arena, argument.value, context).map(|path| (let_index, path))
         })
         .flat_map(|(let_index, let_path)| {
             mutable_paths
@@ -371,37 +512,55 @@ impl PlaceOrigin {
 }
 
 impl Path {
-    fn from_enode(arena: &ENodeArena, node_id: ENodeId) -> Self {
-        Self::try_from_enode(arena, node_id).expect("Cannot resolve a non-place node")
+    fn from_enode(
+        arena: &ENodeArena,
+        node_id: ENodeId,
+        context: &BorrowContext<'_, Elaborated>,
+    ) -> Self {
+        Self::try_from_enode(arena, node_id, context).unwrap_or_else(Self::unknown)
     }
 
-    fn try_from_enode(arena: &ENodeArena, node_id: ENodeId) -> Option<Self> {
+    fn try_from_enode(
+        arena: &ENodeArena,
+        node_id: ENodeId,
+        context: &BorrowContext<'_, Elaborated>,
+    ) -> Option<Self> {
         let node = &arena[node_id];
         use NodeKind::*;
         match &node.kind {
             Project(project) => {
-                let mut path = Self::try_from_enode(arena, project.value)?;
+                let mut path = Self::try_from_enode(arena, project.value, context)?;
                 path.parts
                     .push(PathPart::Projection(project.index.as_index()));
                 Some(path)
             }
-            StaticApply(app) if app.ty.returns_place() => {
-                Self::from_enode_addressor_arguments(arena, &app.arguments)
+            StaticApply(app) if app.ty.result_convention.returns_borrow() => {
+                Self::from_enode_addressor_arguments(
+                    arena,
+                    &app.arguments,
+                    context,
+                    context.is_array_index(app.function),
+                )
             }
-            FunctionApply(app) if app.ty.returns_place() => {
-                Self::from_enode_addressor_arguments(arena, &app.arguments)
+            FunctionApply(app) if app.ty.result_convention.returns_borrow() => {
+                Self::from_enode_addressor_arguments(arena, &app.arguments, context, false)
             }
-            CallDictionaryFunction(call) if call.ty.returns_place() => {
-                Self::from_enode_addressor_arguments(arena, &call.arguments)
+            CallDictionaryFunction(call) if call.ty.result_convention.returns_borrow() => {
+                Self::from_enode_addressor_arguments(arena, &call.arguments, context, false)
             }
-            SubscriptApply(app) if app.ty.returns_place() => {
-                Self::from_enode_addressor_arguments(arena, &app.arguments)
+            SubscriptApply(app) if app.ty.result_convention.returns_borrow() => {
+                Self::from_enode_addressor_arguments(arena, &app.arguments, context, false)
             }
             Block(block) => block
                 .tail_node()
-                .and_then(|tail| Self::try_from_enode(arena, tail)),
-            WithPlace(node) => Self::try_from_enode(arena, node.place),
-            LoadLocal(node) => Some(Self::from_local(node.id)),
+                .and_then(|tail| Self::try_from_enode(arena, tail, context)),
+            WithPlace(node) => Self::try_from_enode(arena, node.place, context),
+            LoadLocal(node) => match context.aliases.get(node.id) {
+                Some(source) => {
+                    Some(Self::try_from_enode(arena, source, context).unwrap_or_else(Self::unknown))
+                }
+                None => Some(Self::from_local(node.id)),
+            },
             FieldAccess(never)
             | TraitMethodApply(never)
             | GetTraitMethod(never)
@@ -414,28 +573,33 @@ impl Path {
     fn from_enode_addressor_arguments(
         arena: &ENodeArena,
         arguments: &[CallArgument<Elaborated>],
+        context: &BorrowContext<'_, Elaborated>,
+        disjoint_indices: bool,
     ) -> Option<Self> {
-        let base_index = arguments
+        let Some(base_index) = arguments
             .iter()
             .position(|argument| !is_enode_evidence(&arena[argument.value].kind))
-            .expect("addressor-place application should have a base argument");
-        let mut path = Self::try_from_enode(arena, arguments[base_index].value)?;
-        if let Some(index) = arguments.get(base_index + 1) {
+        else {
+            return Some(Self::unknown());
+        };
+        let mut path = Self::try_from_enode(arena, arguments[base_index].value, context)
+            .unwrap_or_else(Self::unknown);
+        if disjoint_indices && let Some(index) = arguments.get(base_index + 1) {
             path.parts.push(Self::enode_index_part(arena, index.value));
         } else {
-            path.parts.push(PathPart::IndexDynamic);
+            path.parts.push(PathPart::OpaqueProjection);
         }
         Some(path)
     }
 
     fn enode_index_part(arena: &ENodeArena, node_id: ENodeId) -> PathPart {
-        if let NodeKind::Immediate(immediate) = &arena[node_id].kind {
-            let index = *immediate.as_primitive_ty::<isize>().unwrap();
-            if index >= 0 {
-                return PathPart::IndexStatic(index as usize);
-            }
+        if let NodeKind::Immediate(immediate) = &arena[node_id].kind
+            && let Some(&index) = immediate.as_primitive_ty::<isize>()
+            && index >= 0
+        {
+            return PathPart::IndexStatic(index as usize);
         }
-        PathPart::IndexDynamic
+        PathPart::OpaqueProjection
     }
 }
 
@@ -453,12 +617,13 @@ fn check_elaborated_arguments(
     arguments: &[CallArgument<Elaborated>],
     arena: &ENodeArena,
     fn_span: Location,
+    context: &BorrowContext<'_, Elaborated>,
 ) -> Result<(), InternalCompilationError> {
     let mutable_paths = arguments
         .iter()
         .enumerate()
         .filter(|(_, argument)| argument.passing == ArgConvention::MutableRef)
-        .map(|(index, argument)| (index, Path::from_enode(arena, argument.value)))
+        .map(|(index, argument)| (index, Path::from_enode(arena, argument.value, context)))
         .collect::<Vec<_>>();
     for (index, left) in mutable_paths.iter().enumerate() {
         for right in mutable_paths.iter().skip(index + 1) {
@@ -477,25 +642,67 @@ fn check_elaborated_arguments(
 pub fn check_elaborated_borrows(
     arena: &ENodeArena,
     node_id: ENodeId,
+    modules: &Modules,
+) -> Result<(), InternalCompilationError> {
+    check_borrows_with_aliases(
+        arena,
+        node_id,
+        array_index_members(modules),
+        &mut FxHashMap::default(),
+    )
+}
+
+// This traversal owns its active map and restores it between siblings. Read-only path queries
+// borrow that map through AliasScope; nested write-footprint queries use overlays instead.
+fn check_borrows_with_aliases(
+    arena: &ENodeArena,
+    node_id: ENodeId,
+    array_index_members: [Option<FunctionId>; 2],
+    aliases: &mut FxHashMap<LocalDeclId, ENodeId>,
 ) -> Result<(), InternalCompilationError> {
     let node = &arena[node_id];
+    let binding = match &node.kind {
+        NodeKind::WithPlace(node) => Some((node.binding, node.place, node.body)),
+        NodeKind::WithYielded(node) => Some((node.binding, node.accessor, node.body)),
+        _ => None,
+    };
+    if let Some((binding, source, body)) = binding {
+        check_borrows_with_aliases(arena, source, array_index_members, aliases)?;
+        let previous = aliases.insert(binding, source);
+        let result = check_borrows_with_aliases(arena, body, array_index_members, aliases);
+        if let Some(previous) = previous {
+            aliases.insert(binding, previous);
+        } else {
+            aliases.remove(&binding);
+        }
+        return result;
+    }
+    let context = BorrowContext {
+        array_index_members,
+        aliases: AliasScope::Active(aliases),
+    };
     match &node.kind {
         NodeKind::FunctionApply(app) => {
-            check_elaborated_arguments(&app.arguments, arena, arena[app.function].span)?;
+            check_elaborated_arguments(&app.arguments, arena, arena[app.function].span, &context)?;
         }
         NodeKind::SubscriptApply(app) => {
-            check_elaborated_arguments(&app.arguments, arena, node.span)?;
+            check_elaborated_arguments(&app.arguments, arena, node.span, &context)?;
         }
         NodeKind::StaticApply(app) => {
-            check_elaborated_arguments(&app.arguments, arena, app.function_span)?;
+            check_elaborated_arguments(&app.arguments, arena, app.function_span, &context)?;
         }
         NodeKind::CallDictionaryFunction(call) => {
-            check_elaborated_arguments(&call.arguments, arena, arena[call.dictionary].span)?;
+            check_elaborated_arguments(
+                &call.arguments,
+                arena,
+                arena[call.dictionary].span,
+                &context,
+            )?;
         }
         _ => {}
     }
     for child in elaborated_child_node_ids(&node.kind) {
-        check_elaborated_borrows(arena, child)?;
+        check_borrows_with_aliases(arena, child, array_index_members, aliases)?;
     }
     Ok(())
 }
@@ -927,6 +1134,118 @@ mod tests {
         });
 
         assert_eq!(elaborated_child_node_ids(&kind).as_slice(), &[capture]);
+    }
+
+    #[test]
+    fn receiverless_yielded_provenance_is_unknown_in_both_phases() {
+        use crate::{
+            hir::{CallArgument, FunctionApplication, LoadLocal, Node},
+            types::r#type::{CallImplType, CallResultConvention, FnType},
+        };
+
+        fn exercise<P: HirPhase>() -> (NodeArena<P>, NodeId<P>) {
+            let mut arena = NodeArena::default();
+            let span = Location::new_synthesized();
+            let ty = FnType::new_by_val([], Type::primitive::<isize>(), EffType::empty());
+            let callee = arena.alloc(Node::new(
+                NodeKind::LoadLocal(LoadLocal {
+                    id: LocalDeclId::new(0),
+                }),
+                Type::function_type(ty.clone()),
+                EffType::empty(),
+                span,
+            ));
+            let call = arena.alloc(Node::new(
+                NodeKind::FunctionApply(b(FunctionApplication {
+                    function: callee,
+                    arguments: Vec::new(),
+                    ty: CallImplType::new(ty, CallResultConvention::YIELDED_ONCE),
+                })),
+                Type::primitive::<isize>(),
+                EffType::empty(),
+                span,
+            ));
+            (arena, call)
+        }
+
+        let modules = Modules::default();
+        let aliases = FxHashMap::default();
+        let context = BorrowContext::new(&modules, &aliases);
+        let (arena, call) = exercise::<Unelaborated>();
+        let path = Path::try_from_node(&arena, call, &context).expect("borrow provenance");
+        assert!(do_paths_overlap(
+            &path,
+            &Path::from_local(LocalDeclId::new(42))
+        ));
+
+        let (mut arena, call) = exercise::<Elaborated>();
+        let binding = LocalDeclId::new(1);
+        let load = arena.alloc(ENode::new(
+            NodeKind::LoadLocal(LoadLocal { id: binding }),
+            Type::primitive::<isize>(),
+            EffType::empty(),
+            Location::new_synthesized(),
+        ));
+        let aliases = FxHashMap::from_iter([(binding, call)]);
+        let context = BorrowContext::new(&modules, &aliases);
+        let arguments: [_; 2] = std::array::from_fn(|_| CallArgument {
+            value: load,
+            passing: ArgConvention::MutableRef,
+        });
+        assert!(
+            check_elaborated_arguments(&arguments, &arena, Location::new_synthesized(), &context)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn an_alias_without_resolvable_provenance_is_not_an_independent_root() {
+        use crate::hir::{CallArgument, ENode, LoadLocal, Node};
+        let span = Location::new_synthesized();
+        let modules = Modules::default();
+        let binding = LocalDeclId::new(0);
+        let mut arena = NodeArena::default();
+        let temporary = arena.alloc(Node::new(
+            NodeKind::Uninit,
+            Type::unit(),
+            EffType::empty(),
+            span,
+        ));
+        let load = arena.alloc(Node::new(
+            NodeKind::LoadLocal(LoadLocal { id: binding }),
+            Type::unit(),
+            EffType::empty(),
+            span,
+        ));
+        let aliases = FxHashMap::from_iter([(binding, temporary)]);
+        let context = BorrowContext::new(&modules, &aliases);
+        let path = Path::try_from_node(&arena, load, &context).expect("alias provenance");
+        assert!(do_paths_overlap(
+            &path,
+            &Path::from_local(LocalDeclId::new(42))
+        ));
+
+        let mut arena = ENodeArena::default();
+        let temporary = arena.alloc(ENode::new(
+            NodeKind::Uninit,
+            Type::unit(),
+            EffType::empty(),
+            span,
+        ));
+        let load = arena.alloc(ENode::new(
+            NodeKind::LoadLocal(LoadLocal { id: binding }),
+            Type::unit(),
+            EffType::empty(),
+            span,
+        ));
+        let aliases = FxHashMap::from_iter([(binding, temporary)]);
+        let context = BorrowContext::new(&modules, &aliases);
+        // The checker neither asserts nor drops unknown paths from its mutable-argument census.
+        let arguments: [_; 2] = std::array::from_fn(|_| CallArgument {
+            value: load,
+            passing: ArgConvention::MutableRef,
+        });
+        assert!(check_elaborated_arguments(&arguments, &arena, span, &context).is_err());
     }
 
     fn with_std_solver(result: impl FnOnce(&TraitSolver<'_>)) {

@@ -684,7 +684,7 @@ impl PendingModuleFunction {
             )?;
         }
         check_elaborated_literal_invariants(dst_arena, elaborated.root, ctx.trait_solver)?;
-        check_elaborated_borrows(dst_arena, elaborated.root)?;
+        check_elaborated_borrows(dst_arena, elaborated.root, ctx.trait_solver.others)?;
         ctx.assert_evidence_bindings_valid();
         let mut function = ModuleFunction::new_elaborated(
             self.definition,

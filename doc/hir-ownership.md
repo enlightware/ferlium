@@ -231,6 +231,16 @@ The clone dispatch records representation copy, static semantic clone, or dictio
 The argument-position store preserves left-to-right evaluation: a later mutable argument cannot change the earlier observed value before the callee reads it, while managed snapshot cleanup stays visible to every backend.
 Two overlapping `Let` arguments may share; overlapping mutable arguments are rejected by the borrow checker.
 
+Scoped projection bindings retain their receiver provenance for these checks; they are aliases,
+not independent storage. Arbitrary addressors may select overlapping places even for different
+indices or field names. Disjointness is established only by structural projections or the known
+std array-index member with distinct non-negative constant indices. Rooting and repeatability
+alone do not establish disjointness. The same conservative paths govern `Let` snapshots.
+Known structural fields keep their field identity before snapshot planning, so disjoint accesses
+do not require a copy. Missing receiver provenance is treated as possibly overlapping, not as
+evidence of independent storage. A yielded accessor is not itself a usable place: its scoped
+driver supplies the binding whose provenance these checks follow.
+
 The legality of `ResolvedLocalClone::TrivialCopy` remains a trait-solver decision during HIR elaboration and is independent of size.
 Concrete value layout is not persisted in call metadata or `Module`; eval and later lowering compute it structurally from `Type` plus the owning module environment when implementing a representation copy.
 

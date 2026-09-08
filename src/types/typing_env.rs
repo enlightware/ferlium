@@ -9,7 +9,7 @@
 use ustr::{Ustr, ustr};
 
 use crate::{
-    FxHashSet, Location,
+    FxHashMap, FxHashSet, Location,
     ast::{self, DExprArena, UstrSpan},
     compiler::{
         CompilationCapabilities,
@@ -141,6 +141,9 @@ pub struct TypingEnv<'m> {
     pub(crate) ast_arena: &'m DExprArena,
     /// The HIR node arena, used to allocate HIR nodes during type inference.
     pub(crate) ir_arena: &'m mut NodeArena,
+    /// Scoped projection aliases belong to this function's arena, not the shared type solver.
+    #[new(default)]
+    pub(crate) place_aliases: FxHashMap<LocalDeclId, NodeId>,
     /// Non-fatal source diagnostics discovered while this compilation attempt emits HIR.
     pub(crate) warnings: &'m mut Vec<CompilationWarning>,
     #[new(default)]

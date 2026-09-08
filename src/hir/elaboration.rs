@@ -7,7 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use crate::{FxHashMap, FxHashSet, Modules};
+use crate::{FxHashMap, FxHashSet, Modules, hir::borrow_checker::BorrowContext};
 use ustr::{Ustr, ustr};
 
 use crate::{
@@ -1423,6 +1423,7 @@ struct HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
     ctx: &'a mut DictElaborationCtx<'d, 'sr, 'sm>,
     locals: Vec<LocalDecl>,
     remap: FxHashMap<UNodeId, ENodeId>,
+    place_aliases: FxHashMap<LocalDeclId, UNodeId>,
     in_progress: FxHashSet<UNodeId>,
     warnings: &'w mut Vec<CompilationWarning>,
 }
@@ -1457,6 +1458,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             ctx,
             locals,
             remap: FxHashMap::default(),
+            place_aliases: FxHashMap::default(),
             in_progress: FxHashSet::default(),
             warnings,
         }
@@ -1850,8 +1852,9 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 .expect("addressor-place application should have a base argument")
         });
 
+        let borrow_context = BorrowContext::new(self.ctx.trait_solver.others, &self.place_aliases);
         for (let_index, mutable_index) in
-            hir::borrow_checker::let_arguments_overlapping_mutable(src, arguments)
+            hir::borrow_checker::let_arguments_overlapping_mutable(src, arguments, &borrow_context)
         {
             if caller_rooted_base == Some(let_index) {
                 return Err(internal_compilation_error!(MutablePathsOverlap {
@@ -1863,9 +1866,11 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             snapshot[let_index] = true;
         }
 
-        for (let_index, _) in
-            hir::borrow_checker::let_arguments_overlapping_later_argument_writes(src, arguments)
-        {
+        for (let_index, _) in hir::borrow_checker::let_arguments_overlapping_later_argument_writes(
+            src,
+            arguments,
+            &borrow_context,
+        ) {
             if caller_rooted_base != Some(let_index) {
                 snapshot[let_index] = true;
             }
@@ -2053,6 +2058,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     src,
                     function_source,
                     &app.arguments,
+                    &BorrowContext::new(self.ctx.trait_solver.others, &self.place_aliases),
                 );
 
                 // The function expression is evaluated before every argument. Preserve that
@@ -2765,7 +2771,14 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             Yield(node) => Yield(self.elaborate_node(src, *node)?),
             WithYielded(node) => {
                 let accessor = self.elaborate_node(src, node.accessor)?;
-                let body = self.elaborate_node(src, node.body)?;
+                let previous = self.place_aliases.insert(node.binding, node.accessor);
+                let body = self.elaborate_node(src, node.body);
+                if let Some(previous) = previous {
+                    self.place_aliases.insert(node.binding, previous);
+                } else {
+                    self.place_aliases.remove(&node.binding);
+                }
+                let body = body?;
                 // A generic yielded projection may resolve to a concrete direct
                 // projection or addressor-place call. In either case the
                 // elaborated accessor already produces a place and needs no
@@ -2794,11 +2807,21 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     })
                 }
             }
-            WithPlace(node) => WithPlace(hir::WithPlace {
-                place: self.elaborate_node(src, node.place)?,
-                binding: node.binding,
-                body: self.elaborate_node(src, node.body)?,
-            }),
+            WithPlace(node) => {
+                let place = self.elaborate_node(src, node.place)?;
+                let previous = self.place_aliases.insert(node.binding, node.place);
+                let body = self.elaborate_node(src, node.body);
+                if let Some(previous) = previous {
+                    self.place_aliases.insert(node.binding, previous);
+                } else {
+                    self.place_aliases.remove(&node.binding);
+                }
+                WithPlace(hir::WithPlace {
+                    place,
+                    binding: node.binding,
+                    body: body?,
+                })
+            }
             CheckCallDepth => CheckCallDepth,
             CheckFuel => CheckFuel,
         })

@@ -3185,7 +3185,14 @@ impl TypeInference {
         if accessor.provenance == YieldProvenance::AddressorPlace {
             let (env_size, binding) = self.push_yielded_binding(env, accessor.ty, expr_span);
             let place = self.yielded_binding_load(env, binding, accessor.ty, expr_span);
-            let (body, result_ty) = build_body(self, env, place, accessor.ty, inside_yielded)?;
+            let previous = env.place_aliases.insert(binding, accessor.node);
+            let result = build_body(self, env, place, accessor.ty, inside_yielded);
+            if let Some(previous) = previous {
+                env.place_aliases.insert(binding, previous);
+            } else {
+                env.place_aliases.remove(&binding);
+            }
+            let (body, result_ty) = result?;
             let body_effects = env.ir_arena[body].effects.clone();
             let effects = self.make_dependent_effect([&accessor.effects, &body_effects]);
             let result_mut = if matches!(mode, SubscriptMemberKind::Mut)
@@ -3208,7 +3215,14 @@ impl TypeInference {
         }
         let (env_size, binding) = self.push_yielded_binding(env, accessor.ty, expr_span);
         let place = self.yielded_binding_load(env, binding, accessor.ty, expr_span);
-        let (body, result_ty) = build_body(self, env, place, accessor.ty, true)?;
+        let previous = env.place_aliases.insert(binding, accessor.node);
+        let result = build_body(self, env, place, accessor.ty, true);
+        if let Some(previous) = previous {
+            env.place_aliases.insert(binding, previous);
+        } else {
+            env.place_aliases.remove(&binding);
+        }
+        let (body, result_ty) = result?;
         let body_effects = env.ir_arena[body].effects.clone();
         let effects = self.make_dependent_effect([&accessor.effects, &body_effects]);
         Self::close_yielded_binding_scope(env, env_size, expr_span);
@@ -3373,12 +3387,23 @@ impl TypeInference {
             .as_ref()
             .map(|projection_effects| self.make_dependent_effect([&effects, projection_effects]))
             .unwrap_or(effects);
-        let node = env.ir_arena.alloc(hir::Node::new(
-            NodeKind::FieldAccess(HirFieldAccess::new(record_node_id, field, mode)),
-            element_ty,
-            effects,
-            expr_span,
-        ));
+        // Preserve an already-known structural field identity during borrow/snapshot planning.
+        // Deferred projection evidence stays a FieldAccess: its member need not be disjoint from
+        // another named projection. Keep the constraint above for field type/error resolution.
+        let structural_index = field_receiver_ty
+            .data()
+            .as_record()
+            .and_then(|fields| fields.iter().position(|entry| entry.0 == field));
+        let kind = match structural_index {
+            Some(index) => NodeKind::Project(HirProject::new(
+                record_node_id,
+                ProjectionIndex::from_index(index),
+            )),
+            None => NodeKind::FieldAccess(HirFieldAccess::new(record_node_id, field, mode)),
+        };
+        let node = env
+            .ir_arena
+            .alloc(hir::Node::new(kind, element_ty, effects, expr_span));
         Ok((node, element_ty, record_mut, uses_projection_evidence))
     }
 
@@ -4410,6 +4435,10 @@ impl TypeInference {
             crate::hir::borrow_checker::let_arguments_overlapping_later_argument_writes(
                 env.ir_arena,
                 &source_arguments,
+                &crate::hir::borrow_checker::BorrowContext::new(
+                    env.module_env.modules,
+                    &env.place_aliases,
+                ),
             )
         {
             // A place-returning addressor's base identifies caller storage rather than observing
@@ -4451,8 +4480,14 @@ impl TypeInference {
             }
         }
         let arguments = CallArgument::from_value_slice_and_passing(args, arg_passing);
-        let overlaps =
-            crate::hir::borrow_checker::let_arguments_overlapping_mutable(env.ir_arena, &arguments);
+        let overlaps = crate::hir::borrow_checker::let_arguments_overlapping_mutable(
+            env.ir_arena,
+            &arguments,
+            &crate::hir::borrow_checker::BorrowContext::new(
+                env.module_env.modules,
+                &env.place_aliases,
+            ),
+        );
         let mut snapshotted = vec![false; arguments.len()];
         for (let_index, _) in overlaps {
             // A returned place must stay rooted in caller storage. Elaboration reports
