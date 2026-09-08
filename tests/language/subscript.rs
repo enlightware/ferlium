@@ -2790,6 +2790,117 @@ fn addressor_named_subscript_assignment_writes_direct_place() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn ordinary_assignment_evaluates_rhs_before_array_destination() {
+    for source in [
+        "let mut values = [1, 2]; let mut index = 0; \
+         values[index] = { index = 1; 9 }; values",
+        "let mut values = [1]; values[-1] = { values = [1, 2]; 9 }; values",
+        "let mut values = []; values[1] = { values = [1, 2]; 9 }; values",
+        "let mut values = [[1]]; values[0][-1] = { values = [[1, 2]]; 9 }; values[0]",
+    ] {
+        assert_val_eq!(
+            run_experimental_subscript_source(source),
+            expected_array_infer([int(1), int(9)])
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn ordinary_assignment_runs_rhs_before_addressor_once() {
+    let value = run_experimental_subscript_source(
+        r#"
+        subscript cell(slot: &mut int, log: &mut int) -> int {
+            ref mut {
+                log = log * 10 + 2;
+                slot
+            }
+        }
+        let mut slot = 0;
+        let mut log = 0;
+        slot->[cell](log) = { log = log * 10 + 1; 9 };
+        (slot, log)
+    "#,
+    );
+    assert_val_eq!(value, expected_tuple([int(9), int(12)]));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn ordinary_assignment_runs_rhs_before_yielded_accessor() {
+    let value = run_experimental_subscript_source(
+        r#"
+        subscript cell(slot: &mut int, log: &mut int) -> int {
+            mut {
+                log = log * 10 + 2;
+                let mut local = slot;
+                yield local;
+                slot = local;
+                log = log * 10 + 3
+            }
+        }
+        let mut slot = 0;
+        let mut log = 0;
+        slot->[cell](log) = { log = log * 10 + 1; 9 };
+        (slot, log)
+    "#,
+    );
+    assert_val_eq!(value, expected_tuple([int(9), int(123)]));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn ordinary_assignment_snapshots_rhs_before_destination_mutation() {
+    let value = run_experimental_subscript_source(
+        r#"
+        struct Pair { first: string, second: string }
+        subscript Pair.target(self) -> string {
+            mut {
+                self.first = "changed";
+                self.second
+            }
+        }
+        let mut pair = Pair { first: "original", second: "old" };
+        pair.target = pair.first;
+        (pair.first, pair.second)
+    "#,
+    );
+    assert_val_eq!(
+        value,
+        expected_tuple([string("changed"), string("original")])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn ordinary_assignment_rhs_failure_precedes_destination_failure() {
+    let error = experimental_session().fail_run(
+        r#"
+        let mut values: [int] = [];
+        values[0] = idiv(1, 0)
+    "#,
+    );
+    assert_eq!(error, SourceFailureKind::DivisionByZero);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn ordinary_assignment_rhs_return_skips_destination() {
+    let value = run_experimental_subscript_source(
+        r#"
+        fn run() -> int {
+            let mut values: [int] = [];
+            values[0] = { return 7 };
+            0
+        }
+        run()
+    "#,
+    );
+    assert_val_eq!(value, int(7));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn mut_addressor_return_selects_mut_member_of_nested_subscript() {
     let value = run_experimental_subscript_source(indoc! { r#"
         subscript inner(values: &mut [int]) -> int {
@@ -4053,9 +4164,10 @@ fn named_subscript_body_error_runs_epilogue_before_propagating() {
             }
         }
 
+        fn fail(target: &mut int) { target = [0][1] }
         testing::reset_tracked_drops();
         let mut slot = 5;
-        slot->[cell] = [0][1]
+        fail(slot->[cell])
     "# };
 
     assert_eq!(
@@ -4168,10 +4280,11 @@ fn named_subscript_slide_error_during_unwind_poisons_without_outer_semantic_clea
             }
         }
 
+        fn fail(target: &mut int) { target = [0][2] }
         testing::reset_tracked_drops();
         let owned = Probe(7);
         let mut slot = 5;
-        slot->[cell] = [0][2]
+        fail(slot->[cell])
     "# };
 
     // The body starts unwinding with index 2, then the accessor slide raises index 1. A second

@@ -2445,19 +2445,21 @@ fn reassign_array_element_from_param() {
     assert_eq_sans_flake!(
         session.emit_mir("fn f(a: &mut [int], v: int) { a[0] = v; }"),
         r#"fn f(%p0: @arg &mut [int], %p1: @arg let int, %p2: @ret ()):
-  @c0: int = 0
-  @c1: () = ()
+  @c0: () = ()
+  @c1: int = 0
   b0:
     %r0: place int = alloca int
-    store @c0 to %r0
-    %r1: place *int = alloca_place int
-    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, %r0, %r1) -> b1 error b2
+    memcpy %p1 to %r0
+    %r1: place int = alloca int
+    store @c1 to %r1
+    %r2: place *int = alloca_place int
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, %r1, %r2) -> b1 error b2
   b1:
-    %r2: *int = load %r1
-    %r3: place int = alloca int
-    memcpy %p1 to %r3
-    move %r3 to %r2
-    store @c1 to %p2
+    %r3: *int = load %r2
+    %r4: place int = alloca int
+    move %r0 to %r4
+    move %r4 to %r3
+    store @c0 to %p2
     ret
   b2:
     propagate_error
@@ -2746,13 +2748,15 @@ fn named_subscript_assign() {
         r#"fn f(%p0: @arg &mut [int], %p1: @arg let int, %p2: @ret ()):
   @c0: () = ()
   b0:
-    %r0: place *int = alloca_place int
-    invoke call <test>::first::ref_mut#subscript:19d196cf(%p0, %r0) -> b1 error b2
+    %r0: place int = alloca int
+    memcpy %p1 to %r0
+    %r1: place *int = alloca_place int
+    invoke call <test>::first::ref_mut#subscript:19d196cf(%p0, %r1) -> b1 error b2
   b1:
-    %r1: *int = load %r0
-    %r2: place int = alloca int
-    memcpy %p1 to %r2
-    move %r2 to %r1
+    %r2: *int = load %r1
+    %r3: place int = alloca int
+    move %r0 to %r3
+    move %r3 to %r2
     store @c0 to %p2
     ret
   b2:
@@ -2942,12 +2946,14 @@ fn yielded_subscript_assign() {
 fn f(%p0: @arg &mut int, %p1: @arg let int, %p2: @ret ()):
   @c0: () = ()
   b0:
-    %r0: open place int = project <test>::cell::ref_mut#subscript:f3d0ec43(%p0)
-    %r1: place int = alloca int
-    memcpy %p1 to %r1
-    move %r1 to %r0
+    %r0: place int = alloca int
+    memcpy %p1 to %r0
+    %r1: open place int = project <test>::cell::ref_mut#subscript:f3d0ec43(%p0)
+    %r2: place int = alloca int
+    move %r0 to %r2
+    move %r2 to %r1
     store @c0 to %p2
-    end_project %r0
+    end_project %r1
     ret
 "#,
     );
@@ -3001,11 +3007,54 @@ fn f(%p0: @arg &mut int, %p1: @arg let int, %p2: @ret ()):
 }
 
 #[test]
-fn yielded_subscript_fallible_body_runs_slide_on_unwind() {
-    // When the body of a scoped subscript can raise (here a fallible `/`), the write into the yielded
-    // place is an `invoke`: on the error edge it diverts to a cleanup pad that runs `end_project` (the
-    // accessor slide) before propagating the failure to the caller — the slide runs on the error path,
-    // matching the HIR interpreter's epilogue-on-transfer.
+fn yielded_subscript_compound_assignment_closes_on_error() {
+    let mut session = TestSession::new();
+    session.allow_experimental();
+    let mir = session.emit_mir(&format!(
+        "{CELL_SUBSCRIPT}fn f(a: &mut int, w: int) {{ a->[cell] += idiv(1, w) }}"
+    ));
+    assert_eq_sans_flake!(
+        mir,
+        r#"fn cell::ref_mut#subscript:f3d0ec43(%p0: @arg &mut int, %p1: @ret int):
+  @c0: () = ()
+  b0:
+    %r0: place int = alloca int
+    memcpy %p0 to %r0
+    yield %r0 -> b1
+  b1:
+    %r1: place int = alloca int
+    memcpy %r0 to %r1
+    move %r1 to %p0
+    ret
+
+fn f(%p0: @arg &mut int, %p1: @arg let int, %p2: @ret ()):
+  @c0: int = 1
+  @c1: () = ()
+  b0:
+    %r0: open place int = project <test>::cell::ref_mut#subscript:f3d0ec43(%p0)
+    %r1: place int = alloca int
+    %r2: place int = alloca int
+    store @c0 to %r2
+    %r3: place int = alloca int
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %r3)
+    %r4: place int = alloca int
+    invoke call std::idiv(%r3, %p1, %r4) -> b1 error b2
+  b1:
+    call std::Num<std::int>::add#impl:7665d3ee(%r0, %r4, %r1)
+    move %r1 to %r0
+    store @c1 to %p2
+    end_project %r0
+    ret
+  b2:
+    end_project %r0
+    propagate_error
+"#,
+    );
+}
+
+#[test]
+fn yielded_subscript_assignment_evaluates_fallible_rhs_before_opening() {
+    // Failure propagates before `project`; only a successful RHS opens the accessor.
     let mut session = TestSession::new();
     session.allow_experimental();
     assert_eq_sans_flake!(
@@ -3027,16 +3076,17 @@ fn yielded_subscript_fallible_body_runs_slide_on_unwind() {
 fn f(%p0: @arg &mut int, %p1: @arg let int, %p2: @arg let int, %p3: @ret ()):
   @c0: () = ()
   b0:
-    %r0: open place int = project <test>::cell::ref_mut#subscript:f3d0ec43(%p0)
-    %r1: place int = alloca int
-    invoke call std::idiv(%p1, %p2, %r1) -> b1 error b2
+    %r0: place int = alloca int
+    invoke call std::idiv(%p1, %p2, %r0) -> b1 error b2
   b1:
-    move %r1 to %r0
+    %r1: open place int = project <test>::cell::ref_mut#subscript:f3d0ec43(%p0)
+    %r2: place int = alloca int
+    move %r0 to %r2
+    move %r2 to %r1
     store @c0 to %p3
-    end_project %r0
+    end_project %r1
     ret
   b2:
-    end_project %r0
     propagate_error
 "#,
     );
@@ -3092,11 +3142,10 @@ fn yielded_subscript_compound_assign_runs_slide_writeback() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn yielded_subscript_body_error_propagates() {
+fn yielded_subscript_assignment_rhs_error_propagates() {
     let mut session = TestSession::new();
     session.allow_experimental();
-    // A raise in the body unwinds out of the projection on both backends (the MIR cleanup runs the
-    // slide and then propagates); the outcomes agree — a `DivisionByZero` runtime error.
+    // A failing assignment RHS propagates before the destination accessor is opened.
     assert_eq!(
         session.fail_run(&format!(
             "{CELL_SUBSCRIPT}fn bad(a: &mut int, w: int) {{ a->[cell] = idiv(1, w) }}\nfn driver() -> int {{ let mut x = 5; bad(x, 0); x }}\ndriver()"

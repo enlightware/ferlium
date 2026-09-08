@@ -1571,6 +1571,39 @@ mod tests {
         },
     };
 
+    #[test]
+    fn ordinary_assignment_does_not_materialize_a_never_typed_local() {
+        let mut session = CompilerSession::new();
+        let path = Path::single_str("uninhabited");
+        let mut module = Module::new(session.modules().next_id(), path.clone());
+        // An explicit alias reaches a never-typed place without an earlier diverging statement
+        // causing block inference to skip the assignment altogether.
+        module.add_type_alias_str_with_doc("Bottom", Type::never(), "");
+        session.register_module(path, module);
+        for (name, destination) in [("local", "y"), ("indexed", "values[0]")] {
+            let compiled = session
+                .compile(
+                    &format!(
+                        "fn f(x: uninhabited::Bottom, y: &mut int, values: &mut [int]) {{
+                            {destination} = x
+                        }}"
+                    ),
+                    name,
+                    Path::single_str(name),
+                )
+                .expect("a never-typed RHS must not require Value<never>");
+            let module = session.expect_fresh_module(compiled.module_id);
+            let function = module
+                .get_function_by_id(module.get_local_function_id(ustr::ustr("f")).unwrap())
+                .unwrap();
+            assert!(
+                function.definition.ty_scheme.constraints.is_empty(),
+                "unexpected assignment constraints: {:?}",
+                function.definition.ty_scheme.constraints
+            );
+        }
+    }
+
     fn session_with_named_option() -> (CompilerSession, module::TypeDefId) {
         let mut session = CompilerSession::new();
         let module_id = session.modules().next_id();

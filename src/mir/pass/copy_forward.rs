@@ -121,6 +121,8 @@ enum OperandStorage {
 
 /// Rewrites provably redundant local storage, returning `None` when there is none.
 pub(crate) fn forward_redundant_storage(func: &Function, env: ModuleEnv<'_>) -> Option<Function> {
+    let hoisted = hoist_transfer_field_addresses(func);
+    let func = hoisted.as_ref().unwrap_or(func);
     let mut definitions = FxHashMap::default();
     let mut copies = Vec::new();
     for block in func.blocks() {
@@ -406,6 +408,51 @@ pub(crate) fn forward_redundant_storage(func: &Function, env: ModuleEnv<'_>) -> 
             index += 1;
             keep
         });
+    }
+    Some(edit.finish_unverified())
+}
+
+/// RHS-first assignment can put a fixed structural field address between a producer and its
+/// transfer. Address computation reads no stored value, so move it before the producer to expose
+/// the existing forwarding proof. Never do this for payload indirections or accessor calls.
+/// The caller discards this speculative reorder when no storage can be forwarded.
+fn hoist_transfer_field_addresses(func: &Function) -> Option<Function> {
+    let mut sites = Vec::new();
+    for block in func.blocks() {
+        for (index, triple) in func.block(block).operations().windows(3).enumerate() {
+            let [producer, address, transfer] = triple else {
+                unreachable!()
+            };
+            if initialization_destination_index(producer).is_none()
+                || producer.result_id().is_some()
+                || !matches!(
+                    address.kind,
+                    OperationKind::Subfield {
+                        variant_payload: false,
+                        has_layout_witness: false,
+                        ..
+                    }
+                )
+                || address.operands.len() != 2
+                || field_index(&address.operands[1], func).is_none()
+                || !matches!(
+                    transfer.kind,
+                    OperationKind::Move | OperationKind::MoveBytes { .. } | OperationKind::Memcpy
+                )
+                || transfer.operands.get(1)
+                    != address.result_id().map(mir::Value::Register).as_ref()
+            {
+                continue;
+            }
+            sites.push((block, index));
+        }
+    }
+    if sites.is_empty() {
+        return None;
+    }
+    let mut edit = FunctionEdit::new(func.clone());
+    for (block, index) in sites {
+        edit.block_mut(block).operations.swap(index, index + 1);
     }
     Some(edit.finish_unverified())
 }
@@ -1096,6 +1143,64 @@ mod tests {
             "different constant fields of one root are disjoint:\n{body}"
         );
         assert_eq!(body.matches("alloca int").count(), 0, "{body}");
+    }
+
+    #[test]
+    fn an_unproductive_field_address_hoist_reports_no_change() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let tuple_ty = crate::types::r#type::tuple_type([int_type()]);
+        let mut builder = FunctionBuilder::new("overlapping_transfer".into(), Default::default());
+        let tuple = builder.add_parameter(
+            tuple_ty,
+            ParameterKind::Parameter(ArgConvention::MutableRef),
+        );
+        let block = builder.add_block();
+        let index = builder.add_constant(
+            int_type(),
+            crate::hir::value::LiteralValue::new_native(0isize),
+            &env,
+        );
+        let address = || {
+            Operation::product_subfield(
+                span,
+                mir::Value::Parameter(tuple),
+                mir::Value::Constant(index),
+                int_type(),
+                tuple_ty,
+                [],
+            )
+        };
+        let source = builder.append_operation(block, address()).unwrap();
+        let temporary = builder
+            .append_operation(block, Operation::alloca(span, int_type()))
+            .unwrap();
+        builder.append_operation(block, Operation::memcpy(span, source, temporary.clone()));
+        let destination = builder.append_operation(block, address()).unwrap();
+        builder.append_operation(block, Operation::move_value(span, temporary, destination));
+        builder.set_terminator(block, Terminator::ret(span));
+        let body = builder.finish(env);
+        let hoisted = super::hoist_transfer_field_addresses(&body)
+            .expect("the address must be a speculative hoist candidate");
+        crate::mir::edit::FunctionEdit::new(hoisted).finish(env);
+        assert!(super::forward_redundant_storage(&body, env).is_none());
+    }
+
+    #[test]
+    fn storage_forwarding_preserves_an_overlapping_call_input() {
+        let module = optimized(
+            "struct Pair { a: int, b: int }\n\
+             fn recursive(x: int) -> int {\n\
+                 if x == 0 { 0 } else { recursive(x - 1) }\n\
+             }\n\
+             fn update(mut pair: Pair) -> Pair {\n\
+                 pair.b = recursive(pair.b); pair\n\
+             }",
+        );
+        let body = body_of(&module, "update");
+        assert_eq!(body.matches("alloca int").count(), 1, "{body}");
+        assert!(body.contains("move "), "{body}");
     }
 
     #[test]

@@ -492,6 +492,27 @@ fn mutability() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn ordinary_assignment_checks_destination_after_diverging_rhs() {
+    for source in [
+        "fn f() -> int { let x = 1; x = { return 1 }; 0 }",
+        "fn f() -> int { let x = (1,); x.0 = { return 1 }; 0 }",
+        "fn f() -> int { let x = [1]; x[0] = { return 1 }; 0 }",
+    ] {
+        TestSession::new()
+            .fail_compilation(source)
+            .expect_mutability_must_be(MutabilityMustBeWhat::Mutable);
+    }
+    for source in [
+        "fn f() -> int { undefined = { return 1 }; 0 }",
+        "fn f() -> int { let mut x = [1]; x[missing_fn()] = { return 1 }; 0 }",
+        "fn f() -> int { let mut x = [1]; x[true] = { return 1 }; 0 }",
+    ] {
+        TestSession::new().fail_compilation(source);
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn mut_function_parameters() {
     let mut session = TestSession::new();
     // basic: `mut` parameter is rebound as a mutable local, incremented, and returned
@@ -3236,6 +3257,25 @@ fn fn_pipes() {
     assert_val_eq!(
         session.run("[1, 2] |> concat([3, 4]) |> map(|x| x*x)"),
         int_a![1, 4, 9, 16]
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn ordinary_assignment_evaluates_rhs_before_property_getter() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+        @props::my_scope.my_array = [0];
+        @props::my_scope.my_array[-1] = {
+            @props::my_scope.my_array = [1, 2];
+            9
+        };
+        @props::my_scope.my_array
+    "#
+        ),
+        int_a![1, 9]
     );
 }
 

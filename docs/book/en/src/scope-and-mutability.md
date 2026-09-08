@@ -49,6 +49,19 @@ a = 2;   // value is ()
 a
 ```
 
+For ordinary assignment (`=`), the right-hand side is evaluated first, then the destination
+(including indices and subscript accessors), and finally the value is installed.
+
+```ferlium
+let mut values = [1, 2];
+let mut index = 0;
+values[index] = { index = 1; 9 };
+values // [1, 9]
+```
+
+If the right-hand side fails or exits early, the destination is not evaluated.
+Compound assignments such as `+=` instead evaluate the destination before the right-hand side.
+
 ## Scope
 
 Every block introduces a new [scope](https://en.wikipedia.org/wiki/Scope_(computer_science)).

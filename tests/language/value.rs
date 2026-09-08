@@ -93,6 +93,27 @@ fn native_drop_destroys_values_once_on_source_failure() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn ordinary_assignment_drops_prepared_rhs_when_destination_fails() {
+    for mode in [RunMode::Hir, RunMode::Mir] {
+        let mut session = TestSession::new();
+        session.run_modes([mode]);
+        assert!(
+            session
+                .try_run(
+                    r#"
+            testing::reset_native_drops();
+            let mut values = [];
+            values[0] = testing::make_clone_tracked()
+        "#
+                )
+                .is_err()
+        );
+        assert_val_eq!(session.run("testing::native_drop_count()"), int(1));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn native_drop_through_generic_value_dictionary() {
     let mut session = TestSession::new();
     // Keep the shared generic body's dictionary dispatch and its owned clone/drop pair.

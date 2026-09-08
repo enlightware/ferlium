@@ -53,7 +53,8 @@ use crate::{
     std::{
         STD_MODULE_ID,
         core_traits_names::{REPR_TRAIT_NAME, VALUE_TRAIT_NAME},
-        math::int_type,
+        logic::bool_type,
+        math::{float_type, int_type},
         string::{STRING_FROM_STATIC_FUNCTION_NAME, StaticStr, static_str_type, string_type},
         value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX, is_value_trait},
     },
@@ -1476,16 +1477,6 @@ impl TypeInference {
                 (node, ty, MutType::constant(), effects)
             }
             Assign(data) => {
-                if Self::is_access_chain_expr(&env.ast_arena[data.place].kind) {
-                    let place = self.access_chain_for_expr(env, data.place);
-                    return self.infer_access_chain_assign(
-                        env,
-                        place,
-                        data.sign_span,
-                        data.value,
-                        expr_span,
-                    );
-                }
                 if let Some(pp_data) = env.ast_arena[data.place].kind.as_property_path() {
                     let fn_path = property_to_fn_path(
                         &pp_data.path,
@@ -1505,70 +1496,13 @@ impl TypeInference {
                     let node_id = env.ir_arena.alloc(N::new(node, ty, effects, expr_span));
                     return Ok((node_id, mut_ty));
                 }
-                let (place_id, place_mut) = self.infer_expr(env, data.place)?;
-                let place_span = env.ir_arena[place_id].span;
-                let place_effects = env.ir_arena[place_id].effects.clone();
-                if env.ir_arena[place_id].ty == Type::never() {
-                    let effects = self.make_dependent_effect([&place_effects]);
-                    self.diverging_prefix_result(env, [place_id], effects)
-                } else {
-                    self.add_mut_be_at_least_constraint(
-                        place_mut,
-                        place_span,
-                        MutType::mutable(),
-                        data.sign_span,
-                    );
-                    let value_id = self.infer_expr_drop_mut(env, data.value)?;
-                    let value_ty = env.ir_arena[value_id].ty;
-                    let value_span = env.ir_arena[value_id].span;
-                    let place_ty = env.ir_arena[place_id].ty;
-                    self.add_sub_type_constraint(value_ty, value_span, place_ty, place_span);
-                    let value_effects = env.ir_arena[value_id].effects.clone();
-                    if value_ty == Type::never() {
-                        let mut nodes = self.place_evaluation_prefix_nodes(env.ir_arena, place_id);
-                        nodes.push(value_id);
-                        let effects = self.make_dependent_effect([&place_effects, &value_effects]);
-                        self.diverging_prefix_result(env, nodes, effects)
-                    } else {
-                        let temp_start_index = env.cur_locals.len();
-                        let prepared_place =
-                            self.prepare_place_for_consumer(env, place_id, expr_span);
-                        let place_id = prepared_place.place;
-                        let value_id = self.materialize_owned_value(env, value_id, expr_span);
-                        let initializes_storage =
-                            assignment_initializes_storage(env.ir_arena, place_id, env);
-                        let drop = if initializes_storage {
-                            None
-                        } else {
-                            if self.type_needs_semantic_drop(env, place_ty)
-                                && !place_ty.is_function()
-                            {
-                                self.add_pub_constraint(PubTypeConstraint::new_have_trait(
-                                    value_trait_id(env),
-                                    vec![place_ty],
-                                    vec![],
-                                    vec![],
-                                    expr_span,
-                                ));
-                            }
-                            Some(PendingLocalDrop::Unknown)
-                        };
-                        let combined_effects =
-                            self.make_dependent_effect([&value_effects, &place_effects]);
-                        let node = K::Assign(hir::Assignment {
-                            place: place_id,
-                            value: value_id,
-                            drop,
-                        });
-                        let node = self.wrap_unit_with_temp_drops(
-                            env,
-                            temp_start_index,
-                            prepared_place.prefix,
-                            hir::Node::new(node, Type::unit(), combined_effects.clone(), expr_span),
-                        );
-                        (node, Type::unit(), MutType::constant(), combined_effects)
-                    }
-                }
+                return self.infer_assignment(
+                    env,
+                    data.place,
+                    data.value,
+                    data.sign_span,
+                    expr_span,
+                );
             }
             AssignOp(data) => {
                 if Self::is_access_chain_expr(&env.ast_arena[data.place].kind) {
@@ -3771,28 +3705,122 @@ impl TypeInference {
         )
     }
 
-    fn infer_access_chain_assign(
+    /// Evaluate an ordinary assignment's owned RHS before opening its destination projections.
+    /// Keeping it in a cleanup-scoped local also handles a failing or diverging destination.
+    fn infer_assignment(
         &mut self,
         env: &mut TypingEnv,
-        place: AccessChain,
-        sign_span: Location,
+        place: DExprId,
         value: DExprId,
+        sign_span: Location,
         expr_span: Location,
     ) -> Result<(NodeId, MutType), InternalCompilationError> {
-        self.infer_access_chain_with_body(
-            env,
-            place,
-            SubscriptMemberKind::Mut,
-            expr_span,
-            |this, env, place, place_ty, _inside_yielded| {
-                Ok((
-                    this.infer_assign_to_place(
-                        env, place, place_ty, value, sign_span, expr_span, true,
-                    )?,
-                    Type::unit(),
-                ))
-            },
-        )
+        let value = self.infer_expr_drop_mut(env, value)?;
+        let value_ty = env.ir_arena[value].ty;
+        let rhs_diverges = value_ty == Type::never();
+        let value_span = env.ir_arena[value].span;
+        let value = if rhs_diverges {
+            value
+        } else {
+            self.materialize_owned_value(env, value, expr_span)
+        };
+        let temp_start = env.cur_locals.len();
+        // A local destination has no evaluation work. All other destinations must run only
+        // after the RHS, including accessor prologues and expressions selecting a receiver.
+        // Scalar literals cannot observe destination evaluation and need no cleanup. Do not
+        // generalize this to effect-free expressions, which can still read mutable storage.
+        let scalar_literal = matches!(env.ir_arena[value].kind, NodeKind::Immediate(_))
+            && [Type::unit(), bool_type(), int_type(), float_type()].contains(&value_ty);
+        let (prefix, value) = if rhs_diverges
+            || scalar_literal
+            || matches!(env.ast_arena[place].kind, ExprKind::Identifier(_))
+        {
+            (Vec::new(), value)
+        } else {
+            let (store, load) =
+                self.store_owned_temp(env, value, value_ty, expr_span, ustr("$assignment"));
+            let (take, _) = self.take_local_value_result(env, load, 0, value_span);
+            (vec![store], take)
+        };
+        let node = if Self::is_access_chain_expr(&env.ast_arena[place].kind) {
+            let chain = self.access_chain_for_expr(env, place);
+            self.infer_access_chain_with_body(
+                env,
+                chain,
+                SubscriptMemberKind::Mut,
+                expr_span,
+                |this, env, place, place_ty, _inside_yielded| {
+                    if rhs_diverges {
+                        return Ok((value, Type::never()));
+                    }
+                    this.add_sub_type_constraint(value_ty, value_span, place_ty, sign_span);
+                    Ok((
+                        this.assign_value_node_to_place(
+                            env, place, place_ty, value, expr_span, true,
+                        ),
+                        Type::unit(),
+                    ))
+                },
+            )?
+            .0
+        } else {
+            let (place, place_mut) = self.infer_expr(env, place)?;
+            let place_ty = env.ir_arena[place].ty;
+            if place_ty == Type::never() {
+                place
+            } else {
+                let place_span = env.ir_arena[place].span;
+                self.add_mut_be_at_least_constraint(
+                    place_mut,
+                    place_span,
+                    MutType::mutable(),
+                    sign_span,
+                );
+                if rhs_diverges {
+                    // Keep destination diagnostics, but never emit its evaluation after a
+                    // diverging RHS. Access-chain destinations are discarded below too.
+                    return Ok((value, MutType::constant()));
+                }
+                self.add_sub_type_constraint(value_ty, value_span, place_ty, place_span);
+                let setup_start = env.cur_locals.len();
+                let prepared = self.prepare_place_for_consumer(env, place, expr_span);
+                let drop_old = !assignment_initializes_storage(env.ir_arena, prepared.place, env);
+                let node = self.assign_value_node_to_place(
+                    env,
+                    prepared.place,
+                    place_ty,
+                    value,
+                    expr_span,
+                    drop_old,
+                );
+                let node = env.ir_arena[node].clone();
+                let effects = node.effects.clone();
+                let kind = self.wrap_unit_with_temp_drops(env, setup_start, prepared.prefix, node);
+                env.ir_arena
+                    .alloc(hir::Node::new(kind, Type::unit(), effects, expr_span))
+            }
+        };
+        if rhs_diverges {
+            return Ok((value, MutType::constant()));
+        }
+        if prefix.is_empty() {
+            return Ok((node, MutType::constant()));
+        }
+        let node = env.ir_arena[node].clone();
+        let ty = node.ty;
+        let effects = self.make_dependent_effect(
+            prefix
+                .iter()
+                .map(|id| &env.ir_arena[*id].effects)
+                .chain([&node.effects])
+                .collect::<Vec<_>>(),
+        );
+        let kind = self.wrap_unit_with_temp_drops(env, temp_start, prefix, node);
+        Ok((
+            env.ir_arena
+                .alloc(hir::Node::new(kind, ty, effects, expr_span)),
+            MutType::constant(),
+        ))
     }
 
     fn infer_access_chain_assign_op(
@@ -5406,11 +5434,11 @@ impl TypeInference {
     /// assignment uses, with `SubscriptMemberKind::Mut`. Inferring it as a plain expression selects
     /// the subscript's `ref` member instead and the write is then rejected as immutable.
     ///
-    /// The one difference from assignment is `drop_old: false`, which becomes `hir::Assignment`'s
-    /// `drop: None`. Assignment asks `assignment_initializes_storage`, which answers for locals and
-    /// field chains and says `false` for a subscript place — correctly, since it cannot know a
-    /// dynamically indexed slot is empty. Saying `false` here would drop whatever bytes the fresh
-    /// slot happens to hold, which is why only std may call this.
+    /// This builtin retains place-first call-argument evaluation. Its `drop_old: false` becomes
+    /// `hir::Assignment`'s `drop: None`. Ordinary access-chain assignment assumes initialized storage;
+    /// only its plain-place path consults `assignment_initializes_storage`. This builtin bypasses
+    /// destruction even for a dynamically indexed slot, whose initialization state the compiler
+    /// cannot establish. That unchecked initialization contract restricts it to std.
     fn infer_init_place(
         &mut self,
         env: &mut TypingEnv,

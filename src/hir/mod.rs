@@ -492,11 +492,12 @@ pub struct TakeLocalValue<P: HirPhase = Unelaborated> {
 }
 
 /// Assign a new value into an existing place.
+/// Evaluates the place before the value; source `=` stages its RHS before destination setup.
 #[derive(Debug, Clone, Copy)]
 pub struct Assignment<P: HirPhase = Unelaborated> {
     pub place: NodeId<P>,
     pub value: NodeId<P>,
-    /// Dispatch used to drop the old destination value before overwriting it.
+    /// Dispatch used to drop the displaced old value after installing its replacement.
     /// `None` is used only when the destination storage is uninitialized.
     pub drop: Option<P::LocalDrop>,
 }

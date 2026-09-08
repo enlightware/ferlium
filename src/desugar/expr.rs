@@ -31,16 +31,28 @@ fn desugar_property_index_assignment(
         return None;
     }
 
-    /*
-        Desugar:
-            @scope.property[expr1] = expr2
-        into:
-            {
-                let mut $tmp = @scope.property;
-                $tmp[expr1] = expr2;
-                @scope.property = $tmp;
-            }
-    */
+    // Desugar `@scope.property[index] = rhs` into:
+    // {
+    //     let $rhs = rhs;
+    //     let mut $tmp = @scope.property;
+    //     $tmp[index] = $rhs;
+    //     @scope.property = $tmp;
+    // }
+    // Compound assignment keeps its RHS inline instead of staging it before the getter.
+    let mut statements = Vec::new();
+    let value = if matches!(kind, DesugaredAssignmentKind::Assign) {
+        statements.push(desugared_arena.alloc(DExpr::new(
+            ExprKind::let_(
+                DLetPattern::binding((ustr("$rhs"), expr_span), MutVal::constant()),
+                value,
+                None,
+            ),
+            expr_span,
+        )));
+        desugared_arena.alloc(DExpr::single_identifier(ustr("$rhs"), expr_span))
+    } else {
+        value
+    };
     let let_stmt = desugared_arena.alloc(DExpr::new(
         ExprKind::let_(
             DLetPattern::binding((ustr("$tmp"), expr_span), MutVal::mutable()),
@@ -68,10 +80,8 @@ fn desugar_property_index_assignment(
         ExprKind::assign(index.array, sign_span, tmp_expr),
         expr_span,
     ));
-    Some(desugared_arena.alloc(DExpr::new(
-        ExprKind::Block(vec![let_stmt, assign_tmp_stmt, assign_back_stmt]),
-        expr_span,
-    )))
+    statements.extend([let_stmt, assign_tmp_stmt, assign_back_stmt]);
+    Some(desugared_arena.alloc(DExpr::new(ExprKind::Block(statements), expr_span)))
 }
 
 /// Desugar a single parsed expression ID into a desugared expression ID.

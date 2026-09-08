@@ -119,6 +119,10 @@ storage reclamation cannot destroy that payload again. This keeps the ordinary F
 `&mut T` method signature; the Rust pointer entry is specified in [abi.md](abi.md).
 
 Assignments to initialized storage carry an optional `Assignment::drop`.
+Ordinary source `=` evaluates its owned RHS before the destination. Unless the destination is a
+local or the RHS is a scalar literal, HIR stages that value in a cleanup-scoped temporary outside
+destination accessor drivers, so a failing destination drops it.
+Compound assignment retains its separate evaluation order.
 For a semantic drop, the prepared replacement is installed in the destination before the detached
 old value is dropped. The destination remains initialized throughout cleanup; the resolved mode may be `Skip`.
 Assignments to uninitialized storage use `assignment_mode == InitializeStorage` and must not drop the destination first.
