@@ -26,7 +26,6 @@ use crate::{
             borrow_check_and_elaborate_pending_function, constraint_ptr,
             first_unbound_type_in_constraints, log_dropped_constraints_expr,
         },
-        value_dispatch::elaborate_local_ownership_and_value_dispatches,
     },
     internal_compilation_error,
     module::{
@@ -495,7 +494,6 @@ fn emit_expr_unsafe_inner(
         &mut solver,
         generated_projection_subscripts,
     );
-    elaborate_local_ownership_and_value_dispatches(expr_arena, &mut locals, &mut ctx)?;
     let elaborated = elaborate_hir_with_warnings(
         expr_arena,
         node_id,

@@ -230,6 +230,7 @@ impl UnifiedTypeInference {
             }
         }
         self.activate_take_local_value_constraints(arena, root, locals, value_trait_id, env);
+        self.activate_assignment_value_constraints(arena, root, locals, value_trait_id, env);
         self.activate_product_layout_constraints(arena, root, value_trait_id, env);
     }
 
@@ -333,6 +334,34 @@ impl UnifiedTypeInference {
         }
         for child in node.kind.child_node_ids() {
             self.activate_product_layout_constraints(arena, child, value_trait_id, env);
+        }
+    }
+
+    fn activate_assignment_value_constraints(
+        &mut self,
+        arena: &NodeArena,
+        node: NodeId,
+        locals: &[LocalDecl],
+        value_trait_id: TraitId,
+        env: ModuleEnv<'_>,
+    ) {
+        if let NodeKind::PendingAssignment(plan) = &arena[node].kind {
+            let captures = hir::assignment::captured_inputs(arena, plan, &mut |ty| {
+                self.substitute_in_mut_type(ty)
+            });
+            for capture in captures {
+                let node = &arena[capture];
+                let ty = self.substitute_in_type(node.ty);
+                if !hir::assignment::capture_needs_storage(node, ty, |id| {
+                    self.substitute_in_mut_type(locals[id.as_index()].mut_ty)
+                }) {
+                    continue;
+                }
+                self.add_activated_value_constraint(value_trait_id, node.ty, node.span, env);
+            }
+        }
+        for child in arena[node].kind.child_node_ids() {
+            self.activate_assignment_value_constraints(arena, child, locals, value_trait_id, env);
         }
     }
 

@@ -492,7 +492,7 @@ fn mutability() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn ordinary_assignment_checks_destination_after_diverging_rhs() {
+fn ordinary_assignment_checks_destination_even_when_rhs_diverges() {
     for source in [
         "fn f() -> int { let x = 1; x = { return 1 }; 0 }",
         "fn f() -> int { let x = (1,); x.0 = { return 1 }; 0 }",
@@ -509,6 +509,13 @@ fn ordinary_assignment_checks_destination_after_diverging_rhs() {
     ] {
         TestSession::new().fail_compilation(source);
     }
+
+    TestSession::new()
+        .fail_compilation("fn f() -> int { { return 1 } = true + 1; 0 }")
+        .expect_trait_impl_not_found("Num", &["Self = bool"]);
+    TestSession::new()
+        .fail_compilation("fn f() -> int { let mut x = true; x += { return 1 }; 0 }")
+        .expect_trait_impl_not_found("Num", &["Self = bool"]);
 }
 
 #[test]
@@ -1348,6 +1355,18 @@ fn op_assignment() {
     assert_val_eq!(session.run("let mut a = 4; a -= 1; a"), int(3));
     assert_val_eq!(session.run("let mut a = 4; a *= 2; a"), int(8));
     assert_val_eq!(session.run("let mut a = 4; a /= 2; a"), float(2.0));
+    assert_val_eq!(
+        session.run("let mut pair = (1, 2); pair.0 += pair.1; pair"),
+        int_tuple!(3, 2)
+    );
+    assert_val_eq!(session.run("let mut a = 4; a = a + 1; a"), int(5));
+    assert_val_eq!(session.run("let mut a = 4; a = { a = 1; 2 }; a"), int(2));
+
+    assert_val_eq!(session.run("let mut a = 4; a += a; a"), int(8));
+    assert_val_eq!(
+        session.run("let mut pair = (1, 2); pair.0 += pair.0; pair"),
+        int_tuple!(2, 2)
+    );
 }
 
 #[test]
@@ -3262,20 +3281,40 @@ fn fn_pipes() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn ordinary_assignment_evaluates_rhs_before_property_getter() {
+fn ordinary_assignment_opens_property_destination_after_rhs() {
     let mut session = TestSession::new();
     assert_val_eq!(
         session.run(
             r#"
         @props::my_scope.my_array = [0];
-        @props::my_scope.my_array[-1] = {
+        @props::my_scope.my_array[0] = {
             @props::my_scope.my_array = [1, 2];
             9
         };
         @props::my_scope.my_array
     "#
         ),
-        int_a![1, 9]
+        int_a![9, 2]
+    );
+    assert_val_eq!(
+        session.run(
+            r#"
+        @props::my_scope.my_var = 1;
+        @props::my_scope.my_var += { @props::my_scope.my_var = 5; 2 };
+        @props::my_scope.my_var
+    "#
+        ),
+        int(7)
+    );
+    assert_val_eq!(
+        session.run(
+            r#"
+        @props::my_scope.my_array = [1];
+        @props::my_scope.my_array[-1] += { @props::my_scope.my_array = [10, 20]; 2 };
+        @props::my_scope.my_array
+    "#
+        ),
+        int_a![10, 22]
     );
 }
 

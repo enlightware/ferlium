@@ -170,6 +170,7 @@ pub fn with_yielded<P: HirPhase>(
         accessor,
         binding,
         body,
+        access: hir::PlaceAccess::Alias,
     })
 }
 

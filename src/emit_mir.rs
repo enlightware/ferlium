@@ -3103,7 +3103,8 @@ impl<'a> Emitter<'a> {
             | K::TraitMethodApply(never)
             | K::GetTraitMethod(never)
             | K::GetTraitAssociatedConst(never)
-            | K::GetTraitDictionary(never) => match *never {},
+            | K::GetTraitDictionary(never)
+            | K::PendingAssignment(never) => match *never {},
         }
     }
 

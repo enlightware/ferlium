@@ -205,11 +205,13 @@ enum SnapshotNodeKind {
         accessor: SnapshotNodeId,
         binding: LocalDeclId,
         body: SnapshotNodeId,
+        access: hir::PlaceAccess,
     },
     WithPlace {
         place: SnapshotNodeId,
         binding: LocalDeclId,
         body: SnapshotNodeId,
+        access: hir::PlaceAccess,
     },
     Case {
         value: SnapshotNodeId,
@@ -552,6 +554,7 @@ impl SnapshotNodeKind {
                 variant_payload: value.variant_payload,
             },
             NodeKind::FieldAccess(value) => match *value {},
+            NodeKind::PendingAssignment(value) => match *value {},
             NodeKind::LoadLocal(value) => Self::LoadLocal(value.id),
             NodeKind::StoreLocal(value) => Self::StoreLocal {
                 value: node_id(value.value),
@@ -663,11 +666,13 @@ impl SnapshotNodeKind {
                 accessor: node_id(value.accessor),
                 binding: value.binding,
                 body: node_id(value.body),
+                access: value.access,
             },
             NodeKind::WithPlace(value) => Self::WithPlace {
                 place: node_id(value.place),
                 binding: value.binding,
                 body: node_id(value.body),
+                access: value.access,
             },
             NodeKind::Case(value) => Self::Case {
                 value: node_id(value.value),
@@ -908,19 +913,23 @@ impl SnapshotNodeKind {
                 accessor,
                 binding,
                 body,
+                access,
             } => NodeKind::WithYielded(hir::WithYielded {
                 accessor: id(*accessor)?,
                 binding: *binding,
                 body: id(*body)?,
+                access: *access,
             }),
             Self::WithPlace {
                 place,
                 binding,
                 body,
+                access,
             } => NodeKind::WithPlace(hir::WithPlace {
                 place: id(*place)?,
                 binding: *binding,
                 body: id(*body)?,
+                access: *access,
             }),
             Self::Case {
                 value,

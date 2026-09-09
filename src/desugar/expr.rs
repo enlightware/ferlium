@@ -33,26 +33,26 @@ fn desugar_property_index_assignment(
 
     // Desugar `@scope.property[index] = rhs` into:
     // {
+    //     let $index = index;
     //     let $rhs = rhs;
     //     let mut $tmp = @scope.property;
-    //     $tmp[index] = $rhs;
+    //     $tmp[$index] = $rhs;
     //     @scope.property = $tmp;
     // }
-    // Compound assignment keeps its RHS inline instead of staging it before the getter.
+    // The getter opens the prepared property destination after the RHS, also for `op=`.
     let mut statements = Vec::new();
-    let value = if matches!(kind, DesugaredAssignmentKind::Assign) {
+    for (name, value) in [("$index", index.index), ("$rhs", value)] {
         statements.push(desugared_arena.alloc(DExpr::new(
             ExprKind::let_(
-                DLetPattern::binding((ustr("$rhs"), expr_span), MutVal::constant()),
+                DLetPattern::binding((ustr(name), expr_span), MutVal::constant()),
                 value,
                 None,
             ),
             expr_span,
         )));
-        desugared_arena.alloc(DExpr::single_identifier(ustr("$rhs"), expr_span))
-    } else {
-        value
-    };
+    }
+    let prepared_index = desugared_arena.alloc(DExpr::single_identifier(ustr("$index"), expr_span));
+    let value = desugared_arena.alloc(DExpr::single_identifier(ustr("$rhs"), expr_span));
     let let_stmt = desugared_arena.alloc(DExpr::new(
         ExprKind::let_(
             DLetPattern::binding((ustr("$tmp"), expr_span), MutVal::mutable()),
@@ -63,7 +63,7 @@ fn desugar_property_index_assignment(
     ));
     let tmp_expr = desugared_arena.alloc(DExpr::single_identifier(ustr("$tmp"), expr_span));
     let index_expr = desugared_arena.alloc(DExpr::new(
-        ExprKind::index(tmp_expr, index.index),
+        ExprKind::index(tmp_expr, prepared_index),
         expr_span,
     ));
     let assign_tmp_stmt = desugared_arena.alloc(DExpr::new(
@@ -267,16 +267,29 @@ pub(crate) fn desugar(
             let place = desugar(place, ctx, parsed_arena, desugared_arena, modules_used)?;
             let value = desugar(value, ctx, parsed_arena, desugared_arena, modules_used)?;
             if desugared_arena[place].kind.is_property_path() {
+                // A compound update reads the property only after its RHS has completed.
+                let rhs = desugared_arena.alloc(DExpr::new(
+                    ExprKind::let_(
+                        DLetPattern::binding((ustr("$rhs"), expr_span), MutVal::constant()),
+                        value,
+                        None,
+                    ),
+                    expr_span,
+                ));
+                let value =
+                    desugared_arena.alloc(DExpr::single_identifier(ustr("$rhs"), expr_span));
                 let func =
                     desugared_arena.alloc(DExpr::new(ExprKind::identifier(op_path), sign_span));
                 let apply = desugared_arena.alloc(DExpr::new(
                     ExprKind::apply(func, vec![place, value], UnnamedArg::All),
                     expr_span,
                 ));
-                return Ok(desugared_arena.alloc(DExpr::new(
+                let assign = desugared_arena.alloc(DExpr::new(
                     ExprKind::assign(place, sign_span, apply),
                     expr_span,
-                )));
+                ));
+                return Ok(desugared_arena
+                    .alloc(DExpr::new(ExprKind::Block(vec![rhs, assign]), expr_span)));
             }
             if let Some(node) = desugar_property_index_assignment(
                 desugared_arena,

@@ -53,8 +53,7 @@ use crate::{
     std::{
         STD_MODULE_ID,
         core_traits_names::{REPR_TRAIT_NAME, VALUE_TRAIT_NAME},
-        logic::bool_type,
-        math::{float_type, int_type},
+        math::int_type,
         string::{STRING_FROM_STATIC_FUNCTION_NAME, StaticStr, static_str_type, string_type},
         value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX, is_value_trait},
     },
@@ -1505,92 +1504,14 @@ impl TypeInference {
                 );
             }
             AssignOp(data) => {
-                if Self::is_access_chain_expr(&env.ast_arena[data.place].kind) {
-                    let place = self.access_chain_for_expr(env, data.place);
-                    return self.infer_access_chain_assign_op(
-                        env,
-                        place,
-                        data.sign_span,
-                        &data.op_path,
-                        data.value,
-                        expr_span,
-                    );
-                }
-                let (place_id, place_mut) = self.infer_expr(env, data.place)?;
-                let place_span = env.ir_arena[place_id].span;
-                let place_effects = env.ir_arena[place_id].effects.clone();
-                if env.ir_arena[place_id].ty == Type::never() {
-                    let effects = self.make_dependent_effect([&place_effects]);
-                    self.diverging_prefix_result(env, [place_id], effects)
-                } else {
-                    self.add_mut_be_at_least_constraint(
-                        place_mut,
-                        place_span,
-                        MutType::mutable(),
-                        data.sign_span,
-                    );
-                    let (value_node, value_ty, _value_mut_ty, value_effects) = self
-                        .infer_static_apply(
-                            env,
-                            &data.op_path,
-                            data.sign_span,
-                            &[data.place, data.value],
-                            expr_span,
-                            UnnamedArg::All,
-                        )?;
-                    let value_id =
-                        env.ir_arena
-                            .alloc(N::new(value_node, value_ty, value_effects, expr_span));
-                    let value_ty = env.ir_arena[value_id].ty;
-                    let value_span = env.ir_arena[value_id].span;
-                    let place_ty = env.ir_arena[place_id].ty;
-                    self.add_sub_type_constraint(value_ty, value_span, place_ty, place_span);
-                    let value_effects = env.ir_arena[value_id].effects.clone();
-                    if value_ty == Type::never() {
-                        let mut nodes = self.place_evaluation_prefix_nodes(env.ir_arena, place_id);
-                        nodes.push(value_id);
-                        let effects = self.make_dependent_effect([&place_effects, &value_effects]);
-                        self.diverging_prefix_result(env, nodes, effects)
-                    } else {
-                        let temp_start_index = env.cur_locals.len();
-                        let prepared_place =
-                            self.prepare_place_for_consumer(env, place_id, expr_span);
-                        let place_id = prepared_place.place;
-                        let value_id = self.materialize_owned_value(env, value_id, expr_span);
-                        let initializes_storage =
-                            assignment_initializes_storage(env.ir_arena, place_id, env);
-                        let drop = if initializes_storage {
-                            None
-                        } else {
-                            if self.type_needs_semantic_drop(env, place_ty)
-                                && !place_ty.is_function()
-                            {
-                                self.add_pub_constraint(PubTypeConstraint::new_have_trait(
-                                    value_trait_id(env),
-                                    vec![place_ty],
-                                    vec![],
-                                    vec![],
-                                    expr_span,
-                                ));
-                            }
-                            Some(PendingLocalDrop::Unknown)
-                        };
-                        let combined_effects =
-                            self.make_dependent_effect([&value_effects, &place_effects]);
-                        let node = K::Assign(hir::Assignment {
-                            place: place_id,
-                            value: value_id,
-                            drop,
-                        });
-                        let node = self.wrap_unit_with_temp_drops(
-                            env,
-                            temp_start_index,
-                            prepared_place.prefix,
-                            hir::Node::new(node, Type::unit(), combined_effects.clone(), expr_span),
-                        );
-                        (node, Type::unit(), MutType::constant(), combined_effects)
-                    }
-                }
+                return self.infer_prepared_assignment(
+                    env,
+                    data.place,
+                    data.value,
+                    Some(&data.op_path),
+                    data.sign_span,
+                    expr_span,
+                );
             }
             Tuple(exprs) => {
                 let (nodes, types, effects, diverges) =
@@ -2266,16 +2187,23 @@ impl TypeInference {
         )?;
         let index_effects = env.ir_arena[index_node_id].effects.clone();
         if env.ir_arena[index_node_id].ty == Type::never() {
-            let mut nodes = self.place_evaluation_prefix_nodes(env.ir_arena, array_node_id);
-            nodes.push(index_node_id);
-            let effects = self.make_dependent_effect([&array_effects, &index_effects]);
-            let node = hir::Node::new(
-                Self::block(nodes, Vec::new()),
-                Type::never(),
-                effects,
-                expr_span,
-            );
-            return Ok((node, MutType::constant()));
+            if !node_is_place_reference(env.ir_arena, array_node_id) {
+                let effects = self.make_dependent_effect([&array_effects, &index_effects]);
+                return Ok((
+                    hir::Node::new(
+                        Self::block(vec![array_node_id, index_node_id], Vec::new()),
+                        Type::never(),
+                        effects,
+                        expr_span,
+                    ),
+                    MutType::constant(),
+                ));
+            }
+            // Keep the place/selector boundary even on a diverging path. Assignment preparation
+            // must evaluate this selector without activating an earlier accessor in the chain.
+            let node =
+                self.sequence_place_before_body(env, array_node_id, index_node_id, expr_span);
+            return Ok((env.ir_arena[node].clone(), MutType::constant()));
         }
 
         let (path, (definition, function, _module_id, runtime_arg_passing)) = {
@@ -2548,10 +2476,16 @@ impl TypeInference {
         mode: SubscriptMemberKind,
         expr_span: Location,
         receiver_override: Option<NamedSubscriptReceiverOverride>,
+        preparing_assignment: bool,
     ) -> Result<PreparedNamedSubscriptAccessor, InternalCompilationError> {
-        if let Some(prepared) =
-            self.infer_subscript_value_accessor_call(env, data, mode, expr_span, receiver_override)?
-        {
+        if let Some(prepared) = self.infer_subscript_value_accessor_call(
+            env,
+            data,
+            mode,
+            expr_span,
+            receiver_override,
+            preparing_assignment,
+        )? {
             return Ok(prepared);
         }
         Self::ensure_named_subscript_access_allowed(env, data.name.0, expr_span)?;
@@ -2593,6 +2527,16 @@ impl TypeInference {
                 data.name.1,
             )?;
         if args_diverge {
+            if preparing_assignment {
+                let node = self.prepare_diverging_assignment_arguments(
+                    env,
+                    None,
+                    &args_node_ids,
+                    &inst_fn_ty.args,
+                    expr_span,
+                );
+                return Ok(PreparedNamedSubscriptAccessor::DivergedBeforeYield(node));
+            }
             let nodes = self.value_evaluation_prefix_nodes_for_many(env.ir_arena, args_node_ids);
             let effects = self.make_dependent_effect([&args_effects, &member_effects]);
             return Ok(PreparedNamedSubscriptAccessor::DivergedBeforeYield(
@@ -2651,6 +2595,7 @@ impl TypeInference {
         mode: SubscriptMemberKind,
         expr_span: Location,
         receiver_override: Option<NamedSubscriptReceiverOverride>,
+        preparing_assignment: bool,
     ) -> Result<Option<PreparedNamedSubscriptAccessor>, InternalCompilationError> {
         // Keep this path aligned with `infer_named_subscript_accessor_call`:
         // both prepare the same receiver-first accessor shape, but this one
@@ -2750,6 +2695,18 @@ impl TypeInference {
             )?;
         let subscript_effects = env.ir_arena[subscript_node].effects.clone();
         if args_diverge {
+            if preparing_assignment {
+                let node = self.prepare_diverging_assignment_arguments(
+                    env,
+                    Some(subscript_node),
+                    &args_node_ids,
+                    &inst_fn_ty.args,
+                    expr_span,
+                );
+                return Ok(Some(PreparedNamedSubscriptAccessor::DivergedBeforeYield(
+                    node,
+                )));
+            }
             let nodes = self
                 .value_evaluation_prefix_nodes(env.ir_arena, subscript_node)
                 .into_iter()
@@ -3107,11 +3064,13 @@ impl TypeInference {
         env.cur_locals.truncate(env_size);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn infer_prepared_accessor_with_body(
         &mut self,
         env: &mut TypingEnv,
         accessor: NamedSubscriptCall,
         mode: SubscriptMemberKind,
+        access: hir::PlaceAccess,
         inside_yielded: bool,
         expr_span: Location,
         build_body: WithYieldedBodyBuilder<'_>,
@@ -3141,6 +3100,7 @@ impl TypeInference {
                 place: accessor.node,
                 binding,
                 body,
+                access,
             });
             let node = env
                 .ir_arena
@@ -3164,6 +3124,7 @@ impl TypeInference {
             accessor: accessor.node,
             binding,
             body,
+            access,
         });
         let node = env
             .ir_arena
@@ -3200,6 +3161,7 @@ impl TypeInference {
         subscript_id: SubscriptId,
         field: UstrSpan,
         mode: SubscriptMemberKind,
+        access: hir::PlaceAccess,
         inside_yielded: bool,
         expr_span: Location,
         receiver: NamedSubscriptReceiverOverride,
@@ -3222,6 +3184,7 @@ impl TypeInference {
             env,
             accessor,
             mode,
+            access,
             inside_yielded,
             expr_span,
             build_body,
@@ -3397,6 +3360,31 @@ impl TypeInference {
             bool,
         ) -> Result<(NodeId, Type), InternalCompilationError>,
     ) -> Result<(NodeId, MutType), InternalCompilationError> {
+        self.infer_access_chain_with_body_access(
+            env,
+            place,
+            mode,
+            hir::PlaceAccess::Alias,
+            expr_span,
+            build_body,
+        )
+    }
+
+    fn infer_access_chain_with_body_access(
+        &mut self,
+        env: &mut TypingEnv,
+        place: AccessChain,
+        mode: SubscriptMemberKind,
+        access: hir::PlaceAccess,
+        expr_span: Location,
+        build_body: impl FnOnce(
+            &mut Self,
+            &mut TypingEnv,
+            NodeId,
+            Type,
+            bool,
+        ) -> Result<(NodeId, Type), InternalCompilationError>,
+    ) -> Result<(NodeId, MutType), InternalCompilationError> {
         let (root_node, root_mut) = self.infer_expr(env, place.root)?;
         let root_ty = env.ir_arena[root_node].ty;
         self.infer_access_chain_steps_with_body(
@@ -3407,6 +3395,7 @@ impl TypeInference {
             root_ty,
             root_mut,
             mode,
+            access,
             false,
             expr_span,
             Box::new(build_body),
@@ -3423,12 +3412,13 @@ impl TypeInference {
         place_ty: Type,
         place_mut: MutType,
         mode: SubscriptMemberKind,
+        access: hir::PlaceAccess,
         inside_yielded: bool,
         expr_span: Location,
         build_body: WithYieldedBodyBuilder<'a>,
     ) -> Result<(NodeId, MutType), InternalCompilationError> {
         if step_index == steps.len() {
-            if matches!(mode, SubscriptMemberKind::Mut) {
+            if matches!(mode, SubscriptMemberKind::Mut) && place_ty != Type::never() {
                 self.add_mut_be_at_least_constraint(
                     place_mut,
                     env.ir_arena[place_node].span,
@@ -3459,6 +3449,7 @@ impl TypeInference {
                         subscript_id,
                         *name,
                         mode,
+                        access,
                         inside_yielded,
                         expr_span,
                         NamedSubscriptReceiverOverride {
@@ -3475,6 +3466,7 @@ impl TypeInference {
                                 place_ty,
                                 MutType::mutable(),
                                 mode,
+                                access,
                                 inside_yielded,
                                 expr_span,
                                 build_body,
@@ -3515,6 +3507,7 @@ impl TypeInference {
                             provenance: YieldProvenance::YieldedOnce,
                         },
                         mode,
+                        access,
                         inside_yielded,
                         expr_span,
                         Box::new(move |this, env, place, place_ty, inside_yielded| {
@@ -3526,6 +3519,7 @@ impl TypeInference {
                                 place_ty,
                                 MutType::mutable(),
                                 mode,
+                                access,
                                 inside_yielded,
                                 expr_span,
                                 build_body,
@@ -3542,6 +3536,7 @@ impl TypeInference {
                         next_ty,
                         next_mut,
                         mode,
+                        access,
                         inside_yielded,
                         expr_span,
                         build_body,
@@ -3585,6 +3580,7 @@ impl TypeInference {
                     next_ty,
                     next_mut,
                     mode,
+                    access,
                     inside_yielded,
                     expr_span,
                     build_body,
@@ -3606,6 +3602,7 @@ impl TypeInference {
                     next_ty,
                     next_mut,
                     mode,
+                    access,
                     inside_yielded,
                     expr_span,
                     build_body,
@@ -3622,6 +3619,7 @@ impl TypeInference {
                         ty: place_ty,
                         mut_ty: place_mut,
                     }),
+                    access == hir::PlaceAccess::Exclusive,
                 )? {
                     PreparedNamedSubscriptAccessor::Ready(call) => call,
                     PreparedNamedSubscriptAccessor::DivergedBeforeYield(node) => {
@@ -3632,6 +3630,7 @@ impl TypeInference {
                     env,
                     accessor,
                     mode,
+                    access,
                     inside_yielded,
                     expr_span,
                     Box::new(move |this, env, place, place_ty, inside_yielded| {
@@ -3646,6 +3645,7 @@ impl TypeInference {
                             // field/index/project steps can describe the consumer's final place.
                             MutType::mutable(),
                             mode,
+                            access,
                             inside_yielded,
                             expr_span,
                             build_body,
@@ -3705,8 +3705,6 @@ impl TypeInference {
         )
     }
 
-    /// Evaluate an ordinary assignment's owned RHS before opening its destination projections.
-    /// Keeping it in a cleanup-scoped local also handles a failing or diverging destination.
     fn infer_assignment(
         &mut self,
         env: &mut TypingEnv,
@@ -3715,138 +3713,316 @@ impl TypeInference {
         sign_span: Location,
         expr_span: Location,
     ) -> Result<(NodeId, MutType), InternalCompilationError> {
-        let value = self.infer_expr_drop_mut(env, value)?;
-        let value_ty = env.ir_arena[value].ty;
-        let rhs_diverges = value_ty == Type::never();
-        let value_span = env.ir_arena[value].span;
-        let value = if rhs_diverges {
-            value
-        } else {
-            self.materialize_owned_value(env, value, expr_span)
-        };
-        let temp_start = env.cur_locals.len();
-        // A local destination has no evaluation work. All other destinations must run only
-        // after the RHS, including accessor prologues and expressions selecting a receiver.
-        // Scalar literals cannot observe destination evaluation and need no cleanup. Do not
-        // generalize this to effect-free expressions, which can still read mutable storage.
-        let scalar_literal = matches!(env.ir_arena[value].kind, NodeKind::Immediate(_))
-            && [Type::unit(), bool_type(), int_type(), float_type()].contains(&value_ty);
-        let (prefix, value) = if rhs_diverges
-            || scalar_literal
-            || matches!(env.ast_arena[place].kind, ExprKind::Identifier(_))
-        {
-            (Vec::new(), value)
-        } else {
-            let (store, load) =
-                self.store_owned_temp(env, value, value_ty, expr_span, ustr("$assignment"));
-            let (take, _) = self.take_local_value_result(env, load, 0, value_span);
-            (vec![store], take)
-        };
-        let node = if Self::is_access_chain_expr(&env.ast_arena[place].kind) {
+        self.infer_prepared_assignment(env, place, value, None, sign_span, expr_span)
+    }
+
+    /// Type-check the destination and update, retaining a phase-specific plan until argument
+    /// passing is resolved. Both expressions are checked even when either one diverges.
+    #[allow(clippy::too_many_arguments)]
+    fn infer_prepared_assignment(
+        &mut self,
+        env: &mut TypingEnv,
+        place: DExprId,
+        value: DExprId,
+        operator: Option<&ast::Path>,
+        sign_span: Location,
+        span: Location,
+    ) -> Result<(NodeId, MutType), InternalCompilationError> {
+        let access_chain = Self::is_access_chain_expr(&env.ast_arena[place].kind);
+        let (place, place_mut) = if access_chain {
             let chain = self.access_chain_for_expr(env, place);
-            self.infer_access_chain_with_body(
+            self.infer_access_chain_with_body_access(
                 env,
                 chain,
                 SubscriptMemberKind::Mut,
-                expr_span,
-                |this, env, place, place_ty, _inside_yielded| {
-                    if rhs_diverges {
-                        return Ok((value, Type::never()));
-                    }
-                    this.add_sub_type_constraint(value_ty, value_span, place_ty, sign_span);
-                    Ok((
-                        this.assign_value_node_to_place(
-                            env, place, place_ty, value, expr_span, true,
-                        ),
-                        Type::unit(),
-                    ))
-                },
+                hir::PlaceAccess::Exclusive,
+                span,
+                |_, _, place, ty, _| Ok((place, ty)),
             )?
-            .0
         } else {
-            let (place, place_mut) = self.infer_expr(env, place)?;
-            let place_ty = env.ir_arena[place].ty;
-            if place_ty == Type::never() {
-                place
-            } else {
-                let place_span = env.ir_arena[place].span;
-                self.add_mut_be_at_least_constraint(
-                    place_mut,
-                    place_span,
-                    MutType::mutable(),
-                    sign_span,
-                );
-                if rhs_diverges {
-                    // Keep destination diagnostics, but never emit its evaluation after a
-                    // diverging RHS. Access-chain destinations are discarded below too.
-                    return Ok((value, MutType::constant()));
-                }
-                self.add_sub_type_constraint(value_ty, value_span, place_ty, place_span);
-                let setup_start = env.cur_locals.len();
-                let prepared = self.prepare_place_for_consumer(env, place, expr_span);
-                let drop_old = !assignment_initializes_storage(env.ir_arena, prepared.place, env);
-                let node = self.assign_value_node_to_place(
-                    env,
-                    prepared.place,
-                    place_ty,
-                    value,
-                    expr_span,
-                    drop_old,
-                );
-                let node = env.ir_arena[node].clone();
-                let effects = node.effects.clone();
-                let kind = self.wrap_unit_with_temp_drops(env, setup_start, prepared.prefix, node);
-                env.ir_arena
-                    .alloc(hir::Node::new(kind, Type::unit(), effects, expr_span))
-            }
+            self.infer_expr(env, place)?
         };
-        if rhs_diverges {
-            return Ok((value, MutType::constant()));
+        let place_ty = env.ir_arena[place].ty;
+        if !access_chain && place_ty != Type::never() {
+            self.add_mut_be_at_least_constraint(
+                place_mut,
+                env.ir_arena[place].span,
+                MutType::mutable(),
+                sign_span,
+            );
         }
-        if prefix.is_empty() {
-            return Ok((node, MutType::constant()));
+        let temp_start = env.cur_locals.len();
+        let mut prefix = Vec::new();
+        let value = self.infer_expr_drop_mut(env, value)?;
+        let value_ty = env.ir_arena[value].ty;
+        let operator = operator
+            .map(|path| {
+                self.prepare_assignment_operator(env, place_ty, path, sign_span, value, span)
+            })
+            .transpose()?;
+        if operator.is_none() {
+            self.add_sub_type_constraint(value_ty, env.ir_arena[value].span, place_ty, sign_span);
         }
-        let node = env.ir_arena[node].clone();
-        let ty = node.ty;
+        let diverges = place_ty == Type::never() || value_ty == Type::never();
+        let update = if diverges {
+            None
+        } else {
+            let rhs = if operator.is_some() {
+                self.capture_assignment_value(env, value, &mut prefix)
+            } else {
+                let value = self.materialize_owned_value(env, value, span);
+                if matches!(env.ir_arena[value].kind, NodeKind::Immediate(_))
+                    || matches!(env.ir_arena[place].kind, NodeKind::LoadLocal(_))
+                {
+                    value
+                } else {
+                    let (store, load) =
+                        self.store_owned_temp(env, value, value_ty, span, ustr("$assignment"));
+                    prefix.push(store);
+                    self.take_local_value_result(env, load, 0, span).0
+                }
+            };
+            let drop_old =
+                access_chain || !assignment_initializes_storage(env.ir_arena, place, env);
+            let (env_size, binding) = self.push_yielded_binding(env, place_ty, span);
+            let bound = self.yielded_binding_load(env, binding, place_ty, span);
+            let body =
+                self.open_assignment_destination(env, bound, rhs, operator, span, drop_old)?;
+            Self::close_yielded_binding_scope(env, env_size, span);
+            Some((binding, body))
+        };
+        let rhs = if diverges {
+            value
+        } else {
+            let effects = self.make_dependent_effect(
+                prefix
+                    .iter()
+                    .map(|id| &env.ir_arena[*id].effects)
+                    .collect::<Vec<_>>(),
+            );
+            env.ir_arena.alloc(hir::Node::new(
+                Self::block(prefix, Vec::new()),
+                Type::unit(),
+                effects,
+                span,
+            ))
+        };
+        let ty = if diverges {
+            Type::never()
+        } else {
+            Type::unit()
+        };
+        let mut dependencies = vec![&env.ir_arena[place].effects, &env.ir_arena[rhs].effects];
+        if let Some((_, body)) = update {
+            dependencies.push(&env.ir_arena[body].effects);
+        }
+        let effects = self.make_dependent_effect(dependencies);
+        let cleanup = self.cleanup_locals_for_locals(env, temp_start);
+        env.cur_locals.truncate(temp_start);
+        let node = env.ir_arena.alloc(hir::Node::new(
+            NodeKind::PendingAssignment(b(hir::PendingAssignment::Update {
+                destination: place,
+                rhs,
+                update,
+                cleanup,
+            })),
+            ty,
+            effects.clone(),
+            span,
+        ));
+        Ok((node, MutType::constant()))
+    }
+
+    /// Preserve argument roles until inference can distinguish retained values from mutable places.
+    fn prepare_diverging_assignment_arguments(
+        &mut self,
+        env: &mut TypingEnv,
+        callee: Option<NodeId>,
+        arguments: &[NodeId],
+        arg_types: &[FnArgType],
+        span: Location,
+    ) -> NodeId {
         let effects = self.make_dependent_effect(
-            prefix
+            callee
                 .iter()
+                .chain(arguments)
                 .map(|id| &env.ir_arena[*id].effects)
-                .chain([&node.effects])
                 .collect::<Vec<_>>(),
         );
-        let kind = self.wrap_unit_with_temp_drops(env, temp_start, prefix, node);
-        Ok((
-            env.ir_arena
-                .alloc(hir::Node::new(kind, ty, effects, expr_span)),
-            MutType::constant(),
+        env.ir_arena.alloc(hir::Node::new(
+            NodeKind::PendingAssignment(b(hir::PendingAssignment::DivergingInputs {
+                callee,
+                arguments: arguments.to_vec(),
+                argument_types: arg_types.to_vec(),
+            })),
+            Type::never(),
+            effects,
+            span,
         ))
     }
 
-    fn infer_access_chain_assign_op(
+    fn capture_assignment_value(
         &mut self,
         env: &mut TypingEnv,
-        place: AccessChain,
-        sign_span: Location,
-        op_path: &ast::Path,
-        value: DExprId,
-        expr_span: Location,
-    ) -> Result<(NodeId, MutType), InternalCompilationError> {
-        self.infer_access_chain_with_body(
+        value: NodeId,
+        prefix: &mut Vec<NodeId>,
+    ) -> NodeId {
+        if env.ir_arena[value].ty == Type::never() {
+            prefix.push(value);
+            return value;
+        }
+        if matches!(env.ir_arena[value].kind, NodeKind::Immediate(_)) {
+            return value;
+        }
+        // An immutable binding already is a retained value. Reuse it so selector capture does
+        // not obscure identical addressor inputs or introduce unnecessary managed clones.
+        if let NodeKind::LoadLocal(load) = env.ir_arena[value].kind
+            && env.all_locals[load.id.as_index()].mut_ty == MutType::constant()
+        {
+            return value;
+        }
+        let span = env.ir_arena[value].span;
+        if let NodeKind::LoadLocal(load) = env.ir_arena[value].kind
+            && env.all_locals[load.id.as_index()].mut_ty.is_variable()
+        {
+            // Use the same deferred storage decision as `let`: once inference resolves the
+            // source's mutability this becomes either an immutable alias or an owned snapshot.
+            let ty = env.ir_arena[value].ty;
+            let mut local = LocalDecl::new(
+                (ustr("$destination"), Location::new_synthesized()),
+                MutType::constant(),
+                ty,
+                None,
+                span,
+            );
+            local.set_deferred_storage(DeferredLocalStorage {
+                initializer: value,
+                initializer_mut_ty: env.all_locals[load.id.as_index()].mut_ty,
+                binding_mutable: false,
+            });
+            let id = env.push_local(local);
+            prefix.push(env.ir_arena.alloc(hir::Node::new(
+                NodeKind::StoreLocal(hir::StoreLocal { value, id }),
+                Type::unit(),
+                no_effects(),
+                span,
+            )));
+            return env.ir_arena.alloc(hir::Node::new(
+                NodeKind::LoadLocal(hir::LoadLocal { id }),
+                ty,
+                no_effects(),
+                span,
+            ));
+        }
+        let value = self.materialize_owned_value(env, value, span);
+        let (store, load) = self.store_owned_temp(
             env,
-            place,
-            SubscriptMemberKind::Mut,
+            value,
+            env.ir_arena[value].ty,
+            span,
+            ustr("$destination"),
+        );
+        prefix.push(store);
+        load
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    // `AssignmentLowering::open` substitutes the pending destination binding at the outer
+    // Assign or WithPlace produced here. Preserve that shape when changing update construction.
+    fn open_assignment_destination(
+        &mut self,
+        env: &mut TypingEnv,
+        place: NodeId,
+        rhs: NodeId,
+        operator: Option<PreparedStaticCallTarget>,
+        span: Location,
+        drop_old: bool,
+    ) -> Result<NodeId, InternalCompilationError> {
+        let kind = match env.ir_arena[place].kind.clone() {
+            NodeKind::WithPlace(mut node) => {
+                node.body = self
+                    .open_assignment_destination(env, node.body, rhs, operator, span, drop_old)?;
+                NodeKind::WithPlace(node)
+            }
+            NodeKind::WithYielded(mut node) => {
+                node.body = self
+                    .open_assignment_destination(env, node.body, rhs, operator, span, drop_old)?;
+                NodeKind::WithYielded(node)
+            }
+            _ => {
+                let place_ty = env.ir_arena[place].ty;
+                if let Some(operator) = operator {
+                    let (env_size, binding) = self.push_yielded_binding(env, place_ty, span);
+                    let bound = self.yielded_binding_load(env, binding, place_ty, span);
+                    let call = self.build_static_call_from_checked_args(
+                        env,
+                        StaticCallFromCheckedArgs {
+                            callee: operator.callee,
+                            abi_arg_tys: operator.abi_arg_tys,
+                            inst_fn_ty: operator.inst_fn_ty,
+                            result_convention: operator.result_convention,
+                            inst_data: operator.inst_data,
+                            args_node_ids: vec![bound, rhs],
+                            visible_arg_passing: operator.visible_arg_passing,
+                            result_mut_ty: MutType::constant(),
+                        },
+                        span,
+                    );
+                    let value =
+                        env.ir_arena
+                            .alloc(hir::Node::new(call.node, call.ty, call.effects, span));
+                    let body = self
+                        .assign_value_node_to_place(env, bound, place_ty, value, span, drop_old);
+                    Self::close_yielded_binding_scope(env, env_size, span);
+                    NodeKind::WithPlace(hir::WithPlace {
+                        place,
+                        binding,
+                        body,
+                        access: hir::PlaceAccess::Exclusive,
+                    })
+                } else {
+                    return Ok(
+                        self.assign_value_node_to_place(env, place, place_ty, rhs, span, drop_old)
+                    );
+                }
+            }
+        };
+        let effects = self.make_dependent_effect(
+            kind.child_node_ids()
+                .iter()
+                .map(|id| &env.ir_arena[*id].effects)
+                .collect::<Vec<_>>(),
+        );
+        Ok(env
+            .ir_arena
+            .alloc(hir::Node::new(kind, Type::unit(), effects, span)))
+    }
+
+    /// Keeps an unused place binding to preserve the place/body boundary for assignment preparation.
+    fn sequence_place_before_body(
+        &mut self,
+        env: &mut TypingEnv,
+        place: NodeId,
+        body: NodeId,
+        expr_span: Location,
+    ) -> NodeId {
+        let place_ty = env.ir_arena[place].ty;
+        let (env_size, binding) = self.push_yielded_binding(env, place_ty, expr_span);
+        Self::close_yielded_binding_scope(env, env_size, expr_span);
+        let effects =
+            self.make_dependent_effect([&env.ir_arena[place].effects, &env.ir_arena[body].effects]);
+        let ty = env.ir_arena[body].ty;
+        env.ir_arena.alloc(hir::Node::new(
+            NodeKind::WithPlace(hir::WithPlace {
+                place,
+                binding,
+                body,
+                access: hir::PlaceAccess::Alias,
+            }),
+            ty,
+            effects,
             expr_span,
-            |this, env, place, place_ty, _inside_yielded| {
-                let value = this.infer_static_apply_with_lhs_place(
-                    env, place, place_ty, op_path, sign_span, value, expr_span,
-                )?;
-                Ok((
-                    this.assign_value_node_to_place(env, place, place_ty, value, expr_span, true),
-                    Type::unit(),
-                ))
-            },
-        )
+        ))
     }
 
     /// Infers a write of `value` into the already-inferred place `place`.
@@ -3870,6 +4046,9 @@ impl TypeInference {
             place_ty,
             sign_span,
         );
+        if env.ir_arena[value_id].ty == Type::never() {
+            return Ok(self.sequence_place_before_body(env, place, value_id, expr_span));
+        }
         Ok(self.assign_value_node_to_place(env, place, place_ty, value_id, expr_span, drop_old))
     }
 
@@ -4349,17 +4528,16 @@ impl TypeInference {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn infer_static_apply_with_lhs_place(
+    fn prepare_assignment_operator(
         &mut self,
         env: &mut TypingEnv,
-        lhs_place: NodeId,
         lhs_ty: Type,
         path: &ast::Path,
         path_span: Location,
-        rhs: DExprId,
+        rhs: NodeId,
         expr_span: Location,
-    ) -> Result<NodeId, InternalCompilationError> {
-        let Some(target) =
+    ) -> Result<PreparedStaticCallTarget, InternalCompilationError> {
+        let Some(mut target) =
             self.prepare_static_call_target(env, path, path_span, 2, expr_span, UnnamedArg::All)?
         else {
             return Err(internal_compilation_error!(Unsupported {
@@ -4369,10 +4547,18 @@ impl TypeInference {
         };
         let lhs_arg = target.inst_fn_ty.args[0];
         let rhs_arg = target.inst_fn_ty.args[1];
-        let args_node_ids = vec![
-            lhs_place,
-            self.check_expr(env, rhs, rhs_arg.ty, rhs_arg.mut_ty, path_span)?,
-        ];
+        self.add_sub_type_constraint(
+            env.ir_arena[rhs].ty,
+            env.ir_arena[rhs].span,
+            rhs_arg.ty,
+            path_span,
+        );
+        self.add_mut_be_at_least_constraint(
+            MutType::constant(),
+            env.ir_arena[rhs].span,
+            rhs_arg.mut_ty,
+            path_span,
+        );
         self.add_sub_type_constraint(lhs_ty, expr_span, lhs_arg.ty, path_span);
         self.add_mut_be_at_least_constraint(
             MutType::mutable(),
@@ -4380,26 +4566,10 @@ impl TypeInference {
             lhs_arg.mut_ty,
             path_span,
         );
-        if let Some(constraint) = target.have_trait_constraint {
+        if let Some(constraint) = target.have_trait_constraint.take() {
             self.add_pub_constraint(constraint);
         }
-        let call = self.build_static_call_from_checked_args(
-            env,
-            StaticCallFromCheckedArgs {
-                callee: target.callee,
-                abi_arg_tys: target.abi_arg_tys,
-                inst_fn_ty: target.inst_fn_ty,
-                result_convention: target.result_convention,
-                inst_data: target.inst_data,
-                args_node_ids,
-                visible_arg_passing: target.visible_arg_passing,
-                result_mut_ty: MutType::constant(),
-            },
-            expr_span,
-        );
-        Ok(env
-            .ir_arena
-            .alloc(hir::Node::new(call.node, call.ty, call.effects, expr_span)))
+        Ok(target)
     }
 
     fn store_owned_temp(
@@ -4657,24 +4827,6 @@ impl TypeInference {
 
         let call = env.ir_arena.alloc(call);
         prefix.push(call);
-        env.cur_locals.truncate(temp_start_index);
-        self.block_or_cleanup_scope(prefix, drops)
-    }
-
-    fn wrap_unit_with_temp_drops(
-        &mut self,
-        env: &mut TypingEnv,
-        temp_start_index: usize,
-        mut prefix: Vec<NodeId>,
-        node: hir::Node,
-    ) -> NodeKind {
-        if prefix.is_empty() {
-            return node.kind;
-        }
-
-        let node = env.ir_arena.alloc(node);
-        prefix.push(node);
-        let drops = self.cleanup_locals_for_locals(env, temp_start_index);
         env.cur_locals.truncate(temp_start_index);
         self.block_or_cleanup_scope(prefix, drops)
     }
@@ -6422,6 +6574,8 @@ fn builtin_for_path(path: &ast::Path) -> Option<Builtin> {
     }
 }
 
+// No compiler path currently sets InitializeStorage: source assignments overwrite. Retain this
+// hook for the reserved public/serialized local metadata; builtin::init_place bypasses it.
 fn assignment_initializes_storage(
     arena: &NodeArena,
     place_id: NodeId,

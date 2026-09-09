@@ -109,6 +109,32 @@ fn ordinary_assignment_drops_prepared_rhs_when_destination_fails() {
                 .is_err()
         );
         assert_val_eq!(session.run("testing::native_drop_count()"), int(1));
+        assert_val_eq!(session.run("testing::clone_tracked_clone_count()"), int(0));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn assignment_drops_captured_selector_values_when_rhs_exits() {
+    for rhs in ["idiv(1, 0)", "{ return 7 }"] {
+        let mut session = TestSession::new();
+        session.allow_experimental();
+        session.without_optimized_mode();
+        let result = session.try_run(&format!(
+            r#"
+                subscript cell(slot: &mut int, value) -> int {{ ref mut {{ slot }} }}
+                fn run() -> int {{
+                    let mut slot = 0;
+                    slot->[cell](testing::make_clone_tracked()) = {rhs};
+                    0
+                }}
+                testing::reset_native_drops();
+                run()
+            "#
+        ));
+        assert_eq!(result.is_err(), rhs == "idiv(1, 0)");
+        assert_val_eq!(session.run("testing::native_drop_count()"), int(1));
+        assert_val_eq!(session.run("testing::clone_tracked_clone_count()"), int(0));
     }
 }
 

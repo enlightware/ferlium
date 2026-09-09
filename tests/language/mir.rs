@@ -2439,8 +2439,7 @@ fn reassign_mutable_ref_param_from_local() {
 
 #[test]
 fn reassign_array_element_from_param() {
-    // Assigning into an array element resolves the element place and stores the
-    // param's trivially-copied value into it.
+    // Assigning into an array element resolves the element place before copying the parameter.
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn f(a: &mut [int], v: int) { a[0] = v; }"),
@@ -2923,8 +2922,7 @@ fn f(%p0: @arg &mut int, %p1: @ret int):
 
 #[test]
 fn yielded_subscript_assign() {
-    // An assignment `a->[cell] = v` writes through the yielded place, then `end_project` runs the
-    // slide (the accessor's write-back).
+    // The yielded place opens before `v` is copied; after the write, `end_project` runs the slide.
     let mut session = TestSession::new();
     session.allow_experimental();
     assert_eq_sans_flake!(
@@ -3010,39 +3008,34 @@ fn f(%p0: @arg &mut int, %p1: @arg let int, %p2: @ret ()):
 fn yielded_subscript_compound_assignment_closes_on_error() {
     let mut session = TestSession::new();
     session.allow_experimental();
+    // The RHS is already prepared; it is the update operation that fails inside the access.
+    let cell = CELL_SUBSCRIPT.replace("int", "float");
     let mir = session.emit_mir(&format!(
-        "{CELL_SUBSCRIPT}fn f(a: &mut int, w: int) {{ a->[cell] += idiv(1, w) }}"
+        "{cell}fn f(a: &mut float, w: float) {{ a->[cell] /= w }}"
     ));
     assert_eq_sans_flake!(
         mir,
-        r#"fn cell::ref_mut#subscript:f3d0ec43(%p0: @arg &mut int, %p1: @ret int):
+        r#"fn cell::ref_mut#subscript:1840c74b(%p0: @arg &mut float, %p1: @ret float):
   @c0: () = ()
   b0:
-    %r0: place int = alloca int
+    %r0: place float = alloca float
     memcpy %p0 to %r0
     yield %r0 -> b1
   b1:
-    %r1: place int = alloca int
+    %r1: place float = alloca float
     memcpy %r0 to %r1
     move %r1 to %p0
     ret
 
-fn f(%p0: @arg &mut int, %p1: @arg let int, %p2: @ret ()):
-  @c0: int = 1
-  @c1: () = ()
+fn f(%p0: @arg &mut float, %p1: @arg let float, %p2: @ret ()):
+  @c0: () = ()
   b0:
-    %r0: open place int = project <test>::cell::ref_mut#subscript:f3d0ec43(%p0)
-    %r1: place int = alloca int
-    %r2: place int = alloca int
-    store @c0 to %r2
-    %r3: place int = alloca int
-    call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %r3)
-    %r4: place int = alloca int
-    invoke call std::idiv(%r3, %p1, %r4) -> b1 error b2
+    %r0: open place float = project <test>::cell::ref_mut#subscript:1840c74b(%p0)
+    %r1: place float = alloca float
+    invoke call std::Div<std::float>::div#impl:a765c8d2(%r0, %p1, %r1) -> b1 error b2
   b1:
-    call std::Num<std::int>::add#impl:7665d3ee(%r0, %r4, %r1)
     move %r1 to %r0
-    store @c1 to %p2
+    store @c0 to %p2
     end_project %r0
     ret
   b2:
@@ -3053,8 +3046,8 @@ fn f(%p0: @arg &mut int, %p1: @arg let int, %p2: @ret ()):
 }
 
 #[test]
-fn yielded_subscript_assignment_evaluates_fallible_rhs_before_opening() {
-    // Failure propagates before `project`; only a successful RHS opens the accessor.
+fn yielded_subscript_assignment_opens_after_evaluating_fallible_rhs() {
+    // The RHS error edge must not close an accessor that has not been opened.
     let mut session = TestSession::new();
     session.allow_experimental();
     assert_eq_sans_flake!(
@@ -3145,7 +3138,7 @@ fn yielded_subscript_compound_assign_runs_slide_writeback() {
 fn yielded_subscript_assignment_rhs_error_propagates() {
     let mut session = TestSession::new();
     session.allow_experimental();
-    // A failing assignment RHS propagates before the destination accessor is opened.
+    // A failing RHS propagates after the destination accessor has been opened and closed.
     assert_eq!(
         session.fail_run(&format!(
             "{CELL_SUBSCRIPT}fn bad(a: &mut int, w: int) {{ a->[cell] = idiv(1, w) }}\nfn driver() -> int {{ let mut x = 5; bad(x, 0); x }}\ndriver()"

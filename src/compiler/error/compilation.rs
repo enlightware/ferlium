@@ -1117,6 +1117,13 @@ pub enum CompilationErrorImpl<S: Scope> {
         b_span: Location,
         fn_span: Location,
     },
+    // Unlike overlap between arguments of one call, this crosses an active access scope,
+    // including a yielded accessor suspended while its caller reads the result.
+    ExclusiveAccessOverlap {
+        target_span: Location,
+        access_span: Location,
+        scope_span: Location,
+    },
     UndefinedVarInStringFormatting {
         var_span: Location,
         string_span: Location,
@@ -2008,6 +2015,19 @@ impl FormatWith<SourceTable> for CompilationError {
                     fmt_span(fn_span),
                 )
             }
+            ExclusiveAccessOverlap {
+                target_span,
+                access_span,
+                scope_span,
+            } => {
+                write!(
+                    f,
+                    "Exclusive access to {} overlaps with access {} in {}",
+                    fmt_span(target_span),
+                    fmt_span(access_span),
+                    fmt_span(scope_span),
+                )
+            }
             UndefinedVarInStringFormatting {
                 var_span,
                 string_span,
@@ -2676,6 +2696,15 @@ impl CompilationError {
                 a_span,
                 b_span,
                 fn_span,
+            }),
+            ExclusiveAccessOverlap {
+                target_span,
+                access_span,
+                scope_span,
+            } => compilation_error!(ExclusiveAccessOverlap {
+                target_span,
+                access_span,
+                scope_span,
             }),
             UndefinedVarInStringFormatting {
                 var_span,

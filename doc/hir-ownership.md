@@ -56,6 +56,9 @@ Its place-producing base argument uses `Let` (or `MutableRef`) access, so the re
 When a subscript use must evaluate an addressor projection exactly once, HIR uses `WithPlace { place, binding, body }`.
 `WithPlace` evaluates `place` as a caller-rooted place, binds it to an internal non-owning `binding`, and evaluates `body`.
 It does not suspend an accessor and has no epilogue.
+Its access mode is `Alias` for an implementation alias or `Exclusive` for an opened mutable
+destination whose body must not access overlapping storage through another path.
+Suspended yielded accessors also retain exclusive access to their other mutable arguments.
 Std `array_index` is a source subscript with `AddressorPlace` provenance, backed by the private native `buffer_slot` subscript; source array-index syntax resolves `array_index` and lowers through the addressor path.
 
 `LocalDecl` is the ownership metadata for a local:
@@ -65,7 +68,7 @@ Std `array_index` is a source subscript with `AddressorPlace` provenance, backed
 | `slot` | Frame slot offset within the local value frame. Extra dictionary/evidence parameters use a separate index space. |
 | `storage` | Whether this local is a non-owning alias, owns storage with lexical cleanup, or is temporarily deferred until final mutability facts are known. |
 | `clone` | If present, `StoreLocal` initializes the local by either a trivial copy or the returned result of `Value::clone(source)`. |
-| `assignment_mode` | `InitializeStorage` means assignment writes uninitialized storage and must not drop the previous destination. |
+| `assignment_mode` | Reserved local metadata for distinguishing overwrites from initialization; current source locals use `Overwrite`. |
 
 ## Owned Materialization
 
@@ -119,13 +122,15 @@ storage reclamation cannot destroy that payload again. This keeps the ordinary F
 `&mut T` method signature; the Rust pointer entry is specified in [abi.md](abi.md).
 
 Assignments to initialized storage carry an optional `Assignment::drop`.
-Ordinary source `=` evaluates its owned RHS before the destination. Unless the destination is a
-local or the RHS is a scalar literal, HIR stages that value in a cleanup-scoped temporary outside
-destination accessor drivers, so a failing destination drops it.
-Compound assignment retains its separate evaluation order.
+Both assignment forms capture destination inputs before evaluating the RHS, then open the
+destination against its root's current contents. Value inputs are retained values; local roots and
+mutable arguments retain storage identity, not an element address. RHS failure never activates an
+accessor. Compound assignment reads and writes through one access after the RHS; captured values
+and opened accessors must be cleaned up on every exit.
 For a semantic drop, the prepared replacement is installed in the destination before the detached
 old value is dropped. The destination remains initialized throughout cleanup; the resolved mode may be `Skip`.
-Assignments to uninitialized storage use `assignment_mode == InitializeStorage` and must not drop the destination first.
+The internal `builtin::init_place` operation writes uninitialized storage by constructing an
+assignment without a destination drop; ordinary source assignment overwrites initialized storage.
 
 Final-HIR evaluation and lowering must preserve this cleanup behavior on all exits:
 

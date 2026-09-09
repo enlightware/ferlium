@@ -30,10 +30,7 @@ use crate::{
         ENodeArena, ENodeId, Elaborated, HirPhase, NodeId, UNodeArena, UNodeId, Unelaborated,
         function::ScriptFunction,
     },
-    hir::{
-        dictionary::DictElaborationCtx, elaboration::elaborate_hir_with_warnings,
-        value_dispatch::elaborate_local_ownership_and_value_dispatches,
-    },
+    hir::{dictionary::DictElaborationCtx, elaboration::elaborate_hir_with_warnings},
     internal_compilation_error,
     module::{FunctionDebugInfo, ModuleEnv, ModuleId, id::Id},
     types::mutability::MutType,
@@ -627,11 +624,6 @@ impl PendingModuleFunction {
         ctx.set_retained_effect_vars(self.definition.ty_scheme.eff_quantifiers.clone());
         ctx.reset_evidence_bindings();
         LocalDecl::assign_sequential_slots(&mut self.locals);
-        elaborate_local_ownership_and_value_dispatches(
-            &mut self.code.arena,
-            &mut self.locals,
-            ctx,
-        )?;
         // Record the source-level conventions of visible parameters for later
         // elaboration and lowering.
         let arg_count = self.definition.arg_names.len();
@@ -664,7 +656,7 @@ impl PendingModuleFunction {
             None
         };
         let elaborated = elaborate_hir_with_warnings(
-            &self.code.arena,
+            &mut self.code.arena,
             root,
             dst_arena,
             ctx,

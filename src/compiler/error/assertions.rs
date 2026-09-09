@@ -222,6 +222,16 @@ impl CompilationError {
         }
     }
 
+    pub fn expect_exclusive_access_overlap(&self) {
+        use CompilationErrorImpl::*;
+        match self.deref() {
+            ExclusiveAccessOverlap { .. } => (),
+            _ => {
+                panic!("expect_exclusive_access_overlap called on unexpected error {self:?}")
+            }
+        }
+    }
+
     pub fn expect_undefined_var_in_string_formatting(&self, src: &str, exp_name: &str) {
         use CompilationErrorImpl::*;
         match self.deref() {

@@ -467,6 +467,7 @@ fn node_variable_type_annotations<Env>(
     use NodeKind::*;
     match &node.kind {
         Immediate(_) | Uninit => {}
+        PendingAssignment(never) => match *never {},
         BuildClosure(build_closure) => {
             variable_type_annotations(arena, build_closure.function, result, locals, env);
             // We do not look into captures as they are generated code.

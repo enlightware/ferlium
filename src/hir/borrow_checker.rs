@@ -19,7 +19,9 @@ use crate::{
     format::FormatWith,
     hir::{
         CallArgument, ENodeArena, ENodeId, Elaborated, HirPhase, NodeArena, NodeId, NodeKind,
-        Unelaborated, function::ArgConvention, node_is_place_reference, value::LiteralValue,
+        PlaceAccess, Unelaborated, addressor_place_base_argument_index,
+        elaborated_node_is_place_reference, function::ArgConvention, node_is_place_reference,
+        value::LiteralValue,
     },
     internal_compilation_error,
     module::{ELocalDecl, FunctionId, LocalDeclId, id::Id},
@@ -207,16 +209,18 @@ impl Path {
         context: &BorrowContext<'_>,
         disjoint_indices: bool,
     ) -> Option<Self> {
-        let Some(base_index) = arguments
-            .iter()
-            .position(|argument| !is_evidence_node(&arena[argument.value].kind))
-        else {
+        let Some(base_index) = addressor_place_base_argument_index(arena, arguments) else {
             // A yielded accessor need not have a receiver. Without caller provenance its
             // returned storage cannot establish disjointness.
             return Some(Self::unknown());
         };
-        let mut path = Self::try_from_node(arena, arguments[base_index].value, context)
-            .unwrap_or_else(Self::unknown);
+        let base = arguments[base_index].value;
+        let mut path = match Self::try_from_node(arena, base, context) {
+            Some(path) => path,
+            None if node_is_place_reference(arena, base) => Self::unknown(),
+            // A value result is fresh storage, not a caller alias.
+            None => return None,
+        };
         if disjoint_indices && let Some(index) = arguments.get(base_index + 1) {
             path.parts.push(Self::index_part(arena, index.value));
         } else {
@@ -403,16 +407,6 @@ pub(crate) fn callee_overlaps_argument_writes(
     })
 }
 
-fn is_evidence_node(kind: &NodeKind) -> bool {
-    matches!(
-        kind,
-        NodeKind::GetDictionary(_)
-            | NodeKind::LoadDictionary(_)
-            | NodeKind::LoadSubscriptEvidence(_)
-            | NodeKind::LoadVariantPayloadStorageEvidence(_)
-    )
-}
-
 /// Returns whether the two nodes' path to memory are overlapping.
 /// This assumes the nodes are path in the first place.
 fn do_paths_overlap(a: &Path, b: &Path) -> bool {
@@ -565,7 +559,8 @@ impl Path {
             | TraitMethodApply(never)
             | GetTraitMethod(never)
             | GetTraitAssociatedConst(never)
-            | GetTraitDictionary(never) => match *never {},
+            | GetTraitDictionary(never)
+            | PendingAssignment(never) => match *never {},
             _ => None,
         }
     }
@@ -576,14 +571,16 @@ impl Path {
         context: &BorrowContext<'_, Elaborated>,
         disjoint_indices: bool,
     ) -> Option<Self> {
-        let Some(base_index) = arguments
-            .iter()
-            .position(|argument| !is_enode_evidence(&arena[argument.value].kind))
-        else {
+        let Some(base_index) = addressor_place_base_argument_index(arena, arguments) else {
             return Some(Self::unknown());
         };
-        let mut path = Self::try_from_enode(arena, arguments[base_index].value, context)
-            .unwrap_or_else(Self::unknown);
+        let base = arguments[base_index].value;
+        let mut path = match Self::try_from_enode(arena, base, context) {
+            Some(path) => path,
+            None if elaborated_node_is_place_reference(arena, base) => Self::unknown(),
+            // A value result is fresh storage, not a caller alias.
+            None => return None,
+        };
         if disjoint_indices && let Some(index) = arguments.get(base_index + 1) {
             path.parts.push(Self::enode_index_part(arena, index.value));
         } else {
@@ -601,16 +598,6 @@ impl Path {
         }
         PathPart::OpaqueProjection
     }
-}
-
-fn is_enode_evidence(kind: &NodeKind<Elaborated>) -> bool {
-    matches!(
-        kind,
-        NodeKind::GetDictionary(_)
-            | NodeKind::LoadDictionary(_)
-            | NodeKind::LoadSubscriptEvidence(_)
-            | NodeKind::LoadVariantPayloadStorageEvidence(_)
-    )
 }
 
 fn check_elaborated_arguments(
@@ -639,6 +626,370 @@ fn check_elaborated_arguments(
     Ok(())
 }
 
+fn elaborated_borrow_call_arguments(
+    kind: &NodeKind<Elaborated>,
+) -> Option<&[CallArgument<Elaborated>]> {
+    match kind {
+        NodeKind::StaticApply(app) if app.ty.result_convention.returns_borrow() => {
+            Some(&app.arguments)
+        }
+        NodeKind::FunctionApply(app) if app.ty.result_convention.returns_borrow() => {
+            Some(&app.arguments)
+        }
+        NodeKind::CallDictionaryFunction(call) if call.ty.result_convention.returns_borrow() => {
+            Some(&call.arguments)
+        }
+        NodeKind::SubscriptApply(app) if app.ty.result_convention.returns_borrow() => {
+            Some(&app.arguments)
+        }
+        _ => None,
+    }
+}
+
+fn elaborated_call_arguments(kind: &NodeKind<Elaborated>) -> Option<&[CallArgument<Elaborated>]> {
+    match kind {
+        NodeKind::StaticApply(app) => Some(&app.arguments),
+        NodeKind::FunctionApply(app) => Some(&app.arguments),
+        NodeKind::CallDictionaryFunction(call) => Some(&call.arguments),
+        NodeKind::SubscriptApply(app) => Some(&app.arguments),
+        _ => None,
+    }
+}
+
+fn accessor_arguments(arena: &ENodeArena, node: ENodeId) -> &[CallArgument<Elaborated>] {
+    if let NodeKind::Block(block) = &arena[node].kind {
+        return block
+            .tail_node()
+            .map_or(&[], |tail| accessor_arguments(arena, tail));
+    }
+    elaborated_borrow_call_arguments(&arena[node].kind).unwrap_or(&[])
+}
+
+/// Whether the place expression is rooted in the compiler-only binding that is allowed to
+/// perform the reserved operation's own access.
+fn place_is_rooted_in_binding(
+    arena: &ENodeArena,
+    node_id: ENodeId,
+    binding: LocalDeclId,
+    context: &BorrowContext<'_, Elaborated>,
+) -> bool {
+    let node = &arena[node_id];
+    if let Some(arguments) = elaborated_borrow_call_arguments(&node.kind) {
+        return addressor_place_base_argument_index(arena, arguments).is_some_and(|index| {
+            place_is_rooted_in_binding(arena, arguments[index].value, binding, context)
+        });
+    }
+    match &node.kind {
+        NodeKind::LoadLocal(load) => {
+            load.id == binding
+                || context.aliases.get(load.id).is_some_and(|source| {
+                    place_is_rooted_in_binding(arena, source, binding, context)
+                })
+        }
+        NodeKind::Project(project) => {
+            place_is_rooted_in_binding(arena, project.value, binding, context)
+        }
+        NodeKind::Block(block) => block
+            .tail_node()
+            .is_some_and(|tail| place_is_rooted_in_binding(arena, tail, binding, context)),
+        NodeKind::WithPlace(with) => {
+            let context = context.with_alias(with.binding, with.place);
+            place_is_rooted_in_binding(arena, with.body, binding, &context)
+        }
+        NodeKind::FieldAccess(never)
+        | NodeKind::TraitMethodApply(never)
+        | NodeKind::GetTraitMethod(never)
+        | NodeKind::GetTraitAssociatedConst(never)
+        | NodeKind::GetTraitDictionary(never) => match *never {},
+        _ => false,
+    }
+}
+
+fn mutable_argument_overlaps_reserved(
+    arena: &ENodeArena,
+    arguments: &[CallArgument<Elaborated>],
+    place_base_index: Option<usize>,
+    target: &Path,
+    allowed_binding: LocalDeclId,
+    context: &BorrowContext<'_, Elaborated>,
+) -> Option<Location> {
+    arguments.iter().enumerate().find_map(|(index, argument)| {
+        (Some(index) != place_base_index
+            && argument.passing == ArgConvention::MutableRef
+            && !place_is_rooted_in_binding(arena, argument.value, allowed_binding, context)
+            && Path::try_from_enode(arena, argument.value, context)
+                .is_some_and(|access| do_paths_overlap(&access, target)))
+        .then_some(arena[argument.value].span)
+    })
+}
+
+fn place_selection_overlaps_reserved(
+    arena: &ENodeArena,
+    node_id: ENodeId,
+    target: &Path,
+    allowed_binding: LocalDeclId,
+    context: &BorrowContext<'_, Elaborated>,
+) -> Option<Location> {
+    let node = &arena[node_id];
+    match &node.kind {
+        NodeKind::LoadLocal(_) => None,
+        NodeKind::Project(project) => place_selection_overlaps_reserved(
+            arena,
+            project.value,
+            target,
+            allowed_binding,
+            context,
+        ),
+        NodeKind::StaticApply(app) if app.ty.returns_place() => {
+            call_place_selection_overlaps_reserved(
+                arena,
+                None,
+                &app.arguments,
+                target,
+                allowed_binding,
+                context,
+            )
+        }
+        NodeKind::FunctionApply(app) if app.ty.returns_place() => {
+            evaluation_overlaps_reserved(arena, app.function, target, allowed_binding, context)
+                .or_else(|| {
+                    call_place_selection_overlaps_reserved(
+                        arena,
+                        None,
+                        &app.arguments,
+                        target,
+                        allowed_binding,
+                        context,
+                    )
+                })
+        }
+        NodeKind::CallDictionaryFunction(call) if call.ty.returns_place() => {
+            call_place_selection_overlaps_reserved(
+                arena,
+                Some(call.dictionary),
+                &call.arguments,
+                target,
+                allowed_binding,
+                context,
+            )
+        }
+        NodeKind::SubscriptApply(app) if app.ty.returns_place() => {
+            call_place_selection_overlaps_reserved(
+                arena,
+                None,
+                &app.arguments,
+                target,
+                allowed_binding,
+                context,
+            )
+        }
+        NodeKind::Block(block) => {
+            let (tail, prefix) = block.body.split_last()?;
+            prefix
+                .iter()
+                .copied()
+                .find_map(|child| {
+                    evaluation_overlaps_reserved(arena, child, target, allowed_binding, context)
+                })
+                .or_else(|| {
+                    place_selection_overlaps_reserved(
+                        arena,
+                        *tail,
+                        target,
+                        allowed_binding,
+                        context,
+                    )
+                })
+        }
+        // This form is uncommon as a nested place, but treating its source and body as ordinary
+        // evaluations is conservative and preserves alias scopes.
+        NodeKind::WithPlace(with) => {
+            evaluation_overlaps_reserved(arena, with.place, target, allowed_binding, context)
+                .or_else(|| {
+                    evaluation_overlaps_reserved(
+                        arena,
+                        with.body,
+                        target,
+                        allowed_binding,
+                        &context.with_alias(with.binding, with.place),
+                    )
+                })
+        }
+        NodeKind::FieldAccess(never)
+        | NodeKind::TraitMethodApply(never)
+        | NodeKind::GetTraitMethod(never)
+        | NodeKind::GetTraitAssociatedConst(never)
+        | NodeKind::GetTraitDictionary(never) => match *never {},
+        _ => elaborated_child_node_ids(&node.kind)
+            .into_iter()
+            .find_map(|child| {
+                evaluation_overlaps_reserved(arena, child, target, allowed_binding, context)
+            }),
+    }
+}
+
+fn call_place_selection_overlaps_reserved(
+    arena: &ENodeArena,
+    callee: Option<ENodeId>,
+    arguments: &[CallArgument<Elaborated>],
+    target: &Path,
+    allowed_binding: LocalDeclId,
+    context: &BorrowContext<'_, Elaborated>,
+) -> Option<Location> {
+    if let Some(callee) = callee
+        && let Some(span) =
+            evaluation_overlaps_reserved(arena, callee, target, allowed_binding, context)
+    {
+        return Some(span);
+    }
+    let base_index = addressor_place_base_argument_index(arena, arguments);
+    if let Some(span) = mutable_argument_overlaps_reserved(
+        arena,
+        arguments,
+        base_index,
+        target,
+        allowed_binding,
+        context,
+    ) {
+        return Some(span);
+    }
+    arguments.iter().enumerate().find_map(|(index, argument)| {
+        if Some(index) == base_index && elaborated_node_is_place_reference(arena, argument.value) {
+            place_selection_overlaps_reserved(
+                arena,
+                argument.value,
+                target,
+                allowed_binding,
+                context,
+            )
+        } else {
+            evaluation_overlaps_reserved(arena, argument.value, target, allowed_binding, context)
+        }
+    })
+}
+
+/// Find the first forbidden source-level access to a reserved assignment destination.
+/// A place is checked as a whole, rather than recursively checking its storage root, so proven
+/// disjoint fields and literal array indices remain usable.
+fn evaluation_overlaps_reserved(
+    arena: &ENodeArena,
+    node_id: ENodeId,
+    target: &Path,
+    allowed_binding: LocalDeclId,
+    context: &BorrowContext<'_, Elaborated>,
+) -> Option<Location> {
+    let node = &arena[node_id];
+
+    if elaborated_node_is_place_reference(arena, node_id) {
+        if !place_is_rooted_in_binding(arena, node_id, allowed_binding, context)
+            && Path::try_from_enode(arena, node_id, context)
+                .is_some_and(|access| do_paths_overlap(&access, target))
+        {
+            return Some(node.span);
+        }
+        return place_selection_overlaps_reserved(arena, node_id, target, allowed_binding, context);
+    }
+
+    if let Some(arguments) = elaborated_call_arguments(&node.kind)
+        && let Some(span) = mutable_argument_overlaps_reserved(
+            arena,
+            arguments,
+            None,
+            target,
+            allowed_binding,
+            context,
+        )
+    {
+        return Some(span);
+    }
+
+    match &node.kind {
+        NodeKind::WithPlace(with) => {
+            evaluation_overlaps_reserved(arena, with.place, target, allowed_binding, context)
+                .or_else(|| {
+                    evaluation_overlaps_reserved(
+                        arena,
+                        with.body,
+                        target,
+                        allowed_binding,
+                        &context.with_alias(with.binding, with.place),
+                    )
+                })
+        }
+        NodeKind::WithYielded(with) => {
+            evaluation_overlaps_reserved(arena, with.accessor, target, allowed_binding, context)
+                .or_else(|| {
+                    evaluation_overlaps_reserved(
+                        arena,
+                        with.body,
+                        target,
+                        allowed_binding,
+                        &context.with_alias(with.binding, with.accessor),
+                    )
+                })
+        }
+        NodeKind::Assign(assign) => {
+            let destination_overlap =
+                !place_is_rooted_in_binding(arena, assign.place, allowed_binding, context)
+                    && Path::try_from_enode(arena, assign.place, context)
+                        .is_some_and(|access| do_paths_overlap(&access, target));
+            if destination_overlap {
+                Some(arena[assign.place].span)
+            } else {
+                place_selection_overlaps_reserved(
+                    arena,
+                    assign.place,
+                    target,
+                    allowed_binding,
+                    context,
+                )
+                .or_else(|| {
+                    evaluation_overlaps_reserved(
+                        arena,
+                        assign.value,
+                        target,
+                        allowed_binding,
+                        context,
+                    )
+                })
+            }
+        }
+        NodeKind::StoreLocal(store) => {
+            if do_paths_overlap(&Path::from_local(store.id), target) {
+                Some(node.span)
+            } else {
+                evaluation_overlaps_reserved(arena, store.value, target, allowed_binding, context)
+            }
+        }
+        NodeKind::TakeLocalValue(take) => {
+            do_paths_overlap(&Path::from_local(take.id), target).then_some(node.span)
+        }
+        NodeKind::DropClosureEnv(drop) => {
+            (!place_is_rooted_in_binding(arena, drop.target, allowed_binding, context)
+                && Path::try_from_enode(arena, drop.target, context)
+                    .is_some_and(|access| do_paths_overlap(&access, target)))
+            .then_some(arena[drop.target].span)
+        }
+        NodeKind::DropSubscriptValue(drop) => {
+            (!place_is_rooted_in_binding(arena, drop.target, allowed_binding, context)
+                && Path::try_from_enode(arena, drop.target, context)
+                    .is_some_and(|access| do_paths_overlap(&access, target)))
+            .then_some(arena[drop.target].span)
+        }
+        NodeKind::DropValue(drop) => {
+            (!place_is_rooted_in_binding(arena, drop.target, allowed_binding, context)
+                && Path::try_from_enode(arena, drop.target, context)
+                    .is_some_and(|access| do_paths_overlap(&access, target)))
+            .then_some(arena[drop.target].span)
+        }
+        _ => elaborated_child_node_ids(&node.kind)
+            .into_iter()
+            .find_map(|child| {
+                evaluation_overlaps_reserved(arena, child, target, allowed_binding, context)
+            }),
+    }
+}
+
 pub fn check_elaborated_borrows(
     arena: &ENodeArena,
     node_id: ENodeId,
@@ -662,12 +1013,50 @@ fn check_borrows_with_aliases(
 ) -> Result<(), InternalCompilationError> {
     let node = &arena[node_id];
     let binding = match &node.kind {
-        NodeKind::WithPlace(node) => Some((node.binding, node.place, node.body)),
-        NodeKind::WithYielded(node) => Some((node.binding, node.accessor, node.body)),
+        NodeKind::WithPlace(node) => Some((node.binding, node.place, node.body, node.access)),
+        NodeKind::WithYielded(node) => Some((node.binding, node.accessor, node.body, node.access)),
         _ => None,
     };
-    if let Some((binding, source, body)) = binding {
+    if let Some((binding, source, body, access)) = binding {
         check_borrows_with_aliases(arena, source, array_index_members, aliases)?;
+        let context = BorrowContext {
+            array_index_members,
+            aliases: AliasScope::Active(aliases),
+        };
+        let mut targets = smallvec::SmallVec::<[(Path, Location); 4]>::new();
+        if access == PlaceAccess::Exclusive {
+            // None denotes a fresh value-rooted destination with no caller alias to reserve.
+            // Unresolved provenance of an existing place instead produces Some(Path::unknown()).
+            targets.extend(
+                Path::try_from_enode(arena, source, &context)
+                    .map(|path| (path, arena[source].span)),
+            );
+        }
+        if matches!(node.kind, NodeKind::WithYielded(_)) {
+            // A suspended frame retains all its mutable arguments, not just the receiver that
+            // roots its yielded place. Addressor calls have already returned and retain no such
+            // extra borrows. Reborrowing through the yielded binding itself remains legal.
+            for arg in accessor_arguments(arena, source) {
+                if arg.passing == ArgConvention::MutableRef {
+                    targets.push((
+                        Path::from_enode(arena, arg.value, &context),
+                        arena[arg.value].span,
+                    ));
+                }
+            }
+        }
+        let body_context = context.with_alias(binding, source);
+        for (target, target_span) in targets {
+            if let Some(access_span) =
+                evaluation_overlaps_reserved(arena, body, &target, binding, &body_context)
+            {
+                return Err(internal_compilation_error!(ExclusiveAccessOverlap {
+                    target_span,
+                    access_span,
+                    scope_span: node.span,
+                }));
+            }
+        }
         let previous = aliases.insert(binding, source);
         let result = check_borrows_with_aliases(arena, body, array_index_members, aliases);
         if let Some(previous) = previous {
@@ -1016,6 +1405,7 @@ fn elaborated_returned_place_origin(arena: &ENodeArena, node_id: ENodeId) -> Opt
         | GetTraitMethod(never)
         | GetTraitAssociatedConst(never)
         | GetTraitDictionary(never) => match *never {},
+        PendingAssignment(never) => match *never {},
         _ => None,
     }
 }
@@ -1024,9 +1414,7 @@ fn elaborated_addressor_base_origin(
     arena: &ENodeArena,
     arguments: &[CallArgument<Elaborated>],
 ) -> Option<PlaceOrigin> {
-    let base_index = arguments
-        .iter()
-        .position(|argument| !is_enode_evidence(&arena[argument.value].kind))?;
+    let base_index = addressor_place_base_argument_index(arena, arguments)?;
     elaborated_returned_place_origin(arena, arguments[base_index].value)
         .map(|origin| PlaceOrigin::Addressor(origin.local()))
 }
@@ -1092,6 +1480,7 @@ pub(super) fn elaborated_child_node_ids(kind: &NodeKind<Elaborated>) -> SVec4<EN
             .collect(),
         Loop(r#loop) => smallvec![r#loop.body],
         Break(r#break) => smallvec![r#break.value],
+        PendingAssignment(never) => match *never {},
         FieldAccess(never)
         | TraitMethodApply(never)
         | GetTraitMethod(never)

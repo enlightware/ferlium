@@ -266,6 +266,11 @@ pub(crate) fn diagnostics_from_error(
             b_span: got_span,
             ..
         }
+        | ExclusiveAccessOverlap {
+            target_span: expected_span,
+            access_span: got_span,
+            ..
+        }
         | UndefinedVarInStringFormatting {
             var_span: expected_span,
             string_span: got_span,

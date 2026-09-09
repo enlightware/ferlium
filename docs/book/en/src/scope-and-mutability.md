@@ -49,18 +49,38 @@ a = 2;   // value is ()
 a
 ```
 
-For ordinary assignment (`=`), the right-hand side is evaluated first, then the destination
-(including indices and subscript accessors), and finally the value is installed.
+### Assignment order
+
+For both `=` and compound assignments such as `+=`, Ferlium first remembers which variable
+to update and evaluates any indices once. It then evaluates the right-hand side and writes
+the result using those remembered indices.
 
 ```ferlium
 let mut values = [1, 2];
 let mut index = 0;
 values[index] = { index = 1; 9 };
-values // [1, 9]
+values // [9, 2]
 ```
 
-If the right-hand side fails or exits early, the destination is not evaluated.
-Compound assignments such as `+=` instead evaluate the destination before the right-hand side.
+Here, the index is remembered as `0` before the right-hand side changes it to `1`.
+The update uses the variable's current contents, so the right-hand side may even replace the
+array before the element is updated. Index bounds are checked afterward.
+If the right-hand side fails or returns early, the final update does not happen.
+Likewise, `x = { x = 1; 2 }` leaves `x` at `2`: the final write still targets the same variable.
+
+Compound assignment reads the destination's value **after** the right-hand side:
+
+```ferlium
+let mut value = 1;
+value += { value = 5; 2 };
+value // 7
+```
+
+You can write `values[i] += values[j]`. However, replacing `+=` with an expanded assignment
+can change the result if the right-hand side also changes the value being updated.
+
+Custom subscript code runs after the right-hand side. While it is still using a mutable argument,
+a nested access cannot use the same argument independently—even when reading through the subscript.
 
 ## Scope
 

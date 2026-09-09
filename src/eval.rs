@@ -1834,6 +1834,7 @@ pub(crate) fn eval_node_with_ctx(
         WithPlace(node) => eval_with_place(arena, node, ctx, locals),
         Block(block) => eval_block(arena, block, ctx, locals),
         Assign(assignment) => eval_assign(arena, node_id, assignment, ctx, locals),
+        PendingAssignment(never) => match *never {},
         Tuple(nodes) | Record(nodes) => eval_tuple(arena, nodes, ctx, locals),
         Project(node) => eval_project(arena, node_id, node.value, node.index, ctx, locals),
         FieldAccess(_) => panic!("field access should not be executed after elaboration"),
@@ -3862,8 +3863,8 @@ fn eval_assign(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
-    // Source `=` prepares its RHS outside destination accessors. Here the value is already
-    // stabilized when place evaluation has effects; compound assignment keeps its own ordering.
+    // Source assignments have already captured their RHS outside destination accessors. This
+    // final HIR node opens the place and installs that replacement; compound updates bind it once.
     let place = eval_or_return!(eval_node_as_place(arena, assignment.place, ctx, locals));
     let value = eval_or_return!(eval_node_with_ctx(arena, assignment.value, ctx, locals));
     let span = arena[node_id].span;

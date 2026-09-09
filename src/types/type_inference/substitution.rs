@@ -226,6 +226,18 @@ impl UnifiedTypeInference {
         node.effects = SubstituteTypes::new(self).substitute_effect_type(&node.effects);
         use hir::NodeKind::*;
         match &mut arena[node_id].kind {
+            PendingAssignment(plan) => {
+                if let hir::PendingAssignment::DivergingInputs { argument_types, .. } = &mut **plan
+                {
+                    for arg in argument_types {
+                        arg.ty = self.substitute_in_type(arg.ty);
+                        arg.mut_ty = self.substitute_in_mut_type(arg.mut_ty);
+                    }
+                }
+            }
+            SubscriptApply(app) => {
+                self.substitute_in_call_impl_type_in_place(&mut app.ty);
+            }
             FunctionApply(app) => {
                 self.substitute_in_call_impl_type_in_place(&mut app.ty);
             }

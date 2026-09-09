@@ -6,6 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
+pub(crate) mod assignment;
 pub(crate) mod borrow_checker;
 pub(crate) mod dictionary;
 pub(crate) mod elaboration;
@@ -39,11 +40,14 @@ use crate::{
         ResolvedLocalClone, ResolvedLocalDrop, ResolvedTakeLocalValueMode, SubscriptId,
         SubscriptMemberKind, TakeLocalValueModeMetadata, TraitId, TraitImplId, id::Id,
     },
-    types::r#trait::{TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex},
-    types::type_like::{
-        CastableToType, TypeLike, instantiate_effect_types_in_place, instantiate_types_in_place,
+    types::{
+        r#trait::{TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex},
+        r#type::FnArgType,
+        type_like::{
+            CastableToType, TypeLike, instantiate_effect_types_in_place, instantiate_types_in_place,
+        },
+        type_mapper::TypeMapper,
     },
-    types::type_mapper::TypeMapper,
 };
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
@@ -63,6 +67,7 @@ use crate::{
 
 /// A phase of HIR compilation.
 pub trait HirPhase: Sized + std::fmt::Debug + Clone {
+    type PendingAssignment: HirPayload<Self>;
     type FieldAccess: HirPayload<Self>;
     type TraitMethodApplication: HirPayload<Self>;
     type GetTraitMethod: HirPayload<Self>;
@@ -90,6 +95,7 @@ pub struct Unelaborated;
 pub struct Elaborated;
 
 impl HirPhase for Unelaborated {
+    type PendingAssignment = B<PendingAssignment>;
     type FieldAccess = FieldAccess<Self>;
     type TraitMethodApplication = B<TraitMethodApplication<Self>>;
     type GetTraitMethod = B<GetTraitMethod>;
@@ -103,6 +109,7 @@ impl HirPhase for Unelaborated {
 }
 
 impl HirPhase for Elaborated {
+    type PendingAssignment = Never;
     type FieldAccess = Never;
     type TraitMethodApplication = Never;
     type GetTraitMethod = Never;
@@ -172,6 +179,27 @@ pub(crate) fn node_is_place_reference(arena: &NodeArena, node_id: NodeId) -> boo
         Block(block) => block
             .tail_node()
             .is_some_and(|node| node_is_place_reference(arena, node)),
+        _ => false,
+    }
+}
+
+/// Whether an elaborated node evaluates to a place rather than an owned value.
+pub(crate) fn elaborated_node_is_place_reference(arena: &ENodeArena, node_id: ENodeId) -> bool {
+    match &arena[node_id].kind {
+        NodeKind::LoadLocal(_) | NodeKind::Project(_) => true,
+        NodeKind::FunctionApply(app) => app.ty.returns_place(),
+        NodeKind::SubscriptApply(app) => app.ty.returns_place(),
+        NodeKind::StaticApply(app) => app.ty.returns_place(),
+        NodeKind::CallDictionaryFunction(call) => call.ty.returns_place(),
+        NodeKind::WithPlace(node) => elaborated_node_is_place_reference(arena, node.body),
+        NodeKind::Block(block) => block
+            .tail_node()
+            .is_some_and(|node| elaborated_node_is_place_reference(arena, node)),
+        NodeKind::FieldAccess(never)
+        | NodeKind::TraitMethodApply(never)
+        | NodeKind::GetTraitMethod(never)
+        | NodeKind::GetTraitAssociatedConst(never)
+        | NodeKind::GetTraitDictionary(never) => match *never {},
         _ => false,
     }
 }
@@ -492,7 +520,7 @@ pub struct TakeLocalValue<P: HirPhase = Unelaborated> {
 }
 
 /// Assign a new value into an existing place.
-/// Evaluates the place before the value; source `=` stages its RHS before destination setup.
+/// Evaluates the place before the value; source assignments capture the RHS before opening access.
 #[derive(Debug, Clone, Copy)]
 pub struct Assignment<P: HirPhase = Unelaborated> {
     pub place: NodeId<P>,
@@ -500,6 +528,49 @@ pub struct Assignment<P: HirPhase = Unelaborated> {
     /// Dispatch used to drop the displaced old value after installing its replacement.
     /// `None` is used only when the destination storage is uninitialized.
     pub drop: Option<P::LocalDrop>,
+}
+
+/// Source assignment awaiting resolved argument passing before destination preparation.
+#[derive(Debug, Clone)]
+pub enum PendingAssignment {
+    Update {
+        destination: UNodeId,
+        /// RHS evaluation/capture, outside all destination access scopes.
+        rhs: UNodeId,
+        cleanup: Vec<LocalDeclId>,
+        /// The type-checked update through a binding to the final destination.
+        update: Option<(LocalDeclId, UNodeId)>,
+    },
+    /// Preserve input roles when an early exit prevents constructing the accessor call.
+    DivergingInputs {
+        callee: Option<UNodeId>,
+        arguments: Vec<UNodeId>,
+        argument_types: Vec<FnArgType>,
+    },
+}
+
+impl PendingAssignment {
+    fn children(&self) -> SVec4<UNodeId> {
+        match self {
+            Self::Update {
+                destination,
+                rhs,
+                update,
+                ..
+            } => {
+                let mut children = smallvec::smallvec![*destination, *rhs];
+                children.extend(update.iter().map(|(_, body)| *body));
+                children
+            }
+            Self::DivergingInputs {
+                callee, arguments, ..
+            } => callee
+                .iter()
+                .copied()
+                .chain(arguments.iter().copied())
+                .collect(),
+        }
+    }
 }
 
 /// Materialize a value as an owned result, using the cheapest valid copy mode.
@@ -783,6 +854,17 @@ pub struct WithYielded<P: HirPhase = Unelaborated> {
     pub accessor: NodeId<P>,
     pub binding: LocalDeclId,
     pub body: NodeId<P>,
+    pub access: PlaceAccess,
+}
+
+/// Access discipline attached to a scoped place binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum PlaceAccess {
+    /// An implementation alias used to keep an accessor-produced place alive.
+    Alias,
+    /// An opened mutable destination; alternate overlapping access is forbidden until it closes.
+    Exclusive,
 }
 
 /// Bind a place once for the dynamic extent of `body`.
@@ -791,6 +873,7 @@ pub struct WithPlace<P: HirPhase = Unelaborated> {
     pub place: NodeId<P>,
     pub binding: LocalDeclId,
     pub body: NodeId<P>,
+    pub access: PlaceAccess,
 }
 
 /// The kind-specific part of the expression-based execution tree
@@ -831,6 +914,8 @@ pub enum NodeKind<P: HirPhase = Unelaborated> {
     BuildSubscriptValue(B<BuildSubscriptValue<P>>),
     /// Assign a new value into an existing place.
     Assign(Assignment<P>),
+    /// Defer assignment preparation until inference resolves accessor argument passing.
+    PendingAssignment(P::PendingAssignment),
     /// Materialize a value as an owned result, using the cheapest valid copy mode.
     CloneValue(CloneValue<P>),
     /// Conditionally drop the value stored at `target`.
@@ -978,6 +1063,7 @@ impl NodeKind {
             Block(block) => block.body.iter().copied().collect(),
             Tuple(nodes) | Record(nodes) | Array(nodes) => nodes.iter().copied().collect(),
             Assign(a) => smallvec![a.place, a.value],
+            PendingAssignment(plan) => plan.children(),
             Project(node) => smallvec![node.value],
             FieldAccess(node) => smallvec![node.value],
             Variant(node) => smallvec![node.payload],
@@ -1040,6 +1126,31 @@ impl<P: HirPhase> HirPayload<P> for Never {
 
     fn type_at(&self, _arena: &NodeArena<P>, _pos: usize) -> Option<Type> {
         match *self {}
+    }
+}
+
+impl HirPayload<Unelaborated> for B<PendingAssignment> {
+    fn format_ind(
+        &self,
+        arena: &UNodeArena,
+        f: &mut std::fmt::Formatter,
+        locals: &[LocalDecl],
+        env: &ModuleEnv<'_>,
+        spacing: usize,
+        indent: usize,
+        indent_str: &str,
+    ) -> std::fmt::Result {
+        writeln!(f, "{indent_str}pending assignment")?;
+        for child in self.children() {
+            format_ind(arena, child, f, locals, env, spacing, indent + 1)?;
+        }
+        Ok(())
+    }
+
+    fn type_at(&self, arena: &UNodeArena, pos: usize) -> Option<Type> {
+        self.children()
+            .into_iter()
+            .find_map(|child| type_at(arena, child, pos))
     }
 }
 
@@ -1530,8 +1641,8 @@ impl<P: HirPhase> Node<P> {
                 let local = &locals[node.binding.as_index()];
                 writeln!(
                     f,
-                    "{indent_str}with yielded binding {} as \"{}\"",
-                    local.slot, local.name.0
+                    "{indent_str}with {:?} yielded binding {} as \"{}\"",
+                    node.access, local.slot, local.name.0
                 )?;
                 format_ind(arena, node.accessor, f, locals, env, spacing, indent + 1)?;
                 format_ind(arena, node.body, f, locals, env, spacing, indent + 1)?;
@@ -1540,8 +1651,8 @@ impl<P: HirPhase> Node<P> {
                 let local = &locals[node.binding.as_index()];
                 writeln!(
                     f,
-                    "{indent_str}with place binding {} as \"{}\"",
-                    local.slot, local.name.0
+                    "{indent_str}with {:?} place binding {} as \"{}\"",
+                    node.access, local.slot, local.name.0
                 )?;
                 format_ind(arena, node.place, f, locals, env, spacing, indent + 1)?;
                 format_ind(arena, node.body, f, locals, env, spacing, indent + 1)?;
@@ -1571,6 +1682,9 @@ impl<P: HirPhase> Node<P> {
                 writeln!(f, "{indent_str}assign")?;
                 format_ind(arena, assignment.place, f, locals, env, spacing, indent + 1)?;
                 format_ind(arena, assignment.value, f, locals, env, spacing, indent + 1)?;
+            }
+            PendingAssignment(plan) => {
+                plan.format_ind(arena, f, locals, env, spacing, indent, &indent_str)?
             }
             Tuple(nodes) => {
                 writeln!(f, "{indent_str}build tuple (")?;
@@ -1847,6 +1961,11 @@ impl<P: HirPhase> Node<P> {
                     return Some(ty);
                 }
             }
+            PendingAssignment(plan) => {
+                if let Some(ty) = plan.type_at(arena, pos) {
+                    return Some(ty);
+                }
+            }
             Variant(node) => {
                 if let Some(ty) = type_at(arena, node.payload, pos) {
                     return Some(ty);
@@ -1993,6 +2112,16 @@ impl Node {
                 unbound_ty_vars(arena, assignment.place, result, ignore);
                 unbound_ty_vars(arena, assignment.value, result, ignore);
             }
+            PendingAssignment(plan) => {
+                for child in plan.children() {
+                    unbound_ty_vars(arena, child, result, ignore);
+                }
+                if let self::PendingAssignment::DivergingInputs { argument_types, .. } = &**plan {
+                    for arg in argument_types {
+                        self.unbound_ty_vars_in_ty(&arg.ty, result, ignore);
+                    }
+                }
+            }
             Tuple(nodes) => nodes
                 .iter()
                 .for_each(|&node| unbound_ty_vars(arena, node, result, ignore)),
@@ -2053,7 +2182,18 @@ pub(crate) fn instantiate_node_in_place<M: TypeMapper>(
     }
     // Then modify this node's kind-specific data
     match &mut arena[node_id].kind {
+        PendingAssignment(plan) => {
+            if let self::PendingAssignment::DivergingInputs { argument_types, .. } = &mut **plan {
+                for arg in argument_types {
+                    arg.ty = arg.ty.map(mapper);
+                    arg.mut_ty = mapper.map_mut_type(arg.mut_ty);
+                }
+            }
+        }
         FunctionApply(app) => {
+            app.ty = app.ty.map(mapper);
+        }
+        SubscriptApply(app) => {
             app.ty = app.ty.map(mapper);
         }
         StaticApply(app) => {

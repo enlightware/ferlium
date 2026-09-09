@@ -2790,24 +2790,51 @@ fn addressor_named_subscript_assignment_writes_direct_place() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn ordinary_assignment_evaluates_rhs_before_array_destination() {
+fn ordinary_assignment_captures_array_index_before_rhs() {
+    assert_val_eq!(
+        run_experimental_subscript_source(
+            "let mut values = [1, 2]; let mut index = 0; \
+             values[index] = { index = 1; 9 }; values",
+        ),
+        expected_array_infer([int(9), int(2)])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn ordinary_indirect_assignment_resolves_current_storage_after_rhs() {
     for source in [
-        "let mut values = [1, 2]; let mut index = 0; \
-         values[index] = { index = 1; 9 }; values",
-        "let mut values = [1]; values[-1] = { values = [1, 2]; 9 }; values",
-        "let mut values = []; values[1] = { values = [1, 2]; 9 }; values",
-        "let mut values = [[1]]; values[0][-1] = { values = [[1, 2]]; 9 }; values[0]",
+        "let mut values = [1]; values[0] = { values = [1, 2]; 9 }; values",
+        "let mut values = [1, 2]; values[0] = { values[0] = 4; 9 }; values",
+        "let mut nested = [[1]]; nested[0][0] = { nested = [[1, 2]]; 9 }; nested[0]",
+        r#"
+            subscript first(values: &mut [int]) -> int { ref mut { values[0] } }
+            let mut values = [1];
+            values->[first] = { values = [1, 2]; 9 };
+            values
+        "#,
     ] {
         assert_val_eq!(
             run_experimental_subscript_source(source),
-            expected_array_infer([int(1), int(9)])
+            expected_array_infer([int(9), int(2)])
         );
     }
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn ordinary_assignment_runs_rhs_before_addressor_once() {
+fn ordinary_indirect_assignment_allows_rhs_reads_and_disjoint_writes() {
+    assert_val_eq!(
+        run_experimental_subscript_source(
+            "let mut values = [1, 2]; values[0] = { values[1] = 9; values[0] + 2 }; values",
+        ),
+        expected_array_infer([int(3), int(9)])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn ordinary_assignment_opens_addressor_after_rhs_once() {
     let value = run_experimental_subscript_source(
         r#"
         subscript cell(slot: &mut int, log: &mut int) -> int {
@@ -2827,7 +2854,7 @@ fn ordinary_assignment_runs_rhs_before_addressor_once() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn ordinary_assignment_runs_rhs_before_yielded_accessor() {
+fn ordinary_assignment_opens_yielded_accessor_after_rhs() {
     let value = run_experimental_subscript_source(
         r#"
         subscript cell(slot: &mut int, log: &mut int) -> int {
@@ -2850,7 +2877,7 @@ fn ordinary_assignment_runs_rhs_before_yielded_accessor() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn ordinary_assignment_snapshots_rhs_before_destination_mutation() {
+fn ordinary_assignment_captures_rhs_before_destination_mutation() {
     let value = run_experimental_subscript_source(
         r#"
         struct Pair { first: string, second: string }
@@ -2885,18 +2912,400 @@ fn ordinary_assignment_rhs_failure_precedes_destination_failure() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn ordinary_assignment_rhs_return_skips_destination() {
-    let value = run_experimental_subscript_source(
-        r#"
+fn ordinary_assignment_rhs_return_skips_destination_access() {
+    assert_val_eq!(
+        run_experimental_subscript_source(
+            r#"
         fn run() -> int {
             let mut values: [int] = [];
             values[0] = { return 7 };
             0
         }
         run()
+    "#
+        ),
+        int(7)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn compound_assignment_freezes_array_destination_once() {
+    assert_val_eq!(
+        run_experimental_subscript_source(
+            "let mut values = [1, 2]; let mut index = -1; \
+             values[{ index += 1; index }] += 1; (values, index)",
+        ),
+        expected_tuple([expected_array_infer([int(2), int(2)]), int(0)])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn compound_and_expanded_assignment_capture_selectors_in_the_same_order() {
+    let source = r#"
+        let mut compound = [1, 2];
+        let mut expanded = [1, 2];
+        let mut compound_index = 0;
+        let mut expanded_index = 0;
+        compound[compound_index] += { compound_index += 1; 1 };
+        expanded[expanded_index] = expanded[expanded_index] + {
+            expanded_index += 1;
+            1
+        };
+        (compound, expanded, compound_index, expanded_index)
+    "#;
+    assert_val_eq!(
+        run_experimental_subscript_source(source),
+        expected_tuple([
+            expected_array_infer([int(2), int(2)]),
+            expected_array_infer([int(2), int(2)]),
+            int(1),
+            int(1),
+        ])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn compound_assignment_allows_proven_disjoint_literal_indices() {
+    assert_val_eq!(
+        run_experimental_subscript_source(
+            "let mut values = [1, 2]; values[0] += values[1]; values"
+        ),
+        expected_array_infer([int(3), int(2)])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn ordinary_assignment_allows_proven_disjoint_literal_indices() {
+    assert_val_eq!(
+        run_experimental_subscript_source("let mut values = [1, 2]; values[0] = values[1]; values"),
+        expected_array_infer([int(2), int(2)])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn compound_assignment_allows_access_through_fresh_temporary() {
+    assert_val_eq!(
+        run_experimental_subscript_source(
+            "fn get_values() { [1, 2] } let mut total = 0; total += get_values()[0]; total",
+        ),
+        int(1)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn compound_assignment_reads_destination_after_rhs() {
+    for source in [
+        "let mut values = [1, 2]; values[0] += { values[0] += 10; 1 }; values[0]",
+        "let mut values = [1]; values[0] += { values = [10]; 2 }; values[0]",
+        "let mut value = 1; value += { value = 10; 2 }; value",
+    ] {
+        assert_val_eq!(run_experimental_subscript_source(source), int(12));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn compound_assignment_allows_rhs_read_of_whole_container() {
+    assert_val_eq!(
+        run_experimental_subscript_source(
+            "fn first(values) { values[0] } let mut values = [1, 2]; \
+         values[0] += first(values); values"
+        ),
+        expected_array_infer([int(2), int(2)])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn compound_assignment_captures_dynamic_rhs_access() {
+    assert_val_eq!(
+        run_experimental_subscript_source(
+            "let mut values = [1, 2]; let i = 0; let j = 1; \
+         values[i] += values[j]; values"
+        ),
+        expected_array_infer([int(3), int(2)])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn assignment_prepares_mutable_argument_places_but_captures_value_arguments() {
+    for operator in ["=", "+="] {
+        let source = format!(
+            r#"
+            subscript cell(slot: &mut int, log: &mut int, captured: int) -> int {{
+                ref mut {{ log = log * 10 + captured; slot }}
+            }}
+            let mut slot = 0;
+            let mut logs = [0, 0];
+            let mut index = 0;
+            let mut digit = 2;
+            slot->[cell](logs[index], digit) {operator} {{
+                index = 1;
+                digit = 7;
+                logs = [1, 9];
+                5
+            }};
+            (slot, logs)
+        "#
+        );
+        assert_val_eq!(
+            run_experimental_subscript_source(&source),
+            expected_tuple([int(5), expected_array_infer([int(12), int(9)])])
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn assignment_prepares_late_inferred_mutable_arguments_as_places() {
+    assert_val_eq!(
+        run_experimental_subscript_source(
+            r#"
+        subscript cell(slot: &mut int, log: &mut int) -> int {
+            ref mut { log += 1; slot }
+        }
+        fn update(accessor, log) {
+            let mut slot = 0;
+            slot->[accessor](log) = { log = 10; 5 };
+            slot
+        }
+        let mut log = 0;
+        let result = update(cell, log);
+        (result, log)
+    "#
+        ),
+        expected_tuple([int(5), int(11)])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn assignment_prepares_late_inferred_indexed_mutable_arguments() {
+    for operator in ["=", "+="] {
+        let source = format!(
+            r#"
+            subscript cell(slot: &mut int, log: &mut int) -> int {{
+                ref mut {{ log += 1; slot }}
+            }}
+            fn update(accessor, logs, index) {{
+                let mut slot = 0;
+                slot->[accessor](logs[index]) {operator} {{
+                    index = 1;
+                    logs = [10, 20];
+                    5
+                }};
+                slot
+            }}
+            // The captured index is only valid after the RHS replaces the array.
+            let mut logs = [];
+            let mut index = 0;
+            let result = update(cell, logs, index);
+            (result, logs, index)
+        "#
+        );
+        assert_val_eq!(
+            run_experimental_subscript_source(&source),
+            expected_tuple([int(5), expected_array_infer([int(11), int(20)]), int(1),])
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn assignment_captures_generic_value_arguments_before_rhs() {
+    let source = r#"
+        subscript cell<T>(slot: &mut T, value: T, seen: &mut T) -> T {
+            ref mut { seen = value; slot }
+        }
+        fn update<T>(slot: &mut T, input: &mut T, seen: &mut T, replacement: T) {
+            slot->[cell](input, seen) = { input = replacement; input };
+        }
+        let mut slot = "old";
+        let mut input = "before";
+        let mut seen = "";
+        update(slot, input, seen, "after");
+        (slot, input, seen)
+    "#;
+    assert_val_eq!(
+        run_experimental_subscript_source(source),
+        expected_tuple([string("after"), string("after"), string("before")])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn assignment_capture_evidence_depends_on_argument_passing() {
+    for (passing, needs_value) in [("", true), ("&mut ", false)] {
+        let source = format!(
+            r#"
+            subscript cell<T>(slot: &mut int, unused: {passing}T) -> int {{
+                ref mut {{ slot }}
+            }}
+            fn update<T>(slot: &mut int, input: &mut T) {{
+                slot->[cell](input) = 5;
+            }}
+        "#
+        );
+        let definition = experimental_session().compile_and_get_fn_def(&source, "update");
+        assert_eq!(!definition.ty_scheme.constraints.is_empty(), needs_value);
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn assignment_checks_late_inferred_mutable_argument_overlap() {
+    experimental_session()
+        .fail_compilation(
+            r#"
+        subscript cell(slot: &mut int, a: &mut int, b: &mut int) -> int {
+            ref mut { a += 1; b += 1; slot }
+        }
+        fn update(accessor, log) {
+            let mut slot = 0;
+            slot->[accessor](log, log) = { log = 10; 5 };
+        }
+        let mut log = 0;
+        update(cell, log);
+    "#,
+        )
+        .expect_mutable_paths_overlap();
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn assignment_resolves_negative_index_against_post_rhs_length() {
+    assert_val_eq!(
+        run_experimental_subscript_source(
+            "let mut values = [1]; values[-1] += { values = [10, 20]; 2 }; values"
+        ),
+        expected_array_infer([int(10), int(22)])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn assignment_cannot_reborrow_another_suspended_accessor_argument() {
+    experimental_session()
+        .fail_compilation(
+            r#"
+        subscript outer(slot: &mut int, log: &mut int) -> int {
+            mut { let mut local = slot; yield local; slot = local; log += 1 }
+        }
+        subscript inner(slot: &mut int, log: &mut int) -> int {
+            ref mut { log += 1; slot }
+        }
+        let mut slot = 0;
+        let mut log = 0;
+        slot->[outer](log)->[inner](log) = 7;
+    "#,
+        )
+        .expect_exclusive_access_overlap();
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn read_cannot_reborrow_another_suspended_accessor_argument() {
+    experimental_session()
+        .fail_compilation(
+            r#"
+        subscript outer(slot: &mut int, log: &mut int) -> int {
+            ref { let local = slot; yield local; log += 1 }
+        }
+        subscript inner(slot: int, log: &mut int) -> int {
+            ref { let local = slot; log += 1; yield local }
+        }
+        let mut slot = 7;
+        let mut log = 0;
+        slot->[outer](log)->[inner](log)
+    "#,
+        )
+        .expect_exclusive_access_overlap();
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn assignment_prepares_nested_selectors_before_any_accessor_opens() {
+    assert_val_eq!(
+        run_experimental_subscript_source(
+            r#"
+        subscript rows(values: &mut [[int]], log: &mut int) -> [int] {
+            mut { log = log * 10 + 3; values[0] }
+        }
+        let mut values = [[1]];
+        let mut log = 0;
+        values->[rows](log)[{ log = log * 10 + 1; 0 }] += {
+            log = log * 10 + 2; values = [[10]]; 2
+        };
+        (values[0][0], log)
+    "#
+        ),
+        expected_tuple([int(12), int(123)])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn assignment_captures_first_class_accessor_before_rhs() {
+    assert_val_eq!(
+        run_experimental_subscript_source(
+            r#"
+        subscript first(values: &mut [int]) -> int { ref mut { values[0] } }
+        subscript last(values: &mut [int]) -> int { ref mut { values[-1] } }
+        let mut accessor = first;
+        let mut values = [1, 2];
+        values->[accessor] = { accessor = last; values = [3, 4]; 9 };
+        values
+    "#
+        ),
+        expected_array_infer([int(9), int(4)])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn assignment_selector_failure_precedes_rhs_and_destination_access() {
+    let error = experimental_session().fail_run(
+        r#"
+        subscript rows(values: &mut [[int]]) -> [int] { mut { panic("opened"); values[0] } }
+        let mut values = [[1]];
+        values->[rows][idiv(1, 0)] = { panic("rhs"); 2 }
     "#,
     );
-    assert_val_eq!(value, int(7));
+    assert_eq!(error, SourceFailureKind::DivisionByZero);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn assignment_selector_return_skips_accessor_opening() {
+    for destination in [
+        "values->[rows][{ return 7 }]",
+        "values[0][{ return 7 }]",
+        "values->[rows]->[cell]({ return 7 })",
+        "values[0]->[cell]({ return 7 })",
+    ] {
+        let source = format!(
+            r#"
+            subscript rows(values: &mut [[int]]) -> [int] {{
+                mut {{ panic("opened"); values[0] }}
+            }}
+            subscript cell(values: &mut [int], index: int) -> int {{ ref mut {{ values[index] }} }}
+            fn run() -> int {{
+                let mut values: [[int]] = [];
+                {destination} = 2;
+                0
+            }}
+            run()
+        "#
+        );
+        assert_val_eq!(run_experimental_subscript_source(&source), int(7));
+    }
 }
 
 #[test]
@@ -3258,12 +3667,13 @@ fn named_subscripts_separated_by_field_unwind_lifo() {
         }
 
         let mut holder = {slot: 5, other: 8};
-        let mut log = 0;
-        holder->[outer](log).slot->[inner](log) += 2;
-        (holder.slot, holder.other, log)
+        let mut outer_log = 0;
+        let mut inner_log = 0;
+        holder->[outer](outer_log).slot->[inner](inner_log) += 2;
+        (holder.slot, holder.other, outer_log, inner_log)
     "# });
 
-    assert_val_eq!(value, expected_tuple([int(7), int(8), int(1342)]));
+    assert_val_eq!(value, expected_tuple([int(7), int(8), int(12), int(34)]));
 }
 
 #[test]
@@ -3805,12 +4215,13 @@ fn nested_named_subscript_assignment_unwinds_lifo() {
         }
 
         let mut slot = 5;
-        let mut log = 0;
-        slot->[outer](log)->[inner](log) = 7;
-        (slot, log)
+        let mut outer_log = 0;
+        let mut inner_log = 0;
+        slot->[outer](outer_log)->[inner](inner_log) = 7;
+        (slot, outer_log, inner_log)
     "# });
 
-    assert_val_eq!(value, expected_tuple([int(7), int(1342)]));
+    assert_val_eq!(value, expected_tuple([int(7), int(12), int(34)]));
 }
 
 #[test]
@@ -3838,12 +4249,13 @@ fn nested_named_subscript_compound_assignment_uses_single_projection_per_level()
         }
 
         let mut slot = 5;
-        let mut log = 0;
-        slot->[outer](log)->[inner](log) += 2;
-        (slot, log)
+        let mut outer_log = 0;
+        let mut inner_log = 0;
+        slot->[outer](outer_log)->[inner](inner_log) += 2;
+        (slot, outer_log, inner_log)
     "# });
 
-    assert_val_eq!(value, expected_tuple([int(7), int(1342)]));
+    assert_val_eq!(value, expected_tuple([int(7), int(12), int(34)]));
 }
 
 #[test]

@@ -85,7 +85,7 @@ use crate::{
     hir::{
         self, ArgConvention, CallArgument, ENodeArena, ENodeId, Elaborated, Node, NodeArena,
         NodeKind, Project as HirProject, StaticApplication, UNodeArena, UNodeId, Unelaborated,
-        VariantPayloadStorageSource,
+        VariantPayloadStorageSource, elaborated_node_is_place_reference,
     },
     std::value::{
         dynamic_product_member_layouts, generated_value_evidence_types,
@@ -1297,7 +1297,7 @@ fn node_contains_yield(arena: &UNodeArena, root: UNodeId) -> bool {
 /// Elaborate a pre-dictionary-passing HIR tree into the final HIR arena.
 #[cfg(test)]
 fn elaborate_hir<'d, 'sr, 'sm>(
-    src: &UNodeArena,
+    src: &mut UNodeArena,
     root: UNodeId,
     dst: &mut ENodeArena,
     ctx: &mut DictElaborationCtx<'d, 'sr, 'sm>,
@@ -1310,13 +1310,15 @@ fn elaborate_hir<'d, 'sr, 'sm>(
 /// Elaborate HIR while reporting unreachable suffixes that became visible only after final type
 /// substitution. Most suffixes are already diagnosed and pruned during inference.
 pub(crate) fn elaborate_hir_with_warnings<'d, 'sr, 'sm>(
-    src: &UNodeArena,
+    src: &mut UNodeArena,
     root: UNodeId,
     dst: &mut ENodeArena,
     ctx: &mut DictElaborationCtx<'d, 'sr, 'sm>,
-    locals: Vec<LocalDecl>,
+    mut locals: Vec<LocalDecl>,
     warnings: &mut Vec<CompilationWarning>,
 ) -> Result<ElaboratedHir, InternalCompilationError> {
+    hir::assignment::lower_pending_assignments(src, root, &mut locals);
+    hir::value_dispatch::elaborate_local_ownership_and_value_dispatches(src, &mut locals, ctx)?;
     let mut elaboration = HirElaboration::new(dst, ctx, locals, warnings);
     let root = elaboration.elaborate_node(src, root)?;
     LocalDecl::assign_sequential_slots(&mut elaboration.locals);
@@ -1741,24 +1743,6 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 CallResultConvention::Subscript(member_ty.result_convention),
             ),
         }))
-    }
-
-    fn elaborated_node_is_place_reference(&self, node_id: ENodeId) -> bool {
-        // Elaborated HIR has no `FieldAccess`, `TraitMethodApply`, or
-        // `GetTraitMethod` nodes; keep this phase-specific rather than
-        // teaching the unelaborated place helper about elaboration payloads.
-        match &self.dst[node_id].kind {
-            NodeKind::LoadLocal(_) | NodeKind::Project(_) => true,
-            NodeKind::FunctionApply(app) => app.ty.returns_place(),
-            NodeKind::SubscriptApply(app) => app.ty.returns_place(),
-            NodeKind::StaticApply(app) => app.ty.returns_place(),
-            NodeKind::CallDictionaryFunction(call) => call.ty.returns_place(),
-            NodeKind::WithPlace(node) => self.elaborated_node_is_place_reference(node.body),
-            NodeKind::Block(block) => block
-                .tail_node()
-                .is_some_and(|node| self.elaborated_node_is_place_reference(node)),
-            _ => false,
-        }
     }
 
     fn materialize_elaborated_place_value(
@@ -2616,6 +2600,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     drop: drop.map(|drop| drop.into_elaborated()),
                 })
             }
+            PendingAssignment(_) => unreachable!("assignment preparation precedes HIR elaboration"),
             Tuple(nodes) => {
                 self.ensure_product_layout_evidence(node_ty, node_span)?;
                 Tuple(b(SVec2::from_vec(
@@ -2783,7 +2768,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 // projection or addressor-place call. In either case the
                 // elaborated accessor already produces a place and needs no
                 // suspended yielded-accessor protocol.
-                if self.elaborated_node_is_place_reference(accessor) {
+                if elaborated_node_is_place_reference(self.dst, accessor) {
                     if let Some(inlined) =
                         self.inline_yielded_binding_body(node.binding, accessor, body)?
                     {
@@ -2793,17 +2778,19 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                             place: accessor,
                             binding: node.binding,
                             body,
+                            access: node.access,
                         })
                     }
                 } else {
                     let mut body = body;
-                    if self.elaborated_node_is_place_reference(body) {
+                    if elaborated_node_is_place_reference(self.dst, body) {
                         body = self.materialize_elaborated_place_value(body, node_ty, node_span)?;
                     }
                     WithYielded(hir::WithYielded {
                         accessor,
                         binding: node.binding,
                         body,
+                        access: node.access,
                     })
                 }
             }
@@ -2820,6 +2807,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     place,
                     binding: node.binding,
                     body: body?,
+                    access: node.access,
                 })
             }
             CheckCallDepth => CheckCallDepth,
@@ -3129,7 +3117,7 @@ mod tests {
         let mut warnings = Vec::new();
 
         let elaborated = elaborate_hir_with_warnings(
-            &arena,
+            &mut arena,
             root,
             &mut elaborated_arena,
             &mut ctx,
@@ -3235,8 +3223,14 @@ mod tests {
         );
 
         let mut elaborated_arena = ENodeArena::default();
-        let elaborated =
-            elaborate_hir(&arena, node, &mut elaborated_arena, &mut ctx, Vec::new()).unwrap();
+        let elaborated = elaborate_hir(
+            &mut arena,
+            node,
+            &mut elaborated_arena,
+            &mut ctx,
+            Vec::new(),
+        )
+        .unwrap();
 
         let NodeKind::CallDictionaryFunction(call) = &elaborated_arena[elaborated.root].kind else {
             panic!("expected associated const to elaborate to a dictionary getter call");
@@ -3303,8 +3297,14 @@ mod tests {
         );
 
         let mut elaborated_arena = ENodeArena::default();
-        let elaborated =
-            elaborate_hir(&arena, node, &mut elaborated_arena, &mut ctx, Vec::new()).unwrap();
+        let elaborated = elaborate_hir(
+            &mut arena,
+            node,
+            &mut elaborated_arena,
+            &mut ctx,
+            Vec::new(),
+        )
+        .unwrap();
 
         let NodeKind::CallDictionaryFunction(call) = &elaborated_arena[elaborated.root].kind else {
             panic!("expected associated const to elaborate to a dictionary getter call");

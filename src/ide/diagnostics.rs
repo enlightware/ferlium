@@ -817,6 +817,31 @@ pub(super) fn compilation_error_to_data(
                 ),
             ]
         }
+        ExclusiveAccessOverlap {
+            target_span,
+            access_span,
+            scope_span,
+        } => {
+            let target_name = fmt_span(target_span);
+            let access_name = fmt_span(access_span);
+            vec![
+                error_data_from_location(
+                    access_span,
+                    format!(
+                        "Cannot access `{access_name}` while `{target_name}` is already in use through a mutable access"
+                    ),
+                ),
+                error_data_from_location(
+                    target_span,
+                    format!("Mutable access to `{target_name}` lasts until this access finishes"),
+                ),
+                error_data_from_location(
+                    scope_span,
+                    "Separate the overlapping accesses so one finishes before the other starts"
+                        .to_string(),
+                ),
+            ]
+        }
         UndefinedVarInStringFormatting {
             var_span,
             string_span,
