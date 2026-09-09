@@ -29,20 +29,15 @@
 //!
 //! Both share one resolver, so the two can never disagree.
 //!
-//! The checking entry points are compiled for debug and test builds, and for verified snapshot
-//! restoration. [`check_function_operand_roles`] is the cheap one — one walk over a finished body,
+//! The checking entry points also guard physical artifacts in release builds.
+//! [`check_function_operand_roles`] is the cheap one — one walk over a finished body,
 //! no [`ModuleEnv`], no trait solving, no dataflow — so it runs before the heavier analyses, whose
 //! failures on a role-confused body are harder to read.
 
-use std::borrow::Cow;
+use std::{borrow::Cow, fmt};
 
-#[cfg(any(debug_assertions, test, feature = "std-snapshot"))]
-use std::fmt;
-
-#[cfg(any(debug_assertions, test, feature = "std-snapshot"))]
 use ustr::Ustr;
 
-#[cfg(any(debug_assertions, test, feature = "std-snapshot"))]
 use crate::mir::site::{OperationIndex, OperationSite};
 
 use crate::{
@@ -99,7 +94,6 @@ impl MirType {
         }
     }
 
-    #[cfg(any(debug_assertions, test, feature = "std-snapshot"))]
     pub(crate) fn is_fully_concrete(&self) -> bool {
         use crate::types::type_like::TypeLike;
 
@@ -180,7 +174,6 @@ fn lowered_type_needs_pointer_parentheses(ty: Type, env: &ModuleEnv<'_>) -> bool
 }
 
 /// The predicates used by operand checking, compiled with the checks themselves.
-#[cfg(any(debug_assertions, test, feature = "std-snapshot"))]
 impl ValueRole {
     pub(crate) fn is_callee_operand(&self) -> bool {
         matches!(
@@ -227,7 +220,6 @@ impl ValueRole {
     }
 
     /// The type this role wraps, whether it is held directly or pointed at.
-    #[cfg(any(debug_assertions, test, feature = "std-snapshot"))]
     pub(crate) fn inner_type(&self) -> Option<&MirType> {
         match self {
             Self::Materialized(ty) | Self::Place(ty) => Some(ty),
@@ -495,7 +487,6 @@ impl ValueRoles {
 }
 
 /// Diagnostics used only by the operand checks.
-#[cfg(any(debug_assertions, test, feature = "std-snapshot"))]
 impl ValueRoles {
     /// Whether `value_id` was left unresolved because its result reads itself.
     pub(crate) fn is_cyclic(&self, value_id: mir::ValueId) -> bool {
@@ -552,7 +543,6 @@ fn result_dependency(result: &OperationResult) -> Option<mir::ValueId> {
     }
 }
 
-#[cfg(any(debug_assertions, test, feature = "std-snapshot"))]
 /// Checks the role each operand slot of `operation` requires.
 ///
 /// This is the role half of MIR verification, split out so that lowering can run it at insertion
@@ -841,7 +831,6 @@ pub(crate) fn check_operand_roles(
     }
 }
 
-#[cfg(any(debug_assertions, test, feature = "std-snapshot"))]
 /// Checks the role each operand slot of a terminator requires. See [`check_operand_roles`].
 pub(crate) fn check_terminator_operand_roles(
     roles: &ValueRoles,
@@ -885,7 +874,6 @@ pub(crate) fn check_terminator_operand_roles(
     }
 }
 
-#[cfg(any(debug_assertions, test, feature = "std-snapshot"))]
 /// Checks every operand slot in a whole function against the role it requires.
 ///
 /// The role half of verification over a finished body. Unlike

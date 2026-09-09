@@ -239,6 +239,18 @@ their externally visible identity. Generated helpers are ordinary entries in the
 Semantic and physical stages use the same MIR structures, and shared operations retain their
 meaning. Partially lowered bodies are not valid input to physical executors.
 
+Physical MIR retains shared ownership, callable, and control-flow operations with physical storage
+semantics; it is not machine instruction-level IR. In particular, `clone`, `drop`, scoped
+`project`/`yield`, and `invoke` remain valid. Unresolved semantic field projections and semantic
+subscript-member selection must instead be expanded before this boundary.
+
+Readiness verification checks structural and ownership contracts that survive lowering, supported
+operations, and agreement between call sites and physical entries. It does not prove raw-memory
+safety: physical execution must additionally enforce allocation bounds, alignment, initialization,
+and storage lifetimes. An executor must reject operations outside its supported subset.
+Malformed compiler-generated MIR can trigger an internal verifier panic, including in release
+builds; embedders must not assume such invariant failures are recoverable compilation errors.
+
 Each physical module owns relocatable dictionary and subscript catalogs. A dictionary definition
 records its stable identity, capture schema, entry functions, and entry-to-capture mappings. A
 subscript definition records its identity, capture schema, optional `ref` and `mut` functions, and

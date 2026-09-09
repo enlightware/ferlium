@@ -47,9 +47,20 @@ fn call_type_is_fallible(ty: &CallImplType) -> bool {
 ///
 /// This is intentionally intraprocedural: calls are checked through the uniform by-pointer boundary
 /// contract, so lazy lowering does not force the callee's MIR body to exist.
+#[cfg(any(debug_assertions, test, feature = "std-snapshot"))]
 pub(crate) fn verify_function(func: &Function, env: ModuleEnv<'_>) {
     let solver = TraitSolverProbe::from_module(env.current, env.modules);
-    Verifier::new(func, env, solver).verify();
+    Verifier::new(func, env, solver).verify(true);
+}
+
+/// Physical lowering preserves SSA, operand roles, source-failure flow, and register ownership.
+/// Semantic field-path storage analysis no longer applies after projections become byte offsets;
+/// physical storage initialization and lifetime must be checked by the executor instead.
+pub(crate) fn verify_physical_function(func: &Function, env: ModuleEnv<'_>) {
+    // Diagnose the offending operand slot before type/dataflow analyses see its consequences.
+    role::check_function_operand_roles(func);
+    let solver = TraitSolverProbe::from_module(env.current, env.modules);
+    Verifier::new(func, env, solver).verify(false);
 }
 
 /// Clones an interned type descriptor and explicitly releases the universe read lock.
@@ -499,13 +510,19 @@ impl<'a> Verifier<'a> {
         }
     }
 
-    fn verify(mut self) {
+    fn verify(mut self, semantic_storage: bool) {
+        self.verify_shared_contracts();
+        if semantic_storage {
+            self.verify_storage_ownership();
+        }
+    }
+
+    fn verify_shared_contracts(&mut self) {
         self.verify_structure();
         self.collect_value_information();
         self.verify_operand_roles_and_dominance();
         self.verify_source_failure_flow();
         self.verify_register_ownership();
-        self.verify_storage_ownership();
     }
 
     /// Verifies that source-error edges cannot rejoin normal execution and that each terminal form

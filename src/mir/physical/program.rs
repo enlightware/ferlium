@@ -19,13 +19,13 @@ use crate::{
         value::StaticEvidence,
     },
     module::{FunctionId, LocalFunctionId, ModuleId, SubscriptId, TraitDictionaryId, id::Id},
-    types::r#trait::TraitDictionaryEntryIndex,
+    types::{r#trait::TraitDictionaryEntryIndex, r#type::CallResultConvention},
 };
 
 use super::{
     BackendReadyMirArtifacts, ConstructedSubscript, PhysicalDictionaryDefinition,
     PhysicalSubscriptDefinition, PhysicalSubscriptMember, constructed_dictionary_definitions,
-    constructed_subscript_definitions, evidence::try_for_each_static_evidence,
+    constructed_subscript_definitions, evidence::try_for_each_static_evidence, physical_call_arity,
     static_dictionary_definition, static_subscript,
 };
 
@@ -116,6 +116,15 @@ pub(crate) enum PhysicalProgramError {
         expected: usize,
         actual: usize,
     },
+    InvalidCallConvention {
+        owner: FunctionId,
+        target: FunctionId,
+        expected: CallResultConvention,
+        actual: CallResultConvention,
+    },
+    InvalidResultParameter {
+        function: FunctionId,
+    },
     UnresolvedDictionary {
         owner: FunctionId,
         dictionary: TraitDictionaryId,
@@ -161,6 +170,19 @@ pub(crate) enum PhysicalProgramError {
 impl fmt::Display for PhysicalProgramError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidResultParameter { function } => write!(
+                f,
+                "resolved physical entry {function:?} requires exactly one trailing result parameter"
+            ),
+            Self::InvalidCallConvention {
+                owner,
+                target,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "resolved-program call in {owner:?} to {target:?} uses {actual:?}, expected {expected:?}"
+            ),
             Self::DuplicateModule(module) => {
                 write!(f, "physical module m{module} appears more than once")
             }
@@ -381,11 +403,24 @@ fn verify_operation(
     if let Some(target) = operation.kind.function_id() {
         verify_function(program, owner, target)?;
     }
-    if matches!(operation.kind, OperationKind::Call { .. })
+    if let OperationKind::Call { ty, .. } | OperationKind::Project { ty, .. } = &operation.kind
         && let Some(Value::Function(target)) = operation.operands.first()
         && let Some(target_body) = program.function(*target)
     {
-        let expected = target_body.parameters().len();
+        let expected = physical_call_arity(
+            target_body,
+            matches!(operation.kind, OperationKind::Project { .. }),
+        )
+        .ok_or(PhysicalProgramError::InvalidResultParameter { function: *target })?;
+        // Semantic compatibility requires adaptation, not a mismatched physical call protocol.
+        if ty.result_convention != target_body.result_convention() {
+            return Err(PhysicalProgramError::InvalidCallConvention {
+                owner,
+                target: *target,
+                expected: target_body.result_convention(),
+                actual: ty.result_convention,
+            });
+        }
         let actual = operation.operands.len() - 1;
         if actual != expected {
             return Err(PhysicalProgramError::InvalidCall {

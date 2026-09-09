@@ -118,6 +118,16 @@ pub(crate) enum BackendReadinessError {
         expected: usize,
         actual: usize,
     },
+    InvalidPhysicalCallConvention {
+        owner: FunctionId,
+        target: FunctionId,
+        expected: CallResultConvention,
+        actual: CallResultConvention,
+    },
+    InvalidPhysicalProtocol {
+        function: FunctionId,
+        reason: &'static str,
+    },
     InvalidDictionaryDefinition {
         dictionary: TraitDictionaryId,
     },
@@ -167,6 +177,19 @@ pub(crate) enum BackendReadinessError {
 impl fmt::Display for BackendReadinessError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidPhysicalProtocol { function, reason } => write!(
+                f,
+                "physical entry {function:?} has an invalid execution protocol: {reason}"
+            ),
+            Self::InvalidPhysicalCallConvention {
+                owner,
+                target,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "physical call in {owner:?} to {target:?} uses {actual:?}, expected {expected:?}"
+            ),
             Self::NativeRequirement(error) => error.fmt(f),
             Self::InvalidNativeInteriorAccess {
                 function,
@@ -529,7 +552,7 @@ pub(crate) fn lower_physical_mir(
         dictionaries,
         subscripts,
     };
-    verify_physical_mir(&artifacts)?;
+    verify_physical_mir(&artifacts, env)?;
     Ok(artifacts)
 }
 
@@ -1298,6 +1321,7 @@ impl<'a> PhysicalLowerer<'a> {
         let mut edit = FunctionEdit::new(body);
         let mut cleanups = Vec::new();
         let mut cleanup_flag_values = None;
+        let mut cleanup_prologue = Vec::new();
 
         for (block, index, shell, store) in stores.into_iter().rev() {
             let OperationKind::Variant {
@@ -1372,14 +1396,11 @@ impl<'a> PhysicalLowerer<'a> {
                 let base_slot = edit
                     .assign_new_result(&mut base_operation)
                     .expect("alloca_place produces a place");
-                edit.block_mut(edit.entry()).operations.splice(
-                    0..0,
-                    [
-                        active_operation,
-                        Operation::store(shell.span, false_value.clone(), active.clone()),
-                        base_operation,
-                    ],
-                );
+                cleanup_prologue.extend([
+                    active_operation,
+                    Operation::store(shell.span, false_value.clone(), active.clone()),
+                    base_operation,
+                ]);
                 operations.push(Operation::store(shell.span, base, base_slot.clone()));
                 operations.push(Operation::store(
                     shell.span,
@@ -1403,6 +1424,11 @@ impl<'a> PhysicalLowerer<'a> {
                 .splice(index..=index, operations);
         }
         cleanups.sort_by_key(|cleanup| std::cmp::Reverse(cleanup.depth));
+        // Recorded store indices refer to the original body. Prepending cleanup storage while
+        // processing those stores would shift entry-block indices and splice at the wrong site.
+        edit.block_mut(edit.entry())
+            .operations
+            .splice(0..0, cleanup_prologue);
         Ok((edit.finish_unverified(), cleanups))
     }
 
@@ -2675,7 +2701,24 @@ fn int_unary(
     result
 }
 
-fn verify_physical_mir(artifacts: &BackendReadyMirArtifacts) -> Result<(), BackendReadinessError> {
+/// The shared call boundary has exactly one trailing result parameter, even for scoped accessors.
+/// A Project supplies its result through the yield protocol rather than an explicit out-pointer.
+fn physical_call_arity(body: &Function, projection: bool) -> Option<usize> {
+    let (result, inputs) = body.parameters().split_last()?;
+    if result.kind != ParameterKind::Return
+        || inputs
+            .iter()
+            .any(|parameter| parameter.kind == ParameterKind::Return)
+    {
+        return None;
+    }
+    Some(inputs.len() + usize::from(!projection))
+}
+
+fn verify_physical_mir(
+    artifacts: &BackendReadyMirArtifacts,
+    env: ModuleEnv<'_>,
+) -> Result<(), BackendReadinessError> {
     verify_dictionary_catalog(artifacts)?;
     verify_subscript_catalog(artifacts)?;
     let module = artifacts.module;
@@ -2688,11 +2731,6 @@ fn verify_physical_mir(artifacts: &BackendReadyMirArtifacts) -> Result<(), Backe
         let constructed_dictionaries = constructed_dictionary_definitions(body);
         let constructed_subscripts = constructed_subscript_definitions(body);
 
-        #[cfg(any(debug_assertions, test, feature = "std-snapshot"))]
-        {
-            mir::role::check_function_operand_roles(body);
-        }
-
         for block in body.blocks() {
             let block = body.block(block);
             for operation in block.operations() {
@@ -2704,6 +2742,8 @@ fn verify_physical_mir(artifacts: &BackendReadyMirArtifacts) -> Result<(), Backe
                     operation,
                 )?;
             }
+            // Exhaustive just like operation classification: new terminators require an explicit
+            // physical contract. Existing failure flow and scoped yields remain physical MIR.
             match &block.terminator().kind {
                 TerminatorKind::Invoke { operation, .. } => {
                     verify_physical_operation(
@@ -2713,22 +2753,41 @@ fn verify_physical_mir(artifacts: &BackendReadyMirArtifacts) -> Result<(), Backe
                         &constructed_subscripts,
                         operation,
                     )?;
+                    continue;
                 }
-                _ => {
-                    verify_local_function_operands(
-                        module,
-                        artifacts.entry_count(),
-                        function_id,
-                        block.terminator().operands().iter(),
-                    )?;
-                    verify_evidence_operands(
-                        artifacts,
-                        function_id,
-                        block.terminator().operands().iter(),
-                    )?;
+                TerminatorKind::Yield { .. } => {
+                    if !body.result_convention().requires_yield_driver() {
+                        return Err(BackendReadinessError::InvalidPhysicalProtocol {
+                            function: function_id,
+                            reason: "yield requires a scoped accessor entry",
+                        });
+                    }
                 }
+                TerminatorKind::Goto { .. }
+                | TerminatorKind::CondBr { .. }
+                | TerminatorKind::SwitchVariant { .. }
+                | TerminatorKind::Return
+                | TerminatorKind::PropagateError
+                | TerminatorKind::FailureDuringCleanup
+                | TerminatorKind::InvariantFailure { .. } => {}
             }
+            verify_local_function_operands(
+                module,
+                artifacts.entry_count(),
+                function_id,
+                block.terminator().operands().iter(),
+            )?;
+            verify_evidence_operands(artifacts, function_id, block.terminator().operands().iter())?;
         }
+        if physical_call_arity(body, false).is_none() {
+            return Err(BackendReadinessError::InvalidPhysicalProtocol {
+                function: function_id,
+                reason: "entry requires exactly one trailing result parameter",
+            });
+        }
+        // Compiler-generated malformed MIR is an invariant failure, diagnosed by the shared
+        // verifier's assertions in every build. Unsupported physical contracts return errors.
+        mir::verify::verify_physical_function(body, env);
     }
     Ok(())
 }
@@ -2740,23 +2799,68 @@ fn verify_physical_operation(
     constructed_subscripts: &FxHashMap<mir::ValueId, ConstructedSubscript>,
     operation: &Operation,
 ) -> Result<(), BackendReadinessError> {
-    if let OperationKind::Subfield {
-        variant_payload, ..
-    } = operation.kind
-    {
+    // Deliberately exhaustive: every new MIR operation needs a physical execution contract.
+    // Acceptance here describes the IR, not the operation subset of an individual executor.
+    let unresolved = match &operation.kind {
+        OperationKind::Subfield {
+            variant_payload: true,
+            ..
+        } => Some("variant_payload"),
+        OperationKind::Subfield {
+            variant_payload: false,
+            ..
+        } => Some("subfield"),
+        OperationKind::SubscriptMember { .. } => Some("subscript_member"),
+        OperationKind::Alloca { .. }
+        | OperationKind::AllocaPlace { .. }
+        | OperationKind::RuntimeAlloc { .. }
+        | OperationKind::RuntimeDealloc
+        | OperationKind::Call { .. }
+        | OperationKind::Project { .. }
+        | OperationKind::EndProject
+        | OperationKind::CompareEqual
+        | OperationKind::Load
+        | OperationKind::AddressOffset { .. }
+        | OperationKind::AddressOffsetPlace { .. }
+        | OperationKind::DictEntry { .. }
+        | OperationKind::BuildDictionary { .. }
+        | OperationKind::BuildSubscriptEvidence { .. }
+        | OperationKind::BuildSubscript { .. }
+        | OperationKind::CloneSubscriptEnv { .. }
+        | OperationKind::DropSubscriptEnv
+        | OperationKind::BorrowSubscriptMember { .. }
+        | OperationKind::Variant { .. }
+        | OperationKind::BuildArray { .. }
+        | OperationKind::ExtractTag
+        | OperationKind::ExtractPayloadIndirection
+        | OperationKind::IsInitialized
+        | OperationKind::Store
+        | OperationKind::Clear
+        | OperationKind::Memcpy
+        | OperationKind::Move
+        | OperationKind::Replace
+        | OperationKind::MoveBytes { .. }
+        | OperationKind::StackSave
+        | OperationKind::StackRestore
+        | OperationKind::CheckCallDepth
+        | OperationKind::CheckFuel
+        | OperationKind::Clone { .. }
+        | OperationKind::Drop { .. }
+        | OperationKind::BuildClosure { .. }
+        | OperationKind::CloneClosureEnv { .. }
+        | OperationKind::DropClosureEnv => None,
+    };
+    if let Some(operation) = unresolved {
         return Err(BackendReadinessError::UnresolvedPhysicalOperation {
             function: owner,
-            operation: if variant_payload {
-                "variant_payload"
-            } else {
-                "subfield"
-            },
+            operation,
         });
     }
-    if matches!(operation.kind, OperationKind::SubscriptMember { .. }) {
-        return Err(BackendReadinessError::UnresolvedPhysicalOperation {
+    if matches!(&operation.kind, OperationKind::Call { ty, .. } if ty.result_convention.requires_yield_driver())
+    {
+        return Err(BackendReadinessError::InvalidPhysicalProtocol {
             function: owner,
-            operation: "subscript_member",
+            reason: "scoped accessor requires project, not call",
         });
     }
     verify_local_function_operands(
@@ -3212,8 +3316,10 @@ fn verify_direct_call(
     owner: FunctionId,
     operation: &Operation,
 ) -> Result<(), BackendReadinessError> {
-    let OperationKind::Call { ty, .. } = &operation.kind else {
-        return Ok(());
+    let (ty, projection) = match &operation.kind {
+        OperationKind::Call { ty, .. } => (ty, false),
+        OperationKind::Project { ty, .. } => (ty, true),
+        _ => return Ok(()),
     };
     let Some(Value::Function(target)) = operation.operands.first() else {
         return Ok(());
@@ -3252,7 +3358,23 @@ fn verify_direct_call(
     let Some(target_body) = artifacts.get(target.function) else {
         return Ok(());
     };
-    let expected = target_body.parameters().len();
+    let expected = physical_call_arity(target_body, projection).ok_or(
+        BackendReadinessError::InvalidPhysicalProtocol {
+            function: *target,
+            reason: "entry requires exactly one trailing result parameter",
+        },
+    )?;
+    // Semantic can_satisfy allows adaptation; it does not make value storage, pointer-result
+    // storage, and the yield protocol interchangeable. A direct physical call uses the entry's
+    // actual convention; any widening must already be expressed by surrounding code/an adapter.
+    if ty.result_convention != target_body.result_convention() {
+        return Err(BackendReadinessError::InvalidPhysicalCallConvention {
+            owner,
+            target: *target,
+            expected: target_body.result_convention(),
+            actual: ty.result_convention,
+        });
+    }
     let actual = operation.operands.len() - 1;
     if actual != expected {
         return Err(BackendReadinessError::InvalidPhysicalCall {
@@ -3335,6 +3457,367 @@ mod tests {
             known,
         )?;
         Ok((physical, first_helper))
+    }
+
+    #[test]
+    #[should_panic(expected = "does not dominate")]
+    fn physical_boundary_rejects_use_before_definition() {
+        let mut session = CompilerSession::new();
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new("bad_dominance".into(), CallResultConvention::Value);
+        builder.add_parameter(int_type(), ParameterKind::Return);
+        let block = builder.add_block();
+        let slot = builder
+            .append_operation(block, Operation::alloca(span, int_type()))
+            .unwrap();
+        builder.append_operation(block, Operation::load(span, slot));
+        builder.set_terminator(block, Terminator::ret(span));
+        let mut edit = FunctionEdit::new(builder.finish_unverified());
+        edit.block_mut(block).operations.swap(0, 1);
+        verify_test_body(&mut session, edit.finish_unverified());
+    }
+
+    #[test]
+    #[should_panic(expected = "propagate_error requires one in-flight source failure")]
+    fn physical_boundary_rejects_invalid_failure_flow() {
+        let mut session = CompilerSession::new();
+        let mut builder = FunctionBuilder::new("bad_failure".into(), CallResultConvention::Value);
+        builder.add_parameter(Type::unit(), ParameterKind::Return);
+        let block = builder.add_block();
+        builder.set_terminator(
+            block,
+            Terminator::propagate_error(Location::new_synthesized()),
+        );
+        verify_test_body(&mut session, builder.finish_unverified());
+    }
+
+    #[test]
+    #[should_panic(expected = "frame exits with live owned register")]
+    fn physical_boundary_rejects_owned_register_leaks() {
+        let mut session = CompilerSession::new();
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new("bad_ownership".into(), CallResultConvention::Value);
+        builder.add_parameter(Type::unit(), ParameterKind::Return);
+        let extent = Value::Constant(builder.add_constant(
+            int_type(),
+            LiteralValue::new_native(8isize),
+            &session.module_env(),
+        ));
+        let block = builder.add_block();
+        builder.append_operation(
+            block,
+            Operation::runtime_alloc(span, int_type(), extent.clone(), extent),
+        );
+        builder.set_terminator(block, Terminator::ret(span));
+        verify_test_body(&mut session, builder.finish_unverified());
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "stored operand must be a value or place pointer, got BorrowedCallable"
+    )]
+    fn physical_boundary_rejects_borrowed_callable_escape() {
+        let mut session = CompilerSession::new();
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new("bad_borrow".into(), CallResultConvention::Value);
+        let receiver =
+            Value::Parameter(builder.add_parameter(Type::unit(), ParameterKind::Dictionary));
+        let result = Value::Parameter(builder.add_parameter(Type::unit(), ParameterKind::Return));
+        let block = builder.add_block();
+        let borrowed = builder
+            .append_operation(
+                block,
+                Operation::borrow_subscript_member(span, receiver, false, Type::unit()),
+            )
+            .unwrap();
+        let store = builder
+            .append_operation(block, Operation::alloca(span, Type::unit()))
+            .unwrap();
+        builder.append_operation(block, Operation::store(span, store, result));
+        builder.set_terminator(block, Terminator::ret(span));
+        // Bypass insertion-time debug checks to exercise the actual artifact boundary.
+        let mut edit = FunctionEdit::new(builder.finish_unverified());
+        edit.block_mut(block).operations[2].operands[0] = borrowed;
+        verify_test_body(&mut session, edit.finish_unverified());
+    }
+
+    fn verify_test_body(session: &mut CompilerSession, body: Function) {
+        let module = compile(session, "fn anchor() {}", "invalid_physical_body");
+        let (mut artifacts, _) = lower(session, module).unwrap();
+        artifacts.entries.push(Some(body));
+        let env = ModuleEnv::new(session.expect_fresh_module(module), session.raw_modules());
+        verify_physical_mir(&artifacts, env).unwrap();
+    }
+
+    #[test]
+    fn physical_direct_calls_require_the_callee_result_convention() {
+        let mut session = CompilerSession::new();
+        let module = compile(&mut session, "fn anchor() {}", "call_convention");
+        let (mut artifacts, _) = lower(&mut session, module).unwrap();
+        let span = Location::new_synthesized();
+        let target = FunctionId::new(module, LocalFunctionId::from_index(artifacts.entries.len()));
+        let mut callee =
+            FunctionBuilder::new("addressor".into(), CallResultConvention::ADDRESSOR_PLACE);
+        callee.add_parameter(int_type(), ParameterKind::Return);
+        let block = callee.add_block();
+        callee.set_terminator(block, Terminator::ret(span));
+        artifacts.entries.push(Some(callee.finish_unverified()));
+        let owner = FunctionId::new(module, LocalFunctionId::from_index(artifacts.entries.len()));
+        let mut caller = FunctionBuilder::new("caller".into(), CallResultConvention::Value);
+        let result = Value::Parameter(caller.add_parameter(int_type(), ParameterKind::Return));
+        let block = caller.add_block();
+        let call = Operation::call(
+            span,
+            Value::Function(target),
+            [result],
+            CallImplType::value(FnType::new_by_val([], int_type(), no_effects())),
+        );
+        // Same arity, different result transport: this used to pass the arity-only checks.
+        assert!(matches!(
+            verify_direct_call(&artifacts, owner, &call),
+            Err(BackendReadinessError::InvalidPhysicalCallConvention { .. })
+        ));
+        caller.append_operation(block, call);
+        caller.set_terminator(block, Terminator::ret(span));
+        let caller_module = compile(&mut session, "fn anchor() {}", "foreign_caller");
+        let (mut caller_artifacts, _) = lower(&mut session, caller_module).unwrap();
+        caller_artifacts
+            .entries
+            .push(Some(caller.finish_unverified()));
+        assert!(matches!(
+            program::resolve_physical_program(vec![artifacts, caller_artifacts]),
+            Err(program::PhysicalProgramError::InvalidCallConvention { .. })
+        ));
+    }
+
+    #[test]
+    fn physical_calls_reject_malformed_later_callee_signatures() {
+        for kinds in [
+            vec![],
+            vec![ParameterKind::Parameter(ArgConvention::MutableRef)],
+            vec![ParameterKind::Return, ParameterKind::Return],
+            vec![
+                ParameterKind::Return,
+                ParameterKind::Parameter(ArgConvention::MutableRef),
+            ],
+        ] {
+            let mut session = CompilerSession::new();
+            let module = compile(&mut session, "fn anchor() {}", "malformed_callee");
+            let (mut artifacts, _) = lower(&mut session, module).unwrap();
+            let span = Location::new_synthesized();
+            // The caller is checked before the callee's own entry validation.
+            let target = FunctionId::new(
+                module,
+                LocalFunctionId::from_index(artifacts.entries.len() + 1),
+            );
+            let mut caller =
+                FunctionBuilder::new("earlier_caller".into(), CallResultConvention::Value);
+            caller.add_parameter(Type::unit(), ParameterKind::Return);
+            let block = caller.add_block();
+            caller.append_operation(
+                block,
+                Operation::project(
+                    span,
+                    Value::Function(target),
+                    [],
+                    int_type(),
+                    CallImplType::new(
+                        FnType::new_by_val([], int_type(), no_effects()),
+                        CallResultConvention::YIELDED_ONCE,
+                    ),
+                ),
+            );
+            caller.set_terminator(block, Terminator::ret(span));
+            artifacts.entries.push(Some(caller.finish_unverified()));
+            let mut callee =
+                FunctionBuilder::new("later_callee".into(), CallResultConvention::YIELDED_ONCE);
+            for kind in kinds {
+                callee.add_parameter(int_type(), kind);
+            }
+            let block = callee.add_block();
+            callee.set_terminator(block, Terminator::ret(span));
+            artifacts.entries.push(Some(callee.finish_unverified()));
+            let env = ModuleEnv::new(session.expect_fresh_module(module), session.raw_modules());
+            assert!(matches!(verify_physical_mir(&artifacts, env),
+                Err(BackendReadinessError::InvalidPhysicalProtocol { function, .. }) if function == target));
+            assert!(matches!(program::resolve_physical_program(vec![artifacts]),
+                Err(program::PhysicalProgramError::InvalidResultParameter { function }) if function == target));
+        }
+    }
+
+    #[test]
+    fn physical_boundary_rejects_unresolved_operations_including_invoke() {
+        for invoked in [false, true] {
+            let mut session = CompilerSession::new();
+            let module = compile(&mut session, "fn anchor() {}", "unresolved_operation");
+            let (mut artifacts, _) = lower(&mut session, module).unwrap();
+            let span = Location::new_synthesized();
+            let mut builder =
+                FunctionBuilder::new("unresolved".into(), CallResultConvention::Value);
+            let evidence =
+                Value::Parameter(builder.add_parameter(Type::unit(), ParameterKind::Dictionary));
+            builder.add_parameter(Type::unit(), ParameterKind::Return);
+            let entry = builder.add_block();
+            let operation = Operation::subscript_member(span, evidence, false, Type::unit());
+            if invoked {
+                let normal = builder.add_block();
+                let error = builder.add_block();
+                builder.set_terminator(entry, Terminator::invoke(span, operation, normal, error));
+                builder.set_terminator(normal, Terminator::ret(span));
+                builder.set_terminator(error, Terminator::propagate_error(span));
+            } else {
+                builder.append_operation(entry, operation);
+                builder.set_terminator(entry, Terminator::ret(span));
+            }
+            artifacts.entries.push(Some(builder.finish_unverified()));
+            let env = ModuleEnv::new(session.expect_fresh_module(module), session.raw_modules());
+            assert!(matches!(
+                verify_physical_mir(&artifacts, env),
+                Err(BackendReadinessError::UnresolvedPhysicalOperation {
+                    operation: "subscript_member",
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn physical_yield_requires_a_scoped_entry() {
+        for convention in [
+            CallResultConvention::Value,
+            CallResultConvention::YIELDED_ONCE,
+        ] {
+            let mut session = CompilerSession::new();
+            let module = compile(&mut session, "fn anchor() {}", "yield_protocol");
+            let (mut artifacts, _) = lower(&mut session, module).unwrap();
+            let span = Location::new_synthesized();
+            let mut builder = FunctionBuilder::new("yielding".into(), convention);
+            let place = Value::Parameter(builder.add_parameter(
+                int_type(),
+                ParameterKind::Parameter(ArgConvention::MutableRef),
+            ));
+            builder.add_parameter(int_type(), ParameterKind::Return);
+            let entry = builder.add_block();
+            let resume = builder.add_block();
+            builder.set_terminator(entry, Terminator::r#yield(span, place, resume));
+            builder.set_terminator(resume, Terminator::ret(span));
+            artifacts.entries.push(Some(builder.finish_unverified()));
+            let env = ModuleEnv::new(session.expect_fresh_module(module), session.raw_modules());
+            let result = verify_physical_mir(&artifacts, env);
+            if convention == CallResultConvention::YIELDED_ONCE {
+                result.unwrap();
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(BackendReadinessError::InvalidPhysicalProtocol {
+                        reason: "yield requires a scoped accessor entry",
+                        ..
+                    })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn physical_lowering_preserves_adapted_addressor_call_protocols() {
+        let mut session = CompilerSession::new();
+        session.set_allow_experimental(true);
+        let module = compile(
+            &mut session,
+            r#"
+            subscript first(values: &mut [int]) -> int { ref mut { values[0] } }
+            fn read(slot) -> int {
+                let mut values = [9];
+                values->[slot]
+            }
+            fn direct() -> int {
+                let mut values = [8];
+                values->[first]
+            }
+            let first_slot = first;
+            read(first_slot) + direct()
+        "#,
+            "adapted_physical_addressor",
+        );
+        let (artifacts, _) = lower(&mut session, module).unwrap();
+        let (std, _) = lower(&mut session, crate::std::STD_MODULE_ID).unwrap();
+        program::resolve_physical_program(vec![artifacts, std]).unwrap();
+    }
+
+    #[test]
+    fn physical_scoped_projections_check_conventions_and_arity() {
+        let mut session = CompilerSession::new();
+        let module = compile(&mut session, "fn anchor() {}", "project_convention");
+        let (mut artifacts, _) = lower(&mut session, module).unwrap();
+        let span = Location::new_synthesized();
+        let target = FunctionId::new(module, LocalFunctionId::from_index(artifacts.entries.len()));
+        let mut callee = FunctionBuilder::new("scoped".into(), CallResultConvention::YIELDED_ONCE);
+        callee.add_parameter(
+            int_type(),
+            ParameterKind::Parameter(ArgConvention::MutableRef),
+        );
+        callee.add_parameter(int_type(), ParameterKind::Return);
+        let block = callee.add_block();
+        callee.set_terminator(block, Terminator::ret(span));
+        artifacts.entries.push(Some(callee.finish_unverified()));
+        let argument = Value::Parameter(mir::value::ParameterId::from_index(0));
+        let ty = CallImplType::new(
+            FnType::new_by_val([int_type()], int_type(), no_effects()),
+            CallResultConvention::YIELDED_ONCE,
+        );
+        let projection = Operation::project(
+            span,
+            Value::Function(target),
+            [argument.clone()],
+            int_type(),
+            ty.clone(),
+        );
+        assert!(verify_direct_call(&artifacts, target, &projection).is_ok());
+        let mut bad_arity = projection.clone();
+        bad_arity.operands = vec![Value::Function(target)].into_boxed_slice();
+        assert!(matches!(
+            verify_direct_call(&artifacts, target, &bad_arity),
+            Err(BackendReadinessError::InvalidPhysicalCall { .. })
+        ));
+        let call = Operation::call(
+            span,
+            Value::Function(target),
+            [argument.clone(), argument],
+            ty,
+        );
+        assert!(matches!(
+            verify_physical_operation(
+                &artifacts,
+                target,
+                &FxHashMap::default(),
+                &FxHashMap::default(),
+                &call
+            ),
+            Err(BackendReadinessError::InvalidPhysicalProtocol {
+                reason: "scoped accessor requires project, not call",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn physical_boundary_requires_a_result_parameter() {
+        let mut session = CompilerSession::new();
+        let module = compile(&mut session, "fn anchor() {}", "missing_result");
+        let (mut artifacts, _) = lower(&mut session, module).unwrap();
+        let mut builder =
+            FunctionBuilder::new("missing_result".into(), CallResultConvention::Value);
+        let block = builder.add_block();
+        builder.set_terminator(block, Terminator::ret(Location::new_synthesized()));
+        artifacts.entries.push(Some(builder.finish_unverified()));
+        let env = ModuleEnv::new(session.expect_fresh_module(module), session.raw_modules());
+        assert!(matches!(
+            verify_physical_mir(&artifacts, env),
+            Err(BackendReadinessError::InvalidPhysicalProtocol {
+                reason: "entry requires exactly one trailing result parameter",
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -3904,7 +4387,7 @@ mod tests {
         physical.entries.push(Some(builder.finish_unverified()));
 
         assert!(matches!(
-            verify_physical_mir(&physical),
+            verify_physical_mir(&physical, ModuleEnv::new(session.expect_fresh_module(module), session.raw_modules())),
             Err(BackendReadinessError::InvalidSubscriptCaptureCount {
                 subscript,
                 expected,
@@ -3958,7 +4441,7 @@ mod tests {
         physical.entries.push(Some(builder.finish_unverified()));
 
         assert!(matches!(
-            verify_physical_mir(&physical),
+            verify_physical_mir(&physical, ModuleEnv::new(session.expect_fresh_module(module), session.raw_modules())),
             Err(BackendReadinessError::MissingSubscriptMember {
                 subscript,
                 mut_member: true,
@@ -4169,7 +4652,7 @@ mod tests {
         rebuild_evidence_catalogs(&session, &mut physical);
 
         assert!(matches!(
-            verify_physical_mir(&physical),
+            verify_physical_mir(&physical, ModuleEnv::new(session.expect_fresh_module(module), session.raw_modules())),
             Err(BackendReadinessError::InvalidDictionaryEntryIndex {
                 dictionary,
                 entry,
