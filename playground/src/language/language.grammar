@@ -436,6 +436,7 @@ MutTyOrInfer {
 
 extraExpr {
     stmt* expr
+    | stmt+
 }
 
 expr {
