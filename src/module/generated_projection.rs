@@ -30,7 +30,7 @@ use crate::{
 /// Projection receiver lookup key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProjectionReceiverKey {
-    /// Compiler-generated structural projection for an exact receiver type.
+    /// Exact receiver type: a generated structural projection or explicit Rust-native member.
     Structural(Type),
     /// Source-declared projection attached to a nominal type family.
     Nominal(TypeDefId),
@@ -63,6 +63,15 @@ impl ProjectionKey {
             return None;
         };
         Some(Self::nominal(named.def, field))
+    }
+
+    /// Explicit projections attach to a nominal family or a closed Rust-native type.
+    pub fn explicit_for_receiver_ty(receiver_ty: Type, field: Ustr) -> Option<Self> {
+        if matches!(&*receiver_ty.data(), TypeKind::Native(native) if native.arguments.is_empty()) {
+            Some(Self::structural(receiver_ty, field))
+        } else {
+            Self::nominal_for_receiver_ty(receiver_ty, field)
+        }
     }
 
     pub fn structural_receiver_ty(self) -> Type {

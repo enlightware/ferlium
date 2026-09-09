@@ -12,6 +12,7 @@ use enum_as_inner::EnumAsInner;
 
 use crate::hir::native_functions::NativeFailureState;
 use crate::module::id::Id;
+use crate::place::Place;
 use crate::std::array::array_value_from_vec;
 use crate::std::value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX};
 use crate::{
@@ -32,7 +33,6 @@ use crate::{
         ResolvedLocalDrop, ResolvedTakeLocalValueMode, ResolvedValueLayout, SubscriptId,
         TraitDictionary, TraitDictionaryEntry, TraitDictionaryId, TraitImplId,
     },
-    std::buffer,
     types::{
         r#trait::{TraitDictionaryEntryIndex, TraitMethodIndex},
         r#type::{CallResultConvention, FnArgType, Type},
@@ -80,7 +80,15 @@ impl ValOrMut {
             ValOrMut::Val(_) => None,
             ValOrMut::Dictionary(_) => None,
             ValOrMut::Ref(_) => None,
-            ValOrMut::Mut(place) => place.target_mut(ctx)?.as_primitive_ty_mut::<T>(),
+            ValOrMut::Mut(place) => {
+                if let Some(native) = place.native_member(ctx) {
+                    let pointer = native.mutable::<T>();
+                    // SAFETY: exclusive call-scoped access is established by the place borrow.
+                    pointer.map(|pointer| unsafe { &mut *pointer })
+                } else {
+                    place.boxed_mut(ctx)?.as_primitive_ty_mut::<T>()
+                }
+            }
         })
     }
 
@@ -88,37 +96,32 @@ impl ValOrMut {
         &'a self,
         ctx: &'a EvalCtx<'_>,
     ) -> Result<Option<&'a T>, SourceFailureKind> {
-        Ok(match self {
-            ValOrMut::Val(val) => val.as_primitive_ty::<T>(),
-            ValOrMut::Dictionary(_) => None,
-            ValOrMut::Ref(value) => {
-                // SAFETY: `Ref` entries are only installed for the duration of a
-                // synchronous interpreter call, and the environment frame is
-                // truncated before the borrowed storage can go away.
-                unsafe { &**value }.as_primitive_ty::<T>()
-            }
-            ValOrMut::Mut(place) => place.target_ref(ctx)?.as_primitive_ty::<T>(),
-        })
+        if matches!(self, ValOrMut::Dictionary(_)) {
+            return Ok(None);
+        }
+        Ok(self.as_value_ref(ctx)?.as_primitive_ty::<T>())
     }
 
+    /// Borrow an argument without requiring its contents to occupy a boxed `Value` slot.
     pub fn as_value_ref<'a>(
         &'a self,
         ctx: &'a EvalCtx<'_>,
-    ) -> Result<&'a Value, SourceFailureKind> {
-        Ok(match self {
-            ValOrMut::Val(value) => {
-                if matches!(value, Value::Uninit) {
-                    panic!("attempted to read an uninitialized value");
-                }
-                value
-            }
+    ) -> Result<ValueRef<'a>, SourceFailureKind> {
+        let value = match self {
+            ValOrMut::Val(value) => ValueRef::Boxed(value),
             ValOrMut::Dictionary(_) => panic!("attempted to read a trait dictionary as a Value"),
             ValOrMut::Ref(value) => {
-                // SAFETY: see `ValOrMut::as_primitive`.
-                unsafe { &**value }
+                // SAFETY: `Ref` entries exist only for a synchronous interpreter call;
+                // their environment frame is truncated before the referent can go away.
+                ValueRef::Boxed(unsafe { &**value })
             }
             ValOrMut::Mut(place) => place.target_ref(ctx)?,
-        })
+        };
+        assert!(
+            !value.is_uninit(),
+            "attempted to read an uninitialized value"
+        );
+        Ok(value)
     }
 
     pub fn as_place(&self) -> &Place {
@@ -608,7 +611,7 @@ impl<'a> EvalCtx<'a> {
             let mut prepared = Vec::with_capacity(function_value.closure_env_len + arguments.len());
             if let Some(root) = closure_env_temp {
                 prepared.extend((0..function_value.closure_env_len).map(|index| {
-                    ValOrMut::Mut(Place {
+                    ValOrMut::Mut(Place::Boxed {
                         root,
                         path: vec![index as isize],
                     })
@@ -626,7 +629,7 @@ impl<'a> EvalCtx<'a> {
             let dictionary = closure_env_dictionary
                 .clone()
                 .expect("closure environment dictionary disappeared");
-            let place = Place {
+            let place = Place::Boxed {
                 root,
                 path: Vec::new(),
             };
@@ -957,15 +960,7 @@ impl<'a> EvalCtx<'a> {
     }
 }
 
-/// A place in the environment (absolute position), with a path to a compound value
-/// This behaves like a global address to a Value given our Mutable Value Semantics.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Place {
-    // index of target variable, absolute in the environment, to allow to access parent frames
-    pub root: usize,
-    // path within the compound value located at `target`
-    pub path: Vec<isize>,
-}
+pub use crate::hir::value::ValueRef;
 
 /// Internal runtime marker returned by addressor-place functions.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1029,251 +1024,6 @@ impl AccessorEpilogue {
         if !cleanup.is_empty() {
             self.cleanup_scopes.push(cleanup.to_vec());
         }
-    }
-}
-
-fn invalid_buffer_index(index: isize, len: usize) -> SourceFailureKind {
-    SourceFailureKind::InvalidArgument(format!(
-        "Buffer index {index} is out of bounds for buffer of length {len}"
-    ))
-}
-
-impl Place {
-    /// Return a path and an index of a variable in the environment that is for sure a Value
-    fn resolved_path_and_index(&self, ctx: &EvalCtx) -> (VecDeque<isize>, usize) {
-        let mut path = self.path.iter().copied().collect::<VecDeque<_>>();
-        let mut index = self.root;
-        loop {
-            match &ctx.environment[index] {
-                ValOrMut::Val(_target) => {
-                    break;
-                }
-                ValOrMut::Dictionary(_) => {
-                    panic!("cannot mutably access trait dictionary metadata");
-                }
-                ValOrMut::Ref(_) => {
-                    panic!("cannot mutably access shared reference storage");
-                }
-                ValOrMut::Mut(place) => {
-                    index = place.root;
-                    for &index in place.path.iter().rev() {
-                        path.push_front(index);
-                    }
-                }
-            };
-        }
-        (path, index)
-    }
-
-    fn resolved(&self, ctx: &EvalCtx) -> Self {
-        let (path, root) = self.resolved_path_and_index(ctx);
-        Self {
-            root,
-            path: path.into_iter().collect(),
-        }
-    }
-
-    /// Get a mutable reference to the target value
-    pub fn target_mut<'c>(&self, ctx: &'c mut EvalCtx) -> Result<&'c mut Value, SourceFailureKind> {
-        let (path, index) = self.resolved_path_and_index(ctx);
-        self.project_mut(ctx.environment[index].as_val_mut().unwrap(), &path)
-    }
-
-    /// Install a prepared whole-slot replacement, leaving the displaced value in that slot.
-    pub(crate) fn replace_from_owned_slot(
-        &self,
-        ctx: &mut EvalCtx,
-        replacement: &Place,
-    ) -> Result<(), SourceFailureKind> {
-        assert!(
-            replacement.path.is_empty(),
-            "replacement must be a whole owned slot"
-        );
-        let (path, index) = self.resolved_path_and_index(ctx);
-        let [destination, replacement] = ctx
-            .environment
-            .get_disjoint_mut([index, replacement.root])
-            .expect("replacement and destination must be distinct allocated slots");
-        let replacement = replacement.as_val_mut().expect("replacement must be owned");
-        // Resolve the destination before changing either slot; projection can report failure.
-        let destination = self.project_mut(destination.as_val_mut().unwrap(), &path)?;
-        std::mem::swap(replacement, destination);
-        Ok(())
-    }
-
-    fn project_mut<'v>(
-        &self,
-        mut target: &'v mut Value,
-        path: &VecDeque<isize>,
-    ) -> Result<&'v mut Value, SourceFailureKind> {
-        for &index in path.iter() {
-            use Value::*;
-            target = match target {
-                Tuple(tuple) => tuple.get_mut(index as usize).unwrap(),
-                // A payload-free case has no slot until something writes one.
-                Variant { .. } if index == 0 => target.variant_payload_mut().unwrap(),
-                Native(primitive) => {
-                    let buffer = primitive
-                        .as_mut()
-                        .as_mut_any()
-                        .downcast_mut::<buffer::Buffer>()
-                        .unwrap();
-                    let len = buffer.capacity();
-                    match buffer.get_mut_signed(index) {
-                        Some(target) => target,
-                        None => {
-                            return Err(invalid_buffer_index(index, len));
-                        }
-                    }
-                }
-                Uninit => panic!("cannot access a field of an uninitialized value"),
-                Variant { .. } => panic!("Cannot access a variant payload with a non-zero index"),
-                _ => panic!(
-                    "Cannot access a non-compound value while following mutable place path: index {}, full place {:?}",
-                    index, self
-                ),
-            };
-        }
-        Ok(target)
-    }
-
-    pub(crate) fn target_ref_allow_uninit<'c>(
-        &self,
-        ctx: &'c EvalCtx,
-    ) -> Result<&'c Value, SourceFailureKind> {
-        let mut path = self.path.iter().copied().collect::<VecDeque<_>>();
-        let mut index = self.root;
-        let mut target = loop {
-            match &ctx.environment[index] {
-                ValOrMut::Val(target) => break target,
-                ValOrMut::Dictionary(_) => {
-                    panic!("cannot read trait dictionary metadata as a Value")
-                }
-                ValOrMut::Ref(target) => {
-                    // SAFETY: see `ValOrMut::as_primitive`.
-                    break unsafe { &**target };
-                }
-                ValOrMut::Mut(place) => {
-                    index = place.root;
-                    for &index in place.path.iter().rev() {
-                        path.push_front(index);
-                    }
-                }
-            };
-        };
-        for &index in path.iter() {
-            use Value::*;
-            target = match target {
-                Tuple(tuple) => tuple.get(index as usize).unwrap(),
-                Variant {
-                    payload: Some(payload),
-                    ..
-                } if index == 0 => payload,
-                Native(primitive) => {
-                    let buffer = NativeValue::as_any(primitive.as_ref())
-                        .downcast_ref::<buffer::Buffer>()
-                        .unwrap();
-                    let len = buffer.capacity();
-                    match buffer.get_signed(index) {
-                        Some(target) => target,
-                        None => {
-                            return Err(invalid_buffer_index(index, len));
-                        }
-                    }
-                }
-                Uninit => panic!("cannot read a field of an uninitialized value"),
-                Variant { .. } => panic!("Cannot access a variant payload with a non-zero index"),
-                other => panic!(
-                    "Cannot access a non-compound value while following place path: target {:?}, index {}, full place {:?}",
-                    other, index, self
-                ),
-            };
-        }
-        Ok(target)
-    }
-
-    /// Returns the target when every intermediate projection has materialized storage.
-    /// An uninitialized intermediate or an absent variant payload is an uninitialized place.
-    pub(crate) fn target_ref_if_materialized<'c>(
-        &self,
-        ctx: &'c EvalCtx,
-    ) -> Result<Option<&'c Value>, SourceFailureKind> {
-        let mut path = self.path.iter().copied().collect::<VecDeque<_>>();
-        let mut index = self.root;
-        let mut target = loop {
-            match &ctx.environment[index] {
-                ValOrMut::Val(target) => break target,
-                ValOrMut::Dictionary(_) => {
-                    panic!("cannot read trait dictionary metadata as a Value")
-                }
-                ValOrMut::Ref(target) => {
-                    // SAFETY: the referent outlives this borrow.
-                    break unsafe { &**target };
-                }
-                ValOrMut::Mut(place) => {
-                    index = place.root;
-                    for &index in place.path.iter().rev() {
-                        path.push_front(index);
-                    }
-                }
-            };
-        };
-        for &index in &path {
-            use Value::*;
-            target = match target {
-                Tuple(tuple) => tuple.get(index as usize).unwrap(),
-                Variant {
-                    payload: Some(payload),
-                    ..
-                } if index == 0 => payload,
-                Variant { payload: None, .. } if index == 0 => return Ok(None),
-                Native(primitive) => {
-                    let buffer = NativeValue::as_any(primitive.as_ref())
-                        .downcast_ref::<buffer::Buffer>()
-                        .unwrap();
-                    let len = buffer.capacity();
-                    match buffer.get_signed(index) {
-                        Some(target) => target,
-                        None => return Err(invalid_buffer_index(index, len)),
-                    }
-                }
-                Uninit => return Ok(None),
-                Variant { .. } => {
-                    panic!("Cannot access a variant payload with a non-zero index")
-                }
-                other => panic!(
-                    "Cannot access a non-compound value while following place path: target {:?}, index {}, full place {:?}",
-                    other, index, self
-                ),
-            };
-        }
-        Ok(Some(target))
-    }
-
-    /// Get a shared reference to the target value
-    pub fn target_ref<'c>(&self, ctx: &'c EvalCtx) -> Result<&'c Value, SourceFailureKind> {
-        let target = self.target_ref_allow_uninit(ctx)?;
-        if matches!(target, Value::Uninit) {
-            panic!("attempted to read an uninitialized value");
-        }
-        Ok(target)
-    }
-}
-
-impl FormatWith<EvalCtx<'_>> for Place {
-    fn fmt_with(&self, f: &mut std::fmt::Formatter<'_>, data: &EvalCtx<'_>) -> std::fmt::Result {
-        let Place { root, path } = self;
-        let ctx = data;
-        let relative_index = *root as isize - ctx.frame_base as isize;
-        write!(f, "@{relative_index}")?;
-        if !path.is_empty() {
-            write!(f, ".")?;
-        }
-        write_with_separator(path, ".", f)?;
-        if relative_index < 0 {
-            write!(f, " (in a previous frame)")?;
-        }
-        Ok(())
     }
 }
 
@@ -2051,16 +1801,26 @@ pub(crate) fn try_dictionary_from_place(
     place: &Place,
     ctx: &EvalCtx,
 ) -> Option<ClosedTraitDictionary> {
-    let mut path = place.path.iter().copied().collect::<VecDeque<_>>();
-    let mut index = place.root;
+    let Place::Boxed { root, path } = place else {
+        return None;
+    };
+    let mut path = path.iter().copied().collect::<VecDeque<_>>();
+    let mut index = *root;
     loop {
         match &ctx.environment[index] {
             ValOrMut::Dictionary(dictionary) => {
                 return path.is_empty().then_some(dictionary.clone());
             }
             ValOrMut::Mut(place) => {
-                index = place.root;
-                for &index in place.path.iter().rev() {
+                let Place::Boxed {
+                    root,
+                    path: parent_path,
+                } = place
+                else {
+                    return None;
+                };
+                index = *root;
+                for &index in parent_path.iter().rev() {
                     path.push_front(index);
                 }
             }
@@ -2457,7 +2217,7 @@ pub(crate) fn call_value_drop_for_temp(
                 return Err(error);
             }
             ctx.environment.push(ValOrMut::Val(value));
-            let place = Place {
+            let place = Place::Boxed {
                 root: target_index,
                 path: Vec::new(),
             };
@@ -2493,7 +2253,7 @@ fn discard_value_storage_at_place(
     span: Location,
 ) -> Result<(), RuntimeError> {
     let target = place
-        .target_mut(ctx)
+        .boxed_mut(ctx)
         .map_err(|err| RuntimeError::new(err, Some(span)))?;
     let value = mem::replace(target, Value::uninit());
     value.discard_storage();
@@ -2506,14 +2266,9 @@ fn replace_value_storage_at_place(
     value: Value,
     span: Location,
 ) -> Result<(), RuntimeError> {
-    let target = match place.target_mut(ctx) {
-        Ok(target) => target,
-        Err(err) => {
-            value.discard_storage();
-            return Err(RuntimeError::new(err, Some(span)));
-        }
-    };
-    let old_value = mem::replace(target, value);
+    let old_value = place
+        .replace_value(ctx, value)
+        .map_err(|err| RuntimeError::new(err, Some(span)))?;
     old_value.discard_storage();
     Ok(())
 }
@@ -2526,7 +2281,7 @@ fn place_contains_uninit(
     let target = place
         .target_ref_if_materialized(ctx)
         .map_err(|err| RuntimeError::new(err, Some(span)))?;
-    Ok(target.is_none_or(|target| matches!(target, Value::Uninit)))
+    Ok(target.is_none_or(ValueRef::is_uninit))
 }
 
 fn local_environment_index(ctx: &EvalCtx, locals: &[LocalDecl], id: LocalDeclId) -> usize {
@@ -2534,7 +2289,7 @@ fn local_environment_index(ctx: &EvalCtx, locals: &[LocalDecl], id: LocalDeclId)
 }
 
 fn local_place(ctx: &EvalCtx, locals: &[LocalDecl], id: LocalDeclId) -> Place {
-    Place {
+    Place::Boxed {
         root: local_environment_index(ctx, locals, id),
         path: Vec::new(),
     }
@@ -2549,13 +2304,17 @@ fn eval_clone_closure_env(
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
     let owned_source;
+    let source_place;
     let (function, hidden_args, closure_env_ptr, closure_env_len, closure_env_value_dictionary) = {
         let source = if let Some(place) =
             eval_or_return!(try_eval_node_as_place(arena, node.source, ctx, locals))
         {
-            place
+            source_place = place;
+            source_place
                 .target_ref(ctx)
                 .map_err(|err| RuntimeError::new(err, Some(span)))?
+                .as_boxed()
+                .expect("callable requires boxed storage")
                 .as_function()
                 .unwrap()
         } else {
@@ -2597,7 +2356,7 @@ fn eval_drop_closure_env(
     let target = eval_or_return!(eval_node_as_place(arena, node.target, ctx, locals));
     let captured_env = {
         let target = target
-            .target_mut(ctx)
+            .boxed_mut(ctx)
             .map_err(|err| RuntimeError::new(err, Some(span)))?;
         let function = target.as_function_mut().unwrap();
         let dictionary = function.closure_env_value_dictionary.clone();
@@ -2638,7 +2397,7 @@ fn eval_drop_subscript_value(
 ) -> EvalControlFlowResult {
     let target = eval_or_return!(eval_node_as_place(arena, node.target, ctx, locals));
     let target = target
-        .target_mut(ctx)
+        .boxed_mut(ctx)
         .map_err(|err| RuntimeError::new(err, Some(arena[node.target].span)))?;
     let value = mem::replace(target, Value::uninit());
     value.discard_storage();
@@ -2713,6 +2472,8 @@ fn eval_apply(
         let function_value = place
             .target_ref(ctx)
             .map_err(|err| RuntimeError::new(err, Some(span)))?
+            .as_boxed()
+            .expect("callable requires boxed storage")
             .as_function()
             .unwrap();
         function_value.as_ref() as *const FunctionValue
@@ -2748,6 +2509,8 @@ fn eval_subscript_value<'a>(
         let value = place
             .target_ref(ctx)
             .map_err(|err| RuntimeError::new(err, Some(span)))?
+            .as_boxed()
+            .expect("callable requires boxed storage")
             .as_subscript()
             .unwrap();
         return Ok(ControlFlow::Continue((**value).clone()));
@@ -3160,10 +2923,12 @@ fn eval_take_local_value(
 ///
 /// A variant is rebuilt from its tag and a recursive representation copy of its inline payload.
 /// The fresh host box is only an interpreter implementation detail.
-fn copy_boxed_trivial_copy_representation(value: &Value) -> Option<Value> {
+fn copy_boxed_trivial_copy_representation<'a>(value: impl Into<ValueRef<'a>>) -> Option<Value> {
+    let value = value.into();
     if let Some(value) = copy_boxed_trivial_copy_native(value) {
         return Some(value);
     }
+    let value = value.as_boxed()?;
     if let Some(tag) = value.variant_tag() {
         let storage = value.variant_payload_storage().unwrap();
         return Some(match value.variant_payload() {
@@ -3878,16 +3643,11 @@ fn eval_assign(
             value.discard_storage();
             return Err(error);
         }
-        let target = match place.target_mut(ctx) {
-            Ok(target) => target,
-            Err(error) => {
-                value.discard_storage();
-                return Err(RuntimeError::new(error, Some(span)));
-            }
-        };
-        let old_value = mem::replace(target, value);
+        let old_value = place
+            .replace_value(ctx, value)
+            .map_err(|error| RuntimeError::new(error, Some(span)))?;
         ctx.environment.push(ValOrMut::Val(old_value));
-        let old_place = Place {
+        let old_place = Place::Boxed {
             root: old_index,
             path: Vec::new(),
         };
@@ -3937,7 +3697,7 @@ fn eval_project(
 ) -> EvalControlFlowResult {
     let index = index.as_index();
     if let Some(mut place) = eval_or_return!(try_eval_node_as_place(arena, data, ctx, locals)) {
-        place.path.push(index as isize);
+        place.push_index(index as isize);
         if place_resolution_depends_on_addressor_place(arena, data) {
             if let Some(value) =
                 try_copy_trivial_copy_value_from_place(&place, ctx, arena[node_id].span)?
@@ -4033,8 +3793,12 @@ fn eval_case(
     eval_node_with_ctx(arena, selected, ctx, locals)
 }
 
-fn select_case_alternative(case: &hir::Case<Elaborated>, value: &Value) -> ENodeId {
-    let variant_tag = value.variant_tag();
+fn select_case_alternative<'a>(
+    case: &hir::Case<Elaborated>,
+    value: impl Into<ValueRef<'a>>,
+) -> ENodeId {
+    let value = value.into();
+    let variant_tag = value.as_boxed().and_then(Value::variant_tag);
     for (alternative, node) in &case.alternatives {
         if let Some(&tag) = alternative.as_variant_tag() {
             if variant_tag == Some(tag) {
@@ -4257,7 +4021,7 @@ fn try_eval_node_as_place(
             else {
                 return Ok(ControlFlow::Continue(None));
             };
-            place.path.push(node.index.as_index() as isize);
+            place.push_index(node.index.as_index() as isize);
             place
         }
         FunctionApply(app) if app.ty.returns_place() => {

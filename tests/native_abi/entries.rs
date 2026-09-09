@@ -38,6 +38,38 @@ pub extern "C" fn probe_boolean(value: bool) -> bool {
 #[unsafe(no_mangle)]
 pub extern "C" fn probe_unit() {}
 
+/// # Safety
+/// The receiver is initialized and borrowed for the lifetime of the returned member.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn probe_member_ref(receiver: *const Tracked) -> *const String {
+    unsafe { &raw const (*receiver).payload }
+}
+
+/// # Safety
+/// The receiver is initialized and exclusively borrowed for the returned member's lifetime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn probe_member_mut(receiver: *mut Tracked) -> *mut String {
+    unsafe { &raw mut (*receiver).payload }
+}
+
+/// # Safety
+/// The receiver is initialized and exclusively borrowed. Success initializes the pointer output.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn probe_member_fallible(
+    failure: &mut FailureState,
+    receiver: *mut Tracked,
+    output: &mut MaybeUninit<*mut String>,
+) -> u32 {
+    let payload = unsafe { &(*receiver).payload };
+    if payload.is_empty() {
+        failure.message = Some("empty member".into());
+        1
+    } else {
+        output.write(unsafe { &raw mut (*receiver).payload });
+        0
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn probe_unit_clone(_: &()) {}
 

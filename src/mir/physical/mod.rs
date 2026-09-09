@@ -12,6 +12,7 @@ mod buffer;
 mod dictionary;
 mod evidence;
 mod native;
+mod native_access;
 pub(crate) mod program;
 mod subscript;
 mod subscript_lifecycle;
@@ -107,6 +108,10 @@ pub(crate) enum BackendReadinessError {
         error: NativeContractError,
     },
     NativeRequirement(native::NativeRequirementError),
+    InvalidNativeInteriorAccess {
+        function: FunctionId,
+        operation: &'static str,
+    },
     InvalidPhysicalCall {
         owner: FunctionId,
         target: FunctionId,
@@ -163,6 +168,13 @@ impl fmt::Display for BackendReadinessError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NativeRequirement(error) => error.fmt(f),
+            Self::InvalidNativeInteriorAccess {
+                function,
+                operation,
+            } => write!(
+                f,
+                "{operation} violates initialized native member access in {function:?}"
+            ),
             Self::InvalidPhysicalEntry { owner, target } => write!(
                 f,
                 "physical entry m{}:f{} refers to unavailable entry m{}:f{}",
@@ -493,6 +505,23 @@ pub(crate) fn lower_physical_mir(
     let native_requirements =
         native::NativeRequirements::collect(&entries, &native_signatures, env)
             .map_err(BackendReadinessError::NativeRequirement)?;
+    for (index, body) in entries.iter().enumerate() {
+        if let Some(body) = body {
+            let id = FunctionId::new(module, LocalFunctionId::from_index(index));
+            let original = semantic
+                .specialization(id.function)
+                .map_or(id, |specialization| specialization.original);
+            native_access::verify(
+                body,
+                id,
+                original,
+                helper_base,
+                &native_signatures,
+                &buffer_entries,
+                env,
+            )?;
+        }
+    }
     let artifacts = BackendReadyMirArtifacts {
         module,
         entries,
@@ -2888,11 +2917,21 @@ fn verify_subscript_catalog(
                 subscript: definition.id(),
             });
         }
-        for member in [definition.member(false), definition.member(true)]
-            .into_iter()
-            .flatten()
-        {
+        for mut_member in [false, true] {
+            let Some(member) = definition.member(mut_member) else {
+                continue;
+            };
             let target = member.function();
+            if let Some(NativeResult::Addressor { mutable, .. }) = artifacts
+                .native_signature(target)
+                .map(|signature| signature.result)
+                && mutable != mut_member
+            {
+                return Err(BackendReadinessError::InvalidSubscriptMember {
+                    subscript: definition.id(),
+                    target,
+                });
+            }
             // Native members legitimately occupy a function-table slot without a MIR body.
             if target.module != artifacts.module
                 || target.function.as_index() >= artifacts.entry_count()
@@ -3196,6 +3235,9 @@ fn verify_direct_call(
             "physical native call",
         );
         definition.result_convention = ty.result_convention;
+        if let NativeResult::Addressor { root, .. } = signature.result {
+            definition.result_rooted_in = Some(root);
+        }
         signature.validate(&definition).map_err(|error| {
             BackendReadinessError::InvalidNativeEntry {
                 function: *target,
@@ -3293,6 +3335,88 @@ mod tests {
             known,
         )?;
         Ok((physical, first_helper))
+    }
+
+    #[test]
+    fn native_member_contracts_survive_projection_evidence_and_runtime_matching() {
+        use crate::{
+            hir::native_functions::{NativeAddressorMut, NativeAddressorRef},
+            std::string::String as NativeString,
+        };
+        unsafe extern "C" fn shared(value: *const NativeString) -> *const NativeString {
+            value
+        }
+        unsafe extern "C" fn mutable(value: *mut NativeString) -> *mut NativeString {
+            value
+        }
+        let mut session = CompilerSession::new();
+        let path = Path::single_str("native_members");
+        let host_id = session.modules().next_id();
+        let mut host = Module::new(host_id, path.clone());
+        // SAFETY: identity projections preserve rooting and permit ordinary string mutation.
+        unsafe {
+            host.add_native_member(
+                "native_self".into(),
+                Some(NativeAddressorRef::new(shared).description(
+                    ["self"],
+                    "Shared member",
+                    no_effects(),
+                )),
+                Some(NativeAddressorMut::new(mutable).description(
+                    ["self"],
+                    "Mutable member",
+                    no_effects(),
+                )),
+            );
+        }
+        session.register_module(path, host);
+        let module = compile(
+            &mut session,
+            r#"
+            fn assign<T>(slot: &mut T, value: T) { slot = value; }
+            fn member(value) { value.native_self }
+            fn change(value: &mut string) { assign(value.native_self, "changed"); member(value) }
+        "#,
+            "use_native_members",
+        );
+        let (physical, _) = lower(&mut session, module).unwrap();
+        let (host_physical, _) = lower(&mut session, host_id).unwrap();
+        for artifact in [&physical, &host_physical] {
+            artifact
+                .validate_native_runtime(ModuleEnv::new(
+                    session.expect_fresh_module(artifact.module()),
+                    session.raw_modules(),
+                ))
+                .unwrap();
+        }
+        assert!(
+            host_physical
+                .native_requirements
+                .signatures()
+                .any(|signature| matches!(
+                    signature.result,
+                    NativeResult::Addressor {
+                        mutable: false,
+                        root: 0,
+                        ..
+                    }
+                ))
+        );
+        assert!(
+            host_physical
+                .native_requirements
+                .signatures()
+                .any(|signature| matches!(
+                    signature.result,
+                    NativeResult::Addressor {
+                        mutable: true,
+                        root: 0,
+                        ..
+                    }
+                ))
+        );
+        let (std, _) = lower(&mut session, crate::std::STD_MODULE_ID).unwrap();
+        program::resolve_physical_program(vec![std, host_physical, physical]).unwrap();
     }
 
     #[test]

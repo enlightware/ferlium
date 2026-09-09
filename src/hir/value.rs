@@ -303,6 +303,44 @@ pub enum Value {
     Subscript(ManuallyDrop<B<SubscriptValue>>),
 }
 
+/// A shared read of either a boxed value or a native member. This never owns storage.
+#[derive(Clone, Copy, Debug)]
+pub enum ValueRef<'a> {
+    Boxed(&'a Value),
+    Native(&'a dyn NativeValue),
+}
+
+impl<'a> From<&'a Value> for ValueRef<'a> {
+    fn from(value: &'a Value) -> Self {
+        Self::Boxed(value)
+    }
+}
+
+impl<'a> ValueRef<'a> {
+    pub fn as_boxed(self) -> Option<&'a Value> {
+        match self {
+            Self::Boxed(value) => Some(value),
+            Self::Native(_) => None,
+        }
+    }
+
+    pub fn as_native(self) -> Option<&'a dyn NativeValue> {
+        match self {
+            Self::Boxed(Value::Native(value)) => Some(value.as_ref()),
+            Self::Native(value) => Some(value),
+            Self::Boxed(_) => None,
+        }
+    }
+
+    pub fn as_primitive_ty<T: 'static>(self) -> Option<&'a T> {
+        self.as_native()?.as_any().downcast_ref()
+    }
+
+    pub fn is_uninit(self) -> bool {
+        matches!(self, Self::Boxed(Value::Uninit))
+    }
+}
+
 impl Value {
     pub fn uninit() -> Self {
         Self::Uninit
@@ -669,12 +707,14 @@ impl LiteralValue {
 
     /// Compare immutable pattern data with a runtime value without converting
     /// owned runtime data into a literal representation.
-    pub fn try_matches_runtime_value(
+    pub fn try_matches_runtime_value<'a>(
         &self,
-        value: &Value,
+        value: impl Into<ValueRef<'a>>,
     ) -> Result<bool, IncompatibleLiteralShape> {
-        match (self, value) {
-            (Self::Native(expected), Value::Native(actual)) => {
+        let value = value.into();
+        match self {
+            Self::Native(expected) => {
+                let actual = value.as_native().ok_or(IncompatibleLiteralShape)?;
                 if let Some(expected) =
                     LiteralNativeValue::as_any(expected.as_ref()).downcast_ref::<StaticStr>()
                 {
@@ -685,10 +725,17 @@ impl LiteralValue {
                         .ok_or(IncompatibleLiteralShape);
                 }
                 expected
-                    .matches_native_value(actual.as_ref())
+                    .matches_native_value(actual)
                     .ok_or(IncompatibleLiteralShape)
             }
-            (Self::Tuple(expected), Value::Tuple(actual)) if expected.len() == actual.len() => {
+            Self::Tuple(expected) => {
+                let actual = value
+                    .as_boxed()
+                    .and_then(Value::as_tuple)
+                    .ok_or(IncompatibleLiteralShape)?;
+                if expected.len() != actual.len() {
+                    return Err(IncompatibleLiteralShape);
+                }
                 expected.iter().zip(actual.iter()).try_fold(
                     true,
                     |all_equal, (expected, actual)| {
@@ -697,10 +744,7 @@ impl LiteralValue {
                     },
                 )
             }
-            (Self::Tuple(_), Value::Tuple(_))
-            | (Self::Native(_), _)
-            | (Self::Tuple(_), _)
-            | (Self::VariantTag(_), _) => Err(IncompatibleLiteralShape),
+            Self::VariantTag(_) => Err(IncompatibleLiteralShape),
         }
     }
 

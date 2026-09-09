@@ -13,6 +13,7 @@ use std::fmt;
 use rustc_hash::FxHashMap;
 
 use crate::{
+    hir::native_functions::NativeResult,
     mir::{
         Function, Operation, OperationKind, Value, ValueId, terminator::TerminatorKind,
         value::StaticEvidence,
@@ -313,7 +314,13 @@ fn verify_program(program: &ResolvedPhysicalProgram) -> Result<(), PhysicalProgr
                 let Some(member) = subscript.member(mut_member) else {
                     continue;
                 };
-                if !has_function(program, member.function()) {
+                let signature = program
+                    .module(member.function().module)
+                    .and_then(|module| module.native_signature(member.function()));
+                let wrong_access = signature.is_some_and(|signature| {
+                    matches!(signature.result, NativeResult::Addressor { mutable, .. } if mutable != mut_member)
+                });
+                if !has_function(program, member.function()) || wrong_access {
                     return Err(PhysicalProgramError::InvalidSubscriptMemberFunction {
                         subscript: subscript.id(),
                         mut_member,

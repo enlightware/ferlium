@@ -134,6 +134,16 @@ pub(crate) enum ValueRole {
 }
 
 impl ValueRole {
+    /// The pointee type reached by reading through this value as a place, if it is one.
+    pub(crate) fn place_pointee_type(&self) -> Option<MirType> {
+        match self {
+            Self::Place(ty) => Some(ty.clone()),
+            Self::Materialized(MirType::Pointer(ty)) => Some((**ty).clone()),
+            Self::OpenProjection { yielded, .. } => Some(MirType::Lowered(*yielded)),
+            _ => None,
+        }
+    }
+
     /// Renders this role the way a definition site annotates it, `place int` for addressable
     /// storage holding an `int` and `int` for the value itself.
     pub(crate) fn annotation(&self, env: &ModuleEnv<'_>) -> String {
@@ -221,16 +231,6 @@ impl ValueRole {
     pub(crate) fn inner_type(&self) -> Option<&MirType> {
         match self {
             Self::Materialized(ty) | Self::Place(ty) => Some(ty),
-            _ => None,
-        }
-    }
-
-    /// The pointee type reached by reading through this value as a place, if it is one.
-    pub(crate) fn place_pointee_type(&self) -> Option<MirType> {
-        match self {
-            Self::Place(ty) => Some(ty.clone()),
-            Self::Materialized(MirType::Pointer(ty)) => Some((**ty).clone()),
-            Self::OpenProjection { yielded, .. } => Some(MirType::Lowered(*yielded)),
             _ => None,
         }
     }

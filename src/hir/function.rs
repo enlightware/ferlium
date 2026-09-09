@@ -27,7 +27,7 @@ use crate::{
         drop_frame_owned_locals_on_error, eval_node_with_ctx,
     },
     format::{FormatWith, escape_identifier, format_generic_param_list, write_identifier},
-    hir::value::{LiteralNativeValue, LiteralValue, Value},
+    hir::value::{LiteralNativeValue, LiteralValue, Value, ValueRef},
     hir::{self, ENodeId, UNodeArena, UNodeId},
     module::{ELocalDecl, ModuleEnv, ProjectionIndex, ULocalDecl},
     types::r#type::{
@@ -748,7 +748,7 @@ impl Callable for StructuralFieldAddressor {
                 ));
             }
         };
-        place.path.push(
+        place.push_index(
             isize::try_from(self.index.as_u32())
                 .expect("structural projection index fits the interpreter place path"),
         );
@@ -800,7 +800,7 @@ impl trivial_copy_private::Sealed for crate::std::math::Float {}
 unsafe impl NativeTrivialCopy for crate::std::math::Float {}
 
 fn literal_of_trivial_copy_native_typed<T: NativeTrivialCopy + LiteralNativeValue>(
-    value: &Value,
+    value: ValueRef<'_>,
 ) -> Option<LiteralValue> {
     value
         .as_primitive_ty::<T>()
@@ -818,7 +818,10 @@ fn literal_of_trivial_copy_native_typed<T: NativeTrivialCopy + LiteralNativeValu
 ///
 /// This is the leaf half of reifying a compile-time value into MIR (see `src/mir/reify.rs`), and
 /// the inverse of [`LiteralValue::into_value`].
-pub(crate) fn literal_of_trivial_copy_native(value: &Value) -> Option<LiteralValue> {
+pub(crate) fn literal_of_trivial_copy_native<'a>(
+    value: impl Into<ValueRef<'a>>,
+) -> Option<LiteralValue> {
+    let value = value.into();
     literal_of_trivial_copy_native_typed::<()>(value)
         .or_else(|| literal_of_trivial_copy_native_typed::<bool>(value))
         .or_else(|| literal_of_trivial_copy_native_typed::<isize>(value))
@@ -831,7 +834,7 @@ pub(crate) fn literal_of_trivial_copy_native(value: &Value) -> Option<LiteralVal
 /// Copying such a leaf *is* freezing it and thawing it again: both rebuild the same concrete Rust
 /// value into a fresh box, and `into_value` reuses the box the freeze allocated. Defining it that
 /// way keeps one downcast chain for the sealed set instead of two that can drift apart.
-pub(crate) fn copy_boxed_trivial_copy_native(value: &Value) -> Option<Value> {
+pub(crate) fn copy_boxed_trivial_copy_native<'a>(value: impl Into<ValueRef<'a>>) -> Option<Value> {
     literal_of_trivial_copy_native(value).map(LiteralValue::into_value)
 }
 

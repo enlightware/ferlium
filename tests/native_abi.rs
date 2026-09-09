@@ -9,6 +9,42 @@ use entries::*;
 use std::{cell::Cell, mem::MaybeUninit, rc::Rc};
 
 #[test]
+fn native_abi_rooted_member_pointers() {
+    let drops = Rc::new(Cell::new(0));
+    let mut owner = Tracked {
+        payload: "member".into(),
+        drops: drops.clone(),
+    };
+    let shared: unsafe extern "C" fn(*const Tracked) -> *const String = probe_member_ref;
+    let mutable: unsafe extern "C" fn(*mut Tracked) -> *mut String = probe_member_mut;
+    let mut failure = FailureState::default();
+    let mut output = MaybeUninit::uninit();
+    // SAFETY: each pointer is used within its receiver borrow. Replacement keeps the field live.
+    unsafe {
+        assert_eq!(&*shared(&owner), "member");
+        let old = std::ptr::replace(mutable(&mut owner), "replacement".into());
+        assert_eq!(old, "member");
+        assert_eq!(
+            probe_member_fallible(&mut failure, &mut owner, &mut output),
+            0
+        );
+        (*output.assume_init()).clear();
+        let sentinel = std::ptr::without_provenance_mut::<String>(1);
+        output.write(sentinel);
+        assert_ne!(
+            probe_member_fallible(&mut failure, &mut owner, &mut output),
+            0
+        );
+        assert_eq!(output.assume_init(), sentinel);
+    }
+    assert_eq!(failure.message.as_deref(), Some("empty member"));
+    assert!(owner.payload.is_empty());
+    assert_eq!(drops.get(), 0);
+    drop(owner);
+    assert_eq!(drops.get(), 1);
+}
+
+#[test]
 fn native_abi_scalar_and_unit_transport() {
     // Typed function pointers check that the entries really expose the intended Rust C ABI.
     let mixed: extern "C" fn(i32, i64, f32, f64, usize, bool) -> f64 = probe_scalars;

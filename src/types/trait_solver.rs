@@ -1007,14 +1007,15 @@ impl<'a> TraitSolver<'a> {
         receiver_ty: Type,
         field: Ustr,
     ) -> Option<SubscriptType> {
-        let (receiver_def, receiver_params) = {
+        let key = ProjectionKey::explicit_for_receiver_ty(receiver_ty, field)?;
+        let receiver_params = {
             let data = receiver_ty.data();
-            let TypeKind::Named(named) = &*data else {
-                return None;
-            };
-            (named.def, named.params.clone())
+            match &*data {
+                TypeKind::Named(named) => named.params.clone(),
+                TypeKind::Native(_) => Default::default(),
+                _ => return None,
+            }
         };
-        let key = ProjectionKey::nominal(receiver_def, field);
         let subscript = self.projection_subscript_id(key)?;
         let subscript_ty = if subscript.module == self.current_type_items.module.id {
             self.current_projection_subscript_types.get(key)?

@@ -252,6 +252,9 @@ impl NativeRequirements {
 fn result_layout(result: NativeResult) -> Option<NativeLayout> {
     match result {
         NativeResult::Scalar(layout, _)
+        | NativeResult::Addressor {
+            pointee: layout, ..
+        }
         | NativeResult::Output(layout)
         | NativeResult::Optional {
             payload: layout, ..

@@ -626,3 +626,54 @@ Ferlium variants use case-specific payload offsets and are not C unions. A Rust 
 not structurally interchangeable merely because its cases have corresponding names and payloads;
 it remains an ordinary non-structurally-exposed Rust-native type unless an adapter explicitly
 implements the Ferlium variant representation.
+
+## Native member addressors
+
+A native member addressor exposes a member `M` of a closed Rust-native receiver `T` through
+independent shared and mutable pointer entries. Both types must have registered native
+representations; exposing a member does not make the receiver structurally interchangeable with
+a Ferlium product. Each entry takes one receiver argument:
+
+```rust,ignore
+unsafe extern "C" fn shared(receiver: *const T) -> *const M;
+unsafe extern "C" fn mutable(receiver: *mut T) -> *mut M;
+```
+
+Fallible entries use the invocation-owned failure protocol, with trailing pointer-result storage.
+`NativeFailureState` denotes the opaque [failure state](#source-failure-diagnostics):
+
+```rust,ignore
+unsafe extern "C" fn shared(
+    failure: &mut NativeFailureState,
+    receiver: *const T,
+    output: &mut MaybeUninit<*const M>,
+) -> u32;
+unsafe extern "C" fn mutable(
+    failure: &mut NativeFailureState,
+    receiver: *mut T,
+    output: &mut MaybeUninit<*mut M>,
+) -> u32;
+```
+
+An infallible entry returns a non-null, aligned pointer to an initialized member. A fallible entry
+writes such a pointer to its output on success; failure records a diagnostic and leaves the output
+uninitialized. Both exits preserve the receiver's initialization. The entry contract identifies the
+receiver as the result root and records the member layout and shared/mutable permission. Pointers
+are memory offsets on Wasm32. [MIR result storage](mir-ir.md#function-boundaries) is separate from
+these native return forms.
+
+The host guarantees that the pointer is rooted in the receiver, remains valid throughout its
+borrow, and requires no suspended Rust guard or access epilogue. The caller keeps the receiver live
+through every use of the member, including when the receiver is a temporary.
+Entries must not retain input pointers or unwind. A mutable entry additionally guarantees that
+arbitrary valid member mutation and replacement preserve the enclosing Rust value's invariants.
+If that guarantee cannot be made, expose a shared member or a validating getter/setter instead.
+The addressor contract does not assert repeatability or disjointness of differently named members.
+
+Native members remain initialized for the enclosing value's entire live lifetime. Shared members
+permit reads and registered cloning. Mutable members additionally permit ordinary typed mutable
+calls, whole-member replacement, and complete writes of `TrivialCopy` members. Replacement installs
+the new member before destroying the detached old value. Moving out, clearing, consuming destruction,
+or using a live owning member as uninitialized result storage is invalid. These restrictions also
+apply when forwarding the member through aliases or generic mutable parameters. Generated Ferlium
+code never discovers Rust field offsets by layout arithmetic.

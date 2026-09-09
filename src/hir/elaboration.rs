@@ -539,7 +539,7 @@ fn extra_arg_kind_from_inst_data(
                     let existing_structural = generated.get_existing(structural_key);
                     if existing_structural.is_none()
                         && requirement.accepts_user_defined_projection()
-                        && let Some(key) = ProjectionKey::nominal_for_receiver_ty(ty, *name)
+                        && let Some(key) = ProjectionKey::explicit_for_receiver_ty(ty, *name)
                         && let Some(subscript) = ctx.trait_solver.projection_subscript_id(key)
                     {
                         return Ok((
@@ -1767,6 +1767,9 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
         place: ENodeId,
         body: ENodeId,
     ) -> Result<Option<NodeKind<Elaborated>>, InternalCompilationError> {
+        if matches!(&self.dst[place].kind, NodeKind::Block(_)) {
+            return Ok(None);
+        }
         match &self.dst[body].kind {
             NodeKind::LoadLocal(load) if load.id == binding => {
                 Ok(Some(self.dst[place].kind.clone()))
@@ -1970,6 +1973,26 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             body: b(SVec2::from_vec(vec![call])),
             cleanup,
         }))
+    }
+
+    /// Argument cleanup is introduced during elaboration. Keep it outside the consumer of an
+    /// addressor's pointer; otherwise a temporary receiver is destroyed before its member is read.
+    fn with_place_scope(
+        &mut self,
+        mut node: hir::WithPlace<Elaborated>,
+        ty: Type,
+        effects: &EffType,
+        span: Location,
+    ) -> NodeKind<Elaborated> {
+        if let NodeKind::Block(mut block) = self.dst[node.place].kind.clone() {
+            node.place = block.body.pop().expect("addressor block has a tail place");
+            let inner = self.with_place_scope(node, ty, effects, span);
+            let inner = self.alloc_elaborated_node(inner, ty, effects.clone(), span);
+            block.body.push(inner);
+            NodeKind::Block(block)
+        } else {
+            NodeKind::WithPlace(node)
+        }
     }
 
     fn elaborate_source_kind(
@@ -2774,12 +2797,17 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     {
                         inlined
                     } else {
-                        WithPlace(hir::WithPlace {
-                            place: accessor,
-                            binding: node.binding,
-                            body,
-                            access: node.access,
-                        })
+                        self.with_place_scope(
+                            hir::WithPlace {
+                                place: accessor,
+                                binding: node.binding,
+                                body,
+                                access: node.access,
+                            },
+                            node_ty,
+                            node_effects,
+                            node_span,
+                        )
                     }
                 } else {
                     let mut body = body;
@@ -2803,12 +2831,18 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 } else {
                     self.place_aliases.remove(&node.binding);
                 }
-                WithPlace(hir::WithPlace {
-                    place,
-                    binding: node.binding,
-                    body: body?,
-                    access: node.access,
-                })
+                let body = body?;
+                self.with_place_scope(
+                    hir::WithPlace {
+                        place,
+                        binding: node.binding,
+                        body,
+                        access: node.access,
+                    },
+                    node_ty,
+                    node_effects,
+                    node_span,
+                )
             }
             CheckCallDepth => CheckCallDepth,
             CheckFuel => CheckFuel,

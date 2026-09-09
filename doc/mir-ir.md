@@ -125,8 +125,17 @@ an optimized `owned` argument requires proof that the caller relinquishes owners
 - `AddressorPlace`: the callee writes a caller-rooted `*T` through an `@ret` of shape `**T`; and
 - `YieldedOnce`: `project` exposes a callee-rooted place until `end_project` resumes its slide.
 
+Native member addressors use `AddressorPlace` with explicit native result metadata recording the
+receiver root, pointee layout, and access permission; see [abi.md](abi.md#native-member-addressors).
+The receiver, including a temporary, must remain live throughout every use of the returned place.
+Member storage must stay initialized: consuming access and shared writes are invalid, and owning
+overwrites require `replace`. These restrictions survive aliases and forwarding through ordinary
+generic mutable parameters. They do not make independently owned storage or Buffer slots subject
+to a native member's initialization contract.
+
 Every `Call` and `Project` retains its instantiated `CallImplType`. It is the source of argument and
-result types, the result convention, and source fallibility.
+result types, the result convention, and source fallibility. A native entry's machine return form
+does not change this MIR result-storage contract.
 
 Call operands are `[callee, hidden evidence..., visible places..., ret-out]`. Project operands omit
 the trailing result place because the operation itself yields the scoped place. A dynamic callee is

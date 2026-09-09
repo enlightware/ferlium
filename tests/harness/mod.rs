@@ -770,6 +770,36 @@ fn make_clone_tracked() -> CloneTrackedNative {
     CloneTrackedNative(7)
 }
 
+unsafe extern "C" fn tracked_member_ref(value: *const CloneTrackedNative) -> *const isize {
+    unsafe { &raw const (*value).0 }
+}
+unsafe extern "C" fn tracked_member_mut(value: *mut CloneTrackedNative) -> *mut isize {
+    unsafe { &raw mut (*value).0 }
+}
+unsafe extern "C" fn tracked_self_ref(
+    value: *const CloneTrackedNative,
+) -> *const CloneTrackedNative {
+    value
+}
+unsafe extern "C" fn tracked_self_mut(value: *mut CloneTrackedNative) -> *mut CloneTrackedNative {
+    value
+}
+
+unsafe extern "C" fn tracked_failing_member(
+    failure: &mut ferlium::hir::native_functions::NativeFailureState,
+    value: *mut CloneTrackedNative,
+    output: &mut std::mem::MaybeUninit<*mut isize>,
+) -> u32 {
+    if unsafe { (*value).0 } < 0 {
+        failure.fail(SourceFailureKind::InvalidArgument(
+            "negative native member".into(),
+        ))
+    } else {
+        output.write(unsafe { &raw mut (*value).0 });
+        0
+    }
+}
+
 extern "C" fn clone_tracked_payload(value: &CloneTrackedNative) -> isize {
     value.0
 }
@@ -885,6 +915,63 @@ fn testing_module(
     value_trait_def: &Trait,
 ) -> Module {
     let mut module = Module::new(module_id, Path::single_str("testing"));
+    use ferlium::hir::native_functions::{
+        NativeAddressorMut, NativeAddressorRef, NativeFallibleAddressorMut,
+    };
+    // SAFETY: these entries expose initialized fields (or the receiver itself), with no guard
+    // or extra Rust invariants; the failure entry writes output only on success.
+    unsafe {
+        module.add_native_member(
+            ustr("payload"),
+            Some(NativeAddressorRef::new(tracked_member_ref).description(
+                ["self"],
+                "Native payload",
+                no_effects(),
+            )),
+            Some(NativeAddressorMut::new(tracked_member_mut).description(
+                ["self"],
+                "Native payload",
+                no_effects(),
+            )),
+        );
+        module.add_native_member(
+            ustr("readonly"),
+            Some(NativeAddressorRef::new(tracked_member_ref).description(
+                ["self"],
+                "Read-only payload",
+                no_effects(),
+            )),
+            None,
+        );
+        module.add_native_member(
+            ustr("self_member"),
+            Some(NativeAddressorRef::new(tracked_self_ref).description(
+                ["self"],
+                "Rooted native value",
+                no_effects(),
+            )),
+            Some(NativeAddressorMut::new(tracked_self_mut).description(
+                ["self"],
+                "Rooted native value",
+                no_effects(),
+            )),
+        );
+        module.add_native_member(
+            ustr("checked_payload"),
+            Some(NativeAddressorRef::new(tracked_member_ref).description(
+                ["self"],
+                "Read payload",
+                no_effects(),
+            )),
+            Some(
+                NativeFallibleAddressorMut::new(tracked_failing_member).description(
+                    ["self"],
+                    "Checked payload",
+                    effect(PrimitiveEffect::Fallible),
+                ),
+            ),
+        );
+    }
     let test_assoc_trait = test_assoc_trait();
     let test_witnessed_project_trait = test_witnessed_project_trait();
     let test_assoc_trait_id = TraitId::new(module_id, module.add_trait(test_assoc_trait));
@@ -2043,7 +2130,13 @@ impl Callable for InterpreterFixture {
             }
             Self::GetArray => get_array_property_value_value(),
             Self::SetArray => {
-                set_array_property_value_value_ref(args[0].as_value_ref(ctx).unwrap());
+                set_array_property_value_value_ref(
+                    args[0]
+                        .as_value_ref(ctx)
+                        .unwrap()
+                        .as_boxed()
+                        .expect("array needs boxed storage"),
+                );
                 Value::unit()
             }
         };

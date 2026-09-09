@@ -374,7 +374,7 @@ mod tests {
             // as a `PlaceResult` native, and freezing it would outlive the frame it points into.
             (
                 "bridged place",
-                Value::native(PlaceResult::new(crate::eval::Place {
+                Value::native(PlaceResult::new(crate::place::Place::Boxed {
                     root: 0,
                     path: vec![],
                 })),

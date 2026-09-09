@@ -488,6 +488,25 @@ fn addressor_subscript_accepts_explicit_return_place() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn native_member_addressor_forwarding_and_pattern_matching() {
+    let value = experimental_session().run(indoc! { r#"
+        subscript forward<T>(value: &mut T) -> T {
+            ref mut { value }
+        }
+        let mut owner = testing::make_clone_tracked();
+        let before = match owner.readonly { 7 => 700, _ => 0 };
+        owner.self_member->[forward] = testing::make_clone_tracked();
+        owner.payload->[forward] = 13;
+        match owner.payload->[forward] {
+            13 => before + owner.self_member.payload,
+            _ => 0,
+        }
+    "# });
+    assert_val_eq!(value, int(713));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn addressor_subscript_rejects_implicit_tail_value() {
     assert_invalid_subscript_definition(
         indoc! { r#"

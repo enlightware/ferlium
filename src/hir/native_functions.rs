@@ -79,6 +79,10 @@
 
 use std::{any::TypeId, fmt, mem::MaybeUninit};
 
+#[path = "native_addressors.rs"]
+mod addressors;
+pub use addressors::*;
+
 use super::function::{self, ArgConvention, CallArgsStorageGuard, Callable, CallableDefinition};
 use crate::{
     compiler::error::SourceFailureKind,
@@ -240,6 +244,12 @@ impl NativeParameter {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NativeResult {
+    /// Borrowed initialized Rust member; rooted in one visible receiver argument.
+    Addressor {
+        pointee: NativeLayout,
+        root: u32,
+        mutable: bool,
+    },
     Unit,
     /// Source-level `never`: the status-only entry must always report failure.
     Never,
@@ -259,6 +269,7 @@ impl NativeResult {
             Self::Unit => Type::primitive::<()>(),
             Self::Never => Type::never(),
             Self::Optional { ty, .. } => ty,
+            Self::Addressor { pointee, .. } => pointee.ty,
             Self::Scalar(layout, _) | Self::Output(layout) => layout.ty,
         }
     }
@@ -283,6 +294,7 @@ pub enum NativeContractError {
     ResultType,
     ResultTransport,
     ConsumingSignature,
+    AddressorRoot,
 }
 
 impl fmt::Display for NativeContractError {
@@ -314,6 +326,9 @@ impl fmt::Display for NativeContractError {
             Self::ConsumingSignature => {
                 f.write_str("native destruction requires one consuming argument and a unit result")
             }
+            Self::AddressorRoot => f.write_str(
+                "native addressor root or access permission differs from its declaration",
+            ),
         }
     }
 }
@@ -342,8 +357,27 @@ impl NativeSignature {
         if may_fail != (self.failure == NativeFailureConvention::StatusWithState) {
             return Err(NativeContractError::Fallibility);
         }
-        if definition.result_convention != CallResultConvention::Value {
+        let addressor = matches!(self.result, NativeResult::Addressor { .. });
+        if definition.result_convention
+            != if addressor {
+                CallResultConvention::ADDRESSOR_PLACE
+            } else {
+                CallResultConvention::Value
+            }
+        {
             return Err(NativeContractError::ResultConvention);
+        }
+        if let NativeResult::Addressor { root, mutable, .. } = self.result {
+            let receiver = self.parameters.get(root as usize);
+            if definition.result_rooted_in != Some(root)
+                || !matches!(
+                    (receiver, mutable),
+                    (Some(NativeParameter::Shared(_)), false)
+                        | (Some(NativeParameter::Mutable(_)), true)
+                )
+            {
+                return Err(NativeContractError::AddressorRoot);
+            }
         }
         if self.parameters.len() != ty.args.len() {
             return Err(NativeContractError::ArgumentCount);
@@ -353,7 +387,9 @@ impl NativeSignature {
             if entry.layout().ty != declared.ty || declared.mut_ty != MutType::from(mutable) {
                 return Err(NativeContractError::Argument { index });
             }
-            if matches!(entry, NativeParameter::Shared(layout) if layout.requires_direct_transport())
+            let rooted_receiver = matches!(self.result, NativeResult::Addressor { root, .. } if index == root as usize);
+            if !rooted_receiver
+                && matches!(entry, NativeParameter::Shared(layout) if layout.requires_direct_transport())
             {
                 return Err(NativeContractError::ArgumentTransport { index });
             }
@@ -668,11 +704,16 @@ impl<E: EntryFunction> NativeCallable<E> {
         doc: &'static str,
         ty_scheme: TypeScheme<FnType>,
     ) -> ModuleFunction {
-        let definition = CallableDefinition::new(
+        let mut definition = CallableDefinition::new(
             ty_scheme,
             arg_names.into_iter().map(ustr::Ustr::from).collect(),
             Some(doc.to_owned()),
         );
+        if let NativeResult::Addressor { root, .. } = self.entry.signature.result {
+            definition = definition
+                .with_result_convention(CallResultConvention::ADDRESSOR_PLACE)
+                .with_result_rooted_in(root);
+        }
         self.entry
             .signature
             .validate(&definition)
@@ -1095,7 +1136,7 @@ fn take_native_drop_target<T: 'static>(
     arg: &ValOrMut,
     ctx: &mut EvalCtx,
 ) -> Result<MaybeUninit<T>, SourceFailureKind> {
-    let target = arg.as_place().target_mut(ctx)?;
+    let target = arg.as_place().boxed_mut(ctx)?;
     assert!(
         target
             .as_native()
@@ -1352,7 +1393,7 @@ mod tests {
             function.runtime_argument_passing(),
             Some(&[ArgConvention::MutableRef][..]),
         );
-        let place = crate::eval::Place {
+        let place = crate::place::Place::Boxed {
             root: 0,
             path: vec![0],
         };
@@ -1363,8 +1404,8 @@ mod tests {
             .discard_storage();
 
         assert_eq!(count.get(), 1, "destruction must run during Value::drop");
-        assert!(matches!(place.target_mut(&mut ctx).unwrap(), Value::Uninit));
-        let sibling = crate::eval::Place {
+        assert!(matches!(place.boxed_mut(&mut ctx).unwrap(), Value::Uninit));
+        let sibling = crate::place::Place::Boxed {
             root: 0,
             path: vec![1],
         };
@@ -1384,7 +1425,7 @@ mod tests {
         ctx.environment.push(ValOrMut::Val(Value::uninit()));
         let function = crate::std::value::native_value_drop_function::<isize>();
         let _ = function.call(
-            vec![ValOrMut::Mut(crate::eval::Place {
+            vec![ValOrMut::Mut(crate::place::Place::Boxed {
                 root: 0,
                 path: vec![],
             })],
@@ -1414,14 +1455,14 @@ mod tests {
         ctx.environment
             .push(ValOrMut::Val(Value::native(PanickingDrop(count.clone()))));
 
-        let place = crate::eval::Place {
+        let place = crate::place::Place::Boxed {
             root: 0,
             path: vec![],
         };
         let mut storage =
             take_native_drop_target::<PanickingDrop>(&ValOrMut::Mut(place.clone()), &mut ctx)
                 .unwrap();
-        assert!(matches!(place.target_mut(&mut ctx).unwrap(), Value::Uninit));
+        assert!(matches!(place.boxed_mut(&mut ctx).unwrap(), Value::Uninit));
         // Test Rust unwinding below the non-unwinding C boundary. The actual C entry's
         // abort behavior is checked separately in a subprocess.
         let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
@@ -1435,7 +1476,7 @@ mod tests {
             1,
             "Rust must still drop the fields"
         );
-        assert!(matches!(place.target_mut(&mut ctx).unwrap(), Value::Uninit));
+        assert!(matches!(place.boxed_mut(&mut ctx).unwrap(), Value::Uninit));
         ctx.environment.pop().unwrap().discard_storage();
         assert_eq!(
             count.get(),
@@ -1476,7 +1517,7 @@ mod tests {
                 })));
             let function = crate::std::value::native_value_drop_function::<PanickingDrop>();
             let _ = function.call(
-                vec![ValOrMut::Mut(crate::eval::Place {
+                vec![ValOrMut::Mut(crate::place::Place::Boxed {
                     root: 0,
                     path: vec![],
                 })],
@@ -1551,7 +1592,7 @@ mod tests {
             assert_eq!(entry.signature.parameters, [parameter]);
             assert_eq!(entry.signature.result, result);
             ctx.environment.push(ValOrMut::Val(value));
-            let arg = ValOrMut::Mut(crate::eval::Place {
+            let arg = ValOrMut::Mut(crate::place::Place::Boxed {
                 root: 0,
                 path: vec![],
             });
@@ -1862,7 +1903,7 @@ mod tests {
                 })
             }),
         )));
-        let place = |index: usize| crate::eval::Place {
+        let place = |index: usize| crate::place::Place::Boxed {
             root: 0,
             path: vec![index as isize],
         };

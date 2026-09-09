@@ -2349,7 +2349,7 @@ impl TypeInference {
         receiver_ty: Type,
         field: Ustr,
     ) -> Option<SubscriptId> {
-        let key = ProjectionKey::nominal_for_receiver_ty(receiver_ty, field)?;
+        let key = ProjectionKey::explicit_for_receiver_ty(receiver_ty, field)?;
         if env
             .subscript_member
             .and_then(|subscript_member| subscript_member.projection_key)

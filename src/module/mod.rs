@@ -807,6 +807,79 @@ impl Module {
         id
     }
 
+    /// Expose a Rust-native field through independently typed shared and mutable addressors.
+    /// The entries' unsafe registration establishes pointer rooting and Rust invariants.
+    pub fn add_native_member(
+        &mut self,
+        field: Ustr,
+        shared: Option<ModuleFunction>,
+        mutable: Option<ModuleFunction>,
+    ) -> LocalSubscriptId {
+        use crate::hir::native_functions::NativeResult;
+        let first = shared
+            .as_ref()
+            .or(mutable.as_ref())
+            .expect("native member needs an entry");
+        let mut signature = SubscriptSignature::from_callable_definition(&first.definition);
+        assert_eq!(signature.args.len(), 1, "native members take one receiver");
+        signature.normalize_projection_receiver();
+        let receiver = signature.args[0].ty;
+        assert!(
+            matches!(&*receiver.data(), TypeKind::Native(native) if native.arguments.is_empty()),
+            "native members need a closed Rust-native receiver"
+        );
+        let key = ProjectionKey::structural(receiver, field);
+        assert!(
+            !self.projection_subscripts.contains_key(&key),
+            "duplicate native member"
+        );
+        // Validate the complete pair before registering either member.
+        for (function, mutable) in [(shared.as_ref(), false), (mutable.as_ref(), true)] {
+            if let Some(function) = function {
+                let entry = function
+                    .code
+                    .native_entry()
+                    .expect("native member needs a typed entry");
+                entry
+                    .signature()
+                    .validate(&function.definition)
+                    .expect("invalid native member entry");
+                assert!(
+                    matches!(entry.signature().result, NativeResult::Addressor { root: 0, mutable: access, .. } if access == mutable),
+                    "native member access mismatch"
+                );
+                let ty = &function.definition.ty_scheme.ty;
+                assert!(
+                    ty.args.len() == 1 && ty.args[0].ty == receiver && ty.ret == signature.ret,
+                    "native member type mismatch"
+                );
+            }
+        }
+        let mut subscript = SubscriptDefinition::resolved(signature);
+        for (function, mutable) in [(shared, false), (mutable, true)] {
+            if let Some(function) = function {
+                let name = format!(
+                    "#native_member:{receiver:?}:{field}:{}",
+                    if mutable { "mut" } else { "ref" }
+                );
+                let function = self.add_function_anonymous(function);
+                self.name_function_with_visibility(function, name.into(), Visibility::Module);
+                let member = Some(SubscriptMember {
+                    function,
+                    provenance: YieldProvenance::AddressorPlace,
+                });
+                if mutable {
+                    subscript.mut_member = member;
+                } else {
+                    subscript.ref_member = member;
+                }
+            }
+        }
+        let id = self.add_subscript_anonymous(subscript);
+        self.add_projection_subscript(key, id, Visibility::Public, ProjectionOrigin::Explicit);
+        id
+    }
+
     /// Add a private unsafe native addressor as a shared ref/mut subscript member.
     pub(crate) fn add_private_unsafe_addressor_subscript(
         &mut self,

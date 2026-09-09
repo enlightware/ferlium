@@ -23,7 +23,7 @@ use crate::{
     CompilerSession, Location,
     compiler::MirOptimization,
     eval::{
-        ControlFlow, EvalCtx, Place, PlaceResult, RuntimeError, ValOrMut,
+        ControlFlow, EvalCtx, PlaceResult, RuntimeError, ValOrMut, ValueRef,
         call_value_clone_for_temp, call_value_drop_for_temp,
     },
     execution::ReferenceInterpreterLimits,
@@ -39,6 +39,7 @@ use crate::{
         FunctionId, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, TraitDictionaryEntry,
         id::Id,
     },
+    place::Place,
     std::{array::array_value_from_vec, buffer, value::is_value_drop_function},
     types::{
         r#trait::TraitDictionaryEntryIndex,
@@ -352,7 +353,7 @@ impl<'a> Interpreter<'a> {
         #[cfg(debug_assertions)]
         self.check_call_boundary(&boundary, CallPhase::After, false);
         let slot = ret
-            .target_mut(&mut self.ctx)
+            .boxed_mut(&mut self.ctx)
             .expect("return cell must be addressable");
         let value = std::mem::replace(slot, Value::uninit());
         self.reclaim_frame_storage(entry_top);
@@ -434,7 +435,7 @@ impl<'a> Interpreter<'a> {
         );
         self.run_function(key, bindings)?;
         let slot = ret
-            .target_mut(&mut self.ctx)
+            .boxed_mut(&mut self.ctx)
             .expect("return cell must be addressable");
         Ok(std::mem::replace(slot, Value::uninit()))
     }
@@ -784,7 +785,7 @@ impl<'a> Interpreter<'a> {
             OperationKind::DropSubscriptEnv => {
                 let place = self.place_operand(slots, &operation.operands[0]);
                 let target = place
-                    .target_mut(&mut self.ctx)
+                    .boxed_mut(&mut self.ctx)
                     .expect("drop_subscript_env of an invalid place");
                 let value = std::mem::replace(target, Value::uninit());
                 value.discard_storage();
@@ -950,7 +951,7 @@ impl<'a> Interpreter<'a> {
                 .as_primitive_ty::<isize>()
                 .expect("subfield index must be an int")
         });
-        place.path.push(index);
+        place.push_index(index);
         Self::bind(slots, def, Binding::Place(place));
     }
 
@@ -1126,7 +1127,7 @@ impl<'a> Interpreter<'a> {
         let place = self.place_operand(slots, operand);
         self.materialize_path(&place);
         let slot = place
-            .target_mut(&mut self.ctx)
+            .boxed_mut(&mut self.ctx)
             .expect("clear of an invalid place");
         let husk = husk_like(slot);
         let old = std::mem::replace(slot, husk);
@@ -1216,6 +1217,8 @@ impl<'a> Interpreter<'a> {
             .target_ref(&self.ctx)
             .expect("extract_tag of an invalid place");
         let tag = value
+            .as_boxed()
+            .expect("variant requires boxed storage")
             .variant_tag()
             .expect("extract_tag of a non-variant value");
         Self::bind(slots, def, Binding::VariantTag(tag));
@@ -1294,7 +1297,7 @@ impl<'a> Interpreter<'a> {
             target
                 .target_ref_if_materialized(&self.ctx)
                 .expect("drop target must be addressable")
-                .is_none_or(is_drop_husk)
+                .is_none_or(|value| value.as_boxed().is_some_and(is_drop_husk))
         };
         if skip {
             return Ok(());
@@ -1344,12 +1347,12 @@ impl<'a> Interpreter<'a> {
         // never be observed or retried. Preserve only the aggregate skeleton so assignment can
         // reinitialize it field by field.
         let slot = target
-            .target_mut(&mut self.ctx)
+            .boxed_mut(&mut self.ctx)
             .expect("drop target must be addressable");
         let husk = std::mem::replace(slot, Value::uninit());
         let skeleton = husk_like(&husk);
         *target
-            .target_mut(&mut self.ctx)
+            .boxed_mut(&mut self.ctx)
             .expect("drop target must be addressable") = skeleton;
         husk.discard_storage();
         drop_result
@@ -1394,6 +1397,8 @@ impl<'a> Interpreter<'a> {
             let fv = place
                 .target_ref(&self.ctx)
                 .expect("indirect call of an invalid place")
+                .as_boxed()
+                .expect("callable requires boxed storage")
                 .as_function()
                 .expect("indirect call on a non-function value");
             (
@@ -1441,6 +1446,8 @@ impl<'a> Interpreter<'a> {
                     let fv = place
                         .target_ref(&self.ctx)
                         .expect("project callee of an invalid place")
+                        .as_boxed()
+                        .expect("callable requires boxed storage")
                         .as_function()
                         .expect("project callee must be a function value");
                     assert_eq!(
@@ -1683,7 +1690,9 @@ impl<'a> Interpreter<'a> {
             // Read the pointee. A place that projects through (or ends at) uninitialized storage has
             // no value to read — `boundary_pointee` returns `None`, which the check treats as a husk
             // (the slot is simply not initialized).
-            let is_husk = self.boundary_pointee(place).is_none_or(is_drop_husk);
+            let is_husk = self
+                .boundary_pointee(place)
+                .is_none_or(|value| value.as_boxed().is_some_and(is_drop_husk));
             match tag {
                 // A `&mut`/`&`/trivial-copy argument must point at a live value, before and after.
                 mir::ParameterKind::Parameter(passing) => assert!(
@@ -1727,17 +1736,21 @@ impl<'a> Interpreter<'a> {
     /// which the contract treats as a husk. Unlike [`Place::target_ref_allow_uninit`], this never
     /// panics on an uninitialized (or otherwise non-navigable) intermediate.
     #[cfg(debug_assertions)]
-    fn boundary_pointee(&self, place: &Place) -> Option<&Value> {
-        let mut path: VecDeque<isize> = place.path.iter().copied().collect();
-        let mut index = place.root;
+    fn boundary_pointee<'p>(&'p self, place: &'p Place) -> Option<ValueRef<'p>> {
+        if place.native_member(&self.ctx).is_some() {
+            return place.target_ref(&self.ctx).ok();
+        }
+        let (mut index, path) = place.boxed_parts();
+        let mut path: VecDeque<isize> = path.iter().copied().collect();
         let mut target = loop {
             match self.ctx.environment.get(index)? {
                 ValOrMut::Val(t) => break t,
                 // SAFETY: the referent outlives the borrow, as in `target_ref_allow_uninit`.
                 ValOrMut::Ref(t) => break unsafe { &**t },
                 ValOrMut::Mut(p) => {
-                    index = p.root;
-                    for &i in p.path.iter().rev() {
+                    let (root, parent_path) = p.boxed_parts();
+                    index = root;
+                    for &i in parent_path.iter().rev() {
                         path.push_front(i);
                     }
                 }
@@ -1760,7 +1773,7 @@ impl<'a> Interpreter<'a> {
                 _ => return None,
             };
         }
-        Some(target)
+        Some(ValueRef::Boxed(target))
     }
 
     /// Calls the resolved function `(callee_module, callee_identity)` with `leading` (a closure's
@@ -1975,6 +1988,8 @@ impl<'a> Interpreter<'a> {
             let fv = place
                 .target_ref(&self.ctx)
                 .expect("closure call of an invalid place")
+                .as_boxed()
+                .expect("callable requires boxed storage")
                 .as_function()
                 .expect("closure call on a non-function");
             (
@@ -2028,9 +2043,9 @@ impl<'a> Interpreter<'a> {
             }
             None => Value::uninit(),
         };
-        let env_idx = self.alloc_cell(cloned_env, span)?.root;
+        let env_idx = self.alloc_cell(cloned_env, span)?.boxed_parts().0;
         for i in 0..env_len {
-            leading.push(Binding::Place(Place {
+            leading.push(Binding::Place(Place::Boxed {
                 root: env_idx,
                 path: vec![i as isize],
             }));
@@ -2050,7 +2065,7 @@ impl<'a> Interpreter<'a> {
         // every cell allocated since the marker (the temporary's husk and the callee's frame). The
         // closure itself is left untouched in `place`.
         let drop_result = if call_result.as_ref().is_err_and(RuntimeError::is_poisoning) {
-            self.discard_place_storage(&Place {
+            self.discard_place_storage(&Place::Boxed {
                 root: env_idx,
                 path: vec![],
             });
@@ -2058,7 +2073,7 @@ impl<'a> Interpreter<'a> {
         } else {
             match env_dict {
                 Some(dict) => {
-                    let target = Place {
+                    let target = Place::Boxed {
                         root: env_idx,
                         path: vec![],
                     };
@@ -2150,6 +2165,8 @@ impl<'a> Interpreter<'a> {
             let source = place
                 .target_ref(&self.ctx)
                 .expect("clone_closure_env of an invalid place")
+                .as_boxed()
+                .expect("callable requires boxed storage")
                 .as_function()
                 .expect("clone_closure_env of a non-function value");
             (
@@ -2190,7 +2207,7 @@ impl<'a> Interpreter<'a> {
         let place = self.place_operand(slots, operand);
         let captured = {
             let target = place
-                .target_mut(&mut self.ctx)
+                .boxed_mut(&mut self.ctx)
                 .expect("drop_closure_env of an invalid place");
             let function = target
                 .as_function_mut()
@@ -2232,6 +2249,8 @@ impl<'a> Interpreter<'a> {
         let fv = place
             .target_ref(&self.ctx)
             .expect("drop callee of an invalid place")
+            .as_boxed()
+            .expect("callable requires boxed storage")
             .as_function()
             .expect("drop callee on a non-function value");
         (
@@ -2309,25 +2328,26 @@ impl<'a> Interpreter<'a> {
     /// `Tuple`s with enough `Uninit` leaves), so a subsequent field store can address the leaf.
     ///
     /// First follows `Mut` indirection down to the underlying owned `Val` cell, accumulating the
-    /// full field path the same way `Place::target_mut` resolves it (a store through a returned
+    /// full field path the same way `Place::boxed_mut` resolves it (a store through a returned
     /// out-pointer reaches its cell through a `Mut` reference, not a direct `Val`); then grows that
-    /// cell. The growth descends through every kind of step `target_mut` can take — tuple fields,
+    /// cell. The growth descends through every kind of step `boxed_mut` can take — tuple fields,
     /// array `Buffer` slots, and variant payloads — so an element store into an array of aggregates
     /// (`[…][i].field`) materializes the still-flat element skeleton in place.
     fn materialize_path(&mut self, place: &Place) {
-        let mut index = place.root;
-        let mut path: VecDeque<isize> = place.path.iter().copied().collect();
+        let (mut index, path) = place.boxed_parts();
+        let mut path: VecDeque<isize> = path.iter().copied().collect();
         loop {
             match self.ctx.environment.get(index) {
                 Some(ValOrMut::Val(_)) => break,
                 Some(ValOrMut::Mut(p)) => {
-                    index = p.root;
-                    for &i in p.path.iter().rev() {
+                    let (root, parent_path) = p.boxed_parts();
+                    index = root;
+                    for &i in parent_path.iter().rev() {
                         path.push_front(i);
                     }
                 }
                 // `Ref`/`Dictionary` cells are not owned aggregate storage we can grow into shape;
-                // leave addressing them (and any error) to `target_mut`.
+                // leave addressing them (and any error) to `boxed_mut`.
                 _ => return,
             }
         }
@@ -2355,7 +2375,7 @@ impl<'a> Interpreter<'a> {
         if let Some(profile) = &mut self.profile {
             profile.record_cell_high_water(self.ctx.environment.len());
         }
-        Ok(Place {
+        Ok(Place::Boxed {
             root: target,
             path: vec![],
         })
@@ -2383,7 +2403,7 @@ impl<'a> Interpreter<'a> {
     /// cleanup has already failed, when retrying guest cleanup would be incorrect.
     fn discard_place_storage(&mut self, place: &Place) {
         let target = place
-            .target_mut(&mut self.ctx)
+            .boxed_mut(&mut self.ctx)
             .expect("storage-reclamation target must be addressable");
         let value = std::mem::replace(target, Value::uninit());
         value.discard_storage();
@@ -2520,6 +2540,8 @@ impl<'a> Interpreter<'a> {
         place
             .target_ref(&self.ctx)
             .expect("subscript operand of an invalid place")
+            .as_boxed()
+            .expect("callable requires boxed storage")
             .as_subscript()
             .expect("a subscript operand must resolve to a subscript value")
             .as_ref()
@@ -2618,6 +2640,8 @@ impl<'a> Interpreter<'a> {
         }
         HiddenEvidenceArgValue::Subscript(crate::containers::b(
             value
+                .as_boxed()
+                .expect("subscript evidence requires boxed storage")
                 .as_subscript()
                 .expect("hidden evidence must be a dictionary, subscript, or variant storage mode")
                 .as_ref()
@@ -2756,7 +2780,7 @@ impl<'a> Interpreter<'a> {
         func: &mir::Function,
         slots: &FxHashMap<mir::Value, Binding>,
         operand: &mir::Value,
-        use_value: impl FnOnce(&Value) -> R,
+        use_value: impl FnOnce(ValueRef<'_>) -> R,
     ) -> R {
         match operand {
             mir::Value::Register(_) | mir::Value::Parameter(_) => match slots.get(operand) {
@@ -2770,7 +2794,7 @@ impl<'a> Interpreter<'a> {
                         .target_ref(&self.ctx)
                         .expect("operand is an invalid open projection"),
                 ),
-                Some(Binding::Value(value)) => use_value(value),
+                Some(Binding::Value(value)) => use_value(ValueRef::Boxed(value)),
                 Some(Binding::StackMarker(_)) => {
                     panic!("expected a value but {operand} is bound to a stack marker")
                 }
@@ -2784,7 +2808,7 @@ impl<'a> Interpreter<'a> {
             },
             _ => {
                 let value = self.constant_value(func, operand);
-                let result = use_value(&value);
+                let result = use_value(ValueRef::Boxed(&value));
                 value.discard_storage();
                 result
             }
@@ -2812,7 +2836,7 @@ impl<'a> Interpreter<'a> {
     /// Moves a value out of `place` unconditionally, leaving an addressable drop husk behind.
     fn take(&mut self, place: &Place) -> Value {
         let slot = place
-            .target_mut(&mut self.ctx)
+            .boxed_mut(&mut self.ctx)
             .expect("move from an invalid place");
         let husk = husk_like(slot);
         std::mem::replace(slot, husk)
@@ -2821,11 +2845,22 @@ impl<'a> Interpreter<'a> {
     /// Writes `v` into the cell denoted by `place`. A `store` **drops nothing**; MIR verification
     /// establishes that identifiable local storage carries no live semantic drop obligation.
     fn store(&mut self, v: Value, place: &Place) -> Result<(), RuntimeError> {
+        if place.native_member(&self.ctx).is_some() {
+            assert!(
+                crate::hir::function::literal_of_trivial_copy_native(&v).is_some(),
+                "owning native member writes require replace"
+            );
+            place
+                .replace_value(&mut self.ctx, v)
+                .map_err(RuntimeError::new_native)?
+                .discard_storage();
+            return Ok(());
+        }
         // Generic (`alloca A`) storage starts flat-`Uninit`; a field store grows the enclosing
         // `Tuple` skeleton on demand so the leaf is addressable.
         self.materialize_path(place);
         let slot = place
-            .target_mut(&mut self.ctx)
+            .boxed_mut(&mut self.ctx)
             .expect("store to an invalid place");
         let old = std::mem::replace(slot, v);
         // Reclaims interpreter-only storage (like a stack-pop); runs no `Value::drop`.
@@ -2880,10 +2915,12 @@ fn static_evidence_argument(evidence: &mir::value::StaticEvidence) -> ValOrMut {
 /// their types do not derive the language-level `TrivialCopy` trait. Strings, arrays,
 /// captured functions, and every other owned representation return `None` and must be moved or
 /// cloned explicitly. This intentionally depends on representation shape rather than byte size.
-fn read_copy(v: &Value) -> Option<Value> {
+fn read_copy<'a>(v: impl Into<ValueRef<'a>>) -> Option<Value> {
+    let v = v.into();
     if let Some(native) = copy_boxed_trivial_copy_native(v) {
         return Some(native);
     }
+    let v = v.as_boxed()?;
     if let Some(place) = v.as_primitive_ty::<PlaceResult>() {
         return Some(Value::native(place.clone()));
     }
@@ -2920,9 +2957,9 @@ fn read_copy(v: &Value) -> Option<Value> {
     None
 }
 
-/// Grows `value` so the field path `path` is addressable, mirroring how `Place::target_mut` walks
+/// Grows `value` so the field path `path` is addressable, mirroring how `Place::boxed_mut` walks
 /// the same path. A flat `Uninit` cell met with path still to go is an unmaterialized aggregate
-/// leaf and becomes an empty `Tuple` skeleton; from there each step descends like `target_mut`:
+/// leaf and becomes an empty `Tuple` skeleton; from there each step descends like `boxed_mut`:
 ///   * `Tuple` — extend with `Uninit` leaves up to the index, recurse into the field;
 ///   * `Native` `Buffer` (an array's backing storage) — recurse into the indexed slot, so a store
 ///     into an array element's field (`arr[i].f`) can build the element skeleton in place;

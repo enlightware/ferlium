@@ -27,6 +27,100 @@ use wasm_bindgen_test::*;
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn native_member_reads_mutates_and_replaces_through_generic_aliases() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+        fn assign<T>(slot: &mut T, value: T) { slot = value; }
+        fn set_payload(value, payload) { value.payload = payload; }
+        let mut value = testing::make_clone_tracked();
+        let before = value.readonly;
+        value.payload += 2;
+        assign(value.self_member.payload, 11);
+        set_payload(value, 13);
+        before * 100 + value.payload
+    "#
+        ),
+        int(713)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn native_member_owned_replacement_drops_detached_value_once() {
+    let mut session = TestSession::new();
+    session.without_optimized_mode();
+    assert_val_eq!(
+        session.run(
+            r#"
+        testing::reset_native_drops();
+        let during = {
+            let mut value = testing::make_clone_tracked();
+            value.self_member = testing::make_clone_tracked();
+            testing::native_drop_count()
+        };
+        during * 10 + testing::native_drop_count()
+    "#
+        ),
+        int(12)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn native_member_failure_preserves_owner_and_cleans_up() {
+    for mode in [RunMode::Hir, RunMode::Mir] {
+        let mut session = TestSession::new();
+        session.run_modes([mode]);
+        assert!(
+            session
+                .try_run(
+                    r#"
+            testing::reset_native_drops();
+            let mut value = testing::make_clone_tracked();
+            value.checked_payload = -1;
+            value.checked_payload = 12;
+        "#
+                )
+                .is_err()
+        );
+        assert_val_eq!(session.run("testing::native_drop_count()"), int(1));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn native_member_permissions_and_receiver_aliasing() {
+    let mut session = TestSession::new();
+    session.fail_compilation(
+        r#"
+        let mut value = testing::make_clone_tracked();
+        value.readonly = 2;
+    "#,
+    );
+    session
+        .fail_compilation(
+            r#"
+        fn change(a: &mut int, b: &mut int) { a = 1; b = 2; }
+        let mut value = testing::make_clone_tracked();
+        change(value.payload, value.self_member.payload);
+    "#,
+        )
+        .expect_mutable_paths_overlap();
+    assert_val_eq!(session.run("testing::make_clone_tracked().payload"), int(7));
+    assert_val_eq!(
+        session.run("testing::make_clone_tracked().self_member.payload"),
+        int(7)
+    );
+    assert_val_eq!(
+        session.run("let value = testing::make_clone_tracked().self_member; value.payload"),
+        int(7)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn native_drop_destroys_aggregate_members_once() {
     let mut session = TestSession::new();
     // Exact lifecycle counts are instrumentation, not observable Value semantics.

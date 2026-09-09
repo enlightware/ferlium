@@ -14,8 +14,7 @@ use crate::{
     compiler::error::SourceFailureKind,
     containers::b,
     eval::{
-        EvalControlFlowResult, EvalCtx, Place, PlaceResult, RuntimeError, ValOrMut, ValOrMutArgs,
-        cont,
+        EvalControlFlowResult, EvalCtx, PlaceResult, RuntimeError, ValOrMut, ValOrMutArgs, cont,
     },
     hir::{
         function::{
@@ -24,6 +23,7 @@ use crate::{
         value::{NativeValueType, Value},
     },
     module::{BlanketTraitImplSubKey, Module, ModuleFunction},
+    place::Place,
     std::core_traits_names::{INSPECT_TRAIT_NAME, VALUE_TRAIT_NAME},
     types::{
         effects::no_effects,
@@ -275,7 +275,7 @@ fn place_from_arg(arg: ValOrMut) -> Result<Place, RuntimeError> {
 
 fn buffer_slot_place(buffer: ValOrMut, index: isize) -> Result<Place, RuntimeError> {
     let mut place = place_from_arg(buffer)?;
-    place.path.push(index);
+    place.push_index(index);
     Ok(place)
 }
 
@@ -374,13 +374,13 @@ fn buffer_move_into(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlo
         ctx,
         "buffer element size should be an int",
     );
-    source.path.push(source_index);
-    target.path.push(target_index);
+    source.push_index(source_index);
+    target.push_index(target_index);
     let value = {
-        let source = source.target_mut(ctx).map_err(RuntimeError::new_native)?;
+        let source = source.boxed_mut(ctx).map_err(RuntimeError::new_native)?;
         mem::replace(source, Value::uninit())
     };
-    let target = target.target_mut(ctx).map_err(RuntimeError::new_native)?;
+    let target = target.boxed_mut(ctx).map_err(RuntimeError::new_native)?;
     assert!(
         matches!(target, Value::Uninit),
         "buffer_move_into target slot must be uninitialized"
@@ -420,10 +420,10 @@ fn buffer_move(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResu
     let source = place_from_arg(args.next().unwrap())?;
     let target = place_from_arg(args.next().unwrap())?;
     let value = {
-        let source = source.target_mut(ctx).map_err(RuntimeError::new_native)?;
+        let source = source.boxed_mut(ctx).map_err(RuntimeError::new_native)?;
         mem::replace(source, Value::native(Buffer::with_capacity(0)))
     };
-    let target = target.target_mut(ctx).map_err(RuntimeError::new_native)?;
+    let target = target.boxed_mut(ctx).map_err(RuntimeError::new_native)?;
     let old = mem::replace(target, value);
     old.discard_storage();
     cont(Value::unit())
@@ -452,9 +452,9 @@ fn buffer_take(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResu
         ctx,
         "buffer element size should be an int",
     );
-    source.path.push(index);
+    source.push_index(index);
     let value = {
-        let source = source.target_mut(ctx).map_err(RuntimeError::new_native)?;
+        let source = source.boxed_mut(ctx).map_err(RuntimeError::new_native)?;
         mem::replace(source, Value::uninit())
     };
     cont(value)
