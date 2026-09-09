@@ -30,7 +30,6 @@ use crate::{
     std::array::array_type,
     types::{
         effects::{Effect, PrimitiveEffect},
-        trait_solver::TraitSolverProbe,
         r#type::{CallImplType, Type, TypeKind},
         type_like::TypeLike,
         type_properties::concrete_type_is_trivial_copy,
@@ -49,8 +48,13 @@ fn call_type_is_fallible(ty: &CallImplType) -> bool {
 /// contract, so lazy lowering does not force the callee's MIR body to exist.
 #[cfg(any(debug_assertions, test, feature = "std-snapshot"))]
 pub(crate) fn verify_function(func: &Function, env: ModuleEnv<'_>) {
-    let solver = TraitSolverProbe::from_module(env.current, env.modules);
-    Verifier::new(func, env, solver).verify(true);
+    Verifier::new(func, env).verify(true, None);
+}
+
+/// Verifies semantic MIR using the roles from a pre-check of this exact, unchanged function body.
+#[cfg(any(debug_assertions, test, feature = "std-snapshot"))]
+pub(crate) fn verify_function_with_roles(func: &Function, env: ModuleEnv<'_>, roles: ValueRoles) {
+    Verifier::new(func, env).verify(true, Some(roles));
 }
 
 /// Physical lowering preserves SSA, operand roles, source-failure flow, and register ownership.
@@ -58,9 +62,8 @@ pub(crate) fn verify_function(func: &Function, env: ModuleEnv<'_>) {
 /// physical storage initialization and lifetime must be checked by the executor instead.
 pub(crate) fn verify_physical_function(func: &Function, env: ModuleEnv<'_>) {
     // Diagnose the offending operand slot before type/dataflow analyses see its consequences.
-    role::check_function_operand_roles(func);
-    let solver = TraitSolverProbe::from_module(env.current, env.modules);
-    Verifier::new(func, env, solver).verify(false);
+    let roles = role::check_function_operand_roles(func);
+    Verifier::new(func, env).verify(false, Some(roles));
 }
 
 /// Clones an interned type descriptor and explicitly releases the universe read lock.
@@ -478,7 +481,6 @@ enum NodeLocation {
 struct Verifier<'a> {
     func: &'a Function,
     env: ModuleEnv<'a>,
-    solver: TraitSolverProbe<'a>,
     nodes: Vec<NodeLocation>,
     node_order: Vec<NodeId>,
     node_index: FxHashMap<NodeId, usize>,
@@ -492,11 +494,10 @@ struct Verifier<'a> {
 }
 
 impl<'a> Verifier<'a> {
-    fn new(func: &'a Function, env: ModuleEnv<'a>, solver: TraitSolverProbe<'a>) -> Self {
+    fn new(func: &'a Function, env: ModuleEnv<'a>) -> Self {
         Self {
             func,
             env,
-            solver,
             nodes: vec![],
             node_order: vec![],
             node_index: FxHashMap::default(),
@@ -510,16 +511,17 @@ impl<'a> Verifier<'a> {
         }
     }
 
-    fn verify(mut self, semantic_storage: bool) {
-        self.verify_shared_contracts();
+    fn verify(mut self, semantic_storage: bool, roles: Option<ValueRoles>) {
+        self.verify_shared_contracts(roles);
         if semantic_storage {
+            self.collect_storage_roots();
             self.verify_storage_ownership();
         }
     }
 
-    fn verify_shared_contracts(&mut self) {
+    fn verify_shared_contracts(&mut self, roles: Option<ValueRoles>) {
         self.verify_structure();
-        self.collect_value_information();
+        self.collect_value_information(roles);
         self.verify_operand_roles_and_dominance();
         self.verify_source_failure_flow();
         self.verify_register_ownership();
@@ -735,9 +737,25 @@ impl<'a> Verifier<'a> {
         }
     }
 
-    fn collect_value_information(&mut self) {
-        self.roles = ValueRoles::derive(self.func);
+    fn collect_value_information(&mut self, roles: Option<ValueRoles>) {
+        // Without a role pre-check, malformed structure must be diagnosed before role resolution.
+        self.roles = roles.unwrap_or_else(|| ValueRoles::derive(self.func));
+        for index in 0..self.node_order.len() {
+            let node = self.node_order[index];
+            let Some(mir::Value::Register(value_id)) = self.definition(node) else {
+                continue;
+            };
+            assert!(
+                self.value_definition.insert(value_id, node).is_none(),
+                "MIR function `{}`: value {value_id} has more than one definition",
+                self.func.name
+            );
+        }
+    }
 
+    /// Storage paths and their type properties are only needed by semantic storage analysis.
+    /// Physical verification does not need them, since its storage is byte-offset-based.
+    fn collect_storage_roots(&mut self) {
         for index in 0..self.func.parameters().len() {
             let parameter = &self.func.parameters()[index];
             if !matches!(parameter.kind, ParameterKind::Owned) {
@@ -761,14 +779,6 @@ impl<'a> Verifier<'a> {
             let Some(value) = self.definition(node) else {
                 continue;
             };
-            let mir::Value::Register(value_id) = value else {
-                unreachable!("node definitions are registers")
-            };
-            assert!(
-                self.value_definition.insert(value_id, node).is_none(),
-                "MIR function `{}`: value {value_id} has more than one definition",
-                self.func.name
-            );
             if let OperationKind::Alloca { ty } = self.operation(node).unwrap().kind {
                 let root = self.roots.len();
                 let exact = self.storage_paths_are_exact(ty, &mut Vec::new());
@@ -2037,7 +2047,7 @@ impl<'a> Verifier<'a> {
         if let Some(result) = self.trivial_copy.get(&ty) {
             return *result;
         }
-        let result = self.solver.concrete_type_is_trivial_copy(ty);
+        let result = concrete_type_is_trivial_copy(ty, &self.env);
         self.trivial_copy.insert(ty, result);
         result
     }
@@ -2161,7 +2171,6 @@ mod tests {
         std::{logic::bool_type, math::int_type, string::string_type},
         types::{
             effects::{PrimitiveEffect, effect, no_effects},
-            trait_solver::TraitSolverProbe,
             r#type::{CallImplType, CallResultConvention, FnType, Type},
         },
     };
@@ -2475,6 +2484,24 @@ mod tests {
         );
         terminate_return(&mut f, block, span);
         verify(f);
+    }
+
+    #[test]
+    #[should_panic(expected = "load takes exactly the source place")]
+    fn semantic_verification_checks_structure_before_deriving_roles() {
+        let session = CompilerSession::new();
+        let span = Location::new_synthesized();
+        let mut f = FunctionBuilder::new("bad_load_shape".into(), Default::default());
+        let block = f.add_block();
+        let marker = append_result(&mut f, block, Operation::stack_save(span));
+        let slot = append_result(&mut f, block, Operation::alloca(span, int_type()));
+        append_result(&mut f, block, Operation::load(span, slot));
+        terminate_return(&mut f, block, span);
+        let mut edit = crate::mir::edit::FunctionEdit::new(f.finish_unverified());
+        // Both the operand count and pointee role are invalid. The structural diagnostic must win.
+        edit.block_mut(block).operations[2].operands =
+            vec![marker.clone(), marker].into_boxed_slice();
+        super::verify_function(&edit.finish_unverified(), session.module_env());
     }
 
     #[test]
@@ -2928,8 +2955,7 @@ mod tests {
         f.set_terminator(restore, Terminator::goto(span, loop_header));
 
         let function = f.finish_unverified();
-        let solver = TraitSolverProbe::from_module(env.current, env.modules);
-        let mut verifier = super::Verifier::new(&function, env, solver);
+        let mut verifier = super::Verifier::new(&function, env);
         verifier.verify_structure();
         let live_in = verifier
             .stack_marker_live_in()
@@ -2991,10 +3017,10 @@ mod tests {
         f.set_terminator(restore, Terminator::goto(span, choose_first));
 
         let function = f.finish_unverified();
-        let solver = TraitSolverProbe::from_module(env.current, env.modules);
-        let mut verifier = super::Verifier::new(&function, env, solver);
+        let mut verifier = super::Verifier::new(&function, env);
         verifier.verify_structure();
-        verifier.collect_value_information();
+        verifier.collect_value_information(None);
+        verifier.collect_storage_roots();
         let max_alternatives = verifier.verify_storage_ownership_max_alternatives();
 
         // The two independent branches need four live frontier states. If the dead inner marker

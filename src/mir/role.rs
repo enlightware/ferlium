@@ -30,9 +30,9 @@
 //! Both share one resolver, so the two can never disagree.
 //!
 //! The checking entry points also guard physical artifacts in release builds.
-//! [`check_function_operand_roles`] is the cheap one — one walk over a finished body,
-//! no [`ModuleEnv`], no trait solving, no dataflow — so it runs before the heavier analyses, whose
-//! failures on a role-confused body are harder to read.
+//! [`check_function_operand_roles`] checks operand slots without a [`ModuleEnv`] or control-flow
+//! dataflow and returns the derived roles for reuse. Physical verification and the semantic artifact
+//! and snapshot boundaries run it before heavier analyses to diagnose the offending operand slot.
 
 use std::{borrow::Cow, fmt};
 
@@ -877,13 +877,14 @@ pub(crate) fn check_terminator_operand_roles(
 /// Checks every operand slot in a whole function against the role it requires.
 ///
 /// The role half of verification over a finished body. Unlike
-/// [`verify_function`](crate::mir::verify::verify_function) this needs no [`ModuleEnv`], no trait
-/// solving and no dataflow — one walk over the operations — so it runs before the heavier checks.
+/// [`verify_function`](crate::mir::verify::verify_function) this needs no [`ModuleEnv`] or control-flow
+/// dataflow — one walk over the operations after deriving roles — so it runs before the heavier checks.
 ///
 /// Editing has no single insertion point to check at:
 /// [`block_mut`](crate::mir::edit::FunctionEdit::block_mut) hands a pass raw access to a block's
 /// operations. Checking the finished body instead covers every rewrite, including those.
-pub(crate) fn check_function_operand_roles(func: &Function) {
+/// Returns the derived roles so subsequent verification of the unchanged body can reuse them.
+pub(crate) fn check_function_operand_roles(func: &Function) -> ValueRoles {
     let roles = ValueRoles::derive(func);
     let constants = func.constants();
     for block in func.blocks() {
@@ -907,6 +908,7 @@ pub(crate) fn check_function_operand_roles(func: &Function) {
             constants,
         );
     }
+    roles
 }
 
 #[cfg(test)]

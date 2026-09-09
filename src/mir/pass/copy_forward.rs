@@ -1032,8 +1032,8 @@ mod tests {
 
         let forwarded = super::forward_redundant_storage(&source, env)
             .expect("the initialization must target its destination directly");
-        mir::role::check_function_operand_roles(&forwarded);
-        mir::verify::verify_function(&forwarded, env);
+        let roles = mir::role::check_function_operand_roles(&forwarded);
+        mir::verify::verify_function_with_roles(&forwarded, env, roles);
         let body = forwarded.format_with(&env).to_string();
 
         assert_eq!(body.matches("alloca int").count(), 1, "{body}");

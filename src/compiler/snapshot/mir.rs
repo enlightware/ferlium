@@ -536,12 +536,12 @@ fn verify_functions(
     // panic. This recovery is consequently noisy, and cannot recover in panic=abort builds.
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         for function in functions.iter().flatten() {
-            mir::role::check_function_operand_roles(function);
-            mir::verify::verify_function(function, env);
+            let roles = mir::role::check_function_operand_roles(function);
+            mir::verify::verify_function_with_roles(function, env, roles);
         }
         for specialization in specializations {
-            mir::role::check_function_operand_roles(&specialization.body);
-            mir::verify::verify_function(&specialization.body, env);
+            let roles = mir::role::check_function_operand_roles(&specialization.body);
+            mir::verify::verify_function_with_roles(&specialization.body, env, roles);
         }
     }))
     .map_err(|_| SnapshotError::InvalidMir("MIR verification failed".to_owned()))
