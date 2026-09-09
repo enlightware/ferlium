@@ -19,6 +19,56 @@ function highlightedTokens(source: string): Array<[string, string]> {
 }
 
 describe("MIR language highlighting", () => {
+	it.each([
+		"runtime_alloc int size 8 align 8",
+		"runtime_dealloc %r0",
+		"address_offset %r0 by 8",
+		"address_offset_place %r0 by 8",
+		"move_bytes int %r0 to %r1 size 8",
+		"variant_payload from %r0",
+		"build_dictionary dict(m0:i0) %p0",
+		"build_subscript_evidence subscript(m0:s0) capturing (%p0)",
+		"clone_subscript_env %r0",
+		"drop_subscript_env %r0",
+		"borrow_subscript_member mut from %r0",
+		"extract_payload_indirection %r0",
+		"is_initialized %r0",
+		"replace %r0 to %r1 using %p0",
+		"switch_variant %r0 [0 => b1, 1 => b2] default b3",
+		'invariant_failure "invalid variant tag"',
+	])("highlights the instruction in %s", (source) => {
+		expect(highlightedTokens(source)[0]).toEqual([source.split(" ")[0], "tok-keyword"]);
+	});
+
+	it("highlights physical layout and hidden-evidence qualifiers", () => {
+		const tokens = highlightedTokens([
+			"%r0: *int = runtime_alloc int size 8 align 8",
+			"%r1: *int = address_offset %r0 by 8",
+			"%r2 = variant Some storage via %p0 layout via %p1",
+			"clone T %r0 to %r1 via %r3 with (%p0, %p1)",
+			"switch_variant %r4 [0 => b1] default b2",
+		].join("\n"));
+		for (const keyword of ["size", "align", "by", "storage", "layout", "with", "default"]) {
+			expect(tokens).toContainEqual([keyword, "tok-keyword"]);
+		}
+		expect(tokens).toContainEqual(["=>", "tok-punctuation"]);
+		expect(tokens).toContainEqual(["b2", "tok-labelName"]);
+	});
+
+	it.each([
+		"cell",
+		"<test>::cell::ref_mut#subscript:f3d0ec43",
+		"std::cell#spec:[(int) -> int]",
+		"%r1",
+	])("highlights project callee %s separately from its arguments", (callee) => {
+		const tokens = highlightedTokens(`%r0: open *int = project ${callee}(%p0, %p1)`);
+		expect(tokens).toContainEqual(["project", "tok-keyword"]);
+		expect(tokens).toContainEqual([callee, "tok-variableName"]);
+		expect(tokens).toContainEqual(["(", "tok-punctuation"]);
+		expect(tokens).toContainEqual(["%p0", "tok-variableName"]);
+		expect(tokens).toContainEqual(["%p1", "tok-variableName"]);
+	});
+
 	it("assigns source-style semantic tags to real MIR forms", () => {
 		const source = [
 			"// comment",

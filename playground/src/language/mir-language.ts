@@ -10,17 +10,24 @@ import { LanguageSupport, StreamLanguage } from "@codemirror/language";
 
 const definitionKeywords = new Set(["fn", "let", "ref", "mut"]);
 const controlKeywords = new Set([
-	"br", "condbr", "invoke", "ret", "yield", "propagate_error", "failure_during_cleanup",
+	"br", "condbr", "switch_variant", "invoke", "ret", "yield", "propagate_error",
+	"failure_during_cleanup", "invariant_failure",
 ]);
+// Keep these spellings aligned with OperationKind::fmt_within in src/mir/operation.rs.
 const operationKeywords = new Set([
-	"alloca", "alloca_place", "call", "project", "end_project", "comp_eq", "load",
-	"subfield", "dict_entry", "subscript_member", "build_subscript", "variant", "build_array",
-	"extract_tag", "store", "clear", "memcpy", "move", "stack_save", "stack_restore",
+	"alloca", "alloca_place", "runtime_alloc", "runtime_dealloc", "call", "project",
+	"end_project", "comp_eq", "load", "subfield", "variant_payload", "address_offset",
+	"address_offset_place", "dict_entry", "build_dictionary", "subscript_member",
+	"build_subscript_evidence", "build_subscript", "clone_subscript_env", "drop_subscript_env",
+	"borrow_subscript_member", "variant", "build_array", "extract_tag",
+	"extract_payload_indirection", "is_initialized", "store", "clear", "memcpy", "move",
+	"replace", "move_bytes", "stack_save", "stack_restore",
 	"check_call_depth", "check_fuel", "drop", "clone", "build_closure", "clone_closure_env",
 	"drop_closure_env",
 ]);
 const contextualKeywords = new Set([
 	"arg", "owned", "extra", "using", "from", "to", "via", "capturing", "error",
+	"size", "align", "by", "storage", "layout", "with", "default",
 ]);
 const primitiveTypes = new Set(["bool", "char", "float", "int", "never", "string", "unit"]);
 
@@ -37,7 +44,7 @@ type MirTokenizerState = {
  * arguments, `[...]` specialization arguments and `#tag:hash` suffixes, all of which may contain
  * spaces, parentheses and `->` arrows.
  *
- * A name is followed either by its argument list (`call`, `fn`, `build_closure`) or, where the
+ * A name is followed either by its argument list (`call`, `project`, `fn`, `build_closure`) or, where the
  * callee is only referenced (`drop ... via <callee>`), by a space or the end of the line.
  */
 function skipCallableName(stream: { string: string; pos: number }): boolean {
@@ -180,7 +187,7 @@ export const mirLanguage = StreamLanguage.define({
 			return "controlKeyword";
 		}
 		if (operationKeywords.has(text)) {
-			if (text === "call" || text === "build_closure") {
+			if (text === "call" || text === "project" || text === "build_closure") {
 				state.nextTokenIsFunctionName = true;
 			}
 			return "keyword";
