@@ -1,27 +1,23 @@
 # MIR structure and invariants
 
 Ferlium MIR is a storage-explicit, executable ownership IR. It is the shared input intended for the
-reference interpreter and future machine backends; it is not a physical target ABI.
+reference interpreter and future machine backends; it is not a physical target ABI. This document
+defines its structure, operation semantics, and validity requirements, not compiler implementation
+mechanics.
 
 Related documents:
 
 - [abi.md](abi.md) defines representation and physical call lowering;
 - [hir-ownership.md](hir-ownership.md) defines the source-level ownership semantics MIR preserves;
+- [mir-optimization.md](mir-optimization.md) describes optimization passes and compile-time evaluation;
 - [mir-uninit-tracking.md](mir-uninit-tracking.md) describes derived initialization/drop state;
 - [mir-error-propagation.md](mir-error-propagation.md) describes source-error cleanup; and
 - [runtime-sandboxing.md](runtime-sandboxing.md) distinguishes source failures from sandbox exits.
 
 ## Canonical function form
 
-A finalized `mir::Function` contains parameters, a function-local typed constant pool, and basic
-blocks. Every block has exactly:
-
-```text
-BasicBlock {
-    operations: Vec<Operation>,
-    terminator: Terminator,
-}
-```
+A finalized function contains parameters, a function-local typed constant pool, and basic blocks.
+Every block contains an ordered sequence of operations followed by exactly one terminator.
 
 Operations never carry intra-function successors. The terminators are:
 
@@ -36,25 +32,17 @@ Operations never carry intra-function successors. The terminators are:
 `invariant_failure` requires a fatal trap, not an unchecked unreachability assumption. It has no
 continuation and does not use source-failure cleanup or poisoning.
 
-The first block is the entry block. Every target is a `BlockId` in the same function. Missing
-terminators and forward-declared block bodies exist only in the private `FunctionBuilder`; they
-cannot occur in a finalized function. In debug builds, `FunctionBuilder::finish` runs the full MIR
-verifier at this boundary.
+The first block is the entry block. Every target is a `BlockId` in the same function. A finalized
+function has no missing terminators or unresolved block bodies.
 
-**A `FunctionId` names a function in a context, and the context is `(module, artifact stage)`.** A
-module's MIR bodies line up one-for-one with its HIR function table — except in the *optimized*
-stage, which the optimizer may extend past the end with **specializations**: private copies of a
-generic function with one call site's types substituted and its recursively static evidence bound
-to constants, plus optimized-only ABI variants. The raw stage is always exactly the HIR table, which is also what lets the two stages be
-told apart without a flag.
+A `FunctionId` identifies a function within `(module, artifact stage)`. Raw semantic entries
+correspond to the module's HIR functions. Optimized artifacts may additionally contain private
+specializations and ownership-transfer variants without HIR entries.
 
-A specialization has no HIR entry, since nothing in the source declared it. Whether it is script or
-native and its source return convention come from the function it was specialized from, through one
-indirection. An ordinary monomorphization keeps that original's visible signature. A later
-optimized-only variant may change selected parameters to ownership transfer, recorded directly in
-its MIR body and call sites. Hidden evidence parameters need no HIR metadata either: binding
-evidence replaces its uses, and the optimizer removes the now-dead parameters and call operands.
-An owned-ABI variant of an evidence-parameterized generated thunk retains that live evidence.
+A specialization records its original function and concrete type/evidence bindings. It inherits
+the original's script/native classification and source result convention. An ownership-transfer
+variant records its changed parameter conventions in its MIR body and every call site. Any hidden
+evidence not fixed by specialization remains part of the callable's interface.
 
 ## Values and roles
 
@@ -70,27 +58,16 @@ Text dumps render function and subscript operands with their module-qualified na
 annotations use `*T` for a pointer to `T`; function, variant, and first-class subscript pointees are
 grouped to preserve the pointer boundary, for example `*((A) -> B)` and `*(Left A | Right B)`.
 
-Moving an operation therefore does not renumber unrelated values. A derived def-use map locates the
-operation that defines each `ValueId` when an analysis needs it.
+Moving an operation does not change unrelated value identities.
 
-The constant pool is also an input to *reification* — expressing a value computed at compile time
-back as MIR (`src/mir/reify.rs`). Because `@cN` is pinned to a `TrivialCopy` representation, only a
-trivially-copyable leaf, or a tuple or record of those, can be stored directly. An array whose
-elements have such representations can instead be reified as `build_array<A> [@c0, ...] to %dest`:
-the immutable elements remain constants and executing the operation allocates fresh mutable array
-storage. A compile-time `string` similarly reifies constructively: its normalized contents enter the
-pool as a `StaticStr`, and `string_from_static` creates a fresh owned string in the destination at
-run time. The text is bounded by the optimizer's per-result reification budget. A list, variant,
-closure, or array with non-`TrivialCopy` elements still has no reified form (including a
-`TrivialCopy` variant), so its producing computation remains runtime code. Further resource types
-need either a frozen-prototype representation plus an operation to clone it, or dedicated MIR that
-rebuilds the value from constants the pool can hold.
+The constant pool holds concrete `TrivialCopy` leaves and tuples or records of those. Owned runtime
+values require construction rather than shared mutable constant storage. For example,
+`build_array<A> [@c0, ...] to %dest` creates fresh array storage from constant elements. Compile-time
+evaluation must preserve these ownership rules when expressing its results as MIR.
 
-A `ValueId` does not say which of these it is. An operand slot may accept more than one role —
-`comp_eq` reads a place, a materialized Ferlium value, or an opaque tag — and keeping the operand
-array uniform is what lets alpha-equivalence, hash-consing and operand substitution stay generic
-across passes. The role is instead a property of the *defining* operation, derived by
-`src/mir/role.rs`:
+A `ValueId` does not encode its role; the defining operation determines it. An operand slot may
+accept more than one role: for example, `comp_eq` reads a place, a materialized value, or an opaque
+tag.
 
 | Role | Meaning |
 |---|---|
@@ -105,16 +82,9 @@ An owned result has exactly one consuming use on every returning path which exec
 definition. Mutually exclusive paths may consume it differently. A store transfers its obligation
 to storage, whose initialization and drop obligations are tracked separately.
 
-Almost every operation fixes its result's role by itself. `load` is the exception, reading its role
-from its operand, so the derivation is a table rather than a function per operation. Lowering fills
-that table as it appends; a finished body is re-derived on demand, since block order is not a
-definition order.
-
-Role checking, like the rest of verification (`src/mir/verify.rs`), is debug-and-test only. Lowering
-checks each operand slot as the operation is inserted, naming the block and index while the emitting
-frame is still on the stack. Each finished body is then checked as a whole at the artifact boundary,
-which needs no `ModuleEnv`, no trait solving and no dataflow, so it runs before the heavier analyses
-trip over the consequences; it also covers passes, which rewrite a block's operations directly.
+Almost every operation fixes its result's role by itself. `load` instead derives its result role
+from the storage it reads. Every operand must have a role accepted by its operation, and every
+definition must dominate its uses.
 
 Every register definition renders the role it takes: `place T` for addressable storage, `T` for a
 materialized value, and `dict`, `subscript`, `fn`, `pattern`, `stack` or `open place T` for the rest.
@@ -126,18 +96,14 @@ distinguishes an `alloca` slot from an `alloca_place` one:
 %r1: *int = load %r0
 ```
 
-Compile-time match patterns are not runtime constants. They may represent source literals such as
-`string` whose runtime value is owned even though its HIR immediate representation is `StaticStr`.
+Compile-time match patterns are not runtime constants. They may describe values, such as strings,
+whose runtime representation requires owned storage.
 
-Variant tags are not Ferlium integers. HIR cases branch directly on a variant value; MIR lowering
-introduces `extract_tag` only at the storage/CFG boundary, yielding an opaque `tag` register. The
-reference interpreter retains its symbolic name. A machine backend resolves that name to the
-session-local 31-bit identity and masks the payload-storage bit when reading the ABI's raw `u32`
-field. A tag can only be compared with symbolic variant patterns or consumed by `switch_variant`;
-it cannot enter Ferlium storage, calls, boolean branches, or arithmetic.
-
-Variant `Case` nodes lower directly to one `switch_variant`. Other literal matches remain
-`comp_eq`/`condbr` chains.
+Variant tags are not Ferlium integers. `extract_tag` yields an opaque, symbolic `tag` value; its
+physical encoding is specified in [abi.md](abi.md#tag-representation). A tag can only be compared
+with symbolic variant patterns or consumed by `switch_variant`; it cannot enter Ferlium storage,
+calls, boolean branches, or arithmetic. Variant matches use `switch_variant`; other literal
+matches use `comp_eq` and conditional branches.
 
 ## Function boundaries
 
@@ -145,13 +111,13 @@ Parameters appear in this order:
 
 1. `@extra`: dictionaries and other hidden evidence;
 2. `@arg`: runtime arguments tagged `let`, `&mut`, or optimized-MIR-only `owned`; and
-3. `@ret`: the caller-provided result storage, present unconditionally in current MIR, including
+3. `@ret`: the caller-provided result storage, present unconditionally in semantic MIR, including
    for `()` results.
 
 All argument conventions are represented as places. `Let` is immutable non-escaping access,
 `MutableRef` is exclusive mutable access, and `owned` transfers the pointee into a private callee
-variant which must consume it on every exit. Lowering emits only the first two; the final
-whole-module ownership pass introduces `owned` after proving the caller's last use.
+variant which must consume it on every exit. Raw semantic MIR uses only the first two conventions;
+an optimized `owned` argument requires proof that the caller relinquishes ownership.
 
 `CallResultConvention` determines the result storage shape:
 
@@ -160,8 +126,7 @@ whole-module ownership pass introduces `owned` after proving the caller's last u
 - `YieldedOnce`: `project` exposes a callee-rooted place until `end_project` resumes its slide.
 
 Every `Call` and `Project` retains its instantiated `CallImplType`. It is the source of argument and
-result types, the result convention, and source fallibility. Call-site types are boxed in
-`OperationKind` so the variable-sized signature metadata does not inflate every operation.
+result types, the result convention, and source fallibility.
 
 Call operands are `[callee, hidden evidence..., visible places..., ret-out]`. Project operands omit
 the trailing result place because the operation itself yields the scoped place. A dynamic callee is
@@ -189,10 +154,8 @@ operations rather than one being a call:
 | copy | `memcpy` | `clone <source> to <dest> via <callee>` |
 | transfer / release | `move` | `drop <target> via <callee>` |
 
-Lowering picks the representation form when the type is trivially copyable and the semantic form
-otherwise. `clone` and `drop` each carry the type they act on, so a pass that changes what a type is
-— substituting a concrete instantiation into a generic body — can re-ask whether the semantic form is
-still needed without recovering the type from the dictionary behind the callee. Their callee follows
+Representation copying requires `TrivialCopy`; otherwise copying uses semantic `clone`. `clone`
+and `drop` each carry the type they act on independently of their callee. Their callee follows
 the same contract as a `call`'s: a constant function, or the place of a function value read by
 reference. A `clone` initializes its destination and gives it the drop obligation the copy creates.
 
@@ -206,31 +169,21 @@ evidence.
 
 `build_array<A> [e0, ...] to destination` representation-copies each borrowed element and
 initializes `destination: [A]` with a fresh logical array of exactly that length. `A` must be
-statically `TrivialCopy`; otherwise array literals retain their in-place lowering, which initializes
-each backing slot without an implicit clone. The operation is specified over Ferlium's canonical
-array type, not over its current `Buffer` implementation. The compiler-known array layout and the
-interpreter tuple representation are pinned together by a contract test in `std::array_type`.
+statically `TrivialCopy`. The operation is specified over Ferlium's canonical array type, independent
+of any interpreter representation. Non-trivial elements require explicit ownership operations.
 
-A `call` additionally carries optional metadata: **how it instantiated its callee**, when statically
-known and generic: the type and effect arguments its quantifiers stand for, positionally. They are
-carried down from HIR rather than recovered by matching the callee's generic signature against this
-call's concrete one — see [generic-instantiation.md](generic-instantiation.md). The operand is absent
-for an indirect call, for a non-generic callee, and at synthesized call sites where no generic
-application substitution is available; a consumer treats absence as "not known", which costs an
-optimization rather than correctness. Blanket-method forwarding thunks are not such a case: blanket matching
-supplies their substitution, and their call records it.
+A `call` may record the type and effect arguments instantiating a statically known generic callee,
+in quantifier order; see [generic-instantiation.md](generic-instantiation.md). Substituting these
+arguments into the callee's declared signature must reproduce the call's own type. Missing
+instantiation metadata means "not known", not that the call is necessarily monomorphic.
 
 The same optional metadata records which visible operands transfer ownership. Rendered calls prefix
-those operands with `move`; the matching callee parameters render as `@arg owned`. The verifier
-consumes each caller place on both normal and source-error edges and requires every owned parameter
-to be absent at all callee exits.
+those operands with `move`; the matching callee parameters render as `@arg owned`. Each transferred
+caller place is consumed on both normal and source-error edges, and every owned parameter must be
+absent at all callee exits.
 
-`Operation::verify` checks kind-local arity. The function verifier additionally checks operand
-roles, types where independently known, dominance, linear uses, source-failure flow, and storage
-ownership. For a call that records an instantiation it also checks that substituting the callee's
-declared signature by the recorded arguments reproduces the call's own type — the invariant that
-keeps the two from drifting between the inference that records them and the passes that consume
-them.
+Valid MIR satisfies operation arity and role requirements, type compatibility where independently
+known, dominance, linear uses, source-failure flow, and storage ownership.
 
 ## Source failures and sandbox exits
 
@@ -238,32 +191,29 @@ A source-fallible operation is wrapped by `Invoke`, even if its error successor 
 `propagate_error`. An invoked result exists only on the normal successor. `EndProject` derives
 fallibility from its `OpenProjection` operand rather than duplicating the accessor type.
 
-The verifier rejects both a fallible operation in a block body and an infallible `Invoke`. It also
-tracks the implicit source-error payload through the explicit CFG: normal code may `return`, one
-pending failure may `propagate_error`, and a second failure must reach `failure_during_cleanup`.
-Normal and error control flow may not silently rejoin.
+Both a fallible operation in a block body and an infallible `Invoke` are invalid. The implicit
+source-error payload follows the explicit CFG: normal code may `return`, one pending failure may
+`propagate_error`, and a second failure must reach `failure_during_cleanup`. Normal and error control
+flow may not silently rejoin.
 
-Sandbox violations are not source failures. Fuel, call-depth, and reference-interpreter
-environment-cell limits bypass MIR successors, poison the executor, and enter native reclamation
-without running more guest cleanup.
+Sandbox violations, such as exceeding fuel, call-depth, or memory limits, are not source failures.
+They bypass MIR successors, poison the executor, and enter runtime reclamation without running
+more guest cleanup.
 
 ## Ownership verification boundary
 
-The verifier derives recursive present/absent/drop state for identifiable local storage and follows
-normal and error outcomes separately. `Project` creates an open-projection obligation on its normal
+Initialization and drop obligations are path-sensitive, including for members of local storage;
+normal and source-error outcomes are distinct. `Project` creates an open-projection obligation on its normal
 edge; `EndProject` consumes it when the slide starts on both outcomes. `return` and
 `propagate_error` require all exact local obligations to be discharged. Poisoning exits may transfer
 remaining storage to runtime reclamation.
 
-Generic descriptor equalities proved by HIR inference are not yet retained as standalone MIR
-witnesses. The verifier therefore checks call/storage representations whenever both sides are
-independently concrete, while witnessed generic moves and calls retain that inference boundary. A
-serialized standalone MIR format will need explicit normalized-layout/equality metadata to close it.
+MIR relies on HIR's proofs of generic descriptor equalities where no standalone MIR witness records
+them. Call/storage representations are independently checked when both sides are concrete;
+witnessed generic moves and calls retain that inference boundary. Standalone serialization requires
+explicit normalized-layout/equality metadata to preserve those proofs.
 
 ## Physical MIR stage
-
-> Status: canonical product, variant-payload and Buffer lowering is implemented; the remaining
-> representations and the unboxed interpreter are planned.
 
 Physical lowering consumes the complete optimized `MirArtifacts`, including declared bodies and
 retained specializations. It resolves physical addresses, representations, callable environments,
@@ -276,24 +226,21 @@ artifacts. It maintains a resolution from every retained semantic callable and s
 its physical entry and convention, and rewrites calls consistently. Top-level module entries retain
 their externally visible identity. Generated helpers are ordinary entries in the physical artifact.
 
-The lowerer builds a physical function table. The readiness verifier checks it and returns
-`BackendReadyMirArtifacts`. Both stages use the same MIR structures without a phase parameter.
-Shared operations retain their meaning. Partially lowered bodies remain internal to the lowerer;
-only verified artifacts are exposed to physical executors.
+`BackendReadyMirArtifacts` contains a verified physical function table and its supporting catalogs.
+Semantic and physical stages use the same MIR structures, and shared operations retain their
+meaning. Partially lowered bodies are not valid input to physical executors.
 
 Each physical module owns relocatable dictionary and subscript catalogs. A dictionary definition
 records its stable identity, capture schema, entry functions, and entry-to-capture mappings. A
 subscript definition records its identity, capture schema, optional `ref` and `mut` functions, and
-their provenance. Foreign references form explicit import lists. The readiness verifier checks
-local metadata. Whole-program assembly resolves foreign capture counts, entries, and members
-without consulting semantic `Module` arenas.
+their provenance. Foreign references form explicit import lists. Local metadata and resolved
+imports must agree on capture counts, entry contracts, and available members, independently of
+semantic HIR storage.
 
 A target-independent assembly step creates a `ResolvedPhysicalProgram` over the independently
-lowered artifacts. It does not rewrite or merge their MIR bodies. The resolved view validates
-function and evidence imports and interns equivalent static evidence trees referenced by retained
-bodies. Stable module-qualified identities remain available; an executor may assign target indexes
-or concrete addresses from the catalogs. Assembly does not eagerly materialize every dictionary or
-subscript definition.
+lowered artifacts. It resolves function and evidence imports without rewriting or merging their
+MIR bodies. Stable module-qualified identities remain available; an executor may assign target
+indexes or concrete addresses from the catalogs.
 
 Backend-ready MIR may retain symbolic operands, `DictEntry`, variant construction, and
 `extract_tag`. Each executor supplies their target representation. Interpreter-only native calls
@@ -305,15 +252,13 @@ calls without reconstructing transport from semantic types or introducing anothe
 Contracts describe transport and storage requirements. Native representations are opaque leaves:
 their Rust identity and layout must agree with their typed entries and registered `Value` layout
 and clone/drop operations. Unsupported native type constructors with Ferlium arguments are rejected;
-`Buffer<T>` uses its explicit physical representation instead. These checks run after expansion,
-and include declared native roots and local or imported evidence entries, not only direct calls.
+`Buffer<T>` uses its explicit physical representation instead. These requirements cover declared
+native roots and local or imported evidence entries, not only direct calls.
 
-MIR references remain symbolic. The current in-memory artifacts also retain process-local native
-bindings for runtime validation, including code identity and result-domain guarantees. Construction
-checks the current environment; revalidation when binding an executor is not yet integrated. These
-are not portable ABI fingerprints: equal size and alignment do not establish compatibility with an
-independently built Rust runtime. The protocols are specified in
-[abi.md](abi.md#native-function-boundary).
+MIR references remain symbolic. Native bindings must match the executing runtime's entry identities,
+layouts, and result-domain guarantees. Process-local bindings are not portable ABI fingerprints:
+equal size and alignment do not establish compatibility with an independently built Rust runtime.
+The protocols are specified in [abi.md](abi.md#native-function-boundary).
 
 ### Physical failure transport
 
@@ -369,10 +314,8 @@ an aligned inline place of `A`; `address_offset_place` yields a slot containing 
 retain the base allocation's provenance. Byte-offset expressions use ordinary calls such as
 `Num<int>::add` and `Num<int>::mul`.
 
-Semantic MIR retains logical `subfield` operations through its ordinary optimization rounds. A
-product projection names the aggregate and carries the direct member `Value` witnesses required
-when an inline layout is open. Physical lowering replaces it with `address_offset`, emitting a
-closed addressor helper over open layout witnesses when needed.
+Logical product projections lower to typed byte addresses using the aggregate's layout and any
+`Value` witnesses required by open inline member layouts.
 
 Variant-payload addressors inspect the indirection bit stored in the active tag when the storage
 mode is not statically uniform. Inline payloads use their case-specific aligned byte offset.
@@ -381,19 +324,15 @@ payload projection only loads the resulting address. Payload initialization is i
 allocation lifetime, so `clear` can leave an addressable but absent payload and a later `store` can
 reuse the allocation.
 
-Moving a complete variant transfers its owning pointer, while cloning constructs a new shell and
-therefore a new allocation. The selected generated `Value::drop` implementation first performs the
-semantic payload drop and releases the allocation before returning. A failed partial construction
-in caller-owned return storage uses guarded cleanup; nested allocations are released from inner to
-outer.
+Moving a complete variant transfers its owning pointer; cloning requires a new allocation.
+Destruction drops the live payload before releasing its allocation. Cleanup of a failed partial
+construction drops only initialized members and releases nested allocations from inner to outer.
 
-The private Buffer operations lower by treating `Buffer<A>` storage as one owning `*A` slot.
-Construction allocates `capacity * element_size` bytes. Slot projection computes
-`base + index * element_size`; take and slot-to-slot transfer use `move_bytes<A>` so an open `A`
-needs only the size already passed by std. Slot-to-slot transfer requires an absent destination.
-Whole-buffer movement releases the target allocation, transfers the source pointer, and leaves a
-valid zero-byte allocation in the source. Ordinary conditional `drop` dispatches to a generated
-helper which releases and clears the pointer slot.
+Physical `Buffer<A>` storage is one owning `*A` slot, with the backing layout specified in
+[abi.md](abi.md#arrays). Taking and transferring elements use `move_bytes<A>`; a slot-to-slot
+transfer requires an absent destination. Whole-buffer movement releases the target allocation,
+transfers the source pointer, and leaves a valid zero-byte allocation in the source. Buffer
+destruction releases the allocation and clears the pointer slot.
 
 ### First-class subscript environments
 
@@ -402,8 +341,8 @@ an owned first-class value; `CloneSubscriptEnv` and `DropSubscriptEnv` clone and
 environment, while moving transfers it. The ABI defines its descriptor and environment layout.
 
 Physical lowering refines semantic `SubscriptMember` into `BorrowSubscriptMember`, which produces a
-`BorrowedCallable`: the selected `ref` or `mut` entry and a borrow of the original environment. The
-verifier accepts it only as the callee of `Call` or `Project`. `Call` holds the borrow for one
+`BorrowedCallable`: the selected `ref` or `mut` entry and a borrow of the original environment. It
+is valid only as the callee of `Call` or `Project`. `Call` holds the borrow for one
 invocation; `Project` holds it until the matching `EndProject`.
 
 The callable type determines its visible ABI. The descriptor-specific entry determines its
@@ -412,17 +351,16 @@ temporary required by Ferlium's stateless callable semantics.
 
 ### Known and target-native calls
 
-Calls recognized by shared physical lowering remain ordinary calls throughout semantic MIR and its
-optimization rounds. The lowerer resolves their exact function identities through a session table,
-as existing MIR passes do with `KnownCallees`. Other native calls retain their `FunctionId` and use
-the matching Rust `extern "C"` entry. Backend-readiness verification requires every native call
-to have been lowered or have a compatible entry for the selected target. A retained native entry
-must also have the closed, monomorphic Ferlium signature required by [abi.md](abi.md); physical
-lowering rejects an unresolved type variable at any depth in its parameters or result. Generic
-Buffer storage calls are expanded locally; retained Buffer dictionary, subscript and first-class
-entries receive physical MIR bodies under their existing identities. Generated structural field
-addressors likewise receive bodies using the shared product-layout rules. Program assembly requires
-an actual body or verified native entry, not merely an occupied function-table slot.
+Compiler-known storage and addressor calls remain ordinary calls in semantic MIR; their physical
+expansions are identified by function identity, not spelling. Other native calls retain their
+`FunctionId` and use the matching Rust `extern "C"` entry. Backend-readiness requires every native
+call to have been lowered or have a compatible entry for the selected target. A retained native
+entry must have the closed, monomorphic Ferlium signature required by [abi.md](abi.md), with no
+unresolved type variables at any depth in its parameters or result.
+
+Retained Buffer and structural addressor entries must have physical MIR bodies under their existing
+identities, including when referenced through dictionaries, subscripts, or first-class values.
+Program assembly requires an actual body or verified native entry for every retained callable.
 
 Buffer's internal `Value::clone` lowers to `invariant_failure`: only the surrounding array has
 the information needed for element-wise cloning.

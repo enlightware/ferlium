@@ -1,7 +1,10 @@
 # Ferlium ABI Specification
 
 This document is a draft of the Ferlium ABI for future Ferlium-WASM (and native) interoperability.
-It specifies the binary representation of Ferlium values independently of the execution backend.
+It specifies binary value representations, calling conventions, and the ownership and lifetime
+contracts required at compiled boundaries, independently of the execution backend. Interpreter
+storage and compiler implementation are outside its scope; [mir-ir.md](mir-ir.md) specifies MIR
+contracts, and [hir-ownership.md](hir-ownership.md) specifies source-level ownership semantics.
 Ferlium’s ABI is parametric over backend profiles, which define:
 
 - Size
@@ -22,6 +25,8 @@ This separation allows Ferlium to target:
 The language-defined representations in this document are stable across modules and compilation
 units using the same backend profile. Rust-native values are intentionally build-coupled instead:
 generated code and its runtime must use the same native-type layout catalog, as described below.
+Each supported target must validate that its native calling conventions and layouts agree with
+the runtime; matching pointer width alone does not establish ABI compatibility.
 
 # Backend Profiles
 
@@ -69,10 +74,10 @@ These correspond to the Wasm value types on Wasm targets, and to register-passab
 
 A value uses a scalar slot only when target ABI lowering assigns it a scalar representation.
 Primitive integers, floats, booleans, and pointers have such representations.
-An aggregate does not acquire a scalar representation merely because its byte size is at most 8; tuples, records, and named product types are initially passed indirectly.
+An aggregate does not acquire a scalar representation merely because its byte size is at most 8; tuples, records, and named product types are passed indirectly under this ABI.
 
-A later backend may introduce an explicit aggregate coercion or flattening plan.
-Such a plan must define padding, packing, and callee reconstruction and is an ABI optimization, not a consequence of `TrivialCopy` or size alone.
+Aggregate coercion or flattening requires an explicit ABI extension defining padding, packing, and
+callee reconstruction; it is not a consequence of `TrivialCopy` or size alone.
 
 # Calling conventions
 
@@ -82,14 +87,14 @@ A parameter written as `&mut T` is a `MutableRef` access: the callee receives ex
 
 `Let` is a semantic convention, not a physical transport choice.
 It permits the caller to share existing storage when that is safe.
-When a `Let` argument aliases a mutable argument of the same call, or when evaluation of a later argument writes the same place, HIR stores an explicit `CloneValue` snapshot at the `Let` argument's evaluation point.
-Managed snapshots use an owned temporary cleaned after the call; `TrivialCopy` snapshots remain direct values.
-Thus neither later argument evaluation nor mutation inside the callee can change the value observed through the earlier argument.
-Two `Let` arguments may share storage; overlapping mutable arguments remain a borrow-checking error.
+The value observed through a `Let` argument must not change because of later argument evaluation
+or mutation inside the callee. If these accesses overlap, the caller supplies a snapshot of the
+value at the argument's evaluation point. Two `Let` arguments may share storage; overlapping
+mutable arguments are invalid.
 
 Physical argument passing is derived from the lowered parameter type:
 
-| HIR convention and representation | Physical ABI form |
+| Semantic convention and representation | Physical ABI form |
 |-----------------------------------|-------------------|
 | `MutableRef` | Mutable reference/pointer to caller storage |
 | `Let` with a scalar ABI representation | Direct scalar value |
@@ -102,21 +107,13 @@ result is omitted from the machine return.
 Generic `Let` parameters are physically indirect, even if they have a `T: TrivialCopy` constraint.
 This gives every generic function one stable ABI independent of later concrete instantiations.
 
-An indirect `Let` normally points to the original shared place.
-If overlap analysis required a snapshot, it instead points to the explicit snapshot's storage.
-The convention remains `Let` in both cases: the snapshot and its cleanup are represented by HIR ownership operations, not hidden in call metadata.
+An indirect `Let` points to the original shared place or, when a snapshot is required, to the
+snapshot's storage. In either case, the observed value remains live throughout the call.
 
 For example, `int` and `float` have scalar ABI representations on ABI-32 and ABI-64.
-A tuple or record initially uses indirect transport even when it is small.
-If a snapshot of a structurally `TrivialCopy` aggregate is needed, `CloneValue::TrivialCopy` copies its representation regardless of size.
+A tuple or record uses indirect transport even when it is small.
+The representation of a structurally `TrivialCopy` aggregate may be copied regardless of size.
 `TrivialCopy` classifies whether a representation copy is semantically valid independently of physical passing.
-
-Implementation note: HIR and native callables expose semantic argument conventions.
-Target-specific ABI lowering will derive scalar or indirect physical transport later.
-The interpreter's native-Rust bridge makes the analogous `T` versus `&T` extraction decision separately from `ArgConvention`; both Rust adapter forms can implement a Ferlium `Let` parameter.
-Current MIR keeps both semantic argument conventions as places and gives every function an
-unconditional return out-pointer, including functions returning `()`. This uniform executable MIR
-form is intentionally independent of the direct/indirect physical ABI chosen by a machine backend.
 
 ## Return value
 
@@ -133,7 +130,7 @@ There are three return value classes:
 - **Direct value**: concrete values with a direct scalar ABI representation
 - **Caller-allocated value**: aggregates, address-only values, and polymorphic results
 
-Generated Ferlium functions and Rust native entries initially share this return convention:
+Generated Ferlium functions and Rust native entries share this return convention:
 
 | May return language failure? | Return value kind      | ABI return form                                                | Out-pointer needed? |
 |------------------------------|------------------------|----------------------------------------------------------------|---------------------|
@@ -150,34 +147,29 @@ On failure, result storage contains no live result; the callee must clean up any
 Physical parameter order is: failure-state pointer (when the function may fail), other hidden
 parameters, source arguments, then result out-pointer (when required). Output pointers are explicit
 parameters, not implicit C aggregate-return parameters.
-Physical MIR records failure-pointer transport in ABI signature metadata and retains `Invoke`;
-executors supply the pointer without adding a MIR call operand. See [mir-ir.md](mir-ir.md#physical-failure-transport).
 
 ### Source-failure diagnostics
 
 The execution harness creates one empty, opaque failure state per invocation and passes its
 pointer through calls that may fail, including calls with unresolved effect variables. Calls
-share this state without allocating one per frame; diagnostic storage is allocated only as needed.
+within an invocation share this state.
 A failing callee records its diagnostic, then callers follow semantic cleanup and propagate status.
 The Rust runtime owns the diagnostic, including messages and backtraces; generated code accesses
 it only through runtime operations. The harness takes the diagnostic when execution ends.
 
 Nested host-initiated invocations use separate states. A second failure during cleanup preserves
 both causes and triggers harness cancellation; poisoning is not another return status. Diagnostic
-storage must survive guest-domain reclamation. Both boxed interpreters own one `NativeFailureState`
-per `EvalCtx`. Their C adapters take each diagnostic into the existing `RuntimeError` cleanup and
-backtrace flow, leaving the cell empty for cleanup calls; script-to-script propagation still uses
-`RuntimeError`. Compiled executors will propagate status through the shared state.
+storage must survive guest-domain reclamation.
 
 ### Sandbox violations
 
 Host-enforced sandbox violations are separate from the source-language `Fallible` effect. Fuel,
-call-depth, interpreter-environment, and future accounted-memory limits do not make every function
+call-depth and accounted-memory limits do not make every function
 that can allocate or execute a loop source-level `Fallible`; Ferlium code cannot catch these
 violations.
 
 A sandbox violation therefore does not change the normal return forms above.
-It exits ordinary MIR control flow, poisons the affected runtime domain, and runs no Ferlium semantic cleanup.
+It exits ordinary call/return control flow, poisons the affected runtime domain, and runs no Ferlium semantic cleanup.
 A backend may implement this as a trap or non-returning runtime abort entry that captures diagnostics and performs bounded host-side revocation and storage reset.
 Failures raised by Ferlium's accounted runtime use this defined path; exhaustion below that runtime, such as failure of the host allocator, may still abort or trap at a lower level. See [runtime-sandboxing.md](runtime-sandboxing.md).
 
@@ -194,8 +186,7 @@ the status; they do not use multi-value results for `(status, value)`.
 
 Use the target C calling convention with the explicit scalar/pointer transport above. Detailed
 lowering is target-specific: pointers and `usize`/`isize` follow the target width, while status
-remains `u32`. Wasm32 probes and native-host calls validate the initial transport; additional
-targets, including Wasm64 and future native code generators, require equivalent checks.
+remains `u32`.
 
 # Scalar Representation
 
@@ -236,22 +227,15 @@ On ordinary execution paths, the target glue preserves Rust initialization and R
 - opaque native `Value::drop` invokes the registered Rust destructor exactly once and leaves the
   target uninitialized; subsequent reclamation releases only its storage.
 
-Opaque native destructor registration uses a typed consuming adapter. Its Ferlium signature
-remains `Value::drop(&mut T) -> ()`; the `unsafe extern "C"` entry takes `*mut T` to initialized storage and destroys the
-pointee without freeing that storage. Both boxed interpreters replace the target slot with
-`Value::Uninit`, detach its native payload, and invoke the entry on that payload. They reclaim its
-box without invoking the destructor a second time. Ordinary mutable native argument adapters keep
-their existing contract that the target remains initialized after the call. This pointer transport
-does not introduce a pointer type or another parameter convention into the Ferlium type system.
-Entry metadata distinguishes consuming storage from an ordinary mutable borrow.
+Opaque native destruction has the Ferlium signature `Value::drop(&mut T) -> ()`; its
+`unsafe extern "C"` entry takes `*mut T` to initialized storage and destroys the pointee without
+freeing that storage. The caller must subsequently treat the pointee as uninitialized and must not
+destroy it again. Ordinary mutable native entries instead leave their target initialized after the
+call. Entry contracts distinguish consuming storage from an ordinary mutable borrow without
+introducing another source-language parameter convention.
 
-Interpreter storage reclamation can still destroy opaque native payloads whose semantic cleanup
-did not run, for example while reclaiming roots after poisoning. A successfully consumed native slot is
-already `Uninit`, so that fallback cannot repeat its destructor.
-
-These destructor rules concern types stored as their actual Rust representation. The interpreter's
-private `Buffer<T>` uses a separate representation and cleanup path, described in the
-[Arrays section](#arrays); it does not use this consuming native destructor adapter.
+These destructor rules concern types stored as their actual Rust representation. `Buffer<T>` has
+the separate compiled representation and ownership contract described in the [Arrays section](#arrays).
 
 Generated code may allocate, move and pass a native value using its registered layout, but it must
 not inspect private fields or synthesize byte patterns unless the native registration separately
@@ -280,9 +264,6 @@ Type equality ignores field order.
 ## Canonical field order
 
 Fields are canonicalised to produce a stable layout:
-
-> The compiled layout uses this order. The boxed interpreter does not expose a byte-level field
-> order.
 
 1. Compute each field’s alignment (per backend profile).
 2. Sort fields by:
@@ -351,8 +332,6 @@ Tags are stored as `u32`. The low 31 bits refer to an interned string within one
 session; tag identity is global by name across variant types, as generic variant matching requires.
 The high bit is clear for an inline payload and set for an indirect payload. Semantic tag comparison
 masks that representation bit. Numeric discriminants are not stable across compilation sessions.
-Compiler IR keeps the semantic identity opaque and symbolic; materializing the 31-bit number and
-packing or masking the storage bit are physical ABI-lowering operations.
 
 ## Payload layout
 
@@ -411,13 +390,7 @@ When the case remains open in unspecialized generic code, construction receives 
 decision as a transient boolean evidence argument and combines it into the tag it writes. This is
 not a separate field in the constructed value. Once a variant value has been constructed, payload
 projection obtains the same classification from the high bit of the stored tag; it does not need a
-second boolean argument. MIR payload construction and projection retain `Value<B>` as an explicit
-operand whenever `B` has a run-time-dependent layout.
-
-Final HIR names that transient choice through an `EvidenceBindingId`, not specifically an ABI
-parameter number. The binding may be a caller parameter, a static boolean, or part of a constructed
-evidence graph, so a generic implementation can close its layout decision together with nested
-trait and projection evidence before physical ABI lowering.
+second boolean argument.
 
 A payloadless case writes only its tag and requires no payload layout witness.
 
@@ -425,9 +398,9 @@ No `Value<V>` witness is needed merely to address a known case payload inside an
 place. Allocating or moving the complete variant remains a whole-value operation and uses `Value<V>`
 when `V` has no static layout at the lowering site.
 
-The case-qualified `(V, tag, B)` obligation is compile-time provenance for an ordinary
-`Value<B>` hidden parameter, not a distinct runtime dictionary kind. Multiple cases with the same
-payload type and ordinary operations on `B` share that parameter.
+Payload layout evidence uses the ordinary `Value<B>` hidden parameter, not a distinct runtime
+dictionary kind. Multiple cases with the same payload type and ordinary operations on `B` share
+that parameter.
 
 Every case whose payload representation reaches the same recursive representation component as
 `V` stores an owning pointer to its complete payload `B_i`; other case payloads are inline.
@@ -477,36 +450,27 @@ This leads to:
 The source prelude represents `data_ptr` with its private `Buffer<T>` native type while keeping
 `head`, `len`, and `cap` in the surrounding array value. The compiled representation of
 `Buffer<T>` is therefore exactly one owning pointer: its size and alignment are the target pointer
-size and alignment. Its interpreter representation as a Rust `Vec<Value>` is not part of the ABI.
+size and alignment.
 
 Buffer allocation receives `Value::<T>::SIZE` and `Value::<T>::ALIGN` explicitly. Slot-addressing
 and element-move operations receive only `Value::<T>::SIZE`: the aligned allocation base and the ABI
-rule that type sizes include tail padding already guarantee that each slot is aligned. The boxed
-interpreter accepts and ignores this physical layout evidence. Compiled lowering uses it to allocate
-aligned storage and calculate slot addresses.
+rule that type sizes include tail padding already guarantee that each slot is aligned.
 
 Every layout has a positive power-of-two alignment and a size divisible by that alignment. For
 non-zero-sized types, alignment is therefore no greater than size. Zero-sized types are the
 exception to that last inequality—for example, `()` has size 0 and alignment 1—and require no
 backing allocation.
 
-A buffer allocated with capacity 0 is the one case where the layout arguments are not the element's
-own: an empty array literal passes size 0 and alignment 1 whatever `T` is, because a capacity-0
-buffer has no slot to address and no storage to align. Lowering must therefore treat a zero-byte
-allocation as valid and reclaimable rather than reading the element layout back out of it. Buffers
-that later grow are reallocated by `array_ensure_capacity`, which passes the true `Value::<T>`
-layout, so no slot is ever addressed with the placeholder.
+A buffer allocated with capacity 0 may use placeholder size 0 and alignment 1, because it has no
+slot to address and no storage to align. Its zero-byte allocation is valid and reclaimable; these
+placeholder arguments do not describe the element layout. Growth to non-zero capacity must use
+the true `Value<T>` layout, so no slot is addressed with the placeholder.
 
-The interpreter's native `buffer_drop` remains a no-op because the subsequent interpreter storage
-discard runs Rust `Buffer::drop`, which reclaims any remaining slot payloads through
-`Value::discard_storage` before releasing the `Vec`. Normal Array cleanup has already emptied the
-live slots; after poisoning this fallback reclaims their boxed storage without running Ferlium
-semantic cleanup. This is an interpreter reclamation mechanism, not the final compiled runtime's
-allocation-domain design. Compiled lowering replaces that semantic Buffer drop with
-`dealloc(buffer.ptr)` followed by clearing the pointer. The runtime exposes pointer-only
+Array cleanup destroys its live elements before releasing the backing buffer. Buffer destruction
+deallocates the backing storage and clears its owning pointer. The runtime exposes pointer-only
 deallocation and retains any allocator-specific layout metadata internally; a capacity-0 buffer is
-deallocated by the same path as any other. Whole-buffer moves must use the same cleanup when
-replacing an existing target, so every allocation is reclaimed exactly once.
+deallocated by the same path as any other. Whole-buffer moves must release an existing target
+allocation before replacing its pointer, so every allocation is reclaimed exactly once.
 
 # First-class callables
 
@@ -576,21 +540,18 @@ resulting ephemeral MIR value and its lifetime.
 
 # Native-function boundary
 
-A native callable used by compiled code exposes one typed `extern "C"` entry, shared with
-interpreters under its existing `FunctionId`. Boxing belongs only to interpreter marshalling; it
+A native callable used by compiled code exposes one typed `extern "C"` entry. Interpreter boxing
 is not part of the ABI. Export naming and retention are separate from the calling convention.
 
 The entry contract specifies parameter representations, pointee layouts, mutability, and the result
-protocol. Typed registration derives this contract from the Rust signature and rejects incompatible
-Ferlium declarations. Like [Rust-native layouts](#rust-native-values), it is build-coupled: generated
-callers and the runtime must agree on the contract for their target.
+protocol. The Rust entry and its Ferlium declaration must agree on this contract. Like
+[Rust-native layouts](#rust-native-values), it is build-coupled: generated callers and the runtime
+must agree on the contract for their target.
 
 Every native signature retained at the compiled boundary must be closed and monomorphic, including
 all nested types in visible parameters, hidden parameters, and results. Generic native calls must
-be specialized to closed entries or eliminated by physical lowering; a polymorphic native ABI is
-not yet defined. Callbacks without a typed entry remain interpreter-only unless eliminated by
-lowering. Physical lowering treats every native declared in the module as an entry root, even if
-unused internally; one unsupported callback therefore prevents physical lowering of that module.
+be specialized to closed entries or eliminated before reaching the boundary; this ABI does not
+define polymorphic native entries. Every retained native callable must supply a compatible C entry.
 
 ## Value transport and safety
 
@@ -602,22 +563,20 @@ Entries follow the [calling conventions](#calling-conventions) above:
   as pointers. The caller guarantees valid, aligned storage and call-scoped borrowing. Consuming
   destructors follow the separate [ownership contract](#rust-native-values).
 - Output storage is initialized exactly once when a result is produced and contains no live result
-  on failure or absence. Safe adapters enforce this; registering handwritten output entries
-  requires an unsafe guarantee.
+  on failure or absence.
 - Fallible entries return status and record diagnostics through the leading failure-state pointer.
   Rust `Result` and error layouts never cross the ABI. Rust panics are not source failures and must
   not unwind across the C boundary.
 
 Floating-point values must satisfy Ferlium's finite-value contract before crossing the boundary.
-Rust `Float` has the layout and ABI of `f64`: raw `f64` inputs are allowed, but results must use
-`Float`, including optional and fallible payloads. This protects the invariant independently of
-interpreter boxing. Native implementations must preserve language semantics without panicking on
-valid Ferlium inputs.
+The `float` type has the layout and ABI of `f64`; the finite-value requirement also applies to
+optional and fallible payloads. Native implementations must preserve language semantics without
+panicking on valid Ferlium inputs.
 
 Native entries must not embed session-local variant tags. They return transport-level values, such
 as scalar comparison codes, from which the caller constructs Ferlium variants.
-An ordering-code adapter returns exactly `-1`, `0`, or `1` for Rust `Less`, `Equal`, or `Greater`.
-Its result-domain metadata is independent of ABI transport and asserts no ordering laws or effects.
+An ordering code is exactly `-1`, `0`, or `1` for Rust `Less`, `Equal`, or `Greater`. This value
+domain does not itself assert ordering laws or effects.
 
 ## Native optional results
 
@@ -634,7 +593,7 @@ extern "C" fn(arguments..., output: &mut MaybeUninit<R>) -> bool
 It returns `true` after initializing `output` exactly once with the `Some` payload, or `false` for
 `None` with no live output. The caller constructs the canonical Ferlium variant; Rust's `Option<R>`
 layout never crosses the ABI. This protocol is infallible: absence is not a source failure.
-Registration requires this protocol for optional results and rejects representation mismatches.
+Optional results must use this protocol with matching payload representations.
 
 # Compiled runtime boundary
 
