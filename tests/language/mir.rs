@@ -92,6 +92,8 @@ fn execution_targets_accept_by_value_arguments() {
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn physical_mir_product_cleanup() {
+    // TODO(physical-mir-bridge): Fold into shared cleanup coverage once the full language suite
+    // runs on physical MIR, preserving the partial-construction and interrupted-failure cases.
     let mut session = TestSession::new();
     session
         .session_mut()
@@ -149,6 +151,8 @@ fn physical_mir_product_cleanup() {
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn physical_mir_product_host_arguments() {
+    // TODO(physical-mir-bridge): Fold into shared execution-target argument tests once physical
+    // MIR supports the full suite; remove this separate differential fixture.
     let mut session = TestSession::new();
     for source in [
         "fn compute(p: (int, (bool, int))) -> (int, (bool, int)) { p }",
@@ -183,6 +187,8 @@ fn physical_mir_product_host_arguments() {
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn physical_mir_value_execution() {
+    // TODO(physical-mir-bridge): Replace this supported-subset matrix with shared language-suite
+    // differential coverage once physical MIR is complete, retaining any unique cases there.
     let mut session = TestSession::new();
     for source in [
         "fn compute(x: int) -> (int, bool, float) { (x + 1, x > 2, 3.5) }",
@@ -316,6 +322,8 @@ fn physical_mir_value_execution() {
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn physical_mir_limits() {
+    // TODO(physical-mir-bridge): Merge into shared backend limit tests once physical MIR supports
+    // the full suite, retaining the call-depth boundary comparison.
     let mut session = TestSession::new();
     for (source, limits, expected) in [
         (

@@ -170,6 +170,8 @@ mod tests {
                 && entry.source_from <= entry.source_to
                 && entry.source_to as usize <= source.encode_utf16().count()
         }));
+        // TODO(physical-mir-bridge): Replace this temporary unsupported-execution assertion with
+        // success once supported; keep the browser execution and UTF-16 source-map coverage.
         let error = compiler
             .run_expr_physical_mir()
             .unwrap()
