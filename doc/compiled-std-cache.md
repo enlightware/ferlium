@@ -15,6 +15,8 @@ currently persist the snapshot across page loads.
 The portable DTO and Postcard encoding layer is the separate `std-snapshot` feature. `std-cache`
 enables it and adds the native filesystem backend. This separation leaves room for browser storage
 without coupling snapshot serialization to filesystem availability.
+Snapshot checksum and lineage metadata are likewise available on every target with `std-snapshot`;
+only filesystem storage and automatic disk-cache loading are restricted to native hosts.
 
 The cache is compiler-owned internal data, not a stable public format. Compatibility relies on
 fingerprints, not manually maintained schema versions. Its header contains a build-generated hash

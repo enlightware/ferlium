@@ -32,10 +32,7 @@ use crate::{
 
 use ustr::Ustr;
 
-#[cfg(all(
-    feature = "std-cache",
-    not(all(target_arch = "wasm32", target_os = "unknown"))
-))]
+#[cfg(feature = "std-snapshot")]
 use super::snapshot::CacheChecksum;
 
 /// Whether a compilation session runs the MIR optimization passes.
@@ -60,28 +57,19 @@ pub enum MirOptimization {
 #[derive(Default)]
 pub(crate) struct ModuleArtifacts {
     /// Checksum of the semantic std snapshot this revision was restored from.
-    #[cfg(all(
-        feature = "std-cache",
-        not(all(target_arch = "wasm32", target_os = "unknown"))
-    ))]
+    #[cfg(feature = "std-snapshot")]
     semantic_cache_checksum: Option<CacheChecksum>,
     /// MIR as lowered from final HIR by `emit_mir`.
     raw_mir: OnceCell<MirArtifacts>,
     /// Checksum of the raw-MIR snapshot that produced `raw_mir`, or `None` when it was built
     /// without a published snapshot.
-    #[cfg(all(
-        feature = "std-cache",
-        not(all(target_arch = "wasm32", target_os = "unknown"))
-    ))]
+    #[cfg(feature = "std-snapshot")]
     raw_mir_cache_checksum: OnceCell<Option<CacheChecksum>>,
     /// MIR after the optimization passes, installed at most once and only when some session
     /// requested [`MirOptimization::Enabled`].
     optimized_mir: OnceCell<MirArtifacts>,
     /// Parent identity used when loading a physical snapshot.
-    #[cfg(all(
-        feature = "std-cache",
-        not(all(target_arch = "wasm32", target_os = "unknown"))
-    ))]
+    #[cfg(feature = "std-snapshot")]
     optimized_mir_cache_checksum: OnceCell<Option<CacheChecksum>>,
     /// Host-matched physical artifacts, tied to this same immutable module revision.
     /// Snapshot restoration rebinds native entries from the current runtime.
@@ -106,10 +94,7 @@ impl ModuleArtifacts {
         self.physical_mir.get()
     }
 
-    #[cfg(all(
-        feature = "std-cache",
-        not(all(target_arch = "wasm32", target_os = "unknown"))
-    ))]
+    #[cfg(feature = "std-snapshot")]
     pub(crate) fn with_semantic_cache_checksum(checksum: Option<CacheChecksum>) -> Self {
         Self {
             semantic_cache_checksum: checksum,
@@ -123,10 +108,7 @@ impl ModuleArtifacts {
             .raw_mir
             .set(MirArtifacts::build(module, modules))
             .unwrap_or_else(|_| unreachable!("a new artifact set cannot already contain MIR"));
-        #[cfg(all(
-            feature = "std-cache",
-            not(all(target_arch = "wasm32", target_os = "unknown"))
-        ))]
+        #[cfg(feature = "std-snapshot")]
         artifacts
             .raw_mir_cache_checksum
             .set(None)
@@ -143,18 +125,20 @@ impl ModuleArtifacts {
         self.raw_mir.get()
     }
 
-    #[cfg(all(
-        feature = "std-cache",
-        not(all(target_arch = "wasm32", target_os = "unknown"))
-    ))]
+    #[cfg(feature = "std-snapshot")]
+    #[cfg_attr(
+        any(not(feature = "std-cache"), all(target_arch = "wasm32", target_os = "unknown")),
+        allow(dead_code) // Reserved for non-filesystem snapshot backends.
+    )]
     pub(crate) fn semantic_cache_checksum(&self) -> Option<CacheChecksum> {
         self.semantic_cache_checksum
     }
 
-    #[cfg(all(
-        feature = "std-cache",
-        not(all(target_arch = "wasm32", target_os = "unknown"))
-    ))]
+    #[cfg(feature = "std-snapshot")]
+    #[cfg_attr(
+        any(not(feature = "std-cache"), all(target_arch = "wasm32", target_os = "unknown")),
+        allow(dead_code) // Reserved for non-filesystem snapshot backends.
+    )]
     pub(crate) fn raw_mir_cache_checksum(&self) -> Option<CacheChecksum> {
         self.raw_mir_cache_checksum.get().copied().flatten()
     }
@@ -175,15 +159,15 @@ impl ModuleArtifacts {
         not(all(target_arch = "wasm32", target_os = "unknown"))
     )))]
     pub(crate) fn set_mir(&self, mir: MirArtifacts) {
+        #[cfg(feature = "std-snapshot")]
+        self.set_mir_with_cache_checksum(mir, None);
+        #[cfg(not(feature = "std-snapshot"))]
         self.raw_mir
             .set(mir)
             .unwrap_or_else(|_| panic!("MIR artifacts may only be installed once per revision"));
     }
 
-    #[cfg(all(
-        feature = "std-cache",
-        not(all(target_arch = "wasm32", target_os = "unknown"))
-    ))]
+    #[cfg(feature = "std-snapshot")]
     fn set_mir_with_cache_checksum(&self, mir: MirArtifacts, checksum: Option<CacheChecksum>) {
         self.raw_mir
             .set(mir)
@@ -793,9 +777,14 @@ pub(crate) fn ensure_optimized_mir_artifacts(session: &CompilerSession, module_i
     let optimized = MirArtifacts::optimize(raw, module, session);
     entry.artifacts().set_optimized_mir(optimized);
     #[cfg(all(
-        feature = "std-cache",
-        not(all(target_arch = "wasm32", target_os = "unknown"))
+        feature = "std-snapshot",
+        any(
+            not(feature = "std-cache"),
+            all(target_arch = "wasm32", target_os = "unknown")
+        )
     ))]
+    let checksum = None;
+    #[cfg(feature = "std-snapshot")]
     entry
         .artifacts()
         .optimized_mir_cache_checksum

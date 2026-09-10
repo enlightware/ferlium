@@ -107,6 +107,9 @@ pub(crate) struct ModuleRevision {
 
 impl ModuleRevision {
     fn new(module: Module) -> Self {
+        #[cfg(feature = "std-snapshot")]
+        return Self::with_semantic_cache_checksum(module, None);
+        #[cfg(not(feature = "std-snapshot"))]
         Self {
             module,
             artifacts: ModuleArtifacts::default(),
@@ -117,10 +120,7 @@ impl ModuleRevision {
         Self { module, artifacts }
     }
 
-    #[cfg(all(
-        feature = "std-cache",
-        not(all(target_arch = "wasm32", target_os = "unknown"))
-    ))]
+    #[cfg(feature = "std-snapshot")]
     fn with_semantic_cache_checksum(
         module: Module,
         checksum: Option<super::snapshot::CacheChecksum>,
