@@ -196,6 +196,7 @@ fn ordinary_assignment_drops_prepared_rhs_when_destination_fails() {
                 .try_run(
                     r#"
             testing::reset_native_drops();
+            testing::reset_clone_tracked_clones();
             let mut values = [];
             values[0] = testing::make_clone_tracked()
         "#
@@ -223,6 +224,7 @@ fn assignment_drops_captured_selector_values_when_rhs_exits() {
                     0
                 }}
                 testing::reset_native_drops();
+                testing::reset_clone_tracked_clones();
                 run()
             "#
         ));
