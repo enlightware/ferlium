@@ -1369,16 +1369,22 @@ impl CompilerSession {
         limits: ReferenceInterpreterLimits,
     ) -> Result<Value, RuntimeError> {
         if target == ExecutionTarget::PhysicalMir {
-            // No invocation is started by the shim. Reclaim caller-owned backing storage without
-            // running guest drop code, including when physical preparation fails.
+            let result = self
+                .prepare_physical_program(module_id)
+                .and_then(|program| {
+                    crate::mir::physical::interpreter::run_entry(
+                        &program,
+                        FunctionId::new(module_id, entry),
+                        &arguments,
+                        limits,
+                    )
+                });
+            // Physical execution only imports scalars for now. Reclaim host-owned arguments on
+            // every exit, including unsupported inputs and preparation failures.
             for argument in arguments {
                 argument.discard_storage();
             }
-            let program = self.prepare_physical_program(module_id)?;
-            return crate::mir::physical::interpreter::run_entry(
-                &program,
-                FunctionId::new(module_id, entry),
-            );
+            return result;
         }
         self.prepare_execution_target(target, module_id);
         match target {

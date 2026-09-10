@@ -40,7 +40,7 @@ use crate::{
         id::Id,
     },
     place::Place,
-    std::{array::array_value_from_vec, buffer, value::is_value_drop_function},
+    std::{array::array_value_from_vec, buffer},
     types::{
         r#trait::TraitDictionaryEntryIndex,
         r#type::{Type, TypeKind},
@@ -502,7 +502,7 @@ impl<'a> Interpreter<'a> {
         }
         let module = self.session.expect_fresh_module(semantic.module);
         let env = ModuleEnv::new(module, self.session.raw_modules());
-        let is_drop = is_value_drop_function(semantic, &env);
+        let is_drop = crate::std::value::is_value_drop_function(semantic, &env);
         self.value_drop_functions.insert(semantic, is_drop);
         is_drop
     }

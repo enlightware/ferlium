@@ -23,6 +23,10 @@ rejects re-entry. `CompilerSession` owns immutable compiler artifacts rather tha
 generation, so the REPL, IDE, and other interactive hosts recover by reporting the violation and
 creating a fresh executor for the next evaluation.
 
+`RuntimeError::Backend` is separate from these guest outcomes: it reports backend preparation,
+unsupported execution contracts, or invalid physical-storage accesses. It is not a source failure
+and does not enter guest cleanup.
+
 A cleanup failure during an otherwise successful return is initially a source failure and may
 propagate through enclosing cleanup scopes. Escalation happens only if another source failure was
 already in flight. A sandbox violation always takes the sandbox path, including when it interrupts
@@ -91,19 +95,15 @@ These operations have separate contracts:
 - **Host-resource revocation** releases engine or browser capabilities independently of guest heap
   traversal and guest cleanup.
 
-The boxed reference interpreters currently reclaim known environment, register, closure-temporary,
-and suspended-frame roots explicitly. This is bounded host logic, but `Value` uses `ManuallyDrop`,
-so a forgotten owning root could still leak. Rust `Buffer::drop` also reclaims any remaining boxed
-slot payloads, recursively, without invoking Ferlium semantic cleanup. This closes the live-array
-element leak on poisoning but remains a temporary mechanism for the boxed interpreters.
-
-A compiled runtime should instead make reclamation a property of its runtime-owned allocation
-domain, while a take-once registry owns external capabilities. Poisoning revokes the registry and
-resets the allocation domain without executing Ferlium code. The domain must cover allocations
-owned by both Ferlium representations and native
-Rust values, including their backing allocations; resetting linear memory alone cannot revoke
-external Rust-owned resources. Memory accounting and allocator requirements are specified in
+Reclamation must be a property of the runtime-owned allocation domain, while a take-once registry
+owns external capabilities. Poisoning must revoke the registry and reset the allocation domain
+without executing Ferlium code. The domain must cover allocations owned by both Ferlium
+representations and native Rust values, including their backing allocations; resetting linear
+memory alone cannot revoke external Rust-owned resources. Memory accounting and allocator requirements are specified in
 [runtime-memory-limits.md](runtime-memory-limits.md).
+
+The poisoning policy must define which Rust destructors or registered revocation operations may
+run, including their handling of external resources, partial initialization, re-entry, and panics.
 
 ## Candli integration
 
@@ -114,18 +114,3 @@ Ferlium's mutable value semantics does not require a distinct borrowed host hand
 Immutable compiled code and type metadata remain reusable after a runtime reset; mutable Ferlium
 handles from the poisoned generation do not. Browser Wasm memory boundaries and the required host
 headroom are specified in [runtime-memory-limits.md](runtime-memory-limits.md).
-
-## Future runtime work
-
-The reference interpreters implement the outcome state machine and best-effort bounded reclamation.
-The shared compiled/interpreted runtime still needs:
-
-- generation-checked host handles;
-- a runtime-owned resource registry;
-- an accounted allocator or resettable arena covering native-value allocations;
-- an eager shadow call stack for non-unwinding violations; and
-- an explicit poisoning/revocation domain shared by all execution backends.
-
-Boxed reclamation currently invokes Rust `Drop` even when Ferlium cleanup was skipped. The final
-poisoning policy must define which Rust destructors or registered revocation operations may run,
-including their handling of external resources, partial initialization, re-entry, and panics.

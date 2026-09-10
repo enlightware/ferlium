@@ -68,7 +68,7 @@ impl Display for SandboxViolationKind {
 /// Stable summary of the structurally distinct outcomes carried by `RuntimeError`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeErrorKind {
-    /// The selected backend could not prepare or start execution; not a source effect.
+    /// The selected backend could not prepare or execute the artifact; not a source effect.
     Backend,
     SourceFailure(SourceFailureKind),
     SandboxViolation(SandboxViolationKind),

@@ -844,6 +844,7 @@ impl Operation {
     /// statically-sized pointee; a generic (run-time-layout) transfer uses
     /// [`move_dynamic`](Self::move_dynamic). Unlike a copy, a move needs no `Value::clone`; unlike
     /// `memcpy`, it consumes the source.
+    /// Moving an initialized place to itself leaves it unchanged.
     pub fn move_value(span: Location, source: mir::Value, destination: mir::Value) -> Self {
         Operation {
             result_id: None,
@@ -858,6 +859,7 @@ impl Operation {
     /// witnessing the run-time layout of the moved value (its `SIZE`/`ALIGN`), exactly as for
     /// [`alloca_dynamic`](Self::alloca_dynamic). The MIR interpreter moves the value shape-agnostically
     /// (the witness is metadata it ignores); a real backend uses the witness to size the copy.
+    /// As with [`move_value`](Self::move_value), an initialized self-move leaves storage unchanged.
     pub fn move_dynamic(
         span: Location,
         source: mir::Value,
@@ -894,7 +896,8 @@ impl Operation {
     }
 
     /// Creates a physical ownership transfer of one initialized `ty` value using an explicit byte
-    /// extent. The source becomes absent and the previously absent destination becomes initialized.
+    /// extent. For distinct places, the source becomes absent and the previously absent destination
+    /// becomes initialized. An initialized self-move leaves storage unchanged.
     pub fn move_bytes(
         span: Location,
         ty: Type,

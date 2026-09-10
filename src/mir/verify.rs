@@ -46,7 +46,7 @@ fn call_type_is_fallible(ty: &CallImplType) -> bool {
 ///
 /// This is intentionally intraprocedural: calls are checked through the uniform by-pointer boundary
 /// contract, so lazy lowering does not force the callee's MIR body to exist.
-#[cfg(any(debug_assertions, test, feature = "std-snapshot"))]
+#[cfg(any(debug_assertions, test))]
 pub(crate) fn verify_function(func: &Function, env: ModuleEnv<'_>) {
     Verifier::new(func, env).verify(true, None);
 }
@@ -1683,6 +1683,20 @@ impl<'a> Verifier<'a> {
             _ => None,
         };
 
+        // A self-move reads initialized storage but leaves it unchanged, matching the boxed
+        // executor's take-then-store semantics. Resolve aliases when their paths are known.
+        if is_move
+            && (source == destination
+                || matches!(
+                    (&source_place, &destination_place),
+                    (LocalPlace::Root { root: left, path: Some(left_path) },
+                     LocalPlace::Root { root: right, path: Some(right_path) })
+                        if left == right && left_path == right_path
+                ))
+        {
+            return;
+        }
+
         if let LocalPlace::Root {
             root,
             path: Some(path),
@@ -2191,6 +2205,25 @@ mod tests {
 
     fn terminate_return(f: &mut FunctionBuilder, block: BlockId, span: Location) {
         f.set_terminator(block, Terminator::ret(span));
+    }
+
+    #[test]
+    fn self_move_preserves_initialized_storage() {
+        let span = Location::new_synthesized();
+        let mut f = FunctionBuilder::new("self_move".into(), Default::default());
+        let source = Value::Parameter(f.add_parameter(int_type(), ParameterKind::Owned));
+        let result = Value::Parameter(f.add_parameter(int_type(), ParameterKind::Return));
+        let block = f.add_block();
+        append(
+            &mut f,
+            block,
+            Operation::move_value(span, source.clone(), source.clone()),
+        );
+        // Reading the source afterwards must remain valid; moving it to the result also discharges
+        // the owned parameter's obligation instead of allowing a self-move to consume it.
+        append(&mut f, block, Operation::move_value(span, source, result));
+        terminate_return(&mut f, block, span);
+        verify(f);
     }
 
     /// A variant that owns something, so these tests have a drop obligation to violate. The payload

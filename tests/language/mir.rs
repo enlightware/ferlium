@@ -78,7 +78,7 @@ fn execution_targets_accept_by_value_arguments() {
         .expect_fresh_module(module_id)
         .get_local_function_id(ustr::ustr("add_one"))
         .unwrap();
-    for target in ExecutionTarget::REFERENCE {
+    for target in ExecutionTarget::ALL {
         assert_val_eq!(
             session
                 .session_mut()
@@ -87,6 +87,196 @@ fn execution_targets_accept_by_value_arguments() {
             int(42)
         );
     }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn physical_mir_scalar_execution() {
+    let mut session = TestSession::new();
+    for source in [
+        "fn compute(x: int) -> int { x + 2 }",
+        "fn compute(x: int) -> int { if x > 3 { x * 2 } else { x - 1 } }",
+        "fn twice(x: int) -> int { x + x } fn compute(x: int) -> int { twice(x) + 1 }",
+        "fn compute(x: int) -> int { if x <= 1 { 1 } else { x * compute(x - 1) } }",
+        "fn set(x: &mut int, value: int) { x = value; } fn compute(x: int) -> int { let mut n = x; set(n, x + 1); n }",
+        "fn compute(x: int) -> int { match x { 0 => 11, 2 => 12, _ => 13 } }",
+        "fn compute(x: int) -> int { let mut n = x; let mut sum = 0; loop { if n == 0 { break }; sum += n; n -= 1; }; sum }",
+        "fn compute(x: int) -> int { idiv(100, x) }",
+        "fn compute(x: int) -> int { rem(100, x) }",
+    ] {
+        let module_id = session.compile(source).module_id;
+        let entry = session
+            .session()
+            .expect_fresh_module(module_id)
+            .get_local_function_id(ustr::ustr("compute"))
+            .unwrap();
+        for input in [0, 2, 7] {
+            let boxed = session.session_mut().run_entry(
+                ExecutionTarget::Mir,
+                module_id,
+                entry,
+                vec![int_value(input)],
+            );
+            let physical = session.session_mut().run_entry(
+                ExecutionTarget::PhysicalMir,
+                module_id,
+                entry,
+                vec![int_value(input)],
+            );
+            match (boxed, physical) {
+                (Ok(expected), Ok(actual)) => {
+                    crate::harness::assert_value_eq(&actual, &expected);
+                    expected.discard_storage();
+                    actual.discard_storage();
+                }
+                (Err(expected), Err(actual)) => {
+                    assert_eq!(actual.kind(), expected.kind(), "{source}")
+                }
+                (expected, actual) => panic!(
+                    "{source} input={input}: boxed={expected:?}, physical={actual:?}\n{}",
+                    session
+                        .session()
+                        .emit_physical_mir_module(module_id)
+                        .unwrap()
+                ),
+            }
+        }
+    }
+
+    for (source, input) in [
+        (
+            "fn compute(x: float) -> float { (x + 2.5) * 3.0 }",
+            ferlium::std::math::float_value(1.25),
+        ),
+        (
+            "fn compute(x: float) -> bool { x > 0.5 }",
+            ferlium::std::math::float_value(1.25),
+        ),
+        (
+            "fn compute(x: float) -> float { x / 0.0 }",
+            ferlium::std::math::float_value(1.25),
+        ),
+        ("fn compute(x: bool) -> bool { not x }", Value::native(true)),
+        ("fn compute(x: ()) { x }", Value::unit()),
+    ] {
+        let module_id = session.compile(source).module_id;
+        let entry = session
+            .session()
+            .expect_fresh_module(module_id)
+            .get_local_function_id(ustr::ustr("compute"))
+            .unwrap();
+        // Host input is a scalar, so its representation copy has no ownership effects.
+        let boxed_input = if let Some(value) = input.as_primitive_ty::<ferlium::std::math::Float>()
+        {
+            Value::native(*value)
+        } else if let Some(value) = input.as_primitive_ty::<bool>() {
+            Value::native(*value)
+        } else {
+            Value::unit()
+        };
+        let expected = session.session_mut().run_entry(
+            ExecutionTarget::Mir,
+            module_id,
+            entry,
+            vec![boxed_input],
+        );
+        let actual = session.session_mut().run_entry(
+            ExecutionTarget::PhysicalMir,
+            module_id,
+            entry,
+            vec![input],
+        );
+        match (expected, actual) {
+            (Ok(expected), Ok(actual)) => {
+                crate::harness::assert_value_eq(&actual, &expected);
+                expected.discard_storage();
+                actual.discard_storage();
+            }
+            (Err(expected), Err(actual)) => assert_eq!(actual.kind(), expected.kind(), "{source}"),
+            (expected, actual) => panic!("{source}: boxed={expected:?}, physical={actual:?}"),
+        }
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn physical_mir_limits() {
+    let mut session = TestSession::new();
+    for (source, limits, expected) in [
+        (
+            "fn main() { loop {} }",
+            ReferenceInterpreterLimits::default().with_fuel_limit(Some(2)),
+            SandboxViolationKind::FuelExhausted,
+        ),
+        (
+            "fn main() { main() }",
+            ReferenceInterpreterLimits::default().with_call_depth_limit(4),
+            SandboxViolationKind::CallDepthLimitExceeded { limit: 4 },
+        ),
+        (
+            "fn main() -> int { 42 }",
+            ReferenceInterpreterLimits::default().with_environment_cell_limit(0),
+            SandboxViolationKind::EnvironmentCellLimitExceeded { limit: 0 },
+        ),
+    ] {
+        let module_id = session.compile(source).module_id;
+        let entry = session
+            .session()
+            .expect_fresh_module(module_id)
+            .get_local_function_id(ustr::ustr("main"))
+            .unwrap();
+        let error = session
+            .session_mut()
+            .run_entry_with_limits(
+                ExecutionTarget::PhysicalMir,
+                module_id,
+                entry,
+                vec![],
+                limits,
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), RuntimeErrorKind::SandboxViolation(expected));
+        assert!(error.is_poisoning());
+    }
+
+    // Compare the boundary, not just the eventual failure of an infinite recursion. Both backends
+    // use optimized MIR so optimizer-induced differences in check placement do not obscure it.
+    session
+        .session_mut()
+        .set_mir_optimization(ferlium::MirOptimization::Enabled);
+    let module_id = session
+        .compile("fn descend(n: int) -> int { if n == 0 { 0 } else { 1 + descend(n - 1) } }")
+        .module_id;
+    let entry = session
+        .session()
+        .expect_fresh_module(module_id)
+        .get_local_function_id(ustr::ustr("descend"))
+        .unwrap();
+    let limits = ReferenceInterpreterLimits::default().with_call_depth_limit(4);
+    let mut saw_success = false;
+    let mut saw_limit = false;
+    for depth in 0..6 {
+        let outcomes = [ExecutionTarget::Mir, ExecutionTarget::PhysicalMir].map(|target| {
+            session
+                .session_mut()
+                .run_entry_with_limits(target, module_id, entry, vec![int_value(depth)], limits)
+                .map(|value| {
+                    let result = *value.as_primitive_ty::<isize>().unwrap();
+                    value.discard_storage();
+                    result
+                })
+                .map_err(|error| error.kind())
+        });
+        assert_eq!(outcomes[0], outcomes[1], "recursive input {depth}");
+        saw_success |= outcomes[0].is_ok();
+        saw_limit |= matches!(
+            outcomes[0],
+            Err(RuntimeErrorKind::SandboxViolation(
+                SandboxViolationKind::CallDepthLimitExceeded { limit: 4 }
+            ))
+        );
+    }
+    assert!(saw_success && saw_limit);
 }
 
 #[test]
@@ -101,7 +291,7 @@ fn execution_targets_use_configured_limits() {
         .expect("test source should define a recovery function");
     let limits = ReferenceInterpreterLimits::default().with_fuel_limit(Some(0));
 
-    for target in ExecutionTarget::REFERENCE {
+    for target in ExecutionTarget::ALL {
         let error = session
             .session_mut()
             .run_entry_with_limits(target, output.module_id, entry, vec![], limits)

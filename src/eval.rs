@@ -467,22 +467,7 @@ impl<'a> EvalCtx<'a> {
         initial: RuntimeError,
         during_cleanup: RuntimeError,
     ) -> RuntimeError {
-        match (initial, during_cleanup) {
-            (RuntimeError::SourceFailure(initial), RuntimeError::SourceFailure(during_cleanup)) => {
-                self.poison_source_failures(initial, during_cleanup)
-            }
-            (
-                RuntimeError::SourceFailure(initial),
-                RuntimeError::SandboxViolation(mut violation),
-            ) => {
-                if violation.interrupted_source_failure.is_none() {
-                    violation.interrupted_source_failure = Some(Box::new(initial));
-                }
-                self.record_poisoning_error(RuntimeError::SandboxViolation(violation))
-            }
-            (poisoning, _) if poisoning.is_poisoning() => self.record_poisoning_error(poisoning),
-            (_, poisoning) => self.record_poisoning_error(poisoning),
-        }
+        self.record_poisoning_error(initial.interrupted_by(during_cleanup))
     }
 
     fn poison_source_failures(
@@ -1152,7 +1137,7 @@ impl FormatWith<(&SourceTable, ModuleRegistry<'_>)> for BacktraceFrame {
 /// An execution error: either a backend failed to start or an outcome escaped a guest invocation.
 #[derive(Debug, Clone)]
 pub enum RuntimeError {
-    /// Backend preparation or availability failure, before any guest invocation starts.
+    /// Backend preparation, unsupported execution contract, or checked-storage failure.
     Backend(String),
     /// A failure declared by the source-level `Fallible` effect.
     SourceFailure(SourceFailure),
@@ -1263,6 +1248,27 @@ enum ExecutionState {
 }
 
 impl RuntimeError {
+    /// Combine an in-flight failure with the error that terminates its cleanup. Executors must
+    /// stop guest execution after this result; backing storage can still be reclaimed.
+    pub(crate) fn interrupted_by(self, error: Self) -> Self {
+        match (self, error) {
+            (Self::SourceFailure(initial), Self::SourceFailure(during_cleanup)) => {
+                Self::FailureDuringCleanup(Box::new(FailureDuringCleanup {
+                    initial,
+                    during_cleanup,
+                }))
+            }
+            (Self::SourceFailure(initial), Self::SandboxViolation(mut violation)) => {
+                violation
+                    .interrupted_source_failure
+                    .get_or_insert_with(|| Box::new(initial));
+                Self::SandboxViolation(violation)
+            }
+            (initial, _) if initial.is_poisoning() => initial,
+            (_, error) => error,
+        }
+    }
+
     pub fn new(kind: SourceFailureKind, location: Option<Location>) -> Self {
         Self::SourceFailure(SourceFailure {
             kind,
@@ -1277,7 +1283,10 @@ impl RuntimeError {
         Self::new(kind, None)
     }
 
-    fn new_sandbox_violation(kind: SandboxViolationKind, location: Option<Location>) -> Self {
+    pub(crate) fn new_sandbox_violation(
+        kind: SandboxViolationKind,
+        location: Option<Location>,
+    ) -> Self {
         Self::SandboxViolation(SandboxViolation {
             kind,
             context: FailureContext {

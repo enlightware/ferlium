@@ -9,12 +9,11 @@ the platform-standard per-user Ferlium cache directory, under `compiled-std` (fo
 `$XDG_CACHE_HOME/ferlium/compiled-std` on Linux).
 
 The filesystem cache is not compiled for `wasm32-unknown-unknown`. Browser hosts compile std once
-per Wasm instance and reuse Ferlium's existing in-memory initial-session state; they do not
-currently persist the snapshot across page loads.
+per Wasm instance and reuse Ferlium's in-memory initial-session state.
 
 The portable DTO and Postcard encoding layer is the separate `std-snapshot` feature. `std-cache`
-enables it and adds the native filesystem backend. This separation leaves room for browser storage
-without coupling snapshot serialization to filesystem availability.
+enables it and adds the native filesystem backend. Snapshot serialization is independent of the
+storage backend and filesystem availability.
 Snapshot checksum and lineage metadata are likewise available on every target with `std-snapshot`;
 only filesystem storage and automatic disk-cache loading are restricted to native hosts.
 

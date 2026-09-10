@@ -72,7 +72,8 @@ order they run in, and the rules deciding where a pass belongs are in
 [mir-optimization.md](mir-optimization.md).
 
 Physical preparation lowers each module's optimized MIR to backend-ready physical MIR and resolves
-the module dependency closure. Physical execution and machine-code emission remain future work.
+the module dependency closure. The checked physical interpreter validates execution over ABI-layout
+storage before the same physical MIR is consumed by machine-code backends.
 
 Every compilation attempt stores severity-tagged source diagnostics on its module entry. Errors make
 the attempt fail; warnings remain available through `ModuleInfo::diagnostics` on a successful

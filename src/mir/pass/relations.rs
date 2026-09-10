@@ -1823,9 +1823,13 @@ fn transfer(
         OperationKind::AddressOffset { .. } | OperationKind::AddressOffsetPlace { .. } => {}
         OperationKind::Memcpy | OperationKind::Move | OperationKind::MoveBytes { .. } => {
             let source = tracked_place(state, &operation.operands[0], escaped, interner);
-            if let Some(destination) =
-                tracked_place(state, &operation.operands[1], escaped, interner)
-            {
+            let destination = tracked_place(state, &operation.operands[1], escaped, interner);
+            // Do not redefine the value or its fields for an identity transfer, including aliases
+            // represented by different projection registers.
+            if source.is_some() && source == destination {
+                return;
+            }
+            if let Some(destination) = destination {
                 // The fields travel too, and separately from the whole: a struct's own fact says
                 // nothing about its fields, and a range is built field by field and then copied
                 // into its iterator in one go. Losing the fields there loses the loop's bounds.
@@ -2204,6 +2208,111 @@ mod tests {
         CompilerSession, ExecutionTarget, MirOptimization,
         module::{ModuleId, Path},
     };
+
+    #[test]
+    fn self_transfers_preserve_scalar_and_field_facts() {
+        use crate::{
+            Location,
+            hir::value::LiteralValue,
+            mir::{builder::FunctionBuilder, pass::dataflow, terminator::Terminator},
+            std::math::int_type,
+        };
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let ty = Type::tuple([int_type()]);
+        for whole in [false, true] {
+            for transfer in [
+                OperationKind::Memcpy,
+                OperationKind::Move,
+                OperationKind::MoveBytes {
+                    ty: if whole { ty } else { int_type() },
+                },
+            ] {
+                let mut builder = FunctionBuilder::new("self_transfer".into(), Default::default());
+                let block = builder.add_block();
+                let root = builder
+                    .append_operation(block, Operation::alloca(span, ty))
+                    .unwrap();
+                let zero = builder.add_constant(int_type(), LiteralValue::new_native(0isize), &env);
+                let mut project = || {
+                    builder
+                        .append_operation(
+                            block,
+                            Operation::product_subfield(
+                                span,
+                                root.clone(),
+                                mir::Value::Constant(zero),
+                                int_type(),
+                                ty,
+                                [],
+                            ),
+                        )
+                        .unwrap()
+                };
+                let field = project();
+                let alias = project();
+                let value =
+                    builder.add_constant(int_type(), LiteralValue::new_native(42isize), &env);
+                builder.append_operation(
+                    block,
+                    Operation::store(span, mir::Value::Constant(value), field.clone()),
+                );
+                let (source, destination) = if whole {
+                    (root.clone(), root)
+                } else {
+                    (field.clone(), alias)
+                };
+                let operation = match transfer {
+                    OperationKind::Memcpy => Operation::memcpy(span, source, destination),
+                    OperationKind::Move => Operation::move_value(span, source, destination),
+                    OperationKind::MoveBytes { ty } => {
+                        let size = builder.add_constant(
+                            int_type(),
+                            LiteralValue::new_native(size_of::<isize>() as isize),
+                            &env,
+                        );
+                        Operation::move_bytes(
+                            span,
+                            ty,
+                            source,
+                            destination,
+                            mir::Value::Constant(size),
+                        )
+                    }
+                    _ => unreachable!(),
+                };
+                builder.append_operation(block, operation);
+                let loaded = builder
+                    .append_operation(block, Operation::load(span, field.clone()))
+                    .unwrap();
+                builder.set_terminator(block, Terminator::ret(span));
+                let func = builder.finish(env);
+
+                // The same fixture guards both analyses: scalar aliases must stay initialized,
+                // and moving an aggregate onto itself must not erase facts about its fields.
+                let constants = dataflow::analyze(&func, env);
+                let mut state = constants.entry_state(block);
+                for operation in func.block(block).operations() {
+                    constants.step(&func, env, operation, &mut state);
+                }
+                assert_eq!(
+                    state.place(constants.place_of(&field).unwrap()),
+                    dataflow::Fact::Known(dataflow::Const::Literal(LiteralValue::new_native(
+                        42isize
+                    )))
+                );
+
+                let mut relations = analyze(&func, session.known_callees(), &|_| None);
+                let state = relations.exit_state(block).unwrap().clone();
+                let mir::Value::Register(register) = loaded else {
+                    unreachable!()
+                };
+                let symbol = relations.interner.symbol(Symbol::Register(register));
+                assert_eq!(state.fact(symbol), Some(&Fact::Value(Affine::constant(42))));
+            }
+        }
+    }
 
     #[test]
     fn replace_preserves_field_relations_on_both_sides() {

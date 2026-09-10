@@ -346,6 +346,12 @@ pub(crate) struct BackendReadyMirArtifacts {
 }
 
 impl BackendReadyMirArtifacts {
+    pub(crate) fn native_entry(
+        &self,
+        function: FunctionId,
+    ) -> Option<&crate::hir::native_functions::NativeEntry> {
+        self.native_requirements.entries.get(&function)
+    }
     #[cfg(feature = "std-snapshot")]
     pub(crate) fn native_entries(
         &self,

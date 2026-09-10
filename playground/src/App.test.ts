@@ -22,7 +22,7 @@ const compiler = vi.hoisted(() => {
 		runHir: vi.fn(),
 		runMir: vi.fn(),
 		runPhysicalMir: vi.fn(() => ({
-			html_message: () => "Physical MIR execution is not implemented yet",
+			html_message: () => "42: int",
 			error_data: () => undefined,
 		})),
 	};
@@ -119,7 +119,7 @@ describe("App", () => {
 		});
 	});
 
-	it("inspects physical MIR and reports the execution shim without falling back", async () => {
+	it("inspects and executes physical MIR without falling back", async () => {
 		const app = mountApp();
 		expect(selects(app).executionMode.findAll("option:not([disabled])").map(option => option.text()))
 			.toEqual(["HIR", "raw MIR", "opt. MIR", "phy. MIR"]);
@@ -130,7 +130,7 @@ describe("App", () => {
 		expect(compiler.runPhysicalMir).toHaveBeenCalledOnce();
 		expect(compiler.runHir).not.toHaveBeenCalled();
 		expect(compiler.runMir).not.toHaveBeenCalled();
-		expect(app.text()).toContain("Physical MIR execution is not implemented yet");
+		expect(app.text()).toContain("42: int");
 		await selects(app).executionMode.setValue("opt. MIR");
 		await vi.waitFor(() => expect(irText()).not.toContain("Physical MIR"));
 		await app.get(".execution-controls button").trigger("click");

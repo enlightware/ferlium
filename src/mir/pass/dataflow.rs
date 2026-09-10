@@ -979,6 +979,11 @@ fn transfer(
         OperationKind::Memcpy | OperationKind::Move | OperationKind::MoveBytes { .. } => {
             let source = place_of(&operation.operands[0]);
             let destination = place_of(&operation.operands[1]);
+            // Identity transfers preserve field facts and read provenance as well as the value.
+            // Compare resolved places: distinct projection registers can name the same storage.
+            if source.is_some() && source == destination {
+                return;
+            }
             let fact = match &source {
                 Some(place) if tracked(*place) => state.place(*place),
                 _ => Fact::Unknown,

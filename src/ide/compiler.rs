@@ -682,7 +682,7 @@ mod tests {
     }
 
     #[test]
-    fn physical_mir_inspection_and_execution_shim() {
+    fn physical_mir_inspection_and_scalar_execution() {
         let source = "fn second(pair: (int, bool)) -> bool { pair.1 } second((42, true))";
         let mut compiler = build(source);
         compiler
@@ -704,9 +704,9 @@ mod tests {
         let result = compiler.run_expr_physical_mir().unwrap();
         let error = result
             .error_content()
-            .expect("the shim must not execute boxed MIR");
+            .expect("unsupported aggregates must not fall back to boxed MIR");
         assert!(
-            error.complete.contains("not implemented yet"),
+            error.complete.contains("does not yet support"),
             "{}",
             error.complete
         );
@@ -724,6 +724,10 @@ mod tests {
         let replacement = compiler.physical_mir_text().unwrap();
         assert!(replacement.text.contains("replacement"));
         assert!(!replacement.text.contains("fn second"));
+        assert_eq!(
+            compiler.run_expr_physical_mir().unwrap().html_message(),
+            "7: int"
+        );
         assert!(compiler.compile("fn broken() -> bool { 1 }").is_some());
         assert!(compiler.physical_mir_text().unwrap().text.is_empty());
     }

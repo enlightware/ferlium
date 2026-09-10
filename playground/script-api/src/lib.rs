@@ -155,7 +155,7 @@ mod tests {
     wasm_bindgen_test_configure!(run_in_browser);
 
     #[wasm_bindgen_test]
-    fn physical_mir_inspection_and_execution_shim_in_browser() {
+    fn physical_mir_inspection_and_scalar_execution_in_browser() {
         set_panic_hook();
         let mut compiler = PlaygroundCompiler::new();
         let source =
@@ -176,13 +176,17 @@ mod tests {
             .error_content()
             .unwrap();
         assert!(
-            error.complete.contains("not implemented yet"),
+            error.complete.contains("does not yet support"),
             "{}",
             error.complete
         );
         assert!(compiler.compile("40 + 2").succeeded);
         assert_eq!(
             compiler.run_expr_mir(true).unwrap().html_message(),
+            "42: int"
+        );
+        assert_eq!(
+            compiler.run_expr_physical_mir().unwrap().html_message(),
             "42: int"
         );
     }

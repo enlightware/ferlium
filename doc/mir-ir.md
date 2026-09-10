@@ -143,7 +143,8 @@ read through the place of its function value, so calling a closure never moves i
 
 ## Operations
 
-The operation kind fixes operand arity, roles, and result shape. The main groups are:
+The operation kind fixes operand arity, roles, and result shape. Moving an initialized place to
+itself leaves it unchanged. The main groups are:
 
 | Group | Operations | Contract |
 |---|---|---|
@@ -247,7 +248,8 @@ subscript-member selection must instead be expanded before this boundary.
 Readiness verification checks structural and ownership contracts that survive lowering, supported
 operations, and agreement between call sites and physical entries. It does not prove raw-memory
 safety: physical execution must additionally enforce allocation bounds, alignment, initialization,
-and storage lifetimes. An executor must reject operations outside its supported subset.
+storage lifetimes, and native argument aliasing. An executor must reject unsupported reachable
+contracts before execution, without silently falling back to another execution representation.
 Malformed compiler-generated MIR can trigger an internal verifier panic, including in release
 builds; embedders must not assume such invariant failures are recoverable compilation errors.
 
