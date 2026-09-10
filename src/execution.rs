@@ -21,11 +21,15 @@ use derive_new::new;
 pub enum ExecutionTarget {
     Hir,
     Mir,
+    PhysicalMir,
 }
 
 impl ExecutionTarget {
     /// All execution targets, in canonical comparison order.
-    pub const ALL: [Self; 2] = [Self::Hir, Self::Mir];
+    pub const ALL: [Self; 3] = [Self::Hir, Self::Mir, Self::PhysicalMir];
+
+    /// Fully executable reference targets for semantic comparisons during physical development.
+    pub const REFERENCE: [Self; 2] = [Self::Hir, Self::Mir];
 }
 
 /// Default fuel budget for interactive execution.

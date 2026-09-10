@@ -49,6 +49,7 @@ test-native-abi:
 
 test-wasm:
 	CARGO_PROFILE_TEST_DEBUG=0 WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --chrome --firefox --headless --test language --lib
+	cd playground/script-api && CARGO_PROFILE_TEST_DEBUG=0 WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --chrome --firefox --headless --lib
 
 test: test-local test-wasm
 

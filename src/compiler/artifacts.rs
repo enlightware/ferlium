@@ -21,6 +21,7 @@ use crate::{
             prune_specializations, share_specializations,
             will_return::{WillReturn, WillReturnSummaries},
         },
+        physical::{BackendReadinessError, BackendReadyMirArtifacts, lower_physical_mir},
     },
     module::{
         FunctionId, LocalFunctionId, LocalImplId, Module, ModuleEnv, ModuleId,
@@ -48,7 +49,7 @@ pub enum MirOptimization {
 
 /// Backend output derived from one completed semantic module revision.
 ///
-/// Both stages are monotone: once installed, a stage is never replaced, so references handed out
+/// Stages are monotone: once installed, a stage is never replaced, so references handed out
 /// of a session stay valid and artifact reuse remains observable by pointer identity.
 #[derive(Default)]
 pub(crate) struct ModuleArtifacts {
@@ -70,6 +71,9 @@ pub(crate) struct ModuleArtifacts {
     /// MIR after the optimization passes, installed at most once and only when some session
     /// requested [`MirOptimization::Enabled`].
     optimized_mir: OnceCell<MirArtifacts>,
+    /// Host-matched physical artifacts, tied to this same immutable module revision. Never
+    /// serialized: native bindings must come from the current runtime.
+    physical_mir: OnceCell<BackendReadyMirArtifacts>,
 }
 
 impl std::fmt::Debug for ModuleArtifacts {
@@ -80,11 +84,16 @@ impl std::fmt::Debug for ModuleArtifacts {
                 &self.raw_mir.get().map(MirArtifacts::len),
             )
             .field("optimized", &self.optimized_mir.get().is_some())
+            .field("physical", &self.physical_mir.get().is_some())
             .finish()
     }
 }
 
 impl ModuleArtifacts {
+    pub(crate) fn physical_mir(&self) -> Option<&BackendReadyMirArtifacts> {
+        self.physical_mir.get()
+    }
+
     #[cfg(all(
         feature = "std-cache",
         not(all(target_arch = "wasm32", target_os = "unknown"))
@@ -605,6 +614,33 @@ impl MirArtifacts {
         );
         entries
     }
+}
+
+/// Install physical MIR using the semantic body and environment of the same current revision.
+pub(crate) fn ensure_physical_mir_artifacts(
+    session: &CompilerSession,
+    module_id: ModuleId,
+) -> Result<(), BackendReadinessError> {
+    let module = session.expect_fresh_module(module_id);
+    let artifacts = session.expect_module_entry(module_id).artifacts();
+    if artifacts.physical_mir().is_some() {
+        return Ok(());
+    }
+    ensure_optimized_mir_artifacts(session, module_id);
+    let physical = lower_physical_mir(
+        module_id,
+        artifacts
+            .optimized_mir
+            .get()
+            .expect("optimized MIR was just prepared"),
+        ModuleEnv::new(module, session.raw_modules()),
+        session.known_callees(),
+    )?;
+    artifacts
+        .physical_mir
+        .set(physical)
+        .unwrap_or_else(|_| panic!("physical MIR must only be installed once per module revision"));
+    Ok(())
 }
 
 /// Install complete MIR artifacts for a fresh module and all of its dependencies.

@@ -2,7 +2,7 @@
 
 import { ref, onMounted, watch } from "vue";
 import { DiagnosticSeverity, PlaygroundCompiler as Compiler, ErrorData } from "../compiler-api";
-import type { IrText, SourceRange } from "../types";
+import type { ExecutionMode, IrText, SourceRange } from "../types";
 
 import { EditorView, keymap, ViewUpdate, scrollPastEnd } from "@codemirror/view";
 import { indentWithTab } from "@codemirror/commands";
@@ -21,7 +21,6 @@ const compiler = new Compiler();
 compiler.set_allow_experimental(true);
 
 type AnnotationMode = "none" | "light" | "full";
-type ExecutionMode = "hir" | "mir" | "optimized-mir";
 
 const props = withDefaults(defineProps<{
 	annotationMode: AnnotationMode,
@@ -144,10 +143,14 @@ function refreshIr() {
 		return;
 	}
 	try {
-		const ir = compiler.mir_text(props.executionMode === "optimized-mir") as IrText;
+		const ir = (props.executionMode === "physical-mir"
+			? compiler.physical_mir_text()
+			: compiler.mir_text(props.executionMode === "optimized-mir")) as IrText;
 		emit("irChanged", ir.text === "" ? undefined : ir);
-	} catch {
-		emit("irChanged", undefined);
+	} catch (error) {
+		emit("irChanged", props.executionMode === "physical-mir"
+			? { text: `Unable to prepare MIR: ${String(error)}`, source_map: [] }
+			: undefined);
 	}
 }
 
@@ -165,7 +168,9 @@ const runCode = (executionMode: ExecutionMode = props.executionMode) => {
 	try {
 		const result = executionMode === "hir"
 			? compiler.run_expr()
-			: compiler.run_expr_mir(executionMode === "optimized-mir");
+			: executionMode === "physical-mir"
+				? compiler.run_expr_physical_mir()
+				: compiler.run_expr_mir(executionMode === "optimized-mir");
 		const errorData = result?.error_data();
 		if (errorData !== undefined && view.value) {
 			fillDiagnostics([errorData]);

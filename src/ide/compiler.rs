@@ -200,31 +200,56 @@ impl Compiler {
         )
     }
 
+    /// Physical execution currently reports an explicit backend-unavailable error.
+    pub fn run_expr_physical_mir(&mut self) -> Option<ExecutionResult> {
+        self.run_expr_with_target(ExecutionTarget::PhysicalMir, MirOptimization::Enabled)
+    }
+
+    /// Returns verified, host-matched physical MIR with source-link metadata.
+    pub fn physical_mir_text(&mut self) -> Result<IrText, String> {
+        self.mir_text_at(true, true)
+    }
+
     /// Returns the MIR for the current successfully compiled source, with source-link metadata.
     pub fn mir_text(&mut self, optimized: bool) -> IrText {
+        self.mir_text_at(optimized, false)
+            .expect("semantic MIR preparation is infallible")
+    }
+
+    fn mir_text_at(&mut self, optimized: bool, physical: bool) -> Result<IrText, String> {
         let module_id = self.user_module.module_id;
         let Some(module_info) = self.session.modules().info(module_id) else {
-            return empty_ir_text();
+            return Ok(empty_ir_text());
         };
         if module_info.is_stale() || !module_info.has_compiled_module() {
-            return empty_ir_text();
+            return Ok(empty_ir_text());
         }
         let Some((source_id, _)) = self
             .session
             .source_table()
             .get_latest_source_by_name(SRC_NAME)
         else {
-            return empty_ir_text();
+            return Ok(empty_ir_text());
         };
         self.session.set_mir_optimization(if optimized {
             MirOptimization::Enabled
         } else {
             MirOptimization::Disabled
         });
-        let text = self.session.emit_mir_module_with_source_map(module_id);
+        let text = if physical {
+            self.session
+                .emit_physical_mir_module_with_source_map(module_id)
+                .map_err(|error| {
+                    error
+                        .format_with(&(self.session.source_table(), self.session.raw_modules()))
+                        .to_string()
+                })?
+        } else {
+            self.session.emit_mir_module_with_source_map(module_id)
+        };
         let mir_lookup = PositionIndexLookup::new(&text.text, self.position_encoding);
         let source_lookup = self.position_index_lookup(source_id);
-        IrText {
+        Ok(IrText {
             text: text.text,
             source_map: text
                 .source_map
@@ -245,7 +270,7 @@ impl Compiler {
                     .expect("playground source cannot exceed 4 GiB"),
                 })
                 .collect(),
-        }
+        })
     }
 
     fn run_expr_with_target(
@@ -657,6 +682,53 @@ mod tests {
     }
 
     #[test]
+    fn physical_mir_inspection_and_execution_shim() {
+        let source = "fn second(pair: (int, bool)) -> bool { pair.1 } second((42, true))";
+        let mut compiler = build(source);
+        compiler
+            .session
+            .set_mir_optimization(MirOptimization::Disabled);
+        let physical = compiler.physical_mir_text().unwrap();
+        assert!(
+            physical.text.contains("address_offset"),
+            "{}",
+            physical.text
+        );
+        assert!(!physical.source_map.is_empty());
+        assert!(physical.source_map.iter().all(|entry| {
+            entry.from < entry.to
+                && entry.to as usize <= physical.text.len()
+                && entry.source_from <= entry.source_to
+                && entry.source_to as usize <= source.len()
+        }));
+        let result = compiler.run_expr_physical_mir().unwrap();
+        let error = result
+            .error_content()
+            .expect("the shim must not execute boxed MIR");
+        assert!(
+            error.complete.contains("not implemented yet"),
+            "{}",
+            error.complete
+        );
+        assert!(error.data.is_none());
+        assert_eq!(
+            compiler.run_expr_mir(false).unwrap().html_message(),
+            "true: bool"
+        );
+
+        assert!(
+            compiler
+                .compile("fn replacement() -> int { 7 } replacement()")
+                .is_none()
+        );
+        let replacement = compiler.physical_mir_text().unwrap();
+        assert!(replacement.text.contains("replacement"));
+        assert!(!replacement.text.contains("fn second"));
+        assert!(compiler.compile("fn broken() -> bool { 1 }").is_some());
+        assert!(compiler.physical_mir_text().unwrap().text.is_empty());
+    }
+
+    #[test]
     fn utf16_positions_cover_every_ide_output() {
         let mut compiler = Compiler::new();
         compiler.set_position_encoding(PositionEncoding::Utf16CodeUnit);
@@ -697,6 +769,14 @@ mod tests {
         assert!(mir.source_map.iter().all(|entry| {
             entry.from < entry.to
                 && entry.to as usize <= mir_utf16_len
+                && entry.source_from <= entry.source_to
+                && entry.source_to as usize <= source_utf16_len
+        }));
+        let physical = compiler.physical_mir_text().unwrap();
+        assert!(!physical.source_map.is_empty());
+        assert!(physical.source_map.iter().all(|entry| {
+            entry.from < entry.to
+                && entry.to as usize <= physical.text.encode_utf16().count()
                 && entry.source_from <= entry.source_to
                 && entry.source_to as usize <= source_utf16_len
         }));

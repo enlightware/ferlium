@@ -19,7 +19,7 @@ use ustr::Ustr;
 
 use super::artifacts::{
     MirArtifacts, MirOptimization, ModuleArtifacts, ensure_mir_artifacts,
-    ensure_optimized_mir_artifacts,
+    ensure_optimized_mir_artifacts, ensure_physical_mir_artifacts,
 };
 
 use crate::{
@@ -1059,7 +1059,8 @@ impl CompilerSession {
         self.compile_for(ExecutionTarget::Hir, src_code, source_name, module_path)
     }
 
-    /// Compile source code with the backend artifacts required by `target`.
+    /// Compile source code with the semantic artifacts required by `target`. Physical lowering
+    /// and resolution happen on inspection or execution and can report backend errors separately.
     pub fn compile_for(
         &mut self,
         target: ExecutionTarget,
@@ -1228,6 +1229,65 @@ impl CompilerSession {
         emit_mir::emit_mir_with_source_map(module, self.raw_modules(), artifacts)
     }
 
+    /// Emits verified physical MIR, always derived from optimized MIR for the host ABI.
+    pub fn emit_physical_mir_module(&self, module_id: ModuleId) -> Result<String, RuntimeError> {
+        Ok(self
+            .emit_physical_mir_module_with_source_map(module_id)?
+            .text)
+    }
+
+    pub(crate) fn emit_physical_mir_module_with_source_map(
+        &self,
+        module_id: ModuleId,
+    ) -> Result<emit_mir::MirText, RuntimeError> {
+        let program = self.prepare_physical_program(module_id)?;
+        Ok(emit_mir::emit_physical_mir_with_source_map(
+            self.expect_fresh_module(module_id),
+            self.raw_modules(),
+            program
+                .module(module_id)
+                .expect("the requested module was assembled"),
+        ))
+    }
+
+    /// Lower and resolve the fresh dependency closure of the requested module. Module artifacts
+    /// are revision-cached; the resolved view is rebuilt so edits cannot retain stale imports.
+    pub(crate) fn prepare_physical_program(
+        &self,
+        module_id: ModuleId,
+    ) -> Result<crate::mir::physical::program::ResolvedPhysicalProgram<'_>, RuntimeError> {
+        let mut pending = vec![module_id];
+        let mut seen = FxHashSet::default();
+        let mut artifacts = Vec::new();
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            let entry = self.expect_module_entry(id);
+            if entry.stale || entry.module().is_none() {
+                return Err(RuntimeError::Backend(format!(
+                    "Module {id} is stale or unavailable"
+                )));
+            }
+            pending.extend(entry.module().unwrap().deps());
+            ensure_physical_mir_artifacts(self, id)
+                .map_err(|error| RuntimeError::Backend(error.to_string()))?;
+            let physical = entry
+                .artifacts()
+                .physical_mir()
+                .expect("physical MIR was just prepared");
+            physical
+                .validate_native_runtime(ModuleEnv::new(
+                    entry.module().unwrap(),
+                    self.raw_modules(),
+                ))
+                .map_err(|error| RuntimeError::Backend(error.to_string()))?;
+            artifacts.push(physical);
+        }
+        crate::mir::physical::program::resolve_physical_program(artifacts)
+            .map_err(|error| RuntimeError::Backend(error.to_string()))
+    }
+
     /// Lowers `src` to MIR and interprets its `fn main` entry, returning a textual rendering of the
     /// result. Used to check that the MIR lowering is semantically correct.
     ///
@@ -1305,6 +1365,18 @@ impl CompilerSession {
         arguments: Vec<Value>,
         limits: ReferenceInterpreterLimits,
     ) -> Result<Value, RuntimeError> {
+        if target == ExecutionTarget::PhysicalMir {
+            // No invocation is started by the shim. Reclaim caller-owned backing storage without
+            // running guest drop code, including when physical preparation fails.
+            for argument in arguments {
+                argument.discard_storage();
+            }
+            let program = self.prepare_physical_program(module_id)?;
+            return crate::mir::physical::interpreter::run_entry(
+                &program,
+                FunctionId::new(module_id, entry),
+            );
+        }
         self.prepare_execution_target(target, module_id);
         match target {
             ExecutionTarget::Hir => {
@@ -1322,6 +1394,7 @@ impl CompilerSession {
                 let mut interp = Interpreter::with_limits(module_id, self, limits);
                 interp.run_entry(module_id, entry, arguments)
             }
+            ExecutionTarget::PhysicalMir => unreachable!("handled before starting an invocation"),
         }
     }
 
@@ -1363,10 +1436,17 @@ impl CompilerSession {
         Ok((value, profile))
     }
 
-    /// Ensure that `module_id` and its dependencies have the artifacts needed by `target`.
-    /// Existing artifacts for the same module revision are reused.
+    /// Ensure that `module_id` and its dependencies have the semantic artifacts needed by `target`.
+    /// Physical targets always prepare optimized MIR; fallible physical lowering and resolution
+    /// happen on inspection or execution. Existing artifacts for the same revision are reused.
     pub fn prepare_execution_target(&mut self, target: ExecutionTarget, module_id: ModuleId) {
-        if target != ExecutionTarget::Mir {
+        if target == ExecutionTarget::Hir {
+            return;
+        }
+        // Physical lowering is fallible and is performed by prepare_physical_program. This
+        // infallible preparation API only ensures its optimized semantic input.
+        if target == ExecutionTarget::PhysicalMir {
+            ensure_optimized_mir_artifacts(&*self, module_id);
             return;
         }
         match self.mir_optimization {
@@ -1570,6 +1650,84 @@ mod tests {
             type_scheme::TypeScheme,
         },
     };
+
+    #[test]
+    fn physical_preparation_reuses_revisions_and_rejects_stale_dependencies() {
+        let mut session = CompilerSession::new();
+        let dep_path = Path::single_str("physical_dep");
+        let dep = session
+            .compile(
+                "pub fn second(pair: (int, bool)) -> bool { pair.1 }",
+                "physical_dep",
+                dep_path.clone(),
+            )
+            .unwrap()
+            .module_id;
+        let user_path = Path::single_str("physical_user");
+        let user_source = "physical_dep::second((42, true))";
+        let user = session
+            .compile(user_source, "physical_user", user_path.clone())
+            .unwrap();
+        session.set_mir_optimization(MirOptimization::Disabled);
+        let first = session.prepare_physical_program(user.module_id).unwrap();
+        let second = session.prepare_physical_program(user.module_id).unwrap();
+        for artifact in first.modules() {
+            assert!(std::ptr::eq(
+                *artifact,
+                second.module(artifact.module()).unwrap()
+            ));
+        }
+        assert!(first.module(dep).is_some());
+        assert!(first.module(STD_MODULE_ID).is_some());
+        assert_eq!(session.mir_optimization, MirOptimization::Disabled);
+        // Keep the old revisions alive only for the cache identity comparison after editing.
+        // Resolved programs themselves borrow the session and cannot span a mutable edit.
+        let previous_revisions = [dep, user.module_id, STD_MODULE_ID].map(|id| {
+            (
+                id,
+                Rc::clone(session.expect_module_entry(id).revision.as_ref().unwrap()),
+            )
+        });
+        let error = session
+            .run_entry(
+                ExecutionTarget::PhysicalMir,
+                user.module_id,
+                user.expr.unwrap(),
+                vec![],
+            )
+            .unwrap_err();
+        assert!(matches!(error, RuntimeError::Backend(_)));
+        assert!(error.source_failure().is_none());
+        assert!(!error.is_poisoning());
+
+        session
+            .compile(
+                "pub fn second(pair: (int, bool)) -> bool { false }",
+                "physical_dep",
+                dep_path,
+            )
+            .unwrap();
+        // Successful dependency edits automatically rebuild affected source modules.
+        let third = session.prepare_physical_program(user.module_id).unwrap();
+        for (id, previous) in previous_revisions {
+            assert_eq!(
+                std::ptr::eq(
+                    previous.artifacts.physical_mir().unwrap(),
+                    third.module(id).unwrap()
+                ),
+                id == STD_MODULE_ID,
+            );
+        }
+        assert!(
+            session
+                .compile("fn broken() -> bool { 1 }", "physical_user", user_path)
+                .is_err()
+        );
+        assert!(matches!(
+            session.prepare_physical_program(user.module_id),
+            Err(RuntimeError::Backend(_))
+        ));
+    }
 
     #[test]
     fn ordinary_assignment_does_not_materialize_a_never_typed_local() {

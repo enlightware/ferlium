@@ -125,7 +125,7 @@ pub(crate) fn compile_with_source_id(
             (id, old, had_mir, compilation_revision)
         }
     };
-    let build_mir = target == ExecutionTarget::Mir || had_mir;
+    let build_mir = target != ExecutionTarget::Hir || had_mir;
     let src_info = ModuleSrcInfo::new(source_id, source_version, uses.clone());
     let mut warnings = Vec::<CompilationWarning>::new();
 

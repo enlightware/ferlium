@@ -2561,7 +2561,7 @@ fn recursive_execution_errors() {
         let output = session.compile(source);
         let entry = output.expr.expect("test source should have an expression");
         let limits = ReferenceInterpreterLimits::default().with_call_depth_limit(4);
-        for target in ferlium::ExecutionTarget::ALL {
+        for target in ferlium::ExecutionTarget::REFERENCE {
             let error = session
                 .session_mut()
                 .run_entry_with_limits(target, output.module_id, entry, vec![], limits)

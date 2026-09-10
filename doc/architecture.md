@@ -71,8 +71,8 @@ MIR's structure and invariants are specified in [mir-ir.md](mir-ir.md); the rewr
 order they run in, and the rules deciding where a pass belongs are in
 [mir-optimization.md](mir-optimization.md).
 
-Future backend work lowers each module's optimized MIR to backend-ready physical MIR, links the
-session's physical modules, and then emits WebAssembly, bytecode, JIT, or native code.
+Physical preparation lowers each module's optimized MIR to backend-ready physical MIR and resolves
+the module dependency closure. Physical execution and machine-code emission remain future work.
 
 Every compilation attempt stores severity-tagged source diagnostics on its module entry. Errors make
 the attempt fail; warnings remain available through `ModuleInfo::diagnostics` on a successful

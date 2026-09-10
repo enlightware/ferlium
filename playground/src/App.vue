@@ -7,9 +7,9 @@ import SimpleButton from './components/SimpleButton.vue';
 import FlatLinkButton from './components/FlatLinkButton.vue';
 import ConsoleOutput from './components/ConsoleOutput.vue';
 import { demoCodes } from './demo-codes';
-import { defined } from './types';
+import { defined, executionModes } from './types';
 import { onMounted } from 'vue';
-import type { IrText, SourceRange } from './types';
+import type { ExecutionMode, IrText, SourceRange } from './types';
 
 const demoTitles = demoCodes.map(([title, _]) => title);
 const annotationModes = ["none", "light", "full"] as const;
@@ -23,21 +23,10 @@ const editor = ref<typeof CodeEditor>();
 const console = ref<typeof ConsoleOutput>();
 const isRunDisabled = ref(false);
 const annotationMode = ref<AnnotationMode>("light");
-const executionModes = [
-	{ value: "hir", label: "HIR" },
-	{ value: "mir", label: "MIR" },
-	{ value: "optimized-mir", label: "Opt. MIR" },
-] as const;
-type ExecutionMode = typeof executionModes[number]["value"];
 const executionMode = ref<ExecutionMode>("hir");
 const ir = ref<IrText>();
 const sourceSelection = ref<SourceRange>();
-const irTitles: Record<ExecutionMode, string> = {
-	"hir": "IR",
-	"mir": "MIR",
-	"optimized-mir": "Optimized MIR",
-};
-const irTitle = computed(() => irTitles[executionMode.value]);
+const irTitle = computed(() => defined(executionModes.find(mode => mode.value === executionMode.value)).label);
 // The pane follows the selected execution mode, not the availability of its content: a transiently
 // broken source while typing must not make the layout jump.
 const isIrVisible = computed(() => executionMode.value !== "hir");

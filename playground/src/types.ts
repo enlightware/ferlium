@@ -34,6 +34,15 @@ export function defined<T>(value: T | undefined, message: string | null = null):
 	return value;
 }
 
+export const executionModes = [
+	{ value: "hir", label: "HIR" },
+	{ value: "mir", label: "raw MIR" },
+	{ value: "optimized-mir", label: "opt. MIR" },
+	{ value: "physical-mir", label: "phy. MIR" },
+] as const;
+
+export type ExecutionMode = typeof executionModes[number]["value"];
+
 export interface SourceRange {
 	from: number;
 	to: number;

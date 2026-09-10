@@ -6,7 +6,7 @@ described in [mir-error-propagation.md](mir-error-propagation.md); memory accoun
 
 ## Runtime outcomes
 
-There are three outcomes besides successful return:
+Once guest execution starts, there are three outcomes besides successful return:
 
 1. A **source failure** is declared by the `Fallible` effect. It follows semantic cleanup and uses
    the status-bearing function ABI. If cleanup succeeds, the executor remains reusable.

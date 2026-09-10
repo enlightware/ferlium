@@ -166,6 +166,47 @@ pub(crate) fn emit_mir_with_source_map(
     }
 }
 
+/// Physical dumps include every body, including retained addressors and generated helpers that
+/// have no script entry in the semantic module's function table.
+pub(crate) fn emit_physical_mir_with_source_map(
+    module: &Module,
+    others: &Modules,
+    artifacts: &mir::physical::BackendReadyMirArtifacts,
+) -> MirText {
+    let env = ModuleEnv::new(module, others);
+    let mut text = MirText {
+        text: String::new(),
+        source_map: Vec::new(),
+    };
+    let mut functions = (0..artifacts.entry_count())
+        .map(LocalFunctionId::from_index)
+        .collect::<Vec<_>>();
+    // Match the semantic dump's named-script order, then append other physical entries by id.
+    functions.sort_by_key(|id| {
+        let name = module
+            .get_function_by_id(*id)
+            .filter(|function| function.code.as_ref().as_script().is_some())
+            .and_then(|_| module.get_function_name_by_id(*id));
+        (name.is_none(), name, id.as_index())
+    });
+    for id in functions {
+        if let Some(body) = artifacts.get(id) {
+            if !text.text.is_empty() {
+                text.text.push('\n');
+            }
+            writeln!(
+                text.text,
+                "// physical entry m{}:f{}",
+                artifacts.module(),
+                id
+            )
+            .expect("writing to a string cannot fail");
+            append_rendered_function(body, &env, &mut text.text, &mut text.source_map);
+        }
+    }
+    text
+}
+
 fn append_rendered_function(
     function: &mir::Function,
     env: &ModuleEnv<'_>,

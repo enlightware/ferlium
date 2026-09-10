@@ -445,6 +445,7 @@ impl<'a> EvalCtx<'a> {
             poisoning => return self.record_poisoning_error(poisoning),
         };
         match cleanup(self) {
+            Err(RuntimeError::Backend(_)) => unreachable!("backend errors precede guest execution"),
             Ok(()) => RuntimeError::SourceFailure(initial),
             Err(RuntimeError::SourceFailure(during_cleanup)) => {
                 self.poison_source_failures(initial, during_cleanup)
@@ -500,6 +501,7 @@ impl<'a> EvalCtx<'a> {
 
     fn record_poisoning_error(&mut self, error: RuntimeError) -> RuntimeError {
         self.execution_state = ExecutionState::Poisoned(match &error {
+            RuntimeError::Backend(_) => unreachable!("backend errors precede guest execution"),
             RuntimeError::SandboxViolation(violation) => {
                 PoisonReason::SandboxViolation(violation.clone())
             }
@@ -1147,9 +1149,11 @@ impl FormatWith<(&SourceTable, ModuleRegistry<'_>)> for BacktraceFrame {
     }
 }
 
-/// A runtime outcome that escaped the current Ferlium invocation.
+/// An execution error: either a backend failed to start or an outcome escaped a guest invocation.
 #[derive(Debug, Clone)]
 pub enum RuntimeError {
+    /// Backend preparation or availability failure, before any guest invocation starts.
+    Backend(String),
     /// A failure declared by the source-level `Fallible` effect.
     SourceFailure(SourceFailure),
     /// A host-enforced limit violation. Guest cleanup must not run after this point.
@@ -1286,6 +1290,7 @@ impl RuntimeError {
 
     pub fn with_frame(self, function_id: FunctionId, location: Location) -> Self {
         match self {
+            Self::Backend(_) => self,
             Self::SourceFailure(failure) => {
                 Self::SourceFailure(failure.with_frame(function_id, location))
             }
@@ -1304,12 +1309,13 @@ impl RuntimeError {
     pub fn source_failure(&self) -> Option<&SourceFailure> {
         match self {
             Self::SourceFailure(failure) => Some(failure),
-            Self::SandboxViolation(_) | Self::FailureDuringCleanup(_) => None,
+            Self::Backend(_) | Self::SandboxViolation(_) | Self::FailureDuringCleanup(_) => None,
         }
     }
 
     pub fn kind(&self) -> RuntimeErrorKind {
         match self {
+            Self::Backend(_) => RuntimeErrorKind::Backend,
             Self::SourceFailure(failure) => RuntimeErrorKind::SourceFailure(failure.kind()),
             Self::SandboxViolation(violation) => {
                 RuntimeErrorKind::SandboxViolation(violation.kind())
@@ -1321,19 +1327,20 @@ impl RuntimeError {
     pub fn sandbox_violation(&self) -> Option<&SandboxViolation> {
         match self {
             Self::SandboxViolation(violation) => Some(violation),
-            Self::SourceFailure(_) | Self::FailureDuringCleanup(_) => None,
+            Self::Backend(_) | Self::SourceFailure(_) | Self::FailureDuringCleanup(_) => None,
         }
     }
 
     pub fn failure_during_cleanup(&self) -> Option<&FailureDuringCleanup> {
         match self {
             Self::FailureDuringCleanup(failure) => Some(failure),
-            Self::SourceFailure(_) | Self::SandboxViolation(_) => None,
+            Self::Backend(_) | Self::SourceFailure(_) | Self::SandboxViolation(_) => None,
         }
     }
 
     pub fn location(&self) -> Option<Location> {
         match self {
+            Self::Backend(_) => None,
             Self::SourceFailure(failure) => failure.location(),
             Self::SandboxViolation(violation) => violation.location(),
             Self::FailureDuringCleanup(failure) => failure.initial.location(),
@@ -1342,6 +1349,7 @@ impl RuntimeError {
 
     pub fn backtrace(&self) -> &[BacktraceFrame] {
         match self {
+            Self::Backend(_) => &[],
             Self::SourceFailure(failure) => failure.backtrace(),
             Self::SandboxViolation(violation) => violation.backtrace(),
             Self::FailureDuringCleanup(failure) => failure.initial.backtrace(),
@@ -1350,7 +1358,10 @@ impl RuntimeError {
 
     /// Whether this error poisons its execution domain and forbids further guest cleanup.
     pub fn is_poisoning(&self) -> bool {
-        !matches!(self, Self::SourceFailure(_))
+        matches!(
+            self,
+            Self::SandboxViolation(_) | Self::FailureDuringCleanup(_)
+        )
     }
 
     pub fn top_most_location_in(&self, source_id: SourceId) -> Option<Location> {
@@ -1375,6 +1386,7 @@ impl FormatWith<(&SourceTable, &Modules)> for RuntimeError {
         data: &(&SourceTable, &Modules),
     ) -> std::fmt::Result {
         match self {
+            Self::Backend(message) => write!(f, "Execution backend error: {message}")?,
             Self::SourceFailure(failure) => failure.fmt_with(f, data)?,
             Self::SandboxViolation(violation) => violation.fmt_with(f, data)?,
             Self::FailureDuringCleanup(failure) => {

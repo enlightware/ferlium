@@ -11,6 +11,7 @@
 mod buffer;
 mod dictionary;
 mod evidence;
+pub(crate) mod interpreter;
 mod native;
 mod native_access;
 pub(crate) mod program;
@@ -368,8 +369,7 @@ impl BackendReadyMirArtifacts {
         self.native_requirements.signature(function)
     }
 
-    /// Recheck bindings when an executor attaches a runtime. Artifact construction validates
-    /// its current environment; executor integration of this later check is still pending.
+    /// Recheck bindings against the attached runtime, including when reusing cached artifacts.
     pub(crate) fn validate_native_runtime(
         &self,
         env: ModuleEnv<'_>,
@@ -3585,7 +3585,7 @@ mod tests {
             .entries
             .push(Some(caller.finish_unverified()));
         assert!(matches!(
-            program::resolve_physical_program(vec![artifacts, caller_artifacts]),
+            program::resolve_physical_program([&artifacts, &caller_artifacts]),
             Err(program::PhysicalProgramError::InvalidCallConvention { .. })
         ));
     }
@@ -3640,7 +3640,7 @@ mod tests {
             let env = ModuleEnv::new(session.expect_fresh_module(module), session.raw_modules());
             assert!(matches!(verify_physical_mir(&artifacts, env),
                 Err(BackendReadinessError::InvalidPhysicalProtocol { function, .. }) if function == target));
-            assert!(matches!(program::resolve_physical_program(vec![artifacts]),
+            assert!(matches!(program::resolve_physical_program([&artifacts]),
                 Err(program::PhysicalProgramError::InvalidResultParameter { function }) if function == target));
         }
     }
@@ -3741,7 +3741,7 @@ mod tests {
         );
         let (artifacts, _) = lower(&mut session, module).unwrap();
         let (std, _) = lower(&mut session, crate::std::STD_MODULE_ID).unwrap();
-        program::resolve_physical_program(vec![artifacts, std]).unwrap();
+        program::resolve_physical_program([&artifacts, &std]).unwrap();
     }
 
     #[test]
@@ -3899,7 +3899,7 @@ mod tests {
                 ))
         );
         let (std, _) = lower(&mut session, crate::std::STD_MODULE_ID).unwrap();
-        program::resolve_physical_program(vec![std, host_physical, physical]).unwrap();
+        program::resolve_physical_program([&std, &host_physical, &physical]).unwrap();
     }
 
     #[test]
@@ -4479,7 +4479,7 @@ mod tests {
         rebuild_evidence_catalogs(&session, &mut physical);
 
         assert!(matches!(
-            program::resolve_physical_program(vec![physical]),
+            program::resolve_physical_program([&physical]),
             Err(program::PhysicalProgramError::UnresolvedSubscript { subscript, .. })
                 if subscript == foreign
         ));
@@ -4499,7 +4499,7 @@ mod tests {
         let (user, _) = lower(&mut session, module).unwrap();
         let (std, _) = lower(&mut session, crate::std::STD_MODULE_ID).unwrap();
 
-        let resolved = program::resolve_physical_program(vec![user, std]).unwrap();
+        let resolved = program::resolve_physical_program([&user, &std]).unwrap();
 
         assert!(resolved.module(crate::std::STD_MODULE_ID).is_some());
         assert!(resolved.module(module).is_some());
@@ -4556,7 +4556,7 @@ mod tests {
 
         assert!(user_physical.subscript_imports().contains(&subscript));
         let resolved =
-            program::resolve_physical_program(vec![user_physical, std, base_physical]).unwrap();
+            program::resolve_physical_program([&user_physical, &std, &base_physical]).unwrap();
 
         assert!(resolved.subscript(subscript).is_some());
         assert!(resolved.subscript_member(subscript, true).is_some());

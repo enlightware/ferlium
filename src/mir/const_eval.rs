@@ -307,6 +307,7 @@ impl<'a> ConstEvaluator<'a> {
 /// Maps a runtime outcome to a refusal reason. Nothing escapes as a compilation error.
 fn classify(error: RuntimeError) -> NotFoldable {
     match error {
+        RuntimeError::Backend(_) => unreachable!("const evaluation uses the boxed interpreter"),
         RuntimeError::SourceFailure(_) => NotFoldable::Failed,
         RuntimeError::SandboxViolation(_) | RuntimeError::FailureDuringCleanup(_) => {
             NotFoldable::BudgetExceeded

@@ -78,7 +78,7 @@ fn execution_targets_accept_by_value_arguments() {
         .expect_fresh_module(module_id)
         .get_local_function_id(ustr::ustr("add_one"))
         .unwrap();
-    for target in ExecutionTarget::ALL {
+    for target in ExecutionTarget::REFERENCE {
         assert_val_eq!(
             session
                 .session_mut()
@@ -101,7 +101,7 @@ fn execution_targets_use_configured_limits() {
         .expect("test source should define a recovery function");
     let limits = ReferenceInterpreterLimits::default().with_fuel_limit(Some(0));
 
-    for target in ExecutionTarget::ALL {
+    for target in ExecutionTarget::REFERENCE {
         let error = session
             .session_mut()
             .run_entry_with_limits(target, output.module_id, entry, vec![], limits)
@@ -154,7 +154,7 @@ fn sandbox_violation_during_source_failure_cleanup_retains_both_causes() {
         .expect("test source should define `main`");
     let limits = ReferenceInterpreterLimits::default().with_fuel_limit(Some(0));
 
-    for target in ExecutionTarget::ALL {
+    for target in ExecutionTarget::REFERENCE {
         let error = session
             .session_mut()
             .run_entry_with_limits(target, module_id, main_id, vec![], limits)
@@ -180,7 +180,7 @@ fn assert_fuel_violation_during_cleanup(
 ) {
     let limits = ReferenceInterpreterLimits::default().with_fuel_limit(Some(0));
 
-    for target in ExecutionTarget::ALL {
+    for target in ExecutionTarget::REFERENCE {
         session
             .run("testing::reset_tracked_drops()")
             .discard_storage();

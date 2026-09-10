@@ -18,6 +18,13 @@ const compiler = vi.hoisted(() => {
 			return { succeeded: true, diagnostics: [] };
 		}),
 		mirText: vi.fn(() => ({ text: `MIR of ${source}`, source_map: [] })),
+		physicalMirText: vi.fn(() => ({ text: `Physical MIR of ${source}`, source_map: [] })),
+		runHir: vi.fn(),
+		runMir: vi.fn(),
+		runPhysicalMir: vi.fn(() => ({
+			html_message: () => "Physical MIR execution is not implemented yet",
+			error_data: () => undefined,
+		})),
 	};
 });
 
@@ -30,9 +37,11 @@ vi.mock("./compiler-api", () => ({
 		}
 		get_annotations() { return []; }
 		get_light_annotations() { return []; }
-		run_expr() { return undefined; }
-		run_expr_mir() { return undefined; }
+		run_expr() { return compiler.runHir(); }
+		run_expr_mir(optimized: boolean) { return compiler.runMir(optimized); }
+		run_expr_physical_mir() { return compiler.runPhysicalMir(); }
 		mir_text() { return compiler.mirText(); }
+		physical_mir_text() { return compiler.physicalMirText(); }
 	},
 }));
 
@@ -89,7 +98,7 @@ describe("App", () => {
 		const app = mountApp();
 		// The source is still empty, so no MIR exists yet: the pane must be there all the same, so
 		// that it does not appear and disappear as the source alternates between valid and invalid.
-		await selects(app).executionMode.setValue("MIR");
+		await selects(app).executionMode.setValue("raw MIR");
 		await vi.waitFor(() => {
 			expect(document.body.querySelector(".ir-panel")).not.toBe(null);
 		});
@@ -98,7 +107,7 @@ describe("App", () => {
 
 	it("refreshes the MIR when the source comes from the code sample selector", async () => {
 		const app = mountApp();
-		await selects(app).executionMode.setValue("MIR");
+		await selects(app).executionMode.setValue("raw MIR");
 		await selects(app).sample.setValue("Factorial");
 		await vi.waitFor(() => {
 			expect(irText()).toContain("fn factorial");
@@ -108,5 +117,32 @@ describe("App", () => {
 		await vi.waitFor(() => {
 			expect(irText()).toContain("fn is_even");
 		});
+	});
+
+	it("inspects physical MIR and reports the execution shim without falling back", async () => {
+		const app = mountApp();
+		expect(selects(app).executionMode.findAll("option:not([disabled])").map(option => option.text()))
+			.toEqual(["HIR", "raw MIR", "opt. MIR", "phy. MIR"]);
+		await selects(app).executionMode.setValue("phy. MIR");
+		await selects(app).sample.setValue("Factorial");
+		await vi.waitFor(() => expect(irText()).toContain("Physical MIR of fn factorial"));
+		await app.get(".execution-controls button").trigger("click");
+		expect(compiler.runPhysicalMir).toHaveBeenCalledOnce();
+		expect(compiler.runHir).not.toHaveBeenCalled();
+		expect(compiler.runMir).not.toHaveBeenCalled();
+		expect(app.text()).toContain("Physical MIR execution is not implemented yet");
+		await selects(app).executionMode.setValue("opt. MIR");
+		await vi.waitFor(() => expect(irText()).not.toContain("Physical MIR"));
+		await app.get(".execution-controls button").trigger("click");
+		expect(compiler.runMir).toHaveBeenCalledWith(true);
+	});
+
+	it("shows physical preparation errors in the IR pane", async () => {
+		const app = mountApp();
+		// wasm-bindgen propagates Result::Err(String) as a bare JavaScript string.
+		compiler.physicalMirText.mockImplementationOnce(() => { throw "unsupported native ABI"; });
+		await selects(app).executionMode.setValue("phy. MIR");
+		await selects(app).sample.setValue("Factorial");
+		await vi.waitFor(() => expect(irText()).toContain("Unable to prepare MIR: unsupported native ABI"));
 	});
 });

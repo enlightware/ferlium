@@ -65,6 +65,14 @@ impl PlaygroundCompiler {
         self.inner.mir_text(optimized)
     }
 
+    pub fn run_expr_physical_mir(&mut self) -> Option<ExecutionResult> {
+        self.inner.run_expr_physical_mir()
+    }
+
+    pub fn physical_mir_text(&mut self) -> Result<IrText, String> {
+        self.inner.physical_mir_text()
+    }
+
     pub fn get_annotations(&mut self) -> Vec<AnnotationData> {
         self.inner.get_annotations()
     }
@@ -138,3 +146,44 @@ fn append_to_playground_console(text: &str) {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn append_to_playground_console(_text: &str) {}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod tests {
+    use super::*;
+    use wasm_bindgen_test::*;
+
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    #[wasm_bindgen_test]
+    fn physical_mir_inspection_and_execution_shim_in_browser() {
+        set_panic_hook();
+        let mut compiler = PlaygroundCompiler::new();
+        let source =
+            "fn second(pair: (int, bool)) -> bool { pair.1 } print(\"😀\"); second((42, true))";
+        assert!(compiler.compile(source).succeeded);
+        let physical = compiler.physical_mir_text().unwrap();
+        assert!(physical.text.contains("address_offset"));
+        assert!(!physical.source_map.is_empty());
+        assert!(physical.source_map.iter().all(|entry| {
+            entry.from < entry.to
+                && entry.to as usize <= physical.text.encode_utf16().count()
+                && entry.source_from <= entry.source_to
+                && entry.source_to as usize <= source.encode_utf16().count()
+        }));
+        let error = compiler
+            .run_expr_physical_mir()
+            .unwrap()
+            .error_content()
+            .unwrap();
+        assert!(
+            error.complete.contains("not implemented yet"),
+            "{}",
+            error.complete
+        );
+        assert!(compiler.compile("40 + 2").succeeded);
+        assert_eq!(
+            compiler.run_expr_mir(true).unwrap().html_message(),
+            "42: int"
+        );
+    }
+}

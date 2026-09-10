@@ -50,16 +50,16 @@ pub(crate) enum InternedStaticEvidence {
 
 /// A resolved whole-program view over independently lowered physical modules.
 ///
-/// Assembly preserves every module artifact and its symbolic MIR unchanged. The view validates
+/// Assembly borrows every module artifact and preserves its symbolic MIR unchanged. The view validates
 /// cross-module references and provides shared lookup and static-evidence identities to executors.
-pub(crate) struct ResolvedPhysicalProgram {
-    modules: Box<[BackendReadyMirArtifacts]>,
+pub(crate) struct ResolvedPhysicalProgram<'a> {
+    modules: Box<[&'a BackendReadyMirArtifacts]>,
     static_evidence: Box<[InternedStaticEvidence]>,
     evidence_ids: FxHashMap<InternedStaticEvidence, ProgramEvidenceId>,
 }
 
-impl ResolvedPhysicalProgram {
-    pub(crate) fn modules(&self) -> &[BackendReadyMirArtifacts] {
+impl ResolvedPhysicalProgram<'_> {
+    pub(crate) fn modules(&self) -> &[&BackendReadyMirArtifacts] {
         &self.modules
     }
 
@@ -67,7 +67,7 @@ impl ResolvedPhysicalProgram {
         self.modules
             .binary_search_by_key(&id.as_index(), |module| module.module().as_index())
             .ok()
-            .map(|index| &self.modules[index])
+            .map(|index| self.modules[index])
     }
 
     pub(crate) fn function(&self, id: FunctionId) -> Option<&Function> {
@@ -290,9 +290,10 @@ impl fmt::Display for PhysicalProgramError {
 impl std::error::Error for PhysicalProgramError {}
 
 /// Assemble unchanged physical module artifacts into a resolved executable program view.
-pub(crate) fn resolve_physical_program(
-    mut modules: Vec<BackendReadyMirArtifacts>,
-) -> Result<ResolvedPhysicalProgram, PhysicalProgramError> {
+pub(crate) fn resolve_physical_program<'a>(
+    modules: impl IntoIterator<Item = &'a BackendReadyMirArtifacts>,
+) -> Result<ResolvedPhysicalProgram<'a>, PhysicalProgramError> {
+    let mut modules = modules.into_iter().collect::<Vec<_>>();
     modules.sort_by_key(|module| module.module().as_index());
     for pair in modules.windows(2) {
         if pair[0].module() == pair[1].module() {
@@ -580,11 +581,11 @@ fn has_function(program: &ResolvedPhysicalProgram, target: FunctionId) -> bool {
     })
 }
 
-fn expect_dictionary(
-    program: &ResolvedPhysicalProgram,
+fn expect_dictionary<'a>(
+    program: &'a ResolvedPhysicalProgram<'_>,
     owner: FunctionId,
     dictionary: TraitDictionaryId,
-) -> Result<&PhysicalDictionaryDefinition, PhysicalProgramError> {
+) -> Result<&'a PhysicalDictionaryDefinition, PhysicalProgramError> {
     program
         .dictionary(dictionary)
         .ok_or(PhysicalProgramError::UnresolvedDictionary { owner, dictionary })
@@ -610,11 +611,11 @@ fn verify_dictionary_capture_count(
     }
 }
 
-fn expect_subscript(
-    program: &ResolvedPhysicalProgram,
+fn expect_subscript<'a>(
+    program: &'a ResolvedPhysicalProgram<'_>,
     owner: FunctionId,
     subscript: SubscriptId,
-) -> Result<&PhysicalSubscriptDefinition, PhysicalProgramError> {
+) -> Result<&'a PhysicalSubscriptDefinition, PhysicalProgramError> {
     program
         .subscript(subscript)
         .ok_or(PhysicalProgramError::UnresolvedSubscript { owner, subscript })

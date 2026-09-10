@@ -68,6 +68,8 @@ impl Display for SandboxViolationKind {
 /// Stable summary of the structurally distinct outcomes carried by `RuntimeError`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeErrorKind {
+    /// The selected backend could not prepare or start execution; not a source effect.
+    Backend,
     SourceFailure(SourceFailureKind),
     SandboxViolation(SandboxViolationKind),
     FailureDuringCleanup,
@@ -76,6 +78,7 @@ pub enum RuntimeErrorKind {
 impl Display for RuntimeErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Backend => f.write_str("Execution backend error"),
             Self::SourceFailure(kind) => kind.fmt(f),
             Self::SandboxViolation(kind) => kind.fmt(f),
             Self::FailureDuringCleanup => {

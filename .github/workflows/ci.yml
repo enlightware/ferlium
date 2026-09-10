@@ -96,6 +96,10 @@ jobs:
         # Keep debug assertions, but omit debuginfo from the Wasm test artifact.
         run: CARGO_PROFILE_TEST_DEBUG=0 WASM_BINDGEN_USE_BROWSER=1 WASM_BINDGEN_TEST_TIMEOUT=600 wasm-pack test ${{ matrix.browser_flags }} --headless --test language --lib
 
+      - name: Run Playground WASM tests (${{ matrix.browser }})
+        working-directory: playground/script-api
+        run: CARGO_PROFILE_TEST_DEBUG=0 WASM_BINDGEN_USE_BROWSER=1 WASM_BINDGEN_TEST_TIMEOUT=600 wasm-pack test ${{ matrix.browser_flags }} --headless --lib
+
   build_site:
     name: Build and upload playground and book
     runs-on: ubuntu-latest
