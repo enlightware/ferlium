@@ -18,8 +18,8 @@ use crate::{
 };
 
 use super::{
-    NativeTypeCatalog, SnapshotError, SnapshotFnType, SnapshotLiteral, SnapshotTypeGraph,
-    SnapshotTypeGraphBuilder, SnapshotTypeId,
+    CacheChecksum, NativeTypeCatalog, SnapshotError, SnapshotFnType, SnapshotLiteral,
+    SnapshotTypeGraph, SnapshotTypeGraphBuilder, SnapshotTypeId,
 };
 use crate::compiler::artifacts::{MirArtifacts, Specialization};
 use crate::mir::{operation::VariantMetadata, pass::OptimizationStats};
@@ -29,15 +29,18 @@ use crate::mir::{operation::VariantMetadata, pass::OptimizationStats};
 pub(crate) enum MirSnapshotStage {
     Raw,
     Optimized,
+    Physical,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone)]
 pub(crate) struct CompiledStdMirSnapshot {
+    module: crate::module::ModuleId,
+    module_path: String,
     stage: MirSnapshotStage,
     std_source_fingerprint: String,
     semantic_build_fingerprint: String,
-    parent_checksum: [u8; 32],
+    parent_checksum: CacheChecksum,
     payload: SnapshotMirArtifacts,
 }
 
@@ -54,10 +57,13 @@ pub(crate) struct SnapshotMirArtifacts {
 impl CompiledStdMirSnapshot {
     pub(crate) fn capture(
         stage: MirSnapshotStage,
-        parent_checksum: [u8; 32],
+        parent_checksum: CacheChecksum,
         artifacts: &MirArtifacts,
+        module: &Module,
     ) -> Result<Self, SnapshotError> {
         Ok(Self {
+            module: module.module_id(),
+            module_path: module.path().to_string(),
             stage,
             std_source_fingerprint: env!("FERLIUM_STD_SOURCE_FINGERPRINT").to_owned(),
             semantic_build_fingerprint: env!("FERLIUM_SEMANTIC_BUILD_FINGERPRINT").to_owned(),
@@ -77,7 +83,7 @@ impl CompiledStdMirSnapshot {
     pub(crate) fn matches_current(
         &self,
         stage: MirSnapshotStage,
-        parent_checksum: &[u8; 32],
+        parent_checksum: &CacheChecksum,
     ) -> bool {
         self.stage == stage
             && self.std_source_fingerprint == env!("FERLIUM_STD_SOURCE_FINGERPRINT")
@@ -88,7 +94,7 @@ impl CompiledStdMirSnapshot {
     pub(crate) fn validate_lineage(
         &self,
         stage: MirSnapshotStage,
-        parent_checksum: &[u8; 32],
+        parent_checksum: &CacheChecksum,
     ) -> Result<(), SnapshotError> {
         self.matches_current(stage, parent_checksum)
             .then_some(())
@@ -100,6 +106,7 @@ impl CompiledStdMirSnapshot {
         module: &Module,
         modules: &Modules,
     ) -> Result<MirArtifacts, SnapshotError> {
+        self.validate_module(module)?;
         self.payload.restore_raw(module, modules, false)
     }
 
@@ -108,6 +115,7 @@ impl CompiledStdMirSnapshot {
         module: &Module,
         modules: &Modules,
     ) -> Result<MirArtifacts, SnapshotError> {
+        self.validate_module(module)?;
         self.payload.restore_raw(module, modules, true)
     }
 
@@ -117,6 +125,7 @@ impl CompiledStdMirSnapshot {
         modules: &Modules,
         raw: &MirArtifacts,
     ) -> Result<MirArtifacts, SnapshotError> {
+        self.validate_module(module)?;
         self.payload.restore_optimized(module, modules, raw, false)
     }
 
@@ -126,7 +135,16 @@ impl CompiledStdMirSnapshot {
         modules: &Modules,
         raw: &MirArtifacts,
     ) -> Result<MirArtifacts, SnapshotError> {
+        self.validate_module(module)?;
         self.payload.restore_optimized(module, modules, raw, true)
+    }
+
+    fn validate_module(&self, module: &Module) -> Result<(), SnapshotError> {
+        if self.module == module.module_id() && self.module_path == module.path().to_string() {
+            Ok(())
+        } else {
+            Err(SnapshotError::StaleSnapshot)
+        }
     }
 }
 
@@ -140,7 +158,7 @@ struct SnapshotSpecialization {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone)]
-struct SnapshotMirFunction {
+pub(super) struct SnapshotMirFunction {
     name: String,
     result_convention: CallResultConvention,
     parameters: Vec<SnapshotParameter>,
@@ -548,7 +566,7 @@ fn verify_functions(
 }
 
 impl SnapshotMirFunction {
-    fn capture(
+    pub(super) fn capture(
         function: &Function,
         graph: &mut SnapshotTypeGraphBuilder<'_>,
     ) -> Result<Self, SnapshotError> {
@@ -583,7 +601,7 @@ impl SnapshotMirFunction {
         })
     }
 
-    fn materialize(&self, types: &[Type]) -> Result<Function, SnapshotError> {
+    pub(super) fn materialize(&self, types: &[Type]) -> Result<Function, SnapshotError> {
         Ok(Function::new(
             self.name.as_str().into(),
             self.result_convention,
@@ -1300,7 +1318,7 @@ mod tests {
         let raw = entry.raw_mir().unwrap();
 
         let raw_snapshot =
-            CompiledStdMirSnapshot::capture(MirSnapshotStage::Raw, [7; 32], raw).unwrap();
+            CompiledStdMirSnapshot::capture(MirSnapshotStage::Raw, [7; 32], raw, module).unwrap();
         let encoded = raw_snapshot.encode().unwrap();
         let decoded = CompiledStdMirSnapshot::decode(&encoded).unwrap();
         assert_eq!(
@@ -1328,13 +1346,18 @@ mod tests {
             .restore_raw_verified(module, session.raw_modules())
             .unwrap();
         let recaptured_raw =
-            CompiledStdMirSnapshot::capture(MirSnapshotStage::Raw, [7; 32], &restored_raw).unwrap();
+            CompiledStdMirSnapshot::capture(MirSnapshotStage::Raw, [7; 32], &restored_raw, module)
+                .unwrap();
         assert_eq!(recaptured_raw.encode().unwrap(), encoded);
 
         let optimized = MirArtifacts::optimize(raw, module, &session);
-        let optimized_snapshot =
-            CompiledStdMirSnapshot::capture(MirSnapshotStage::Optimized, [9; 32], &optimized)
-                .unwrap();
+        let optimized_snapshot = CompiledStdMirSnapshot::capture(
+            MirSnapshotStage::Optimized,
+            [9; 32],
+            &optimized,
+            module,
+        )
+        .unwrap();
         let encoded = optimized_snapshot.encode().unwrap();
         let decoded = CompiledStdMirSnapshot::decode(&encoded).unwrap();
         assert_eq!(
@@ -1352,6 +1375,7 @@ mod tests {
             MirSnapshotStage::Optimized,
             [9; 32],
             &restored_optimized,
+            module,
         )
         .unwrap();
         assert_eq!(recaptured_optimized.encode().unwrap(), encoded);

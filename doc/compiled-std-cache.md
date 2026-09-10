@@ -1,6 +1,6 @@
 # Compiled standard-library cache
 
-Ferlium caches the standard library's semantic HIR, raw MIR, and optimized MIR across compiler
+Ferlium caches the standard library's semantic HIR, raw MIR, optimized MIR, and physical MIR across compiler
 processes. Each stage is a separate artifact and is loaded only when requested. This is enabled by
 the default `std-cache` Cargo feature. Set
 `FERLIUM_STD_CACHE_DISABLE` to any value to force the old compile-on-startup path, or set
@@ -27,14 +27,21 @@ compilation. The format is trusted compiler-owned cache data rather than a harde
 format. Both hashes are part of the filename, allowing worktrees and branches to coexist in the
 shared directory.
 
-Raw MIR records the checksum of the semantic-HIR snapshot installed in the session. Optimized MIR
-records the checksum of the installed raw-MIR snapshot. A stage built without a published parent is
-not used to load or publish dependent stages. If a stage is missing or invalid, its dependent
-stages are discarded: semantic HIR invalidates both MIR stages, while raw MIR invalidates optimized
-MIR.
-An optimized-MIR failure does not invalidate raw MIR. Fresh snapshots are type-reinterned and
-verified before atomic publication. Later loads trust checksum-matching compiler-owned bytes and
-repeat structural restoration, not whole-corpus MIR verification.
+The file magic identifies the Ferlium cache format, not a particular module. Module IDs and paths
+are stored inside the checksummed snapshot data and validated on restoration.
+
+Each MIR stage records its parent's snapshot checksum: semantic HIR → raw MIR → optimized MIR →
+physical MIR. The session retains each checksum needed to load the next stage. A stage built
+without a published parent is not used to load or publish dependent stages. Invalidating a stage
+discards its downstream caches, never its parents. Fresh snapshots are type-reinterned and verified
+before atomic publication. Later semantic MIR loads trust checksum-matching compiler-owned bytes
+and repeat structural restoration, not whole-corpus MIR verification.
+
+Physical snapshots are valid only for the matching compiler/runtime build and target. They store
+physical bodies and native layout/ABI requirements, but no code pointers or Rust type identities.
+Loading rebinds native entries from the current runtime, reconstructs evidence catalogs, checks
+the native contracts, and repeats physical readiness verification. An incompatibility is a cache
+miss. Whole-program resolution remains session-local and is not persisted.
 
 Std optimization is module-local. Its result may depend on std, compiler and target configuration,
 all covered by the cache fingerprints, but not on unrelated modules later registered in a session.

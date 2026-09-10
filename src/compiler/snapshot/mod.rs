@@ -16,6 +16,7 @@ mod hir;
 mod literal;
 mod mir;
 mod native;
+mod physical;
 mod semantic;
 mod source;
 mod std_snapshot;
@@ -29,7 +30,8 @@ mod types;
     not(all(target_arch = "wasm32", target_os = "unknown"))
 ))]
 pub(crate) use cache::{
-    load_or_build_optimized_std_mir, load_or_build_raw_std_mir, load_or_build_std,
+    load_or_build_optimized_std_mir, load_or_build_physical_std_mir, load_or_build_raw_std_mir,
+    load_or_build_std,
 };
 pub(crate) use callable::{NativeCallableCatalog, SnapshotFunctionBody};
 pub(crate) use checkpoint::{ModuleCheckpointShape, SnapshotModuleCheckpoint};
@@ -58,6 +60,9 @@ pub(crate) use type_graph::{
 pub(crate) use types::{SnapshotTrait, SnapshotTypeAlias, SnapshotTypeDefSlot};
 
 use std::fmt;
+
+/// SHA-256 of a serialized cache payload, used for integrity and parent-snapshot identity.
+pub(crate) type CacheChecksum = [u8; 32];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SnapshotError {

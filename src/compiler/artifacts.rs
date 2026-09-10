@@ -32,6 +32,12 @@ use crate::{
 
 use ustr::Ustr;
 
+#[cfg(all(
+    feature = "std-cache",
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+use super::snapshot::CacheChecksum;
+
 /// Whether a compilation session runs the MIR optimization passes.
 ///
 /// Optimized bodies are stored beside the raw ones rather than replacing them, and a session only
@@ -58,7 +64,7 @@ pub(crate) struct ModuleArtifacts {
         feature = "std-cache",
         not(all(target_arch = "wasm32", target_os = "unknown"))
     ))]
-    semantic_cache_checksum: Option<[u8; 32]>,
+    semantic_cache_checksum: Option<CacheChecksum>,
     /// MIR as lowered from final HIR by `emit_mir`.
     raw_mir: OnceCell<MirArtifacts>,
     /// Checksum of the raw-MIR snapshot that produced `raw_mir`, or `None` when it was built
@@ -67,12 +73,18 @@ pub(crate) struct ModuleArtifacts {
         feature = "std-cache",
         not(all(target_arch = "wasm32", target_os = "unknown"))
     ))]
-    raw_mir_cache_checksum: OnceCell<Option<[u8; 32]>>,
+    raw_mir_cache_checksum: OnceCell<Option<CacheChecksum>>,
     /// MIR after the optimization passes, installed at most once and only when some session
     /// requested [`MirOptimization::Enabled`].
     optimized_mir: OnceCell<MirArtifacts>,
-    /// Host-matched physical artifacts, tied to this same immutable module revision. Never
-    /// serialized: native bindings must come from the current runtime.
+    /// Parent identity used when loading a physical snapshot.
+    #[cfg(all(
+        feature = "std-cache",
+        not(all(target_arch = "wasm32", target_os = "unknown"))
+    ))]
+    optimized_mir_cache_checksum: OnceCell<Option<CacheChecksum>>,
+    /// Host-matched physical artifacts, tied to this same immutable module revision.
+    /// Snapshot restoration rebinds native entries from the current runtime.
     physical_mir: OnceCell<BackendReadyMirArtifacts>,
 }
 
@@ -98,7 +110,7 @@ impl ModuleArtifacts {
         feature = "std-cache",
         not(all(target_arch = "wasm32", target_os = "unknown"))
     ))]
-    pub(crate) fn with_semantic_cache_checksum(checksum: Option<[u8; 32]>) -> Self {
+    pub(crate) fn with_semantic_cache_checksum(checksum: Option<CacheChecksum>) -> Self {
         Self {
             semantic_cache_checksum: checksum,
             ..Self::default()
@@ -135,7 +147,7 @@ impl ModuleArtifacts {
         feature = "std-cache",
         not(all(target_arch = "wasm32", target_os = "unknown"))
     ))]
-    pub(crate) fn semantic_cache_checksum(&self) -> Option<[u8; 32]> {
+    pub(crate) fn semantic_cache_checksum(&self) -> Option<CacheChecksum> {
         self.semantic_cache_checksum
     }
 
@@ -143,7 +155,7 @@ impl ModuleArtifacts {
         feature = "std-cache",
         not(all(target_arch = "wasm32", target_os = "unknown"))
     ))]
-    pub(crate) fn raw_mir_cache_checksum(&self) -> Option<[u8; 32]> {
+    pub(crate) fn raw_mir_cache_checksum(&self) -> Option<CacheChecksum> {
         self.raw_mir_cache_checksum.get().copied().flatten()
     }
 
@@ -172,7 +184,7 @@ impl ModuleArtifacts {
         feature = "std-cache",
         not(all(target_arch = "wasm32", target_os = "unknown"))
     ))]
-    fn set_mir_with_cache_checksum(&self, mir: MirArtifacts, checksum: Option<[u8; 32]>) {
+    fn set_mir_with_cache_checksum(&self, mir: MirArtifacts, checksum: Option<CacheChecksum>) {
         self.raw_mir
             .set(mir)
             .unwrap_or_else(|_| panic!("MIR artifacts may only be installed once per revision"));
@@ -627,15 +639,41 @@ pub(crate) fn ensure_physical_mir_artifacts(
         return Ok(());
     }
     ensure_optimized_mir_artifacts(session, module_id);
-    let physical = lower_physical_mir(
-        module_id,
-        artifacts
-            .optimized_mir
-            .get()
-            .expect("optimized MIR was just prepared"),
-        ModuleEnv::new(module, session.raw_modules()),
-        session.known_callees(),
-    )?;
+    let optimized = artifacts
+        .optimized_mir
+        .get()
+        .expect("optimized MIR was just prepared");
+    let build = || {
+        lower_physical_mir(
+            module_id,
+            optimized,
+            ModuleEnv::new(module, session.raw_modules()),
+            session.known_callees(),
+        )
+    };
+    #[cfg(all(
+        feature = "std-cache",
+        not(all(target_arch = "wasm32", target_os = "unknown"))
+    ))]
+    let physical = if module_id == crate::std::STD_MODULE_ID {
+        super::snapshot::load_or_build_physical_std_mir(
+            optimized,
+            artifacts
+                .optimized_mir_cache_checksum
+                .get()
+                .copied()
+                .flatten(),
+            module,
+            session,
+        )
+    } else {
+        build()
+    }?;
+    #[cfg(not(all(
+        feature = "std-cache",
+        not(all(target_arch = "wasm32", target_os = "unknown"))
+    )))]
+    let physical = build()?;
     artifacts
         .physical_mir
         .set(physical)
@@ -738,7 +776,7 @@ pub(crate) fn ensure_optimized_mir_artifacts(session: &CompilerSession, module_i
         feature = "std-cache",
         not(all(target_arch = "wasm32", target_os = "unknown"))
     ))]
-    let optimized = if module_id == crate::std::STD_MODULE_ID {
+    let (optimized, checksum) = if module_id == crate::std::STD_MODULE_ID {
         crate::compiler::snapshot::load_or_build_optimized_std_mir(
             raw,
             entry.artifacts().raw_mir_cache_checksum(),
@@ -746,7 +784,7 @@ pub(crate) fn ensure_optimized_mir_artifacts(session: &CompilerSession, module_i
             session,
         )
     } else {
-        MirArtifacts::optimize(raw, module, session)
+        (MirArtifacts::optimize(raw, module, session), None)
     };
     #[cfg(not(all(
         feature = "std-cache",
@@ -754,4 +792,13 @@ pub(crate) fn ensure_optimized_mir_artifacts(session: &CompilerSession, module_i
     )))]
     let optimized = MirArtifacts::optimize(raw, module, session);
     entry.artifacts().set_optimized_mir(optimized);
+    #[cfg(all(
+        feature = "std-cache",
+        not(all(target_arch = "wasm32", target_os = "unknown"))
+    ))]
+    entry
+        .artifacts()
+        .optimized_mir_cache_checksum
+        .set(checksum)
+        .unwrap_or_else(|_| panic!("optimized MIR cache lineage may only be installed once"));
 }

@@ -10,25 +10,26 @@ use std::{
 use crate::{
     SourceTable,
     compiler::{CompilerSession, MirArtifacts, Modules},
-    module::Module,
+    mir::physical::{BackendReadinessError, BackendReadyMirArtifacts, lower_physical_mir},
+    module::{Module, ModuleEnv},
 };
 use directories::ProjectDirs;
 use sha2::{Digest, Sha256};
 
-use super::{CompiledStdMirSnapshot, CompiledStdSnapshot, MirSnapshotStage};
+use super::physical::CompiledPhysicalMirSnapshot;
+use super::{CacheChecksum, CompiledStdMirSnapshot, CompiledStdSnapshot, MirSnapshotStage};
 
 const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const LOCK_WAIT_LIMIT: Duration = Duration::from_secs(120);
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-const CACHE_MAGIC: &[u8; 8] = b"FERSTD\0\x01";
-const CHECKSUM_LEN: usize = 32;
-type CacheChecksum = [u8; CHECKSUM_LEN];
+const CACHE_MAGIC: &[u8; 8] = b"FERLIUM\x01";
+const CHECKSUM_LEN: usize = std::mem::size_of::<CacheChecksum>();
 type CachedStd = (SourceTable, Module, Option<CacheChecksum>);
 type CachedMir = (MirArtifacts, Option<CacheChecksum>);
 
 struct CheckedPayload<'a> {
     payload: &'a [u8],
-    checksum: [u8; CHECKSUM_LEN],
+    checksum: CacheChecksum,
 }
 
 /// Load compiled std from the process-shared cache, or build and atomically publish it once.
@@ -136,7 +137,7 @@ pub(crate) fn load_or_build_std() -> CachedStd {
 pub(crate) fn load_or_build_raw_std_mir(
     module: &Module,
     modules: &Modules,
-    semantic_checksum: Option<[u8; CHECKSUM_LEN]>,
+    semantic_checksum: Option<CacheChecksum>,
 ) -> CachedMir {
     let Some(semantic_checksum) = semantic_checksum else {
         return (MirArtifacts::build(module, modules), None);
@@ -153,12 +154,12 @@ pub(crate) fn load_or_build_raw_std_mir(
 
 pub(crate) fn load_or_build_optimized_std_mir(
     raw: &MirArtifacts,
-    raw_checksum: Option<[u8; CHECKSUM_LEN]>,
+    raw_checksum: Option<CacheChecksum>,
     module: &Module,
     session: &CompilerSession,
-) -> MirArtifacts {
+) -> CachedMir {
     let Some(raw_checksum) = raw_checksum else {
-        return MirArtifacts::optimize(raw, module, session);
+        return (MirArtifacts::optimize(raw, module, session), None);
     };
     load_or_build_mir(
         MirSnapshotStage::Optimized,
@@ -168,26 +169,102 @@ pub(crate) fn load_or_build_optimized_std_mir(
         Some(raw),
         || MirArtifacts::optimize(raw, module, session),
     )
-    .0
+}
+
+pub(crate) fn load_or_build_physical_std_mir(
+    optimized: &MirArtifacts,
+    optimized_checksum: Option<CacheChecksum>,
+    module: &Module,
+    session: &CompilerSession,
+) -> Result<BackendReadyMirArtifacts, BackendReadinessError> {
+    let build = || {
+        lower_physical_mir(
+            module.module_id(),
+            optimized,
+            ModuleEnv::new(module, session.raw_modules()),
+            session.known_callees(),
+        )
+    };
+    let Some(parent_checksum) = optimized_checksum else {
+        return build();
+    };
+    load_or_build_stage(
+        MirSnapshotStage::Physical,
+        cache_path(),
+        build,
+        |artifacts| {
+            CompiledPhysicalMirSnapshot::capture(artifacts, module, parent_checksum)
+                .map_err(|error| error.to_string())?
+                .encode()
+                .map_err(|error| error.to_string())
+        },
+        |bytes, _| {
+            // Physical readiness verification is mandatory on every load, including cache hits,
+            // because restoration rebuilds native bindings and evidence catalogs.
+            CompiledPhysicalMirSnapshot::decode(bytes)
+                .map_err(|error| error.to_string())?
+                .restore(&parent_checksum, optimized, module, session)
+                .map_err(|error| error.to_string())
+        },
+    )
+    .map(|(artifacts, _)| artifacts)
 }
 
 fn load_or_build_mir(
     stage: MirSnapshotStage,
-    parent_checksum: [u8; CHECKSUM_LEN],
+    parent_checksum: CacheChecksum,
     module: &Module,
     modules: &Modules,
     raw: Option<&MirArtifacts>,
     build: impl FnOnce() -> MirArtifacts,
 ) -> CachedMir {
-    let Some(semantic_path) = cache_path() else {
-        return (build(), None);
+    load_or_build_stage(
+        stage,
+        cache_path(),
+        || Ok::<_, std::convert::Infallible>(build()),
+        |artifacts| {
+            CompiledStdMirSnapshot::capture(stage, parent_checksum, artifacts, module)
+                .map_err(|error| error.to_string())?
+                .encode()
+                .map_err(|error| error.to_string())
+        },
+        |bytes, verify| {
+            let snapshot =
+                CompiledStdMirSnapshot::decode(bytes).map_err(|error| error.to_string())?;
+            restore_mir_snapshot(
+                &snapshot,
+                stage,
+                &parent_checksum,
+                module,
+                modules,
+                raw,
+                verify,
+            )
+            .map_err(|error| error.to_string())
+        },
+    )
+    .unwrap_or_else(|never| match never {})
+}
+
+/// Shared read/build/publish protocol for semantic and physical MIR. Cache failures fall back
+/// to building; only the builder's own error can escape.
+fn load_or_build_stage<T, E>(
+    stage: MirSnapshotStage,
+    semantic_path: Option<PathBuf>,
+    build: impl FnOnce() -> Result<T, E>,
+    encode: impl Fn(&T) -> Result<Vec<u8>, String>,
+    restore: impl Fn(&[u8], bool) -> Result<T, String>,
+) -> Result<(T, Option<CacheChecksum>), E> {
+    let Some(semantic_path) = semantic_path else {
+        return build().map(|artifacts| (artifacts, None));
     };
     let stage_path = mir_cache_path(&semantic_path, stage);
     let failure_path = stage_path.with_extension("invalid");
     let mut build = Some(build);
-    let mut build_now = || (build.take().expect("MIR builder is called once")(), None);
-    match try_load_mir(&stage_path, stage, &parent_checksum, module, modules, raw) {
-        Ok(Some(restored)) => return restored,
+    let mut build_now =
+        || build.take().expect("MIR builder is called once")().map(|artifacts| (artifacts, None));
+    match try_load_stage(&stage_path, &restore) {
+        Ok(Some(restored)) => return Ok(restored),
         Ok(None) => {}
         Err(error) => {
             log::warn!(
@@ -219,15 +296,13 @@ fn load_or_build_mir(
         if failure_path.exists() {
             return build_now();
         }
-        if let Ok(Some(restored)) =
-            try_load_mir(&stage_path, stage, &parent_checksum, module, modules, raw)
-        {
-            return restored;
+        if let Ok(Some(restored)) = try_load_stage(&stage_path, &restore) {
+            return Ok(restored);
         }
         match lock_file.try_lock() {
             Ok(()) => {
-                match try_load_mir(&stage_path, stage, &parent_checksum, module, modules, raw) {
-                    Ok(Some(restored)) => return restored,
+                match try_load_stage(&stage_path, &restore) {
+                    Ok(Some(restored)) => return Ok(restored),
                     Ok(None) => {}
                     Err(error) => {
                         log::warn!(
@@ -238,39 +313,22 @@ fn load_or_build_mir(
                     }
                 }
 
-                let (artifacts, _) = build_now();
-                let snapshot =
-                    match CompiledStdMirSnapshot::capture(stage, parent_checksum, &artifacts) {
-                        Ok(snapshot) => snapshot,
-                        Err(error) => {
-                            let error = error.to_string();
-                            log::warn!("failed to capture {stage:?} std MIR snapshot: {error}");
-                            mark_cache_unusable(&failure_path, &error);
-                            return (artifacts, None);
-                        }
-                    };
-                let payload = match snapshot.encode() {
+                let (artifacts, _) = build_now()?;
+                let payload = match encode(&artifacts) {
                     Ok(payload) => payload,
                     Err(error) => {
-                        log::warn!("failed to encode {stage:?} std MIR snapshot: {error}");
-                        return (artifacts, None);
+                        log::warn!("failed to capture or encode {stage:?} MIR snapshot: {error}");
+                        mark_cache_unusable(&failure_path, &error);
+                        return Ok((artifacts, None));
                     }
                 };
-                let restored = match restore_mir_snapshot(
-                    &snapshot,
-                    stage,
-                    &parent_checksum,
-                    module,
-                    modules,
-                    raw,
-                    true,
-                ) {
+                let restored = match restore(&payload, true) {
                     Ok(restored) => restored,
                     Err(error) => {
                         let error = error.to_string();
                         log::warn!("fresh {stage:?} std MIR snapshot is invalid: {error}");
                         mark_cache_unusable(&failure_path, &error);
-                        return (artifacts, None);
+                        return Ok((artifacts, None));
                     }
                 };
                 let checksum = payload_checksum(&payload);
@@ -285,7 +343,7 @@ fn load_or_build_mir(
                         None
                     }
                 };
-                return (restored, checksum);
+                return Ok((restored, checksum));
             }
             Err(TryLockError::WouldBlock) => {
                 if started.elapsed() >= LOCK_WAIT_LIMIT {
@@ -319,39 +377,25 @@ fn try_load(path: &Path) -> Result<Option<CachedStd>, String> {
         .map_err(|error| format!("failed to restore snapshot: {error}"))
 }
 
-fn try_load_mir(
+fn try_load_stage<T>(
     path: &Path,
-    stage: MirSnapshotStage,
-    parent_checksum: &[u8; CHECKSUM_LEN],
-    module: &Module,
-    modules: &Modules,
-    raw: Option<&MirArtifacts>,
-) -> Result<Option<CachedMir>, String> {
+    restore: &impl Fn(&[u8], bool) -> Result<T, String>,
+) -> Result<Option<(T, Option<CacheChecksum>)>, String> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("failed to read cache: {error}")),
     };
     let checked = checked_payload(&bytes).map_err(str::to_owned)?;
-    let snapshot = CompiledStdMirSnapshot::decode(checked.payload)
-        .map_err(|error| format!("failed to decode snapshot: {error}"))?;
-    restore_mir_snapshot(
-        &snapshot,
-        stage,
-        parent_checksum,
-        module,
-        modules,
-        raw,
-        false,
-    )
-    .map(|artifacts| Some((artifacts, Some(checked.checksum))))
-    .map_err(|error| format!("failed to restore snapshot: {error}"))
+    restore(checked.payload, false)
+        .map(|artifacts| Some((artifacts, Some(checked.checksum))))
+        .map_err(|error| format!("failed to restore snapshot: {error}"))
 }
 
 fn restore_mir_snapshot(
     snapshot: &CompiledStdMirSnapshot,
     stage: MirSnapshotStage,
-    parent_checksum: &[u8; CHECKSUM_LEN],
+    parent_checksum: &CacheChecksum,
     module: &Module,
     modules: &Modules,
     raw: Option<&MirArtifacts>,
@@ -371,6 +415,9 @@ fn restore_mir_snapshot(
             modules,
             raw.expect("optimized MIR restoration requires raw MIR"),
         ),
+        MirSnapshotStage::Physical => {
+            unreachable!("physical snapshots have their own restore path")
+        }
     }
 }
 
@@ -397,7 +444,7 @@ fn cache_file_bytes(payload: &[u8]) -> Vec<u8> {
     cache_file_bytes_with_checksum(payload, &checksum)
 }
 
-fn cache_file_bytes_with_checksum(payload: &[u8], checksum: &[u8; CHECKSUM_LEN]) -> Vec<u8> {
+fn cache_file_bytes_with_checksum(payload: &[u8], checksum: &CacheChecksum) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(CACHE_MAGIC.len() + CHECKSUM_LEN + payload.len());
     bytes.extend_from_slice(CACHE_MAGIC);
     bytes.extend_from_slice(checksum);
@@ -405,7 +452,7 @@ fn cache_file_bytes_with_checksum(payload: &[u8], checksum: &[u8; CHECKSUM_LEN])
     bytes
 }
 
-fn payload_checksum(payload: &[u8]) -> [u8; CHECKSUM_LEN] {
+fn payload_checksum(payload: &[u8]) -> CacheChecksum {
     Sha256::digest(payload).into()
 }
 
@@ -433,6 +480,7 @@ fn mir_cache_path(semantic_path: &Path, stage: MirSnapshotStage) -> PathBuf {
     match stage {
         MirSnapshotStage::Raw => semantic_path.with_extension("raw-mir.bin"),
         MirSnapshotStage::Optimized => semantic_path.with_extension("optimized-mir.bin"),
+        MirSnapshotStage::Physical => semantic_path.with_extension("physical-mir.bin"),
     }
 }
 
@@ -440,8 +488,13 @@ fn invalidate_mir_from(semantic_path: &Path, stage: MirSnapshotStage) {
     // Invalid markers are only retry suppressors. A racing deletion can cause one redundant
     // rebuild, but cannot admit an artifact because lineage and payload checks still run.
     let stages: &[MirSnapshotStage] = match stage {
-        MirSnapshotStage::Raw => &[MirSnapshotStage::Raw, MirSnapshotStage::Optimized],
-        MirSnapshotStage::Optimized => &[MirSnapshotStage::Optimized],
+        MirSnapshotStage::Raw => &[
+            MirSnapshotStage::Raw,
+            MirSnapshotStage::Optimized,
+            MirSnapshotStage::Physical,
+        ],
+        MirSnapshotStage::Optimized => &[MirSnapshotStage::Optimized, MirSnapshotStage::Physical],
+        MirSnapshotStage::Physical => &[MirSnapshotStage::Physical],
     };
     for &stage in stages {
         let path = mir_cache_path(semantic_path, stage);
@@ -497,6 +550,53 @@ fn publish_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mir_cache_hits_skip_building_and_corruption_rebuilds() {
+        let directory = std::env::temp_dir().join(format!(
+            "ferlium-stage-cache-test-{}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("module.bin");
+        let builds = std::cell::Cell::new(0u8);
+        let load = || {
+            load_or_build_stage(
+                MirSnapshotStage::Physical,
+                Some(path.clone()),
+                || {
+                    builds.set(builds.get() + 1);
+                    Ok::<_, String>(builds.get())
+                },
+                |value| Ok(vec![*value]),
+                |bytes, _| match bytes {
+                    [value] => Ok(*value),
+                    _ => Err("invalid payload".into()),
+                },
+            )
+            .unwrap()
+        };
+        let first = load();
+        assert!(first.1.is_some());
+        assert_eq!(load(), first);
+        assert_eq!(builds.get(), 1);
+        fs::write(
+            mir_cache_path(&path, MirSnapshotStage::Physical),
+            b"corrupt",
+        )
+        .unwrap();
+        assert_eq!(load().0, 2);
+        let failed: Result<(u8, _), _> = load_or_build_stage(
+            MirSnapshotStage::Raw,
+            Some(path),
+            || Err("lowering failed"),
+            |_| unreachable!(),
+            |_, _| unreachable!(),
+        );
+        assert_eq!(failed, Err("lowering failed"));
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn atomic_publication_never_exposes_partial_bytes() {
@@ -557,16 +657,29 @@ mod tests {
         fs::create_dir_all(&directory).unwrap();
         let semantic = directory.join("std.bin");
         fs::write(&semantic, b"semantic").unwrap();
-        for stage in [MirSnapshotStage::Raw, MirSnapshotStage::Optimized] {
+        for stage in [
+            MirSnapshotStage::Raw,
+            MirSnapshotStage::Optimized,
+            MirSnapshotStage::Physical,
+        ] {
             let path = mir_cache_path(&semantic, stage);
             fs::write(&path, b"mir").unwrap();
             fs::write(path.with_extension("invalid"), b"failure").unwrap();
         }
 
+        invalidate_mir_from(&semantic, MirSnapshotStage::Physical);
+        assert!(!mir_cache_path(&semantic, MirSnapshotStage::Physical).exists());
+        assert!(mir_cache_path(&semantic, MirSnapshotStage::Optimized).exists());
+        fs::write(
+            mir_cache_path(&semantic, MirSnapshotStage::Physical),
+            b"physical",
+        )
+        .unwrap();
         invalidate_mir_from(&semantic, MirSnapshotStage::Optimized);
         assert!(semantic.exists());
         assert!(mir_cache_path(&semantic, MirSnapshotStage::Raw).exists());
         assert!(!mir_cache_path(&semantic, MirSnapshotStage::Optimized).exists());
+        assert!(!mir_cache_path(&semantic, MirSnapshotStage::Physical).exists());
 
         invalidate_mir_from(&semantic, MirSnapshotStage::Raw);
         assert!(semantic.exists());

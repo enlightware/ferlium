@@ -1,6 +1,8 @@
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StdSnapshotHeader {
+    pub(crate) module: crate::module::ModuleId,
+    pub(crate) module_path: String,
     pub(crate) std_source_fingerprint: String,
     pub(crate) semantic_build_fingerprint: String,
     pub(crate) native_offer_fingerprint: String,
@@ -9,6 +11,8 @@ pub(crate) struct StdSnapshotHeader {
 impl StdSnapshotHeader {
     pub(crate) fn current(native_offer_fingerprint: String) -> Self {
         Self {
+            module: crate::std::STD_MODULE_ID,
+            module_path: "std".into(),
             std_source_fingerprint: env!("FERLIUM_STD_SOURCE_FINGERPRINT").to_owned(),
             semantic_build_fingerprint: env!("FERLIUM_SEMANTIC_BUILD_FINGERPRINT").to_owned(),
             native_offer_fingerprint,
@@ -16,7 +20,9 @@ impl StdSnapshotHeader {
     }
 
     pub(crate) fn matches_current(&self, native_offer_fingerprint: &str) -> bool {
-        self.std_source_fingerprint == env!("FERLIUM_STD_SOURCE_FINGERPRINT")
+        self.module == crate::std::STD_MODULE_ID
+            && self.module_path == "std"
+            && self.std_source_fingerprint == env!("FERLIUM_STD_SOURCE_FINGERPRINT")
             && self.semantic_build_fingerprint == env!("FERLIUM_SEMANTIC_BUILD_FINGERPRINT")
             && self.native_offer_fingerprint == native_offer_fingerprint
     }

@@ -1,5 +1,5 @@
-//! Native requirements of a physical artifact. These are process/build-local contracts, not
-//! portable Rust ABI fingerprints. A future serialized artifact needs explicit runtime provenance.
+//! Process-local native requirements, rebuilt when restoring a physical snapshot. Snapshots
+//! separately validate build provenance and the pointer-free layout/transport contracts.
 
 use std::fmt;
 
@@ -86,7 +86,7 @@ pub(super) struct NativeTypeRequirement {
 #[derive(Default)]
 pub(super) struct NativeRequirements {
     pub(super) types: FxHashMap<Type, NativeTypeRequirement>,
-    entries: FxHashMap<FunctionId, NativeEntry>,
+    pub(super) entries: FxHashMap<FunctionId, NativeEntry>,
 }
 
 impl NativeRequirements {

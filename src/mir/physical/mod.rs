@@ -346,6 +346,31 @@ pub(crate) struct BackendReadyMirArtifacts {
 }
 
 impl BackendReadyMirArtifacts {
+    #[cfg(feature = "std-snapshot")]
+    pub(crate) fn native_entries(
+        &self,
+    ) -> impl Iterator<Item = (FunctionId, &crate::hir::native_functions::NativeEntry)> {
+        self.native_requirements
+            .entries
+            .iter()
+            .map(|(&id, entry)| (id, entry))
+    }
+
+    #[cfg(feature = "std-snapshot")]
+    pub(crate) fn native_layouts(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            crate::hir::native_functions::NativeLayout,
+            Option<(FunctionId, FunctionId)>,
+        ),
+    > + '_ {
+        self.native_requirements
+            .types
+            .values()
+            .map(|requirement| (requirement.layout, requirement.lifecycle))
+    }
+
     pub(crate) fn module(&self) -> ModuleId {
         self.module
     }
@@ -520,6 +545,19 @@ pub(crate) fn lower_physical_mir(
         }
     }
     entries.extend(lowerer.helpers.into_iter().map(Some));
+    prepare_physical_mir(entries, semantic, env, known)
+}
+
+/// Rebuild process-local bindings and derived catalogs, then verify lowered or restored bodies.
+pub(crate) fn prepare_physical_mir(
+    entries: Vec<Option<Function>>,
+    semantic: &MirArtifacts,
+    env: ModuleEnv<'_>,
+    known: &KnownCallees,
+) -> Result<BackendReadyMirArtifacts, BackendReadinessError> {
+    let module = env.current.module_id();
+    let helper_base = FunctionId::new(module, LocalFunctionId::from_index(semantic.entry_count()));
+    let buffer_entries = buffer::entries(env, known);
     let references = PhysicalEvidenceReferences::collect(&entries);
     let dictionaries = PhysicalDictionaryCatalog::from_module(module, env.current, &references);
     let subscripts = PhysicalSubscriptCatalog::from_module(module, env.current, env, &references);

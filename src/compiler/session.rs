@@ -121,7 +121,10 @@ impl ModuleRevision {
         feature = "std-cache",
         not(all(target_arch = "wasm32", target_os = "unknown"))
     ))]
-    fn with_semantic_cache_checksum(module: Module, checksum: Option<[u8; 32]>) -> Self {
+    fn with_semantic_cache_checksum(
+        module: Module,
+        checksum: Option<super::snapshot::CacheChecksum>,
+    ) -> Self {
         Self {
             module,
             artifacts: ModuleArtifacts::with_semantic_cache_checksum(checksum),

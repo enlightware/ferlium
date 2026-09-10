@@ -169,6 +169,7 @@ impl NativeFailureState {
 
 /// Physical transport of source failure, independent of the target's pointer width.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum NativeFailureConvention {
     Infallible,
     /// Leading state pointer and a `u32` return: zero succeeds, nonzero propagates source failure.
@@ -208,6 +209,7 @@ impl NativeLayout {
 /// C scalar transport. `Int` has the target's pointer width, independently of `Float`.
 /// Rust `Float` and `f64` share this scalar ABI through `Float`'s transparent representation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum NativeScalar {
     Bool,
     Int,
