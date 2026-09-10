@@ -91,9 +91,124 @@ fn execution_targets_accept_by_value_arguments() {
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn physical_mir_scalar_execution() {
+fn physical_mir_product_cleanup() {
+    let mut session = TestSession::new();
+    session
+        .session_mut()
+        .set_mir_optimization(ferlium::compiler::MirOptimization::Enabled);
+    // A bounded non-returning destructor makes its invocation observable without a new native
+    // fixture. Exercise normal cleanup, replacement, and cleanup of a partial construction.
+    for body in [
+        "let p = (Probe(x), Probe(2)); 7",
+        "let mut p = (Probe(x), Probe(2)); p.0 = Probe(3); 7",
+        "let p = (Probe(x), idiv(1, x)); p.1",
+    ] {
+        let source = format!(
+            r#"
+            struct Probe(int)
+            impl Value for Probe {{
+                fn eq(a: Probe, b: Probe) -> bool {{ a.0 == b.0 }}
+                fn to_string(a: Probe) -> string {{ to_string(a.0) }}
+                fn hash(a: Probe, s: &mut hasher) {{ hash(a.0, s) }}
+                fn clone(a: Probe) -> Probe {{ Probe(a.0) }}
+                fn drop(a: &mut Probe) {{ if a.0 == 0 {{ loop {{}} }}; }}
+            }}
+            fn compute(x: int) -> int {{ {body} }}
+        "#
+        );
+        let module_id = session.compile(&source).module_id;
+        let entry = session
+            .session()
+            .expect_fresh_module(module_id)
+            .get_local_function_id(ustr::ustr("compute"))
+            .unwrap();
+        for input in [0, 2] {
+            let outcomes = [ExecutionTarget::Mir, ExecutionTarget::PhysicalMir].map(|target| {
+                session
+                    .session_mut()
+                    .run_entry_with_limits(
+                        target,
+                        module_id,
+                        entry,
+                        vec![int_value(input)],
+                        ReferenceInterpreterLimits::default().with_fuel_limit(Some(100)),
+                    )
+                    .map(|value| {
+                        let result = *value.as_primitive_ty::<isize>().unwrap();
+                        value.discard_storage();
+                        result
+                    })
+                    .map_err(|error| (error.kind(), error.source_failure().is_some()))
+            });
+            assert_eq!(outcomes[0], outcomes[1], "{body}, input={input}");
+            assert_eq!(outcomes[1].is_ok(), input != 0);
+        }
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn physical_mir_product_host_arguments() {
     let mut session = TestSession::new();
     for source in [
+        "fn compute(p: (int, (bool, int))) -> (int, (bool, int)) { p }",
+        "fn compute(p: (int, (bool, int))) -> (bool, int) { (p.1.0, p.0 + p.1.1) }",
+    ] {
+        let module_id = session.compile(source).module_id;
+        let entry = session
+            .session()
+            .expect_fresh_module(module_id)
+            .get_local_function_id(ustr::ustr("compute"))
+            .unwrap();
+        let mut results = [ExecutionTarget::Mir, ExecutionTarget::PhysicalMir]
+            .map(|target| {
+                let argument = Value::tuple(vec![
+                    int_value(7),
+                    Value::tuple(vec![Value::native(true), int_value(11)]),
+                ]);
+                session
+                    .session_mut()
+                    .run_entry(target, module_id, entry, vec![argument])
+                    .unwrap()
+            })
+            .into_iter();
+        let expected = results.next().unwrap();
+        let actual = results.next().unwrap();
+        crate::harness::assert_value_eq(&actual, &expected);
+        expected.discard_storage();
+        actual.discard_storage();
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn physical_mir_value_execution() {
+    let mut session = TestSession::new();
+    for source in [
+        "fn compute(x: int) -> (int, bool, float) { (x + 1, x > 2, 3.5) }",
+        "fn compute(x: int) -> int { let mut pair = (x, (true, x + 1)); pair.1.1 += 2; pair.0 + pair.1.1 }",
+        "fn compute(x: int) -> int { let mut r = { a: true, b: x, c: false }; r.b += 2; if r.a { r.b } else { 0 } }",
+        "fn pair(x: int) -> (int, int) { (x, x + 1) } fn compute(x: int) -> (int, int) { pair(x) }",
+        "fn adjust(p: &mut (int, bool), x: int) { p.0 += x; p.1 = true; } fn compute(x: int) -> (int, bool) { let mut p = (1, false); adjust(p, x); p }",
+        "struct Pair { a: bool, b: int } fn compute(x: int) -> Pair { Pair { a: true, b: x } }",
+        "fn compute(x: int) -> (int, int) { let mut p = (1, 2); if x > 0 { p = (x, x + 1); }; p }",
+        "fn compute(x: int) -> int { let p = (x, idiv(100, x)); p.0 + p.1 }",
+        "fn compute(x: int) -> ((), int, ()) { ((), x, ()) }",
+        "fn compute(x: int) -> int { let p = ((1, true), (2, false)); if x > 0 { p.0.0 } else { p.1.0 } }",
+        r#"
+        struct Probe(int)
+        impl Value for Probe {
+            fn eq(a: Probe, b: Probe) -> bool { a.0 == b.0 }
+            fn to_string(a: Probe) -> string { to_string(a.0) }
+            fn hash(a: Probe, s: &mut hasher) { hash(a.0, s) }
+            fn clone(a: Probe) -> Probe { Probe(a.0 + 1) }
+            fn drop(a: &mut Probe) { a.0 = 0; }
+        }
+        fn compute(x: int) -> int {
+            let mut p = (Probe(x), Probe(2)); let q = p; p.0 = Probe(3);
+            p.0.0 + q.0.0 + q.1.0
+        }
+        "#,
         "fn compute(x: int) -> int { x + 2 }",
         "fn compute(x: int) -> int { if x > 3 { x * 2 } else { x - 1 } }",
         "fn twice(x: int) -> int { x + x } fn compute(x: int) -> int { twice(x) + 1 }",

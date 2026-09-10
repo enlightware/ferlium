@@ -682,7 +682,7 @@ mod tests {
     }
 
     #[test]
-    fn physical_mir_inspection_and_scalar_execution() {
+    fn physical_mir_inspection_and_execution() {
         let source = "fn second(pair: (int, bool)) -> bool { pair.1 } second((42, true))";
         let mut compiler = build(source);
         compiler
@@ -702,15 +702,7 @@ mod tests {
                 && entry.source_to as usize <= source.len()
         }));
         let result = compiler.run_expr_physical_mir().unwrap();
-        let error = result
-            .error_content()
-            .expect("unsupported aggregates must not fall back to boxed MIR");
-        assert!(
-            error.complete.contains("does not yet support"),
-            "{}",
-            error.complete
-        );
-        assert!(error.data.is_none());
+        assert_eq!(result.html_message(), "true: bool");
         assert_eq!(
             compiler.run_expr_mir(false).unwrap().html_message(),
             "true: bool"

@@ -6,7 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 
-//! Checked scalar physical-MIR execution. Boxed values exist only at the host boundary.
+//! Checked physical-MIR execution. Boxed values exist only at the host boundary.
 //! Unsupported reachable contracts are rejected before execution, even in untaken branches.
 
 #[path = "interpreter_memory.rs"]
@@ -27,11 +27,12 @@ use crate::{
         self, Function, Operation, OperationKind, function::ParameterKind,
         terminator::TerminatorKind,
     },
-    module::{FunctionId, id::Id},
-    types::r#type::CallResultConvention,
+    module::{FunctionId, ModuleEnv, id::Id},
+    types::r#type::{CallResultConvention, Type},
 };
-use memory::{Address, Memory, Scalar, ScalarKind};
+use memory::{Address, Memory, Scalar, ScalarKind, StoredValue};
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::rc::Rc;
 
 fn unsupported(detail: impl std::fmt::Display) -> RuntimeError {
     RuntimeError::Backend(format!(
@@ -42,17 +43,18 @@ fn invalid(detail: &str) -> RuntimeError {
     RuntimeError::Backend(format!("Invalid physical MIR execution: {detail}"))
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Binding {
     Scalar(Scalar),
+    Product(Rc<StoredValue>),
     Place(Address),
     StackMarker(usize),
 }
 
 impl Binding {
-    fn place(self) -> Result<Address, RuntimeError> {
+    fn place(&self) -> Result<Address, RuntimeError> {
         match self {
-            Self::Place(address) => Ok(address),
+            Self::Place(address) => Ok(*address),
             _ => Err(invalid("expected a place")),
         }
     }
@@ -69,6 +71,7 @@ pub(crate) fn run_entry(
     entry: FunctionId,
     arguments: &[Value],
     limits: ReferenceInterpreterLimits,
+    env: ModuleEnv<'_>,
 ) -> Result<Value, RuntimeError> {
     let mut interpreter = Interpreter {
         program,
@@ -77,7 +80,7 @@ pub(crate) fn run_entry(
         fuel: limits.execution.fuel_limit,
         depth: 0,
     };
-    interpreter.check_supported(entry)?;
+    interpreter.check_supported(entry, env)?;
     let body = program
         .function(entry)
         .ok_or_else(|| unsupported("native host entry points"))?;
@@ -97,20 +100,17 @@ pub(crate) fn run_entry(
     }
     let mut bindings = Vec::with_capacity(arguments.len() + 1);
     for (parameter, argument) in parameters.iter().zip(arguments) {
-        let scalar = Scalar::from_value(argument)?;
-        let kind = ScalarKind::for_type(parameter.ty)?;
-        if scalar.kind() != kind {
-            return Err(invalid("host argument type differs from parameter"));
-        }
-        let address = interpreter.allocate(kind, None)?;
-        interpreter.memory.write(address, scalar)?;
+        let value = interpreter.memory.import(parameter.ty, argument)?;
+        let address = interpreter.allocate(parameter.ty, None)?;
+        interpreter.memory.write_value(address, &value)?;
         bindings.push(Binding::Place(address));
     }
-    let result = interpreter.allocate(ScalarKind::for_type(result.ty)?, None)?;
+    let result = interpreter.allocate(result.ty, None)?;
     bindings.push(Binding::Place(result));
     interpreter.call(entry, bindings)?;
-    // Supported values are trivially destructible. Memory reclaims all allocations on every exit.
-    Ok(interpreter.memory.read(result)?.boxed())
+    // Semantic cleanup is explicit MIR; native storage leaves need no Rust destructor.
+    // Memory reclaims every allocation on both successful and failed exits.
+    interpreter.memory.export(result)
 }
 
 struct Interpreter<'a, 'p> {
@@ -130,7 +130,11 @@ impl<'a, 'p> Interpreter<'a, 'p> {
     }
 
     /// Capability checking of reachable callees, not another verifier or a whole-std scan.
-    fn check_supported(&self, entry: FunctionId) -> Result<(), RuntimeError> {
+    fn check_supported(
+        &mut self,
+        entry: FunctionId,
+        env: ModuleEnv<'_>,
+    ) -> Result<(), RuntimeError> {
         let mut pending = vec![entry];
         let mut visited = FxHashSet::default();
         while let Some(id) = pending.pop() {
@@ -161,21 +165,35 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 if parameter.kind == ParameterKind::Dictionary {
                     return Err(unsupported("generic evidence"));
                 }
-                ScalarKind::for_type(parameter.ty)?;
+                self.memory.prepare_type(parameter.ty, &env)?;
             }
             for constant in body.constants() {
-                Scalar::from_literal(&constant.representation)?;
+                self.memory.prepare_type(constant.ty, &env)?;
+                self.memory.literal(constant.ty, &constant.representation)?;
             }
             for block in body.blocks() {
                 let block = body.block(block);
-                for operation in block.operations() {
+                for operation in block
+                    .operations()
+                    .iter()
+                    .chain(match &block.terminator().kind {
+                        TerminatorKind::Invoke { operation, .. } => Some(operation),
+                        _ => None,
+                    })
+                {
+                    match operation.kind {
+                        OperationKind::Alloca { ty }
+                        | OperationKind::AddressOffset { ty }
+                        | OperationKind::Clone { ty }
+                        | OperationKind::Drop { ty }
+                        | OperationKind::MoveBytes { ty } => self.memory.prepare_type(ty, &env)?,
+                        _ => (),
+                    }
                     Self::check_operation(operation, &mut pending)?;
                 }
                 match &block.terminator().kind {
-                    TerminatorKind::Invoke { operation, .. } => {
-                        Self::check_operation(operation, &mut pending)?
-                    }
-                    TerminatorKind::Goto { .. }
+                    TerminatorKind::Invoke { .. }
+                    | TerminatorKind::Goto { .. }
                     | TerminatorKind::CondBr { .. }
                     | TerminatorKind::Return
                     | TerminatorKind::PropagateError
@@ -192,16 +210,16 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         operation: &Operation,
         pending: &mut Vec<FunctionId>,
     ) -> Result<(), RuntimeError> {
+        // Physical preparation already verifies operand arities. These are capability checks:
+        // e.g. a third Move operand is valid MIR, but needs dynamic-layout support here.
         use OperationKind::*;
         match &operation.kind {
-            Alloca { ty } => {
-                ScalarKind::for_type(*ty)?;
+            Alloca { .. } => {
                 if !operation.operands.is_empty() {
                     return Err(unsupported("dynamic layouts"));
                 }
             }
-            Clone { ty } | Drop { ty } => {
-                ScalarKind::for_type(*ty)?;
+            Clone { .. } | Drop { .. } => {
                 let index = if matches!(operation.kind, Clone { .. }) {
                     2
                 } else {
@@ -222,20 +240,41 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 let mir::Value::Pattern(pattern) = &operation.operands[1] else {
                     return Err(invalid("expected literal pattern"));
                 };
-                Scalar::from_literal(pattern)?;
+                Self::check_pattern(pattern)?;
             }
-            Load | Store | Clear | Memcpy | Move | Replace | IsInitialized | StackSave
-            | StackRestore | CheckCallDepth | CheckFuel => (),
+            Move | Replace if operation.operands.len() != 2 => {
+                return Err(unsupported("dynamic transfers"));
+            }
+            AddressOffset { .. }
+            | MoveBytes { .. }
+            | Load
+            | Store
+            | Clear
+            | Memcpy
+            | Move
+            | Replace
+            | IsInitialized
+            | StackSave
+            | StackRestore
+            | CheckCallDepth
+            | CheckFuel => (),
             _ => return Err(unsupported("aggregate, address, or callable operations")),
         }
         Ok(())
     }
 
-    fn allocate(
-        &mut self,
-        kind: ScalarKind,
-        span: Option<Location>,
-    ) -> Result<Address, RuntimeError> {
+    fn check_pattern(pattern: &crate::hir::value::LiteralValue) -> Result<(), RuntimeError> {
+        if let crate::hir::value::LiteralValue::Tuple(fields) = pattern {
+            for field in fields.iter() {
+                Self::check_pattern(field)?;
+            }
+            Ok(())
+        } else {
+            Scalar::from_literal(pattern).map(|_| ())
+        }
+    }
+
+    fn allocate(&mut self, ty: Type, span: Option<Location>) -> Result<Address, RuntimeError> {
         // Reuse the API's existing storage-slot guard; this is not a byte-memory quota.
         if self.memory.len() >= self.limits.environment_cell_limit {
             return Err(RuntimeError::new_sandbox_violation(
@@ -245,7 +284,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 span,
             ));
         }
-        self.memory.allocate(kind)
+        self.memory.allocate(ty)
     }
 
     fn call(&mut self, id: FunctionId, args: Vec<Binding>) -> Result<(), RuntimeError> {
@@ -256,7 +295,9 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             return Err(invalid("call arity mismatch"));
         }
         for (argument, parameter) in args.iter().zip(body.parameters()) {
-            if argument.place()?.kind != ScalarKind::for_type(parameter.ty)? {
+            // Call boundaries retain exact types. Representation-compatible stores are a separate
+            // bridge between nominal products and the structural values used to construct them.
+            if argument.place()?.ty != parameter.ty {
                 return Err(invalid("call argument type mismatch"));
             }
         }
@@ -270,22 +311,30 @@ impl<'a, 'p> Interpreter<'a, 'p> {
     }
 
     fn operand(
+        &self,
         body: &Function,
         args: &[Binding],
         registers: &FxHashMap<mir::ValueId, Binding>,
         operand: &mir::Value,
     ) -> Result<Binding, RuntimeError> {
         match operand {
-            mir::Value::Constant(id) => Ok(Binding::Scalar(Scalar::from_literal(
-                &body.constant(*id).representation,
-            )?)),
+            mir::Value::Constant(id) => {
+                let constant = body.constant(*id);
+                if let Ok(scalar) = Scalar::from_literal(&constant.representation) {
+                    Ok(Binding::Scalar(scalar))
+                } else {
+                    Ok(Binding::Product(Rc::new(
+                        self.memory.literal(constant.ty, &constant.representation)?,
+                    )))
+                }
+            }
             mir::Value::Parameter(id) => args
                 .get(id.as_index())
-                .copied()
+                .cloned()
                 .ok_or_else(|| invalid("unbound parameter")),
             mir::Value::Register(id) => registers
                 .get(id)
-                .copied()
+                .cloned()
                 .ok_or_else(|| invalid("unbound register")),
             _ => Err(invalid("unsupported operand")),
         }
@@ -318,7 +367,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     else_target,
                 } => {
                     let Scalar::Bool(taken) =
-                        Self::operand(body, args, &registers, condition)?.scalar()?
+                        self.operand(body, args, &registers, condition)?.scalar()?
                     else {
                         return Err(invalid("non-boolean branch condition"));
                     };
@@ -380,15 +429,36 @@ impl<'a, 'p> Interpreter<'a, 'p> {
     ) -> Result<(), RuntimeError> {
         use OperationKind::*;
         let operand =
-            |index: usize| Self::operand(body, args, registers, &operation.operands[index]);
+            |index: usize| self.operand(body, args, registers, &operation.operands[index]);
         let place = |index| operand(index)?.place();
         let result = match &operation.kind {
-            Alloca { ty } => Some(Binding::Place(
-                self.allocate(ScalarKind::for_type(*ty)?, Some(operation.span))?,
-            )),
-            Load => Some(Binding::Scalar(self.memory.read(place(0)?)?)),
+            Alloca { ty } => Some(Binding::Place(self.allocate(*ty, Some(operation.span))?)),
+            AddressOffset { ty } => {
+                let Scalar::Int(offset) = operand(1)?.scalar()? else {
+                    return Err(invalid("non-integer offset"));
+                };
+                let offset = usize::try_from(offset).map_err(|_| invalid("negative offset"))?;
+                Some(Binding::Place(self.memory.offset(
+                    place(0)?,
+                    offset,
+                    *ty,
+                )?))
+            }
+            Load => {
+                let address = place(0)?;
+                Some(if ScalarKind::for_type(address.ty).is_ok() {
+                    Binding::Scalar(self.memory.read(address)?)
+                } else {
+                    Binding::Product(Rc::new(self.memory.read_value(address, false)?))
+                })
+            }
             Store => {
-                self.memory.write(place(1)?, operand(0)?.scalar()?)?;
+                let destination = place(1)?;
+                match operand(0)? {
+                    Binding::Scalar(value) => self.memory.write(destination, value)?,
+                    Binding::Product(value) => self.memory.write_value(destination, &value)?,
+                    _ => return Err(invalid("expected a value register")),
+                }
                 None
             }
             Clear => {
@@ -398,12 +468,23 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             IsInitialized => Some(Binding::Scalar(Scalar::Bool(
                 self.memory.initialized(place(0)?)?,
             ))),
-            Memcpy | Move => {
+            Memcpy | Move | MoveBytes { .. } => {
                 let source = place(0)?;
                 let destination = place(1)?;
-                let value = self.memory.read(source)?;
-                self.memory.write(destination, value)?;
-                if matches!(operation.kind, Move) && source != destination {
+                if matches!(operation.kind, MoveBytes { .. }) {
+                    let Scalar::Int(size) = operand(2)?.scalar()? else {
+                        return Err(invalid("non-integer transfer size"));
+                    };
+                    if usize::try_from(size).ok() != Some(self.memory.size(source)?) {
+                        return Err(invalid("transfer size differs from value layout"));
+                    }
+                }
+                if source != destination && self.memory.overlaps(source, destination)? {
+                    return Err(invalid("partially overlapping transfer"));
+                }
+                let value = self.memory.read_value(source, false)?;
+                self.memory.write_value(destination, &value)?;
+                if matches!(operation.kind, Move | MoveBytes { .. }) && source != destination {
                     self.memory.clear(source)?;
                 }
                 None
@@ -411,21 +492,14 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             Replace => {
                 let source = place(0)?;
                 let destination = place(1)?;
-                if source == destination || source.kind != destination.kind {
+                // Replacement exchanges ownership of the same type; it is not a structural cast.
+                if self.memory.overlaps(source, destination)? || source.ty != destination.ty {
                     return Err(invalid("invalid replacement storage"));
                 }
-                let replacement = self.memory.read(source)?;
-                let old = self
-                    .memory
-                    .initialized(destination)?
-                    .then(|| self.memory.read(destination))
-                    .transpose()?;
-                self.memory.clear(source)?;
-                self.memory.clear(destination)?;
-                self.memory.write(destination, replacement)?;
-                if let Some(old) = old {
-                    self.memory.write(source, old)?;
-                }
+                let replacement = self.memory.read_value(source, false)?;
+                let old = self.memory.read_value(destination, true)?;
+                self.memory.write_value(destination, &replacement)?;
+                self.memory.write_value(source, &old)?;
                 None
             }
             Clone { .. } => {
@@ -438,12 +512,16 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             }
             Drop { .. } => {
                 let address = place(0)?;
-                if self.memory.initialized(address)? {
+                // Drop must not skip an aggregate with remaining live fields. Partial-construction
+                // cleanup is emitted per field (or through a structural drop body); a custom
+                // destructor must only be called once its receiver is fully constructed.
+                // IsInitialized, by contrast, asks whether the entire selected value is present.
+                if self.memory.any_initialized(address)? {
                     let mir::Value::Function(id) = operation.operands[1] else {
                         unreachable!()
                     };
                     let marker = self.memory.len();
-                    let result = self.allocate(ScalarKind::Unit, Some(operation.span))?;
+                    let result = self.allocate(ScalarKind::Unit.ty(), Some(operation.span))?;
                     let outcome =
                         self.call(id, vec![Binding::Place(address), Binding::Place(result)]);
                     self.memory.restore(marker);
@@ -456,13 +534,12 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 let mir::Value::Pattern(pattern) = &operation.operands[1] else {
                     return Err(invalid("expected literal pattern"));
                 };
-                let value = match operand(0)? {
-                    Binding::Place(address) => self.memory.read(address)?,
-                    value => value.scalar()?,
+                let equal = match operand(0)? {
+                    Binding::Place(address) => self.memory.matches(address, pattern)?,
+                    Binding::Product(value) => *value == self.memory.literal(value.ty, pattern)?,
+                    value => value.scalar()? == Scalar::from_literal(pattern)?,
                 };
-                Some(Binding::Scalar(Scalar::Bool(
-                    value == Scalar::from_literal(pattern)?,
-                )))
+                Some(Binding::Scalar(Scalar::Bool(equal)))
             }
             Call { .. } => {
                 let mir::Value::Function(id) = operation.operands[0] else {
@@ -470,7 +547,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 };
                 let values = operation.operands[1..]
                     .iter()
-                    .map(|value| Self::operand(body, args, registers, value))
+                    .map(|value| self.operand(body, args, registers, value))
                     .collect::<Result<Vec<_>, _>>()?;
                 self.call(id, values)
                     .map_err(|error| error.with_frame(id, operation.span))?;
@@ -531,25 +608,27 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             return Err(invalid("native arity mismatch"));
         }
         let output = output.place()?;
-        if output.kind != ScalarKind::for_type(signature.result.ty())? {
+        if ScalarKind::for_type(output.ty)? != ScalarKind::for_type(signature.result.ty())? {
             return Err(invalid("invalid native output storage"));
         }
         let mut addresses = Vec::with_capacity(inputs.len());
         for (input, parameter) in inputs.iter().zip(&signature.parameters) {
             let address = input.place()?;
-            if address.kind != ScalarKind::for_native(parameter.layout())?
+            if ScalarKind::for_type(address.ty)? != ScalarKind::for_native(parameter.layout())?
                 || !self.memory.initialized(address)?
             {
                 return Err(invalid("invalid native input storage"));
             }
-            if address == output && !matches!(parameter, NativeParameter::Scalar(..)) {
+            if self.memory.overlaps(address, output)?
+                && !matches!(parameter, NativeParameter::Scalar(..))
+            {
                 return Err(invalid("native output aliases an input"));
             }
             addresses.push(address);
         }
         for (index, address) in addresses.iter().enumerate() {
             for (other_index, other) in addresses[..index].iter().enumerate() {
-                if address == other
+                if self.memory.overlaps(*address, *other)?
                     && !matches!(signature.parameters[index], NativeParameter::Scalar(..))
                     && !matches!(
                         signature.parameters[other_index],
@@ -631,8 +710,8 @@ mod tests {
             vec![],
             vec![],
         );
-        let source = interpreter.memory.allocate(ScalarKind::Int).unwrap();
-        let destination = interpreter.memory.allocate(ScalarKind::Int).unwrap();
+        let source = interpreter.memory.allocate(ScalarKind::Int.ty()).unwrap();
+        let destination = interpreter.memory.allocate(ScalarKind::Int.ty()).unwrap();
         let mut registers = FxHashMap::from_iter([
             (mir::ValueId::from_index(0), Binding::Place(source)),
             (mir::ValueId::from_index(1), Binding::Place(destination)),
@@ -682,7 +761,7 @@ mod tests {
             (LiteralValue::new_native(1isize), true),
             (
                 LiteralValue::new_tuple(vec![LiteralValue::new_native(1isize)]),
-                false,
+                true,
             ),
             (LiteralValue::new_variant_tag("Some".into()), false),
         ] {

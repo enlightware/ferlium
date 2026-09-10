@@ -1064,6 +1064,18 @@ fn product_members(ty: Type, env: &impl TypeLayoutEnv) -> Option<DirectProductMe
     }
 }
 
+/// Inspect direct product members without recursively computing their layouts. Consumers can
+/// bound representation expansion before asking for the full layout recipe.
+pub(crate) fn product_member_types(ty: Type, env: &impl TypeLayoutEnv) -> Option<Vec<Type>> {
+    Some(
+        product_members(ty, env)?
+            .members
+            .into_iter()
+            .map(|(_, ty)| ty)
+            .collect(),
+    )
+}
+
 /// Build the product layout recipe consumed by physical aggregate lowering.
 pub(crate) fn product_layout_spec(
     ty: Type,

@@ -337,6 +337,11 @@ an aligned inline place of `A`; `address_offset_place` yields a slot containing 
 retain the base allocation's provenance. Byte-offset expressions use ordinary calls such as
 `Num<int>::add` and `Num<int>::mul`.
 
+Checked execution validates allocation lifetime, alignment, bounds, and the type of the selected
+subobject. Transferring a member preserves the initialization state of its siblings. Copying or
+moving a whole product requires all its fields to be initialized; replacement preserves absent
+fields of the displaced value. Padding bytes are not value data and need not be initialized or read.
+
 Logical product projections lower to typed byte addresses using the aggregate's layout and any
 `Value` witnesses required by open inline member layouts.
 

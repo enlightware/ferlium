@@ -155,7 +155,7 @@ mod tests {
     wasm_bindgen_test_configure!(run_in_browser);
 
     #[wasm_bindgen_test]
-    fn physical_mir_inspection_and_scalar_execution_in_browser() {
+    fn physical_mir_inspection_and_execution_in_browser() {
         set_panic_hook();
         let mut compiler = PlaygroundCompiler::new();
         let source =
@@ -179,6 +179,15 @@ mod tests {
             error.complete.contains("does not yet support"),
             "{}",
             error.complete
+        );
+        assert!(
+            compiler
+                .compile("fn second(pair: (int, bool)) -> bool { pair.1 } second((42, true))")
+                .succeeded
+        );
+        assert_eq!(
+            compiler.run_expr_physical_mir().unwrap().html_message(),
+            "true: bool"
         );
         assert!(compiler.compile("40 + 2").succeeded);
         assert_eq!(

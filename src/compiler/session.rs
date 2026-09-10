@@ -1372,15 +1372,18 @@ impl CompilerSession {
             let result = self
                 .prepare_physical_program(module_id)
                 .and_then(|program| {
+                    // Preparation established a fresh dependency closure. The borrowed program
+                    // prevents a revision change while execution resolves named product types.
                     crate::mir::physical::interpreter::run_entry(
                         &program,
                         FunctionId::new(module_id, entry),
                         &arguments,
                         limits,
+                        ModuleEnv::new(self.expect_fresh_module(module_id), self.raw_modules()),
                     )
                 });
-            // Physical execution only imports scalars for now. Reclaim host-owned arguments on
-            // every exit, including unsupported inputs and preparation failures.
+            // Reclaim host-owned arguments on every exit, including unsupported inputs and
+            // preparation failures.
             for argument in arguments {
                 argument.discard_storage();
             }
@@ -1697,17 +1700,16 @@ mod tests {
                 Rc::clone(session.expect_module_entry(id).revision.as_ref().unwrap()),
             )
         });
-        let error = session
+        let value = session
             .run_entry(
                 ExecutionTarget::PhysicalMir,
                 user.module_id,
                 user.expr.unwrap(),
                 vec![],
             )
-            .unwrap_err();
-        assert!(matches!(error, RuntimeError::Backend(_)));
-        assert!(error.source_failure().is_none());
-        assert!(!error.is_poisoning());
+            .unwrap();
+        assert_eq!(value.as_primitive_ty::<bool>(), Some(&true));
+        value.discard_storage();
 
         session
             .compile(
