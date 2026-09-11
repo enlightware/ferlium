@@ -15,6 +15,7 @@ It achieves so by borrowing the type system from Haskell, the syntax from Rust, 
 - Compile and run an expression: `echo "1 + 1" | cargo run --example ferlium` where `1 + 1 ` is your expression.
 
 ## Workflow Rules
+- Follow the surrounding code's style; prefer Rust `use` imports over fully qualified paths.
 - **IF** you modify the main parser file `src/parser.lalrpop`, **THEN** you must also update the IDE Lezer grammar file `playground/src/language/language.grammar` and validate it.
 - **IF** we agree to remove a feature, **THEN** you must **NOT** add a unit test to make sure that this feature is removed.
 - **IF** you modify compiler behaviour or language features, **THEN** update the documentation in `doc/` if necessary.
