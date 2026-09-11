@@ -13,14 +13,19 @@
 //! per function and checks them before execution. A later backend may lower the same abstract state
 //! to concrete drop flags without exposing those flags to optimization-oriented MIR.
 
-use std::{collections::VecDeque, fmt};
+use std::{
+    collections::{VecDeque, hash_map::Entry},
+    fmt,
+    iter::once,
+};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     format::FormatWith,
     mir::{
-        self, BlockId, Function, Operation, OperationKind, OperationResult, ParameterKind,
+        self, BlockId, Function, Instantiation, Operation, OperationKind, OperationResult,
+        ParameterId, ParameterKind, ValueId,
         dominance::Dominance,
         operation::SourceFallibility,
         role::{self, MirType, ValueRole, ValueRoles},
@@ -30,7 +35,7 @@ use crate::{
     std::array::array_type,
     types::{
         effects::{Effect, PrimitiveEffect},
-        r#type::{CallImplType, Type, TypeKind},
+        r#type::{CallImplType, CallResultConvention, Type, TypeKind},
         type_like::TypeLike,
         type_properties::concrete_type_is_trivial_copy,
     },
@@ -377,7 +382,7 @@ impl OwnedRegisterState {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RegisterOwnershipState {
-    registers: FxHashMap<mir::ValueId, OwnedRegisterState>,
+    registers: FxHashMap<ValueId, OwnedRegisterState>,
 }
 
 impl RegisterOwnershipState {
@@ -486,7 +491,7 @@ struct Verifier<'a> {
     node_index: FxHashMap<NodeId, usize>,
     node_block: FxHashMap<NodeId, BlockId>,
     block_first: FxHashMap<BlockId, NodeId>,
-    value_definition: FxHashMap<mir::ValueId, NodeId>,
+    value_definition: FxHashMap<ValueId, NodeId>,
     roles: ValueRoles,
     roots: Vec<RootInfo>,
     root_index: FxHashMap<mir::Value, usize>,
@@ -548,7 +553,7 @@ impl<'a> Verifier<'a> {
                 TerminatorKind::SwitchVariant { cases, default, .. } => cases
                     .iter()
                     .map(|(_, target)| (*target, state))
-                    .chain(std::iter::once((*default, state)))
+                    .chain(once((*default, state)))
                     .collect(),
                 TerminatorKind::Invoke { normal, error, .. } => {
                     let error_state = match state {
@@ -607,11 +612,11 @@ impl<'a> Verifier<'a> {
 
             for (successor, successor_state) in successors {
                 match inputs.entry(successor) {
-                    std::collections::hash_map::Entry::Vacant(entry) => {
+                    Entry::Vacant(entry) => {
                         entry.insert(successor_state);
                         worklist.push_back(successor);
                     }
-                    std::collections::hash_map::Entry::Occupied(entry) => assert_eq!(
+                    Entry::Occupied(entry) => assert_eq!(
                         *entry.get(),
                         successor_state,
                         "MIR function `{}` block {} joins normal and source-error control flow",
@@ -762,7 +767,7 @@ impl<'a> Verifier<'a> {
                 continue;
             }
             let ty = parameter.ty;
-            let value = mir::Value::Parameter(mir::ParameterId::from_index(index));
+            let value = mir::Value::Parameter(ParameterId::from_index(index));
             let root = self.roots.len();
             let exact = self.storage_paths_are_exact(ty, &mut Vec::new());
             self.roots.push(RootInfo {
@@ -967,7 +972,7 @@ impl<'a> Verifier<'a> {
             OperationKind::Project { yielded, ty } => {
                 assert_eq!(
                     ty.result_convention,
-                    crate::types::r#type::CallResultConvention::YIELDED_ONCE,
+                    CallResultConvention::YIELDED_ONCE,
                     "MIR function `{}` node {}: project requires a YieldedOnce call convention",
                     self.func.name,
                     node
@@ -1118,7 +1123,7 @@ impl<'a> Verifier<'a> {
         node: usize,
         callee: &mir::Value,
         ty: &CallImplType,
-        instantiation: Option<&mir::Instantiation>,
+        instantiation: Option<&Instantiation>,
     ) {
         let (Some(instantiation), mir::Value::Function(callee)) = (instantiation, callee) else {
             return;
@@ -1320,7 +1325,7 @@ impl<'a> Verifier<'a> {
     /// several earlier branches can otherwise multiply ownership alternatives on every trip
     /// around the loop. Ordinary backwards liveness proves exactly when that history is dead while
     /// preserving markers which are restored more than once.
-    fn stack_marker_live_in(&self) -> Option<Vec<FxHashSet<mir::ValueId>>> {
+    fn stack_marker_live_in(&self) -> Option<Vec<FxHashSet<ValueId>>> {
         let node_count = self.node_order.len();
         if !self.node_order.iter().any(|&node| {
             self.operation(node)
@@ -1372,7 +1377,7 @@ impl<'a> Verifier<'a> {
         Some(live_in)
     }
 
-    fn operand_consumes_value(&self, node: &crate::mir::Operation, index: usize) -> bool {
+    fn operand_consumes_value(&self, node: &Operation, index: usize) -> bool {
         matches!(
             node.kind,
             OperationKind::Store | OperationKind::RuntimeDealloc
@@ -2174,11 +2179,17 @@ impl<'a> Verifier<'a> {
 
 #[cfg(test)]
 mod tests {
+    use ustr::ustr;
+
+    use super::{Verifier, verify_function};
     use crate::{
         CompilerSession, Location,
-        hir::value::LiteralValue,
+        hir::{
+            function::ArgConvention,
+            value::{LiteralValue, VariantPayloadStorage},
+        },
         mir::{
-            BlockId, Operation, ParameterKind, Value, builder::FunctionBuilder,
+            BlockId, Operation, ParameterKind, Value, builder::FunctionBuilder, edit::FunctionEdit,
             terminator::Terminator,
         },
         module::{FunctionId, LocalFunctionId, ModuleId},
@@ -2229,7 +2240,7 @@ mod tests {
     /// A variant that owns something, so these tests have a drop obligation to violate. The payload
     /// is load-bearing: a sum type with only trivial inline payloads has no drop obligation.
     fn managed_variant_ty() -> Type {
-        Type::variant([(ustr::ustr("A"), string_type())])
+        Type::variant([(ustr("A"), string_type())])
     }
 
     fn replace_body(initialized: bool, aliases: bool) -> FunctionBuilder {
@@ -2238,7 +2249,7 @@ mod tests {
         let mut f = FunctionBuilder::new("replace_test".into(), Default::default());
         let destination = Value::Parameter(f.add_parameter(
             int_type(),
-            ParameterKind::Parameter(crate::hir::function::ArgConvention::MutableRef),
+            ParameterKind::Parameter(ArgConvention::MutableRef),
         ));
         let block = f.add_block();
         let replacement = append_result(&mut f, block, Operation::alloca(span, int_type()));
@@ -2379,7 +2390,7 @@ mod tests {
     fn replace_rejects_a_borrowed_replacement() {
         let span = Location::new_synthesized();
         let mut f = FunctionBuilder::new("borrowed_replace".into(), Default::default());
-        let kind = ParameterKind::Parameter(crate::hir::function::ArgConvention::MutableRef);
+        let kind = ParameterKind::Parameter(ArgConvention::MutableRef);
         let first = Value::Parameter(f.add_parameter(int_type(), kind));
         let second = Value::Parameter(f.add_parameter(int_type(), kind));
         let block = f.add_block();
@@ -2396,7 +2407,7 @@ mod tests {
         let first = Value::Parameter(f.add_parameter(string_type(), ParameterKind::Owned));
         let second = Value::Parameter(f.add_parameter(
             string_type(),
-            ParameterKind::Parameter(crate::hir::function::ArgConvention::MutableRef),
+            ParameterKind::Parameter(ArgConvention::MutableRef),
         ));
         let block = f.add_block();
         append(&mut f, block, Operation::replace(span, first, second, None));
@@ -2409,7 +2420,7 @@ mod tests {
         let session = CompilerSession::new();
         let env = session.module_env();
         let span = Location::new_synthesized();
-        let mut f = FunctionBuilder::new(ustr::ustr("fatal"), CallResultConvention::Value);
+        let mut f = FunctionBuilder::new(ustr("fatal"), CallResultConvention::Value);
         f.add_parameter(string_type(), ParameterKind::Return);
         let block = f.add_block();
         let variant_ty = managed_variant_ty();
@@ -2419,10 +2430,10 @@ mod tests {
             block,
             Operation::variant(
                 span,
-                ustr::ustr("A"),
+                ustr("A"),
                 variant_ty,
                 string_type(),
-                Some(crate::hir::value::VariantPayloadStorage::Inline),
+                Some(VariantPayloadStorage::Inline),
                 None,
                 None,
             ),
@@ -2430,7 +2441,7 @@ mod tests {
         append(&mut f, block, Operation::store(span, value, place));
         f.set_terminator(
             block,
-            Terminator::invariant_failure(span, ustr::ustr("broken invariant")),
+            Terminator::invariant_failure(span, ustr("broken invariant")),
         );
         f.finish(env);
     }
@@ -2442,19 +2453,15 @@ mod tests {
         let session = CompilerSession::new();
         let env = session.module_env();
         let mut f = FunctionBuilder::new("bad_variant_evidence".into(), Default::default());
-        let storage = f.add_constant(
-            crate::std::logic::bool_type(),
-            LiteralValue::new_native(false),
-            &env,
-        );
-        let variant_ty = Type::variant([(ustr::ustr("A"), Type::unit())]);
+        let storage = f.add_constant(bool_type(), LiteralValue::new_native(false), &env);
+        let variant_ty = Type::variant([(ustr("A"), Type::unit())]);
         let block = f.add_block();
         append(
             &mut f,
             block,
             Operation::variant(
                 span,
-                ustr::ustr("A"),
+                ustr("A"),
                 variant_ty,
                 Type::unit(),
                 None,
@@ -2483,10 +2490,10 @@ mod tests {
             block,
             Operation::variant(
                 span,
-                ustr::ustr("A"),
+                ustr("A"),
                 variant_ty,
                 string_type(),
-                Some(crate::hir::value::VariantPayloadStorage::Inline),
+                Some(VariantPayloadStorage::Inline),
                 None,
                 None,
             ),
@@ -2497,10 +2504,10 @@ mod tests {
             block,
             Operation::variant(
                 span,
-                ustr::ustr("A"),
+                ustr("A"),
                 variant_ty,
                 string_type(),
-                Some(crate::hir::value::VariantPayloadStorage::Inline),
+                Some(VariantPayloadStorage::Inline),
                 None,
                 None,
             ),
@@ -2509,11 +2516,7 @@ mod tests {
         append(
             &mut f,
             block,
-            Operation::store(
-                span,
-                crate::mir::Value::Constant(constant),
-                crate::mir::Value::Parameter(ret),
-            ),
+            Operation::store(span, Value::Constant(constant), Value::Parameter(ret)),
         );
         terminate_return(&mut f, block, span);
         verify(f);
@@ -2530,11 +2533,11 @@ mod tests {
         let slot = append_result(&mut f, block, Operation::alloca(span, int_type()));
         append_result(&mut f, block, Operation::load(span, slot));
         terminate_return(&mut f, block, span);
-        let mut edit = crate::mir::edit::FunctionEdit::new(f.finish_unverified());
+        let mut edit = FunctionEdit::new(f.finish_unverified());
         // Both the operand count and pointee role are invalid. The structural diagnostic must win.
         edit.block_mut(block).operations[2].operands =
             vec![marker.clone(), marker].into_boxed_slice();
-        super::verify_function(&edit.finish_unverified(), session.module_env());
+        verify_function(&edit.finish_unverified(), session.module_env());
     }
 
     #[test]
@@ -2544,11 +2547,7 @@ mod tests {
         let session = CompilerSession::new();
         let env = session.module_env();
         let mut f = FunctionBuilder::new("bad_dominance".into(), Default::default());
-        let condition = f.add_constant(
-            crate::std::logic::bool_type(),
-            LiteralValue::new_native(true),
-            &env,
-        );
+        let condition = f.add_constant(bool_type(), LiteralValue::new_native(true), &env);
         let variant_ty = managed_variant_ty();
         let entry = f.add_block();
         let defining = f.add_block();
@@ -2556,22 +2555,17 @@ mod tests {
         let local = append_result(&mut f, entry, Operation::alloca(span, variant_ty));
         f.set_terminator(
             entry,
-            Terminator::cond_br(
-                span,
-                crate::mir::Value::Constant(condition),
-                defining,
-                using,
-            ),
+            Terminator::cond_br(span, Value::Constant(condition), defining, using),
         );
         let value = append_result(
             &mut f,
             defining,
             Operation::variant(
                 span,
-                ustr::ustr("A"),
+                ustr("A"),
                 variant_ty,
                 string_type(),
-                Some(crate::hir::value::VariantPayloadStorage::Inline),
+                Some(VariantPayloadStorage::Inline),
                 None,
                 None,
             ),
@@ -2588,11 +2582,7 @@ mod tests {
         let session = CompilerSession::new();
         let env = session.module_env();
         let mut f = FunctionBuilder::new("diamond_dominance".into(), Default::default());
-        let condition = f.add_constant(
-            crate::std::logic::bool_type(),
-            LiteralValue::new_native(true),
-            &env,
-        );
+        let condition = f.add_constant(bool_type(), LiteralValue::new_native(true), &env);
         let value = f.add_constant(int_type(), LiteralValue::new_native(42isize), &env);
         let ret = f.add_parameter(int_type(), ParameterKind::Return);
         let entry = f.add_block();
@@ -2604,11 +2594,11 @@ mod tests {
         append(
             &mut f,
             entry,
-            Operation::store(span, crate::mir::Value::Constant(value), local.clone()),
+            Operation::store(span, Value::Constant(value), local.clone()),
         );
         f.set_terminator(
             entry,
-            Terminator::cond_br(span, crate::mir::Value::Constant(condition), left, right),
+            Terminator::cond_br(span, Value::Constant(condition), left, right),
         );
         f.set_terminator(left, Terminator::goto(span, join));
         f.set_terminator(right, Terminator::goto(span, join));
@@ -2616,7 +2606,7 @@ mod tests {
         append(
             &mut f,
             join,
-            Operation::store(span, loaded, crate::mir::Value::Parameter(ret)),
+            Operation::store(span, loaded, Value::Parameter(ret)),
         );
         terminate_return(&mut f, join, span);
 
@@ -2629,11 +2619,7 @@ mod tests {
         let session = CompilerSession::new();
         let env = session.module_env();
         let mut f = FunctionBuilder::new("loop_dominance".into(), Default::default());
-        let condition = f.add_constant(
-            crate::std::logic::bool_type(),
-            LiteralValue::new_native(true),
-            &env,
-        );
+        let condition = f.add_constant(bool_type(), LiteralValue::new_native(true), &env);
         let value = f.add_constant(int_type(), LiteralValue::new_native(42isize), &env);
         let ret = f.add_parameter(int_type(), ParameterKind::Return);
         let entry = f.add_block();
@@ -2645,13 +2631,13 @@ mod tests {
         append(
             &mut f,
             entry,
-            Operation::store(span, crate::mir::Value::Constant(value), local.clone()),
+            Operation::store(span, Value::Constant(value), local.clone()),
         );
         f.set_terminator(entry, Terminator::goto(span, header));
         append(&mut f, header, Operation::load(span, local.clone()));
         f.set_terminator(
             header,
-            Terminator::cond_br(span, crate::mir::Value::Constant(condition), body, exit),
+            Terminator::cond_br(span, Value::Constant(condition), body, exit),
         );
         append(&mut f, body, Operation::load(span, local.clone()));
         f.set_terminator(body, Terminator::goto(span, header));
@@ -2659,7 +2645,7 @@ mod tests {
         append(
             &mut f,
             exit,
-            Operation::store(span, loaded, crate::mir::Value::Parameter(ret)),
+            Operation::store(span, loaded, Value::Parameter(ret)),
         );
         terminate_return(&mut f, exit, span);
 
@@ -2751,8 +2737,8 @@ mod tests {
             block,
             Operation::call(
                 span,
-                crate::mir::Value::Function(callee),
-                [crate::mir::Value::Parameter(dictionary)],
+                Value::Function(callee),
+                [Value::Parameter(dictionary)],
                 CallImplType::value(FnType::new_by_val([], int_type(), no_effects())),
             ),
         );
@@ -2766,11 +2752,7 @@ mod tests {
         let span = Location::new_synthesized();
         let mut f = FunctionBuilder::new("bad_call_argument_type".into(), Default::default());
         let block = f.add_block();
-        let argument = append_result(
-            &mut f,
-            block,
-            Operation::alloca(span, crate::std::logic::bool_type()),
-        );
+        let argument = append_result(&mut f, block, Operation::alloca(span, bool_type()));
         let result = append_result(&mut f, block, Operation::alloca(span, int_type()));
         append(
             &mut f,
@@ -2805,7 +2787,7 @@ mod tests {
                     LocalFunctionId::default(),
                 )),
                 [],
-                crate::std::logic::bool_type(),
+                bool_type(),
                 CallImplType::new(
                     FnType::new_by_val([], int_type(), no_effects()),
                     CallResultConvention::YIELDED_ONCE,
@@ -2899,10 +2881,10 @@ mod tests {
             block,
             Operation::variant(
                 span,
-                ustr::ustr("A"),
+                ustr("A"),
                 managed_variant_ty(),
                 string_type(),
-                Some(crate::hir::value::VariantPayloadStorage::Inline),
+                Some(VariantPayloadStorage::Inline),
                 None,
                 None,
             ),
@@ -2927,10 +2909,10 @@ mod tests {
             block,
             Operation::variant(
                 span,
-                ustr::ustr("A"),
+                ustr("A"),
                 variant_ty,
                 string_type(),
-                Some(crate::hir::value::VariantPayloadStorage::Inline),
+                Some(VariantPayloadStorage::Inline),
                 None,
                 None,
             ),
@@ -2988,7 +2970,7 @@ mod tests {
         f.set_terminator(restore, Terminator::goto(span, loop_header));
 
         let function = f.finish_unverified();
-        let mut verifier = super::Verifier::new(&function, env);
+        let mut verifier = Verifier::new(&function, env);
         verifier.verify_structure();
         let live_in = verifier
             .stack_marker_live_in()
@@ -3050,7 +3032,7 @@ mod tests {
         f.set_terminator(restore, Terminator::goto(span, choose_first));
 
         let function = f.finish_unverified();
-        let mut verifier = super::Verifier::new(&function, env);
+        let mut verifier = Verifier::new(&function, env);
         verifier.verify_structure();
         verifier.collect_value_information(None);
         verifier.collect_storage_roots();
@@ -3274,11 +3256,7 @@ mod tests {
         let session = CompilerSession::new();
         let env = session.module_env();
         let mut f = FunctionBuilder::new("conditional_stack_allocation".into(), Default::default());
-        let condition = f.add_constant(
-            crate::std::logic::bool_type(),
-            LiteralValue::new_native(true),
-            &env,
-        );
+        let condition = f.add_constant(bool_type(), LiteralValue::new_native(true), &env);
         let entry = f.add_block();
         let allocated = f.add_block();
         let skipped = f.add_block();
@@ -3286,12 +3264,7 @@ mod tests {
 
         f.set_terminator(
             entry,
-            Terminator::cond_br(
-                span,
-                crate::mir::Value::Constant(condition),
-                allocated,
-                skipped,
-            ),
+            Terminator::cond_br(span, Value::Constant(condition), allocated, skipped),
         );
         append(&mut f, allocated, Operation::alloca(span, int_type()));
         f.set_terminator(allocated, Terminator::goto(span, join));
@@ -3314,10 +3287,10 @@ mod tests {
             block,
             Operation::variant(
                 span,
-                ustr::ustr("A"),
+                ustr("A"),
                 variant_ty,
                 string_type(),
-                Some(crate::hir::value::VariantPayloadStorage::Inline),
+                Some(VariantPayloadStorage::Inline),
                 None,
                 None,
             ),
@@ -3351,8 +3324,8 @@ mod tests {
             block,
             Operation::move_value(
                 span,
-                crate::mir::Value::Parameter(source),
-                crate::mir::Value::Parameter(destination),
+                Value::Parameter(source),
+                Value::Parameter(destination),
             ),
         );
         terminate_return(&mut f, block, span);

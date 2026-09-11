@@ -38,15 +38,15 @@ use std::{borrow::Cow, fmt};
 
 use ustr::Ustr;
 
-use crate::mir::site::{OperationIndex, OperationSite};
-
 use crate::{
     containers::{B, b},
     format::FormatWith,
     mir::{
         self, Function, Operation, OperationKind, OperationResult, Parameter, ParameterKind,
+        ValueId,
+        site::{OperationIndex, OperationSite},
         terminator::TerminatorKind,
-        value::{Constant, ConstantId},
+        value::{Constant, ConstantId, StaticEvidence},
     },
     module::{ModuleEnv, id::Id},
     std::math::int_type,
@@ -240,7 +240,7 @@ pub(crate) struct ValueRoles {
     registers: Vec<Option<ValueRole>>,
     /// Registers whose result reads their own role, directly or through a chain. Empty in any
     /// well-formed function; kept so the diagnostic can say *why* a role is missing.
-    cyclic: Vec<mir::ValueId>,
+    cyclic: Vec<ValueId>,
 }
 
 impl ValueRoles {
@@ -275,7 +275,7 @@ impl ValueRoles {
     pub(crate) fn define(
         &mut self,
         func_name: Ustr,
-        value_id: mir::ValueId,
+        value_id: ValueId,
         operation: &Operation,
         result: OperationResult,
         constants: &[Constant],
@@ -334,7 +334,7 @@ impl ValueRoles {
         let mut resolving = Vec::new();
         for index in 0..definitions.len() {
             roles.ensure(
-                mir::ValueId::from_index(index),
+                ValueId::from_index(index),
                 &definitions,
                 func.constants(),
                 &mut resolving,
@@ -346,10 +346,10 @@ impl ValueRoles {
     /// Resolves one register's role, and every role its result reads, into the table.
     fn ensure(
         &mut self,
-        value_id: mir::ValueId,
+        value_id: ValueId,
         definitions: &[Option<&Operation>],
         constants: &[Constant],
-        resolving: &mut Vec<mir::ValueId>,
+        resolving: &mut Vec<ValueId>,
     ) {
         let index = value_id.as_index();
         if self.registers.get(index).is_some_and(Option::is_some) {
@@ -472,11 +472,9 @@ impl ValueRoles {
             mir::Value::Dictionary(_) => Cow::Owned(ValueRole::Dictionary),
             mir::Value::Subscript(_) => Cow::Owned(ValueRole::Subscript),
             mir::Value::Evidence(evidence) => Cow::Owned(match &**evidence {
-                mir::value::StaticEvidence::Dictionary { .. } => ValueRole::Dictionary,
-                mir::value::StaticEvidence::Subscript { .. } => ValueRole::Subscript,
-                mir::value::StaticEvidence::VariantPayloadStorage(_) => {
-                    ValueRole::VariantPayloadStorage
-                }
+                StaticEvidence::Dictionary { .. } => ValueRole::Dictionary,
+                StaticEvidence::Subscript { .. } => ValueRole::Subscript,
+                StaticEvidence::VariantPayloadStorage(_) => ValueRole::VariantPayloadStorage,
             }),
             mir::Value::Function(_) => Cow::Owned(ValueRole::Function),
             mir::Value::Pattern(_) => Cow::Owned(ValueRole::Pattern),
@@ -489,7 +487,7 @@ impl ValueRoles {
 /// Diagnostics used only by the operand checks.
 impl ValueRoles {
     /// Whether `value_id` was left unresolved because its result reads itself.
-    pub(crate) fn is_cyclic(&self, value_id: mir::ValueId) -> bool {
+    pub(crate) fn is_cyclic(&self, value_id: ValueId) -> bool {
         self.cyclic.contains(&value_id)
     }
 
@@ -533,7 +531,7 @@ fn parameter_role(parameter: &Parameter, result_convention: CallResultConvention
 ///
 /// A result nests one child per level and ends in at most one `Same`, so there is never more
 /// than one.
-fn result_dependency(result: &OperationResult) -> Option<mir::ValueId> {
+fn result_dependency(result: &OperationResult) -> Option<ValueId> {
     match result {
         OperationResult::Same(mir::Value::Register(value_id)) => Some(*value_id),
         OperationResult::Pointee(inner)
@@ -929,8 +927,7 @@ mod tests {
         let mut builder = FunctionBuilder::new("layout_capture".into(), Default::default());
         let block = builder.add_block();
         let definition = TraitDictionaryId::new(ModuleId::new(0), LocalImplId::new(0));
-        let capture =
-            crate::mir::Value::Evidence(Box::new(StaticEvidence::VariantPayloadStorage(true)));
+        let capture = Value::Evidence(Box::new(StaticEvidence::VariantPayloadStorage(true)));
 
         builder.append_operation(
             block,

@@ -46,25 +46,26 @@
 
 #![allow(dead_code)]
 
+use std::mem;
+
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::mir::{
-    self, BlockId, Function, OperationKind,
-    edit::FunctionEdit,
-    role::{ValueRole, ValueRoles},
-    terminator::TerminatorKind,
-    value::ValueId,
-};
+use super::{dataflow, known_callee::KnownCallees, site::OperationIndex};
 use crate::{
     hir::function::ArgConvention,
+    mir::{
+        self, BlockId, Function, Operation, OperationKind,
+        edit::FunctionEdit,
+        role::{ValueRole, ValueRoles},
+        terminator::TerminatorKind,
+        value::ValueId,
+    },
     module::{FunctionId, ModuleEnv, id::Id},
     types::{
         r#type::{CallResultConvention, Type},
         type_properties::concrete_type_is_trivial_copy,
     },
 };
-
-use super::{dataflow, known_callee::KnownCallees, site::OperationIndex};
 
 #[derive(Clone, Copy)]
 struct DeadResultCandidate {
@@ -663,7 +664,7 @@ fn remove_empty_local_stack_regions(
 /// even though they are not spelled `alloca`; dictionary/subscript projection, semantic drop and a
 /// call carrying symbolic subscript evidence can do so. False positives merely retain a bracket.
 pub(super) fn may_leave_frame_storage(
-    operation: &mir::Operation,
+    operation: &Operation,
     func: &Function,
     roles: &ValueRoles,
 ) -> bool {
@@ -879,7 +880,7 @@ impl DceCensus {
         &mut self,
         block: BlockId,
         index: OperationIndex,
-        operation: &mir::Operation,
+        operation: &Operation,
         pending: &mut FxHashMap<ValueId, (OperationIndex, Type)>,
     ) {
         let remove_pending_operands = |pending: &mut FxHashMap<ValueId, _>| {
@@ -945,7 +946,7 @@ impl DceCensus {
         &mut self,
         block: BlockId,
         index: OperationIndex,
-        operation: &mir::Operation,
+        operation: &Operation,
         position: usize,
         operand: &mir::Value,
         track_clone_pairs: bool,
@@ -1099,7 +1100,7 @@ impl DceCensus {
             return Vec::new();
         }
 
-        let mut uses = std::mem::take(&mut self.derived_uses);
+        let mut uses = mem::take(&mut self.derived_uses);
         // A removed clone/drop lifetime can strand its dictionary-derived dispatch places. Retire
         // those uses before starting the existing derived-place worklist, avoiding a second DCE
         // traversal merely to collect the callees the lifetime removal made unread.
@@ -1158,7 +1159,7 @@ impl DceCensus {
 /// whole-place writes and drops may belong to later lifetimes in the same allocation and therefore
 /// remain. A replacement needs the separately checked drop of its detached old value. Any other read,
 /// projection, call argument, or unmodelled role rejects every pair for the root.
-fn is_exact_clone_lifetime_role(operation: &mir::Operation, position: usize) -> bool {
+fn is_exact_clone_lifetime_role(operation: &Operation, position: usize) -> bool {
     match &operation.kind {
         OperationKind::Clone { .. } => position == 1,
         OperationKind::Drop { .. } | OperationKind::Clear => position == 0,
@@ -1177,12 +1178,18 @@ fn is_exact_clone_lifetime_role(operation: &mir::Operation, position: usize) -> 
 
 #[cfg(test)]
 mod tests {
+    use ustr::ustr;
+
+    use super::{
+        super::stack_region::remove_redundant_stack_markers, may_leave_frame_storage,
+        remove_dead_trivial_results, remove_discarded_trivial_copy_results,
+    };
     use crate::{
         CompilerSession, ExecutionTarget, Location, MirOptimization, Path,
         format::FormatWith,
         mir::{
-            Operation, ParameterKind, Value, builder::FunctionBuilder, role::ValueRoles,
-            terminator::Terminator,
+            Operation, OperationKind, ParameterKind, Value, builder::FunctionBuilder,
+            edit::FunctionEdit, role::ValueRoles, terminator::Terminator,
         },
         module::{FunctionId, LocalFunctionId, LocalSubscriptId, ModuleId, SubscriptId, id::Id},
         std::math::int_type,
@@ -1333,9 +1340,7 @@ mod tests {
             .unwrap()
             .module_id;
         let module = session.expect_fresh_module(module_id);
-        let function_id = module
-            .get_local_function_id(crate::ustr("has_value"))
-            .unwrap();
+        let function_id = module.get_local_function_id(ustr("has_value")).unwrap();
         let env = session.modules().env_for(module);
         let raw = session
             .mir_artifacts_for(module_id, MirOptimization::Disabled)
@@ -1343,7 +1348,7 @@ mod tests {
             .get(function_id)
             .unwrap()
             .clone();
-        let retained = super::remove_discarded_trivial_copy_results(&raw, env).unwrap_or(raw);
+        let retained = remove_discarded_trivial_copy_results(&raw, env).unwrap_or(raw);
         let body = retained.format_with(&env).to_string();
 
         assert!(
@@ -1460,8 +1465,8 @@ mod tests {
         builder.append_operation(block, Operation::stack_restore(span, live.clone()));
         builder.set_terminator(block, Terminator::ret(span));
         let function = builder.finish(env);
-        let cleaned = super::remove_dead_trivial_results(&function).unwrap();
-        let cleaned = crate::mir::edit::FunctionEdit::new(cleaned).finish(env);
+        let cleaned = remove_dead_trivial_results(&function).unwrap();
+        let cleaned = FunctionEdit::new(cleaned).finish(env);
         let operations = cleaned.block(cleaned.entry()).operations();
         assert!(!operations.iter().any(|operation| operation.result_id().map(Value::Register) == Some(unused.clone())));
         assert!(
@@ -1472,13 +1477,12 @@ mod tests {
         assert!(
             operations
                 .iter()
-                .any(|operation| operation.kind == crate::mir::OperationKind::StackRestore)
+                .any(|operation| operation.kind == OperationKind::StackRestore)
         );
         assert!(
-            operations.iter().any(|operation| matches!(
-                operation.kind,
-                crate::mir::OperationKind::Alloca { .. }
-            ))
+            operations
+                .iter()
+                .any(|operation| matches!(operation.kind, OperationKind::Alloca { .. }))
         );
     }
 
@@ -1496,10 +1500,9 @@ mod tests {
         builder.append_operation(block, Operation::stack_restore(span, inner));
         builder.set_terminator(block, Terminator::ret(span));
         let function = builder.finish(env);
-        let canonical =
-            super::super::stack_region::remove_redundant_stack_markers(&function).unwrap();
-        let cleaned = super::remove_dead_trivial_results(&canonical).unwrap();
-        let cleaned = crate::mir::edit::FunctionEdit::new(cleaned).finish(env);
+        let canonical = remove_redundant_stack_markers(&function).unwrap();
+        let cleaned = remove_dead_trivial_results(&canonical).unwrap();
+        let cleaned = FunctionEdit::new(cleaned).finish(env);
         assert!(cleaned.block(cleaned.entry()).operations().is_empty());
     }
 
@@ -1563,7 +1566,7 @@ mod tests {
         let roles = ValueRoles::derive(&function);
         let call = &function.block(block).operations()[1];
 
-        assert!(super::may_leave_frame_storage(call, &function, &roles));
+        assert!(may_leave_frame_storage(call, &function, &roles));
     }
 
     /// A local place in an inlined body belongs to the former callee frame. Its bracket must stay

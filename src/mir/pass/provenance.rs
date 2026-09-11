@@ -25,17 +25,16 @@
 //!
 use rustc_hash::FxHashMap;
 
+use super::{call_graph::CallGraph, dataflow::call_operands};
 use crate::{
     hir::function::ArgConvention,
     mir::{
-        self, Function, OperationKind, ParameterKind, const_eval::effects_allow_const_eval,
-        terminator::TerminatorKind,
+        self, Function, OperationKind, ParameterId, ParameterKind, ValueId,
+        const_eval::effects_allow_const_eval, terminator::TerminatorKind,
     },
     module::{FunctionId, LocalFunctionId, ModuleEnv, ModuleId, id::Id},
     types::r#type::CallResultConvention,
 };
-
-use super::{call_graph::CallGraph, dataflow::call_operands};
 
 /// Which of a function's parameters its returned place points into.
 ///
@@ -181,11 +180,11 @@ fn derive_provenance(
     {
         return ResultProvenance::Unknown;
     }
-    let ret = mir::ParameterId::from_index(parameters.len() - 1);
+    let ret = ParameterId::from_index(parameters.len() - 1);
 
     // MIR parameter index -> visible argument index. Hidden evidence comes first and is not an
     // argument, so a root landing on one has no argument to name and stays unknown.
-    let argument_of = |id: mir::ParameterId| -> Option<u32> {
+    let argument_of = |id: ParameterId| -> Option<u32> {
         let index = id.as_index();
         matches!(parameters.get(index)?.kind, ParameterKind::Parameter(_)).then(|| {
             parameters[..index]
@@ -197,7 +196,7 @@ fn derive_provenance(
 
     // Which parameter each register's place points into, filled in as the body is walked. A
     // register absent from the map is one the trace could not follow, which is `Unknown`.
-    let mut roots: FxHashMap<mir::ValueId, u32> = FxHashMap::default();
+    let mut roots: FxHashMap<ValueId, u32> = FxHashMap::default();
     let mut result: Option<ResultProvenance> = None;
 
     for block_id in body.blocks() {
@@ -210,8 +209,7 @@ fn derive_provenance(
                 _ => None,
             });
         for operation in operations {
-            let root_of = |operand: &mir::Value, roots: &FxHashMap<mir::ValueId, u32>| match operand
-            {
+            let root_of = |operand: &mir::Value, roots: &FxHashMap<ValueId, u32>| match operand {
                 mir::Value::Parameter(id) => argument_of(*id),
                 mir::Value::Register(id) => roots.get(id).copied(),
                 _ => None,
@@ -323,7 +321,7 @@ fn derive_repeatable(
         return false;
     }
     let parameters = body.parameters();
-    let argument_of = |id: mir::ParameterId| -> Option<u32> {
+    let argument_of = |id: ParameterId| -> Option<u32> {
         let index = id.as_index();
         matches!(parameters.get(index)?.kind, ParameterKind::Parameter(_)).then(|| {
             parameters[..index]
@@ -332,17 +330,16 @@ fn derive_repeatable(
                 .count() as u32
         })
     };
-    let mut roots: FxHashMap<mir::ValueId, u32> = FxHashMap::default();
-    let mut places: FxHashMap<mir::ValueId, StablePlace> = FxHashMap::default();
-    let mut returned_places: FxHashMap<mir::ValueId, StablePlace> = FxHashMap::default();
+    let mut roots: FxHashMap<ValueId, u32> = FxHashMap::default();
+    let mut places: FxHashMap<ValueId, StablePlace> = FxHashMap::default();
+    let mut returned_places: FxHashMap<ValueId, StablePlace> = FxHashMap::default();
     let mut result_place: Option<StablePlace> = None;
 
-    let place_of =
-        |operand: &mir::Value, places: &FxHashMap<mir::ValueId, StablePlace>| match operand {
-            mir::Value::Parameter(id) => argument_of(*id).map(StablePlace::Argument),
-            mir::Value::Register(id) => places.get(id).cloned(),
-            _ => None,
-        };
+    let place_of = |operand: &mir::Value, places: &FxHashMap<ValueId, StablePlace>| match operand {
+        mir::Value::Parameter(id) => argument_of(*id).map(StablePlace::Argument),
+        mir::Value::Register(id) => places.get(id).cloned(),
+        _ => None,
+    };
 
     for block_id in body.blocks() {
         let block = body.block(block_id);
@@ -354,8 +351,7 @@ fn derive_repeatable(
                 _ => None,
             });
         for operation in operations {
-            let root_of = |operand: &mir::Value, roots: &FxHashMap<mir::ValueId, u32>| match operand
-            {
+            let root_of = |operand: &mir::Value, roots: &FxHashMap<ValueId, u32>| match operand {
                 mir::Value::Parameter(id) => argument_of(*id),
                 mir::Value::Register(id) => roots.get(id).copied(),
                 _ => None,
@@ -527,16 +523,18 @@ fn derive_repeatable(
 
 #[cfg(test)]
 mod tests {
+    use ustr::ustr;
+
     use super::*;
     use crate::{
         CompilerSession, ExecutionTarget, Location, MirOptimization,
+        compiler::ensure_mir_artifacts,
         hir::value::LiteralValue,
         mir::{Operation, builder::FunctionBuilder, terminator::Terminator},
         module::{LocalSubscriptId, Path, SubscriptId},
         std::math::int_type,
         types::r#type::{SubscriptType, Type},
     };
-    use ustr::ustr;
 
     /// Provenance over a compiled module, plus a lookup from source name to local id.
     fn provenance_of(src: &str) -> (AddressorSummaries, impl Fn(&str) -> LocalFunctionId) {
@@ -605,7 +603,7 @@ mod tests {
             .modules()
             .get_by_path(&Path::single_str("std"))
             .expect("the standard library is always registered");
-        crate::compiler::ensure_mir_artifacts(session.raw_modules(), std_id);
+        ensure_mir_artifacts(session.raw_modules(), std_id);
         let modules = session.raw_modules();
         let module = session.expect_fresh_module(std_id);
         let artifacts = session

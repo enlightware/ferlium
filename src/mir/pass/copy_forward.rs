@@ -30,20 +30,22 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use super::{
+    dataflow::{call_operands, field_index},
+    site::{OperationIndex, OperationSite},
+};
 use crate::{
     containers::SVec2,
     hir::function::ArgConvention,
     mir::{
-        self, BlockId, Function, Operation, OperationKind, edit::FunctionEdit,
-        terminator::TerminatorKind, value::ValueId,
+        self, BlockId, Function, Operation, OperationKind,
+        edit::FunctionEdit,
+        terminator::TerminatorKind,
+        value::{ConstantId, ParameterId, ValueId},
     },
     module::{ModuleEnv, ProjectionIndex, id::Id},
     types::type_properties::concrete_type_is_trivial_copy,
 };
-
-use super::dataflow::{call_operands, field_index};
-
-use super::site::{OperationIndex, OperationSite};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Site {
@@ -101,8 +103,8 @@ struct ForwardedInitialization {
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum PlaceRoot {
-    Constant(mir::value::ConstantId),
-    Parameter(mir::value::ParameterId),
+    Constant(ConstantId),
+    Parameter(ParameterId),
     Result(ValueId),
 }
 
@@ -757,19 +759,27 @@ fn note_unsafe(operand: &mir::Value, uses: &mut FxHashMap<ValueId, Uses>) {
 
 #[cfg(test)]
 mod tests {
+    use ustr::ustr;
+
+    use super::{forward_redundant_storage, hoist_transfer_field_addresses};
     use crate::{
         CompilerSession, ExecutionTarget, Location, MirOptimization, Path,
         format::FormatWith,
-        hir::{function::ArgConvention, value::Value},
+        hir::{
+            function::ArgConvention,
+            value::{LiteralValue, Value},
+        },
         mir::{
-            self, Operation, ParameterKind,
+            self, Function, Operation, ParameterKind,
             builder::FunctionBuilder,
+            edit::FunctionEdit,
             operation::OperationKindDiscriminant as Op,
             profile::{MirInstructionCounts, MirInstructionKind as Kind},
             terminator::Terminator,
         },
         module::ModuleEnv,
         std::{math::int_type, string::string_type},
+        types::r#type::tuple_type,
     };
 
     fn optimized(src: &str) -> String {
@@ -802,7 +812,7 @@ mod tests {
             .module_id;
         let entry = session
             .expect_fresh_module(module_id)
-            .get_local_function_id(crate::ustr("repeated"))
+            .get_local_function_id(ustr("repeated"))
             .unwrap();
         let (result, profile) = session
             .run_mir_entry_profiled(
@@ -815,7 +825,7 @@ mod tests {
         profile.total().clone()
     }
 
-    fn forwarded_move_chain(env: ModuleEnv<'_>) -> crate::mir::Function {
+    fn forwarded_move_chain(env: ModuleEnv<'_>) -> Function {
         let span = Location::new_synthesized();
         let mut builder = FunctionBuilder::new("move_chain".into(), Default::default());
         let result = builder.add_parameter(int_type(), ParameterKind::Return);
@@ -829,11 +839,7 @@ mod tests {
         let second = builder
             .append_operation(block, Operation::alloca(span, int_type()))
             .unwrap();
-        let constant = builder.add_constant(
-            int_type(),
-            crate::hir::value::LiteralValue::new_native(1isize),
-            &env,
-        );
+        let constant = builder.add_constant(int_type(), LiteralValue::new_native(1isize), &env);
         builder.append_operation(
             block,
             Operation::store(span, mir::Value::Constant(constant), source.clone()),
@@ -848,7 +854,7 @@ mod tests {
         builder.finish(env)
     }
 
-    fn staged_memcpy(env: ModuleEnv<'_>) -> crate::mir::Function {
+    fn staged_memcpy(env: ModuleEnv<'_>) -> Function {
         let span = Location::new_synthesized();
         let mut builder = FunctionBuilder::new("staged_memcpy".into(), Default::default());
         let source =
@@ -967,8 +973,8 @@ mod tests {
         let session = CompilerSession::new();
         let env = session.module_env();
         let source = forwarded_move_chain(env);
-        let forwarded = super::forward_redundant_storage(&source, env)
-            .expect("the move chain must be forwarded");
+        let forwarded =
+            forward_redundant_storage(&source, env).expect("the move chain must be forwarded");
         let body = forwarded.format_with(&env).to_string();
 
         assert_eq!(body.matches("alloca int").count(), 0, "{body}");
@@ -981,8 +987,8 @@ mod tests {
         let session = CompilerSession::new();
         let env = session.module_env();
         let source = staged_memcpy(env);
-        let forwarded = super::forward_redundant_storage(&source, env)
-            .expect("the staging memcpy must be forwarded");
+        let forwarded =
+            forward_redundant_storage(&source, env).expect("the staging memcpy must be forwarded");
         let body = forwarded.format_with(&env).to_string();
 
         assert_eq!(body.matches("alloca int").count(), 0, "{body}");
@@ -1004,16 +1010,8 @@ mod tests {
         let destination = builder
             .append_operation(block, Operation::alloca(span, int_type()))
             .unwrap();
-        let initialized = builder.add_constant(
-            int_type(),
-            crate::hir::value::LiteralValue::new_native(1isize),
-            &env,
-        );
-        let returned = builder.add_constant(
-            int_type(),
-            crate::hir::value::LiteralValue::new_native(0isize),
-            &env,
-        );
+        let initialized = builder.add_constant(int_type(), LiteralValue::new_native(1isize), &env);
+        let returned = builder.add_constant(int_type(), LiteralValue::new_native(0isize), &env);
         builder.append_operation(
             block,
             Operation::store(span, mir::Value::Constant(initialized), temporary.clone()),
@@ -1030,7 +1028,7 @@ mod tests {
         builder.set_terminator(block, Terminator::ret(span));
         let source = builder.finish(env);
 
-        let forwarded = super::forward_redundant_storage(&source, env)
+        let forwarded = forward_redundant_storage(&source, env)
             .expect("the initialization must target its destination directly");
         let roles = mir::role::check_function_operand_roles(&forwarded);
         mir::verify::verify_function_with_roles(&forwarded, env, roles);
@@ -1053,7 +1051,7 @@ mod tests {
             .unwrap()
             .module_id;
         let module = session.expect_fresh_module(module_id);
-        let copy = module.get_local_function_id(crate::ustr("copy")).unwrap();
+        let copy = module.get_local_function_id(ustr("copy")).unwrap();
         let raw = session
             .mir_artifacts_for(module_id, MirOptimization::Disabled)
             .unwrap()
@@ -1091,8 +1089,8 @@ mod tests {
         );
         builder.set_terminator(block, Terminator::ret(span));
         let staged = builder.finish(env);
-        let forwarded = super::forward_redundant_storage(&staged, env)
-            .expect("the staged clone must be forwarded");
+        let forwarded =
+            forward_redundant_storage(&staged, env).expect("the staged clone must be forwarded");
         let body = forwarded.format_with(&env).to_string();
 
         assert_eq!(body.matches("alloca string").count(), 0, "{body}");
@@ -1150,18 +1148,14 @@ mod tests {
         let session = CompilerSession::new();
         let env = session.module_env();
         let span = Location::new_synthesized();
-        let tuple_ty = crate::types::r#type::tuple_type([int_type()]);
+        let tuple_ty = tuple_type([int_type()]);
         let mut builder = FunctionBuilder::new("overlapping_transfer".into(), Default::default());
         let tuple = builder.add_parameter(
             tuple_ty,
             ParameterKind::Parameter(ArgConvention::MutableRef),
         );
         let block = builder.add_block();
-        let index = builder.add_constant(
-            int_type(),
-            crate::hir::value::LiteralValue::new_native(0isize),
-            &env,
-        );
+        let index = builder.add_constant(int_type(), LiteralValue::new_native(0isize), &env);
         let address = || {
             Operation::product_subfield(
                 span,
@@ -1181,10 +1175,10 @@ mod tests {
         builder.append_operation(block, Operation::move_value(span, temporary, destination));
         builder.set_terminator(block, Terminator::ret(span));
         let body = builder.finish(env);
-        let hoisted = super::hoist_transfer_field_addresses(&body)
+        let hoisted = hoist_transfer_field_addresses(&body)
             .expect("the address must be a speculative hoist candidate");
-        crate::mir::edit::FunctionEdit::new(hoisted).finish(env);
-        assert!(super::forward_redundant_storage(&body, env).is_none());
+        FunctionEdit::new(hoisted).finish(env);
+        assert!(forward_redundant_storage(&body, env).is_none());
     }
 
     #[test]

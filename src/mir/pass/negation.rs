@@ -57,6 +57,7 @@ use std::cell::OnceCell;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use super::site::{OperationIndex, OperationSite};
 use crate::{
     containers::b,
     hir::value::LiteralValue,
@@ -69,8 +70,6 @@ use crate::{
     },
     module::id::Id,
 };
-
-use super::site::{OperationIndex, OperationSite};
 
 /// A boolean value, and whether reaching it passed through an odd number of negations.
 #[derive(Clone, Copy)]
@@ -454,6 +453,7 @@ mod tests {
     use crate::{
         CompilerSession, Location, MirOptimization,
         containers::b,
+        format::FormatWith,
         hir::{function::ArgConvention, value::LiteralValue},
         mir::{
             self, Function, Operation, ParameterKind, builder::FunctionBuilder,
@@ -578,7 +578,7 @@ mod tests {
         assert!(
             forward_boolean_negations(&source).is_none(),
             "a flag with two writers must be left alone:\n{}",
-            crate::format::FormatWith::format_with(&source, &session.module_env())
+            FormatWith::format_with(&source, &session.module_env())
         );
     }
 

@@ -66,11 +66,20 @@
 //!   `subscript_member` is place-producing like `dict_entry` but is left out until its redundancy
 //!   is measured rather than assumed.
 
-use std::hash::{Hash, Hasher};
+use std::{
+    hash::{Hash, Hasher},
+    ptr,
+};
 
 use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 
+use super::{
+    dataflow::{CallOperands, Root, call_operands},
+    provenance::{AddressorSummary, ResultProvenance},
+    site::OperationIndex,
+};
 use crate::{
+    Location,
     hir::function::ArgConvention,
     mir::{
         self, BlockId, Function, Operation, OperationKind,
@@ -87,12 +96,6 @@ use crate::{
         r#type::{CallImplType, CallResultConvention, Type},
         type_properties::concrete_type_is_trivial_copy,
     },
-};
-
-use super::{
-    dataflow::{CallOperands, Root, call_operands},
-    provenance::{AddressorSummary, ResultProvenance},
-    site::OperationIndex,
 };
 
 /// An operand in a call-expression identity.
@@ -324,7 +327,7 @@ fn is_let_call_argument(
         return false;
     };
     call.arguments.iter().any(|(argument, convention)| {
-        *convention == ArgConvention::Let && std::ptr::eq(*argument, &operation.operands[position])
+        *convention == ArgConvention::Let && ptr::eq(*argument, &operation.operands[position])
     })
 }
 
@@ -528,7 +531,7 @@ struct CallReplacement {
     site: ReplacementSite,
     source: mir::Value,
     destination: mir::Value,
-    span: crate::Location,
+    span: Location,
 }
 
 /// Eliminates repeated, statically known addressor and trivially-copyable value calls before the
@@ -1276,7 +1279,9 @@ enum Enter {
 #[cfg(test)]
 mod tests {
     use super::{has_duplicate_call_fingerprint, has_multiple_numberable_computations};
-    use crate::{CompilerSession, ExecutionTarget, MirOptimization, module::Path, ustr};
+    use crate::{
+        CompilerSession, ExecutionTarget, MirOptimization, mir::Function, module::Path, ustr,
+    };
 
     fn optimized(src: &str) -> String {
         let mut session = CompilerSession::new();
@@ -1307,7 +1312,7 @@ mod tests {
             .count()
     }
 
-    fn raw_body(src: &str, name: &str) -> crate::mir::Function {
+    fn raw_body(src: &str, name: &str) -> Function {
         let mut session = CompilerSession::new();
         let module_id = session
             .compile_for(

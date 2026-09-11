@@ -10,22 +10,23 @@
 
 use ustr::Ustr;
 
+#[cfg(any(debug_assertions, test))]
+use crate::mir::{
+    role::{self, ValueRoles},
+    site::{OperationIndex, OperationSite},
+    verify::verify_function,
+};
 use crate::{
     hir::value::LiteralValue,
     mir::{
-        self, BasicBlock, BlockId, Function, Operation, OperationResult, Parameter, ParameterKind,
+        self, BasicBlock, BlockId, Function, Operation, OperationResult, Parameter, ParameterId,
+        ParameterKind, ValueId,
         operation::SourceFallibility,
         terminator::{Terminator, TerminatorKind},
         value::{Constant, ConstantId},
     },
     module::{ModuleEnv, id::Id},
     types::r#type::{CallResultConvention, Type},
-};
-
-#[cfg(any(debug_assertions, test))]
-use crate::mir::{
-    role::{self, ValueRoles},
-    site::{OperationIndex, OperationSite},
 };
 
 /// A temporarily unterminated block used only while lowering.
@@ -67,8 +68,8 @@ impl FunctionBuilder {
         }
     }
 
-    pub(crate) fn add_parameter(&mut self, ty: Type, tag: ParameterKind) -> mir::ParameterId {
-        let id = mir::ParameterId::from_index(self.parameters.len());
+    pub(crate) fn add_parameter(&mut self, ty: Type, tag: ParameterKind) -> ParameterId {
+        let id = ParameterId::from_index(self.parameters.len());
         let parameter = Parameter { ty, kind: tag };
         #[cfg(any(debug_assertions, test))]
         self.roles
@@ -180,7 +181,7 @@ impl FunctionBuilder {
     fn assign_result(&mut self, operation: &mut Operation) -> Option<mir::Value> {
         let result = operation.result();
         let result_id = (result != OperationResult::Nothing).then(|| {
-            let id = mir::ValueId::from_index(self.next_value_index);
+            let id = ValueId::from_index(self.next_value_index);
             self.next_value_index += 1;
             id
         });
@@ -200,7 +201,7 @@ impl FunctionBuilder {
     pub(crate) fn finish(self, env: ModuleEnv<'_>) -> Function {
         let function = self.finish_unverified();
         #[cfg(any(debug_assertions, test))]
-        super::verify::verify_function(&function, env);
+        verify_function(&function, env);
         #[cfg(not(any(debug_assertions, test)))]
         let _ = env;
         function
@@ -239,7 +240,9 @@ impl FunctionBuilder {
 mod tests {
     use crate::{
         CompilerSession, Location,
-        mir::{Operation, Value, builder::FunctionBuilder, terminator::Terminator},
+        mir::{
+            BlockId, Operation, Value, ValueId, builder::FunctionBuilder, terminator::Terminator,
+        },
         std::math::int_type,
     };
 
@@ -263,8 +266,8 @@ mod tests {
         let session = CompilerSession::new();
         let _function = builder.finish(session.module_env());
 
-        assert_eq!(first, Value::Register(crate::mir::ValueId::new(0)));
-        assert_eq!(second, Value::Register(crate::mir::ValueId::new(1)));
+        assert_eq!(first, Value::Register(ValueId::new(0)));
+        assert_eq!(second, Value::Register(ValueId::new(1)));
     }
 
     #[test]
@@ -273,7 +276,7 @@ mod tests {
         let span = Location::new_synthesized();
         let mut builder = FunctionBuilder::new("invalid_target".into(), Default::default());
         let entry = builder.add_block();
-        builder.set_terminator(entry, Terminator::goto(span, crate::mir::BlockId::new(1)));
+        builder.set_terminator(entry, Terminator::goto(span, BlockId::new(1)));
 
         let session = CompilerSession::new();
         builder.finish(session.module_env());

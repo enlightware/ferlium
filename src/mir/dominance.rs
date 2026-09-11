@@ -20,6 +20,8 @@
 //! The queries the verifier asks are unused in a release build, where it is compiled out entirely.
 #![allow(dead_code)]
 
+use crate::graph::reverse_postorder;
+
 /// The dominator tree of a rooted graph, and constant-time dominance queries over it.
 pub(crate) struct Dominance {
     children: Vec<Vec<usize>>,
@@ -43,7 +45,7 @@ impl Dominance {
             }
         }
 
-        let reverse_postorder = crate::graph::reverse_postorder(successors, entry);
+        let reverse_postorder = reverse_postorder(successors, entry);
         let mut reverse_postorder_index = vec![Self::UNREACHABLE; node_count];
         for (index, &node) in reverse_postorder.iter().enumerate() {
             reverse_postorder_index[node] = index;

@@ -171,20 +171,22 @@ pub(super) fn bool_value(func: &Function, value: &mir::Value) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
+    use super::materialize_boolean_results;
     use crate::{
         CompilerSession, Location,
         format::FormatWith,
         hir::{function::ArgConvention, value::LiteralValue},
         mir::{
-            self, Operation, OperationKind, ParameterKind,
+            self, BlockId, Function, Operation, OperationKind, ParameterId, ParameterKind,
             builder::FunctionBuilder,
+            edit::FunctionEdit,
             terminator::{Terminator, TerminatorKind},
         },
         module::id::Id,
         std::{logic::bool_type, math::int_type, option::option_type},
     };
 
-    fn boolean_materialization(value_when_true: bool) -> crate::mir::Function {
+    fn boolean_materialization(value_when_true: bool) -> Function {
         let span = Location::new_synthesized();
         let session = CompilerSession::new();
         let env = session.module_env();
@@ -240,7 +242,7 @@ mod tests {
         builder.finish(env)
     }
 
-    fn variant_boolean_materialization() -> crate::mir::Function {
+    fn variant_boolean_materialization() -> Function {
         let span = Location::new_synthesized();
         let session = CompilerSession::new();
         let env = session.module_env();
@@ -287,7 +289,7 @@ mod tests {
         let session = CompilerSession::new();
         let env = session.module_env();
         let source = boolean_materialization(true);
-        let optimized = super::materialize_boolean_results(&source)
+        let optimized = materialize_boolean_results(&source)
             .expect("the materialization diamond should be rewritten");
         let rendered = optimized.format_with(&env).to_string();
 
@@ -313,7 +315,7 @@ mod tests {
         let session = CompilerSession::new();
         let env = session.module_env();
         let source = boolean_materialization(false);
-        let optimized = super::materialize_boolean_results(&source)
+        let optimized = materialize_boolean_results(&source)
             .expect("the materialization diamond should be rewritten");
         let rendered = optimized.format_with(&env).to_string();
 
@@ -356,7 +358,7 @@ mod tests {
         let session = CompilerSession::new();
         let env = session.module_env();
         let source = variant_boolean_materialization();
-        let optimized = super::materialize_boolean_results(&source)
+        let optimized = materialize_boolean_results(&source)
             .expect("the variant materialization diamond should be rewritten");
         let rendered = optimized.format_with(&env).to_string();
 
@@ -371,13 +373,11 @@ mod tests {
         let session = CompilerSession::new();
         let env = session.module_env();
         let source = boolean_materialization(true);
-        let mut altered = crate::mir::edit::FunctionEdit::new(source);
-        altered
-            .block_mut(crate::mir::BlockId::from_index(1))
-            .operations[0]
-            .operands[0] = mir::Value::Parameter(crate::mir::ParameterId::from_index(0));
+        let mut altered = FunctionEdit::new(source);
+        altered.block_mut(BlockId::from_index(1)).operations[0].operands[0] =
+            mir::Value::Parameter(ParameterId::from_index(0));
         let altered = altered.finish(env);
 
-        assert!(super::materialize_boolean_results(&altered).is_none());
+        assert!(materialize_boolean_results(&altered).is_none());
     }
 }

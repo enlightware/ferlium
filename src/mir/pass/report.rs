@@ -27,10 +27,11 @@
 //! "why was this not evaluated away?" and "why was the callee not copied in?" have different
 //! answers and different remedies — a native folds readily and can never be inlined.
 
-use std::fmt;
+use std::{cmp::Reverse, fmt};
 
 use ustr::Ustr;
 
+use super::{fold, inline, inline::NotInlinable, string_accumulate::StringFunctions};
 use crate::{
     Location, MirOptimization,
     compiler::{CompilerSession, MirArtifacts, Specialization},
@@ -41,8 +42,6 @@ use crate::{
     },
     module::{FunctionId, ModuleEnv, ModuleId, id::Id},
 };
-
-use super::{fold, inline, inline::NotInlinable};
 
 /// The pass a remark came from.
 ///
@@ -230,7 +229,7 @@ pub(crate) fn build(
     let mut call_sites_after = 0usize;
     let mut remarks = Vec::new();
     let known_callees = session.known_callees();
-    let string_functions = super::string_accumulate::StringFunctions::resolve(env);
+    let string_functions = StringFunctions::resolve(env);
     let string_materializer =
         fold::StringMaterializer::resolve(env, string_functions.static_constructor());
     let original_of = |callee: FunctionId| {
@@ -437,7 +436,7 @@ impl FormatWith<ModuleEnv<'_>> for OptimizationReport {
             // Costliest per unit of payoff first: a cost model has to reject from this end, so this
             // is the order in which to read the list.
             let mut ranked: Vec<&SpecializationRemark> = self.specializations.iter().collect();
-            ranked.sort_by_key(|s| std::cmp::Reverse(s.size / s.payoff().max(1)));
+            ranked.sort_by_key(|s| Reverse(s.size / s.payoff().max(1)));
             for s in ranked {
                 let original = match s.original_optimized_size {
                     Some(optimized) => format!("{} raw, {optimized} optimized", s.original_size),
@@ -476,7 +475,7 @@ impl FormatWith<ModuleEnv<'_>> for OptimizationReport {
         }
         for remark in &self.remarks {
             let callee = match remark.callee {
-                Some(id) => crate::mir::Value::Function(id).format_with(env).to_string(),
+                Some(id) => mir::Value::Function(id).format_with(env).to_string(),
                 None => "<indirect>".to_string(),
             };
             let span = remark.site.span();
@@ -496,12 +495,14 @@ impl FormatWith<ModuleEnv<'_>> for OptimizationReport {
 
 #[cfg(test)]
 mod tests {
-    use super::OptimizationPass;
+    use super::{OptimizationPass, OptimizationReport};
     use crate::{
-        CompilerSession, ExecutionTarget, MirOptimization, format::FormatWith, module::Path,
+        CompilerSession, ExecutionTarget, MirOptimization,
+        format::FormatWith,
+        module::{ModuleEnv, Path},
     };
 
-    fn report_for(src: &str) -> (crate::mir::pass::report::OptimizationReport, String) {
+    fn report_for(src: &str) -> (OptimizationReport, String) {
         let mut session = CompilerSession::new();
         session.set_mir_optimization(MirOptimization::Enabled);
         let module_id = session
@@ -515,7 +516,7 @@ mod tests {
             .module_id;
         let report = session.optimization_report(module_id);
         let module = session.expect_fresh_module(module_id);
-        let env = crate::module::ModuleEnv::new(module, session.raw_modules());
+        let env = ModuleEnv::new(module, session.raw_modules());
         let rendered = report.format_with(&env).to_string();
         (report, rendered)
     }

@@ -14,27 +14,35 @@
 //! the [`EvalCtx`]'s `environment`. Native (std) callees are delegated to the HIR interpreter; MIR
 //! (script) callees are interpreted recursively so their own lowering is exercised too.
 
-use std::collections::VecDeque;
+#[cfg(debug_assertions)]
+use std::fmt;
+use std::{cmp::Reverse, collections::VecDeque, mem, vec::IntoIter};
 
 use rustc_hash::FxHashMap;
 use ustr::Ustr;
 
+#[cfg(debug_assertions)]
+use crate::std::value::is_value_drop_function;
 use crate::{
     CompilerSession, Location,
     compiler::MirOptimization,
+    containers::b,
     eval::{
-        ControlFlow, EvalCtx, PlaceResult, RuntimeError, ValOrMut, ValueRef,
+        ControlFlow, EvalControlFlowResult, EvalCtx, PlaceResult, RuntimeError, ValOrMut, ValueRef,
         call_value_clone_for_temp, call_value_drop_for_temp,
     },
     execution::ReferenceInterpreterLimits,
     hir::{
-        function::{ArgConvention, copy_boxed_trivial_copy_native},
+        function::{ArgConvention, copy_boxed_trivial_copy_native, literal_of_trivial_copy_native},
         value::{
             ClosedTraitDictionary, FunctionValue, HiddenEvidenceArgValue, LiteralValue,
             SubscriptValue, Value, VariantPayloadStorage,
         },
     },
-    mir::{self, BlockId, Operation, OperationKind, terminator::TerminatorKind},
+    mir::{
+        self, BlockId, Function, Operation, OperationKind, ParameterId, ParameterKind,
+        profile::MirExecutionProfile, terminator::TerminatorKind, value::StaticEvidence,
+    },
     module::{
         FunctionId, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, TraitDictionaryEntry,
         id::Id,
@@ -99,7 +107,7 @@ pub(crate) enum CallArgument {
 /// This guard makes that unrepresentable: whatever has not been consumed when it goes out of scope,
 /// on any path including an early return, is discarded. It is the same idiom as
 /// [`ValOrMutArgs`](crate::eval::ValOrMutArgs) and `CallArgsStorageGuard` on the HIR side.
-pub(crate) struct CallArguments(std::vec::IntoIter<CallArgument>);
+pub(crate) struct CallArguments(IntoIter<CallArgument>);
 
 impl CallArguments {
     pub(crate) fn new(arguments: Vec<CallArgument>) -> Self {
@@ -151,8 +159,8 @@ enum CallPhase {
 }
 
 #[cfg(debug_assertions)]
-impl std::fmt::Display for CallPhase {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for CallPhase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             CallPhase::Before => "before",
             CallPhase::After => "after",
@@ -189,7 +197,7 @@ pub struct Interpreter<'a> {
     stage: MirOptimization,
     /// Present only for explicitly profiled runs; ordinary interpretation pays one predictable
     /// branch per executed MIR instruction and allocates no counter state.
-    profile: Option<mir::profile::MirExecutionProfile>,
+    profile: Option<MirExecutionProfile>,
     /// Memoized semantic classification used only by debug call-boundary assertions.
     #[cfg(debug_assertions)]
     value_drop_functions: FxHashMap<FunctionId, bool>,
@@ -243,12 +251,12 @@ impl<'a> Interpreter<'a> {
         limits: ReferenceInterpreterLimits,
     ) -> Self {
         let mut interpreter = Self::with_limits(module_id, session, limits);
-        interpreter.profile = Some(mir::profile::MirExecutionProfile::default());
+        interpreter.profile = Some(MirExecutionProfile::default());
         interpreter
     }
 
     /// Takes the profile from a profiled interpreter, leaving profiling disabled.
-    pub fn take_profile(&mut self) -> Option<mir::profile::MirExecutionProfile> {
+    pub fn take_profile(&mut self) -> Option<MirExecutionProfile> {
         self.profile.take()
     }
 
@@ -302,10 +310,10 @@ impl<'a> Interpreter<'a> {
         assert!(
             parameter_tags[..arguments.len()]
                 .iter()
-                .all(|tag| matches!(tag, mir::ParameterKind::Parameter(_))),
+                .all(|tag| matches!(tag, ParameterKind::Parameter(_))),
             "MIR entry functions cannot require hidden dictionary parameters"
         );
-        assert_eq!(parameter_tags.last(), Some(&mir::ParameterKind::Return));
+        assert_eq!(parameter_tags.last(), Some(&ParameterKind::Return));
 
         let entry_top = self.ctx.environment.len();
         let required_cells = arguments.len() + 1;
@@ -355,7 +363,7 @@ impl<'a> Interpreter<'a> {
         let slot = ret
             .boxed_mut(&mut self.ctx)
             .expect("return cell must be addressable");
-        let value = std::mem::replace(slot, Value::uninit());
+        let value = mem::replace(slot, Value::uninit());
         self.reclaim_frame_storage(entry_top);
         Ok(value)
     }
@@ -437,7 +445,7 @@ impl<'a> Interpreter<'a> {
         let slot = ret
             .boxed_mut(&mut self.ctx)
             .expect("return cell must be addressable");
-        Ok(std::mem::replace(slot, Value::uninit()))
+        Ok(mem::replace(slot, Value::uninit()))
     }
 
     /// The native branch of [`call_with_known_arguments`](Self::call_with_known_arguments).
@@ -502,13 +510,13 @@ impl<'a> Interpreter<'a> {
         }
         let module = self.session.expect_fresh_module(semantic.module);
         let env = ModuleEnv::new(module, self.session.raw_modules());
-        let is_drop = crate::std::value::is_value_drop_function(semantic, &env);
+        let is_drop = is_value_drop_function(semantic, &env);
         self.value_drop_functions.insert(semantic, is_drop);
         is_drop
     }
 
     /// Returns the immutable MIR body stored beside the function's semantic module revision.
-    fn function(&self, key: FunctionKey) -> &'a mir::Function {
+    fn function(&self, key: FunctionKey) -> &'a Function {
         self.session
             .mir_artifacts_for(key.module, self.stage)
             .unwrap_or_else(|| panic!("module {} has no current MIR artifacts", key.module))
@@ -555,7 +563,7 @@ impl<'a> Interpreter<'a> {
         let func = self.function(key);
         let mut slots: FxHashMap<mir::Value, Binding> = FxHashMap::default();
         for (i, b) in args.into_iter().enumerate() {
-            slots.insert(mir::Value::Parameter(mir::ParameterId::from_index(i)), b);
+            slots.insert(mir::Value::Parameter(ParameterId::from_index(i)), b);
         }
         match self.run_loop(key, func, slots, func.entry())? {
             FrameOutcome::Completed => Ok(()),
@@ -572,7 +580,7 @@ impl<'a> Interpreter<'a> {
     fn run_loop(
         &mut self,
         key: FunctionKey,
-        func: &mir::Function,
+        func: &Function,
         mut slots: FxHashMap<mir::Value, Binding>,
         mut block: BlockId,
     ) -> Result<FrameOutcome, RuntimeError> {
@@ -685,13 +693,16 @@ impl<'a> Interpreter<'a> {
                 TerminatorKind::InvariantFailure { message } => {
                     // Even catch_unwind must not turn this exit into resumable execution.
                     // Ignore diagnostic I/O errors so they cannot cause a Rust unwind instead.
-                    use std::io::Write;
+                    use std::{
+                        io::{Write, stderr},
+                        process::abort,
+                    };
                     let _ = writeln!(
-                        std::io::stderr(),
+                        stderr(),
                         "Ferlium invariant failure at {:?}: {message}",
                         current.terminator().span
                     );
-                    std::process::abort();
+                    abort();
                 }
                 TerminatorKind::Yield { place, resume } => {
                     assert!(
@@ -713,7 +724,7 @@ impl<'a> Interpreter<'a> {
     fn exec_operation(
         &mut self,
         key: FunctionKey,
-        func: &mir::Function,
+        func: &Function,
         slots: &mut FxHashMap<mir::Value, Binding>,
         operation: &Operation,
     ) -> Result<(), RuntimeError> {
@@ -787,7 +798,7 @@ impl<'a> Interpreter<'a> {
                 let target = place
                     .boxed_mut(&mut self.ctx)
                     .expect("drop_subscript_env of an invalid place");
-                let value = std::mem::replace(target, Value::uninit());
+                let value = mem::replace(target, Value::uninit());
                 value.discard_storage();
             }
             OperationKind::BorrowSubscriptMember { .. } => {
@@ -907,7 +918,7 @@ impl<'a> Interpreter<'a> {
 
     fn exec_runtime_check(
         &mut self,
-        check: impl FnOnce(&mut EvalCtx<'a>) -> crate::eval::EvalControlFlowResult,
+        check: impl FnOnce(&mut EvalCtx<'a>) -> EvalControlFlowResult,
     ) -> Result<(), RuntimeError> {
         match check(&mut self.ctx) {
             Ok(result) => {
@@ -938,7 +949,7 @@ impl<'a> Interpreter<'a> {
 
     fn exec_subfield(
         &mut self,
-        func: &mir::Function,
+        func: &Function,
         slots: &mut FxHashMap<mir::Value, Binding>,
         operands: &[mir::Value],
         def: mir::Value,
@@ -1068,7 +1079,7 @@ impl<'a> Interpreter<'a> {
     #[inline(never)]
     fn exec_store(
         &mut self,
-        func: &mir::Function,
+        func: &Function,
         slots: &mut FxHashMap<mir::Value, Binding>,
         operands: &[mir::Value],
     ) -> Result<(), RuntimeError> {
@@ -1091,7 +1102,7 @@ impl<'a> Interpreter<'a> {
     /// operation rather than accidentally moving a resource out of an input place.
     fn exec_build_array(
         &mut self,
-        func: &mir::Function,
+        func: &Function,
         slots: &mut FxHashMap<mir::Value, Binding>,
         operands: &[mir::Value],
     ) -> Result<(), RuntimeError> {
@@ -1130,7 +1141,7 @@ impl<'a> Interpreter<'a> {
             .boxed_mut(&mut self.ctx)
             .expect("clear of an invalid place");
         let husk = husk_like(slot);
-        let old = std::mem::replace(slot, husk);
+        let old = mem::replace(slot, husk);
         old.discard_storage();
     }
 
@@ -1179,7 +1190,7 @@ impl<'a> Interpreter<'a> {
     #[inline(never)]
     fn exec_compare_equal(
         &mut self,
-        func: &mir::Function,
+        func: &Function,
         slots: &mut FxHashMap<mir::Value, Binding>,
         operands: &[mir::Value],
         def: mir::Value,
@@ -1349,7 +1360,7 @@ impl<'a> Interpreter<'a> {
         let slot = target
             .boxed_mut(&mut self.ctx)
             .expect("drop target must be addressable");
-        let husk = std::mem::replace(slot, Value::uninit());
+        let husk = mem::replace(slot, Value::uninit());
         let skeleton = husk_like(&husk);
         *target
             .boxed_mut(&mut self.ctx)
@@ -1578,7 +1589,7 @@ impl<'a> Interpreter<'a> {
         // script branch of `exec_resolved_call` (an extra parameter binds to its interned dictionary
         // or by-pointer place; every other operand, including the unused return out-pointer, binds to
         // its place).
-        let param_tags: Vec<mir::ParameterKind> = self
+        let param_tags: Vec<ParameterKind> = self
             .function(key)
             .parameters()
             .iter()
@@ -1590,7 +1601,7 @@ impl<'a> Interpreter<'a> {
         args.extend(leading);
         for (k, op) in arg_ops.iter().enumerate() {
             let binding = match param_tags.get(offset + k) {
-                Some(mir::ParameterKind::Dictionary) => self.evidence_binding(slots, op, span)?,
+                Some(ParameterKind::Dictionary) => self.evidence_binding(slots, op, span)?,
                 _ => Binding::Place(self.place_operand(slots, op)),
             };
             args.push(binding);
@@ -1621,7 +1632,7 @@ impl<'a> Interpreter<'a> {
         let func = self.function(key);
         let mut acc_slots: FxHashMap<mir::Value, Binding> = FxHashMap::default();
         for (i, b) in args.into_iter().enumerate() {
-            acc_slots.insert(mir::Value::Parameter(mir::ParameterId::from_index(i)), b);
+            acc_slots.insert(mir::Value::Parameter(ParameterId::from_index(i)), b);
         }
         match self.run_loop(key, func, acc_slots, func.entry()) {
             Ok(FrameOutcome::Suspended {
@@ -1662,10 +1673,7 @@ impl<'a> Interpreter<'a> {
     /// pointee) are dropped; everything place-bound — visible arguments, the return out-pointer, and
     /// place-carried evidence — is kept with its tag.
     #[cfg(debug_assertions)]
-    fn call_boundary(
-        tags: &[mir::ParameterKind],
-        args: &[Binding],
-    ) -> Vec<(mir::ParameterKind, Place)> {
+    fn call_boundary(tags: &[ParameterKind], args: &[Binding]) -> Vec<(ParameterKind, Place)> {
         tags.iter()
             .zip(args)
             .filter_map(|(tag, binding)| match binding {
@@ -1682,7 +1690,7 @@ impl<'a> Interpreter<'a> {
     #[cfg(debug_assertions)]
     fn check_call_boundary(
         &self,
-        boundary: &[(mir::ParameterKind, Place)],
+        boundary: &[(ParameterKind, Place)],
         phase: CallPhase,
         drop_target_may_be_consumed: bool,
     ) {
@@ -1695,7 +1703,7 @@ impl<'a> Interpreter<'a> {
                 .is_none_or(|value| value.as_boxed().is_some_and(is_drop_husk));
             match tag {
                 // A `&mut`/`&`/trivial-copy argument must point at a live value, before and after.
-                mir::ParameterKind::Parameter(passing) => assert!(
+                ParameterKind::Parameter(passing) => assert!(
                     !is_husk
                         || (drop_target_may_be_consumed
                             && matches!(phase, CallPhase::After)
@@ -1703,7 +1711,7 @@ impl<'a> Interpreter<'a> {
                     "MIR call boundary: an argument passed as {passing:?} is a husk {phase} the \
                      call; a `&mut`/`&`/trivial-copy argument must point at a live value",
                 ),
-                mir::ParameterKind::Owned => match phase {
+                ParameterKind::Owned => match phase {
                     CallPhase::Before => assert!(
                         !is_husk,
                         "MIR call boundary: an owned argument is a husk before the call",
@@ -1717,7 +1725,7 @@ impl<'a> Interpreter<'a> {
                 // There is no dynamic precondition on `@ret` here: the caller-side MIR ownership
                 // analysis checks identifiable result storage, and opaque caller-owned storage is a
                 // calling-convention contract.
-                mir::ParameterKind::Return => {
+                ParameterKind::Return => {
                     if matches!(phase, CallPhase::After) {
                         assert!(
                             !is_husk,
@@ -1726,7 +1734,7 @@ impl<'a> Interpreter<'a> {
                         );
                     }
                 }
-                mir::ParameterKind::Dictionary => {}
+                ParameterKind::Dictionary => {}
             }
         }
     }
@@ -1807,7 +1815,7 @@ impl<'a> Interpreter<'a> {
             // other parameter binds to its by-pointer place. Classifying by the callee's tag (rather
             // than guessing from the operand's runtime binding) is essential: a value operand must
             // bind as a place even if it could superficially resolve to a dictionary.
-            let param_tags: Vec<mir::ParameterKind> = self
+            let param_tags: Vec<ParameterKind> = self
                 .function(key)
                 .parameters()
                 .iter()
@@ -1823,9 +1831,7 @@ impl<'a> Interpreter<'a> {
                     // `Dictionary` tag, so the operand disambiguates them. A non-extra
                     // (visible/return) parameter is always a by-pointer place, never reinterpreted
                     // as a dictionary.
-                    Some(mir::ParameterKind::Dictionary) => {
-                        self.evidence_binding(slots, op, span)?
-                    }
+                    Some(ParameterKind::Dictionary) => self.evidence_binding(slots, op, span)?,
                     _ => Binding::Place(self.place_operand(slots, op)),
                 };
                 args.push(binding);
@@ -2217,7 +2223,7 @@ impl<'a> Interpreter<'a> {
                 function.closure_env_value_dictionary = None;
                 (
                     dict,
-                    std::mem::replace(&mut function.closure_env, Value::uninit()),
+                    mem::replace(&mut function.closure_env, Value::uninit()),
                 )
             })
         };
@@ -2405,7 +2411,7 @@ impl<'a> Interpreter<'a> {
         let target = place
             .boxed_mut(&mut self.ctx)
             .expect("storage-reclamation target must be addressable");
-        let value = std::mem::replace(target, Value::uninit());
+        let value = mem::replace(target, Value::uninit());
         value.discard_storage();
     }
 
@@ -2454,7 +2460,7 @@ impl<'a> Interpreter<'a> {
 
         // Nested projections occupy successively higher environment ranges. Reclaim the innermost
         // frames first so truncating an outer frame cannot invalidate a still-to-be-visited root.
-        suspended.sort_unstable_by_key(|frame| std::cmp::Reverse(frame.frame_top));
+        suspended.sort_unstable_by_key(|frame| Reverse(frame.frame_top));
         for frame in suspended {
             self.discard_bindings_after_poisoning(frame.slots);
             self.ctx.call_depth = self
@@ -2609,9 +2615,7 @@ impl<'a> Interpreter<'a> {
             return static_evidence_value(evidence);
         }
         if let mir::Value::Subscript(id) = op {
-            return HiddenEvidenceArgValue::Subscript(crate::containers::b(SubscriptValue::bare(
-                *id,
-            )));
+            return HiddenEvidenceArgValue::Subscript(b(SubscriptValue::bare(*id)));
         }
         if let mir::Value::Register(_) | mir::Value::Parameter(_) = op
             && let Some(Binding::Value(value)) = slots.get(op)
@@ -2621,13 +2625,11 @@ impl<'a> Interpreter<'a> {
                     VariantPayloadStorage::from_indirect(*indirect),
                 );
             }
-            return HiddenEvidenceArgValue::Subscript(crate::containers::b(
-                value
-                    .as_subscript()
-                    .expect("hidden evidence must be a subscript or variant storage mode")
-                    .as_ref()
-                    .clone(),
-            ));
+            return HiddenEvidenceArgValue::Subscript(b(value
+                .as_subscript()
+                .expect("hidden evidence must be a subscript or variant storage mode")
+                .as_ref()
+                .clone()));
         }
         let place = self.place_operand(slots, op);
         let value = place
@@ -2638,15 +2640,13 @@ impl<'a> Interpreter<'a> {
                 VariantPayloadStorage::from_indirect(*indirect),
             );
         }
-        HiddenEvidenceArgValue::Subscript(crate::containers::b(
-            value
-                .as_boxed()
-                .expect("subscript evidence requires boxed storage")
-                .as_subscript()
-                .expect("hidden evidence must be a dictionary, subscript, or variant storage mode")
-                .as_ref()
-                .clone(),
-        ))
+        HiddenEvidenceArgValue::Subscript(b(value
+            .as_boxed()
+            .expect("subscript evidence requires boxed storage")
+            .as_subscript()
+            .expect("hidden evidence must be a dictionary, subscript, or variant storage mode")
+            .as_ref()
+            .clone()))
     }
 
     /// Resolves a symbolic dictionary operand to its interned `TraitDictionaryId`, panicking if the
@@ -2694,7 +2694,7 @@ impl<'a> Interpreter<'a> {
     /// of their register slot).
     fn value_operand(
         &mut self,
-        func: &mir::Function,
+        func: &Function,
         slots: &mut FxHashMap<mir::Value, Binding>,
         v: &mir::Value,
     ) -> Value {
@@ -2735,7 +2735,7 @@ impl<'a> Interpreter<'a> {
     }
 
     /// Materializes a non-register MIR constant as a runtime value.
-    fn constant_value(&self, func: &mir::Function, constant: &mir::Value) -> Value {
+    fn constant_value(&self, func: &Function, constant: &mir::Value) -> Value {
         match constant {
             mir::Value::Constant(id) => func.constant(*id).representation.clone().into_value(),
             mir::Value::Function(r) => Value::function(*r),
@@ -2744,19 +2744,17 @@ impl<'a> Interpreter<'a> {
                  operand (see `dict_operand`)/call argument, never read with `value_operand`"
             ),
             mir::Value::Evidence(evidence) => match &**evidence {
-                mir::value::StaticEvidence::Dictionary { .. } => {
+                StaticEvidence::Dictionary { .. } => {
                     panic!("a static closed dictionary is evidence, not a materialized value")
                 }
-                mir::value::StaticEvidence::Subscript {
+                StaticEvidence::Subscript {
                     definition,
                     captures,
                 } => Value::subscript_value(SubscriptValue {
                     subscript: *definition,
                     hidden_args: captures.iter().map(static_evidence_value).collect(),
                 }),
-                mir::value::StaticEvidence::VariantPayloadStorage(indirect) => {
-                    Value::native(*indirect)
-                }
+                StaticEvidence::VariantPayloadStorage(indirect) => Value::native(*indirect),
             },
             // A bare static subscript materializes as a first-class subscript value (mirroring
             // `eval`'s `GetSubscript`, which yields `Value::subscript`).
@@ -2777,7 +2775,7 @@ impl<'a> Interpreter<'a> {
     /// discarding it leaks.
     fn with_runtime_value<R>(
         &self,
-        func: &mir::Function,
+        func: &Function,
         slots: &FxHashMap<mir::Value, Binding>,
         operand: &mir::Value,
         use_value: impl FnOnce(ValueRef<'_>) -> R,
@@ -2839,7 +2837,7 @@ impl<'a> Interpreter<'a> {
             .boxed_mut(&mut self.ctx)
             .expect("move from an invalid place");
         let husk = husk_like(slot);
-        std::mem::replace(slot, husk)
+        mem::replace(slot, husk)
     }
 
     /// Writes `v` into the cell denoted by `place`. A `store` **drops nothing**; MIR verification
@@ -2847,7 +2845,7 @@ impl<'a> Interpreter<'a> {
     fn store(&mut self, v: Value, place: &Place) -> Result<(), RuntimeError> {
         if place.native_member(&self.ctx).is_some() {
             assert!(
-                crate::hir::function::literal_of_trivial_copy_native(&v).is_some(),
+                literal_of_trivial_copy_native(&v).is_some(),
                 "owning native member writes require replace"
             );
             place
@@ -2862,32 +2860,30 @@ impl<'a> Interpreter<'a> {
         let slot = place
             .boxed_mut(&mut self.ctx)
             .expect("store to an invalid place");
-        let old = std::mem::replace(slot, v);
+        let old = mem::replace(slot, v);
         // Reclaims interpreter-only storage (like a stack-pop); runs no `Value::drop`.
         old.discard_storage();
         Ok(())
     }
 }
 
-pub(crate) fn static_evidence_value(
-    evidence: &mir::value::StaticEvidence,
-) -> HiddenEvidenceArgValue {
+pub(crate) fn static_evidence_value(evidence: &StaticEvidence) -> HiddenEvidenceArgValue {
     match evidence {
-        mir::value::StaticEvidence::Dictionary {
+        StaticEvidence::Dictionary {
             definition,
             captures,
         } => HiddenEvidenceArgValue::TraitDictionary(ClosedTraitDictionary {
             definition: *definition,
             captures: captures.iter().map(static_evidence_value).collect(),
         }),
-        mir::value::StaticEvidence::Subscript {
+        StaticEvidence::Subscript {
             definition,
             captures,
-        } => HiddenEvidenceArgValue::Subscript(crate::containers::b(SubscriptValue {
+        } => HiddenEvidenceArgValue::Subscript(b(SubscriptValue {
             subscript: *definition,
             hidden_args: captures.iter().map(static_evidence_value).collect(),
         })),
-        mir::value::StaticEvidence::VariantPayloadStorage(indirect) => {
+        StaticEvidence::VariantPayloadStorage(indirect) => {
             HiddenEvidenceArgValue::VariantPayloadStorage(VariantPayloadStorage::from_indirect(
                 *indirect,
             ))
@@ -2895,7 +2891,7 @@ pub(crate) fn static_evidence_value(
     }
 }
 
-fn static_evidence_argument(evidence: &mir::value::StaticEvidence) -> ValOrMut {
+fn static_evidence_argument(evidence: &StaticEvidence) -> ValOrMut {
     match static_evidence_value(evidence) {
         HiddenEvidenceArgValue::TraitDictionary(dictionary) => ValOrMut::Dictionary(dictionary),
         HiddenEvidenceArgValue::Subscript(subscript) => {
@@ -3052,46 +3048,53 @@ fn husk_like(v: &Value) -> Value {
 #[cfg(test)]
 #[cfg(all(unix, not(target_arch = "wasm32")))]
 mod fatal_exit_tests {
+    use std::{
+        env::{current_exe, var_os},
+        panic::{AssertUnwindSafe, catch_unwind},
+        process::exit,
+    };
+
+    use ustr::ustr;
+
     use super::*;
+    use crate::{
+        mir::{ParameterKind, builder::FunctionBuilder, terminator::Terminator},
+        std::STD_MODULE_ID,
+        types::r#type::CallResultConvention,
+    };
 
     #[test]
     fn invariant_failure_aborts_without_unwinding() {
         use std::{os::unix::process::ExitStatusExt, process::Command};
         const CHILD: &str = "FERLIUM_MIR_INVARIANT_FAILURE_CHILD";
         const MESSAGE: &str = "test fatal MIR invariant";
-        if std::env::var_os(CHILD).is_some() {
+        if var_os(CHILD).is_some() {
             let session = CompilerSession::new();
-            let mut builder = mir::builder::FunctionBuilder::new(
-                ustr::ustr("fatal"),
-                crate::types::r#type::CallResultConvention::Value,
-            );
+            let mut builder = FunctionBuilder::new(ustr("fatal"), CallResultConvention::Value);
             // Fatal exit is valid even though the caller's result is never initialized.
-            builder.add_parameter(Type::unit(), mir::ParameterKind::Return);
+            builder.add_parameter(Type::unit(), ParameterKind::Return);
             let block = builder.add_block();
             builder.set_terminator(
                 block,
-                mir::terminator::Terminator::invariant_failure(
-                    Location::new_synthesized(),
-                    ustr::ustr(MESSAGE),
-                ),
+                Terminator::invariant_failure(Location::new_synthesized(), ustr(MESSAGE)),
             );
             let body = builder.finish(session.module_env());
             let key = FunctionKey {
-                module: crate::std::STD_MODULE_ID,
+                module: STD_MODULE_ID,
                 identity: LocalFunctionId::from_index(0),
             };
             let mut interpreter = Interpreter::new(key.module, &session);
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = catch_unwind(AssertUnwindSafe(|| {
                 interpreter.run_loop(key, &body, FxHashMap::default(), body.entry())
             }));
             // Neither normal/error return nor a catchable Rust panic satisfies the contract.
-            std::process::exit(77);
+            exit(77);
         }
         let (_, module) = module_path!().split_once("::").unwrap();
         let test = format!("{module}::invariant_failure_aborts_without_unwinding");
         let output = Command::new("sh")
             .args(["-c", "ulimit -c 0; exec \"$@\"", "mir-fatal-exit-test"])
-            .arg(std::env::current_exe().unwrap())
+            .arg(current_exe().unwrap())
             .args(["--exact", &test, "--nocapture"])
             .env(CHILD, "1")
             .output()

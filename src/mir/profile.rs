@@ -308,13 +308,17 @@ impl fmt::Display for MirExecutionProfile {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        CompilerSession, ExecutionTarget, MirOptimization, Path, hir::value::Value,
-        mir::operation::OperationKindDiscriminant as Op,
-        mir::terminator::TerminatorKindDiscriminant as Term,
-    };
+    use ustr::ustr;
 
     use super::{MirInstructionCostClass as Cost, MirInstructionKind as Kind};
+    use crate::{
+        CompilerSession, ExecutionTarget, MirOptimization, Path,
+        hir::value::Value,
+        mir::{
+            operation::OperationKindDiscriminant as Op,
+            terminator::TerminatorKindDiscriminant as Term,
+        },
+    };
 
     #[test]
     fn instruction_discriminants_are_grouped_by_ordinal_cost() {
@@ -351,7 +355,7 @@ mod tests {
             .module_id;
         let entry = session
             .expect_fresh_module(module_id)
-            .get_local_function_id(crate::ustr("main"))
+            .get_local_function_id(ustr("main"))
             .unwrap();
         let (result, profile) = session
             .run_mir_entry_profiled(module_id, entry, vec![Value::native(21isize)])

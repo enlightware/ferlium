@@ -317,13 +317,18 @@ fn classify(error: RuntimeError) -> NotFoldable {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt;
+
+    use ustr::ustr;
+
     use super::*;
     use crate::{
         ExecutionTarget,
-        mir::{Function, OperationKind, terminator::TerminatorKind},
+        hir::value::NativeDisplay,
+        mir::{self, Function, Operation, OperationKind, terminator::TerminatorKind},
         module::{LocalFunctionId, Path, id::Id},
-        types::effects::effect,
-        types::r#type::CallImplType,
+        std::{math::int_type, string::String as NativeString},
+        types::{effects::effect, r#type::CallImplType},
     };
 
     /// A call site extracted from real lowered MIR, with everything compile-time evaluation needs.
@@ -343,7 +348,7 @@ mod tests {
     fn body<'a>(session: &'a CompilerSession, module: ModuleId, name: &str) -> &'a Function {
         let id = session
             .expect_fresh_module(module)
-            .get_local_function_id(crate::ustr(name))
+            .get_local_function_id(ustr(name))
             .unwrap_or_else(|| panic!("no function named {name}"));
         session
             .mir_artifacts_for(module, MirOptimization::Disabled)
@@ -357,7 +362,7 @@ mod tests {
             module,
             function: session
                 .expect_fresh_module(module)
-                .get_local_function_id(crate::ustr(name))
+                .get_local_function_id(ustr(name))
                 .unwrap_or_else(|| panic!("no function named {name}")),
         }
     }
@@ -369,9 +374,9 @@ mod tests {
     /// folding pass will rely on.
     fn call_sites(func: &Function) -> Vec<CallSite> {
         let mut sites = Vec::new();
-        let mut collect = |operation: &crate::mir::Operation| {
+        let mut collect = |operation: &Operation| {
             if let OperationKind::Call { ty, .. } = &operation.kind
-                && let crate::mir::Value::Function(callee) = &operation.operands[0]
+                && let mir::Value::Function(callee) = &operation.operands[0]
             {
                 sites.push(CallSite {
                     callee: *callee,
@@ -459,19 +464,13 @@ mod tests {
             .expect("`string_concat` must be called directly");
 
         let arguments = vec![
-            ConstArgument::Value(Value::native(crate::std::string::String::from(
-                "ab".to_string(),
-            ))),
-            ConstArgument::Value(Value::native(crate::std::string::String::from(
-                "cd".to_string(),
-            ))),
+            ConstArgument::Value(Value::native(NativeString::from("ab".to_string()))),
+            ConstArgument::Value(Value::native(NativeString::from("cd".to_string()))),
         ];
         let result = try_call(&session, module, concat, arguments)
             .expect("concatenating two known strings must fold");
         assert_eq!(
-            result
-                .as_primitive_ty::<crate::std::string::String>()
-                .map(AsRef::as_ref),
+            result.as_primitive_ty::<NativeString>().map(AsRef::as_ref),
             Some("abcd")
         );
         result.discard_storage();
@@ -574,8 +573,8 @@ mod tests {
             }
         }
 
-        impl crate::hir::value::NativeDisplay for DropTracked {
-            fn fmt_repr(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        impl NativeDisplay for DropTracked {
+            fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 write!(f, "<drop-tracked>")
             }
         }
@@ -602,7 +601,7 @@ mod tests {
         let result = interpreter.call_with_known_arguments(
             callee,
             arguments,
-            crate::std::math::int_type(),
+            int_type(),
             Location::new_synthesized(),
         );
         assert!(result.is_err(), "binding must run out of cells");
@@ -659,12 +658,8 @@ mod tests {
             .expect("`string_concat` must be called directly");
 
         let arguments = vec![
-            ConstArgument::Value(Value::native(crate::std::string::String::from(
-                "ab".to_string(),
-            ))),
-            ConstArgument::Value(Value::native(crate::std::string::String::from(
-                "cd".to_string(),
-            ))),
+            ConstArgument::Value(Value::native(NativeString::from("ab".to_string()))),
+            ConstArgument::Value(Value::native(NativeString::from("cd".to_string()))),
         ];
         let result = try_call(&session, module, concat, arguments).expect("must fold");
         let env = session

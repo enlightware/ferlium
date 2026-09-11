@@ -16,13 +16,12 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use super::{dataflow, site::OperationIndex};
 use crate::{
-    mir::{self, BlockId, Function, OperationKind, edit::FunctionEdit},
+    mir::{self, BlockId, Function, Operation, OperationKind, ValueId, edit::FunctionEdit},
     module::{ModuleEnv, id::Id},
     types::type_properties::concrete_type_is_trivial_copy,
 };
-
-use super::{dataflow, site::OperationIndex};
 
 /// Removes stores to a local whole place that every following path overwrites before reading.
 pub(crate) fn remove_overwritten_trivial_copy_stores(
@@ -48,7 +47,7 @@ pub(crate) fn remove_overwritten_trivial_copy_stores(
         .blocks()
         .flat_map(|block| func.block(block).operations())
         .filter(|operation| operation.result_requires_consuming_use())
-        .filter_map(mir::Operation::result_id)
+        .filter_map(Operation::result_id)
         .collect::<FxHashSet<_>>();
 
     // We intentionally do not reason through aliases. The role whitelist below is fail-safe: an
@@ -153,9 +152,9 @@ pub(crate) fn remove_overwritten_trivial_copy_stores(
 fn transfer_block(
     func: &Function,
     block: BlockId,
-    candidates: &FxHashSet<mir::ValueId>,
-    consuming_results: &FxHashSet<mir::ValueId>,
-    live: &mut FxHashSet<mir::ValueId>,
+    candidates: &FxHashSet<ValueId>,
+    consuming_results: &FxHashSet<ValueId>,
+    live: &mut FxHashSet<ValueId>,
     mut removed: Option<&mut FxHashMap<BlockId, FxHashSet<OperationIndex>>>,
 ) {
     for (index, operation) in func.block(block).operations().iter().enumerate().rev() {
@@ -189,8 +188,8 @@ fn transfer_block(
 
 /// Whether removing this store would orphan an owned value register.
 fn store_source_requires_consuming_use(
-    operation: &mir::Operation,
-    consuming_results: &FxHashSet<mir::ValueId>,
+    operation: &Operation,
+    consuming_results: &FxHashSet<ValueId>,
 ) -> bool {
     matches!(
         operation.operands.first(),
@@ -203,7 +202,7 @@ fn store_source_requires_consuming_use(
 /// `memcpy` is a representation copy, not an ownership action. A call's final result place is
 /// recovered through the shared, allocation-free call-layout helper rather than duplicated here;
 /// any candidate in another call operand is rejected by the scan above.
-fn whole_place_write_index(operation: &mir::Operation) -> Option<usize> {
+fn whole_place_write_index(operation: &Operation) -> Option<usize> {
     match &operation.kind {
         OperationKind::Store | OperationKind::Memcpy => Some(1),
         OperationKind::Call { ty, .. } => {
@@ -219,7 +218,7 @@ fn whole_place_write_index(operation: &mir::Operation) -> Option<usize> {
 /// leave an ownership obligation for a `TrivialCopy` root, unlike an arbitrary move. We do not
 /// model a move-out's later absence: retaining a store longer is conservative, and recognizing the
 /// read is necessary for the ordinary final `move local to return` shape.
-fn is_exact_place_read(operation: &mir::Operation, position: usize) -> bool {
+fn is_exact_place_read(operation: &Operation, position: usize) -> bool {
     matches!(
         operation.kind,
         OperationKind::Load

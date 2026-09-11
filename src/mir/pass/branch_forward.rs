@@ -60,6 +60,10 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 use ustr::Ustr;
 
+use super::{
+    dataflow::{self, Root},
+    site::{OperationIndex, OperationSite},
+};
 use crate::{
     mir::{
         self, BlockId, Function, Operation, OperationKind,
@@ -71,11 +75,6 @@ use crate::{
     module::{ModuleEnv, id::Id},
     std::logic::bool_type,
     types::type_properties::concrete_type_is_trivial_copy,
-};
-
-use super::{
-    dataflow::{self, Root},
-    site::{OperationIndex, OperationSite},
 };
 
 #[derive(Clone, Copy)]
@@ -635,10 +634,16 @@ fn bool_value(func: &Function, value: &mir::Value) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
+    use ustr::ustr;
+
+    use super::{bool_value, forward_boolean_branches, forward_variant_branches};
     use crate::{
         CompilerSession, Location, MirOptimization,
         containers::b,
-        hir::{function::ArgConvention, value::LiteralValue},
+        hir::{
+            function::ArgConvention,
+            value::{LiteralValue, VariantPayloadStorage},
+        },
         mir::{
             Operation, OperationKind, ParameterKind, Value, builder::FunctionBuilder,
             terminator::Terminator,
@@ -786,8 +791,8 @@ mod tests {
         let session = CompilerSession::new();
         let env = session.module_env();
         let span = Location::new_synthesized();
-        let some = crate::ustr("Some");
-        let none = crate::ustr("None");
+        let some = ustr("Some");
+        let none = ustr("None");
         let payload_ty = Type::tuple([int_type()]);
         let variant_ty = Type::variant([(none, Type::unit()), (some, payload_ty)]);
         let mutator_ty =
@@ -826,7 +831,7 @@ mod tests {
                     some,
                     variant_ty,
                     payload_ty,
-                    Some(crate::hir::value::VariantPayloadStorage::Inline),
+                    Some(VariantPayloadStorage::Inline),
                     None,
                     None,
                 ),
@@ -887,7 +892,7 @@ mod tests {
                     none,
                     variant_ty,
                     Type::unit(),
-                    Some(crate::hir::value::VariantPayloadStorage::Inline),
+                    Some(VariantPayloadStorage::Inline),
                     None,
                     None,
                 ),
@@ -910,7 +915,7 @@ mod tests {
         builder.set_terminator(none_target, Terminator::ret(span));
 
         let function = builder.finish(env);
-        assert!(super::forward_variant_branches(&function, env).is_none());
+        assert!(forward_variant_branches(&function, env).is_none());
     }
 
     /// A boolean alternative head lowers to `load`, so nothing in the emitter produces the
@@ -968,14 +973,14 @@ mod tests {
         builder.append_operation(no, Operation::check_call_depth(span));
         builder.set_terminator(no, Terminator::ret(span));
 
-        let forwarded = super::forward_boolean_branches(&builder.finish(env))
+        let forwarded = forward_boolean_branches(&builder.finish(env))
             .expect("the comparison form must still be forwarded");
         let stored_with = |value: bool, marker: &OperationKind| {
             forwarded.blocks().any(|block| {
                 let operations = forwarded.block(block).operations();
                 operations.iter().any(|operation| {
                     matches!(operation.kind, OperationKind::Store)
-                        && super::bool_value(&forwarded, &operation.operands[0]) == Some(value)
+                        && bool_value(&forwarded, &operation.operands[0]) == Some(value)
                 }) && operations.iter().any(|operation| &operation.kind == marker)
             })
         };
@@ -1048,6 +1053,6 @@ mod tests {
         builder.set_terminator(no, Terminator::ret(span));
 
         let function = builder.finish(env);
-        assert!(super::forward_boolean_branches(&function).is_none());
+        assert!(forward_boolean_branches(&function).is_none());
     }
 }

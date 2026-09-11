@@ -11,11 +11,11 @@ use std::fmt::{self, Write};
 use ustr::Ustr;
 
 use crate::{
-    Location,
+    Location, define_id_type,
     format::FormatWith,
     hir::function::ArgConvention,
     mir::{
-        self, Operation,
+        self, Operation, ParameterId, ValueId,
         role::ValueRoles,
         terminator::{Terminator, TerminatorKind},
         value::{Constant, ConstantId},
@@ -45,7 +45,7 @@ pub struct Parameter {
     pub kind: ParameterKind,
 }
 
-crate::define_id_type!(
+define_id_type!(
     /// The stable identity of a basic block within a MIR function.
     BlockId
 );
@@ -182,7 +182,7 @@ impl Function {
         // Every definition states the role it takes. Derived per rendering,
         // which is a debugging path, so nothing pays for it otherwise.
         let roles = ValueRoles::derive(self);
-        let annotate = |text: &mut String, result: mir::ValueId| -> fmt::Result {
+        let annotate = |text: &mut String, result: ValueId| -> fmt::Result {
             let value = mir::Value::Register(result);
             match roles.get(&value, self.constants()) {
                 Some(role) => write!(text, "{value}: {} = ", role.annotation(env)),
@@ -207,7 +207,7 @@ impl Function {
                 write!(
                     text,
                     "{}: @{} {}",
-                    mir::Value::Parameter(mir::ParameterId::from_index(index)),
+                    mir::Value::Parameter(ParameterId::from_index(index)),
                     kind,
                     parameter.ty.format_with(env)
                 )?;

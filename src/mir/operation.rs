@@ -44,6 +44,7 @@ use crate::{
     format::FormatWith,
     hir::value::VariantPayloadStorage,
     mir,
+    mir::ValueId,
     module::{FunctionId, ModuleEnv, ProjectionIndex, TraitDictionaryId},
     types::{
         effects::{EffType, Effect, PrimitiveEffect},
@@ -61,7 +62,7 @@ pub struct Operation {
     /// The function-local identity assigned to this operation's result, if it has one.
     ///
     /// Constructors leave this unset; inserting the operation into a function assigns it.
-    result_id: Option<mir::ValueId>,
+    result_id: Option<ValueId>,
 
     /// The region of the code corresponding to this operation.
     pub span: Location,
@@ -90,12 +91,12 @@ impl Operation {
     }
 
     /// Returns the stable identity assigned to this operation's result, if any.
-    pub fn result_id(&self) -> Option<mir::ValueId> {
+    pub fn result_id(&self) -> Option<ValueId> {
         self.result_id
     }
 
     /// Assigns this operation's result identity when it is inserted into a function.
-    pub(crate) fn assign_result_id(&mut self, result_id: Option<mir::ValueId>) {
+    pub(crate) fn assign_result_id(&mut self, result_id: Option<ValueId>) {
         debug_assert!(
             self.result_id.is_none(),
             "an operation is inserted only once"
@@ -2008,6 +2009,8 @@ fn fmt_callee_and_args(
 mod tests {
     use std::mem::size_of;
 
+    use ustr::ustr;
+
     use super::{Operation, OperationKind, OperationResult};
     use crate::{
         CompilerSession, Location,
@@ -2016,7 +2019,6 @@ mod tests {
         mir::{ParameterId, Value},
         types::r#type::{SubscriptType, Type},
     };
-    use ustr::ustr;
 
     #[test]
     #[cfg(any(target_pointer_width = "32", target_pointer_width = "64"))]

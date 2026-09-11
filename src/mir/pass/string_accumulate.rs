@@ -34,6 +34,7 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 use ustr::ustr;
 
+use super::site::{OperationIndex, OperationSite};
 use crate::{
     containers::b,
     mir::{self, BlockId, Function, Operation, OperationKind, edit::FunctionEdit, value::ValueId},
@@ -43,14 +44,12 @@ use crate::{
         core_traits_names::VALUE_TRAIT_NAME,
         string::{
             STRING_FROM_STATIC_FUNCTION_NAME, STRING_PUSH_STATIC_STR_FUNCTION_NAME,
-            STRING_PUSH_STR_FUNCTION_NAME, StaticStr, string_type,
+            STRING_PUSH_STR_FUNCTION_NAME, StaticStr, static_str_type, string_type,
         },
         value::{VALUE_DROP_METHOD_INDEX, VALUE_TO_STRING_METHOD_INDEX},
     },
     types::r#type::Type,
 };
-
-use super::site::{OperationIndex, OperationSite};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum UseSite {
@@ -242,7 +241,7 @@ pub(crate) fn fuse_static_string_appends(
         debug_assert_eq!(rewritten_ty.fn_ty.args[0].ty, string_type());
         debug_assert_eq!(rewritten_ty.fn_ty.args[1].ty, string_type());
         debug_assert_eq!(rewritten_ty.fn_ty.ret, Type::unit());
-        rewritten_ty.fn_ty.args[1].ty = crate::std::string::static_str_type();
+        rewritten_ty.fn_ty.args[1].ty = static_str_type();
         *ty = b(rewritten_ty);
         replacements.insert(fusion.push, push);
         removals
@@ -274,7 +273,7 @@ fn plan_static_append(
     else {
         return None;
     };
-    if !census.is_local_alloca(*text, crate::std::string::static_str_type())
+    if !census.is_local_alloca(*text, static_str_type())
         || !census.is_local_alloca(*rendered, string_type())
         || static_initialization(func, census, *text, materialization).is_none()
     {
@@ -440,7 +439,7 @@ fn plan_forward(
     else {
         return None;
     };
-    if !census.is_local_alloca(*static_text, crate::std::string::static_str_type())
+    if !census.is_local_alloca(*static_text, static_str_type())
         || !census.is_local_alloca(*builder, string_type())
         || !is_empty_static_initialization(func, census, *static_text, initialize_builder)
     {

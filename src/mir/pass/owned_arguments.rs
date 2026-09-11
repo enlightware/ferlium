@@ -17,23 +17,24 @@
 //! concrete clone and the forwarding thunk are visible then, and no earlier pass needs to reason
 //! about the narrowed ABI.
 
+use std::iter::once;
+
 use itertools::Itertools;
 use rustc_hash::{FxHashMap, FxHashSet};
 use ustr::ustr;
 
+use super::{budget, dce, site::OperationIndex, stack_region};
 use crate::{
     compiler::Specialization,
     containers::{DenseBitSet, b},
     hir::function::ArgConvention,
     mir::{
-        self, BlockId, Function, Operation, OperationKind, ParameterKind, edit::FunctionEdit,
-        terminator::TerminatorKind,
+        self, BlockId, CallMetadata, Function, Operation, OperationKind, ParameterId,
+        ParameterKind, ValueId, edit::FunctionEdit, terminator::TerminatorKind,
     },
     module::{FunctionId, LocalFunctionId, ModuleEnv, ModuleId, id::Id, unique_generated_name},
     std::value::type_has_static_layout,
 };
-
-use super::{budget, dce, site::OperationIndex, stack_region};
 
 #[derive(Clone, Copy)]
 struct SourceBody<'a> {
@@ -252,7 +253,7 @@ fn forward_clones_into_owned_invokes(source: &Function) -> Option<Function> {
             let later_use = operations_use_root(
                 source.block(block).operations()[index + 1..]
                     .iter()
-                    .chain(std::iter::once(invoke)),
+                    .chain(once(invoke)),
                 source_root,
                 &origins,
             );
@@ -344,8 +345,8 @@ fn may_forward_clones_into_owned_invokes(source: &Function) -> bool {
 
 fn operations_use_root<'a>(
     operations: impl Iterator<Item = &'a Operation>,
-    root: mir::ValueId,
-    origins: &FxHashMap<mir::ValueId, mir::ValueId>,
+    root: ValueId,
+    origins: &FxHashMap<ValueId, ValueId>,
 ) -> bool {
     operations
         .flat_map(|operation| operation.operands.iter())
@@ -432,11 +433,9 @@ impl VariantFactory<'_> {
             .iter()
             .enumerate()
             .filter_map(|(index, parameter)| match parameter.kind {
-                ParameterKind::Parameter(convention) => Some((
-                    mir::ParameterId::from_index(index),
-                    convention,
-                    parameter.ty,
-                )),
+                ParameterKind::Parameter(convention) => {
+                    Some((ParameterId::from_index(index), convention, parameter.ty))
+                }
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -525,7 +524,7 @@ impl VariantFactory<'_> {
             let OperationKind::Call { metadata, .. } = &mut operation.kind else {
                 unreachable!("a forwarding sink was classified as a call")
             };
-            let metadata = metadata.get_or_insert_with(|| b(mir::CallMetadata::default()));
+            let metadata = metadata.get_or_insert_with(|| b(CallMetadata::default()));
             metadata.owned_arguments.union_with(&mask);
         }
         Some(edit.finish_unverified())
@@ -645,7 +644,7 @@ fn rewrite_caller(source: &Function, factory: &mut VariantFactory<'_>) -> Option
         let OperationKind::Call { metadata, .. } = &mut operation.kind else {
             unreachable!()
         };
-        let metadata = metadata.get_or_insert_with(|| b(mir::CallMetadata::default()));
+        let metadata = metadata.get_or_insert_with(|| b(CallMetadata::default()));
         metadata.owned_arguments.union_with(&rewrite.arguments);
     }
     let mut drops_by_block: FxHashMap<BlockId, Vec<OperationIndex>> = FxHashMap::default();
@@ -674,8 +673,8 @@ fn terminal_drops(
     function: &Function,
     call: Site,
     operand: &mir::Value,
-    root: mir::ValueId,
-    origins: &FxHashMap<mir::ValueId, mir::ValueId>,
+    root: ValueId,
+    origins: &FxHashMap<ValueId, ValueId>,
     predecessors: &[usize],
 ) -> Option<Vec<Site>> {
     match call {
@@ -732,8 +731,8 @@ fn sole_drop_in_operations(
     operations: &[Operation],
     start: usize,
     operand: &mir::Value,
-    root: mir::ValueId,
-    origins: &FxHashMap<mir::ValueId, mir::ValueId>,
+    root: ValueId,
+    origins: &FxHashMap<ValueId, ValueId>,
 ) -> Option<OperationIndex> {
     let mut found = None;
     for (index, operation) in operations.iter().enumerate().skip(start) {
@@ -769,7 +768,7 @@ fn sole_use(function: &Function, value: &mir::Value) -> Option<(Site, usize)> {
     found
 }
 
-fn place_origins(function: &Function) -> FxHashMap<mir::ValueId, mir::ValueId> {
+fn place_origins(function: &Function) -> FxHashMap<ValueId, ValueId> {
     let mut origins = FxHashMap::default();
     for block in function.blocks() {
         for operation in function.block(block).operations() {
@@ -803,10 +802,7 @@ fn place_origins(function: &Function) -> FxHashMap<mir::ValueId, mir::ValueId> {
     origins
 }
 
-fn operand_root(
-    operand: &mir::Value,
-    origins: &FxHashMap<mir::ValueId, mir::ValueId>,
-) -> Option<mir::ValueId> {
+fn operand_root(operand: &mir::Value, origins: &FxHashMap<ValueId, ValueId>) -> Option<ValueId> {
     let mir::Value::Register(value) = operand else {
         return None;
     };
@@ -912,29 +908,28 @@ fn operation_at_mut(edit: &mut FunctionEdit, site: Site) -> &mut Operation {
 
 #[cfg(test)]
 mod tests {
+    use std::iter::once;
+
     use rustc_hash::FxHashMap;
 
+    use super::{OperationIndex, Site, operations_use_root, site_dominates_exits};
     use crate::{
         CompilerSession, Location, MirOptimization,
-        mir::{BasicBlock, Function, Operation, terminator::Terminator},
+        mir::{BasicBlock, BlockId, Function, Operation, Value, ValueId, terminator::Terminator},
     };
 
     #[test]
     fn an_invoke_operand_counts_as_a_later_use_for_clone_forwarding() {
         let span = Location::new_synthesized();
-        let source_id = crate::mir::ValueId::new(0);
-        let destination_id = crate::mir::ValueId::new(1);
-        let source = crate::mir::Value::Register(source_id);
-        let destination = crate::mir::Value::Register(destination_id);
+        let source_id = ValueId::new(0);
+        let destination_id = ValueId::new(1);
+        let source = Value::Register(source_id);
+        let destination = Value::Register(destination_id);
         let invoke = Operation::move_value(span, source, destination);
         let origins =
             FxHashMap::from_iter([(source_id, source_id), (destination_id, destination_id)]);
 
-        assert!(super::operations_use_root(
-            std::iter::once(&invoke),
-            source_id,
-            &origins,
-        ));
+        assert!(operations_use_root(once(&invoke), source_id, &origins,));
     }
 
     fn optimized(source: &str) -> String {
@@ -1008,9 +1003,9 @@ mod tests {
     #[test]
     fn an_earlier_error_exit_prevents_an_owned_variant() {
         let span = Location::new_synthesized();
-        let entry = crate::mir::BlockId::new(0);
-        let normal = crate::mir::BlockId::new(1);
-        let error = crate::mir::BlockId::new(2);
+        let entry = BlockId::new(0);
+        let normal = BlockId::new(1);
+        let error = BlockId::new(2);
         let function = Function::new(
             "fallible_before_sink".into(),
             Default::default(),
@@ -1026,16 +1021,16 @@ mod tests {
             ],
         );
 
-        assert!(!super::site_dominates_exits(
+        assert!(!site_dominates_exits(
             &function,
-            super::Site::Operation {
+            Site::Operation {
                 block: normal,
-                index: super::OperationIndex::new(0),
+                index: OperationIndex::new(0),
             }
         ));
-        assert!(super::site_dominates_exits(
+        assert!(site_dominates_exits(
             &function,
-            super::Site::Terminator { block: entry }
+            Site::Terminator { block: entry }
         ));
     }
 }

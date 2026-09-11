@@ -42,37 +42,41 @@
 use std::{
     cell::RefCell,
     hash::{Hash, Hasher},
+    mem,
 };
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use ustr::{Ustr, ustr};
 
+use super::{
+    budget,
+    site::{OperationIndex, OperationSite},
+};
 use crate::{
     CompilerSession, MirOptimization,
     compiler::Specialization,
     format::FormatWith,
     mir::{
-        self, Function, Instantiation, Operation, OperationKind, ParameterKind,
+        self, Function, Instantiation, Operation, OperationKind, ParameterId, ParameterKind,
+        ValueId,
         edit::FunctionEdit,
         operation::SourceFallibility,
         terminator::{Terminator, TerminatorKind, TerminatorKindDiscriminant},
+        value::StaticEvidence,
     },
     module::{
         FunctionId, LocalFunctionId, ModuleEnv, ModuleId, id::Id, stable_generated_name_hash,
         unique_generated_name,
     },
     std::value::{dynamic_product_member_layouts, type_has_static_layout},
-    types::effects::{EffType, Effect, PrimitiveEffect},
-    types::type_properties::concrete_type_is_trivial_copy,
     types::{
-        r#type::Type, type_like::TypeLike, type_mapper::BitmapInstantiationMapper,
-        type_mapper::TypeMapper, type_scheme::TypeScheme,
+        effects::{EffType, Effect, PrimitiveEffect},
+        r#type::Type,
+        type_like::TypeLike,
+        type_mapper::{BitmapInstantiationMapper, TypeMapper},
+        type_properties::concrete_type_is_trivial_copy,
+        type_scheme::TypeScheme,
     },
-};
-
-use super::{
-    budget,
-    site::{OperationIndex, OperationSite},
 };
 
 // Sharing one residual body between the keys that produce it.
@@ -150,7 +154,7 @@ pub(super) fn structure_digest(
     original: FunctionId,
     canonical: &impl Fn(FunctionId) -> FunctionId,
 ) -> u64 {
-    let mut state = rustc_hash::FxHasher::default();
+    let mut state = FxHasher::default();
     original.hash(&mut state);
     body.result_convention().hash(&mut state);
     body.parameters().hash(&mut state);
@@ -261,7 +265,7 @@ pub(super) fn structurally_identical(
 pub(crate) struct SpecializationKey {
     pub(crate) callee: FunctionId,
     pub(crate) instantiation: Instantiation,
-    pub(crate) dictionaries: Vec<mir::value::StaticEvidence>,
+    pub(crate) dictionaries: Vec<StaticEvidence>,
 }
 
 /// The specializations one module's optimization has created, and the caches that keep them shared.
@@ -899,7 +903,7 @@ fn witnessed_type(witness: &mir::Value, env: ModuleEnv<'_>) -> Option<Type> {
     let id = match witness {
         mir::Value::Dictionary(id) => *id,
         mir::Value::Evidence(evidence) => match &**evidence {
-            mir::value::StaticEvidence::Dictionary { definition, .. } => *definition,
+            StaticEvidence::Dictionary { definition, .. } => *definition,
             _ => return None,
         },
         _ => return None,
@@ -909,14 +913,10 @@ fn witnessed_type(witness: &mir::Value, env: ModuleEnv<'_>) -> Option<Type> {
     key.input_tys().first().copied()
 }
 
-fn static_evidence_operand(value: &mir::Value) -> Option<mir::value::StaticEvidence> {
+fn static_evidence_operand(value: &mir::Value) -> Option<StaticEvidence> {
     match value {
-        mir::Value::Dictionary(definition) => {
-            Some(mir::value::StaticEvidence::bare_dictionary(*definition))
-        }
-        mir::Value::Subscript(definition) => {
-            Some(mir::value::StaticEvidence::bare_subscript(*definition))
-        }
+        mir::Value::Dictionary(definition) => Some(StaticEvidence::bare_dictionary(*definition)),
+        mir::Value::Subscript(definition) => Some(StaticEvidence::bare_subscript(*definition)),
         mir::Value::Evidence(evidence) => Some((**evidence).clone()),
         _ => None,
     }
@@ -955,7 +955,7 @@ fn demote_infallible_invokes(edit: &mut FunctionEdit) {
         let span = block.terminator.span;
         let normal = *normal;
         let TerminatorKind::Invoke { operation, .. } =
-            std::mem::replace(&mut block.terminator, Terminator::goto(span, normal)).kind
+            mem::replace(&mut block.terminator, Terminator::goto(span, normal)).kind
         else {
             unreachable!("the terminator was just matched as an invoke");
         };
@@ -980,7 +980,7 @@ fn demote_infallible_invokes(edit: &mut FunctionEdit) {
 /// rejects.
 fn operation_is_source_fallible(
     operation: &Operation,
-    projections: &FxHashMap<mir::ValueId, bool>,
+    projections: &FxHashMap<ValueId, bool>,
 ) -> bool {
     match operation.source_fallibility() {
         SourceFallibility::Infallible => false,
@@ -996,7 +996,7 @@ fn operation_is_source_fallible(
 ///
 /// The accessor contract lives on the defining `project`, so this is the substituting pass's
 /// equivalent of the operand role the verifier derives.
-fn open_projection_fallibility(edit: &FunctionEdit) -> FxHashMap<mir::ValueId, bool> {
+fn open_projection_fallibility(edit: &FunctionEdit) -> FxHashMap<ValueId, bool> {
     let mut fallibility = FxHashMap::default();
     let mut record = |operation: &Operation| {
         if let OperationKind::Project { ty, .. } = &operation.kind
@@ -1049,13 +1049,13 @@ fn map_types(edit: &mut FunctionEdit, mapper: &mut impl TypeMapper) {
 /// The parameters themselves stay in the signature; see the module documentation. Binding fewer
 /// dictionaries than the body has parameters is a caller bug rather than a partial specialization:
 /// a call site either knows all of its callee's evidence or forwards its own.
-fn bind_dictionaries(edit: &mut FunctionEdit, dictionaries: &[mir::value::StaticEvidence]) {
-    let parameters: Vec<mir::ParameterId> = edit
+fn bind_dictionaries(edit: &mut FunctionEdit, dictionaries: &[StaticEvidence]) {
+    let parameters: Vec<ParameterId> = edit
         .parameters()
         .iter()
         .enumerate()
         .filter(|(_, parameter)| matches!(parameter.kind, ParameterKind::Dictionary))
-        .map(|(index, _)| mir::ParameterId::from_index(index))
+        .map(|(index, _)| ParameterId::from_index(index))
         .collect();
     assert_eq!(
         parameters.len(),
@@ -1068,7 +1068,7 @@ fn bind_dictionaries(edit: &mut FunctionEdit, dictionaries: &[mir::value::Static
         return;
     }
 
-    let bound: FxHashMap<mir::ParameterId, mir::value::StaticEvidence> = parameters
+    let bound: FxHashMap<ParameterId, StaticEvidence> = parameters
         .into_iter()
         .zip(dictionaries.iter().cloned())
         .collect();
@@ -1347,18 +1347,18 @@ fn worth_specializing<Ty: TypeLike>(
     body: &Function,
     scheme: &TypeScheme<Ty>,
     instantiation: &Instantiation,
-    dictionaries: &[mir::value::StaticEvidence],
+    dictionaries: &[StaticEvidence],
     env: ModuleEnv<'_>,
 ) -> bool {
     if dictionaries.is_empty() {
         return false;
     }
-    let parameters: Vec<mir::ParameterId> = body
+    let parameters: Vec<ParameterId> = body
         .parameters()
         .iter()
         .enumerate()
         .filter(|(_, parameter)| matches!(parameter.kind, ParameterKind::Dictionary))
-        .map(|(index, _)| mir::ParameterId::from_index(index))
+        .map(|(index, _)| ParameterId::from_index(index))
         .collect();
     if parameters.len() != dictionaries.len() {
         // The call's evidence does not line up with the body's parameters. Not a case that should
@@ -1581,24 +1581,26 @@ fn substitute_in_instantiation(instantiation: &mut Instantiation, mapper: &mut i
 
 #[cfg(test)]
 mod tests {
+    use ustr::ustr;
+
     use super::*;
     use crate::{
         CompilerSession, ExecutionTarget, MirOptimization,
+        compiler::ensure_mir_artifacts,
         mir::{Value, terminator::TerminatorKind},
         module::{ModuleId, Path},
         types::{
             effects::{EffType, EffectVar},
             mutability::MutType,
-            r#type::{Type, TypeVar},
+            r#type::{FnType, Type, TypeVar},
         },
     };
-    use ustr::ustr;
 
     /// A generic callee, its declared scheme, and how one concrete call site instantiated it —
     /// everything specialization consumes, harvested from real lowering rather than hand-built.
     struct Site {
         body: Function,
-        scheme: crate::types::type_scheme::TypeScheme<crate::types::r#type::FnType>,
+        scheme: TypeScheme<FnType>,
         key: SpecializationKey,
     }
 
@@ -1920,7 +1922,7 @@ mod tests {
             .iter()
             .enumerate()
             .filter(|(_, parameter)| matches!(parameter.kind, ParameterKind::Dictionary))
-            .map(|(index, _)| mir::ParameterId::from_index(index))
+            .map(|(index, _)| ParameterId::from_index(index))
             .collect();
         assert!(
             uses_any_parameter(&site.body, &dictionary_parameters),
@@ -2025,13 +2027,13 @@ mod tests {
             !site.key.dictionaries.is_empty(),
             "the call must pass constant evidence, or this test proves nothing"
         );
-        let dictionary_parameters: Vec<mir::ParameterId> = site
+        let dictionary_parameters: Vec<ParameterId> = site
             .body
             .parameters()
             .iter()
             .enumerate()
             .filter(|(_, parameter)| matches!(parameter.kind, ParameterKind::Dictionary))
-            .map(|(index, _)| mir::ParameterId::from_index(index))
+            .map(|(index, _)| ParameterId::from_index(index))
             .collect();
         assert!(
             uses_any_parameter(&site.body, &dictionary_parameters),
@@ -2494,7 +2496,7 @@ mod tests {
             .modules()
             .get_by_path(&Path::single_str("std"))
             .expect("the standard library is always registered");
-        crate::compiler::ensure_mir_artifacts(session.raw_modules(), std_id);
+        ensure_mir_artifacts(session.raw_modules(), std_id);
         let artifacts = session
             .mir_artifacts_for(std_id, MirOptimization::Disabled)
             .expect("std MIR must be prepared");
@@ -2606,7 +2608,7 @@ mod tests {
     }
 
     /// Whether any operand of `func` names one of `parameters`.
-    fn uses_any_parameter(func: &Function, parameters: &[mir::ParameterId]) -> bool {
+    fn uses_any_parameter(func: &Function, parameters: &[ParameterId]) -> bool {
         let mut found = false;
         // Through the editor, so the terminator's operands are covered like any other.
         let mut edit = FunctionEdit::new(func.clone());

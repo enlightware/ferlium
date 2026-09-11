@@ -25,21 +25,20 @@
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
+use super::{
+    budget::{OUTCOME_BOOLEAN_OPERATIONS, OUTCOME_BRANCH_BLOCKS},
+    dataflow::{self, Const, Outcome},
+    peephole::bool_value,
+};
 use crate::{
     hir::value::LiteralValue,
     mir::{
-        self, BlockId, Function, Operation, OperationKind,
+        self, BlockId, Function, Operation, OperationKind, ValueId,
         edit::FunctionEdit,
         terminator::{Terminator, TerminatorKind},
     },
     module::ModuleEnv,
     std::logic::bool_type,
-};
-
-use super::{
-    budget::{OUTCOME_BOOLEAN_OPERATIONS, OUTCOME_BRANCH_BLOCKS},
-    dataflow::{self, Const, Outcome},
-    peephole::bool_value,
 };
 
 struct Test<'a> {
@@ -167,7 +166,7 @@ fn same_boolean_tail(func: &Function, left: BlockId, right: BlockId) -> bool {
 fn tail_results_are_local(
     func: &Function,
     block: BlockId,
-    uses: &FxHashMap<mir::ValueId, usize>,
+    uses: &FxHashMap<ValueId, usize>,
 ) -> bool {
     let body = func.block(block);
     body.operations()
@@ -190,9 +189,9 @@ fn boolean_tail_value(
     operand: &mir::Value,
     outcome: Outcome,
 ) -> Option<bool> {
-    let mut values: SmallVec<[(mir::ValueId, bool); 4]> = SmallVec::new();
+    let mut values: SmallVec<[(ValueId, bool); 4]> = SmallVec::new();
     let mut result = None;
-    let value = |operand: &mir::Value, values: &[(mir::ValueId, bool)]| {
+    let value = |operand: &mir::Value, values: &[(ValueId, bool)]| {
         bool_value(func, operand).or_else(|| {
             let mir::Value::Register(id) = operand else {
                 return None;
@@ -231,7 +230,7 @@ fn plan_boolean_result(
     block: BlockId,
     test: &Test<'_>,
     outcomes: impl Iterator<Item = Outcome>,
-    uses: &FxHashMap<mir::ValueId, usize>,
+    uses: &FxHashMap<ValueId, usize>,
     incoming: &FxHashMap<BlockId, usize>,
 ) -> Option<BooleanRewrite> {
     if test.yes == test.no || [test.yes, test.no].contains(&block) {
@@ -305,7 +304,7 @@ fn destination(
     mut block: BlockId,
     operand: &mir::Value,
     outcome: Outcome,
-    uses: &FxHashMap<mir::ValueId, usize>,
+    uses: &FxHashMap<ValueId, usize>,
 ) -> Option<(BlockId, bool)> {
     let mut compared = false;
     for _ in 0..OUTCOME_BRANCH_BLOCKS {
@@ -495,7 +494,9 @@ pub(crate) fn simplify_outcome_branches(func: &Function, env: ModuleEnv<'_>) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use ustr::ustr;
+
+    use super::{super::dce::remove_dead_trivial_results, *};
     use crate::{
         CompilerSession, ExecutionTarget, Location, MirOptimization, Path,
         hir::{function::ArgConvention, native_functions::NativeFnNN},
@@ -634,7 +635,7 @@ mod tests {
         let mir::Value::Pattern(pattern) = &last.operands[1] else {
             panic!()
         };
-        assert_eq!(pattern.as_variant_tag(), Some(&ustr::ustr("Greater")));
+        assert_eq!(pattern.as_variant_tag(), Some(&ustr("Greater")));
         assert_eq!(
             simplified
                 .blocks()
@@ -709,7 +710,7 @@ mod tests {
                 .iter()
                 .any(|operation| operation.kind == OperationKind::CompareEqual)
         }));
-        let cleaned = super::super::dce::remove_dead_trivial_results(&simplified).unwrap();
+        let cleaned = remove_dead_trivial_results(&simplified).unwrap();
         let cleaned = FunctionEdit::new(cleaned).finish(session.module_env());
         assert!(cleaned.blocks().all(|block| {
             cleaned
@@ -954,8 +955,7 @@ mod tests {
         ] {
             let original = boolean_result_chain(&session, shape);
             let simplified = simplify_outcome_branches(&original, session.module_env()).unwrap();
-            let simplified =
-                super::super::dce::remove_dead_trivial_results(&simplified).unwrap_or(simplified);
+            let simplified = remove_dead_trivial_results(&simplified).unwrap_or(simplified);
             let simplified = FunctionEdit::new(simplified).finish(session.module_env());
             assert!(simplified.blocks().all(|block| !matches!(
                 simplified.block(block).terminator().kind,

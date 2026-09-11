@@ -33,10 +33,12 @@
 //! untouched, so the indirection through `Specialization::original` still answers every question
 //! asked about a specialized callee.
 
+use std::mem;
+
 use crate::{
     compiler::Specialization,
     mir::{
-        self, Function, OperationKind, ParameterKind, edit::FunctionEdit,
+        self, Function, OperationKind, ParameterId, ParameterKind, edit::FunctionEdit,
         terminator::TerminatorKind,
     },
     module::{ModuleId, id::Id},
@@ -98,7 +100,7 @@ fn dead_dictionary_parameters(body: &Function) -> usize {
         .iter()
         .enumerate()
         .filter(|(_, parameter)| matches!(parameter.kind, ParameterKind::Dictionary))
-        .map(|(index, _)| mir::ParameterId::from_index(index))
+        .map(|(index, _)| ParameterId::from_index(index))
         .collect::<Vec<_>>();
     if dictionaries.is_empty() {
         return 0;
@@ -186,7 +188,7 @@ fn rewrite(
                  recursively static",
                 name
             );
-            let mut operands = std::mem::take(&mut operation.operands).into_vec();
+            let mut operands = mem::take(&mut operation.operands).into_vec();
             operands.drain(1..visible_start);
             operation.operands = operands.into_boxed_slice();
         }
@@ -217,7 +219,10 @@ fn calls_a_narrowed_callee(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CompilerSession, MirOptimization, module::FunctionId, module::Path};
+    use crate::{
+        CompilerSession, MirOptimization,
+        module::{FunctionId, Path},
+    };
 
     /// The whole invariant, over the corpus that has specializations worth counting.
     ///

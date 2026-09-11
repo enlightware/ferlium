@@ -18,14 +18,13 @@
 //! clone/drop remain unknown. Native functions have no MIR and are proved by Ferlium's host-function
 //! contract, which requires them to terminate for every valid input.
 
-use std::collections::VecDeque;
-
-use crate::{
-    mir::{Function, Operation, OperationKind, terminator::TerminatorKind},
-    module::{FunctionId, LocalFunctionId, ModuleId, id::Id},
-};
+use std::{collections::VecDeque, mem};
 
 use super::call_graph::CallGraph;
+use crate::{
+    mir::{Function, Operation, OperationKind, Value, terminator::TerminatorKind},
+    module::{FunctionId, LocalFunctionId, ModuleId, id::Id},
+};
 
 /// Whether termination has been proved for every valid invocation of a function.
 ///
@@ -152,7 +151,7 @@ fn derive(
 
 /// Whether an operation is intrinsically finite or invokes only a proved callee.
 fn operation_returns(operation: &Operation, callee_returns: &impl Fn(FunctionId) -> bool) -> bool {
-    let direct = |operand: Option<&crate::mir::Value>| matches!(operand, Some(crate::mir::Value::Function(callee)) if callee_returns(*callee));
+    let direct = |operand: Option<&Value>| matches!(operand, Some(Value::Function(callee)) if callee_returns(*callee));
     match &operation.kind {
         OperationKind::Call { .. } => direct(operation.operands.first()),
         OperationKind::Clone { .. } => direct(operation.operands.get(2)),
@@ -203,7 +202,7 @@ fn reachable_blocks(body: &Function) -> Vec<bool> {
     let mut reachable = vec![false; body.blocks().count()];
     let mut pending = vec![body.entry()];
     while let Some(block) = pending.pop() {
-        if std::mem::replace(&mut reachable[block.as_index()], true) {
+        if mem::replace(&mut reachable[block.as_index()], true) {
             continue;
         }
         pending.extend(body.block(block).terminator().successors());
@@ -248,9 +247,13 @@ fn has_cycle(body: &Function, reachable: &[bool]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{CompilerSession, ExecutionTarget, MirOptimization, module::Path};
     use ustr::ustr;
+
+    use super::*;
+    use crate::{
+        CompilerSession, ExecutionTarget, Location, MirOptimization, module::Path,
+        std::STD_MODULE_ID,
+    };
 
     fn summaries_of(src: &str) -> (WillReturnSummaries, impl Fn(&str) -> LocalFunctionId) {
         let mut session = CompilerSession::new();
@@ -304,16 +307,11 @@ mod tests {
         let block = builder.add_block();
         builder.set_terminator(
             block,
-            Terminator::invariant_failure(
-                crate::Location::new_synthesized(),
-                ustr("broken invariant"),
-            ),
+            Terminator::invariant_failure(Location::new_synthesized(), ustr("broken invariant")),
         );
         let body = builder.finish_unverified();
         assert_eq!(
-            derive(&body, crate::std::STD_MODULE_ID, &[], &|_| {
-                WillReturn::Proven
-            }),
+            derive(&body, STD_MODULE_ID, &[], &|_| { WillReturn::Proven }),
             WillReturn::Unknown
         );
     }

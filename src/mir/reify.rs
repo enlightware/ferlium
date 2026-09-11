@@ -26,6 +26,7 @@
 #![allow(dead_code)]
 
 use crate::{
+    containers::SVec2,
     hir::{
         function::literal_of_trivial_copy_native,
         value::{LiteralValue, Value},
@@ -162,7 +163,7 @@ fn freeze(value: &Value) -> Option<LiteralValue> {
                 .map(freeze)
                 .collect::<Option<Vec<_>>>()?
                 .into_iter()
-                .collect::<crate::containers::SVec2<_>>();
+                .collect::<SVec2<_>>();
             Some(LiteralValue::new_tuple(members))
         }
         // `Uninit` never reaches MIR, a subscript is evidence rather than data, and a function
@@ -173,14 +174,17 @@ fn freeze(value: &Value) -> Option<LiteralValue> {
 
 #[cfg(test)]
 mod tests {
+    use ustr::ustr;
+
     use super::*;
     use crate::{
         CompilerSession, Location,
         eval::PlaceResult,
         format::FormatWith,
-        hir::value::{FunctionValue, HiddenEvidenceArgValue},
+        hir::value::{ClosedTraitDictionary, FunctionValue, HiddenEvidenceArgValue},
         mir::{self, Operation, builder::FunctionBuilder, terminator::Terminator},
         module::{FunctionId, LocalFunctionId, LocalImplId, ModuleId, TraitDictionaryId, id::Id},
+        place::Place,
         std::{
             array::{array_type, array_value_from_vec},
             math::{Float, float_type, int_type},
@@ -188,7 +192,6 @@ mod tests {
         },
         types::r#type::Type,
     };
-    use ustr::ustr;
 
     fn bool_type() -> Type {
         Type::primitive::<bool>()
@@ -359,7 +362,7 @@ mod tests {
         let mut refused: Vec<(&str, Value, Type)> = vec![
             (
                 "variant",
-                Value::tuple_variant(crate::ustr("Some"), vec![Value::native(1isize)]),
+                Value::tuple_variant(ustr("Some"), vec![Value::native(1isize)]),
                 int_type(),
             ),
             (
@@ -374,7 +377,7 @@ mod tests {
             // as a `PlaceResult` native, and freezing it would outlive the frame it points into.
             (
                 "bridged place",
-                Value::native(PlaceResult::new(crate::place::Place::Boxed {
+                Value::native(PlaceResult::new(Place::Boxed {
                     root: 0,
                     path: vec![],
                 })),
@@ -397,7 +400,7 @@ mod tests {
                 function,
                 vec![],
                 vec![Value::native(1isize)],
-                Some(crate::hir::value::ClosedTraitDictionary::bare(dictionary)),
+                Some(ClosedTraitDictionary::bare(dictionary)),
             )),
             int_type(),
         ));
@@ -406,7 +409,7 @@ mod tests {
             Value::function_value(FunctionValue::closure(
                 function,
                 vec![HiddenEvidenceArgValue::TraitDictionary(
-                    crate::hir::value::ClosedTraitDictionary::bare(dictionary),
+                    ClosedTraitDictionary::bare(dictionary),
                 )],
                 vec![],
                 None,

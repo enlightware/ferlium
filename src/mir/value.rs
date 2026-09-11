@@ -10,6 +10,7 @@ use std::fmt;
 
 use crate::{
     containers::B,
+    define_id_type,
     format::FormatWith,
     hir::value::LiteralValue,
     module::{FunctionId, ModuleEnv, QualifiedNameEnv, SubscriptId, TraitDictionaryId, id::Id},
@@ -130,17 +131,17 @@ impl fmt::Display for StaticEvidence {
     }
 }
 
-crate::define_id_type!(
+define_id_type!(
     /// The stable identity of a typed immediate in a MIR function's constant pool.
     ConstantId
 );
 
-crate::define_id_type!(
+define_id_type!(
     /// The stable identity of a parameter in a MIR function's signature.
     ParameterId
 );
 
-crate::define_id_type!(
+define_id_type!(
     /// The stable identity of an operation result within a MIR function.
     ValueId
 );

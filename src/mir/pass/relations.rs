@@ -48,12 +48,22 @@
 //! by the tests below until those land.
 #![allow(dead_code)]
 
-use std::{borrow::Cow, cmp::Reverse, collections::BinaryHeap};
+use std::{
+    borrow::Cow,
+    cmp::{Ordering, Reverse},
+    collections::BinaryHeap,
+};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use ustr::Ustr;
 
+use super::{
+    dataflow::{PlaceBindings, Root, call_operands, escaping_roots, field_index},
+    known_callee::{KnownCallee, KnownCallees, Layouts, RangeLayout},
+    site::{OperationIndex, OperationSite},
+};
 use crate::{
+    graph,
     hir::function::ArgConvention,
     mir::{
         self, BlockId, Function, Operation, OperationKind, dominance::Dominance,
@@ -62,12 +72,6 @@ use crate::{
     module::{FunctionId, ProjectionIndex, id::Id},
     std::math::Int,
     types::r#type::Type,
-};
-
-use super::{
-    dataflow::{PlaceBindings, Root, call_operands, escaping_roots, field_index},
-    known_callee::{KnownCallee, KnownCallees, Layouts, RangeLayout},
-    site::{OperationIndex, OperationSite},
 };
 
 /// The most terms an affine form may carry.
@@ -750,9 +754,9 @@ impl State {
         let (mut ours, mut theirs) = (0, 0);
         while ours < self.known.len() && theirs < other.known.len() {
             match self.known[ours].cmp(&other.known[theirs]) {
-                std::cmp::Ordering::Less => ours += 1,
-                std::cmp::Ordering::Greater => theirs += 1,
-                std::cmp::Ordering::Equal => {
+                Ordering::Less => ours += 1,
+                Ordering::Greater => theirs += 1,
+                Ordering::Equal => {
                     known.push(self.known[ours].clone());
                     ours += 1;
                     theirs += 1;
@@ -1075,7 +1079,7 @@ fn run(context: &Context<'_>, mut interner: Interner) -> Run {
     // back edges last. Block ids are only construction order after edits, so derive reverse
     // postorder from the actual CFG and use it as worklist priority.
     let mut reverse_postorder = vec![usize::MAX; block_count];
-    for (index, block) in crate::graph::reverse_postorder(&successor_lists, func.entry().as_index())
+    for (index, block) in graph::reverse_postorder(&successor_lists, func.entry().as_index())
         .into_iter()
         .enumerate()
     {

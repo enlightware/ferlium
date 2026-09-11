@@ -31,17 +31,18 @@
 //! frontier, intersected at joins. Anything that may leave frame storage clears it; that predicate
 //! is [`dce`]'s, so the two passes cannot drift on what grows a frame.
 
+use std::cmp::Ordering;
+
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use super::{dce::may_leave_frame_storage, site::OperationIndex};
 use crate::{
     mir::{
-        self, BlockId, Function, OperationKind, edit::FunctionEdit, role::ValueRoles,
+        self, BlockId, Function, Operation, OperationKind, edit::FunctionEdit, role::ValueRoles,
         terminator::TerminatorKind, value::ValueId,
     },
     module::id::Id,
 };
-
-use super::{dce::may_leave_frame_storage, site::OperationIndex};
 
 /// The markers known to equal the current allocation frontier, ordered by index.
 ///
@@ -73,13 +74,13 @@ fn intersect(left: &Frontier, right: &Frontier) -> Frontier {
     while i < left.len() && j < right.len() {
         let (a, b) = (left[i].as_index(), right[j].as_index());
         match a.cmp(&b) {
-            std::cmp::Ordering::Equal => {
+            Ordering::Equal => {
                 result.push(left[i]);
                 i += 1;
                 j += 1;
             }
-            std::cmp::Ordering::Less => i += 1,
-            std::cmp::Ordering::Greater => j += 1,
+            Ordering::Less => i += 1,
+            Ordering::Greater => j += 1,
         }
     }
     result
@@ -223,7 +224,7 @@ fn analyze(func: &Function, roles: &ValueRoles) -> FxHashMap<BlockId, Frontier> 
 }
 
 /// Advances the frontier state across one operation.
-fn step(operation: &mir::Operation, func: &Function, roles: &ValueRoles, state: &mut Frontier) {
+fn step(operation: &Operation, func: &Function, roles: &ValueRoles, state: &mut Frontier) {
     match &operation.kind {
         OperationKind::StackSave => {
             if let Some(marker) = operation.result_id() {

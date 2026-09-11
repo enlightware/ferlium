@@ -38,19 +38,30 @@
 use rustc_hash::FxHashSet;
 use ustr::{Ustr, ustr};
 
+use super::{
+    budget::INLINE_FUNCTION_GROWTH,
+    dataflow::{self, Analysis, Const, Fact, Root, State},
+    known_callee::{KnownCallee, KnownCallees},
+    site::OperationIndex,
+};
 use crate::{
     CompilerSession, Location,
     containers::b,
     hir::{
         function::ArgConvention,
-        value::{LiteralValue, VariantPayloadStorage},
+        value::{
+            ClosedTraitDictionary, HiddenEvidenceArgValue, LiteralValue, Value,
+            VariantPayloadStorage,
+        },
     },
     mir::{
-        self, BlockId, Function, Operation, OperationKind,
+        self, BlockId, Function, Operation, OperationKind, ValueId,
         const_eval::{ConstArgument, ConstEvaluator, NotFoldable},
         edit::FunctionEdit,
+        interpreter::static_evidence_value,
         reify::{Reification, reify},
         terminator::{Terminator, TerminatorKind},
+        value::{Constant, StaticEvidence},
     },
     module::{FunctionId, ModuleEnv, ModuleId, id::Id},
     std::{
@@ -60,12 +71,6 @@ use crate::{
         string::{static_str_type, string_type},
     },
     types::r#type::{CallImplType, CallResultConvention, Type},
-};
-
-use super::{
-    dataflow::{self, Analysis, Const, Fact, Root, State},
-    known_callee::{KnownCallee, KnownCallees},
-    site::OperationIndex,
 };
 
 /// A call result the optimizer can materialize without knowing every argument.
@@ -140,13 +145,13 @@ struct Devirtualization {
     site: Site,
     operand: usize,
     callee: FunctionId,
-    hidden_evidence: Vec<mir::value::StaticEvidence>,
+    hidden_evidence: Vec<StaticEvidence>,
 }
 
 struct ResolvedCallee {
     operand: usize,
     callee: FunctionId,
-    hidden_evidence: Vec<mir::value::StaticEvidence>,
+    hidden_evidence: Vec<StaticEvidence>,
 }
 
 /// Where a dispatch sits in its block: an ordinary operation, or the `Invoke` terminator.
@@ -275,7 +280,7 @@ impl<'m, 's> FoldResources<'m, 's> {
 
 struct RefusalContext {
     /// The `alloca`s a call writes its result into. See [`call_destinations`].
-    call_destinations: FxHashSet<mir::ValueId>,
+    call_destinations: FxHashSet<ValueId>,
 }
 
 /// Why one call site was not folded, and where it is.
@@ -564,7 +569,7 @@ fn reserve_growth(
     original_size: usize,
 ) -> bool {
     let next = planned_size.saturating_sub(removed).saturating_add(added);
-    if next > original_size + super::budget::INLINE_FUNCTION_GROWTH {
+    if next > original_size + INLINE_FUNCTION_GROWTH {
         return false;
     }
     *planned_size = next;
@@ -1032,12 +1037,10 @@ fn partial_call_outcome(
             }
             _ => return None,
         };
-        Some(CallRewrite::Reification(Reification::Constant(
-            mir::value::Constant {
-                ty: ty.ret(),
-                representation,
-            },
-        )))
+        Some(CallRewrite::Reification(Reification::Constant(Constant {
+            ty: ty.ret(),
+            representation,
+        })))
     };
 
     match known {
@@ -1245,7 +1248,7 @@ fn why_operand_names_no_place(
 /// This feeds a report, not a rewrite, so an approximation that is honest about its edges is the
 /// right trade — a precise answer would mean recording a cause alongside every `Unknown` the
 /// dataflow produces.
-fn call_destinations(func: &Function) -> FxHashSet<mir::ValueId> {
+fn call_destinations(func: &Function) -> FxHashSet<ValueId> {
     let mut destinations = FxHashSet::default();
     let mut record = |operation: &Operation| {
         if let OperationKind::Call { ty, .. } = &operation.kind
@@ -1332,12 +1335,12 @@ fn try_fold_call(
     let mut arguments = Vec::with_capacity(call.extras.len() + call.arguments.len());
     for extra in call.extras {
         match extra {
-            mir::Value::Dictionary(id) => arguments.push(ConstArgument::Dictionary(
-                crate::hir::value::ClosedTraitDictionary::bare(*id),
-            )),
+            mir::Value::Dictionary(id) => {
+                arguments.push(ConstArgument::Dictionary(ClosedTraitDictionary::bare(*id)))
+            }
             mir::Value::Evidence(evidence) => {
-                let crate::hir::value::HiddenEvidenceArgValue::TraitDictionary(dictionary) =
-                    crate::mir::interpreter::static_evidence_value(evidence)
+                let HiddenEvidenceArgValue::TraitDictionary(dictionary) =
+                    static_evidence_value(evidence)
                 else {
                     return discard(arguments, NotFoldable::EvidenceNotKnown);
                 };
@@ -1357,7 +1360,7 @@ fn try_fold_call(
         // parameter therefore carries all the information compile-time evaluation needs, even
         // though the place dataflow quite correctly knows nothing about its containing aggregate.
         if parameter.ty == Type::unit() {
-            arguments.push(ConstArgument::Value(crate::hir::value::Value::unit()));
+            arguments.push(ConstArgument::Value(Value::unit()));
             continue;
         }
         let known = context
@@ -1382,10 +1385,9 @@ fn try_fold_call(
                         .collect(),
                 )))
             }
-            Some(Fact::Known(Const::Function(function))) if parameter.ty.is_function() => arguments
-                .push(ConstArgument::Value(crate::hir::value::Value::function(
-                    function,
-                ))),
+            Some(Fact::Known(Const::Function(function))) if parameter.ty.is_function() => {
+                arguments.push(ConstArgument::Value(Value::function(function)))
+            }
             Some(Fact::Known(_)) => return discard(arguments, NotFoldable::ArgumentNotLiteral),
             _ => {
                 // The reason is irrelevant to the rewrite. Detailed provenance is computed only
@@ -1430,6 +1432,7 @@ fn discard(arguments: Vec<ConstArgument>, reason: NotFoldable) -> Result<Reifica
 
 #[cfg(test)]
 mod tests {
+    use super::{INLINE_FUNCTION_GROWTH, reserve_growth};
     use crate::{CompilerSession, MirOptimization};
 
     #[test]
@@ -1437,23 +1440,10 @@ mod tests {
         let original_size = 10;
         let mut planned_size = original_size;
         for _ in 0..64 {
-            assert!(super::reserve_growth(
-                &mut planned_size,
-                1,
-                3,
-                original_size
-            ));
+            assert!(reserve_growth(&mut planned_size, 1, 3, original_size));
         }
-        assert_eq!(
-            planned_size,
-            original_size + super::super::budget::INLINE_FUNCTION_GROWTH
-        );
-        assert!(!super::reserve_growth(
-            &mut planned_size,
-            1,
-            3,
-            original_size
-        ));
+        assert_eq!(planned_size, original_size + INLINE_FUNCTION_GROWTH);
+        assert!(!reserve_growth(&mut planned_size, 1, 3, original_size));
     }
 
     fn optimized_function<'a>(module: &'a str, name: &str) -> &'a str {

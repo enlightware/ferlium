@@ -8,14 +8,14 @@
 //
 //! MIR block terminators and their control-flow contracts.
 
-use std::fmt;
+use std::{fmt, slice::from_ref};
 
 use ustr::Ustr;
 
 use crate::{
     Location,
     format::FormatWith,
-    mir::{self, Operation},
+    mir::{self, BlockId, Operation},
     module::ModuleEnv,
 };
 
@@ -30,7 +30,7 @@ pub struct Terminator {
 }
 
 impl Terminator {
-    pub fn goto(span: Location, target: mir::BlockId) -> Self {
+    pub fn goto(span: Location, target: BlockId) -> Self {
         Self {
             span,
             kind: TerminatorKind::Goto { target },
@@ -40,8 +40,8 @@ impl Terminator {
     pub fn cond_br(
         span: Location,
         condition: mir::Value,
-        then_target: mir::BlockId,
-        else_target: mir::BlockId,
+        then_target: BlockId,
+        else_target: BlockId,
     ) -> Self {
         Self {
             span,
@@ -57,8 +57,8 @@ impl Terminator {
     pub fn switch_variant(
         span: Location,
         tag: mir::Value,
-        cases: Vec<(Ustr, mir::BlockId)>,
-        default: mir::BlockId,
+        cases: Vec<(Ustr, BlockId)>,
+        default: BlockId,
     ) -> Self {
         Self {
             span,
@@ -70,12 +70,7 @@ impl Terminator {
         }
     }
 
-    pub fn invoke(
-        span: Location,
-        operation: Operation,
-        normal: mir::BlockId,
-        error: mir::BlockId,
-    ) -> Self {
+    pub fn invoke(span: Location, operation: Operation, normal: BlockId, error: BlockId) -> Self {
         Self {
             span,
             kind: TerminatorKind::Invoke {
@@ -86,7 +81,7 @@ impl Terminator {
         }
     }
 
-    pub fn r#yield(span: Location, place: mir::Value, resume: mir::BlockId) -> Self {
+    pub fn r#yield(span: Location, place: mir::Value, resume: BlockId) -> Self {
         Self {
             span,
             kind: TerminatorKind::Yield { place, resume },
@@ -161,10 +156,10 @@ impl Terminator {
     /// invoked operation.
     pub fn operands(&self) -> &[mir::Value] {
         match &self.kind {
-            TerminatorKind::CondBr { condition, .. } => std::slice::from_ref(condition),
-            TerminatorKind::SwitchVariant { tag, .. } => std::slice::from_ref(tag),
+            TerminatorKind::CondBr { condition, .. } => from_ref(condition),
+            TerminatorKind::SwitchVariant { tag, .. } => from_ref(tag),
             TerminatorKind::Invoke { operation, .. } => &operation.operands,
-            TerminatorKind::Yield { place, .. } => std::slice::from_ref(place),
+            TerminatorKind::Yield { place, .. } => from_ref(place),
             TerminatorKind::Goto { .. }
             | TerminatorKind::Return
             | TerminatorKind::PropagateError
@@ -174,7 +169,7 @@ impl Terminator {
     }
 
     /// Basic blocks this terminator may transfer control to.
-    pub(crate) fn successors(&self) -> impl Iterator<Item = mir::BlockId> {
+    pub(crate) fn successors(&self) -> impl Iterator<Item = BlockId> {
         self.kind.successors()
     }
 }
@@ -188,29 +183,29 @@ impl Terminator {
 )]
 pub enum TerminatorKind {
     Goto {
-        target: mir::BlockId,
+        target: BlockId,
     },
     CondBr {
         condition: mir::Value,
-        then_target: mir::BlockId,
-        else_target: mir::BlockId,
+        then_target: BlockId,
+        else_target: BlockId,
     },
     /// Branch on an opaque tag using symbolic variant names.
     SwitchVariant {
         tag: mir::Value,
-        cases: Vec<(Ustr, mir::BlockId)>,
-        default: mir::BlockId,
+        cases: Vec<(Ustr, BlockId)>,
+        default: BlockId,
     },
     /// Execute one source-fallible operation and select its normal or source-error successor.
     Invoke {
         operation: Operation,
-        normal: mir::BlockId,
-        error: mir::BlockId,
+        normal: BlockId,
+        error: BlockId,
     },
     /// Suspend a scoped accessor and continue at `resume` when its driver ends the projection.
     Yield {
         place: mir::Value,
-        resume: mir::BlockId,
+        resume: BlockId,
     },
     Return,
     /// Continue propagating the source failure currently in flight to the caller.
@@ -226,8 +221,8 @@ pub enum TerminatorKind {
 
 impl TerminatorKind {
     /// Basic blocks this terminator form may transfer control to.
-    pub(crate) fn successors(&self) -> impl Iterator<Item = mir::BlockId> {
-        let (cases, targets): (&[(Ustr, mir::BlockId)], [_; 2]) = match self {
+    pub(crate) fn successors(&self) -> impl Iterator<Item = BlockId> {
+        let (cases, targets): (&[(Ustr, BlockId)], [_; 2]) = match self {
             Self::Goto { target } => (&[], [Some(*target), None]),
             Self::CondBr {
                 then_target,

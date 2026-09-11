@@ -48,20 +48,19 @@ use std::borrow::Cow;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use super::{Specializations, budget, monomorphize, site::OperationIndex};
 use crate::{
     CompilerSession, Location,
     compiler::MirOptimization,
     containers::DenseBitSet,
     mir::{
-        self, BlockId, Function, Instantiation, Operation, OperationKind,
+        self, BlockId, Function, Instantiation, Operation, OperationKind, ParameterKind, ValueId,
         edit::FunctionEdit,
         terminator::{Terminator, TerminatorKind},
     },
     module::{FunctionId, ModuleEnv, ModuleId, id::Id},
     types::{r#type::Type, type_like::TypeLike},
 };
-
-use super::{Specializations, budget, monomorphize, site::OperationIndex};
 
 /// Where the call to inline sits in the caller.
 #[derive(Clone, Copy)]
@@ -402,7 +401,7 @@ fn concrete_body<'a>(
     let mut has_open_visible_parameter = false;
     for parameter in body.parameters() {
         if !parameter.ty.is_constant() {
-            if matches!(parameter.kind, mir::ParameterKind::Dictionary) {
+            if matches!(parameter.kind, ParameterKind::Dictionary) {
                 has_open_dictionary = true;
             } else {
                 has_open_visible_parameter = true;
@@ -423,7 +422,7 @@ fn concrete_body<'a>(
                 .enumerate()
                 .all(|(index, parameter)| {
                     parameter.ty.is_constant()
-                        || (matches!(parameter.kind, mir::ParameterKind::Dictionary)
+                        || (matches!(parameter.kind, ParameterKind::Dictionary)
                             && !used.contains(index))
                 });
         if every_open_dictionary_is_dead {
@@ -674,7 +673,7 @@ struct Copier<'a> {
     /// Where a `propagate_error` continues, when the site has an error successor.
     error: Option<BlockId>,
     blocks: FxHashMap<BlockId, BlockId>,
-    registers: FxHashMap<mir::ValueId, mir::ValueId>,
+    registers: FxHashMap<ValueId, ValueId>,
     constants: FxHashMap<usize, mir::Value>,
 }
 
@@ -868,6 +867,8 @@ mod tests {
         use super::*;
         use crate::{
             mir::{ParameterKind, builder::FunctionBuilder},
+            module::LocalFunctionId,
+            std::STD_MODULE_ID,
             types::{
                 effects::no_effects,
                 r#type::{CallImplType, FnType},
@@ -893,8 +894,8 @@ mod tests {
             Operation::call(
                 span,
                 mir::Value::Function(FunctionId::new(
-                    crate::std::STD_MODULE_ID,
-                    crate::module::LocalFunctionId::from_index(0),
+                    STD_MODULE_ID,
+                    LocalFunctionId::from_index(0),
                 )),
                 [mir::Value::Parameter(result)],
                 CallImplType::value(FnType::new_by_val([], Type::unit(), no_effects())),

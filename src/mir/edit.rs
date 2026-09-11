@@ -36,22 +36,24 @@
 //! internal rewrite.
 #![allow(dead_code)]
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, iter::once, mem};
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use ustr::Ustr;
 
+#[cfg(any(debug_assertions, test))]
+use crate::mir::verify::verify_function;
 use crate::{
     hir::value::LiteralValue,
     mir::{
-        self, BasicBlock, BlockId, Function, Operation, OperationResult, Parameter,
+        self, BasicBlock, BlockId, Function, Operation, OperationResult, Parameter, ParameterId,
+        ValueId,
         terminator::{Terminator, TerminatorKind},
         value::{Constant, ConstantId},
     },
     module::{FunctionId, ModuleEnv, id::Id},
     types::r#type::{CallResultConvention, Type},
 };
-
-use ustr::Ustr;
 
 /// A basic block being edited: the same content as a [`BasicBlock`], with its parts exposed.
 pub(crate) struct EditBlock {
@@ -145,14 +147,13 @@ impl FunctionEdit {
     /// Panics if a removed parameter is still named by an operand, which is what makes "this
     /// parameter is dead" a checked claim rather than the caller's assertion.
     pub(crate) fn remove_parameters(&mut self, mut remove: impl FnMut(&Parameter) -> bool) {
-        let mut renumbered: Vec<Option<mir::ParameterId>> =
-            Vec::with_capacity(self.parameters.len());
+        let mut renumbered: Vec<Option<ParameterId>> = Vec::with_capacity(self.parameters.len());
         let mut retained = Vec::with_capacity(self.parameters.len());
-        for parameter in std::mem::take(&mut self.parameters) {
+        for parameter in mem::take(&mut self.parameters) {
             if remove(&parameter) {
                 renumbered.push(None);
             } else {
-                renumbered.push(Some(mir::ParameterId::from_index(retained.len())));
+                renumbered.push(Some(ParameterId::from_index(retained.len())));
                 retained.push(parameter);
             }
         }
@@ -216,8 +217,8 @@ impl FunctionEdit {
     ///
     /// The caller assigns it with [`Operation::assign_result_id`], as the builder does; an
     /// operation that produces no result must not be given one.
-    pub(crate) fn new_value(&mut self) -> mir::ValueId {
-        let id = mir::ValueId::from_index(self.next_value_index);
+    pub(crate) fn new_value(&mut self) -> ValueId {
+        let id = ValueId::from_index(self.next_value_index);
         self.next_value_index += 1;
         id
     }
@@ -291,7 +292,7 @@ impl FunctionEdit {
             }
         }
         let mut retained = Vec::with_capacity(next);
-        for (index, mut block) in std::mem::take(&mut self.blocks).into_iter().enumerate() {
+        for (index, mut block) in mem::take(&mut self.blocks).into_iter().enumerate() {
             if !reachable.contains(&BlockId::from_index(index)) {
                 continue;
             }
@@ -345,10 +346,8 @@ impl FunctionEdit {
         for (index, block) in order.iter().enumerate() {
             renumbered.insert(*block, BlockId::from_index(index));
         }
-        let mut previous: Vec<Option<EditBlock>> = std::mem::take(&mut self.blocks)
-            .into_iter()
-            .map(Some)
-            .collect();
+        let mut previous: Vec<Option<EditBlock>> =
+            mem::take(&mut self.blocks).into_iter().map(Some).collect();
         self.blocks = order
             .iter()
             .map(|block| {
@@ -406,12 +405,12 @@ impl FunctionEdit {
             let Some(successor) = self.mergeable_successor(predecessor, &incoming) else {
                 continue;
             };
-            let operations = std::mem::take(&mut self.blocks[successor.as_index()].operations);
+            let operations = mem::take(&mut self.blocks[successor.as_index()].operations);
             let span = self.blocks[successor.as_index()].terminator.span;
             // Leave the emptied block terminal. The predecessor's old edge to the successor
             // disappears, while every outgoing edge of the successor is transferred one-for-one
             // to the predecessor, so no other incoming count changes.
-            let terminator = std::mem::replace(
+            let terminator = mem::replace(
                 &mut self.blocks[successor.as_index()].terminator,
                 Terminator::ret(span),
             );
@@ -459,7 +458,7 @@ impl FunctionEdit {
 
         let mut renumbered = FxHashMap::default();
         let mut retained = Vec::with_capacity(used.len());
-        for (index, constant) in std::mem::take(&mut self.constants).into_iter().enumerate() {
+        for (index, constant) in mem::take(&mut self.constants).into_iter().enumerate() {
             let id = ConstantId::from_index(index);
             if used.contains(&id) {
                 renumbered.insert(id, ConstantId::from_index(retained.len()));
@@ -520,7 +519,7 @@ impl FunctionEdit {
     pub(crate) fn finish(self, env: ModuleEnv<'_>) -> Function {
         let function = self.finish_unverified();
         #[cfg(any(debug_assertions, test))]
-        super::verify::verify_function(&function, env);
+        verify_function(&function, env);
         #[cfg(not(any(debug_assertions, test)))]
         let _ = env;
         function
@@ -564,7 +563,7 @@ impl EditBlock {
         if operation.result() != OperationResult::Nothing {
             operation.assign_result_id(previous.result_id());
         }
-        std::mem::replace(&mut self.operations[index], operation)
+        mem::replace(&mut self.operations[index], operation)
     }
 }
 
@@ -610,7 +609,7 @@ fn successors_mut(terminator: &mut Terminator) -> Vec<&mut BlockId> {
         TerminatorKind::SwitchVariant { cases, default, .. } => cases
             .iter_mut()
             .map(|(_, target)| target)
-            .chain(std::iter::once(default))
+            .chain(once(default))
             .collect(),
         TerminatorKind::Invoke { normal, error, .. } => vec![normal, error],
         TerminatorKind::Yield { resume, .. } => vec![resume],

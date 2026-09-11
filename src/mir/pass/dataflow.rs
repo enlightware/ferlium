@@ -33,29 +33,32 @@
 //! or edge is distinct from a reachable state with no known values and contributes nothing at joins.
 #![allow(dead_code)]
 
-use std::{borrow::Cow, cmp::Reverse, collections::BinaryHeap};
+use std::{borrow::Cow, cmp::Reverse, collections::BinaryHeap, rc::Rc};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use ustr::Ustr;
 
 use crate::{
+    define_id_type, graph,
     hir::{
         function::{ArgConvention, arg_conventions_for_args},
         native_functions::NativeResultKnowledge,
         value::LiteralValue,
     },
     mir::{
-        self, BlockId, Function, Operation, OperationKind,
+        self, BlockId, Function, Operation, OperationKind, ParameterKind,
         terminator::TerminatorKind,
-        value::{ParameterId, ValueId},
+        value::{ParameterId, StaticEvidence, ValueId},
     },
     module::{
         FunctionId, ModuleEnv, ProjectionIndex, TraitDictionaryEntry, TraitDictionaryId, id::Id,
     },
     std::math::Int,
-    types::r#trait::TraitDictionaryEntryIndex,
-    types::r#type::{CallImplType, Type, TypeKind},
+    types::{
+        r#trait::TraitDictionaryEntryIndex,
+        r#type::{CallImplType, Type, TypeKind},
+    },
 };
 
 /// A root of addressable storage the analysis can track.
@@ -71,7 +74,7 @@ pub(crate) enum Root {
     DictEntry(ValueId),
 }
 
-crate::define_id_type!(
+define_id_type!(
     /// An interned storage path within one dataflow analysis.
     PlaceId
 );
@@ -213,11 +216,11 @@ pub(crate) enum Const {
     /// A known trait dictionary.
     Dictionary(TraitDictionaryId),
     /// Recursively static hidden evidence.
-    Evidence(mir::value::StaticEvidence),
+    Evidence(StaticEvidence),
     /// A dictionary entry function together with its closed hidden evidence.
     ClosedFunction {
         function: FunctionId,
-        hidden_evidence: Vec<mir::value::StaticEvidence>,
+        hidden_evidence: Vec<StaticEvidence>,
     },
     /// A symbolic discriminant, kept independent of compilation-session numeric tag ids.
     VariantTag(Ustr),
@@ -243,7 +246,7 @@ pub(crate) enum Fact {
     Known(Const),
     /// A bounded set of possible integer values or semantic variant tags.
     /// Must include every possible runtime outcome: consumers may eliminate excluded branches.
-    Outcomes(std::rc::Rc<[Outcome]>),
+    Outcomes(Rc<[Outcome]>),
 }
 
 impl Fact {
@@ -713,8 +716,7 @@ fn entry_state(
     for (index, parameter) in func.parameters().iter().enumerate() {
         if matches!(
             parameter.kind,
-            crate::mir::function::ParameterKind::Parameter(_)
-                | crate::mir::function::ParameterKind::Owned
+            ParameterKind::Parameter(_) | ParameterKind::Owned
         ) {
             let place = bindings.parameters[index];
             if !escaped.contains(&bindings.root_of_place(place)) {
@@ -789,7 +791,7 @@ pub(crate) fn analyze(func: &Function, env: ModuleEnv<'_>) -> Analysis {
     // actual CFG rather than relying on their current numbering.
     let entry = func.entry().as_index();
     let mut reverse_postorder = vec![usize::MAX; block_count];
-    for (priority, block) in crate::graph::reverse_postorder(&successor_lists, entry)
+    for (priority, block) in graph::reverse_postorder(&successor_lists, entry)
         .into_iter()
         .enumerate()
     {
@@ -1126,11 +1128,11 @@ fn transfer(
 /// Resolves one entry of a dictionary, from module metadata alone — exactly as the interpreter
 /// does when it executes a `dict_entry`.
 fn dictionary_entry(
-    dictionary: &mir::value::StaticEvidence,
+    dictionary: &StaticEvidence,
     entry: TraitDictionaryEntryIndex,
     env: ModuleEnv<'_>,
-) -> Option<(FunctionId, Vec<mir::value::StaticEvidence>)> {
-    let mir::value::StaticEvidence::Dictionary {
+) -> Option<(FunctionId, Vec<StaticEvidence>)> {
+    let StaticEvidence::Dictionary {
         definition,
         captures,
     } = dictionary
@@ -1151,14 +1153,10 @@ fn dictionary_entry(
     ))
 }
 
-fn static_evidence_operand(value: &mir::Value) -> Option<mir::value::StaticEvidence> {
+fn static_evidence_operand(value: &mir::Value) -> Option<StaticEvidence> {
     match value {
-        mir::Value::Dictionary(definition) => {
-            Some(mir::value::StaticEvidence::bare_dictionary(*definition))
-        }
-        mir::Value::Subscript(definition) => {
-            Some(mir::value::StaticEvidence::bare_subscript(*definition))
-        }
+        mir::Value::Dictionary(definition) => Some(StaticEvidence::bare_dictionary(*definition)),
+        mir::Value::Subscript(definition) => Some(StaticEvidence::bare_subscript(*definition)),
         mir::Value::Evidence(evidence) => Some((**evidence).clone()),
         _ => None,
     }
@@ -1470,6 +1468,8 @@ pub(crate) fn call_operands<'a>(
 
 #[cfg(test)]
 mod tests {
+    use std::cmp::Ordering;
+
     use super::*;
     use crate::{
         CompilerSession, ExecutionTarget, Location,
@@ -1477,24 +1477,20 @@ mod tests {
         containers::b,
         hir::{native_functions::NativeFnNN, value::VariantPayloadStorage},
         mir::{Operation, builder::FunctionBuilder, terminator::Terminator},
-        module::{Module, Path},
-        std::math::int_type,
+        module::{LocalFunctionId, Module, ModuleId, Path},
+        std::{logic::bool_type, math::int_type},
         types::{effects::no_effects, r#type::Type},
         ustr,
     };
 
-    fn compile(session: &mut CompilerSession, src: &str) -> crate::module::ModuleId {
+    fn compile(session: &mut CompilerSession, src: &str) -> ModuleId {
         session
             .compile_for(ExecutionTarget::Mir, src, "test", Path::single_str("test"))
             .expect("test source must compile")
             .module_id
     }
 
-    fn body<'a>(
-        session: &'a CompilerSession,
-        module: crate::module::ModuleId,
-        name: &str,
-    ) -> &'a Function {
+    fn body<'a>(session: &'a CompilerSession, module: ModuleId, name: &str) -> &'a Function {
         let id = session
             .expect_fresh_module(module)
             .get_local_function_id(ustr(name))
@@ -1866,7 +1862,7 @@ mod tests {
                 Operation::dict_entry(
                     span,
                     mir::Value::Dictionary(dictionary),
-                    crate::types::r#trait::TraitDictionaryEntryIndex::new(0),
+                    TraitDictionaryEntryIndex::new(0),
                     int_type(),
                 ),
             )
@@ -1888,8 +1884,8 @@ mod tests {
     fn disagreeing_paths_join_to_unknown() {
         assert_eq!(
             Fact::Known(Const::Function(FunctionId {
-                module: crate::module::ModuleId::new(0),
-                function: crate::module::LocalFunctionId::new(0),
+                module: ModuleId::new(0),
+                function: LocalFunctionId::new(0),
             }))
             .join(&Fact::Uninit),
             Fact::Unknown
@@ -1948,11 +1944,7 @@ mod tests {
             .unwrap();
         let one = builder.add_constant(int_type(), LiteralValue::new_native(1isize), &env);
         let two = builder.add_constant(int_type(), LiteralValue::new_native(2isize), &env);
-        let condition = builder.add_constant(
-            crate::std::logic::bool_type(),
-            LiteralValue::new_native(true),
-            &env,
-        );
+        let condition = builder.add_constant(bool_type(), LiteralValue::new_native(true), &env);
         builder.append_operation(
             entry,
             Operation::store(span, mir::Value::Constant(one), slot.clone()),
@@ -2070,7 +2062,7 @@ mod tests {
     fn impossible_restrictions_mark_the_edge_unreachable() {
         let place = PlaceId::from_index(0);
         let read = ValueId::from_index(1);
-        let less = Outcome::Tag(ustr::ustr("Less"));
+        let less = Outcome::Tag(ustr("Less"));
         let fact = Fact::from_outcomes([less]);
         let mut state = State::default();
         state.places.insert(place, fact.clone());
@@ -2085,7 +2077,7 @@ mod tests {
         let no = BlockId::from_index(2);
         let branch = TerminatorKind::SwitchVariant {
             tag: mir::Value::Register(read),
-            cases: vec![(ustr::ustr("Less"), yes)],
+            cases: vec![(ustr("Less"), yes)],
             default: no,
         };
         assert!(
@@ -2245,7 +2237,7 @@ mod tests {
         let mut host = Module::new(session.modules().next_id(), path.clone());
         // Deliberately not a std identity, and ordered in the opposite direction.
         let compare = host.add_function(
-            ustr::ustr("compare"),
+            ustr("compare"),
             NativeFnNN::from_rust_ordering_code(|a: isize, b: isize| b.cmp(&a)).description(
                 ["a", "b"],
                 "Host comparison",
@@ -2253,7 +2245,7 @@ mod tests {
             ),
         );
         host.add_function(
-            ustr::ustr("ordinary"),
+            ustr("ordinary"),
             NativeFnNN::from_rust(isize::wrapping_sub).description(
                 ["a", "b"],
                 "Unrestricted result",
@@ -2267,11 +2259,14 @@ mod tests {
         );
         copied_description.definition =
             host.get_function_by_id(compare).unwrap().definition.clone();
-        host.add_function(ustr::ustr("copied_description"), copied_description);
+        host.add_function(ustr("copied_description"), copied_description);
         host.add_function(
-            ustr::ustr("not_reflexive"),
-            NativeFnNN::from_rust_ordering_code(|_: isize, _: isize| std::cmp::Ordering::Less)
-                .description(["a", "b"], "No ordering laws", no_effects()),
+            ustr("not_reflexive"),
+            NativeFnNN::from_rust_ordering_code(|_: isize, _: isize| Ordering::Less).description(
+                ["a", "b"],
+                "No ordering laws",
+                no_effects(),
+            ),
         );
         let id = session.register_module(path, host);
         assert!(

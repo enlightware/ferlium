@@ -33,13 +33,13 @@ use rustc_hash::{FxHashMap, FxHasher};
 
 use crate::{
     containers::{DenseBitSet, SVec2},
-    mir::{self, BlockId, Function, edit::FunctionEdit, terminator::TerminatorKind},
+    mir::{self, BlockId, Function, ValueId, edit::FunctionEdit, terminator::TerminatorKind},
     module::id::Id,
 };
 
 fn hash_value(
     value: &mir::Value,
-    local_results: &FxHashMap<mir::ValueId, usize>,
+    local_results: &FxHashMap<ValueId, usize>,
     state: &mut impl Hasher,
 ) {
     match value {
@@ -57,8 +57,8 @@ fn hash_value(
 fn values_alpha_equivalent(
     left: &mir::Value,
     right: &mir::Value,
-    left_results: &FxHashMap<mir::ValueId, usize>,
-    right_results: &FxHashMap<mir::ValueId, usize>,
+    left_results: &FxHashMap<ValueId, usize>,
+    right_results: &FxHashMap<ValueId, usize>,
 ) -> bool {
     match (left, right) {
         (mir::Value::Register(left), mir::Value::Register(right)) => {
@@ -80,7 +80,7 @@ fn block_fingerprint(
     function: &Function,
     block: BlockId,
     replacement: &FxHashMap<BlockId, BlockId>,
-    local_results: &mut FxHashMap<mir::ValueId, usize>,
+    local_results: &mut FxHashMap<ValueId, usize>,
 ) -> Option<u64> {
     let block = function.block(block);
     let mut state = FxHasher::default();
@@ -587,18 +587,20 @@ pub(crate) fn simplify_tails(function: &Function) -> Option<SimplifiedTails> {
 
 #[cfg(test)]
 mod tests {
+    use ustr::ustr;
+
+    use super::simplify_tails;
     use crate::{
         CompilerSession, Location, MirOptimization,
         hir::value::LiteralValue,
         mir::{
-            Operation, ParameterKind,
+            Operation, ParameterKind, Value,
             builder::FunctionBuilder,
             terminator::{Terminator, TerminatorKind},
+            verify::verify_function,
         },
         std::{logic::bool_type, math::int_type},
     };
-
-    use super::simplify_tails;
 
     fn optimized_body(src: &str) -> String {
         let mut session = CompilerSession::new();
@@ -637,7 +639,7 @@ mod tests {
             let no = builder.add_block();
             builder.set_terminator(
                 entry,
-                Terminator::cond_br(span, crate::mir::Value::Constant(condition), yes, no),
+                Terminator::cond_br(span, Value::Constant(condition), yes, no),
             );
             builder.set_terminator(yes, Terminator::invariant_failure(span, "first".into()));
             builder.set_terminator(
@@ -646,7 +648,7 @@ mod tests {
             );
             let body = builder.finish(env);
             let body = simplify_tails(&body).map_or(body, |result| result.body);
-            crate::mir::verify::verify_function(&body, env);
+            verify_function(&body, env);
             assert_eq!(body.blocks().count(), if same { 1 } else { 3 });
             let messages: Vec<_> = body
                 .blocks()
@@ -655,8 +657,8 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            assert!(messages.contains(&ustr::ustr("first")));
-            assert_eq!(messages.contains(&ustr::ustr("second")), !same);
+            assert!(messages.contains(&ustr("first")));
+            assert_eq!(messages.contains(&ustr("second")), !same);
         }
     }
 
@@ -737,7 +739,7 @@ mod tests {
         builder.set_terminator(reachable, Terminator::goto(span, successor));
         builder.append_operation(
             successor,
-            Operation::store(span, reachable_result, crate::mir::Value::Parameter(ret)),
+            Operation::store(span, reachable_result, Value::Parameter(ret)),
         );
         builder.set_terminator(successor, Terminator::ret(span));
         builder.append_operation(unreachable, Operation::load(span, slot));
@@ -762,7 +764,7 @@ mod tests {
         let exit = builder.add_block();
         builder.set_terminator(
             entry,
-            Terminator::cond_br(span, crate::mir::Value::Constant(condition), exit, exit),
+            Terminator::cond_br(span, Value::Constant(condition), exit, exit),
         );
         builder.set_terminator(exit, Terminator::ret(span));
 
@@ -787,12 +789,7 @@ mod tests {
 
         builder.set_terminator(
             entry,
-            Terminator::cond_br(
-                span,
-                crate::mir::Value::Constant(condition),
-                arm,
-                forwarding,
-            ),
+            Terminator::cond_br(span, Value::Constant(condition), arm, forwarding),
         );
         // An operation in each of the two surviving blocks keeps them out of the reach of every
         // other rewrite here: they are neither equivalent to one another nor empty.
@@ -841,24 +838,16 @@ mod tests {
         let exit = builder.add_block();
         builder.set_terminator(
             entry,
-            Terminator::cond_br(span, crate::mir::Value::Constant(condition), left, right),
+            Terminator::cond_br(span, Value::Constant(condition), left, right),
         );
         builder.append_operation(
             left,
-            Operation::store(
-                span,
-                crate::mir::Value::Constant(one),
-                crate::mir::Value::Parameter(ret),
-            ),
+            Operation::store(span, Value::Constant(one), Value::Parameter(ret)),
         );
         builder.set_terminator(left, Terminator::goto(span, shared));
         builder.append_operation(
             right,
-            Operation::store(
-                span,
-                crate::mir::Value::Constant(two),
-                crate::mir::Value::Parameter(ret),
-            ),
+            Operation::store(span, Value::Constant(two), Value::Parameter(ret)),
         );
         builder.set_terminator(right, Terminator::goto(span, shared));
         builder.set_terminator(shared, Terminator::goto(span, exit));

@@ -30,6 +30,10 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use super::{
+    dataflow::{self, Root},
+    site::{OperationIndex, OperationSite},
+};
 use crate::{
     hir::function::ArgConvention,
     mir::{
@@ -37,12 +41,10 @@ use crate::{
         edit::FunctionEdit, terminator::TerminatorKind, value::ValueId,
     },
     module::{FunctionId, ModuleEnv, id::Id},
-    types::{r#type::CallResultConvention, type_properties::concrete_type_is_trivial_copy},
-};
-
-use super::{
-    dataflow::{self, Root},
-    site::{OperationIndex, OperationSite},
+    types::{
+        r#type::{CallResultConvention, Type},
+        type_properties::concrete_type_is_trivial_copy,
+    },
 };
 
 #[derive(Clone)]
@@ -54,7 +56,7 @@ struct NaturalLoop {
 #[derive(Clone, Copy)]
 struct Alloca {
     site: OperationSite,
-    ty: crate::types::r#type::Type,
+    ty: Type,
     is_static: bool,
 }
 

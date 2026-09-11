@@ -14,9 +14,9 @@
 
 use std::fmt;
 
-use crate::{mir::BlockId, module::id::Id};
+use crate::{define_id_type, mir::BlockId, module::id::Id};
 
-crate::define_id_type!(
+define_id_type!(
     /// A transient position in one block's operation vector, not a stable MIR identity.
     ///
     /// A block's terminator takes the index one past the last operation, for the passes that need
