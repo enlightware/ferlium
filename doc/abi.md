@@ -472,9 +472,10 @@ deallocation and retains any allocator-specific layout metadata internally; a ca
 deallocated by the same path as any other. Whole-buffer moves must release an existing target
 allocation before replacing its pointer, so every allocation is reclaimed exactly once.
 
-# First-class callables
+# Dictionary evidence
 
-Every first-class callable has this outer representation:
+A dictionary reference has this representation, with fields in the stated order and alignment
+according to the backend profile:
 
 ```text
 {
@@ -483,7 +484,31 @@ Every first-class callable has this outer representation:
 }
 ```
 
-`descriptor_index` is a session-local implementation identity.
+`descriptor_index` identifies the dictionary's entries and environment contract. Dictionary,
+function, and subscript descriptors use module-qualified symbolic references in independently
+compiled artifacts. Linking resolves those references to program-wide indexes; references to
+static data similarly resolve to target addresses.
+
+`env_ptr` points to the captured prerequisite evidence, or is zero for a captureless dictionary.
+The descriptor determines the environment's layout and entry calling contracts, including how
+each entry receives its required evidence.
+
+Dynamic evidence environments are immutable and reference-counted. Calls borrow evidence for
+their duration. Capturing or cloning evidence retains its environment; moving transfers ownership;
+releasing the last owner releases the captured evidence and reclaims the environment. Static
+evidence has program lifetime and requires no reference-count updates. Evidence lifecycle
+operations do not invoke source-level clone/drop methods.
+
+Stored evidence captures form an acyclic graph: construction captures existing evidence, and
+capture fields cannot subsequently change. An entry requiring its own dictionary receives the
+current dictionary reference rather than an owning self-capture. Capturing evidence therefore
+secures the lifetime of all its transitive prerequisites without copying their environments.
+
+# First-class callables
+
+Every first-class callable uses the same outer `{ descriptor_index: u32, env_ptr: target_pointer }`
+layout as [dictionary evidence](#dictionary-evidence). Its environment ownership follows the
+function or subscript contract below.
 
 ## Functions and closures
 
@@ -509,11 +534,12 @@ evidence may instead be compiled into those operations.
 `env_ptr` is zero exactly when the closure captures neither hidden evidence nor source values. A
 non-zero environment pointer owns one allocation:
 
-- construction moves the already-owned source captures into it;
+- construction moves the already-owned source captures into it and retains captured evidence;
 - moving the closure transfers the pointer and clears the source;
-- cloning the closure allocates a new environment, copies non-owning hidden evidence and clones the
+- cloning the closure allocates a new environment, retains captured evidence and clones the
   owned capture tuple through `Value<B>`;
-- dropping the closure drops the owned capture tuple and deallocates the environment exactly once.
+- dropping the closure drops the owned capture tuple, releases captured evidence, and deallocates
+  the environment exactly once.
 
 Invoking a closure borrows the closure value. It clones the owned capture tuple into a per-call
 temporary, passes the temporary captures and stored hidden evidence to the function body, and
@@ -532,8 +558,9 @@ schema; indirect application passes `env_ptr` and the type-derived visible ABI.
 
 A non-zero `env_ptr` owns one environment allocation. Construction initializes it, moving transfers
 ownership, cloning creates an independent environment, and dropping destroys its captures and
-deallocates it. Invocation borrows stored evidence. Captured source values follow the closure
-invocation rules above.
+deallocates it. Construction and cloning retain captured evidence; destruction releases it.
+Invocation borrows stored evidence. Captured source values follow the closure invocation rules
+above.
 
 Selecting `ref` or `mut` borrows the subscript environment. [mir-ir.md](mir-ir.md) specifies the
 resulting ephemeral MIR value and its lifetime.
