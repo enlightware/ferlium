@@ -1,9 +1,10 @@
+use std::any::type_name_of_val;
+
+use super::SnapshotError;
 use crate::{
     hir::value::{LiteralNativeValue, LiteralValue},
     std::{math::Float, string::StaticStr},
 };
-
-use super::SnapshotError;
 
 /// Portable literal data used by cached HIR and pattern alternatives.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -71,7 +72,7 @@ fn capture_native(value: &dyn LiteralNativeValue) -> Result<SnapshotLiteral, Sna
         Ok(SnapshotLiteral::StaticString(value.as_str().to_owned()))
     } else {
         Err(SnapshotError::UnknownNativeLiteral(
-            std::any::type_name_of_val(value).to_owned(),
+            type_name_of_val(value).to_owned(),
         ))
     }
 }

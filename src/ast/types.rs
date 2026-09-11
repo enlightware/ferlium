@@ -7,23 +7,21 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use derive_new::new;
-use enum_as_inner::EnumAsInner;
 use std::fmt::{self, Display};
 
+use derive_new::new;
+use enum_as_inner::EnumAsInner;
 use ustr::Ustr;
 
+use super::{Parsed, Path, Phase, UstrSpan, format_effect_binding_value};
 use crate::{
     FxHashMap, FxHashSet, Location,
     compiler::error::InternalCompilationError,
     containers::{B, b},
     format::{FormatWith, write_identifier, write_identifier_list, write_with_separator},
     module::{ModuleEnv, Visibility},
-    types::mutability::FormatInFnArg,
-    types::r#type::Type as IrType,
+    types::{mutability::FormatInFnArg, r#type::Type as IrType},
 };
-
-use super::{Parsed, Path, Phase, UstrSpan, format_effect_binding_value};
 
 pub type TypeSpan<P> = (<P as Phase>::Type, Location);
 
@@ -82,7 +80,7 @@ pub struct TypeAlias {
 pub type PTypeAlias = TypeAlias;
 
 impl FormatWith<ModuleEnv<'_>> for TypeAlias {
-    fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv) -> std::fmt::Result {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv) -> fmt::Result {
         write_identifier(f, self.name.0.as_str())?;
         self.generic_params.format_source(f)?;
         write!(f, ": ")?;

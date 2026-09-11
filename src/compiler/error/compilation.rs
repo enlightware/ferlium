@@ -8,29 +8,27 @@
 //
 use std::{
     fmt::{self, Debug, Display},
+    mem,
     ops::Deref,
 };
 
-use crate::{
-    ast,
-    containers::iterable_to_string,
-    format::{FormatWith, write_with_separator, write_with_separator_and_format_fn},
-    module::{ModuleId, SubscriptMemberKind, TraitId, TypeDefId},
-    parser::location::{Location, SourceTable},
-    types::type_inference::unify::SubOrSameType,
-    types::type_scheme::PubTypeConstraint,
-};
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
 use ustr::Ustr;
 
 use super::resolve_must_be_mutable_ctx;
-
 use crate::{
-    ast::{PatternType, PropertyAccess},
-    module::ModuleEnv,
-    types::effects::{EffType, EffectVar},
-    types::r#type::{Type, TypeVar},
+    ast::{self, PatternType, PropertyAccess},
+    containers::iterable_to_string,
+    format::{FormatWith, write_with_separator, write_with_separator_and_format_fn},
+    module::{ModuleEnv, ModuleId, SubscriptMemberKind, TraitId, TypeDefId, path::Path},
+    parser::location::{Location, SourceTable},
+    types::{
+        effects::{EffType, EffectVar},
+        r#type::{Type, TypeVar},
+        type_inference::unify::SubOrSameType,
+        type_scheme::PubTypeConstraint,
+    },
 };
 
 pub type LocatedError = (String, Location);
@@ -730,7 +728,7 @@ pub enum ImportKind {
 #[derive(Debug, Clone)]
 pub struct ImportSite {
     pub kind: ImportKind,
-    pub module: crate::module::path::Path,
+    pub module: Path,
     pub span: Location,
 }
 
@@ -1228,8 +1226,8 @@ impl InternalCompilationError {
         mut b_span: Location,
     ) -> Self {
         if a_span.start() > b_span.start() {
-            std::mem::swap(&mut a_type, &mut b_type);
-            std::mem::swap(&mut a_span, &mut b_span);
+            mem::swap(&mut a_type, &mut b_type);
+            mem::swap(&mut a_span, &mut b_span);
         }
         internal_compilation_error!(InconsistentADT {
             a_type,

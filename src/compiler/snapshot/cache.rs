@@ -1,29 +1,36 @@
 use std::{
+    convert::Infallible,
+    env,
     fs::{self, OpenOptions, TryLockError},
-    io::Write,
+    io::{self, Write},
+    mem::size_of,
     path::{Path, PathBuf},
+    process,
     sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, Instant},
 };
 
+use directories::ProjectDirs;
+use sha2::{Digest, Sha256};
+
+use super::{
+    CacheChecksum, CompiledStdMirSnapshot, CompiledStdSnapshot, MirSnapshotStage, SnapshotError,
+    physical::CompiledPhysicalMirSnapshot,
+};
 use crate::{
     SourceTable,
     compiler::{CompilerSession, MirArtifacts, Modules},
     mir::physical::{BackendReadinessError, BackendReadyMirArtifacts, lower_physical_mir},
     module::{Module, ModuleEnv},
+    std::std_module,
 };
-use directories::ProjectDirs;
-use sha2::{Digest, Sha256};
-
-use super::physical::CompiledPhysicalMirSnapshot;
-use super::{CacheChecksum, CompiledStdMirSnapshot, CompiledStdSnapshot, MirSnapshotStage};
 
 const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const LOCK_WAIT_LIMIT: Duration = Duration::from_secs(120);
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const CACHE_MAGIC: &[u8; 8] = b"FERLIUM\x01";
-const CHECKSUM_LEN: usize = std::mem::size_of::<CacheChecksum>();
+const CHECKSUM_LEN: usize = size_of::<CacheChecksum>();
 type CachedStd = (SourceTable, Module, Option<CacheChecksum>);
 type CachedMir = (MirArtifacts, Option<CacheChecksum>);
 
@@ -221,7 +228,7 @@ fn load_or_build_mir(
     load_or_build_stage(
         stage,
         cache_path(),
-        || Ok::<_, std::convert::Infallible>(build()),
+        || Ok::<_, Infallible>(build()),
         |artifacts| {
             CompiledStdMirSnapshot::capture(stage, parent_checksum, artifacts, module)
                 .map_err(|error| error.to_string())?
@@ -358,14 +365,14 @@ fn load_or_build_stage<T, E>(
 
 fn compile_without_cache() -> CachedStd {
     let mut sources = SourceTable::default();
-    let module = crate::std::std_module(&mut sources);
+    let module = std_module(&mut sources);
     (sources, module, None)
 }
 
 fn try_load(path: &Path) -> Result<Option<CachedStd>, String> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("failed to read cache: {error}")),
     };
     let checked = checked_payload(&bytes).map_err(str::to_owned)?;
@@ -383,7 +390,7 @@ fn try_load_stage<T>(
 ) -> Result<Option<(T, Option<CacheChecksum>)>, String> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("failed to read cache: {error}")),
     };
     let checked = checked_payload(&bytes).map_err(str::to_owned)?;
@@ -400,7 +407,7 @@ fn restore_mir_snapshot(
     modules: &Modules,
     raw: Option<&MirArtifacts>,
     verify: bool,
-) -> Result<MirArtifacts, super::SnapshotError> {
+) -> Result<MirArtifacts, SnapshotError> {
     snapshot.validate_lineage(stage, parent_checksum)?;
     match stage {
         MirSnapshotStage::Raw if verify => snapshot.restore_raw_verified(module, modules),
@@ -504,10 +511,10 @@ fn invalidate_mir_from(semantic_path: &Path, stage: MirSnapshotStage) {
 }
 
 fn cache_path() -> Option<PathBuf> {
-    if std::env::var_os("FERLIUM_STD_CACHE_DISABLE").is_some() {
+    if env::var_os("FERLIUM_STD_CACHE_DISABLE").is_some() {
         return None;
     }
-    let directory = std::env::var_os("FERLIUM_STD_CACHE_DIR")
+    let directory = env::var_os("FERLIUM_STD_CACHE_DIR")
         .map(PathBuf::from)
         .or_else(|| {
             ProjectDirs::from("com", "Enlightware", "Ferlium")
@@ -520,9 +527,9 @@ fn cache_path() -> Option<PathBuf> {
     )))
 }
 
-fn publish_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+fn publish_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let temp = path.with_extension(format!("tmp-{}-{sequence}", std::process::id()));
+    let temp = path.with_extension(format!("tmp-{}-{sequence}", process::id()));
     let result = (|| {
         let mut file = OpenOptions::new()
             .write(true)
@@ -549,18 +556,20 @@ fn publish_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
 
     #[test]
     fn mir_cache_hits_skip_building_and_corruption_rebuilds() {
-        let directory = std::env::temp_dir().join(format!(
+        let directory = env::temp_dir().join(format!(
             "ferlium-stage-cache-test-{}-{}",
-            std::process::id(),
+            process::id(),
             TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&directory).unwrap();
         let path = directory.join("module.bin");
-        let builds = std::cell::Cell::new(0u8);
+        let builds = Cell::new(0u8);
         let load = || {
             load_or_build_stage(
                 MirSnapshotStage::Physical,
@@ -600,9 +609,9 @@ mod tests {
 
     #[test]
     fn atomic_publication_never_exposes_partial_bytes() {
-        let directory = std::env::temp_dir().join(format!(
+        let directory = env::temp_dir().join(format!(
             "ferlium-cache-test-{}-{}",
-            std::process::id(),
+            process::id(),
             TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&directory).unwrap();
@@ -629,9 +638,9 @@ mod tests {
 
     #[test]
     fn malformed_cache_is_distinguished_from_a_missing_cache() {
-        let directory = std::env::temp_dir().join(format!(
+        let directory = env::temp_dir().join(format!(
             "ferlium-invalid-cache-test-{}-{}",
-            std::process::id(),
+            process::id(),
             TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&directory).unwrap();
@@ -649,9 +658,9 @@ mod tests {
 
     #[test]
     fn invalidation_cascades_only_to_dependent_mir_stages() {
-        let directory = std::env::temp_dir().join(format!(
+        let directory = env::temp_dir().join(format!(
             "ferlium-lineage-test-{}-{}",
-            std::process::id(),
+            process::id(),
             TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&directory).unwrap();
@@ -689,9 +698,9 @@ mod tests {
 
     #[test]
     fn process_lock_is_released_with_its_file_handle() {
-        let directory = std::env::temp_dir().join(format!(
+        let directory = env::temp_dir().join(format!(
             "ferlium-lock-test-{}-{}",
-            std::process::id(),
+            process::id(),
             TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&directory).unwrap();

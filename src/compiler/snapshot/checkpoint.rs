@@ -1,13 +1,12 @@
-use crate::{
-    FxHashSet,
-    module::{Def, Module, ModuleId, TypeDefSlots, id::Id},
-    types::r#type::Type,
-};
-
 use super::{
     NativeCallableCatalog, SnapshotError, SnapshotHirArena, SnapshotModuleFunction,
     SnapshotProjection, SnapshotSubscript, SnapshotTrait, SnapshotTraitImpls, SnapshotTypeAlias,
     SnapshotTypeDefSlot, SnapshotTypeGraphBuilder,
+};
+use crate::{
+    FxHashSet,
+    module::{Def, Module, ModuleId, TypeDefSlots, function::CallableOrigin, id::Id},
+    types::r#type::Type,
 };
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -70,9 +69,7 @@ impl SnapshotModuleCheckpoint {
         let functions = module.functions[before.functions..]
             .iter()
             .map(|value| {
-                if let crate::module::function::CallableOrigin::Native { canonical_name } =
-                    value.origin
-                {
+                if let CallableOrigin::Native { canonical_name } = value.origin {
                     return Err(SnapshotError::NativeCallableInSourceCheckpoint(
                         canonical_name
                             .map(|name| name.to_string())
@@ -237,10 +234,11 @@ fn validate_monotonic(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{super::NativeTypeCatalog, *};
     use crate::{
         CompilerSession,
         module::{Path, function::CallableOrigin},
+        types::r#type::BareNativeTypeB,
     };
 
     #[test]
@@ -256,9 +254,8 @@ mod tests {
         let mut module = Module::new(ModuleId::new(97), Path::single_str("snapshot-test"));
         let before = ModuleCheckpointShape::of(&module);
         module.functions.push(native);
-        let native_types = super::super::NativeTypeCatalog::std();
-        let native_name =
-            |native: &crate::types::r#type::BareNativeTypeB| native_types.canonical_name(native);
+        let native_types = NativeTypeCatalog::std();
+        let native_name = |native: &BareNativeTypeB| native_types.canonical_name(native);
         let mut graph = SnapshotTypeGraphBuilder::new(&native_name);
 
         assert!(matches!(

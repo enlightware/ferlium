@@ -7,61 +7,63 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::{borrow::Cow, iter::repeat, mem, rc::Rc};
-
-use crate::{FxHashMap, FxHashSet, Modules, types::type_scheme::PubTypeConstraint};
+use std::{
+    borrow::Cow,
+    iter::{repeat, repeat_n},
+    mem,
+    rc::Rc,
+};
 
 use ustr::Ustr;
 
+#[cfg(debug_assertions)]
+use crate::types::type_visitor::AllVarsCollector;
 use crate::{
-    Location,
+    FxHashMap, FxHashSet, Location, Modules,
     ast::UnnamedArg,
     compiler::error::InternalCompilationError,
     containers::b,
-    hir::dictionary::DictionaryReq,
-    hir::emit_value_impl::{function_value_method, generic_value_methods_for_type},
-    hir::function::{CallableDefinition, arg_conventions_for_args},
-    hir::hir_syn::{get_dictionary, load_local},
     hir::{
-        CallArgument, FnInstData, Node, NodeArena, NodeKind, StaticApplication, value::LiteralValue,
+        CallArgument, FnInstData, Node, NodeArena, NodeKind, StaticApplication,
+        dictionary::DictionaryReq,
+        emit_value_impl::{function_value_method, generic_value_methods_for_type},
+        function::{CallableDefinition, arg_conventions_for_args},
+        hir_syn::{get_dictionary, load_local},
+        value::LiteralValue,
     },
     internal_compilation_error,
     module::{
         self, BlanketImpls, BlanketTraitImpls, ConcreteTraitImplKey, CurrentTypeItems, Def,
         DefKind, DefTable, FunctionId, LocalDecl, LocalDeclId, LocalFunctionId, LocalImplId,
-        Module, ModuleEnv, ModuleFunction, ModuleId, PendingFunctionBody, PendingFunctionCollector,
-        PendingModuleFunction, ProjectionKey, QualifiedNameEnv, ResolvedValueLayout,
-        TraitDictionary, TraitId, TraitImpl, TraitImplId, TraitImpls, TypeDefId, Visibility,
-        build_capturing_dictionary_value, build_dictionary_value, dictionary_capture_plan, id::Id,
-        unique_generated_name,
+        LocalTraitId, Module, ModuleEnv, ModuleFunction, ModuleId, PendingFunctionBody,
+        PendingFunctionCollector, PendingModuleFunction, ProjectionKey, QualifiedNameEnv,
+        ResolvedValueLayout, TraitDictionary, TraitId, TraitImpl, TraitImplId, TraitImpls,
+        TypeDefId, Visibility, build_capturing_dictionary_value, build_dictionary_value,
+        dictionary_capture_plan, id::Id, unique_generated_name,
     },
     std::{
         STD_MODULE_ID,
         core_traits_names::{REPR_TRAIT_NAME, TRIVIAL_COPY_TRAIT_NAME, VALUE_TRAIT_NAME},
         value::{
-            generated_value_evidence_types, generated_value_layout_getter,
+            TypeLayoutEnv, generated_value_evidence_types, generated_value_layout_getter,
             is_compiler_provided_value_trait_application,
             is_function_surface_only_value_trait_application, is_value_trait,
             is_value_trait_for_function_type, value_layout_associated_const_values,
             value_layout_for_type, value_layout_getter_evidence_types,
         },
     },
-    types::effects::{EffType, Effect, EffectVar},
-    types::mutability::{MutType, MutVar},
-    types::r#trait::{Trait, TraitAssociatedConstIndex, TraitMethodIndex},
-    types::r#type::{CallImplType, SubscriptType, Type, TypeDef, TypeKind, TypeVar},
-    types::type_inference::substitution::InstSubst,
-    types::type_inference::unify::UnifiedTypeInference,
-    types::type_like::{TypeLike, instantiate_types},
-    types::type_mapper::{BitmapInstantiationMapper, TypeMapper},
-    types::type_properties::{
-        TypePropertyEnv, concrete_type_is_trivial_copy, trivial_copy_impl_key,
+    types::{
+        effects::{EffType, Effect, EffectVar},
+        mutability::{MutType, MutVar},
+        r#trait::{Trait, TraitAssociatedConstIndex, TraitMethodIndex},
+        r#type::{CallImplType, SubscriptType, Type, TypeDef, TypeKind, TypeVar},
+        type_inference::{substitution::InstSubst, unify::UnifiedTypeInference},
+        type_like::{TypeLike, instantiate_types},
+        type_mapper::{BitmapInstantiationMapper, TypeMapper},
+        type_properties::{TypePropertyEnv, concrete_type_is_trivial_copy, trivial_copy_impl_key},
+        type_scheme::{PubTypeConstraint, TypeScheme},
     },
-    types::type_scheme::TypeScheme,
 };
-
-#[cfg(debug_assertions)]
-use crate::types::type_visitor::AllVarsCollector;
 
 /// Trait solving is performed by this structure, mutating it by caching intermediate results.
 #[allow(clippy::too_many_arguments)]
@@ -920,7 +922,7 @@ fn is_compiler_provided_no_output_trait_application(
     input_tys: &[Type],
     output_tys: &[Type],
     output_effs: &[EffType],
-    env: &impl crate::std::value::TypeLayoutEnv,
+    env: &impl TypeLayoutEnv,
 ) -> bool {
     output_tys.is_empty()
         && output_effs.is_empty()
@@ -984,10 +986,7 @@ impl<'a> TraitSolver<'a> {
                 .enumerate()
                 .find(|(_, trait_def)| trait_def.name == name)
         {
-            return TraitId::new(
-                STD_MODULE_ID,
-                crate::module::LocalTraitId::from_index(index),
-            );
+            return TraitId::new(STD_MODULE_ID, LocalTraitId::from_index(index));
         }
         Module::expect_std_trait_id(self.others, name)
     }
@@ -2808,7 +2807,7 @@ impl<'a> TraitSolver<'a> {
                 (Vec::new(), getters, getter_requirements)
             };
         let dictionary_ty = TraitImpls::dictionary_ty(method_tys, associated_const_tys);
-        let entry_requirements = std::iter::repeat_n(requirements, methods.len())
+        let entry_requirements = repeat_n(requirements, methods.len())
             .chain(getter_requirements)
             .collect::<Vec<_>>();
         let (capture_schema, entry_capture_mappings) =
@@ -4141,11 +4140,14 @@ impl TypePropertyEnv for TraitSolver<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::{fmt, slice::from_ref};
+
     use super::*;
     use crate::{
         CompilerSession,
-        hir::function::Function,
-        module::{BlanketTraitImplSubKey, Path},
+        eval::{EvalControlFlowResult, EvalCtx, ValOrMut},
+        hir::function::{ArgConvention, Callable, Function},
+        module::{BlanketTraitImplSubKey, ELocalDecl, Path},
         std::{core_traits_names::VALUE_TRAIT_NAME, math::int_type, new_module_using_std},
         types::{
             effects::{PrimitiveEffect, effect},
@@ -4157,26 +4159,26 @@ mod tests {
     #[derive(Clone)]
     struct UnexecutedEffectMethod;
 
-    impl crate::hir::function::Callable for UnexecutedEffectMethod {
+    impl Callable for UnexecutedEffectMethod {
         fn call(
             &self,
-            _: Vec<crate::eval::ValOrMut>,
-            _: &mut crate::eval::EvalCtx,
-            _: &[crate::module::ELocalDecl],
-        ) -> crate::eval::EvalControlFlowResult {
+            _: Vec<ValOrMut>,
+            _: &mut EvalCtx,
+            _: &[ELocalDecl],
+        ) -> EvalControlFlowResult {
             unreachable!("the effect-cache test only queries method types")
         }
-        fn runtime_argument_passing(&self) -> Option<&[crate::hir::function::ArgConvention]> {
-            Some(&[crate::hir::function::ArgConvention::Let])
+        fn runtime_argument_passing(&self) -> Option<&[ArgConvention]> {
+            Some(&[ArgConvention::Let])
         }
         fn format_ind(
             &self,
-            f: &mut std::fmt::Formatter,
-            _: &[crate::module::ELocalDecl],
+            f: &mut fmt::Formatter,
+            _: &[ELocalDecl],
             _: &ModuleEnv,
             _: usize,
             _: usize,
-        ) -> std::fmt::Result {
+        ) -> fmt::Result {
             f.write_str("UnexecutedEffectMethod")
         }
     }
@@ -4274,7 +4276,7 @@ mod tests {
                     [(
                         "run",
                         CallableDefinition::new_infer_quantifiers(
-                            crate::types::r#type::FnType::new_by_val(
+                            FnType::new_by_val(
                                 [Type::variable_id(0)],
                                 Type::variable_id(1),
                                 EffType::single_variable_id(0),
@@ -4332,7 +4334,7 @@ mod tests {
                 trait_id,
                 &[int_type()],
                 &[int_type()],
-                std::slice::from_ref(&read),
+                from_ref(&read),
                 Location::new_synthesized(),
                 &mut arena,
             )

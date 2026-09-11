@@ -7,12 +7,16 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use derive_new::new;
-use enum_as_inner::EnumAsInner;
 use std::fmt::{self, Display};
 
+use derive_new::new;
+use enum_as_inner::EnumAsInner;
 use ustr::Ustr;
 
+use super::{
+    Desugared, ExprArena, ExprId, ExprVisitor, FormatWithIndent, LetPattern, PLetPattern, Parsed,
+    Path, Pattern, PatternConstraintKind, Phase, TypeSpan, UstrSpan, VisitExpr,
+};
 use crate::{
     Location,
     compiler::error::LocatedError,
@@ -24,11 +28,6 @@ use crate::{
     types::r#type::Type as IrType,
 };
 
-use super::{
-    Desugared, ExprArena, ExprId, ExprVisitor, FormatWithIndent, LetPattern, PLetPattern, Parsed,
-    Path, Pattern, PatternConstraintKind, Phase, TypeSpan, UstrSpan, VisitExpr,
-};
-
 #[derive(Debug, Clone, Copy, new)]
 pub struct MapLiteralEntry {
     pub key: PExprId,
@@ -38,11 +37,11 @@ pub struct MapLiteralEntry {
 impl FormatWithIndent<Parsed> for MapLiteralEntry {
     fn format_ind(
         &self,
-        f: &mut std::fmt::Formatter,
+        f: &mut fmt::Formatter,
         env: &ModuleEnv,
         arena: &ExprArena<Parsed>,
         indent: usize,
-    ) -> std::fmt::Result {
+    ) -> fmt::Result {
         let indent_str = "  ".repeat(indent.saturating_sub(1));
         arena[self.key].format_ind(f, env, arena, indent)?;
         writeln!(f, "{indent_str}=>")?;
@@ -78,11 +77,11 @@ impl ForLoopData {
 impl FormatWithIndent<Parsed> for B<ForLoopData> {
     fn format_ind(
         &self,
-        f: &mut std::fmt::Formatter,
+        f: &mut fmt::Formatter,
         env: &ModuleEnv,
         arena: &PExprArena,
         indent: usize,
-    ) -> std::fmt::Result {
+    ) -> fmt::Result {
         let indent_str = "  ".repeat(indent);
         writeln!(f, "{indent_str}for {} in", self.pattern)?;
         arena[self.iterator].format_ind(f, env, arena, indent + 1)?;
@@ -253,11 +252,11 @@ impl Display for PatternConstraintData {
 impl FormatWithIndent<Desugared> for PatternConstraintData {
     fn format_ind(
         &self,
-        f: &mut std::fmt::Formatter,
+        f: &mut fmt::Formatter,
         env: &ModuleEnv,
         arena: &ExprArena<Desugared>,
         indent: usize,
-    ) -> std::fmt::Result {
+    ) -> fmt::Result {
         let indent_str = "  ".repeat(indent);
         writeln!(f, "{indent_str}pattern constraint {}", self.constraint)?;
         arena[self.expr].format_ind(f, env, arena, indent + 1)
@@ -542,11 +541,11 @@ impl<P: Phase> Expr<P> {}
 impl<P: Phase> FormatWithIndent<P> for Expr<P> {
     fn format_ind(
         &self,
-        f: &mut std::fmt::Formatter,
+        f: &mut fmt::Formatter,
         env: &ModuleEnv<'_>,
         arena: &ExprArena<P>,
         indent: usize,
-    ) -> std::fmt::Result {
+    ) -> fmt::Result {
         let indent_str = "  ".repeat(indent);
         use ExprKind::*;
         match &self.kind {
@@ -827,7 +826,7 @@ pub struct ExprDisplay<'a, P: Phase> {
 }
 
 impl<'a, P: Phase> FormatWith<ModuleEnv<'_>> for ExprDisplay<'a, P> {
-    fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
         self.arena[self.id].format_ind(f, env, self.arena, 0)
     }
 }

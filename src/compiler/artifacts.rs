@@ -7,8 +7,22 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::cell::OnceCell;
+use std::{cell::OnceCell, fmt};
 
+use ustr::Ustr;
+
+#[cfg(feature = "std-snapshot")]
+use super::snapshot::CacheChecksum;
+#[cfg(all(
+    feature = "std-cache",
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+use crate::{
+    compiler::snapshot::{
+        load_or_build_optimized_std_mir, load_or_build_physical_std_mir, load_or_build_raw_std_mir,
+    },
+    std::STD_MODULE_ID,
+};
 use crate::{
     compiler::{CompilerSession, Modules},
     emit_mir::build_mir_function,
@@ -29,11 +43,6 @@ use crate::{
     },
     types::r#trait::TraitDictionaryEntryIndex,
 };
-
-use ustr::Ustr;
-
-#[cfg(feature = "std-snapshot")]
-use super::snapshot::CacheChecksum;
 
 /// Whether a compilation session runs the MIR optimization passes.
 ///
@@ -76,8 +85,8 @@ pub(crate) struct ModuleArtifacts {
     physical_mir: OnceCell<BackendReadyMirArtifacts>,
 }
 
-impl std::fmt::Debug for ModuleArtifacts {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for ModuleArtifacts {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ModuleArtifacts")
             .field(
                 "mir_function_slots",
@@ -639,8 +648,8 @@ pub(crate) fn ensure_physical_mir_artifacts(
         feature = "std-cache",
         not(all(target_arch = "wasm32", target_os = "unknown"))
     ))]
-    let physical = if module_id == crate::std::STD_MODULE_ID {
-        super::snapshot::load_or_build_physical_std_mir(
+    let physical = if module_id == STD_MODULE_ID {
+        load_or_build_physical_std_mir(
             optimized,
             artifacts
                 .optimized_mir_cache_checksum
@@ -695,12 +704,8 @@ pub(crate) fn ensure_mir_artifacts(modules: &Modules, module_id: ModuleId) {
         feature = "std-cache",
         not(all(target_arch = "wasm32", target_os = "unknown"))
     ))]
-    let (mir, cache_checksum) = if module_id == crate::std::STD_MODULE_ID {
-        crate::compiler::snapshot::load_or_build_raw_std_mir(
-            module,
-            modules,
-            entry.artifacts().semantic_cache_checksum(),
-        )
+    let (mir, cache_checksum) = if module_id == STD_MODULE_ID {
+        load_or_build_raw_std_mir(module, modules, entry.artifacts().semantic_cache_checksum())
     } else {
         (MirArtifacts::build(module, modules), None)
     };
@@ -760,8 +765,8 @@ pub(crate) fn ensure_optimized_mir_artifacts(session: &CompilerSession, module_i
         feature = "std-cache",
         not(all(target_arch = "wasm32", target_os = "unknown"))
     ))]
-    let (optimized, checksum) = if module_id == crate::std::STD_MODULE_ID {
-        crate::compiler::snapshot::load_or_build_optimized_std_mir(
+    let (optimized, checksum) = if module_id == STD_MODULE_ID {
+        load_or_build_optimized_std_mir(
             raw,
             entry.artifacts().raw_mir_cache_checksum(),
             module,

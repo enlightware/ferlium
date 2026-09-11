@@ -6,19 +6,23 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use crate::compiler::error::InvalidRecursiveTypeKind;
-use crate::desugar::types::{
-    RecursiveAliasRef, RecursiveTypeBuilder, desugar_type_constraints_with_next_effect_var,
-    extend_generic_eff_params, extend_generic_ty_params,
+use super::{expr::desugar, *};
+use crate::{
+    compiler::error::{InvalidRecursiveTypeKind, InvalidTraitDefinitionKind},
+    desugar::types::{
+        RecursiveAliasRef, RecursiveTypeBuilder, desugar_type_constraints_with_next_effect_var,
+        extend_generic_eff_params, extend_generic_ty_params,
+    },
+    hir::function::CallableDefinition,
+    module::Visibility,
+    types::{
+        effects::EffectVar,
+        r#trait::{
+            Trait, TraitAssociatedConst, TraitImplPolicy, TraitMethodSpans, TraitSpans,
+            TraitValidationError,
+        },
+    },
 };
-use crate::hir::function::CallableDefinition;
-use crate::module::Visibility;
-use crate::types::r#trait::{
-    Trait, TraitAssociatedConst, TraitMethodSpans, TraitSpans, TraitValidationError,
-};
-
-use super::expr::desugar;
-use super::*;
 
 /// A reference to name of a type, either an alias or a definition, in parsed AST.
 enum NamedTypeData {
@@ -1088,9 +1092,7 @@ impl ast::TraitDefinition {
             if !item_names.insert(name) {
                 return Err(internal_compilation_error!(InvalidTraitDefinition {
                     trait_name: self.name.0,
-                    kind: crate::compiler::error::InvalidTraitDefinitionKind::DuplicateItem {
-                        name,
-                    },
+                    kind: InvalidTraitDefinitionKind::DuplicateItem { name },
                     span,
                 }));
             }
@@ -1110,7 +1112,7 @@ impl ast::TraitDefinition {
         let mut generic_eff_params = GenericEffParams::default();
         for (index, (name, span)) in self.output_effect_names.iter().copied().enumerate() {
             if generic_eff_params
-                .insert(name, crate::types::effects::EffectVar::new(index as u32))
+                .insert(name, EffectVar::new(index as u32))
                 .is_some()
             {
                 return Err(internal_compilation_error!(InvalidGenericParams {
@@ -1183,7 +1185,7 @@ impl ast::TraitDefinition {
             methods,
             associated_consts,
             derivers: vec![],
-            impl_policy: crate::types::r#trait::TraitImplPolicy::UserImplementable,
+            impl_policy: TraitImplPolicy::UserImplementable,
             spans: Some(spans),
         })
         .map_err(|error| match error {

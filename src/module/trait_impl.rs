@@ -9,38 +9,39 @@
 
 use std::{fmt, hash::Hash};
 
-use crate::{FxHashMap, module::fmt_ordered_quantifiers};
-
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
 use ustr::Ustr;
 
 use crate::{
+    FxHashMap,
     containers::b,
     define_id_type,
     format::{FormatWith, write_with_separator_and_format_fn},
-    hir::hir_syn,
-    hir::value::LiteralValue,
-    hir::{ENodeArena, NodeArena},
     hir::{
+        ENodeArena, NodeArena,
         dictionary::DictionaryReq,
         function::{CallableDefinition, Function, PendingScriptFunction, ScriptFunction},
+        hir_syn,
+        value::LiteralValue,
     },
     module::{
         LocalDecl, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, PendingModuleFunction,
-        QualifiedNameEnv, TraitId, Visibility, id::Id, unique_generated_name,
+        QualifiedNameEnv, TraitId, Visibility, fmt_ordered_quantifiers, id::Id,
+        unique_generated_name,
     },
     parser::location::Location,
-    types::effects::{EffType, EffectVar, format_effect_binding_value},
-    types::r#trait::{
-        Trait, TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex,
+    std::value::is_value_trait,
+    types::{
+        effects::{EffType, EffectVar, format_effect_binding_value},
+        r#trait::{Trait, TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex},
+        r#type::{FnType, Type, TypeKind, TypeVar, fmt_fn_type_with_arg_names},
+        type_inference::substitution::InstSubst,
+        type_like::TypeLike,
+        type_scheme::PubTypeConstraint,
+        type_scheme_display::format_constraints_consolidated,
     },
-    types::r#type::{FnType, Type, TypeKind, TypeVar, fmt_fn_type_with_arg_names},
-    types::type_inference::substitution::InstSubst,
-    types::type_like::TypeLike,
-    types::type_scheme::PubTypeConstraint,
-    types::type_scheme_display::format_constraints_consolidated,
 };
 
 fn associated_const_getter_definition(ty: Type) -> CallableDefinition {
@@ -109,7 +110,7 @@ pub struct TraitDictionaryId {
 }
 
 impl FormatWith<ModuleEnv<'_>> for TraitImplId {
-    fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
         let module = if self.module == env.current.module_id() {
             env.current
         } else {
@@ -581,7 +582,7 @@ impl TraitImpls {
         let output_effs = trait_def.impl_output_effs_or_pure_defaults(output_effs.into());
         let associated_const_values = associated_const_values.into();
         debug_assert!(
-            !crate::std::value::is_value_trait(trait_id, trait_def)
+            !is_value_trait(trait_id, trait_def)
                 || input_tys.iter().all(|ty| !matches!(
                     &*ty.data(),
                     TypeKind::Tuple(_)
@@ -1139,10 +1140,10 @@ impl TraitImpls {
 
     pub(crate) fn fmt_with_filter(
         &self,
-        f: &mut std::fmt::Formatter,
+        f: &mut fmt::Formatter,
         env: &ModuleEnv<'_>,
         filter: impl Fn(TraitId, LocalImplId) -> DisplayFilter,
-    ) -> std::fmt::Result {
+    ) -> fmt::Result {
         for (key, id) in &self.concrete_key_to_id {
             let imp = self.get_impl_by_local_id(*id);
             let level = filter(key.trait_id, *id);
@@ -1185,9 +1186,9 @@ impl TraitImpls {
     pub fn format_impl_header_by_id(
         &self,
         id: LocalImplId,
-        f: &mut std::fmt::Formatter,
+        f: &mut fmt::Formatter,
         env: &ModuleEnv<'_>,
-    ) -> std::fmt::Result {
+    ) -> fmt::Result {
         let key = &self
             .get_key_by_local_id(id)
             .expect("local impl id not found");
@@ -1224,7 +1225,7 @@ impl TraitImpls {
 }
 
 impl FormatWith<ModuleEnv<'_>> for TraitImpls {
-    fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
         self.fmt_with_filter(f, env, |_, _| DisplayFilter::MethodDefinitions)
     }
 }
@@ -1241,9 +1242,9 @@ where
 pub fn format_concrete_impl(
     key: &ConcreteTraitImplKey,
     imp: &TraitImpl,
-    f: &mut std::fmt::Formatter,
+    f: &mut fmt::Formatter,
     env: &ModuleEnv<'_>,
-) -> std::fmt::Result {
+) -> fmt::Result {
     let subst = format_concrete_impl_header(key, &imp.output_tys, &imp.output_effs, f, env)?;
     format_impl_fns(key.trait_id, subst, imp, false, f, env)
 }
@@ -1251,9 +1252,9 @@ pub fn format_concrete_impl(
 pub fn format_blanket_impl(
     key: &BlanketTraitImplKey,
     imp: &TraitImpl,
-    f: &mut std::fmt::Formatter,
+    f: &mut fmt::Formatter,
     env: &ModuleEnv<'_>,
-) -> std::fmt::Result {
+) -> fmt::Result {
     format_blanket_impl_header(key, &imp.output_tys, &imp.output_effs, f, env)?;
     // For blanket impls, the function types already use the correct type variables,
     // so we don't need to apply any substitution.
@@ -1265,7 +1266,7 @@ pub fn format_impl_header_by_key(
     key: &TraitKey,
     imp: &TraitImpl,
     env: &ModuleEnv,
-) -> Result<InstSubst, std::fmt::Error> {
+) -> Result<InstSubst, fmt::Error> {
     use TraitKey::*;
     match key {
         Concrete(key) => {
@@ -1279,9 +1280,9 @@ pub fn format_blanket_impl_header(
     key: &BlanketTraitImplKey,
     output_tys: &[Type],
     output_effs: &[EffType],
-    f: &mut std::fmt::Formatter,
+    f: &mut fmt::Formatter,
     env: &ModuleEnv<'_>,
-) -> Result<InstSubst, std::fmt::Error> {
+) -> Result<InstSubst, fmt::Error> {
     let subst = format_impl_header_expanded(
         key.trait_id,
         key.sub_key.ty_var_count,
@@ -1303,9 +1304,9 @@ pub fn format_concrete_impl_header(
     key: &ConcreteTraitImplKey,
     output_tys: &[Type],
     output_effs: &[EffType],
-    f: &mut std::fmt::Formatter,
+    f: &mut fmt::Formatter,
     env: &ModuleEnv<'_>,
-) -> Result<InstSubst, std::fmt::Error> {
+) -> Result<InstSubst, fmt::Error> {
     format_impl_header_expanded(
         key.trait_id,
         0,
@@ -1324,9 +1325,9 @@ fn format_impl_header_expanded(
     input_tys: &[Type],
     output_tys: &[Type],
     output_effs: &[EffType],
-    f: &mut std::fmt::Formatter,
+    f: &mut fmt::Formatter,
     env: &ModuleEnv<'_>,
-) -> Result<InstSubst, std::fmt::Error> {
+) -> Result<InstSubst, fmt::Error> {
     let trait_def = env.trait_def(trait_id);
     write!(f, "impl")?;
     if ty_var_count > 0 {
@@ -1390,9 +1391,9 @@ fn format_impl_fns(
     subst: InstSubst,
     imp: &TraitImpl,
     show_code: bool,
-    f: &mut std::fmt::Formatter,
+    f: &mut fmt::Formatter,
     env: &ModuleEnv<'_>,
-) -> std::fmt::Result {
+) -> fmt::Result {
     let trait_def = env.trait_def(trait_id);
     writeln!(f, " {{")?;
     let impl_functions = imp.methods.iter().map(|&id| {
@@ -1411,9 +1412,9 @@ fn format_impl_fn(
     id: LocalFunctionId,
     subst: &InstSubst,
     show_code: bool,
-    f: &mut std::fmt::Formatter,
+    f: &mut fmt::Formatter,
     env: &ModuleEnv<'_>,
-) -> std::fmt::Result {
+) -> fmt::Result {
     let def = &function.definition;
     let ty = def.ty_scheme.ty.instantiate_simple(subst);
     write!(f, "    fn {name}")?;

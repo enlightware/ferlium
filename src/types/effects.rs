@@ -9,15 +9,18 @@
 use std::{
     cmp::Ordering,
     fmt::{self, Display},
-    iter::FusedIterator,
+    iter::{Copied, FusedIterator},
+    slice::Iter,
+    vec::IntoIter,
 };
-
-use crate::{FxHashMap, FxHashSet};
 
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
 
-use crate::format::{type_variable_subscript, write_with_separator};
+use crate::{
+    FxHashMap, FxHashSet,
+    format::{type_variable_subscript, write_with_separator},
+};
 
 /// An effect describing the non-pure behavior of a function
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -29,7 +32,7 @@ pub enum PrimitiveEffect {
 }
 
 impl Display for PrimitiveEffect {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use PrimitiveEffect::*;
         match self {
             Read => write!(f, "read"),
@@ -54,7 +57,7 @@ impl EffectVar {
 }
 
 impl Display for EffectVar {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "e{}", type_variable_subscript(self.name))
     }
 }
@@ -70,7 +73,7 @@ pub enum Effect {
 }
 
 impl Display for Effect {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Effect::Primitive(effect) => write!(f, "{effect}"),
             Effect::Variable(var) => write!(f, "{var}"),
@@ -478,12 +481,12 @@ pub struct EffTypeIntoIter {
 
 enum EffectVarsIter<'a> {
     Inline(InlineEffectVars),
-    Heap(std::iter::Copied<std::slice::Iter<'a, EffectVar>>),
+    Heap(Copied<Iter<'a, EffectVar>>),
 }
 
 enum EffectVarsIntoIter {
     Inline(InlineEffectVars),
-    Heap(std::vec::IntoIter<EffectVar>),
+    Heap(IntoIter<EffectVar>),
 }
 
 impl Iterator for EffectVarsIter<'_> {
@@ -689,7 +692,7 @@ impl FromIterator<Effect> for EffType {
 }
 
 impl Display for EffType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write_with_separator(self.iter(), ", ", f)
     }
 }
@@ -742,6 +745,8 @@ pub type EffectsInstSubst = FxHashMap<EffectVar, EffType>;
 
 #[cfg(test)]
 mod tests {
+    use std::mem::size_of;
+
     use super::*;
 
     #[test]
@@ -802,13 +807,13 @@ mod tests {
     #[test]
     #[cfg(target_pointer_width = "64")]
     fn eff_type_is_compact_on_64_bit_targets() {
-        assert_eq!(std::mem::size_of::<EffType>(), 16);
+        assert_eq!(size_of::<EffType>(), 16);
     }
 
     #[test]
     #[cfg(target_pointer_width = "32")]
     fn eff_type_is_compact_on_32_bit_targets() {
-        assert_eq!(std::mem::size_of::<EffType>(), 8);
+        assert_eq!(size_of::<EffType>(), 8);
     }
 
     #[test]

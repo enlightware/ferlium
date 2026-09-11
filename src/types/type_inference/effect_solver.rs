@@ -6,10 +6,12 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::borrow::Borrow;
+use std::{borrow::Borrow, mem};
 
 use ena::unify::{InPlace, InPlaceUnificationTable, Snapshot};
+use ustr::Ustr;
 
+use super::constraints::EffectConstraint;
 use crate::{
     FxHashMap, FxHashSet,
     compiler::error::InternalCompilationError,
@@ -21,9 +23,6 @@ use crate::{
         r#type::{FnType, SubscriptMemberType, SubscriptType, Type, TypeKind},
     },
 };
-use ustr::Ustr;
-
-use super::constraints::EffectConstraint;
 
 /// A pending lower-bound dependency on an effect variable.
 ///
@@ -143,7 +142,7 @@ impl EffectSolver {
     }
 
     pub(super) fn drain_constraints(&mut self) -> Vec<EffectConstraint> {
-        std::mem::take(&mut self.constraints)
+        mem::take(&mut self.constraints)
     }
 
     pub(super) fn make_dependent_effect<T: Borrow<EffType> + Clone>(
@@ -403,7 +402,7 @@ impl EffectSolver {
     pub(super) fn expand_pending_dependencies(&mut self) -> Result<(), InternalCompilationError> {
         self.expand_all_pending_dependencies()?;
 
-        let deferred_inclusions = std::mem::take(&mut self.deferred_inclusions);
+        let deferred_inclusions = mem::take(&mut self.deferred_inclusions);
         let mut residual_inclusions = Vec::new();
         for inclusion in deferred_inclusions {
             if !self.try_add_effect_inclusion(inclusion.clone(), false)? {
@@ -418,7 +417,7 @@ impl EffectSolver {
     }
 
     fn expand_all_pending_dependencies(&mut self) -> Result<(), InternalCompilationError> {
-        let pending_dependencies = std::mem::take(&mut self.pending_dependencies);
+        let pending_dependencies = mem::take(&mut self.pending_dependencies);
         for dep in pending_dependencies {
             self.expand_pending_dependency(dep)?;
         }
@@ -771,15 +770,15 @@ fn invalid_effect_dependency(
 
 #[cfg(test)]
 mod tests {
+    use ustr::ustr;
+
+    use super::{EffectConstraintOrigin, EffectSolver, PendingEffectDependency};
     use crate::{
         compiler::error::CompilationErrorImpl,
         module::{LocalTraitId, ModuleId, TraitId},
         parser::location::Location,
         types::effects::{EffType, Effect, PrimitiveEffect},
     };
-    use ustr::ustr;
-
-    use super::{EffectConstraintOrigin, EffectSolver, PendingEffectDependency};
 
     #[test]
     fn self_referential_effect_var_is_a_stable_noop() {

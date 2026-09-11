@@ -8,6 +8,9 @@
 //
 use std::mem;
 
+use log::log_enabled;
+use ustr::ustr;
+
 use crate::{
     FxHashMap, FxHashSet, Location, Modules,
     ast::{PExprArena, PExprId},
@@ -15,8 +18,8 @@ use crate::{
         CompilationCapabilities, diagnostics::CompilationWarning, error::InternalCompilationError,
     },
     desugar::desugar_expr_with_empty_ctx,
-    hir::{self, UNodeArena},
     hir::{
+        self, UNodeArena,
         borrow_checker::check_elaborated_borrows,
         dictionary::DictElaborationCtx,
         elaboration::{elaborate_generated_functions, elaborate_hir_with_warnings},
@@ -33,6 +36,7 @@ use crate::{
         ModuleEnv, ModuleFunction, ModuleId, PendingGeneratedStructuralProjectionSubscripts,
         Visibility, id::Id,
     },
+    std::core_traits_names::VALUE_TRAIT_NAME,
     types::{
         effects::EffType,
         trait_solver::{TraitSolver, trait_solver_from_module},
@@ -46,8 +50,6 @@ use crate::{
         typing_env::TypingEnv,
     },
 };
-
-use log::log_enabled;
 
 /// Expression HIR awaiting registration as a module function.
 #[derive(Debug)]
@@ -106,7 +108,7 @@ impl PendingExprEntry {
             self.locals,
         );
         function.evidence_bindings = self.evidence_bindings;
-        module.add_function_with_visibility(ustr::ustr("<expr>"), function, Visibility::Module)
+        module.add_function_with_visibility(ustr("<expr>"), function, Visibility::Module)
     }
 }
 
@@ -249,8 +251,7 @@ fn emit_expr_unsafe_inner(
     ty_inf.log_debug_constraints(module_env);
 
     // Resolve local-storage decisions before defaulting so only finalized ownership semantics add `Value`.
-    let value_trait_id =
-        module_env.expect_std_trait_id(crate::std::core_traits_names::VALUE_TRAIT_NAME);
+    let value_trait_id = module_env.expect_std_trait_id(VALUE_TRAIT_NAME);
     for lambda_id in lambda_functions.iter() {
         let descr = pending_functions
             .get_mut(lambda_id)

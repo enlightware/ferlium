@@ -8,32 +8,33 @@
 //
 use std::fmt::{self, Debug};
 
-use crate::{FxHashMap, FxHashSet, define_id_type};
-
 use dyn_clone::DynClone;
 use itertools::Itertools;
-use ustr::Ustr;
-use ustr::ustr;
+use ustr::{Ustr, ustr};
 
 use crate::{
-    Location,
+    FxHashMap, FxHashSet, Location,
     compiler::error::{
         InternalCompilationError, InvalidTraitDefinitionKind, UnsupportedTraitDefinitionKind,
     },
+    define_id_type,
     format::{FormatWith, write_with_separator_and_format_fn},
-    hir::function::{CallableDefinition, FunctionDisplayContext},
-    module::{ModuleEnv, TraitId, TraitImplId, id::Id},
-    types::effects::{EffType, EffectVar, EffectsInstSubst},
-    types::trait_solver::TraitSolver,
-    types::r#type::{FnType, Type, TypeInstSubst, TypeVar},
-    types::type_inference::substitution::InstSubst,
-    types::type_like::TypeLike,
-    types::type_mapper::BitmapInstantiationMapper,
-    types::type_scheme::PubTypeConstraint,
-    types::type_scheme_display::{
-        TypeConstraintRenderStyle, format_pub_type_constraint_with_style,
+    hir::{
+        NodeArena,
+        function::{CallableDefinition, FunctionDisplayContext},
     },
-    types::type_visitor::TyVarsCollector,
+    module::{ModuleEnv, TraitId, TraitImplId, id::Id},
+    types::{
+        effects::{EffType, EffectVar, EffectsInstSubst},
+        trait_solver::TraitSolver,
+        r#type::{FnType, Type, TypeInstSubst, TypeVar},
+        type_inference::substitution::InstSubst,
+        type_like::TypeLike,
+        type_mapper::BitmapInstantiationMapper,
+        type_scheme::PubTypeConstraint,
+        type_scheme_display::{TypeConstraintRenderStyle, format_pub_type_constraint_with_style},
+        type_visitor::TyVarsCollector,
+    },
 };
 
 /// Help deriving implementations of traits.
@@ -44,7 +45,7 @@ pub trait Deriver: Debug + DynClone + Sync + Send {
         trait_id: TraitId,
         input_types: &[Type],
         span: Location,
-        arena: &mut crate::hir::NodeArena,
+        arena: &mut NodeArena,
         solver: &mut TraitSolver,
     ) -> Result<Option<TraitImplId>, InternalCompilationError>;
 }
@@ -824,15 +825,16 @@ impl Trait {
 
 #[cfg(test)]
 mod tests {
+    use std::slice::from_ref;
+
+    use super::*;
     use crate::{
         types::{
-            effects::EffType,
+            effects::{EffType, PrimitiveEffect},
             r#type::{FnType, Type},
         },
         ustr,
     };
-
-    use super::*;
 
     #[test]
     fn construct_multi_parameter_trait() {
@@ -892,12 +894,8 @@ mod tests {
         assert_eq!(trait_def.output_effect_names, vec![ustr("E")]);
 
         // Instantiating the trait substitutes the effect slot in the method signature.
-        let read = EffType::single_primitive(crate::types::effects::PrimitiveEffect::Read);
-        let defs = trait_def.instantiate_for_tys(
-            &[Type::unit()],
-            &[Type::unit()],
-            std::slice::from_ref(&read),
-        );
+        let read = EffType::single_primitive(PrimitiveEffect::Read);
+        let defs = trait_def.instantiate_for_tys(&[Type::unit()], &[Type::unit()], from_ref(&read));
         assert_eq!(defs[0].ty_scheme.ty.effects, read);
 
         // An empty effect list pads to all-empty effects, a wrong length panics.

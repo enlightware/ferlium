@@ -1,28 +1,35 @@
 //! Portable representation of standard-library MIR artifacts.
 
-use crate::{
-    compiler::Modules,
-    containers::DenseBitSet,
-    hir::{function::ArgConvention, value::VariantPayloadStorage},
-    mir::{
-        self, BasicBlock, Function, Operation, OperationKind, Parameter, ParameterKind,
-        terminator::{Terminator, TerminatorKind},
-        value::{Constant, ConstantId, StaticEvidence},
-    },
-    module::{FunctionId, Module, ModuleEnv, ProjectionIndex, SubscriptId, TraitDictionaryId},
-    types::{
-        effects::{EffType, Effect},
-        r#trait::TraitDictionaryEntryIndex,
-        r#type::{CallImplType, CallResultConvention, FnArgType, FnType, Type},
-    },
-};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use super::{
     CacheChecksum, NativeTypeCatalog, SnapshotError, SnapshotFnType, SnapshotLiteral,
     SnapshotTypeGraph, SnapshotTypeGraphBuilder, SnapshotTypeId,
 };
-use crate::compiler::artifacts::{MirArtifacts, Specialization};
-use crate::mir::{operation::VariantMetadata, pass::OptimizationStats};
+use crate::{
+    Location,
+    compiler::{
+        Modules,
+        artifacts::{MirArtifacts, Specialization},
+    },
+    containers::DenseBitSet,
+    hir::{function::ArgConvention, value::VariantPayloadStorage},
+    mir::{
+        self, BasicBlock, Function, Operation, OperationKind, Parameter, ParameterKind,
+        operation::{ProductProjectionMetadata, VariantMetadata},
+        pass::OptimizationStats,
+        terminator::{Terminator, TerminatorKind},
+        value::{Constant, ConstantId, StaticEvidence},
+    },
+    module::{
+        FunctionId, Module, ModuleEnv, ModuleId, ProjectionIndex, SubscriptId, TraitDictionaryId,
+    },
+    types::{
+        effects::{EffType, Effect},
+        r#trait::TraitDictionaryEntryIndex,
+        r#type::{BareNativeTypeB, CallImplType, CallResultConvention, FnArgType, FnType, Type},
+    },
+};
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +42,7 @@ pub(crate) enum MirSnapshotStage {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone)]
 pub(crate) struct CompiledStdMirSnapshot {
-    module: crate::module::ModuleId,
+    module: ModuleId,
     module_path: String,
     stage: MirSnapshotStage,
     std_source_fingerprint: String,
@@ -200,7 +207,7 @@ struct SnapshotBasicBlock {
 #[derive(Debug, Clone)]
 struct SnapshotOperation {
     result_id: Option<mir::ValueId>,
-    span: crate::Location,
+    span: Location,
     operands: Vec<SnapshotValue>,
     kind: SnapshotOperationKind,
 }
@@ -363,7 +370,7 @@ enum SnapshotOperationKind {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone)]
 struct SnapshotTerminator {
-    span: crate::Location,
+    span: Location,
     kind: SnapshotTerminatorKind,
 }
 
@@ -403,8 +410,7 @@ enum SnapshotTerminatorKind {
 impl SnapshotMirArtifacts {
     pub(crate) fn capture(artifacts: &MirArtifacts) -> Result<Self, SnapshotError> {
         let native_types = NativeTypeCatalog::std();
-        let native_name =
-            |native: &crate::types::r#type::BareNativeTypeB| native_types.canonical_name(native);
+        let native_name = |native: &BareNativeTypeB| native_types.canonical_name(native);
         let mut graph = SnapshotTypeGraphBuilder::new(&native_name);
         let functions = artifacts
             .bodies()
@@ -553,7 +559,7 @@ fn verify_functions(
     let env = ModuleEnv::new(module, modules);
     // Keep the process-wide panic hook intact: replacing it here could hide an unrelated thread's
     // panic. This recovery is consequently noisy, and cannot recover in panic=abort builds.
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    catch_unwind(AssertUnwindSafe(|| {
         for function in functions.iter().flatten() {
             let roles = mir::role::check_function_operand_roles(function);
             mir::verify::verify_function_with_roles(function, env, roles);
@@ -978,7 +984,7 @@ impl SnapshotOperationKind {
                 has_layout_witness: *has_layout_witness,
                 product: product_ty
                     .map(|product_ty| {
-                        Ok(Box::new(crate::mir::operation::ProductProjectionMetadata {
+                        Ok(Box::new(ProductProjectionMetadata {
                             aggregate_ty: resolve_type(types, product_ty)?,
                             layout_witness_tys: product_layout_witness_tys
                                 .iter()
@@ -1290,6 +1296,8 @@ fn resolve_type(types: &[Type], id: SnapshotTypeId) -> Result<Type, SnapshotErro
 
 #[cfg(test)]
 mod tests {
+    use ustr::ustr;
+
     use super::*;
     use crate::{
         compiler::{CompilerSession, ensure_mir_artifacts},
@@ -1298,10 +1306,8 @@ mod tests {
 
     #[test]
     fn invariant_failure_round_trips_its_diagnostic() {
-        let terminator = Terminator::invariant_failure(
-            crate::Location::new_synthesized(),
-            ustr::ustr("broken invariant"),
-        );
+        let terminator =
+            Terminator::invariant_failure(Location::new_synthesized(), ustr("broken invariant"));
         let mut graph = SnapshotTypeGraphBuilder::new(&|_| None);
         let stored = SnapshotTerminator::capture(&terminator, &mut graph).unwrap();
         let bytes = postcard::to_allocvec(&stored).unwrap();

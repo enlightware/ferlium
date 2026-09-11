@@ -161,9 +161,12 @@ addressor!(
 
 #[cfg(test)]
 mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
     use super::*;
     use crate::{
-        CompilerSession, eval::EvalCtx, hir::value::NativeValueType, types::effects::no_effects,
+        CompilerSession, compiler::error::RuntimeErrorKind, eval::EvalCtx,
+        hir::value::NativeValueType, types::effects::no_effects,
     };
 
     unsafe extern "C" fn shared(value: *const isize) -> *const isize {
@@ -248,9 +251,7 @@ mod tests {
             let error = callable.function.invoke(&[arg], &mut ctx).unwrap_err();
             assert!(matches!(
                 error.kind(),
-                crate::compiler::error::RuntimeErrorKind::SourceFailure(
-                    SourceFailureKind::InvalidArgument(_)
-                )
+                RuntimeErrorKind::SourceFailure(SourceFailureKind::InvalidArgument(_))
             ));
         }
     }
@@ -275,7 +276,7 @@ mod tests {
             .place()
             .clone();
         assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            catch_unwind(AssertUnwindSafe(|| {
                 let _ = ValOrMut::Mut(place.clone()).as_mut_primitive::<isize>(&mut ctx);
             }))
             .is_err()
@@ -291,7 +292,7 @@ mod tests {
             .place()
             .clone();
         assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            catch_unwind(AssertUnwindSafe(|| {
                 let _ = place.boxed_mut(&mut ctx);
             }))
             .is_err()

@@ -7,18 +7,21 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use crate::FxHashSet;
-
 use itertools::Itertools;
 
-use crate::types::effects::EffectVar;
-use crate::types::mutability::MutVar;
-use crate::types::r#type::{Type, TypeVar};
-use crate::types::type_inference::substitution::InstSubst;
-use crate::types::type_mapper::{SimpleInstantiationMapper, TypeMapper};
-use crate::types::type_visitor::{
-    ContainsAnyTyVars, ContainsOnlyTyVars, EffectVarsCollector, MutVarsCollector, TyVarsCollector,
-    TypeInnerVisitor,
+use crate::{
+    FxHashSet,
+    types::{
+        effects::{EffType, EffectVar},
+        mutability::MutVar,
+        r#type::{Type, TypeVar},
+        type_inference::substitution::InstSubst,
+        type_mapper::{SimpleInstantiationMapper, TypeMapper},
+        type_visitor::{
+            ContainsAnyTyVars, ContainsOnlyTyVars, EffectVarsCollector, MutVarsCollector,
+            TyVarsCollector, TypeInnerVisitor,
+        },
+    },
 };
 
 /// Something that is a type or part of it, and that can
@@ -140,7 +143,7 @@ pub(crate) fn instantiate_types_in_place<T: TypeLike, M: TypeMapper>(
 
 /// Instantiate every effect type in `effs` in place using a pre-built mapper.
 pub(crate) fn instantiate_effect_types_in_place<M: TypeMapper>(
-    effs: &mut [crate::types::effects::EffType],
+    effs: &mut [EffType],
     mapper: &mut M,
 ) {
     for eff in effs {

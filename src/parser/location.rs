@@ -7,7 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::ops::Range;
+use std::{fmt, ops::Range};
 
 use crate::{define_id_type, format::FormatWith, module::id::Id};
 
@@ -205,11 +205,7 @@ impl InstantiableLocation {
 }
 
 impl FormatWith<SourceTable> for Location {
-    fn fmt_with(
-        &self,
-        f: &mut std::fmt::Formatter<'_>,
-        source_table: &SourceTable,
-    ) -> std::fmt::Result {
+    fn fmt_with(&self, f: &mut fmt::Formatter<'_>, source_table: &SourceTable) -> fmt::Result {
         let start = self.start_usize();
         let end = self.end_usize();
         let source_id = self.source_id();
@@ -394,9 +390,10 @@ impl Default for SourceTable {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     #[cfg(target_arch = "wasm32")]
     use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::*;
 
     #[test]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]

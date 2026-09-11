@@ -7,23 +7,27 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use crate::types::effects::EffType;
 use crate::{
     FxHashSet, Location, ast,
     compiler::error::{
         InternalCompilationError, InvalidTraitAssociatedConstImplKind,
         InvalidTraitAssociatedConstImplKind::{Duplicate, Missing, Unknown},
     },
-    hir::{Node, NodeArena, NodeId, hir_syn},
     hir::{
+        Node, NodeArena, NodeId,
         function::{CallableDefinition, PendingScriptFunction},
+        hir_syn,
         value::LiteralValue,
         value_dispatch::materialize_static_string,
     },
     internal_compilation_error,
     module::{LocalDecl, PendingModuleFunction, TraitId},
-    std::value::{is_value_trait, value_layout_associated_const_values},
+    std::{
+        string::{StaticStr, string_type},
+        value::{is_value_trait, value_layout_associated_const_values},
+    },
     types::{
+        effects::EffType,
         r#trait::Trait,
         trait_solver::TraitSolver,
         r#type::{FnType, Type, TypeKind},
@@ -39,8 +43,8 @@ fn materialize_associated_const_literal(
     ty: Type,
     span: Location,
 ) -> Result<NodeId, InternalCompilationError> {
-    if let Some(value) = value.as_primitive_ty::<crate::std::string::StaticStr>() {
-        debug_assert_eq!(ty, crate::std::string::string_type());
+    if let Some(value) = value.as_primitive_ty::<StaticStr>() {
+        debug_assert_eq!(ty, string_type());
         return materialize_static_string(arena, locals, solver, value.as_str(), span);
     }
 

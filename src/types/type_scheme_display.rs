@@ -6,19 +6,23 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::collections::BTreeMap;
-
-use crate::{FxHashMap, FxHashSet};
+use std::{collections::BTreeMap, fmt};
 
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
 use ustr::Ustr;
 
 use crate::{
+    FxHashMap, FxHashSet,
     format::{FormatWith, FormatWithData, write_with_separator_and_format_fn},
     module::{ModuleEnv, TraitId},
+    std::{
+        STD_MODULE_ID,
+        core_traits_names::{REPR_TRAIT_NAME, VALUE_TRAIT_NAME},
+    },
     types::{
         effects::{EffType, EffectsInstSubst},
+        r#trait::Trait,
         r#type::{
             Type, TypeDisplayEnv, TypeFormatEnv, TypeInstSubst, TypeVar,
             format_effect_binding_value_with_env,
@@ -30,17 +34,13 @@ use crate::{
 };
 
 impl FormatWith<ModuleEnv<'_>> for PubTypeConstraint {
-    fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
         format_pub_type_constraint(self, f, env)
     }
 }
 
 impl FormatWith<TypeDisplayEnv<'_, '_>> for PubTypeConstraint {
-    fn fmt_with(
-        &self,
-        f: &mut std::fmt::Formatter,
-        env: &TypeDisplayEnv<'_, '_>,
-    ) -> std::fmt::Result {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &TypeDisplayEnv<'_, '_>) -> fmt::Result {
         format_pub_type_constraint(self, f, env)
     }
 }
@@ -59,9 +59,9 @@ pub(crate) enum TypeSchemeConstraintRenderMode {
 
 fn format_pub_type_constraint<Env>(
     constraint: &PubTypeConstraint,
-    f: &mut std::fmt::Formatter,
+    f: &mut fmt::Formatter,
     env: &Env,
-) -> std::fmt::Result
+) -> fmt::Result
 where
     Type: FormatWith<Env>,
     Env: TypeFormatEnv,
@@ -76,10 +76,10 @@ where
 
 pub(crate) fn format_pub_type_constraint_with_style<Env>(
     constraint: &PubTypeConstraint,
-    f: &mut std::fmt::Formatter,
+    f: &mut fmt::Formatter,
     env: &Env,
     style: TypeConstraintRenderStyle,
-) -> std::fmt::Result
+) -> fmt::Result
 where
     Type: FormatWith<Env>,
     Env: TypeFormatEnv,
@@ -250,7 +250,7 @@ fn collect_aggregated_constraint(
     }
 }
 
-fn write_constraint_separator(f: &mut std::fmt::Formatter, first: &mut bool) -> std::fmt::Result {
+fn write_constraint_separator(f: &mut fmt::Formatter, first: &mut bool) -> fmt::Result {
     if *first {
         *first = false;
     } else {
@@ -262,9 +262,9 @@ fn write_constraint_separator(f: &mut std::fmt::Formatter, first: &mut bool) -> 
 fn write_aggregated_constraint<Env>(
     ty: Type,
     constraint: AggregatedConstraint,
-    f: &mut std::fmt::Formatter,
+    f: &mut fmt::Formatter,
     env: &Env,
-) -> std::fmt::Result
+) -> fmt::Result
 where
     Type: FormatWith<Env>,
     Env: TypeFormatEnv,
@@ -320,9 +320,9 @@ where
 
 fn write_projection_member_effects<Env>(
     projection: AggregatedProjectionField,
-    f: &mut std::fmt::Formatter,
+    f: &mut fmt::Formatter,
     env: &Env,
-) -> std::fmt::Result
+) -> fmt::Result
 where
     Env: TypeFormatEnv,
 {
@@ -471,7 +471,7 @@ impl<'a> DisplayConstraints<'a> {
             && self.other_constraints.is_empty()
     }
 
-    fn format<Env>(&self, f: &mut std::fmt::Formatter, env: &Env) -> std::fmt::Result
+    fn format<Env>(&self, f: &mut fmt::Formatter, env: &Env) -> fmt::Result
     where
         Type: FormatWith<Env>,
         Env: TypeFormatEnv,
@@ -569,7 +569,7 @@ impl ConstraintDisplayItem<'_> {
         }
     }
 
-    fn format<Env>(&self, f: &mut std::fmt::Formatter, env: &Env) -> std::fmt::Result
+    fn format<Env>(&self, f: &mut fmt::Formatter, env: &Env) -> fmt::Result
     where
         Type: FormatWith<Env>,
         Env: TypeFormatEnv,
@@ -618,8 +618,8 @@ fn is_hidden_light_constraint(constraint: &PubTypeConstraint, env: &ModuleEnv<'_
             output_tys,
             ..
         } => {
-            trait_id.module == crate::std::STD_MODULE_ID
-                && env.trait_def(*trait_id).name == crate::std::core_traits_names::VALUE_TRAIT_NAME
+            trait_id.module == STD_MODULE_ID
+                && env.trait_def(*trait_id).name == VALUE_TRAIT_NAME
                 && input_tys.len() == 1
                 && output_tys.is_empty()
         }
@@ -628,8 +628,7 @@ fn is_hidden_light_constraint(constraint: &PubTypeConstraint, env: &ModuleEnv<'_
 }
 
 fn is_repr_trait(env: &ModuleEnv<'_>, trait_id: TraitId) -> bool {
-    trait_id.module == crate::std::STD_MODULE_ID
-        && env.trait_def(trait_id).name == crate::std::core_traits_names::REPR_TRAIT_NAME
+    trait_id.module == STD_MODULE_ID && env.trait_def(trait_id).name == REPR_TRAIT_NAME
 }
 
 fn transitive_parent_constraints(
@@ -667,11 +666,7 @@ fn collect_transitive_parent_constraints(
     }
 }
 
-fn trait_constraint_subst(
-    trait_def: &crate::types::r#trait::Trait,
-    input_tys: &[Type],
-    output_tys: &[Type],
-) -> InstSubst {
+fn trait_constraint_subst(trait_def: &Trait, input_tys: &[Type], output_tys: &[Type]) -> InstSubst {
     let mut ty_subst = TypeInstSubst::default();
     for (index, ty) in input_tys.iter().enumerate() {
         ty_subst.insert(TypeVar::new(index as u32), *ty);
@@ -718,18 +713,18 @@ fn aggregated_constraint_sort_name(constraint: &AggregatedConstraint) -> String 
 impl<Ty: TypeLike> TypeScheme<Ty> {
     pub(crate) fn format_constraints_with_type_env(
         &self,
-        f: &mut std::fmt::Formatter,
+        f: &mut fmt::Formatter,
         env: &TypeDisplayEnv<'_, '_>,
-    ) -> std::fmt::Result {
+    ) -> fmt::Result {
         self.format_constraints_with_mode(f, env, TypeSchemeConstraintRenderMode::Full)
     }
 
     pub(crate) fn format_constraints_with_mode(
         &self,
-        f: &mut std::fmt::Formatter,
+        f: &mut fmt::Formatter,
         env: &TypeDisplayEnv<'_, '_>,
         mode: TypeSchemeConstraintRenderMode,
-    ) -> std::fmt::Result {
+    ) -> fmt::Result {
         let constraints = match mode {
             TypeSchemeConstraintRenderMode::Full => DisplayConstraints::full(&self.constraints),
             TypeSchemeConstraintRenderMode::Light => {
@@ -770,9 +765,9 @@ where
 {
     pub(crate) fn format_with_module_env(
         &self,
-        f: &mut std::fmt::Formatter,
+        f: &mut fmt::Formatter,
         env: &ModuleEnv<'a>,
-    ) -> std::fmt::Result {
+    ) -> fmt::Result {
         let has_constraints = !self.constraints.is_empty();
         let ty_var_names = self.display_ty_var_names();
         let type_env = self.type_display_env(env, &ty_var_names);
@@ -798,9 +793,9 @@ pub fn format_have_trait(
     input_tys: &[Type],
     output_tys: &[Type],
     output_effs: &[EffType],
-    f: &mut std::fmt::Formatter,
+    f: &mut fmt::Formatter,
     env: &ModuleEnv<'_>,
-) -> std::fmt::Result {
+) -> fmt::Result {
     format_have_trait_with_env(
         trait_id,
         input_tys,
@@ -818,10 +813,10 @@ fn format_have_trait_with_env<Env>(
     input_tys: &[Type],
     output_tys: &[Type],
     output_effs: &[EffType],
-    f: &mut std::fmt::Formatter,
+    f: &mut fmt::Formatter,
     env: &Env,
     style: TypeConstraintRenderStyle,
-) -> std::fmt::Result
+) -> fmt::Result
 where
     Type: FormatWith<Env>,
     Env: TypeFormatEnv,
@@ -904,17 +899,17 @@ where
 
 pub(crate) fn format_constraints_consolidated(
     constraints: &[PubTypeConstraint],
-    f: &mut std::fmt::Formatter,
+    f: &mut fmt::Formatter,
     env: &ModuleEnv<'_>,
-) -> std::fmt::Result {
+) -> fmt::Result {
     format_constraints_consolidated_with_env(constraints, f, env)
 }
 
 fn format_constraints_consolidated_with_env<Env>(
     constraints: &[PubTypeConstraint],
-    f: &mut std::fmt::Formatter,
+    f: &mut fmt::Formatter,
     env: &Env,
-) -> std::fmt::Result
+) -> fmt::Result
 where
     Type: FormatWith<Env>,
     Env: TypeFormatEnv,
@@ -928,8 +923,8 @@ pub(crate) struct DisplayConstraintsWithTypeEnv<'a, 'm, T: TypeLike> {
     mode: TypeSchemeConstraintRenderMode,
 }
 
-impl<Ty: TypeLike> std::fmt::Display for DisplayConstraintsWithTypeEnv<'_, '_, Ty> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<Ty: TypeLike> fmt::Display for DisplayConstraintsWithTypeEnv<'_, '_, Ty> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.value
             .format_constraints_with_mode(f, self.env, self.mode)
     }
@@ -937,12 +932,12 @@ impl<Ty: TypeLike> std::fmt::Display for DisplayConstraintsWithTypeEnv<'_, '_, T
 
 pub struct DisplayTypeScheme<'a, T>(FormatWithData<'a, T, ModuleEnv<'a>>);
 
-impl<'a, Ty> std::fmt::Display for DisplayTypeScheme<'a, TypeScheme<Ty>>
+impl<'a, Ty> fmt::Display for DisplayTypeScheme<'a, TypeScheme<Ty>>
 where
     Ty: TypeLike + FormatWith<ModuleEnv<'a>>,
     Ty: for<'b, 'm> FormatWith<TypeDisplayEnv<'b, 'm>>,
 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.value.format_with_module_env(f, self.0.data)
     }
 }

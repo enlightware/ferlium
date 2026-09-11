@@ -6,38 +6,18 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::any::TypeId;
-use std::any::type_name;
-use std::cell::RefCell;
-use std::cmp::Ordering;
-use std::fmt::Display;
-use std::fmt::{self, Debug};
-use std::hash::Hash;
-use std::hash::Hasher;
-use std::sync::OnceLock;
-use std::sync::RwLock;
-
-use crate::ast::Attribute;
-use crate::ast::UstrSpan;
-use crate::containers::FromIndex;
-use crate::define_id_type;
-use crate::format::{
-    FormatWith, escape_identifier, format_generic_param_list, write_identifier,
-    write_with_separator_and_format_fn,
+use std::{
+    any::{TypeId, type_name},
+    borrow::Borrow,
+    cell::RefCell,
+    cmp::Ordering,
+    fmt::{self, Debug, Display},
+    hash::{Hash, Hasher},
+    mem::{align_of, size_of},
+    ops::Deref,
+    sync::{OnceLock, RwLock, RwLockReadGuard},
 };
-use crate::graph::find_strongly_connected_components;
-use crate::graph::topological_sort_sccs;
-use crate::hir::value::LiteralValue;
-use crate::module::id::Id;
-use crate::module::{LocalDecl, TypeDefId};
-use crate::types::mutability::FormatInFnArg;
-use crate::types::type_like::CastableToType;
-use crate::types::type_like::TypeLike;
-use crate::types::type_mapper::TypeMapper;
-use crate::types::type_substitution::{instantiate_type, map_type_recursive};
-use crate::types::type_visitor::TypeInnerVisitor;
-use crate::types::var_set::KindVarSet;
-use crate::{FxHashMap, FxHashSet, Location};
+
 use derive_new::new;
 use dyn_clone::DynClone;
 use dyn_eq::DynEq;
@@ -46,18 +26,32 @@ use indexmap::IndexSet;
 use nonmax::NonMaxU32;
 use ustr::{Ustr, ustr};
 
-use crate::assert::assert_unique_strings;
-use crate::containers::compare_by;
-use crate::containers::{B, DenseBitSet, SVec2, b};
-use crate::format::type_variable_index_to_string_latin;
-use crate::graph;
-use crate::module::{ModuleEnv, QualifiedNameEnv};
-use crate::sync::SyncPhantomData;
-use crate::types::effects::{
-    EffType, Effect, EffectVar, PrimitiveEffect, format_effect_binding_value,
+use crate::{
+    FxHashMap, FxHashSet, Location,
+    assert::assert_unique_strings,
+    ast::{Attribute, UstrSpan},
+    containers::{B, DenseBitSet, FromIndex, SVec2, b, compare_by},
+    define_id_type,
+    format::{
+        FormatWith, escape_identifier, format_generic_param_list,
+        type_variable_index_to_string_latin, write_identifier, write_with_separator_and_format_fn,
+    },
+    graph::{self, find_strongly_connected_components, topological_sort_sccs},
+    hir::value::LiteralValue,
+    module::{LocalDecl, ModuleEnv, QualifiedNameEnv, TypeDefId, id::Id},
+    std::array::array_type_def,
+    sync::SyncPhantomData,
+    types::{
+        effects::{EffType, Effect, EffectVar, PrimitiveEffect, format_effect_binding_value},
+        mutability::{FormatInFnArg, MutType, MutVar},
+        type_like::{CastableToType, TypeLike},
+        type_mapper::TypeMapper,
+        type_scheme::TypeScheme,
+        type_substitution::{instantiate_type, map_type_recursive},
+        type_visitor::TypeInnerVisitor,
+        var_set::KindVarSet,
+    },
 };
-use crate::types::mutability::{MutType, MutVar};
-use crate::types::type_scheme::TypeScheme;
 
 pub const PRIVATE_REPR_ATTRIBUTE: &str = "private_repr";
 
@@ -168,7 +162,7 @@ impl PartialOrd for dyn BareNativeType {
 }
 
 impl Hash for dyn BareNativeType {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+    fn hash<H: Hasher>(&self, state: &mut H) {
         BareNativeType::type_id(self).hash(state)
     }
 }
@@ -212,11 +206,11 @@ impl<T: 'static> BareNativeType for BareNativeTypeImpl<T> {
     //     type_name::<T>()
     // }
     fn value_size(&self) -> usize {
-        std::mem::size_of::<T>()
+        size_of::<T>()
     }
 
     fn value_align(&self) -> usize {
-        std::mem::align_of::<T>()
+        align_of::<T>()
     }
 }
 
@@ -2702,7 +2696,7 @@ where
             def,
             params: args,
             effect_params: _,
-        }) if *def == crate::std::array::array_type_def() && args.len() == 1 => {
+        }) if *def == array_type_def() && args.len() == 1 => {
             write!(f, "[")?;
             args[0].fmt_with(f, env)?;
             write!(f, "]")
@@ -2815,7 +2809,7 @@ fn fmt_type_kind_with_qualified_name_env(
             def,
             params: args,
             effect_params: _,
-        }) if *def == crate::std::array::array_type_def() && args.len() == 1 => {
+        }) if *def == array_type_def() && args.len() == 1 => {
             write!(f, "[")?;
             args[0].fmt_with(f, env)?;
             write!(f, "]")
@@ -2931,7 +2925,7 @@ impl PartialEq for InternedType {
 }
 impl Eq for InternedType {}
 
-impl std::borrow::Borrow<TypeKind> for InternedType {
+impl Borrow<TypeKind> for InternedType {
     fn borrow(&self) -> &TypeKind {
         &self.kind
     }
@@ -3691,9 +3685,9 @@ pub fn dump_type_world(index: usize, env: &ModuleEnv<'_>) {
 
 pub struct TypeDataRef<'a> {
     ty: Type,
-    guard: std::sync::RwLockReadGuard<'a, TypeUniverse>,
+    guard: RwLockReadGuard<'a, TypeUniverse>,
 }
-impl std::ops::Deref for TypeDataRef<'_> {
+impl Deref for TypeDataRef<'_> {
     type Target = TypeKind;
     fn deref(&self) -> &Self::Target {
         self.guard.get_type_data(self.ty)
@@ -3702,9 +3696,9 @@ impl std::ops::Deref for TypeDataRef<'_> {
 
 pub struct TypeSummaryRef<'a> {
     ty: Type,
-    guard: std::sync::RwLockReadGuard<'a, TypeUniverse>,
+    guard: RwLockReadGuard<'a, TypeUniverse>,
 }
-impl std::ops::Deref for TypeSummaryRef<'_> {
+impl Deref for TypeSummaryRef<'_> {
     type Target = TypeSummary;
     fn deref(&self) -> &Self::Target {
         self.guard.get_type_summary(self.ty)
@@ -3718,13 +3712,15 @@ pub struct TypeNames {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{
         CompilerSession,
-        parser::location::Location,
+        parser::location::{Location, SourceTable},
         std::{
             array::array_type,
             logic::bool_type,
             math::{Int, int_type},
+            std_module,
             string::string_type,
         },
         types::{
@@ -3734,8 +3730,6 @@ mod tests {
             type_mapper::SimpleInstantiationMapper,
         },
     };
-
-    use super::*;
 
     #[derive(Debug)]
     struct SyntheticContainer;
@@ -4318,8 +4312,8 @@ mod tests {
     fn data_value_type_is_named_std_type() {
         use crate::std::data_value::{data_value_type, data_value_type_def};
 
-        let mut source_table = crate::parser::location::SourceTable::default();
-        crate::std::std_module(&mut source_table);
+        let mut source_table = SourceTable::default();
+        std_module(&mut source_table);
 
         let data_value = data_value_type();
         let ty_data = data_value.data();

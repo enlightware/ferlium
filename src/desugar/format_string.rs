@@ -8,22 +8,23 @@
 //
 use std::sync::LazyLock;
 
-use crate::ast::{DExprArena, DExprId, DLetPattern as LetPattern};
-use crate::parser::helpers::syn_static_apply_path;
-use crate::{Location, internal_compilation_error};
 use regex::Regex;
 use ustr::{Ustr, ustr};
 
-use crate::std::string::StaticStr;
-use crate::types::mutability::MutVal;
 use crate::{
-    ast::{DExpr as Expr, DExprKind as ExprKind},
+    Location,
+    ast::{
+        DExpr as Expr, DExprArena, DExprId, DExprKind as ExprKind, DLetPattern as LetPattern, Path,
+    },
     compiler::error::InternalCompilationError,
     hir::value::LiteralValue,
+    internal_compilation_error,
+    parser::helpers::syn_static_apply_path,
     std::string::{
-        STRING_PUSH_STATIC_STR_FUNCTION_NAME, STRING_PUSH_STR_FUNCTION_NAME, static_str_type,
-        string_type,
+        STRING_PUSH_STATIC_STR_FUNCTION_NAME, STRING_PUSH_STR_FUNCTION_NAME, StaticStr,
+        static_str_type, string_type,
     },
+    types::mutability::MutVal,
 };
 
 /// A literal segment, kept as constant data rather than as an owned `string`.
@@ -58,7 +59,7 @@ fn variable_to_string(
         ));
     };
     let var_expr = arena.alloc(Expr::new(
-        ExprKind::Identifier(crate::ast::Path::single(ustr(var_name), var_span)),
+        ExprKind::Identifier(Path::single(ustr(var_name), var_span)),
         var_span,
     ));
     let kind = syn_static_apply_path(

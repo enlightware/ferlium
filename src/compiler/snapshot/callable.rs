@@ -2,13 +2,15 @@ use std::collections::BTreeMap;
 
 use la_arena::{Idx, RawIdx};
 
+use super::SnapshotError;
 use crate::{
     containers::b,
-    hir::function::{Function, ScriptFunction},
-    module::{ModuleFunction, function::CallableOrigin},
+    hir::{
+        self, Elaborated,
+        function::{Function, ScriptFunction, StructuralFieldAddressor},
+    },
+    module::{ModuleFunction, ProjectionIndex, function::CallableOrigin},
 };
-
-use super::SnapshotError;
 
 /// Process-local implementations indexed by their stable canonical module names.
 ///
@@ -123,9 +125,9 @@ impl SnapshotFunctionBody {
             if index as usize >= hir_node_count {
                 Err(SnapshotError::InvalidHirNodeReference(index))
             } else {
-                Ok(Idx::<crate::hir::Node<crate::hir::Elaborated>>::from_raw(
-                    RawIdx::from_u32(index),
-                ))
+                Ok(Idx::<hir::Node<Elaborated>>::from_raw(RawIdx::from_u32(
+                    index,
+                )))
             }
         };
         Ok(match self {
@@ -151,12 +153,12 @@ impl SnapshotFunctionBody {
                 field_index,
                 hidden_argument_count,
             } => (
-                b(crate::hir::function::StructuralFieldAddressor::new(
-                    crate::module::ProjectionIndex::new(*field_index),
+                b(StructuralFieldAddressor::new(
+                    ProjectionIndex::new(*field_index),
                     *hidden_argument_count,
                 )) as Function,
                 CallableOrigin::StructuralFieldAddressor {
-                    field_index: crate::module::ProjectionIndex::new(*field_index),
+                    field_index: ProjectionIndex::new(*field_index),
                 },
             ),
         })
@@ -165,9 +167,8 @@ impl SnapshotFunctionBody {
 
 #[cfg(test)]
 mod tests {
-    use crate::CompilerSession;
-
     use super::*;
+    use crate::CompilerSession;
 
     #[test]
     fn std_native_callable_bodies_round_trip_by_canonical_name() {

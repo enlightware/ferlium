@@ -6,24 +6,27 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use itertools::process_results;
 use std::mem;
+
+use itertools::process_results;
+
+use crate::graph;
 
 mod import_resolver;
 
-use crate::{FxHashMap, FxHashSet, Modules, ast::PFnEffects};
+use import_resolver::{ModulesResolver, resolve_imports};
 use ustr::{Ustr, ustr};
 
 use crate::{
-    Location,
+    FxHashMap, FxHashSet, Location, Modules,
     ast::{
         self, AbstractData, ApplyData, AssignData, DExpr, DExprArena, DExprId, DLetPattern,
         DModule, DModuleFunction, DModuleFunctionArg, DTraitImpl, ExprId, ExprKind,
         FieldAccessData, ForLoopData, IndexData, LetData, LetPatternKind, LetRecordPatternField,
-        MatchData, ModuleFunction, ModuleFunctionArg, PExprArena, PLetPattern as LetPattern,
-        PModule, PModuleFunction, PModuleFunctionArg, PTraitImpl, PTypeAlias, PTypeDef, Parsed,
-        Path, Pattern, PatternConstraintKind, PatternKind, PatternVar, ProjectData,
-        StructLiteralData, TypeAscriptionData, UnnamedArg, UstrSpan,
+        MatchData, ModuleFunction, ModuleFunctionArg, PExprArena, PFnEffects,
+        PLetPattern as LetPattern, PModule, PModuleFunction, PModuleFunctionArg, PTraitImpl,
+        PTypeAlias, PTypeDef, Parsed, Path, Pattern, PatternConstraintKind, PatternKind,
+        PatternVar, ProjectData, StructLiteralData, TypeAscriptionData, UnnamedArg, UstrSpan,
     },
     compiler::error::{
         DuplicatedFieldContext, DuplicatedVariantContext, GenericParamsOwner, InfiniteTypeKind,
@@ -33,24 +36,23 @@ use crate::{
     containers::b,
     graph::{find_strongly_connected_components, topological_sort_sccs},
     internal_compilation_error,
-    module::TypeDefId,
-    module::{Module, ModuleEnv, ModuleId, TypeDefLookupResult},
+    module::{Module, ModuleEnv, ModuleId, TypeDefId, TypeDefLookupResult},
     parser::helpers::syn_static_apply,
     std::{STD_MODULE_ID, math::int_type},
-    types::effects::EffectsInstSubst,
-    types::effects::{EffType, Effect, EffectVar, PrimitiveEffect},
-    types::mutability::{MutType, MutVal},
-    types::r#type::{FnArgType, FnType, NativeType, Type, TypeDef as HirTypeDef, TypeVar},
-    types::type_like::TypeLike,
-    types::type_scheme::{PubTypeConstraint, TypeScheme},
+    types::{
+        effects::{EffType, Effect, EffectVar, EffectsInstSubst, PrimitiveEffect},
+        mutability::{MutType, MutVal},
+        r#type::{FnArgType, FnType, NativeType, Type, TypeDef as HirTypeDef, TypeVar},
+        type_like::TypeLike,
+        type_scheme::{PubTypeConstraint, TypeScheme},
+    },
 };
-use import_resolver::{ModulesResolver, resolve_imports};
 
 /// A node of a function dependency graph
 #[derive(Debug)]
 pub struct DepGraphNode(pub Vec<usize>);
 
-impl crate::graph::Node for DepGraphNode {
+impl graph::Node for DepGraphNode {
     type Index = usize;
     fn neighbors(&self) -> impl Iterator<Item = Self::Index> {
         self.0.iter().copied()

@@ -1,3 +1,5 @@
+use std::char::from_u32;
+
 // Copyright 2026 Enlightware GmbH
 //
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at
@@ -50,7 +52,7 @@ pub(crate) fn apply_string_escapes(s: &str) -> String {
                             }
                         }
                         if let Ok(cp) = u32::from_str_radix(&hex, 16) {
-                            if let Some(ch) = std::char::from_u32(cp) {
+                            if let Some(ch) = from_u32(cp) {
                                 result.push(ch);
                             } else {
                                 // Invalid Unicode code point

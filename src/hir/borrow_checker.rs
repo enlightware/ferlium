@@ -6,6 +6,8 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
+use std::iter::once;
+
 use smallvec::smallvec;
 use ustr::Ustr;
 
@@ -25,7 +27,10 @@ use crate::{
     },
     internal_compilation_error,
     module::{ELocalDecl, FunctionId, LocalDeclId, id::Id},
-    std::STD_MODULE_ID,
+    std::{
+        STD_MODULE_ID,
+        string::{StaticStr, string_type},
+    },
     types::{
         trait_solver::TraitSolver,
         r#type::{Type, TypeKind},
@@ -359,7 +364,7 @@ pub(crate) fn let_arguments_overlapping_later_argument_writes(
         .enumerate()
         .filter(|(_, argument)| {
             argument.passing == ArgConvention::Let
-                && crate::hir::node_is_place_reference(arena, argument.value)
+                && node_is_place_reference(arena, argument.value)
                 && !matches!(arena[argument.value].kind, NodeKind::GetTraitMethod(_))
         })
         .filter_map(|(let_index, argument)| {
@@ -460,7 +465,7 @@ pub(crate) fn let_arguments_overlapping_mutable(
         .enumerate()
         .filter(|(_, argument)| {
             argument.passing == ArgConvention::Let
-                && crate::hir::node_is_place_reference(arena, argument.value)
+                && node_is_place_reference(arena, argument.value)
                 // A generic trait method is place-like for dictionary dispatch, but the
                 // method value is metadata rather than aliasable source storage.
                 && !matches!(arena[argument.value].kind, NodeKind::GetTraitMethod(_))
@@ -1214,12 +1219,8 @@ fn literal_value_compatible_with_type(
         }
         match value {
             LiteralValue::Native(_) => {
-                if pattern
-                    && value
-                        .as_primitive_ty::<crate::std::string::StaticStr>()
-                        .is_some()
-                {
-                    ty == crate::std::string::string_type()
+                if pattern && value.as_primitive_ty::<StaticStr>().is_some() {
+                    ty == string_type()
                 } else if value.as_primitive_ty::<()>().is_some() {
                     matches!(&kind, TypeKind::Tuple(fields) if fields.is_empty())
                         || matches!(&kind, TypeKind::Record(fields) if fields.is_empty())
@@ -1435,18 +1436,18 @@ pub(super) fn elaborated_child_node_ids(kind: &NodeKind<Elaborated>) -> SVec4<EN
         | CheckFuel
         | Continue(_) => smallvec![],
         GetDictionary(dictionary) => dictionary.captures.iter().copied().collect(),
-        BuildClosure(build) => std::iter::once(build.function)
+        BuildClosure(build) => once(build.function)
             .chain(build.dictionary_captures.iter().copied())
             .chain(build.captures.iter().copied())
             .chain(build.captures_value_dictionary)
             .collect(),
-        BuildSubscriptValue(build) => std::iter::once(build.subscript)
+        BuildSubscriptValue(build) => once(build.subscript)
             .chain(build.evidence_captures.iter().copied())
             .collect(),
-        FunctionApply(app) => std::iter::once(app.function)
+        FunctionApply(app) => once(app.function)
             .chain(app.arguments.iter().map(|argument| argument.value))
             .collect(),
-        SubscriptApply(app) => std::iter::once(app.subscript)
+        SubscriptApply(app) => once(app.subscript)
             .chain(app.arguments.iter().map(|argument| argument.value))
             .collect(),
         StaticApply(app) => app
@@ -1455,7 +1456,7 @@ pub(super) fn elaborated_child_node_ids(kind: &NodeKind<Elaborated>) -> SVec4<EN
             .copied()
             .chain(app.arguments.iter().map(|argument| argument.value))
             .collect(),
-        CallDictionaryFunction(call) => std::iter::once(call.dictionary)
+        CallDictionaryFunction(call) => once(call.dictionary)
             .chain(call.arguments.iter().map(|argument| argument.value))
             .collect(),
         CloneClosureEnv(operation) => smallvec![operation.source],
@@ -1474,9 +1475,9 @@ pub(super) fn elaborated_child_node_ids(kind: &NodeKind<Elaborated>) -> SVec4<EN
         Tuple(values) | Record(values) | Array(values) => values.iter().copied().collect(),
         Project(project) => smallvec![project.value],
         Variant(variant) => smallvec![variant.payload],
-        Case(case) => std::iter::once(case.value)
+        Case(case) => once(case.value)
             .chain(case.alternatives.iter().map(|(_, value)| *value))
-            .chain(std::iter::once(case.default))
+            .chain(once(case.default))
             .collect(),
         Loop(r#loop) => smallvec![r#loop.body],
         Break(r#break) => smallvec![r#break.value],
@@ -1491,15 +1492,15 @@ pub(super) fn elaborated_child_node_ids(kind: &NodeKind<Elaborated>) -> SVec4<EN
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::array::from_fn;
 
+    use super::*;
     use crate::{
         FxHashMap,
         compiler::CompilerSession,
         containers::b,
-        hir::{Case, ENode, value::LiteralValue},
-        module::{CurrentTypeItems, PendingFunctionCollector},
-        module::{LocalImplId, ModuleId, TraitImplId},
+        hir::{Case, ENode, GetDictionary, value::LiteralValue},
+        module::{CurrentTypeItems, LocalImplId, ModuleId, PendingFunctionCollector, TraitImplId},
         std::string::{StaticStr, string_type},
         types::{
             effects::EffType,
@@ -1517,7 +1518,7 @@ mod tests {
             EffType::empty(),
             Location::new_synthesized(),
         ));
-        let kind = NodeKind::GetDictionary(crate::hir::GetDictionary {
+        let kind = NodeKind::GetDictionary(GetDictionary {
             dictionary: TraitImplId::new(ModuleId::new(0), LocalImplId::new(0)),
             captures: vec![capture],
         });
@@ -1577,7 +1578,7 @@ mod tests {
         ));
         let aliases = FxHashMap::from_iter([(binding, call)]);
         let context = BorrowContext::new(&modules, &aliases);
-        let arguments: [_; 2] = std::array::from_fn(|_| CallArgument {
+        let arguments: [_; 2] = from_fn(|_| CallArgument {
             value: load,
             passing: ArgConvention::MutableRef,
         });
@@ -1630,7 +1631,7 @@ mod tests {
         let aliases = FxHashMap::from_iter([(binding, temporary)]);
         let context = BorrowContext::new(&modules, &aliases);
         // The checker neither asserts nor drops unknown paths from its mutable-argument census.
-        let arguments: [_; 2] = std::array::from_fn(|_| CallArgument {
+        let arguments: [_; 2] = from_fn(|_| CallArgument {
             value: load,
             passing: ArgConvention::MutableRef,
         });

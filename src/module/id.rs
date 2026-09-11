@@ -7,19 +7,19 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use crate::FxHashMap;
-use std::hash::Hash;
-use std::mem::swap;
+use std::{fmt, hash::Hash, mem::swap};
 
 #[doc(hidden)]
 pub use nonmax::NonMaxU32 as IdRepr;
+
+use crate::FxHashMap;
 
 /// A positional index that does not fit the compact representation an id type uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexOutOfRange;
 
-impl std::fmt::Display for IndexOutOfRange {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for IndexOutOfRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "index does not fit in this id type")
     }
 }
@@ -123,9 +123,12 @@ macro_rules! define_id_type {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        hash::{DefaultHasher, Hash, Hasher},
+        mem::size_of,
+    };
+
     use super::*;
-    use std::hash::{DefaultHasher, Hash, Hasher};
-    use std::mem::size_of;
 
     define_id_type!(TestId);
 

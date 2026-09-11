@@ -6,16 +6,19 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::mem;
+use std::{mem, slice::from_ref};
 
+use itertools::Itertools;
+
+use super::{substitution::InstSubst, unify::UnifiedTypeInference};
 use crate::{
     FxHashMap, FxHashSet,
     compiler::error::InternalCompilationError,
     hir::{self, NodeArena, NodeId, NodeKind},
-    module::{LocalDecl, ModuleEnv, TraitId, id::Id},
+    module::{LocalDecl, ModuleEnv, PendingTakeLocalValueMode, TraitId, id::Id},
     parser::location::Location,
     std::{
-        core_traits_names::NUM_TRAIT_NAME,
+        core_traits_names::{NUM_TRAIT_NAME, VALUE_TRAIT_NAME},
         value::{
             dynamic_product_member_layouts, generated_value_evidence_types,
             value_type_needs_layout_witness,
@@ -29,9 +32,6 @@ use crate::{
         type_scheme::PubTypeConstraint,
     },
 };
-use itertools::Itertools;
-
-use super::{substitution::InstSubst, unify::UnifiedTypeInference};
 
 /// A transitive boundary over public constraints, defined by seed type variables.
 #[derive(Debug, Clone, Default)]
@@ -375,7 +375,7 @@ impl UnifiedTypeInference {
     ) {
         let node = &arena[node_id];
         if let NodeKind::TakeLocalValue(take) = &node.kind
-            && matches!(take.mode, crate::module::PendingTakeLocalValueMode::Unknown)
+            && matches!(take.mode, PendingTakeLocalValueMode::Unknown)
             && !locals[take.id.as_index()].owns_storage()
         {
             self.add_activated_value_constraint(value_trait_id, node.ty, node.span, env);
@@ -568,8 +568,10 @@ impl UnifiedTypeInference {
             return Ok(());
         }
 
-        use crate::module::ConcreteTraitImplKey;
-        use crate::std::math::{float_type, int_type};
+        use crate::{
+            module::ConcreteTraitImplKey,
+            std::math::{float_type, int_type},
+        };
 
         let default_tys = [int_type(), float_type()];
         let num_trait_id = trait_solver.std_trait_id(NUM_TRAIT_NAME);
@@ -732,8 +734,8 @@ impl UnifiedTypeInference {
                         payload_span,
                         ..
                     } => (
-                        trait_solver.std_trait_id(crate::std::core_traits_names::VALUE_TRAIT_NAME),
-                        std::slice::from_ref(payload_ty),
+                        trait_solver.std_trait_id(VALUE_TRAIT_NAME),
+                        from_ref(payload_ty),
                         &[] as &[Type],
                         payload_span.use_site,
                     ),

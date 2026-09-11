@@ -77,7 +77,15 @@
 //! let _ = NativeFnN::new(identity);
 //! ```
 
-use std::{any::TypeId, fmt, mem::MaybeUninit};
+use std::{
+    any::{TypeId, type_name},
+    error::Error,
+    fmt,
+    marker::PhantomData,
+    mem::{self, MaybeUninit},
+};
+
+use ustr::ustr;
 
 #[path = "native_addressors.rs"]
 mod addressors;
@@ -334,7 +342,7 @@ impl fmt::Display for NativeContractError {
         }
     }
 }
-impl std::error::Error for NativeContractError {}
+impl Error for NativeContractError {}
 
 impl NativeSignature {
     /// Check a registration's semantic declaration against its typed entry before execution.
@@ -605,16 +613,16 @@ impl<T: NativeValue> NativeArgument for &'static mut T {
 }
 
 /// Select scalar value passing while allowing the concrete type to be inferred.
-pub struct ByValue<T>(::std::marker::PhantomData<T>);
+pub struct ByValue<T>(PhantomData<T>);
 /// Select shared reference passing with a fresh lifetime for each call.
-pub struct Shared<T>(::std::marker::PhantomData<T>);
+pub struct Shared<T>(PhantomData<T>);
 /// Select mutable reference passing with a fresh lifetime for each call.
 /// ```compile_fail
 /// use ferlium::hir::native_functions::NativeFnM;
 /// extern "C" fn needs_static(_: &'static mut isize) {}
 /// let _ = NativeFnM::new(needs_static);
 /// ```
-pub struct Mutable<T>(::std::marker::PhantomData<T>);
+pub struct Mutable<T>(PhantomData<T>);
 
 // Explicit Borrowed mappings let Rust infer T from the entry signature. Extraction still
 // delegates to the same sealed implementations used by native_fn!'s explicit Rust types.
@@ -1210,7 +1218,7 @@ impl<T: 'static> EntryFunction for NativeDropFn<T> {
             // SAFETY: this adapter is paired with exactly native_value_drop<T>'s entry type;
             // the executor provides an initialized, exclusively accessible T.
             unsafe {
-                let function: unsafe extern "C" fn(*mut T) = std::mem::transmute(address);
+                let function: unsafe extern "C" fn(*mut T) = mem::transmute(address);
                 function(inputs[0].cast::<T>());
             }
             Ok(())
@@ -1248,9 +1256,9 @@ fn take_native_drop_target<T: 'static>(
             .as_native()
             .is_some_and(|native| NativeValue::as_any(native.as_ref()).is::<T>()),
         "native drop target must contain an initialized {}",
-        std::any::type_name::<T>(),
+        type_name::<T>(),
     );
-    let value = std::mem::replace(target, Value::uninit());
+    let value = mem::replace(target, Value::uninit());
     let native = value
         .into_native()
         .expect("validated native drop target")
@@ -1386,9 +1394,9 @@ impl<A: NativeArgument, O: NativeStoredResult> EntryFunction for NativeOptionalF
         cont(if present {
             // SAFETY: registration guarantees initialization exactly on true.
             let value = NativeStoredResult::boxed(unsafe { output.assume_init() });
-            Value::tuple_variant(ustr::ustr("Some"), [value])
+            Value::tuple_variant(ustr("Some"), [value])
         } else {
-            Value::unit_variant(ustr::ustr("None"))
+            Value::unit_variant(ustr("None"))
         })
     }
 }
@@ -1405,16 +1413,31 @@ macro_rules! native_optional_entry {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        cell::Cell,
+        cmp::Ordering,
+        convert,
+        hint::black_box,
+        ops::{BitAnd, BitXor},
+        ptr,
+        rc::Rc,
+    };
+
     use super::*;
     use crate::{
         CompilerSession,
+        compiler::error::RuntimeErrorKind,
         eval::ControlFlow,
         hir::value::NativeValueType,
-        module::{Module, ModuleId, id::Id},
-        std::math::int_type,
+        module::{Module, ModuleId, Path, id::Id},
+        place::Place,
+        std::{
+            math::int_type,
+            option::option_type,
+            value::{native_value_clone_function, native_value_drop_function},
+        },
         types::effects::{effect, no_effects},
     };
-    use std::{cell::Cell, rc::Rc};
 
     #[test]
     fn physical_native_adapters_use_typed_scalar_transport() {
@@ -1428,10 +1451,7 @@ mod tests {
         unsafe {
             add.entry
                 .invoke_physical(
-                    &[
-                        std::ptr::from_mut(&mut a).cast(),
-                        std::ptr::from_mut(&mut b).cast(),
-                    ],
+                    &[ptr::from_mut(&mut a).cast(), ptr::from_mut(&mut b).cast()],
                     output.as_mut_ptr().cast(),
                     &mut failure,
                 )
@@ -1454,10 +1474,7 @@ mod tests {
             let error = divide
                 .entry
                 .invoke_physical(
-                    &[
-                        std::ptr::from_mut(&mut a).cast(),
-                        std::ptr::from_mut(&mut b).cast(),
-                    ],
+                    &[ptr::from_mut(&mut a).cast(), ptr::from_mut(&mut b).cast()],
                     output.as_mut_ptr().cast(),
                     &mut failure,
                 )
@@ -1471,10 +1488,7 @@ mod tests {
             divide
                 .entry
                 .invoke_physical(
-                    &[
-                        std::ptr::from_mut(&mut a).cast(),
-                        std::ptr::from_mut(&mut b).cast(),
-                    ],
+                    &[ptr::from_mut(&mut a).cast(), ptr::from_mut(&mut b).cast()],
                     output.as_mut_ptr().cast(),
                     &mut failure,
                 )
@@ -1488,7 +1502,7 @@ mod tests {
         #[derive(Debug)]
         struct HostU32(u32);
         impl NativeValueType for HostU32 {}
-        fn compare(a: &HostU32, b: &HostU32) -> std::cmp::Ordering {
+        fn compare(a: &HostU32, b: &HostU32) -> Ordering {
             a.0.cmp(&b.0)
         }
         let native = NativeFnRR::from_rust_ordering_code(compare);
@@ -1555,7 +1569,7 @@ mod tests {
             Value::native(DropTracked(count.clone())),
             Value::native(42isize),
         ])));
-        let function = crate::std::value::native_value_drop_function::<DropTracked>();
+        let function = native_value_drop_function::<DropTracked>();
         let entry = function.native_entry().expect("typed destructor entry");
         assert_eq!(
             entry.signature.parameters,
@@ -1566,7 +1580,7 @@ mod tests {
             function.runtime_argument_passing(),
             Some(&[ArgConvention::MutableRef][..]),
         );
-        let place = crate::place::Place::Boxed {
+        let place = Place::Boxed {
             root: 0,
             path: vec![0],
         };
@@ -1578,7 +1592,7 @@ mod tests {
 
         assert_eq!(count.get(), 1, "destruction must run during Value::drop");
         assert!(matches!(place.boxed_mut(&mut ctx).unwrap(), Value::Uninit));
-        let sibling = crate::place::Place::Boxed {
+        let sibling = Place::Boxed {
             root: 0,
             path: vec![1],
         };
@@ -1596,9 +1610,9 @@ mod tests {
         let session = CompilerSession::new_empty_for_tests();
         let mut ctx = EvalCtx::new(ModuleId::from_index(0), &session);
         ctx.environment.push(ValOrMut::Val(Value::uninit()));
-        let function = crate::std::value::native_value_drop_function::<isize>();
+        let function = native_value_drop_function::<isize>();
         let _ = function.call(
-            vec![ValOrMut::Mut(crate::place::Place::Boxed {
+            vec![ValOrMut::Mut(Place::Boxed {
                 root: 0,
                 path: vec![],
             })],
@@ -1610,7 +1624,7 @@ mod tests {
     #[test]
     #[cfg(all(not(target_arch = "wasm32"), panic = "unwind"))]
     fn native_drop_unwinding_does_not_repeat_destruction() {
-        use std::{cell::Cell, panic::AssertUnwindSafe, rc::Rc};
+        use std::panic::{AssertUnwindSafe, catch_unwind};
 
         #[derive(Debug)]
         struct PanickingDrop(Rc<Cell<usize>>);
@@ -1628,7 +1642,7 @@ mod tests {
         ctx.environment
             .push(ValOrMut::Val(Value::native(PanickingDrop(count.clone()))));
 
-        let place = crate::place::Place::Boxed {
+        let place = Place::Boxed {
             root: 0,
             path: vec![],
         };
@@ -1638,7 +1652,7 @@ mod tests {
         assert!(matches!(place.boxed_mut(&mut ctx).unwrap(), Value::Uninit));
         // Test Rust unwinding below the non-unwinding C boundary. The actual C entry's
         // abort behavior is checked separately in a subprocess.
-        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let result = catch_unwind(AssertUnwindSafe(|| {
             // SAFETY: detached storage contains one live payload; never retry its destruction.
             unsafe { storage.assume_init_drop() };
         }));
@@ -1661,10 +1675,10 @@ mod tests {
     #[test]
     #[cfg(all(unix, not(target_arch = "wasm32")))]
     fn native_drop_panics_abort_at_c_boundary() {
-        use std::{os::unix::process::ExitStatusExt, process::Command};
+        use std::{env, os::unix::process::ExitStatusExt, process::Command};
 
         const CHILD: &str = "FERLIUM_NATIVE_DROP_ABORT_CHILD";
-        if std::env::var_os(CHILD).is_some() {
+        if env::var_os(CHILD).is_some() {
             #[derive(Debug)]
             struct Field;
             impl Drop for Field {
@@ -1688,9 +1702,9 @@ mod tests {
                 .push(ValOrMut::Val(Value::native(PanickingDrop {
                     _field: Field,
                 })));
-            let function = crate::std::value::native_value_drop_function::<PanickingDrop>();
+            let function = native_value_drop_function::<PanickingDrop>();
             let _ = function.call(
-                vec![ValOrMut::Mut(crate::place::Place::Boxed {
+                vec![ValOrMut::Mut(Place::Boxed {
                     root: 0,
                     path: vec![],
                 })],
@@ -1705,7 +1719,7 @@ mod tests {
         let test_name = format!("{module}::native_drop_panics_abort_at_c_boundary");
         let output = Command::new("sh")
             .args(["-c", "ulimit -c 0; exec \"$@\"", "native-drop-abort-test"])
-            .arg(std::env::current_exe().unwrap())
+            .arg(env::current_exe().unwrap())
             .args(["--exact", &test_name, "--nocapture"])
             .env(CHILD, "1")
             .output()
@@ -1765,7 +1779,7 @@ mod tests {
             assert_eq!(entry.signature.parameters, [parameter]);
             assert_eq!(entry.signature.result, result);
             ctx.environment.push(ValOrMut::Val(value));
-            let arg = ValOrMut::Mut(crate::place::Place::Boxed {
+            let arg = ValOrMut::Mut(Place::Boxed {
                 root: 0,
                 path: vec![],
             });
@@ -1863,8 +1877,8 @@ mod tests {
     #[test]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn native_rust_function_items_produce_independent_c_entries() {
-        let and = NativeFnNN::from_rust(<bool as std::ops::BitAnd>::bitand);
-        let xor = NativeFnNN::from_rust(<bool as std::ops::BitXor>::bitxor);
+        let and = NativeFnNN::from_rust(<bool as BitAnd>::bitand);
+        let xor = NativeFnNN::from_rust(<bool as BitXor>::bitxor);
         // Invoke the actual typed C pointers without an interpreter or a callback registry.
         assert!((and.function.0)(true, true));
         assert!(!(xor.function.0)(true, true));
@@ -1931,14 +1945,14 @@ mod tests {
         let mut ctx = EvalCtx::new(ModuleId::from_index(0), &session);
         for function in [
             NativeFnN::new(float_identity),
-            NativeFnN::from_rust(std::convert::identity::<Float>),
+            NativeFnN::from_rust(convert::identity::<Float>),
         ] {
             assert_eq!(function.entry.signature, raw.entry.signature);
             // SAFETY: Float and NotNan<f64> are both repr(transparent), preserving f64's
             // calling ABI. All inputs below are finite and satisfy Float's invariant.
             let call = unsafe {
-                std::mem::transmute::<extern "C" fn(Float) -> Float, extern "C" fn(f64) -> f64>(
-                    std::hint::black_box(function.function.0),
+                mem::transmute::<extern "C" fn(Float) -> Float, extern "C" fn(f64) -> f64>(
+                    black_box(function.function.0),
                 )
             };
             for value in [-0.0, 1.25, f64::MIN, f64::MAX] {
@@ -1984,9 +1998,7 @@ mod tests {
         type RawEntry = extern "C" fn(&mut NativeFailureState, f64, &mut MaybeUninit<f64>) -> u32;
         // SAFETY: the scalar input has the same ABI, and MaybeUninit<Float> has the same
         // layout as MaybeUninit<f64>. The input is finite; the output holds a Float on success.
-        let call = unsafe {
-            std::mem::transmute::<FloatEntry, RawEntry>(std::hint::black_box(checked.function.0))
-        };
+        let call = unsafe { mem::transmute::<FloatEntry, RawEntry>(black_box(checked.function.0)) };
         let mut failure = NativeFailureState::default();
         let mut output = MaybeUninit::new(7.0);
         assert_ne!(call(&mut failure, -1.0, &mut output), 0);
@@ -2076,7 +2088,7 @@ mod tests {
                 })
             }),
         )));
-        let place = |index: usize| crate::place::Place::Boxed {
+        let place = |index: usize| Place::Boxed {
             root: 0,
             path: vec![index as isize],
         };
@@ -2090,9 +2102,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             error.kind(),
-            crate::compiler::error::RuntimeErrorKind::SourceFailure(SourceFailureKind::Aborted(
-                None
-            ),)
+            RuntimeErrorKind::SourceFailure(SourceFailureKind::Aborted(None),)
         );
         assert!(ctx.native_failure.is_empty());
         for (index, expected) in ["source", "left:source", "right:source"]
@@ -2119,8 +2129,8 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn typed_native_output_and_argument_ownership() {
         for function in [
-            crate::std::value::native_value_clone_function::<Owned>(),
-            Box::new(NativeOutFnR::from_rust(Owned::clone)) as crate::hir::function::Function,
+            native_value_clone_function::<Owned>(),
+            Box::new(NativeOutFnR::from_rust(Owned::clone)) as function::Function,
         ] {
             let session = CompilerSession::new_empty_for_tests();
             let mut ctx = EvalCtx::new(ModuleId::from_index(0), &session);
@@ -2301,9 +2311,9 @@ mod tests {
                 } else {
                     assert_eq!(
                         result.unwrap_err().kind(),
-                        crate::compiler::error::RuntimeErrorKind::SourceFailure(
-                            SourceFailureKind::InvalidArgument("clone rejected".into())
-                        )
+                        RuntimeErrorKind::SourceFailure(SourceFailureKind::InvalidArgument(
+                            "clone rejected".into()
+                        ))
                     );
                 }
                 assert_eq!(drops.get(), before + 2);
@@ -2375,7 +2385,7 @@ mod tests {
         fn optional_rust(source: &Owned) -> Option<Owned> {
             (!source.text.is_empty()).then(|| source.clone())
         }
-        let result_type = crate::std::option::option_type(Type::primitive::<Owned>());
+        let result_type = option_type(Type::primitive::<Owned>());
         for function in [
             // SAFETY: optional writes exactly on Some through the shared helper.
             unsafe { NativeOptionalFnR::new(optional, result_type) },
@@ -2403,13 +2413,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "invalid typed native registration")]
     fn typed_native_registration_checks_manually_declared_functions() {
-        let mut module = Module::new(
-            ModuleId::from_index(1),
-            crate::module::Path::single_str("typed"),
-        );
+        let mut module = Module::new(ModuleId::from_index(1), Path::single_str("typed"));
         let mut function =
             NativeFnN::new(identity).description(["value"], "identity", no_effects());
         function.definition.ty_scheme.ty.ret = Type::primitive::<bool>();
-        module.add_function(ustr::ustr("wrong"), function);
+        module.add_function(ustr("wrong"), function);
     }
 }

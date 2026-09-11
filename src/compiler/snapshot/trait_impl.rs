@@ -1,17 +1,17 @@
+use super::{
+    SnapshotError, SnapshotLiteral, SnapshotTypeGraphBuilder, SnapshotTypeId,
+    hir::SnapshotDictionaryReq, semantic::SnapshotConstraint,
+};
 use crate::{
+    Location,
     module::{
         BlanketTraitImplSubKey, ConcreteTraitImplKey, DictionaryEntryEvidence, LocalFunctionId,
-        LocalImplId, ModuleId, TraitId, TraitImpl, TraitImpls,
+        LocalImplId, ModuleId, TraitId, TraitImpl, TraitImpls, build_dictionary_value,
     },
     types::{
         effects::{EffType, Effect},
         r#type::Type,
     },
-};
-
-use super::{
-    SnapshotError, SnapshotLiteral, SnapshotTypeGraphBuilder, SnapshotTypeId,
-    hir::SnapshotDictionaryReq, semantic::SnapshotConstraint,
 };
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -43,7 +43,7 @@ struct SnapshotTraitImpl {
     entry_capture_mappings: Vec<Vec<DictionaryEntryEvidence>>,
     dictionary_ty: SnapshotTypeId,
     public: bool,
-    source_span: Option<crate::Location>,
+    source_span: Option<Location>,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -172,14 +172,13 @@ impl SnapshotTraitImpl {
             .map(SnapshotLiteral::materialize)
             .collect::<Result<Vec<_>, _>>()?;
         let dictionary_value =
-            crate::module::build_dictionary_value(&self.methods, &self.associated_const_getters)
-                .with_captures(
-                    self.capture_schema
-                        .iter()
-                        .map(|requirement| requirement.materialize(types))
-                        .collect::<Result<_, _>>()?,
-                    self.entry_capture_mappings.clone(),
-                );
+            build_dictionary_value(&self.methods, &self.associated_const_getters).with_captures(
+                self.capture_schema
+                    .iter()
+                    .map(|requirement| requirement.materialize(types))
+                    .collect::<Result<_, _>>()?,
+                self.entry_capture_mappings.clone(),
+            );
         Ok(TraitImpl {
             trait_id: self.trait_id,
             output_tys: live_types(&self.output_tys, types)?,
@@ -289,14 +288,15 @@ impl SnapshotTraitImpls {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CompilerSession, compiler::snapshot::NativeTypeCatalog};
+    use crate::{
+        CompilerSession, compiler::snapshot::NativeTypeCatalog, types::r#type::BareNativeTypeB,
+    };
 
     #[test]
     fn complete_std_trait_impl_tables_round_trip() {
         let session = CompilerSession::new();
         let catalog = NativeTypeCatalog::std();
-        let native_name =
-            |native: &crate::types::r#type::BareNativeTypeB| catalog.canonical_name(native);
+        let native_name = |native: &BareNativeTypeB| catalog.canonical_name(native);
         let mut graph = SnapshotTypeGraphBuilder::new(&native_name);
         let snapshot =
             SnapshotTraitImpls::capture(&session.std_module().impls, &mut graph).unwrap();

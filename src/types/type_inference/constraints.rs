@@ -51,7 +51,7 @@ pub enum TypeConstraint {
 }
 
 impl FormatWith<ModuleEnv<'_>> for TypeConstraint {
-    fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
         use TypeConstraint::*;
         match self {
             SameType {

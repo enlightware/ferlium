@@ -24,6 +24,8 @@ pub mod trait_impl;
 mod type_alias_name;
 pub mod uses;
 
+use std::{fmt, hash::Hash, ops};
+
 pub use debug_info::*;
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
@@ -34,34 +36,36 @@ pub use module_env::*;
 pub use path::*;
 pub use trait_impl::*;
 pub use uses::*;
-
-use crate::hir::function::CallableDefinition;
-use std::{fmt, hash::Hash, ops};
-
 use ustr::{Ustr, ustr};
 
 use crate::{
     FxHashMap, FxHashSet, Location, ModuleRegistry, Modules,
     ast::UstrSpan,
     compiler::error::{ImportKind, ImportSite, InternalCompilationError},
+    containers::B,
     define_id_type,
     format::{FormatWith, write_identifier},
     hir::{
-        self, ENodeArena, emit_functions::EmitTraitOutput, function::Function, value::LiteralValue,
+        self, ENodeArena,
+        emit_functions::EmitTraitOutput,
+        function::{CallableDefinition, Function},
+        value::LiteralValue,
     },
     internal_compilation_error,
     module::id::{Id, NamedIndexed},
     std::{
+        STD_MODULE_ID,
         core_traits_names::{TRIVIAL_COPY_TRAIT_NAME, VALUE_TRAIT_NAME},
         option::{
             NativeOptionalContractError, ReprResolutionError, native_optional_payload_contract_with,
         },
     },
     types::{
+        effects::EffType,
         mutability::MutType,
         r#trait::Trait,
         r#type::{
-            CallResultConvention, FnArgType, LocalTypeAliasId, SubscriptMemberType,
+            BareNativeType, CallResultConvention, FnArgType, LocalTypeAliasId, SubscriptMemberType,
             SubscriptResultConvention, SubscriptType, Type, TypeAliasEntry, TypeAliases, TypeDef,
             TypeDefSlot, TypeDisplayEnv, TypeKind, TypeVar,
         },
@@ -1222,10 +1226,7 @@ impl Module {
     }
 
     /// Look-up a bare native type alias by name in this module.
-    pub fn get_bare_native_type_alias(
-        &self,
-        name: Ustr,
-    ) -> Option<crate::containers::B<dyn crate::types::r#type::BareNativeType>> {
+    pub fn get_bare_native_type_alias(&self, name: Ustr) -> Option<B<dyn BareNativeType>> {
         self.type_aliases.get_bare_native_by_name(name).cloned()
     }
 
@@ -1233,7 +1234,7 @@ impl Module {
     pub(crate) fn add_unsafe_bare_native_type_alias_str(
         &mut self,
         name: &str,
-        native: Box<dyn crate::types::r#type::BareNativeType>,
+        native: Box<dyn BareNativeType>,
     ) {
         self.add_bare_native_type_alias_with_visibility(ustr(name), native, Visibility::Module);
         self.unsafe_items.insert(ustr(name));
@@ -1245,7 +1246,7 @@ impl Module {
     pub(crate) fn add_private_bare_native_type_alias_str(
         &mut self,
         name: &str,
-        native: Box<dyn crate::types::r#type::BareNativeType>,
+        native: Box<dyn BareNativeType>,
     ) {
         self.add_bare_native_type_alias_with_visibility(ustr(name), native, Visibility::Module);
     }
@@ -1253,7 +1254,7 @@ impl Module {
     fn add_bare_native_type_alias_with_visibility(
         &mut self,
         name: Ustr,
-        native: Box<dyn crate::types::r#type::BareNativeType>,
+        native: Box<dyn BareNativeType>,
         visibility: Visibility,
     ) {
         self.type_aliases.set_bare_native(name, native);
@@ -1533,7 +1534,7 @@ impl Module {
     pub fn expect_std_trait_id_in_current_module(&self, name: &str) -> TraitId {
         assert_eq!(
             self.module_id(),
-            crate::std::STD_MODULE_ID,
+            STD_MODULE_ID,
             "std trait lookup in current module requires the std module"
         );
         self.expect_trait_id_str(name)
@@ -1554,7 +1555,7 @@ impl Module {
 
     /// Look-up a std trait in the registered std module.
     pub(crate) fn expect_std_trait_id(modules: &Modules, name: &str) -> TraitId {
-        Self::expect_trait_id_str_in_module(crate::std::STD_MODULE_ID, modules, name)
+        Self::expect_trait_id_str_in_module(STD_MODULE_ID, modules, name)
     }
 
     /// Look-up a trait definition by name in this module.
@@ -1613,7 +1614,7 @@ impl Module {
         trait_id: TraitId,
         input_tys: impl Into<Vec<Type>>,
         output_tys: impl Into<Vec<Type>>,
-        output_effs: impl Into<Vec<crate::types::effects::EffType>>,
+        output_effs: impl Into<Vec<EffType>>,
         associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: impl Into<Vec<Function>>,
     ) {
@@ -1654,7 +1655,7 @@ impl Module {
         trait_id: TraitId,
         sub_key: BlanketTraitImplSubKey,
         output_tys: impl Into<Vec<Type>>,
-        output_effs: impl Into<Vec<crate::types::effects::EffType>>,
+        output_effs: impl Into<Vec<EffType>>,
         associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: impl Into<Vec<Function>>,
     ) {
@@ -2656,50 +2657,52 @@ pub(crate) fn fmt_ordered_quantifiers(f: &mut fmt::Formatter<'_>, count: u32) ->
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use crate::hir::native_functions::NativeOptionalFnN;
-
+    use super::*;
     use crate::{
-        hir::value::Value,
+        eval::{EvalControlFlowResult, EvalCtx, ValOrMut, cont},
+        hir::{
+            function::{ArgConvention, Callable},
+            native_functions::NativeOptionalFnN,
+            value::Value,
+        },
         std::{logic::bool_type, math::int_type, option::option_type},
         types::{effects::no_effects, r#type::FnType},
     };
-
-    use super::*;
 
     /// Deliberately lacks the optional C protocol: registration must reject its boxed result.
     #[derive(Clone)]
     struct OptionalWithoutNativeEntry;
 
-    impl crate::hir::function::Callable for OptionalWithoutNativeEntry {
+    impl Callable for OptionalWithoutNativeEntry {
         fn call(
             &self,
-            args: Vec<crate::eval::ValOrMut>,
-            _: &mut crate::eval::EvalCtx,
+            args: Vec<ValOrMut>,
+            _: &mut EvalCtx,
             _: &[ELocalDecl],
-        ) -> crate::eval::EvalControlFlowResult {
+        ) -> EvalControlFlowResult {
             for arg in args {
                 arg.discard_storage();
             }
-            crate::eval::cont(Value::unit_variant(ustr("None")))
+            cont(Value::unit_variant(ustr("None")))
         }
-        fn runtime_argument_passing(&self) -> Option<&[crate::hir::function::ArgConvention]> {
+        fn runtime_argument_passing(&self) -> Option<&[ArgConvention]> {
             Some(&[])
         }
         fn format_ind(
             &self,
-            f: &mut std::fmt::Formatter,
+            f: &mut fmt::Formatter,
             _: &[ELocalDecl],
             _: &ModuleEnv,
             _: usize,
             _: usize,
-        ) -> std::fmt::Result {
+        ) -> fmt::Result {
             f.write_str("OptionalWithoutNativeEntry")
         }
     }
 
     pub(crate) fn optional_without_native_entry_fixture(result: Type) -> ModuleFunction {
         ModuleFunction::new(
-            crate::hir::function::CallableDefinition::new_infer_quantifiers(
+            CallableDefinition::new_infer_quantifiers(
                 FnType::new_by_val([], result, no_effects()),
                 [],
                 "test",

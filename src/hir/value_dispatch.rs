@@ -22,7 +22,8 @@ use crate::{
     internal_compilation_error,
     module::{
         self, EvidenceBindingId, FunctionId, LocalDecl, LocalDeclId, LocalStorage,
-        PendingLocalClone, PendingLocalDrop, ResolvedLocalClone, ResolvedLocalDrop, id::Id,
+        PendingLocalClone, PendingLocalDrop, ResolvedLocalClone, ResolvedLocalDrop, TraitId,
+        id::Id,
     },
     std::{
         core_traits_names::VALUE_TRAIT_NAME,
@@ -37,9 +38,10 @@ use crate::{
         mutability::MutType,
         r#trait::TraitMethodIndex,
         trait_solver::TraitSolver,
-        r#type::{FnArgType, FnType, Type},
+        r#type::{CallImplType, FnArgType, FnType, Type},
         type_like::TypeLike,
     },
+    ustr,
 };
 
 /// Build the ordinary owned-value materialization for compiler string data.
@@ -59,7 +61,7 @@ pub(crate) fn materialize_static_string(
     let function = trait_solver.get_local_or_import_function(
         span,
         &module::Path::single_str("std"),
-        crate::ustr(STRING_FROM_STATIC_FUNCTION_NAME),
+        ustr(STRING_FROM_STATIC_FUNCTION_NAME),
     )?;
     static_apply_generated_with_locals(
         arena,
@@ -251,7 +253,7 @@ pub(crate) fn trait_apply_generated_with_locals(
     arena: &mut NodeArena,
     locals: &mut Vec<LocalDecl>,
     trait_solver: &mut TraitSolver<'_>,
-    trait_id: crate::module::TraitId,
+    trait_id: TraitId,
     input_tys: Vec<Type>,
     method_index: TraitMethodIndex,
     arguments: impl IntoIterator<Item = NodeId>,
@@ -288,10 +290,7 @@ pub(crate) fn trait_apply_generated_with_locals(
             method_span: span,
             arguments,
             arguments_unnamed: UnnamedArg::All,
-            ty: crate::types::r#type::CallImplType::new(
-                definition.ty_scheme.ty,
-                definition.result_convention,
-            ),
+            ty: CallImplType::new(definition.ty_scheme.ty, definition.result_convention),
             input_tys,
             inst_data: hir::FnInstData::none(),
         })),
@@ -345,7 +344,7 @@ pub(crate) fn prepare_generated_call_arguments_with_locals(
         let value_effects = arena[value].effects.clone();
         let ty = arg_ty.ty;
         let mut local = LocalDecl::new(
-            (crate::ustr("$arg"), Location::new_synthesized()),
+            (ustr("$arg"), Location::new_synthesized()),
             MutType::constant(),
             ty,
             None,

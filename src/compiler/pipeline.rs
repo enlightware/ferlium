@@ -15,16 +15,16 @@ use crate::{
     Location, SourceId, SourceTable,
     ast::{self, PExprArena, UnstableCollector, VisitExpr},
     compilation_error,
-    compiler::artifacts::ensure_mir_artifacts,
-    compiler::diagnostics::{
-        CompilationWarning, diagnostics_from_error, diagnostics_from_warnings,
+    compiler::{
+        CompilationCapabilities, ModuleArtifacts,
+        artifacts::ensure_mir_artifacts,
+        diagnostics::{CompilationWarning, diagnostics_from_error, diagnostics_from_warnings},
+        error::{CompilationError, LocatedError},
+        session::{
+            AstInspectorCb, CompilationOutput, CompilationRevision, ModuleEntry, ModuleRevision,
+            ModuleSrcInfo, Modules, SourceVersion,
+        },
     },
-    compiler::error::{CompilationError, LocatedError},
-    compiler::session::{
-        AstInspectorCb, CompilationOutput, CompilationRevision, ModuleEntry, ModuleRevision,
-        ModuleSrcInfo, Modules, SourceVersion,
-    },
-    compiler::{CompilationCapabilities, ModuleArtifacts},
     containers::b,
     execution::ExecutionTarget,
     format::FormatWith,
@@ -34,7 +34,7 @@ use crate::{
         emit_hir::{EmitModuleFrom, emit_module_with_capabilities},
     },
     module::{Module, ModuleEnv, ModuleId, Path, Uses, id::Id},
-    parser::{self, describe_parse_error},
+    parser::{self, Token, describe_parse_error},
 };
 
 pub(crate) enum ModuleRef {
@@ -574,7 +574,7 @@ pub(crate) fn new_ast_arena_sized_from_source(src: &str) -> PExprArena {
 
 /// Transform parse error into LocatedError.
 fn describe_recovered_errors(
-    errors: Vec<ErrorRecovery<usize, crate::parser::Token<'_>, LocatedError>>,
+    errors: Vec<ErrorRecovery<usize, Token<'_>, LocatedError>>,
     source_id: SourceId,
 ) -> Result<(), Vec<LocatedError>> {
     if !errors.is_empty() {

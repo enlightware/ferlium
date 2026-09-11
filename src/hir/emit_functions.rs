@@ -6,6 +6,12 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
+use indexmap::IndexMap;
+use itertools::Itertools;
+use log::log_enabled;
+use ustr::Ustr;
+
+use super::emit_subscripts::attach_subscript_member;
 use crate::{
     FxHashMap, FxHashSet, Location, Modules,
     ast::{self, DExprArena, DModuleFunctionArg},
@@ -21,8 +27,9 @@ use crate::{
     },
     containers::{SVec2, b},
     format::FormatWith,
-    hir::{self, NodeArena},
     hir::{
+        self, NodeArena,
+        elaboration::elaborate_generated_functions,
         emit_hir::{
             ImplStubData, PendingModuleFunctions, PubTypeConstraintPtr,
             add_pending_function_anonymous, borrow_check_and_elaborate_dict, constraint_ptr,
@@ -43,8 +50,9 @@ use crate::{
         SubscriptMemberFunctionKind, SubscriptMemberKind, SubscriptSignature, TraitId, Visibility,
         YieldProvenance, id::Id,
     },
-    std::STD_MODULE_ID,
+    std::{STD_MODULE_ID, core_traits_names::VALUE_TRAIT_NAME},
     types::{
+        effects::{EffType, Effect, EffectVar, EffectsInstSubst},
         mutability::MutType,
         r#trait::{Trait, TraitMethodIndex},
         trait_solver::{TraitSolver, trait_solver_from_module},
@@ -63,17 +71,9 @@ use crate::{
             PubTypeConstraint, TypeScheme, extra_parameters_from_constraints, normalize_types,
         },
         type_visitor::{TyVarsCollector, collect_ty_vars},
-        typing_env::{SubscriptMemberTypingContext, TypingEnv},
+        typing_env::{SubscriptMemberTypingContext, TypingEnv, YieldTypingContext},
     },
 };
-
-use indexmap::IndexMap;
-use itertools::Itertools;
-use log::log_enabled;
-use ustr::Ustr;
-
-use crate::hir::elaboration::elaborate_generated_functions;
-use crate::types::effects::{EffType, Effect, EffectVar, EffectsInstSubst};
 
 /// Context passed to emit_functions when a trait implementation is being emitted.
 pub(super) struct EmitTraitCtx<'a> {
@@ -975,7 +975,7 @@ where
 
     for (attachment, id) in subscript_attachments.iter().zip(local_fns.iter()) {
         for attachment in attachment {
-            super::emit_subscripts::attach_subscript_member(
+            attach_subscript_member(
                 output,
                 attachment.subscript_id,
                 *id,
@@ -1050,7 +1050,7 @@ where
         }
         ty_env.compilation_capabilities = capabilities;
         if descr.definition.result_convention.requires_yield_driver() {
-            ty_env.yield_context = Some(crate::types::typing_env::YieldTypingContext::new(
+            ty_env.yield_context = Some(YieldTypingContext::new(
                 expected_ret_ty,
                 expected_span,
                 kind.requires_mutable_yield(),
@@ -1196,8 +1196,7 @@ where
     ty_inf.log_debug_constraints(module_env);
 
     // Resolve local-storage decisions before defaulting so only finalized ownership semantics add `Value`.
-    let value_trait_id =
-        module_env.expect_std_trait_id(crate::std::core_traits_names::VALUE_TRAIT_NAME);
+    let value_trait_id = module_env.expect_std_trait_id(VALUE_TRAIT_NAME);
     for id in local_fns.iter() {
         for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
             let descr = pending_functions

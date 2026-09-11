@@ -6,6 +6,9 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
+use std::mem;
+
+use derive_new::new;
 use ustr::{Ustr, ustr};
 
 use crate::{
@@ -16,22 +19,22 @@ use crate::{
         diagnostics::CompilationWarning,
         error::{InternalCompilationError, UnsafeFeature},
     },
-    hir::function::{ArgConvention, CallableDefinition},
-    hir::{LoopId, NodeArena, NodeId},
+    hir::{
+        LoopId, NodeArena, NodeId,
+        function::{ArgConvention, CallableDefinition},
+    },
     module::{
         FunctionId, LocalDecl, LocalDeclId, LocalFunctionId, Module, ModuleEnv, ModuleId,
         ProjectionKey, SubscriptDefinition, SubscriptId, SubscriptMember, TraitId,
         TypeDefLookupResult, UModuleFunction, id::Id,
     },
     std::{STD_MODULE_ID, array::array_type as std_array_type},
-    types::r#trait::TraitMethodIndex,
     types::{
+        r#trait::TraitMethodIndex,
         r#type::{CallResultConvention, Type, TypeVar},
         type_inference::substitution::InstSubst,
     },
 };
-
-use derive_new::new;
 
 /// A trait method description as result of a lookup in the typing environment.
 /// The tuple contains the trait id, the method index in the trait, and the method definition.
@@ -165,7 +168,7 @@ impl<'m> TypingEnv<'m> {
     }
 
     pub fn get_all_locals_and_drop(self) -> Vec<LocalDecl> {
-        std::mem::take(self.all_locals)
+        mem::take(self.all_locals)
     }
 
     pub fn push_local(&mut self, local: LocalDecl) -> LocalDeclId {

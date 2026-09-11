@@ -7,27 +7,31 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use derive_new::new;
-use la_arena::{Arena, Idx};
 use std::fmt::{self, Debug, Display};
 
+use derive_new::new;
+use la_arena::{Arena, Idx};
 use ustr::Ustr;
 
+use super::{
+    expr::{Expr, ForLoopData, MapLiteralEntry, PatternConstraintData},
+    module::TraitDefinition,
+    patterns::{LetBindingPattern, LetPatternKind, TypeConstraint, TypeDef},
+    types::{PMutType, PType, TypeAlias},
+};
 use crate::{
     Location,
+    ast::FunctionScc,
     containers::B,
     format::{FormatWith, write_identifier_list},
     module::ModuleEnv,
-    types::mutability::{FormatInFnArg, MutType as IrMutType},
-    types::never::Never,
-    types::r#type::Type as IrType,
-    types::type_scheme::PubTypeConstraint,
+    types::{
+        mutability::{FormatInFnArg, MutType as IrMutType},
+        never::Never,
+        r#type::Type as IrType,
+        type_scheme::PubTypeConstraint,
+    },
 };
-
-use super::expr::{Expr, ForLoopData, MapLiteralEntry, PatternConstraintData};
-use super::module::TraitDefinition;
-use super::patterns::{LetBindingPattern, LetPatternKind, TypeConstraint, TypeDef};
-use super::types::{PMutType, PType, TypeAlias};
 
 /// An index into an expression arena
 pub type ExprId<P> = Idx<Expr<P>>;
@@ -149,7 +153,7 @@ impl Phase for Desugared {
     type LetTyAscriptionComplete = bool;
     type WhereClause = PubTypeConstraint;
     type TraitInModule = Never;
-    type FunctionSccs = Vec<crate::ast::FunctionScc>;
+    type FunctionSccs = Vec<FunctionScc>;
     type TypeAliasInModule = Never;
     type TypeDefInModule = Never;
 }
@@ -157,21 +161,21 @@ impl Phase for Desugared {
 pub trait FormatWithIndent<P: Phase = Parsed> {
     fn format_ind(
         &self,
-        f: &mut std::fmt::Formatter,
+        f: &mut fmt::Formatter,
         env: &ModuleEnv,
         arena: &ExprArena<P>,
         indent: usize,
-    ) -> std::fmt::Result;
+    ) -> fmt::Result;
 }
 
 impl<P: Phase> FormatWithIndent<P> for Never {
     fn format_ind(
         &self,
-        f: &mut std::fmt::Formatter,
+        f: &mut fmt::Formatter,
         _env: &ModuleEnv,
         _arena: &ExprArena<P>,
         indent: usize,
-    ) -> std::fmt::Result {
+    ) -> fmt::Result {
         let indent_str = "  ".repeat(indent);
         write!(f, "{indent_str}{self}")
     }
@@ -180,11 +184,11 @@ impl<P: Phase> FormatWithIndent<P> for Never {
 impl<P: Phase, T: FormatWithIndent<P> + ?Sized> FormatWithIndent<P> for Box<T> {
     fn format_ind(
         &self,
-        f: &mut std::fmt::Formatter,
+        f: &mut fmt::Formatter,
         env: &ModuleEnv,
         arena: &ExprArena<P>,
         indent: usize,
-    ) -> std::fmt::Result {
+    ) -> fmt::Result {
         (**self).format_ind(f, env, arena, indent)
     }
 }
@@ -192,11 +196,11 @@ impl<P: Phase, T: FormatWithIndent<P> + ?Sized> FormatWithIndent<P> for Box<T> {
 impl<P: Phase> FormatWithIndent<P> for ExprId<P> {
     fn format_ind(
         &self,
-        f: &mut std::fmt::Formatter,
+        f: &mut fmt::Formatter,
         env: &ModuleEnv,
         arena: &ExprArena<P>,
         indent: usize,
-    ) -> std::fmt::Result {
+    ) -> fmt::Result {
         arena[*self].format_ind(f, env, arena, indent)
     }
 }

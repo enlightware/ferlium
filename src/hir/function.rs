@@ -7,17 +7,17 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use std::{
+    any::type_name,
     fmt::{self, Debug},
     hash::DefaultHasher,
+    mem, ptr,
 };
 
-use dyn_clone::DynClone;
-
 use derive_new::new;
+use dyn_clone::DynClone;
 use ustr::Ustr;
 
 use super::native_functions::{NativeEntry, NativeResultKnowledge};
-
 use crate::{
     Location,
     ast::{Attribute, MetaItem, UstrSpan},
@@ -27,17 +27,22 @@ use crate::{
         drop_frame_owned_locals_on_error, eval_node_with_ctx,
     },
     format::{FormatWith, escape_identifier, format_generic_param_list, write_identifier},
-    hir::value::{LiteralNativeValue, LiteralValue, Value, ValueRef},
-    hir::{self, ENodeId, UNodeArena, UNodeId},
-    module::{ELocalDecl, ModuleEnv, ProjectionIndex, ULocalDecl},
-    types::r#type::{
-        CallImplType, CallResultConvention, FnArgType, FnType, Type,
-        fmt_call_impl_type_with_arg_names,
+    hir::{
+        self, ENodeId, UNodeArena, UNodeId,
+        value::{LiteralNativeValue, LiteralValue, Value, ValueRef},
     },
-    types::type_like::TypeLike,
-    types::type_mapper::TypeMapper,
-    types::type_scheme::{PubTypeConstraint, TypeScheme},
-    types::type_visitor::TypeInnerVisitor,
+    module::{ELocalDecl, ModuleEnv, ProjectionIndex, ULocalDecl},
+    std::{math::Float, string::StaticStr},
+    types::{
+        r#type::{
+            CallImplType, CallResultConvention, FnArgType, FnType, Type,
+            fmt_call_impl_type_with_arg_names,
+        },
+        type_like::TypeLike,
+        type_mapper::TypeMapper,
+        type_scheme::{PubTypeConstraint, TypeScheme},
+        type_visitor::TypeInnerVisitor,
+    },
 };
 
 pub(crate) struct FunctionDisplayContext<'a, 'm> {
@@ -391,7 +396,7 @@ impl TypeLike for CallableDefinition {
 }
 
 impl FormatWith<ModuleEnv<'_>> for (&CallableDefinition, Ustr) {
-    fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
         self.0.fmt_with_name_and_module_env(f, self.1, "", env)?;
         Ok(())
     }
@@ -446,12 +451,12 @@ pub trait Callable: DynClone {
 
     fn format_ind(
         &self,
-        f: &mut std::fmt::Formatter,
+        f: &mut fmt::Formatter,
         locals: &[ELocalDecl],
         env: &ModuleEnv<'_>,
         spacing: usize,
         indent: usize,
-    ) -> std::fmt::Result;
+    ) -> fmt::Result;
 }
 
 impl Debug for dyn Callable {
@@ -473,7 +478,7 @@ impl CallArgsStorageGuard {
     }
 
     fn into_vec(mut self) -> Vec<ValOrMut> {
-        std::mem::take(&mut self.args)
+        mem::take(&mut self.args)
     }
 }
 
@@ -545,12 +550,12 @@ impl Callable for VoidFunction {
 
     fn format_ind(
         &self,
-        f: &mut std::fmt::Formatter,
+        f: &mut fmt::Formatter,
         _locals: &[ELocalDecl],
         _env: &ModuleEnv<'_>,
         spacing: usize,
         indent: usize,
-    ) -> std::fmt::Result {
+    ) -> fmt::Result {
         let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
         write!(f, "{indent_str}VoidFunction")
     }
@@ -639,12 +644,12 @@ impl Callable for ScriptFunction {
     }
     fn format_ind(
         &self,
-        f: &mut std::fmt::Formatter,
+        f: &mut fmt::Formatter,
         locals: &[ELocalDecl],
         env: &ModuleEnv<'_>,
         spacing: usize,
         indent: usize,
-    ) -> std::fmt::Result {
+    ) -> fmt::Result {
         hir::format_ind(
             &env.current.hir_arena,
             self.entry_node_id,
@@ -696,7 +701,7 @@ impl PendingScriptFunction {
 
 impl PartialEq for Box<ScriptFunction> {
     fn eq(&self, other: &Self) -> bool {
-        std::ptr::eq(self.as_ref(), other.as_ref())
+        ptr::eq(self.as_ref(), other.as_ref())
     }
 }
 
@@ -765,12 +770,12 @@ impl Callable for StructuralFieldAddressor {
 
     fn format_ind(
         &self,
-        f: &mut std::fmt::Formatter,
+        f: &mut fmt::Formatter,
         _locals: &[ELocalDecl],
         _env: &ModuleEnv<'_>,
         spacing: usize,
         indent: usize,
-    ) -> std::fmt::Result {
+    ) -> fmt::Result {
         let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
         write!(f, "{}structural field addressor {}", indent_str, self.index)
     }
@@ -796,8 +801,8 @@ impl trivial_copy_private::Sealed for bool {}
 unsafe impl NativeTrivialCopy for bool {}
 impl trivial_copy_private::Sealed for isize {}
 unsafe impl NativeTrivialCopy for isize {}
-impl trivial_copy_private::Sealed for crate::std::math::Float {}
-unsafe impl NativeTrivialCopy for crate::std::math::Float {}
+impl trivial_copy_private::Sealed for Float {}
+unsafe impl NativeTrivialCopy for Float {}
 
 fn literal_of_trivial_copy_native_typed<T: NativeTrivialCopy + LiteralNativeValue>(
     value: ValueRef<'_>,
@@ -825,8 +830,8 @@ pub(crate) fn literal_of_trivial_copy_native<'a>(
     literal_of_trivial_copy_native_typed::<()>(value)
         .or_else(|| literal_of_trivial_copy_native_typed::<bool>(value))
         .or_else(|| literal_of_trivial_copy_native_typed::<isize>(value))
-        .or_else(|| literal_of_trivial_copy_native_typed::<crate::std::math::Float>(value))
-        .or_else(|| literal_of_trivial_copy_native_typed::<crate::std::string::StaticStr>(value))
+        .or_else(|| literal_of_trivial_copy_native_typed::<Float>(value))
+        .or_else(|| literal_of_trivial_copy_native_typed::<StaticStr>(value))
 }
 
 /// Copy one of the boxed interpreter's native `TrivialCopy` representations.
@@ -846,7 +851,7 @@ pub fn extract_trivial_native_input<T: NativeTrivialCopy>(
         Some(value) => Ok(*value),
         None => panic!(
             "Expected a primitive of type {}, found {}",
-            std::any::type_name::<T>(),
+            type_name::<T>(),
             arg.format_with(ctx)
         ),
     }
@@ -860,7 +865,7 @@ pub fn extract_native_ref<'m, T: 'static>(
         Some(value) => Ok(value),
         None => panic!(
             "Expected a primitive of type {}, found {}",
-            std::any::type_name::<T>(),
+            type_name::<T>(),
             arg.format_with(ctx)
         ),
     }
@@ -868,17 +873,18 @@ pub fn extract_native_ref<'m, T: 'static>(
 
 #[cfg(test)]
 mod tests {
-    use std::mem::size_of;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use crate::{
-        CompilerSession,
-        eval::ControlFlow,
-        hir::{CallArgument, Elaborated, value::NativeValueType},
-        module::{ModuleId, id::Id},
+    use std::{
+        mem::size_of,
+        sync::atomic::{AtomicUsize, Ordering},
     };
 
     use super::*;
+    use crate::{
+        CompilerSession,
+        eval::ControlFlow,
+        hir::{CallArgument, Elaborated, native_functions::NativeFnR, value::NativeValueType},
+        module::{ModuleId, id::Id},
+    };
 
     static NATIVE_ARG_DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
 
@@ -915,7 +921,7 @@ mod tests {
         NATIVE_ARG_DROP_COUNT.store(0, Ordering::Relaxed);
         let session = CompilerSession::new();
         let mut ctx = EvalCtx::new(ModuleId::from_index(0), &session);
-        let function = crate::hir::native_functions::NativeFnR::new(observe_value);
+        let function = NativeFnR::new(observe_value);
 
         let result = function
             .call(

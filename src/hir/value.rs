@@ -6,16 +6,17 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use dyn_clone::DynClone;
-use dyn_eq::DynEq;
-use dyn_hash::DynHash;
-use enum_as_inner::EnumAsInner;
 use std::{
     any::Any,
     fmt::{self, Display},
     hash::Hash,
-    mem::ManuallyDrop,
+    mem::{self, ManuallyDrop},
 };
+
+use dyn_clone::DynClone;
+use dyn_eq::DynEq;
+use dyn_hash::DynHash;
+use enum_as_inner::EnumAsInner;
 use ustr::Ustr;
 
 use crate::{
@@ -24,7 +25,7 @@ use crate::{
     format::write_with_separator,
     hir::function::NativeTrivialCopy,
     module::{FunctionId, ModuleEnv, SubscriptId, TraitDictionaryId},
-    std::string::StaticStr,
+    std::string::{StaticStr, String as NativeString},
     types::r#type::{Type, TypeKind},
 };
 
@@ -611,7 +612,7 @@ impl Value {
             }
             Self::Function(value) => {
                 let mut value = ManuallyDrop::into_inner(value);
-                let closure_env = std::mem::replace(&mut value.closure_env, Value::uninit());
+                let closure_env = mem::replace(&mut value.closure_env, Value::uninit());
                 closure_env.discard_storage();
             }
             Self::Subscript(value) => {
@@ -718,7 +719,7 @@ impl LiteralValue {
                 {
                     return actual
                         .as_any()
-                        .downcast_ref::<crate::std::string::String>()
+                        .downcast_ref::<NativeString>()
                         .map(|actual| expected.as_str() == actual.as_ref())
                         .ok_or(IncompatibleLiteralShape);
                 }
@@ -848,10 +849,15 @@ impl Display for LiteralValue {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        mem::size_of,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    use ustr::ustr;
+
     use super::*;
     use crate::module::{LocalFunctionId, LocalImplId, LocalSubscriptId, ModuleId, id::Id};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use ustr::ustr;
 
     static RUST_DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
 
@@ -923,17 +929,14 @@ mod tests {
     #[test]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn a_value_is_no_wider_than_its_fat_pointer_arm() {
-        assert_eq!(
-            std::mem::size_of::<Value>(),
-            3 * std::mem::size_of::<usize>()
-        );
+        assert_eq!(size_of::<Value>(), 3 * size_of::<usize>());
     }
 
     /// A case carrying nothing stores no payload at all — the point of holding the tag outside the
     /// box. Every integer comparison produces one of these.
     #[test]
     fn a_payload_free_variant_allocates_nothing() {
-        let value = Value::unit_variant(ustr::ustr("Less"));
+        let value = Value::unit_variant(ustr("Less"));
         assert!(matches!(value, Value::Variant { payload: None, .. }));
         assert!(value.variant_payload().is_none());
     }
@@ -956,7 +959,7 @@ mod tests {
             )),
             Value::subscript(SubscriptId::new(
                 ModuleId::from_index(0),
-                crate::module::LocalSubscriptId::from_index(0),
+                LocalSubscriptId::from_index(0),
             )),
         ]);
 

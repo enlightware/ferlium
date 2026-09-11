@@ -19,8 +19,10 @@ use rustc_hash::FxHashSet;
 
 use crate::{
     module::{ConcreteTraitImplKey, TraitId, TypeDefId},
-    types::r#type::{Type, TypeDef, TypeKind},
-    types::type_like::TypeLike,
+    types::{
+        r#type::{Type, TypeDef, TypeKind},
+        type_like::TypeLike,
+    },
 };
 
 /// What [`concrete_type_is_trivial_copy`] needs from whoever asks it.
@@ -97,8 +99,13 @@ fn is_trivial_copy(ty: Type, active: &mut FxHashSet<Type>, env: &impl TypeProper
 
 #[cfg(test)]
 mod tests {
+    use ustr::ustr;
+
     use super::*;
-    use crate::{CompilerSession, std::math::int_type, std::string::string_type};
+    use crate::{
+        CompilerSession,
+        std::{math::int_type, ordering::ordering_type, string::string_type},
+    };
 
     /// The two environments must agree, or a type would be copyable during elaboration and not
     /// during optimization — the property they share is the whole point of the abstraction.
@@ -106,7 +113,7 @@ mod tests {
     fn the_module_env_agrees_with_the_trait_solver() {
         let session = CompilerSession::new();
         let env = session.module_env();
-        let ordering = crate::std::ordering::ordering_type();
+        let ordering = ordering_type();
         for (ty, expected) in [
             (int_type(), true),
             (Type::unit(), true),
@@ -114,8 +121,8 @@ mod tests {
             (string_type(), false),
             (Type::tuple([int_type(), int_type()]), true),
             (Type::tuple([int_type(), string_type()]), false),
-            (Type::variant([(ustr::ustr("Some"), int_type())]), true),
-            (Type::variant([(ustr::ustr("Some"), string_type())]), false),
+            (Type::variant([(ustr("Some"), int_type())]), true),
+            (Type::variant([(ustr("Some"), string_type())]), false),
         ] {
             assert_eq!(concrete_type_is_trivial_copy(ty, &env), expected, "{ty:?}");
         }

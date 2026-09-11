@@ -15,13 +15,24 @@ use ::std::{
 };
 use derive_new::new;
 use itertools::Itertools;
-use ustr::Ustr;
+use ustr::{Ustr, ustr};
 
 use super::artifacts::{
     MirArtifacts, MirOptimization, ModuleArtifacts, ensure_mir_artifacts,
     ensure_optimized_mir_artifacts, ensure_physical_mir_artifacts,
 };
-
+#[cfg(feature = "std-snapshot")]
+use super::snapshot::CacheChecksum;
+#[cfg(all(
+    feature = "std-cache",
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+use super::snapshot::load_or_build_std;
+#[cfg(any(
+    not(feature = "std-cache"),
+    all(target_arch = "wasm32", target_os = "unknown")
+))]
+use crate::std::std_module;
 use crate::{
     FxHashMap, FxHashSet, Location, SourceId, SourceTable, ast, compilation_error,
     compiler::{
@@ -36,15 +47,34 @@ use crate::{
     eval::{ControlFlow, EvalCtx, RuntimeError, ValOrMut, eval_function_with_ctx},
     execution::{DEFAULT_INTERACTIVE_FUEL_LIMIT, ExecutionTarget, ReferenceInterpreterLimits},
     format::FormatWith,
-    hir::{self, emit_expr::emit_expr_entry_with_private_impls, hir_syn::local, value::Value},
-    mir::pass::{known_callee::KnownCallees, report::OptimizationReport},
+    hir::{
+        self,
+        emit_expr::emit_expr_entry_with_private_impls,
+        hir_syn::local,
+        value::{Value, VariantPayloadStorage},
+    },
+    mir::{
+        interpreter::Interpreter,
+        pass::{
+            known_callee::KnownCallees,
+            report::{self, OptimizationReport},
+        },
+        physical::{
+            interpreter as physical_interpreter,
+            program::{ResolvedPhysicalProgram, resolve_physical_program},
+        },
+        profile::MirExecutionProfile,
+    },
     module::{
         self, FunctionId, LocalFunctionId, Module, ModuleEnv, ModuleFunction, ModuleId, Path,
         ResolvedValueLayout, Uses,
         id::{Id, NamedIndexed},
     },
     parser::{self, describe_parse_error},
-    std::{STD_MODULE_ID, new_module_using_std, value::value_layout_for_type},
+    std::{
+        STD_MODULE_ID, new_module_using_std, string::String as NativeString,
+        value::value_layout_for_type,
+    },
     types::r#type::Type,
 };
 
@@ -121,10 +151,7 @@ impl ModuleRevision {
     }
 
     #[cfg(feature = "std-snapshot")]
-    fn with_semantic_cache_checksum(
-        module: Module,
-        checksum: Option<super::snapshot::CacheChecksum>,
-    ) -> Self {
+    fn with_semantic_cache_checksum(module: Module, checksum: Option<CacheChecksum>) -> Self {
         Self {
             module,
             artifacts: ModuleArtifacts::with_semantic_cache_checksum(checksum),
@@ -507,7 +534,7 @@ impl VariantTags {
         }
         let id = u32::try_from(self.names.len()).expect("too many distinct variant tags");
         assert_eq!(
-            id & crate::hir::value::VariantPayloadStorage::INDIRECT_TAG_BIT,
+            id & VariantPayloadStorage::INDIRECT_TAG_BIT,
             0,
             "too many distinct variant tags for the 31-bit ABI identity space"
         );
@@ -534,8 +561,7 @@ impl InitialSessionState {
             feature = "std-cache",
             not(all(target_arch = "wasm32", target_os = "unknown"))
         ))]
-        let (source_table, std_module, semantic_cache_checksum) =
-            crate::compiler::snapshot::load_or_build_std();
+        let (source_table, std_module, semantic_cache_checksum) = load_or_build_std();
         #[cfg(all(
             feature = "std-cache",
             not(all(target_arch = "wasm32", target_os = "unknown"))
@@ -550,7 +576,7 @@ impl InitialSessionState {
         ))]
         let (source_table, std_revision) = {
             let mut source_table = SourceTable::default();
-            let std_module = crate::std::std_module(&mut source_table);
+            let std_module = std_module(&mut source_table);
             (source_table, Rc::new(ModuleRevision::new(std_module)))
         };
         Self {
@@ -893,7 +919,7 @@ impl CompilerSession {
             fuel_limit,
         ) {
             Ok(rendered) => rendered
-                .into_primitive_ty::<crate::std::string::String>()
+                .into_primitive_ty::<NativeString>()
                 .map(|rendered| rendered.to_string())
                 .ok_or_else(|| "to_string(value) did not return a string".to_string()),
             Err(error) => Err(error),
@@ -931,7 +957,7 @@ impl CompilerSession {
             fuel_limit,
         ) {
             Ok(rendered) => rendered
-                .into_primitive_ty::<crate::std::string::String>()
+                .into_primitive_ty::<NativeString>()
                 .map(|rendered| rendered.to_string())
                 .ok_or_else(|| "inspect(value) did not return a string".to_string()),
             Err(error) => Err(error),
@@ -1254,7 +1280,7 @@ impl CompilerSession {
     pub(crate) fn prepare_physical_program(
         &self,
         module_id: ModuleId,
-    ) -> Result<crate::mir::physical::program::ResolvedPhysicalProgram<'_>, RuntimeError> {
+    ) -> Result<ResolvedPhysicalProgram<'_>, RuntimeError> {
         let mut pending = vec![module_id];
         let mut seen = FxHashSet::default();
         let mut artifacts = Vec::new();
@@ -1283,7 +1309,7 @@ impl CompilerSession {
                 .map_err(|error| RuntimeError::Backend(error.to_string()))?;
             artifacts.push(physical);
         }
-        crate::mir::physical::program::resolve_physical_program(artifacts)
+        resolve_physical_program(artifacts)
             .map_err(|error| RuntimeError::Backend(error.to_string()))
     }
 
@@ -1294,8 +1320,6 @@ impl CompilerSession {
     /// script functions it calls) is run by the MIR interpreter, while native (std) callees are
     /// delegated to the HIR interpreter.
     pub fn eval_mir(&mut self, source_name: &str, src: &str) -> String {
-        use crate::mir::interpreter::Interpreter;
-
         let p = module::Path::single_str(source_name);
         let module_id = self
             .compile_for(ExecutionTarget::Mir, src, source_name, p)
@@ -1304,7 +1328,7 @@ impl CompilerSession {
         let (main_id, ret_ty) = {
             let module = self.expect_fresh_module(module_id);
             let main_id = module
-                .get_local_function_id(ustr::ustr("main"))
+                .get_local_function_id(ustr("main"))
                 .expect("eval_mir requires a `fn main` entry");
             let ret_ty = module
                 .get_function_by_id(main_id)
@@ -1370,7 +1394,7 @@ impl CompilerSession {
                 .and_then(|program| {
                     // Preparation established a fresh dependency closure. The borrowed program
                     // prevents a revision change while execution resolves named types.
-                    crate::mir::physical::interpreter::run_entry(
+                    physical_interpreter::run_entry(
                         &program,
                         FunctionId::new(module_id, entry),
                         &arguments,
@@ -1398,7 +1422,6 @@ impl CompilerSession {
                 .map(ControlFlow::into_value)
             }
             ExecutionTarget::Mir => {
-                use crate::mir::interpreter::Interpreter;
                 let mut interp = Interpreter::with_limits(module_id, self, limits);
                 interp.run_entry(module_id, entry, arguments)
             }
@@ -1417,7 +1440,7 @@ impl CompilerSession {
         module_id: ModuleId,
         entry: LocalFunctionId,
         arguments: Vec<Value>,
-    ) -> Result<(Value, crate::mir::profile::MirExecutionProfile), RuntimeError> {
+    ) -> Result<(Value, MirExecutionProfile), RuntimeError> {
         self.run_mir_entry_profiled_with_limits(
             module_id,
             entry,
@@ -1433,10 +1456,9 @@ impl CompilerSession {
         entry: LocalFunctionId,
         arguments: Vec<Value>,
         limits: ReferenceInterpreterLimits,
-    ) -> Result<(Value, crate::mir::profile::MirExecutionProfile), RuntimeError> {
+    ) -> Result<(Value, MirExecutionProfile), RuntimeError> {
         self.prepare_execution_target(ExecutionTarget::Mir, module_id);
-        let mut interpreter =
-            crate::mir::interpreter::Interpreter::with_profile(module_id, self, limits);
+        let mut interpreter = Interpreter::with_profile(module_id, self, limits);
         let value = interpreter.run_entry(module_id, entry, arguments)?;
         let profile = interpreter
             .take_profile()
@@ -1516,7 +1538,7 @@ impl CompilerSession {
             .expect("optimized MIR must be prepared");
         let module = self.expect_fresh_module(module_id);
         let env = ModuleEnv::new(module, self.raw_modules());
-        crate::mir::pass::report::build(self, module_id, raw, optimized, env)
+        report::build(self, module_id, raw, optimized, env)
     }
 
     /// Returns the entry for module_id, or panic if not found.
@@ -1647,14 +1669,16 @@ impl Default for CompilerSession {
 
 #[cfg(test)]
 mod tests {
+    use std::ptr;
+
     use super::*;
-    use crate::hir::native_functions::NativeOptionalFnN;
     use crate::{
-        module::function::CallableOrigin,
+        hir::native_functions::NativeOptionalFnN,
+        module::{function::CallableOrigin, tests::optional_without_native_entry_fixture},
         std::{math::int_type, option::native_optional_payload_contract_with},
         types::{
             effects::no_effects,
-            r#type::{TypeDef, variant_type},
+            r#type::{TypeDef, TypeDefShapeDocs, TypeVar, variant_type},
             type_scheme::TypeScheme,
         },
     };
@@ -1680,7 +1704,7 @@ mod tests {
         let first = session.prepare_physical_program(user.module_id).unwrap();
         let second = session.prepare_physical_program(user.module_id).unwrap();
         for artifact in first.modules() {
-            assert!(std::ptr::eq(
+            assert!(ptr::eq(
                 *artifact,
                 second.module(artifact.module()).unwrap()
             ));
@@ -1718,7 +1742,7 @@ mod tests {
         let third = session.prepare_physical_program(user.module_id).unwrap();
         for (id, previous) in previous_revisions {
             assert_eq!(
-                std::ptr::eq(
+                ptr::eq(
                     previous.artifacts.physical_mir().unwrap(),
                     third.module(id).unwrap()
                 ),
@@ -1759,7 +1783,7 @@ mod tests {
                 .expect("a never-typed RHS must not require Value<never>");
             let module = session.expect_fresh_module(compiled.module_id);
             let function = module
-                .get_function_by_id(module.get_local_function_id(ustr::ustr("f")).unwrap())
+                .get_function_by_id(module.get_local_function_id(ustr("f")).unwrap())
                 .unwrap();
             assert!(
                 function.definition.ty_scheme.constraints.is_empty(),
@@ -1774,20 +1798,20 @@ mod tests {
         let module_id = session.modules().next_id();
         let path = Path::single_str("named_option_owner");
         let mut module = Module::new(module_id, path.clone());
-        let name = ustr::ustr("NamedOption");
+        let name = ustr("NamedOption");
         let generic = Type::variable_id(0);
         let definition = TypeDef {
             name,
             doc: None,
-            generic_params: vec![(ustr::ustr("T"), Location::new_synthesized())],
+            generic_params: vec![(ustr("T"), Location::new_synthesized())],
             generic_effect_params: Vec::new(),
             shape: TypeScheme {
-                ty_quantifiers: vec![crate::types::r#type::TypeVar::new(0)],
+                ty_quantifiers: vec![TypeVar::new(0)],
                 eff_quantifiers: FxHashSet::default(),
                 ty: variant_type([("None", Type::unit()), ("Some", Type::tuple([generic]))]),
                 constraints: Vec::new(),
             },
-            shape_docs: crate::types::r#type::TypeDefShapeDocs::Enum(Vec::new()),
+            shape_docs: TypeDefShapeDocs::Enum(Vec::new()),
             span: Location::new_synthesized(),
             attributes: Vec::new(),
             default_variant: None,
@@ -1851,7 +1875,7 @@ mod tests {
         let path = Path::single_str("named_option_consumer");
         let mut module = Module::new(module_id, path.clone());
         module.add_function(
-            ustr::ustr("some_int"),
+            ustr("some_int"),
             NativeOptionalFnN::from_rust(Some::<isize>, Type::named(option, [int_type()]))
                 .description(["value"], "test", no_effects()),
         );
@@ -1867,11 +1891,8 @@ mod tests {
         let path = Path::single_str("boxed_named_option_consumer");
         let mut module = Module::new(module_id, path.clone());
         module.add_function(
-            ustr::ustr("boxed_option"),
-            crate::module::tests::optional_without_native_entry_fixture(Type::named(
-                option,
-                [int_type()],
-            )),
+            ustr("boxed_option"),
+            optional_without_native_entry_fixture(Type::named(option, [int_type()])),
         );
         // The session can look up the return type in its defining module and reject
         // this function's missing optional-result ABI adapter before adding the module.
@@ -1882,8 +1903,8 @@ mod tests {
     fn variant_tags_are_compact_bidirectional_and_session_local() {
         let first = CompilerSession::new();
         let second = CompilerSession::new();
-        let some = ustr::ustr("Some");
-        let none = ustr::ustr("None");
+        let some = ustr("Some");
+        let none = ustr("None");
 
         assert_eq!(first.variant_tag_id(some), 0);
         assert_eq!(first.variant_tag_id(none), 1);
@@ -1899,7 +1920,7 @@ mod tests {
         let mut first = CompilerSession::new();
         let second = CompilerSession::new();
 
-        assert!(std::ptr::eq(first.std_module(), second.std_module()));
+        assert!(ptr::eq(first.std_module(), second.std_module()));
         assert!(Rc::ptr_eq(
             first
                 .modules
@@ -1955,8 +1976,8 @@ mod tests {
             .raw_mir()
             .unwrap();
         let third_mir = third.modules.get(STD_MODULE_ID).unwrap().raw_mir().unwrap();
-        assert!(std::ptr::eq(first_mir, second_mir));
-        assert!(std::ptr::eq(first_mir, third_mir));
+        assert!(ptr::eq(first_mir, second_mir));
+        assert!(ptr::eq(first_mir, third_mir));
     }
 
     fn module_snapshot(

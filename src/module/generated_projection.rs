@@ -11,15 +11,17 @@ use ustr::Ustr;
 
 use crate::{
     FxHashMap, Location, Modules,
-    hir::dictionary::DictionaryReq,
-    hir::function::CallableDefinition,
+    hir::{dictionary::DictionaryReq, function::CallableDefinition},
     module::{
-        LocalSubscriptId, Module, ModuleEnv, ModuleFunction, ProjectionIndex, ProjectionOrigin,
-        QualifiedNameEnv, SubscriptDefinition, SubscriptId, SubscriptMember,
-        SubscriptMemberFunctionKind, SubscriptSignature, TypeDefId, Visibility, YieldProvenance,
-        id::Id,
+        LocalSubscriptId, Module, ModuleEnv, ModuleFunction, ModuleId, ProjectionIndex,
+        ProjectionOrigin, QualifiedNameEnv, SubscriptDefinition, SubscriptId, SubscriptMember,
+        SubscriptMemberFunctionKind, SubscriptSignature, TraitId, TypeDefId, Visibility,
+        YieldProvenance, id::Id,
     },
-    std::value::{TypeLayoutEnv, dynamic_product_member_layouts},
+    std::{
+        core_traits_names::VALUE_TRAIT_NAME,
+        value::{TypeLayoutEnv, dynamic_product_member_layouts},
+    },
     types::{
         effects::EffType,
         r#type::{CallResultConvention, FnArgType, FnType, Type, TypeKind},
@@ -98,7 +100,7 @@ pub struct GeneratedStructuralProjectionSpec {
 /// addressor's module definition and every use-site closure over it.
 pub(crate) fn generated_structural_projection_definition(
     spec: GeneratedStructuralProjectionSpec,
-    value_trait_id: crate::module::TraitId,
+    value_trait_id: TraitId,
     env: &impl TypeLayoutEnv,
 ) -> (CallableDefinition, Vec<DictionaryReq>) {
     let receiver_ty = spec.key.structural_receiver_ty();
@@ -140,7 +142,7 @@ pub(crate) fn generated_structural_projection_definition(
 /// Pending generated structural projection subscripts for one elaboration pass.
 #[derive(Debug, Clone)]
 pub(crate) struct PendingGeneratedStructuralProjectionSubscripts {
-    module_id: crate::module::ModuleId,
+    module_id: ModuleId,
     base_subscript: usize,
     known: FxHashMap<ProjectionKey, LocalSubscriptId>,
     pending: Vec<GeneratedStructuralProjectionSpec>,
@@ -206,8 +208,7 @@ impl Module {
         }
 
         let env = ModuleEnv::new(self, modules);
-        let value_trait_id =
-            env.expect_std_trait_id(crate::std::core_traits_names::VALUE_TRAIT_NAME);
+        let value_trait_id = env.expect_std_trait_id(VALUE_TRAIT_NAME);
         let (mut definition, requirements) =
             generated_structural_projection_definition(spec, value_trait_id, &env);
         definition.doc = Some(format!(

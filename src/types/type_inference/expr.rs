@@ -6,19 +6,20 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::borrow::Borrow;
+use std::{borrow::Borrow, iter::once, slice::from_ref};
 
 use derive_new::new;
 use ena::unify::InPlaceUnificationTable;
 use smallvec::{SmallVec, smallvec};
 use ustr::{Ustr, ustr};
 
-use super::substitution::InstSubst;
+use super::{effect_solver::EffectConstraintOrigin, substitution::InstSubst};
 use crate::{
     FxHashMap, FxHashSet,
     ast::{
         self, DExprArena, DExprId, Desugared, ExprKind, Pattern, PatternConstraintKind,
-        PatternKind, PatternVar, PropertyAccess, RecordField, RecordFields, UnnamedArg, UstrSpan,
+        PatternKind, PatternVar, Phase, PropertyAccess, RecordField, RecordFields, TypeSpan,
+        UnnamedArg, UstrSpan,
     },
     compiler::{
         diagnostics::CompilationWarning,
@@ -36,6 +37,10 @@ use crate::{
         self, CallArgument, FieldAccess as HirFieldAccess, LoopId, NodeArena, NodeId, NodeKind,
         Project as HirProject, StoreLocal, Variant as HirVariant,
         addressor_place_base_argument_index,
+        borrow_checker::{
+            BorrowContext, let_arguments_overlapping_later_argument_writes,
+            let_arguments_overlapping_mutable,
+        },
         function::{ArgConvention, CallableDefinition, arg_conventions_for_args},
         node_is_place_reference, node_is_stable_place_reference,
         node_is_stable_storage_place_reference, place_resolution_may_create_temp,
@@ -46,7 +51,7 @@ use crate::{
         DeferredLocalStorage, FunctionId, LocalAssignmentMode, LocalDecl, LocalDeclId, ModuleEnv,
         ModuleFunctionSpans, PendingFunctionBody, PendingLocalClone, PendingLocalDrop,
         PendingModuleFunction, PendingTakeLocalValueMode, ProjectionIndex, ProjectionKey,
-        ResolvedLocalDrop, SubscriptId, SubscriptMember, SubscriptMemberKind, TraitId,
+        ResolvedLocalDrop, SubscriptId, SubscriptMember, SubscriptMemberKind, TraitId, TypeDefId,
         TypeDefLookupResult, YieldProvenance, id::Id,
     },
     parser::location::Location,
@@ -76,11 +81,11 @@ use crate::{
     },
 };
 
-fn value_trait_id(env: &TypingEnv<'_>) -> crate::module::TraitId {
+fn value_trait_id(env: &TypingEnv<'_>) -> TraitId {
     env.module_env.expect_std_trait_id(VALUE_TRAIT_NAME)
 }
 
-fn repr_trait_id(env: &TypingEnv<'_>) -> crate::module::TraitId {
+fn repr_trait_id(env: &TypingEnv<'_>) -> TraitId {
     env.module_env.expect_std_trait_id(REPR_TRAIT_NAME)
 }
 
@@ -100,7 +105,7 @@ use super::{
 
 /// Returns whether a trait method may only be called by compiler-generated HIR.
 fn is_compiler_callable_only_method(
-    trait_id: crate::module::TraitId,
+    trait_id: TraitId,
     trait_def: &Trait,
     method_index: TraitMethodIndex,
 ) -> bool {
@@ -112,7 +117,7 @@ fn is_compiler_callable_only_method(
 }
 
 fn compiler_only_trait_method_use_error(
-    trait_id: crate::module::TraitId,
+    trait_id: TraitId,
     trait_def: &Trait,
     method_index: TraitMethodIndex,
     span: Location,
@@ -407,7 +412,7 @@ impl TypeInference {
         env: &mut TypingEnv,
         trait_id: TraitId,
         associated_const_name: UstrSpan,
-        explicit_input_tys: Option<&[crate::ast::TypeSpan<Desugared>]>,
+        explicit_input_tys: Option<&[TypeSpan<Desugared>]>,
         expr_span: Location,
     ) -> Result<(NodeKind, Type, MutType, EffType), InternalCompilationError> {
         let trait_def = env.module_env.trait_def(trait_id);
@@ -539,7 +544,7 @@ impl TypeInference {
         type_def_lookup: TypeDefLookupResult,
         use_site: Location,
         module_env: &ModuleEnv<'_>,
-    ) -> (crate::module::TypeDefId, Type, Type, Option<Ustr>) {
+    ) -> (TypeDefId, Type, Type, Option<Ustr>) {
         let (type_def, tag) = type_def_lookup.lookup_payload();
         let type_def_data = module_env.type_def(type_def);
         let (payload_ty, _inst_data, subst) = type_def_data
@@ -570,8 +575,7 @@ impl TypeInference {
         expected_fn_ty: Option<FnType>,
         span: Location,
     ) -> Result<(NodeId, Type, MutType, EffType), InternalCompilationError> {
-        use hir::Node as N;
-        use hir::NodeKind as K;
+        use hir::{Node as N, NodeKind as K};
 
         // 1. Collect free variables in the body.
         let mut free_vars = FxHashSet::default();
@@ -840,8 +844,7 @@ impl TypeInference {
         expr_id: DExprId,
     ) -> Result<(NodeId, MutType), InternalCompilationError> {
         use ExprKind::*;
-        use hir::Node as N;
-        use hir::NodeKind as K;
+        use hir::{Node as N, NodeKind as K};
         let expr = &env.ast_arena[expr_id];
         let expr_span = expr.span;
         if let ExprKind::Literal(value, ty) = &expr.kind {
@@ -2318,7 +2321,7 @@ impl TypeInference {
     }
 
     fn named_subscript_args(data: &ast::NamedSubscriptData<Desugared>) -> Vec<DExprId> {
-        std::iter::once(data.receiver)
+        once(data.receiver)
             .chain(data.args.iter().copied())
             .collect()
     }
@@ -4629,16 +4632,11 @@ impl TypeInference {
                 .expect("addressor-place application should have a base argument")
         });
         let mut needs_snapshot_constraint = vec![false; args.len()];
-        for (let_index, _) in
-            crate::hir::borrow_checker::let_arguments_overlapping_later_argument_writes(
-                env.ir_arena,
-                &source_arguments,
-                &crate::hir::borrow_checker::BorrowContext::new(
-                    env.module_env.modules,
-                    &env.place_aliases,
-                ),
-            )
-        {
+        for (let_index, _) in let_arguments_overlapping_later_argument_writes(
+            env.ir_arena,
+            &source_arguments,
+            &BorrowContext::new(env.module_env.modules, &env.place_aliases),
+        ) {
             // A place-returning addressor's base identifies caller storage rather than observing
             // its current value. A later argument may finish mutating that storage before the
             // addressor accesses it, but the returned place must remain rooted in the caller.
@@ -4678,13 +4676,10 @@ impl TypeInference {
             }
         }
         let arguments = CallArgument::from_value_slice_and_passing(args, arg_passing);
-        let overlaps = crate::hir::borrow_checker::let_arguments_overlapping_mutable(
+        let overlaps = let_arguments_overlapping_mutable(
             env.ir_arena,
             &arguments,
-            &crate::hir::borrow_checker::BorrowContext::new(
-                env.module_env.modules,
-                &env.place_aliases,
-            ),
+            &BorrowContext::new(env.module_env.modules, &env.place_aliases),
         );
         let mut snapshotted = vec![false; arguments.len()];
         for (let_index, _) in overlaps {
@@ -4761,7 +4756,7 @@ impl TypeInference {
                 {
                     ArgConvention::MutableRef
                 } else {
-                    arg_conventions_for_args(std::slice::from_ref(arg_ty))
+                    arg_conventions_for_args(from_ref(arg_ty))
                         .into_iter()
                         .next()
                         .unwrap()
@@ -5367,7 +5362,7 @@ impl TypeInference {
 
     fn add_value_constraint_for_unknown_drop(
         &mut self,
-        value_trait_id: crate::module::TraitId,
+        value_trait_id: TraitId,
         ty: Type,
         span: Location,
     ) {
@@ -5643,8 +5638,7 @@ impl TypeInference {
         expr_span: Location,
         arguments_unnamed: UnnamedArg,
     ) -> Result<(NodeKind, Type, MutType, EffType), InternalCompilationError> {
-        use hir::Node as N;
-        use hir::NodeKind as K;
+        use hir::{Node as N, NodeKind as K};
         let args_span =
             || Location::fuse(args.iter().map(|arg| env.ast_arena[*arg].span)).unwrap_or(path_span);
         // Get the function and its type from the environment.
@@ -6188,7 +6182,7 @@ impl TypeInference {
         current_span: Location,
         target: &EffType,
         target_span: Location,
-        origin: super::effect_solver::EffectConstraintOrigin,
+        origin: EffectConstraintOrigin,
     ) -> Result<(), InternalCompilationError> {
         self.effects
             .add_effect_dep_with_origin(current, current_span, target, target_span, origin)
@@ -6669,10 +6663,7 @@ fn property_to_fn_path(
     }
 }
 
-fn fields_to_record_type<P: crate::ast::Phase>(
-    fields: &[&RecordField<P>],
-    types: Vec<Type>,
-) -> Type {
+fn fields_to_record_type<P: Phase>(fields: &[&RecordField<P>], types: Vec<Type>) -> Type {
     Type::record(
         fields
             .iter()

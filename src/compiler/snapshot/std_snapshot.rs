@@ -1,13 +1,15 @@
-use crate::{
-    SourceTable,
-    module::{Module, function::CallableOrigin},
-    std::{self as ferlium_std, StdSourceLoader},
-};
+use std::{fmt, slice::Iter};
 
 use super::{
     ModuleCheckpointShape, NativeTypeCatalog, SnapshotError, SnapshotModuleCheckpoint,
     SnapshotSourceTable, SnapshotTypeGraph, SnapshotTypeGraphBuilder, StdSnapshot,
     StdSnapshotHeader,
+};
+use crate::{
+    SourceTable,
+    module::{Module, function::CallableOrigin},
+    std::{self as ferlium_std, StdSourceLoader},
+    types::r#type::{BareNativeTypeB, Type},
 };
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -39,8 +41,8 @@ impl StdSnapshotCaptureError {
     }
 }
 
-impl std::fmt::Debug for StdSnapshotCaptureError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for StdSnapshotCaptureError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("StdSnapshotCaptureError")
             .field(&self.error)
             .finish()
@@ -98,8 +100,8 @@ impl StdSourceLoader for RecordingLoader<'_, '_> {
 }
 
 struct RestoringLoader<'a> {
-    checkpoints: std::slice::Iter<'a, SnapshotModuleCheckpoint>,
-    types: &'a [crate::types::r#type::Type],
+    checkpoints: Iter<'a, SnapshotModuleCheckpoint>,
+    types: &'a [Type],
     error: Option<SnapshotError>,
 }
 
@@ -139,8 +141,7 @@ impl StdSourceLoader for RestoringLoader<'_> {
 impl CompiledStdSnapshot {
     pub(crate) fn capture() -> Result<(Self, Module), Box<StdSnapshotCaptureError>> {
         let native_types = NativeTypeCatalog::std();
-        let native_name =
-            |native: &crate::types::r#type::BareNativeTypeB| native_types.canonical_name(native);
+        let native_name = |native: &BareNativeTypeB| native_types.canonical_name(native);
         let mut graph = SnapshotTypeGraphBuilder::new(&native_name);
         let mut source_table = SourceTable::default();
         let (module, checkpoints, error) = {

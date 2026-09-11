@@ -11,6 +11,11 @@ use std::borrow::Cow;
 use ena::unify::{InPlace, InPlaceUnificationTable, Snapshot};
 use ustr::Ustr;
 
+use super::{
+    constraints::{EffectConstraint, MutConstraint, TypeConstraint},
+    effect_solver::{EffectSolver, EffectSolverSnapshot},
+    expr::TypeInference,
+};
 use crate::{
     FxHashMap, FxHashSet,
     compiler::error::{
@@ -19,13 +24,14 @@ use crate::{
     },
     hir::NodeArena,
     internal_compilation_error,
+    module::TraitId,
     parser::location::Location,
     std::{
         core_traits_names::{FROM_ITERATOR_TRAIT_NAME, REPR_TRAIT_NAME, VALUE_TRAIT_NAME},
         value::{is_compiler_provided_value_trait_application, type_has_static_layout},
     },
     types::{
-        effects::{EffType, EffectVar, no_effects},
+        effects::{EffType, EffectVar, EffectsInstSubst, no_effects},
         mutability::{MutType, MutVal, MutVar, MutVarKey},
         recursive_equation::{RecursiveEquationError, try_intern_recursive_equation},
         trait_solver::{ConstraintAssumptions, TraitSolver},
@@ -38,12 +44,6 @@ use crate::{
     },
 };
 
-use super::{
-    constraints::{EffectConstraint, MutConstraint, TypeConstraint},
-    effect_solver::EffectSolver,
-    expr::TypeInference,
-};
-
 /// Whether the unification should target a subtype or the same type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubOrSameType {
@@ -54,7 +54,7 @@ pub enum SubOrSameType {
 pub(crate) struct UnifiedTypeInferenceSnapshot {
     ty_unification_table: Snapshot<InPlace<TyVarKey>>,
     mut_unification_table: Snapshot<InPlace<MutVarKey>>,
-    effects: super::effect_solver::EffectSolverSnapshot,
+    effects: EffectSolverSnapshot,
     remaining_ty_constraints_len: usize,
 }
 
@@ -129,10 +129,7 @@ impl UnifiedTypeInference {
         self.effects.fresh_var()
     }
 
-    pub(crate) fn fresh_effect_var_subst(
-        &mut self,
-        count: u32,
-    ) -> crate::types::effects::EffectsInstSubst {
+    pub(crate) fn fresh_effect_var_subst(&mut self, count: u32) -> EffectsInstSubst {
         (0..count)
             .map(|old_var| {
                 (
@@ -149,7 +146,7 @@ impl UnifiedTypeInference {
         &mut self,
         constraints: &[PubTypeConstraint],
         effs: &[EffType],
-    ) -> crate::types::effects::EffectsInstSubst {
+    ) -> EffectsInstSubst {
         let mut eff_vars = FxHashSet::default();
         for constraint in constraints {
             constraint.fill_with_inner_effect_vars(&mut eff_vars);
@@ -1111,7 +1108,7 @@ impl UnifiedTypeInference {
     #[allow(clippy::too_many_arguments)]
     fn unify_have_trait(
         &mut self,
-        trait_id: crate::module::TraitId,
+        trait_id: TraitId,
         input_tys: &[Type],
         output_tys: &[Type],
         output_effs: &[EffType],
@@ -1279,7 +1276,7 @@ impl UnifiedTypeInference {
         let mut aggregation = ConstraintPassAggregation::with_capacity(constraints.size_hint().0);
         let mut projection_indices = FxHashMap::<(Type, Ustr), usize>::default();
         type HaveTraitOutputs = (Vec<Type>, Vec<EffType>, Location);
-        let mut have_traits: FxHashMap<(crate::module::TraitId, Vec<Type>), HaveTraitOutputs> =
+        let mut have_traits: FxHashMap<(TraitId, Vec<Type>), HaveTraitOutputs> =
             FxHashMap::default();
 
         for constraint in constraints {

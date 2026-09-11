@@ -25,30 +25,14 @@ pub(crate) mod value_dispatch;
 
 #[doc(hidden)]
 pub mod test_support {
-    pub use crate::hir::emit_expr::emit_expr_unsafe;
-    pub use crate::hir::emit_hir::{EmitModuleFrom, emit_module};
+    pub use crate::hir::{
+        emit_expr::emit_expr_unsafe,
+        emit_hir::{EmitModuleFrom, emit_module},
+    };
 }
 
-use crate::{
-    Location,
-    ast::{self, UnnamedArg},
-    format::FormatWith,
-    hir::function::{ArgConvention, CallArgConventionMetadata},
-    module::{
-        EvidenceBindingId, FunctionId, LocalCloneMetadata, LocalDecl, LocalDeclId,
-        PendingLocalClone, PendingLocalDrop, PendingTakeLocalValueMode, ProjectionIndex,
-        ResolvedLocalClone, ResolvedLocalDrop, ResolvedTakeLocalValueMode, SubscriptId,
-        SubscriptMemberKind, TakeLocalValueModeMetadata, TraitId, TraitImplId, id::Id,
-    },
-    types::{
-        r#trait::{TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex},
-        r#type::FnArgType,
-        type_like::{
-            CastableToType, TypeLike, instantiate_effect_types_in_place, instantiate_types_in_place,
-        },
-        type_mapper::TypeMapper,
-    },
-};
+use std::fmt;
+
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
 use indexmap::IndexMap;
@@ -56,17 +40,37 @@ use la_arena::{Arena, Idx};
 use ustr::Ustr;
 
 use crate::{
+    Location,
+    ast::{self, UnnamedArg},
     containers::{B, SVec2, SVec4},
-    hir::dictionary::DictionariesReq,
-    hir::value::{LiteralValue, VariantPayloadStorage},
-    module::ModuleEnv,
-    types::effects::EffType,
-    types::never::Never,
-    types::r#type::{CallImplType, Type, TypeVar},
+    define_id_type,
+    format::FormatWith,
+    hir::{
+        dictionary::DictionariesReq,
+        function::{ArgConvention, CallArgConventionMetadata},
+        value::{LiteralValue, VariantPayloadStorage},
+    },
+    module::{
+        DeferredLocalStorage, EvidenceBindingId, FunctionId, LocalCloneMetadata, LocalDecl,
+        LocalDeclId, LocalStorage, ModuleEnv, PendingLocalClone, PendingLocalDrop,
+        PendingTakeLocalValueMode, ProjectionIndex, ResolvedLocalClone, ResolvedLocalDrop,
+        ResolvedTakeLocalValueMode, SubscriptId, SubscriptMemberKind, TakeLocalValueModeMetadata,
+        TraitId, TraitImplId, id::Id,
+    },
+    types::{
+        effects::EffType,
+        never::Never,
+        r#trait::{TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex},
+        r#type::{CallImplType, FnArgType, Type, TypeVar},
+        type_like::{
+            CastableToType, TypeLike, instantiate_effect_types_in_place, instantiate_types_in_place,
+        },
+        type_mapper::TypeMapper,
+    },
 };
 
 /// A phase of HIR compilation.
-pub trait HirPhase: Sized + std::fmt::Debug + Clone {
+pub trait HirPhase: Sized + fmt::Debug + Clone {
     type PendingAssignment: HirPayload<Self>;
     type FieldAccess: HirPayload<Self>;
     type TraitMethodApplication: HirPayload<Self>;
@@ -74,16 +78,16 @@ pub trait HirPhase: Sized + std::fmt::Debug + Clone {
     type GetTraitAssociatedConst: HirPayload<Self>;
     type GetTraitDictionary: HirPayload<Self>;
     /// Clone metadata carried by local declarations and clone nodes in this phase.
-    type LocalClone: std::fmt::Debug + Clone + Copy + LocalCloneMetadata;
+    type LocalClone: fmt::Debug + Clone + Copy + LocalCloneMetadata;
     /// Drop metadata carried by local declarations, assignment nodes, and explicit value drops in
     /// this phase.
-    type LocalDrop: std::fmt::Debug + Clone + Copy;
+    type LocalDrop: fmt::Debug + Clone + Copy;
     /// Take-local mode carried by `TakeLocalValue` nodes in this phase.
-    type TakeLocalValueMode: std::fmt::Debug + Clone + Copy + TakeLocalValueModeMetadata;
+    type TakeLocalValueMode: fmt::Debug + Clone + Copy + TakeLocalValueModeMetadata;
     /// Argument-passing metadata carried by call arguments in this phase.
-    type CallArgConvention: std::fmt::Debug + Clone + Copy + CallArgConventionMetadata;
+    type CallArgConvention: fmt::Debug + Clone + Copy + CallArgConventionMetadata;
     /// Deferred local-storage payload carried by local declarations in this phase.
-    type DeferredLocalStorage: std::fmt::Debug + Clone + Copy;
+    type DeferredLocalStorage: fmt::Debug + Clone + Copy;
 }
 
 /// HIR before dictionary passing and final ownership/call elaboration.
@@ -105,7 +109,7 @@ impl HirPhase for Unelaborated {
     type LocalDrop = PendingLocalDrop;
     type TakeLocalValueMode = PendingTakeLocalValueMode;
     type CallArgConvention = ArgConvention;
-    type DeferredLocalStorage = crate::module::DeferredLocalStorage;
+    type DeferredLocalStorage = DeferredLocalStorage;
 }
 
 impl HirPhase for Elaborated {
@@ -125,7 +129,7 @@ impl HirPhase for Elaborated {
 /// An index to a node in the HIR arena.
 pub type NodeId<P = Unelaborated> = Idx<Node<P>>;
 
-crate::define_id_type!(
+define_id_type!(
     /// A unique loop identifier within a function.
     LoopId
 );
@@ -289,7 +293,7 @@ pub(crate) fn resolve_deferred_local_storage_shape(
     arena: &NodeArena,
     local: &mut LocalDecl<Unelaborated>,
 ) -> bool {
-    let crate::module::LocalStorage::Deferred(deferred) = local.storage.clone() else {
+    let LocalStorage::Deferred(deferred) = local.storage.clone() else {
         return false;
     };
 
@@ -752,7 +756,7 @@ pub struct TraitMethodApplication<P: HirPhase = Unelaborated> {
     pub inst_data: FnInstData,
 }
 impl<P: HirPhase> TraitMethodApplication<P> {
-    pub fn argument_names<'a>(&self, env: &'a crate::module::ModuleEnv<'_>) -> &'a [Ustr] {
+    pub fn argument_names<'a>(&self, env: &'a ModuleEnv<'_>) -> &'a [Ustr] {
         &env.trait_def(self.trait_id)
             .method(self.method_index)
             .1
@@ -1091,18 +1095,18 @@ pub struct Node<P: HirPhase = Unelaborated> {
     pub span: Location,
 }
 
-pub trait HirPayload<P: HirPhase>: std::fmt::Debug + Clone {
+pub trait HirPayload<P: HirPhase>: fmt::Debug + Clone {
     #[allow(clippy::too_many_arguments)]
     fn format_ind(
         &self,
         arena: &NodeArena<P>,
-        f: &mut std::fmt::Formatter,
+        f: &mut fmt::Formatter,
         locals: &[LocalDecl<P>],
         env: &ModuleEnv<'_>,
         spacing: usize,
         indent: usize,
         indent_str: &str,
-    ) -> std::fmt::Result;
+    ) -> fmt::Result;
 
     fn type_at(&self, arena: &NodeArena<P>, pos: usize) -> Option<Type> {
         let _ = (arena, pos);
@@ -1114,13 +1118,13 @@ impl<P: HirPhase> HirPayload<P> for Never {
     fn format_ind(
         &self,
         _arena: &NodeArena<P>,
-        _f: &mut std::fmt::Formatter,
+        _f: &mut fmt::Formatter,
         _locals: &[LocalDecl<P>],
         _env: &ModuleEnv<'_>,
         _spacing: usize,
         _indent: usize,
         _indent_str: &str,
-    ) -> std::fmt::Result {
+    ) -> fmt::Result {
         match *self {}
     }
 
@@ -1133,13 +1137,13 @@ impl HirPayload<Unelaborated> for B<PendingAssignment> {
     fn format_ind(
         &self,
         arena: &UNodeArena,
-        f: &mut std::fmt::Formatter,
+        f: &mut fmt::Formatter,
         locals: &[LocalDecl],
         env: &ModuleEnv<'_>,
         spacing: usize,
         indent: usize,
         indent_str: &str,
-    ) -> std::fmt::Result {
+    ) -> fmt::Result {
         writeln!(f, "{indent_str}pending assignment")?;
         for child in self.children() {
             format_ind(arena, child, f, locals, env, spacing, indent + 1)?;
@@ -1157,7 +1161,7 @@ impl HirPayload<Unelaborated> for B<PendingAssignment> {
 #[allow(clippy::too_many_arguments)]
 fn format_call_argument<P: HirPhase>(
     arena: &NodeArena<P>,
-    f: &mut std::fmt::Formatter,
+    f: &mut fmt::Formatter,
     locals: &[LocalDecl<P>],
     env: &ModuleEnv<'_>,
     spacing: usize,
@@ -1165,7 +1169,7 @@ fn format_call_argument<P: HirPhase>(
     indent_str: &str,
     name: Option<Ustr>,
     arg: &CallArgument<P>,
-) -> std::fmt::Result {
+) -> fmt::Result {
     let label = arg.passing.format_label();
     if let Some(name) = name.filter(|name| !name.is_empty()) {
         writeln!(f, "{indent_str}  {name} ({label}):")?;
@@ -1179,13 +1183,13 @@ impl<P: HirPhase> HirPayload<P> for FieldAccess<P> {
     fn format_ind(
         &self,
         arena: &NodeArena<P>,
-        f: &mut std::fmt::Formatter,
+        f: &mut fmt::Formatter,
         locals: &[LocalDecl<P>],
         env: &ModuleEnv<'_>,
         spacing: usize,
         indent: usize,
         indent_str: &str,
-    ) -> std::fmt::Result {
+    ) -> fmt::Result {
         writeln!(f, "{indent_str}access")?;
         format_ind(arena, self.value, f, locals, env, spacing, indent + 1)?;
         writeln!(f, "{indent_str}at field {}", self.field)
@@ -1200,13 +1204,13 @@ impl<P: HirPhase> HirPayload<P> for B<TraitMethodApplication<P>> {
     fn format_ind(
         &self,
         arena: &NodeArena<P>,
-        f: &mut std::fmt::Formatter,
+        f: &mut fmt::Formatter,
         locals: &[LocalDecl<P>],
         env: &ModuleEnv<'_>,
         spacing: usize,
         indent: usize,
         indent_str: &str,
-    ) -> std::fmt::Result {
+    ) -> fmt::Result {
         let trait_def = env.trait_def(self.trait_id);
         let method_data = trait_def.method(self.method_index);
         let method_name = method_data.0;
@@ -1252,13 +1256,13 @@ impl<P: HirPhase> HirPayload<P> for B<GetTraitMethod> {
     fn format_ind(
         &self,
         _arena: &NodeArena<P>,
-        f: &mut std::fmt::Formatter,
+        f: &mut fmt::Formatter,
         _locals: &[LocalDecl<P>],
         env: &ModuleEnv<'_>,
         _spacing: usize,
         _indent: usize,
         indent_str: &str,
-    ) -> std::fmt::Result {
+    ) -> fmt::Result {
         let trait_def = env.trait_def(self.trait_id);
         let method_name = trait_def.method(self.method_index).0;
         let trait_name = trait_def.name;
@@ -1273,13 +1277,13 @@ impl<P: HirPhase> HirPayload<P> for B<GetTraitAssociatedConst> {
     fn format_ind(
         &self,
         _arena: &NodeArena<P>,
-        f: &mut std::fmt::Formatter,
+        f: &mut fmt::Formatter,
         _locals: &[LocalDecl<P>],
         env: &ModuleEnv<'_>,
         _spacing: usize,
         _indent: usize,
         indent_str: &str,
-    ) -> std::fmt::Result {
+    ) -> fmt::Result {
         let trait_name = env.trait_def(self.trait_id).name;
         let const_name = self.associated_const_name;
         writeln!(
@@ -1293,13 +1297,13 @@ impl<P: HirPhase> HirPayload<P> for B<GetTraitDictionary> {
     fn format_ind(
         &self,
         _arena: &NodeArena<P>,
-        f: &mut std::fmt::Formatter,
+        f: &mut fmt::Formatter,
         _locals: &[LocalDecl<P>],
         env: &ModuleEnv<'_>,
         _spacing: usize,
         _indent: usize,
         indent_str: &str,
-    ) -> std::fmt::Result {
+    ) -> fmt::Result {
         let trait_name = env.trait_def(self.trait_id).name;
         writeln!(f, "{indent_str}get trait dictionary (from {trait_name})")
     }
@@ -1308,12 +1312,12 @@ impl<P: HirPhase> HirPayload<P> for B<GetTraitDictionary> {
 pub(crate) fn format_ind<P: HirPhase>(
     arena: &NodeArena<P>,
     node_id: NodeId<P>,
-    f: &mut std::fmt::Formatter,
+    f: &mut fmt::Formatter,
     locals: &[LocalDecl<P>],
     env: &ModuleEnv<'_>,
     spacing: usize,
     indent: usize,
-) -> std::fmt::Result {
+) -> fmt::Result {
     arena[node_id].format_ind(arena, f, locals, env, spacing, indent)
 }
 
@@ -1344,12 +1348,12 @@ impl<P: HirPhase> Node<P> {
     pub(crate) fn format_ind(
         &self,
         arena: &NodeArena<P>,
-        f: &mut std::fmt::Formatter,
+        f: &mut fmt::Formatter,
         locals: &[LocalDecl<P>],
         env: &ModuleEnv<'_>,
         spacing: usize,
         indent: usize,
-    ) -> std::fmt::Result {
+    ) -> fmt::Result {
         let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
         use NodeKind::*;
         match &self.kind {
@@ -2243,7 +2247,7 @@ pub struct ExprDisplay<'a> {
 }
 
 impl FormatWith<ModuleEnv<'_>> for ExprDisplay<'_> {
-    fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
         format_ind(&env.current.hir_arena, self.body, f, self.locals, env, 0, 0)
     }
 }

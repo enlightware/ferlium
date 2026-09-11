@@ -9,36 +9,46 @@
 
 //! Functions within a module
 
-use crate::{
-    Location,
-    ast::UstrSpan,
-    compiler::error::{
-        InternalCompilationError, InvalidSubscriptDefinitionKind, SubscriptDefinitionSubject,
-    },
-    containers::b,
-    define_id_type,
-    format::FormatWith,
-    hir::borrow_checker::{
-        check_elaborated_borrows, check_elaborated_literal_invariants,
-        check_elaborated_place_return_roots, check_elaborated_yield_roots,
-    },
-    hir::function::{
-        ArgConvention, CallableDefinition, Function, PendingScriptFunction,
-        arg_conventions_for_args,
-    },
-    hir::{
-        ENodeArena, ENodeId, Elaborated, HirPhase, NodeId, UNodeArena, UNodeId, Unelaborated,
-        function::ScriptFunction,
-    },
-    hir::{dictionary::DictElaborationCtx, elaboration::elaborate_hir_with_warnings},
-    internal_compilation_error,
-    module::{FunctionDebugInfo, ModuleEnv, ModuleId, id::Id},
-    types::mutability::MutType,
-    types::r#type::{FnArgType, Type},
+use std::{
+    fmt,
+    mem::{align_of, size_of},
 };
 
 use derive_new::new;
 use ustr::Ustr;
+
+use crate::{
+    Location,
+    ast::UstrSpan,
+    compiler::{
+        diagnostics::CompilationWarning,
+        error::{
+            InternalCompilationError, InvalidSubscriptDefinitionKind, SubscriptDefinitionSubject,
+        },
+    },
+    containers::b,
+    define_id_type,
+    format::FormatWith,
+    hir::{
+        ENodeArena, ENodeId, Elaborated, HirPhase, NodeId, UNodeArena, UNodeId, Unelaborated,
+        borrow_checker::{
+            check_elaborated_borrows, check_elaborated_literal_invariants,
+            check_elaborated_place_return_roots, check_elaborated_yield_roots,
+        },
+        dictionary::{DictElaborationCtx, EvidenceBinding},
+        elaboration::elaborate_hir_with_warnings,
+        function::{
+            ArgConvention, CallableDefinition, Function, PendingScriptFunction, ScriptFunction,
+            StructuralFieldAddressor, VoidFunction, arg_conventions_for_args,
+        },
+    },
+    internal_compilation_error,
+    module::{FunctionDebugInfo, ModuleEnv, ModuleId, id::Id},
+    types::{
+        mutability::MutType,
+        r#type::{FnArgType, Type},
+    },
+};
 
 define_id_type!(
     /// Local function ID within a module
@@ -61,7 +71,7 @@ pub struct FunctionId {
 }
 
 impl FormatWith<ModuleEnv<'_>> for FunctionId {
-    fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
         let module = if self.module == env.current.module_id() {
             env.current
         } else {
@@ -388,8 +398,8 @@ pub struct ResolvedValueLayout {
 impl ResolvedValueLayout {
     pub const fn native<T>() -> Self {
         Self {
-            size: std::mem::size_of::<T>() as u32,
-            align: std::mem::align_of::<T>() as u32,
+            size: size_of::<T>() as u32,
+            align: align_of::<T>() as u32,
         }
     }
 }
@@ -493,7 +503,7 @@ pub struct ModuleFunction {
     /// bodies provide it through `Callable::visible_parameter_passing`.
     pub parameter_passing: Vec<ArgConvention>,
     /// Immutable hidden evidence available throughout this function, in dependency order.
-    pub evidence_bindings: Vec<crate::hir::dictionary::EvidenceBinding>,
+    pub evidence_bindings: Vec<EvidenceBinding>,
     pub spans: Option<ModuleFunctionSpans>,
     /// Local variable declarations for the function body, including arguments and any variables declared within the function.
     pub locals: Vec<ELocalDecl>,
@@ -618,7 +628,7 @@ impl PendingModuleFunction {
         mut self,
         dst_arena: &mut ENodeArena,
         ctx: &mut DictElaborationCtx<'_, '_, '_>,
-        warnings: &mut Vec<crate::compiler::diagnostics::CompilationWarning>,
+        warnings: &mut Vec<CompilationWarning>,
     ) -> Result<EModuleFunction, InternalCompilationError> {
         let root = self.code.entry_node_id;
         ctx.set_retained_effect_vars(self.definition.ty_scheme.eff_quantifiers.clone());
@@ -790,7 +800,7 @@ impl ModuleFunction {
     pub fn placeholder(definition: CallableDefinition, spans: Option<ModuleFunctionSpans>) -> Self {
         Self {
             definition,
-            code: b(crate::hir::function::VoidFunction),
+            code: b(VoidFunction),
             origin: CallableOrigin::Transient,
             // Placeholders are transient module slots installed before their
             // pending function body is elaborated and replaced.
@@ -808,7 +818,7 @@ impl ModuleFunction {
         field_index: ProjectionIndex,
         hidden_argument_count: usize,
     ) -> Self {
-        let code = b(crate::hir::function::StructuralFieldAddressor::new(
+        let code = b(StructuralFieldAddressor::new(
             field_index,
             hidden_argument_count,
         )) as Function;
@@ -863,11 +873,7 @@ impl ModuleFunction {
         self.definition.gen_locals_no_bounds(arg_locations, scope)
     }
 
-    pub(crate) fn fmt_code(
-        &self,
-        f: &mut std::fmt::Formatter,
-        env: &ModuleEnv<'_>,
-    ) -> std::fmt::Result {
+    pub(crate) fn fmt_code(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
         let requirements = self
             .definition
             .ty_scheme
@@ -887,17 +893,17 @@ impl ModuleFunction {
 
     pub(crate) fn fmt_code_ind(
         &self,
-        f: &mut std::fmt::Formatter,
+        f: &mut fmt::Formatter,
         env: &ModuleEnv<'_>,
         spacing: usize,
         indent: usize,
-    ) -> std::fmt::Result {
+    ) -> fmt::Result {
         self.code.format_ind(f, &self.locals, env, spacing, indent)
     }
 }
 
 impl FormatWith<ModuleEnv<'_>> for (&ModuleFunction, Ustr) {
-    fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
         self.0
             .definition
             .fmt_with_name_and_module_env(f, self.1, "", env)?;

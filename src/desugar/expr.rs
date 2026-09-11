@@ -6,12 +6,18 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use super::format_string::emit_format_string_ast;
-use super::patterns::{desugar_block_exprs, desugar_let_exprs, desugar_pattern_bindings};
-use super::*;
-use crate::ast::{self, AssignOpData, Desugared};
-use crate::containers::b;
-use crate::parser::helpers::ext_b;
+use std::iter::once;
+
+use super::{
+    format_string::emit_format_string_ast,
+    patterns::{desugar_block_exprs, desugar_let_exprs, desugar_pattern_bindings},
+    *,
+};
+use crate::{
+    ast::{self, AssignOpData, Desugared, TraitAssociatedConstData},
+    containers::b,
+    parser::helpers::ext_b,
+};
 
 enum DesugaredAssignmentKind<'a> {
     Assign,
@@ -323,7 +329,7 @@ pub(crate) fn desugar(
                     ))
                 })
                 .collect::<Result<Vec<_>, InternalCompilationError>>()?;
-            TraitAssociatedConst(b(crate::ast::TraitAssociatedConstData {
+            TraitAssociatedConst(b(TraitAssociatedConstData {
                 trait_name: data.trait_name,
                 input_tys,
                 name: data.name,
@@ -637,7 +643,7 @@ fn inferred_collection_type(
 
 fn std_path(segments: &[&str], span: Location) -> Path {
     Path::new(
-        std::iter::once("std")
+        once("std")
             .chain(segments.iter().copied())
             .map(|segment| (ustr(segment), span))
             .collect(),

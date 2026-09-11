@@ -1,29 +1,30 @@
 use la_arena::{Arena, Idx, RawIdx};
 
+use super::{
+    SnapshotError, SnapshotLiteral, SnapshotTypeGraphBuilder, SnapshotTypeId,
+    type_graph::{SnapshotFnType, SnapshotSubscriptType},
+};
 use crate::{
     Location, ast,
     containers::b,
+    define_id_type,
     hir::{
         self, ENode, ENodeArena, ENodeId, Elaborated, FnInstData, NodeKind,
         dictionary::DictionaryReq, function::ArgConvention,
     },
     module::{
         EvidenceBindingId, FunctionId, LocalDeclId, ProjectionIndex, ResolvedLocalClone,
-        ResolvedLocalDrop, ResolvedTakeLocalValueMode, SubscriptId, TraitImplId,
+        ResolvedLocalDrop, ResolvedTakeLocalValueMode, SubscriptId, TraitId, TraitImplId,
     },
     types::{
         effects::{EffType, Effect},
+        r#trait::TraitDictionaryEntryIndex,
         r#type::{CallImplType, CallResultConvention, Type},
         type_scheme::ProjectionRequirementKind,
     },
 };
 
-use super::{
-    SnapshotError, SnapshotLiteral, SnapshotTypeGraphBuilder, SnapshotTypeId,
-    type_graph::{SnapshotFnType, SnapshotSubscriptType},
-};
-
-crate::define_id_type!(SnapshotNodeId);
+define_id_type!(SnapshotNodeId);
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,7 +44,7 @@ pub(crate) enum SnapshotDictionaryReq {
         payload_ty: SnapshotTypeId,
     },
     TraitImpl {
-        trait_id: crate::module::TraitId,
+        trait_id: TraitId,
         input_tys: Vec<SnapshotTypeId>,
         output_tys: Vec<SnapshotTypeId>,
         output_effs: Vec<Vec<Effect>>,
@@ -184,11 +185,11 @@ enum SnapshotNodeKind {
     LoadVariantPayloadStorageEvidence(EvidenceBindingId),
     GetDictionaryFunction {
         dictionary: SnapshotNodeId,
-        entry_index: crate::types::r#trait::TraitDictionaryEntryIndex,
+        entry_index: TraitDictionaryEntryIndex,
     },
     CallDictionaryFunction {
         dictionary: SnapshotNodeId,
-        entry_index: crate::types::r#trait::TraitDictionaryEntryIndex,
+        entry_index: TraitDictionaryEntryIndex,
         arguments: Vec<SnapshotCallArgument>,
         argument_names: Vec<String>,
         ty: SnapshotCallImplType,
@@ -953,14 +954,15 @@ impl SnapshotNodeKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CompilerSession, compiler::snapshot::NativeTypeCatalog};
+    use crate::{
+        CompilerSession, compiler::snapshot::NativeTypeCatalog, types::r#type::BareNativeTypeB,
+    };
 
     #[test]
     fn complete_std_hir_arena_round_trips() {
         let session = CompilerSession::new();
         let catalog = NativeTypeCatalog::std();
-        let native_name =
-            |native: &crate::types::r#type::BareNativeTypeB| catalog.canonical_name(native);
+        let native_name = |native: &BareNativeTypeB| catalog.canonical_name(native);
         let mut graph = SnapshotTypeGraphBuilder::new(&native_name);
         let snapshot =
             SnapshotHirArena::capture(&session.std_module().hir_arena, &mut graph).unwrap();
@@ -969,8 +971,7 @@ mod tests {
         let restored = snapshot.materialize(&types).unwrap();
 
         assert_eq!(restored.len(), session.std_module().hir_arena.len());
-        let native_name =
-            |native: &crate::types::r#type::BareNativeTypeB| catalog.canonical_name(native);
+        let native_name = |native: &BareNativeTypeB| catalog.canonical_name(native);
         let mut restored_graph = SnapshotTypeGraphBuilder::new(&native_name);
         let recaptured = SnapshotHirArena::capture(&restored, &mut restored_graph).unwrap();
         assert_eq!(recaptured, snapshot);

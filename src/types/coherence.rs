@@ -7,6 +7,8 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
+use ustr::ustr;
+
 use crate::{
     FxHashMap, FxHashSet, Location, Modules,
     compiler::error::{InternalCompilationError, InternalTraitImplHeader},
@@ -17,17 +19,17 @@ use crate::{
         ModuleId, TraitId, TraitImpl, TraitKey,
     },
     std::value::{NO_DERIVE_VALUE_ATTRIBUTE, is_value_trait},
-    types::effects::{EffType, EffectsInstSubst},
-    types::r#trait::TraitImplPolicy,
-    types::trait_solver::TraitSolverProbe,
-    types::r#type::{Type, TypeKind, TypeVar},
-    types::type_inference::unify::{UnifiedTypeInference, UnifiedTypeInferenceSnapshot},
-    types::type_like::TypeLike,
-    types::type_like::instantiate_types,
-    types::type_mapper::{BitmapInstantiationMapper, SimpleInstantiationMapper, TypeMapper},
-    types::type_scheme::PubTypeConstraint,
+    types::{
+        effects::{EffType, EffectsInstSubst},
+        r#trait::TraitImplPolicy,
+        trait_solver::TraitSolverProbe,
+        r#type::{Type, TypeKind, TypeVar},
+        type_inference::unify::{UnifiedTypeInference, UnifiedTypeInferenceSnapshot},
+        type_like::{TypeLike, instantiate_types},
+        type_mapper::{BitmapInstantiationMapper, SimpleInstantiationMapper, TypeMapper},
+        type_scheme::PubTypeConstraint,
+    },
 };
-use ustr::ustr;
 
 struct CoherenceTypeUnifier {
     inner: UnifiedTypeInference,
@@ -205,10 +207,7 @@ fn has_anonymous_structural_head(ty: Type) -> bool {
     let ty_data = ty.data();
     matches!(
         &*ty_data,
-        crate::types::r#type::TypeKind::Tuple(_)
-            | crate::types::r#type::TypeKind::Record(_)
-            | crate::types::r#type::TypeKind::Variant(_)
-            | crate::types::r#type::TypeKind::Function(_)
+        TypeKind::Tuple(_) | TypeKind::Record(_) | TypeKind::Variant(_) | TypeKind::Function(_)
     )
 }
 

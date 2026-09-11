@@ -12,7 +12,7 @@ use std::fmt::{self, Display};
 use derive_new::new;
 use ustr::Ustr;
 
-use crate::format::write_with_separator;
+use crate::{ast::UstrSpan, format::write_with_separator};
 
 /// A non-spanned path used in HIR and module lookups.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, new)]
@@ -40,7 +40,7 @@ impl Path {
         self.segments.len() == 1 && self.segments[0] == name
     }
 
-    pub fn from_ast_segments(segments: &[crate::ast::UstrSpan]) -> Self {
+    pub fn from_ast_segments(segments: &[UstrSpan]) -> Self {
         Self {
             segments: segments.iter().map(|(name, _)| *name).collect(),
         }

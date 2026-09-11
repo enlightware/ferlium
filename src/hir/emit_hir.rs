@@ -6,6 +6,8 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
+use std::iter::once;
+
 use crate::{
     FxHashMap, FxHashSet, Location, Modules,
     containers::B,
@@ -55,8 +57,8 @@ use crate::{
     },
     containers::{b, iterable_to_string},
     format::FormatWith,
-    hir::{self, UNodeArena},
     hir::{
+        self, UNodeArena,
         dictionary::{DictElaborationCtx, ExtraParameters, LateFunctionInstData, ModuleInstData},
         elaboration::elaborate_generated_functions,
         emit_functions::{
@@ -74,17 +76,21 @@ use crate::{
         SubscriptMemberFunctionKind, TraitImpl, UModuleFunction, Visibility, YieldProvenance,
         build_dictionary_value, id::Id,
     },
-    std::value::is_compiler_provided_value_trait_application,
-    std::{STD_MODULE_ID, core_traits_names::VALUE_TRAIT_NAME},
-    types::coherence::check_trait_impl,
-    types::effects::{EffType, EffectVar},
-    types::trait_solver::{TraitSolver, trait_solver_from_module},
-    types::r#type::{Type, TypeKind, TypeVar},
-    types::type_inference::unify::UnifiedTypeInference,
-    types::type_like::TypeLike,
-    types::type_mapper::{BitmapInstantiationMapper, TypeMapper},
-    types::type_scheme::PubTypeConstraint,
-    types::type_visitor::{collect_effect_vars, collect_ty_vars},
+    std::{
+        STD_MODULE_ID, core_traits_names::VALUE_TRAIT_NAME,
+        value::is_compiler_provided_value_trait_application,
+    },
+    types::{
+        coherence::check_trait_impl,
+        effects::{EffType, EffectVar},
+        trait_solver::{TraitSolver, trait_solver_from_module},
+        r#type::{Type, TypeKind, TypeVar},
+        type_inference::unify::UnifiedTypeInference,
+        type_like::TypeLike,
+        type_mapper::{BitmapInstantiationMapper, TypeMapper},
+        type_scheme::PubTypeConstraint,
+        type_visitor::{collect_effect_vars, collect_ty_vars},
+    },
 };
 
 /// Record explicit ownership behavior on the named type constructor before any
@@ -155,7 +161,7 @@ pub(super) fn function_and_associated_lambdas<'a>(
     id: &'a LocalFunctionId,
     associated_lambdas: &'a FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
 ) -> impl Iterator<Item = LocalFunctionId> + 'a {
-    std::iter::once(*id).chain(associated_lambdas.get(id).into_iter().flatten().copied())
+    once(*id).chain(associated_lambdas.get(id).into_iter().flatten().copied())
 }
 
 pub(super) type PendingModuleFunctions = FxHashMap<LocalFunctionId, PendingModuleFunction>;

@@ -25,6 +25,8 @@ mod trait_impl;
 mod type_graph;
 mod types;
 
+use std::{error::Error, fmt};
+
 #[cfg(all(
     feature = "std-cache",
     not(all(target_arch = "wasm32", target_os = "unknown"))
@@ -58,8 +60,6 @@ pub(crate) use type_graph::{
     SnapshotFnType, SnapshotTypeGraph, SnapshotTypeGraphBuilder, SnapshotTypeId,
 };
 pub(crate) use types::{SnapshotTrait, SnapshotTypeAlias, SnapshotTypeDefSlot};
-
-use std::fmt;
 
 /// SHA-256 of a serialized cache payload, used for integrity and parent-snapshot identity.
 pub(crate) type CacheChecksum = [u8; 32];
@@ -157,4 +157,4 @@ impl fmt::Display for SnapshotError {
     }
 }
 
-impl std::error::Error for SnapshotError {}
+impl Error for SnapshotError {}

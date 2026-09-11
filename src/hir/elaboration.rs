@@ -7,39 +7,47 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use crate::{FxHashMap, FxHashSet, Modules, hir::borrow_checker::BorrowContext};
 use ustr::{Ustr, ustr};
 
 use crate::{
-    Location,
+    FxHashMap, FxHashSet, Location, Modules,
+    ast::Path,
     compiler::{diagnostics::CompilationWarning, error::InternalCompilationError},
-    hir::hir_syn::{call_dictionary_function, get_dictionary},
     hir::{
+        borrow_checker::BorrowContext,
         dictionary::{
             DictElaborationCtx, DictionaryReq, EvidenceBindingSource, ExtraParameters,
             LateFunctionInstData, StaticEvidence, find_projection_subscript_dict_index,
             find_projection_subscript_dict_index_for_receiver_ty, find_trait_impl_dict_index,
             find_variant_payload_indirection_index, instantiate_dictionary_requirements,
         },
+        emit_hir::instantiate_function_descr_in_place,
+        hir_syn::{call_dictionary_function, get_dictionary},
         value_dispatch::{resolve_local_clone, resolve_local_drop},
     },
     internal_compilation_error,
     module::{
         ELocalDecl, EvidenceBindingId, FunctionId, GeneratedStructuralProjectionSpec, LocalDecl,
-        LocalDeclId, LocalFunctionId, Module, ModuleEnv, PendingLocalClone, PendingLocalDrop,
+        LocalDeclId, LocalFunctionId, Module, ModuleEnv,
+        PendingGeneratedStructuralProjectionSubscripts, PendingLocalClone, PendingLocalDrop,
         PendingModuleFunction, PendingTakeLocalValueMode, ProjectionIndex, ProjectionKey,
         ResolvedLocalClone, ResolvedLocalDrop, SubscriptId, SubscriptMemberKind, TraitDictionaryId,
         TraitId, generated_structural_projection_definition, id::Id,
     },
-    types::r#trait::{TraitDictionaryEntryIndex, TraitMethodIndex},
-    types::trait_solver::{TraitSolver, trait_solver_from_module},
+    std::core_traits_names::VALUE_TRAIT_NAME,
+    types::{
+        effects::EffectVar,
+        r#trait::{Trait, TraitDictionaryEntryIndex, TraitMethodIndex},
+        trait_solver::{TraitSolver, trait_solver_from_module},
+        type_scheme::TypeScheme,
+    },
 };
 
 struct ElaborationEffectDefaultMapper<'a> {
-    retained: &'a FxHashSet<crate::types::effects::EffectVar>,
+    retained: &'a FxHashSet<EffectVar>,
 }
 
-impl crate::types::type_mapper::TypeMapper for ElaborationEffectDefaultMapper<'_> {
+impl TypeMapper for ElaborationEffectDefaultMapper<'_> {
     fn map_type(&mut self, ty: Type) -> Type {
         ty
     }
@@ -63,7 +71,7 @@ fn default_unquantified_trait_application_effects(
     input_tys: &[Type],
     output_tys: &[Type],
     output_effs: &[EffType],
-    retained: &FxHashSet<crate::types::effects::EffectVar>,
+    retained: &FxHashSet<EffectVar>,
 ) -> (Vec<Type>, Vec<Type>, Vec<EffType>) {
     let mut mapper = ElaborationEffectDefaultMapper { retained };
     (
@@ -80,12 +88,11 @@ use itertools::{Itertools, process_results};
 
 use crate::{
     containers::{SVec2, b},
-    hir::emit_value_impl::function_value_method,
-    hir::value::LiteralValue,
     hir::{
         self, ArgConvention, CallArgument, ENodeArena, ENodeId, Elaborated, Node, NodeArena,
         NodeKind, Project as HirProject, StaticApplication, UNodeArena, UNodeId, Unelaborated,
         VariantPayloadStorageSource, elaborated_node_is_place_reference,
+        emit_value_impl::function_value_method, value::LiteralValue,
     },
     std::value::{
         dynamic_product_member_layouts, generated_value_evidence_types,
@@ -93,13 +100,11 @@ use crate::{
         is_value_trait_for_function_type, type_has_static_layout,
         value_layout_associated_const_values, variant_payload_storage_for_type,
     },
-    types::effects::{EffType, Effect, EffectsInstSubst, no_effects},
-    types::mutability::MutType,
-    types::r#type::{
-        CallImplType, CallResultConvention, FnArgType, FnType, Type, TypeKind, TypeVar,
-    },
     types::{
+        effects::{EffType, Effect, EffectsInstSubst, no_effects},
+        mutability::MutType,
         trait_solver::alpha_canonicalize_types_with_instantiation,
+        r#type::{CallImplType, CallResultConvention, FnArgType, FnType, Type, TypeKind, TypeVar},
         type_like::TypeLike,
         type_mapper::{BitmapInstantiationMapper, TypeMapper},
     },
@@ -424,7 +429,7 @@ fn evidence_binding_for_requirement(
 
 /// Return the method slot and callable type from an already-instantiated dictionary type.
 fn dictionary_method_projection_data(
-    trait_def: &crate::types::r#trait::Trait,
+    trait_def: &Trait,
     dictionary_ty: Type,
     method_index: TraitMethodIndex,
 ) -> (TraitDictionaryEntryIndex, Type) {
@@ -444,7 +449,7 @@ fn get_projection_subscript_node_kind(
 ) -> NodeKind {
     NodeKind::GetSubscript(b(hir::GetSubscript {
         subscript,
-        subscript_path: crate::ast::Path::new(vec![(name, span)]),
+        subscript_path: Path::new(vec![(name, span)]),
         inst_data,
     }))
 }
@@ -456,7 +461,7 @@ fn generated_projection_subscript_node_kind(
     span: Location,
     solver: &TraitSolver<'_>,
 ) -> NodeKind {
-    let value_trait_id = solver.std_trait_id(crate::std::core_traits_names::VALUE_TRAIT_NAME);
+    let value_trait_id = solver.std_trait_id(VALUE_TRAIT_NAME);
     let (definition, requirements) =
         generated_structural_projection_definition(spec, value_trait_id, solver);
     let ty_args = definition
@@ -1356,7 +1361,7 @@ pub fn elaborate_generated_functions(
         // visiting a function generated during that pass. Re-establish the positional
         // correspondence before dictionary lookup; matching evidence alpha-equivalently at each
         // use would be ambiguous for functions with several independent variables.
-        let target_type_quantifiers = crate::types::type_scheme::TypeScheme::list_ty_vars(
+        let target_type_quantifiers = TypeScheme::list_ty_vars(
             &function.definition.ty_scheme.ty,
             function.definition.ty_scheme.constraints.iter(),
         );
@@ -1366,7 +1371,7 @@ pub fn elaborate_generated_functions(
             .enumerate()
             .map(|(index, target)| (TypeVar::new(index as u32), Type::variable(target)))
             .collect();
-        let target_effect_quantifiers = crate::types::type_scheme::TypeScheme::list_eff_vars(
+        let target_effect_quantifiers = TypeScheme::list_eff_vars(
             &function.definition.ty_scheme.ty,
             function.definition.ty_scheme.constraints.iter(),
         );
@@ -1377,14 +1382,14 @@ pub fn elaborate_generated_functions(
             .enumerate()
             .map(|(index, target)| {
                 (
-                    crate::types::effects::EffectVar::new(index as u32),
+                    EffectVar::new(index as u32),
                     EffType::single_variable(target),
                 )
             })
             .collect();
         let subst = (type_subst, effect_subst);
         let mut mapper = BitmapInstantiationMapper::new(&subst);
-        crate::hir::emit_hir::instantiate_function_descr_in_place(&mut function, &mut mapper);
+        instantiate_function_descr_in_place(&mut function, &mut mapper);
         function.definition.ty_scheme.ty_quantifiers = target_type_quantifiers;
         function.definition.ty_scheme.eff_quantifiers = target_effect_quantifiers;
 
@@ -1393,7 +1398,7 @@ pub fn elaborate_generated_functions(
             .ty_scheme
             .extra_parameters(ModuleEnv::new(module, others));
         let generated_projection_subscripts =
-            crate::module::PendingGeneratedStructuralProjectionSubscripts::new(module);
+            PendingGeneratedStructuralProjectionSubscripts::new(module);
         let mut solver = trait_solver_from_module!(module, others);
         let mut ctx = DictElaborationCtx::new_with_generated_projection_subscripts(
             &dicts,
@@ -1479,10 +1484,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
         if type_has_static_layout(ty, span, self.ctx.trait_solver) {
             return Ok(());
         }
-        let value_trait = self
-            .ctx
-            .trait_solver
-            .std_trait_id(crate::std::core_traits_names::VALUE_TRAIT_NAME);
+        let value_trait = self.ctx.trait_solver.std_trait_id(VALUE_TRAIT_NAME);
         trait_dictionary_evidence_binding(
             &mut self.generated,
             value_trait,
@@ -1718,7 +1720,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
         });
         let mut inst_fn_args = subscript_ty.args.clone();
         if access_mode.mut_member() {
-            inst_fn_args[0].mut_ty = crate::types::mutability::MutType::mutable();
+            inst_fn_args[0].mut_ty = MutType::mutable();
         }
         let subscript = self.alloc_elaborated_node(
             LoadSubscriptEvidence(hir::LoadSubscriptEvidence { extra_parameter }),
@@ -2853,12 +2855,14 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use crate::{
-        FxHashMap, Location, Modules,
+        FxHashMap, Location, Modules, SourceId,
         containers::b,
-        hir::function::Function,
-        hir::{GetTraitAssociatedConst, value::LiteralValue},
+        hir::{
+            GetTraitAssociatedConst,
+            function::{CallableDefinition, Function},
+            value::LiteralValue,
+        },
         module::{
             CurrentTypeItems, FunctionCollector, LocalDecl, LocalTraitId, Module, ModuleId, Path,
             PendingFunctionCollector, PendingGeneratedStructuralProjectionSubscripts,
@@ -3077,7 +3081,7 @@ mod tests {
             "Layout",
             "Compiler-only layout metadata.",
             Vec::<&str>::new(),
-            Vec::<(&str, crate::hir::function::CallableDefinition)>::new(),
+            Vec::<(&str, CallableDefinition)>::new(),
         )
         .with_associated_consts([
             TraitAssociatedConst::new("SIZE", Type::primitive::<isize>(), "Size in bytes."),
@@ -3087,7 +3091,7 @@ mod tests {
 
     #[test]
     fn final_elaboration_prunes_suffix_after_late_never_substitution() {
-        let source_id = crate::SourceId::from_index(1);
+        let source_id = SourceId::from_index(1);
         let live_span = Location::new(0, 6, source_id);
         let dead_span = Location::new(8, 11, source_id);
         let other_dead_span = Location::new(13, 17, source_id);

@@ -6,35 +6,37 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
+use ustr::{Ustr, ustr};
+
 use crate::{
     FxHashMap, Location,
     ast::{self, UstrSpan},
-    compiler::MirOptimization,
-    compiler::error::InternalCompilationError,
+    compiler::{MirOptimization, error::InternalCompilationError},
     format::FormatWith,
+    hir::function::CallableDefinition,
     internal_compilation_error,
     module::{
         FunctionId, Module, ModuleFunction, ModuleId, Modules, ProjectionEntry, ProjectionKey,
         ProjectionOrigin, ProjectionReceiverKey, SubscriptId, SubscriptMemberFunctionKind, TraitId,
-        TypeDefId, YieldProvenance, disambiguated_subscript_member_function_name,
+        TypeDefId, Visibility, YieldProvenance, disambiguated_subscript_member_function_name,
         id::Id,
         path::Path,
         stable_generated_name_hash,
         type_alias_name::{find_generic_alias_name, find_generic_alias_name_with},
     },
-    std::STD_MODULE_ID,
-    std::core_traits_names::TRIVIAL_COPY_TRAIT_NAME,
-    types::effects::EffType,
-    types::r#trait::{Trait, TraitAssociatedConstIndex, TraitMethodIndex},
-    types::r#type::{
-        BareNativeTypeB, FnArgType, NativeType, Type, TypeAliasEntry, TypeAliases, TypeDef,
-        TypeDefSlot,
+    std::{STD_MODULE_ID, core_traits_names::TRIVIAL_COPY_TRAIT_NAME},
+    types::{
+        effects::EffType,
+        r#trait::{Trait, TraitAssociatedConstIndex, TraitMethodIndex},
+        r#type::{
+            BareNativeTypeB, FnArgType, NativeType, Type, TypeAliasEntry, TypeAliases, TypeDef,
+            TypeDefSlot,
+        },
+        type_properties::{TypePropertyEnv, trivial_copy_impl_key},
+        type_scheme::PubTypeConstraint,
+        typing_env::TraitMethodDescription,
     },
-    types::type_properties::{TypePropertyEnv, trivial_copy_impl_key},
-    types::type_scheme::PubTypeConstraint,
-    types::typing_env::TraitMethodDescription,
 };
-use ustr::{Ustr, ustr};
 
 #[derive(Debug, Clone)]
 pub enum TypeDefLookupResult {
@@ -65,7 +67,7 @@ fn visible_projection_entry(
     key: ProjectionKey,
     entry: ProjectionEntry,
 ) -> Option<ProjectionEntry> {
-    (module.module_id() == current_module || entry.visibility == crate::module::Visibility::Public)
+    (module.module_id() == current_module || entry.visibility == Visibility::Public)
         .then_some(entry)
         .filter(|entry| entry.origin == ProjectionOrigin::Explicit)
         .filter(|_| module.get_projection_subscript(key).is_some())
@@ -524,7 +526,7 @@ impl<'m> QualifiedNameEnv<'m> {
         &self,
         readable_subscript_name: &str,
         member_kind: SubscriptMemberFunctionKind,
-        definition: &crate::hir::function::CallableDefinition,
+        definition: &CallableDefinition,
         provenance: YieldProvenance,
     ) -> String {
         let ty_scheme = &definition.ty_scheme;
@@ -1045,7 +1047,7 @@ impl<'m> ModuleEnv<'m> {
 
     /// Look up a trait in the registered std module by its fully-qualified module id.
     pub fn expect_std_trait_id(&self, name: &str) -> TraitId {
-        if self.current.module_id() == crate::std::STD_MODULE_ID {
+        if self.current.module_id() == STD_MODULE_ID {
             if let Some(id) = self.current.get_trait_id_str(name) {
                 return id;
             }

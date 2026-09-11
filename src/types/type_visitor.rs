@@ -7,13 +7,15 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
+use std::iter::once;
+
 use itertools::Itertools;
 
-use crate::{
-    types::effects::{EffType, EffectVar},
-    types::mutability::{MutType, MutVar},
-    types::r#type::{TypeKind, TypeVar},
-    types::type_like::TypeLike,
+use crate::types::{
+    effects::{EffType, EffectVar},
+    mutability::{MutType, MutVar},
+    r#type::{TypeKind, TypeVar},
+    type_like::TypeLike,
 };
 
 /// Allow for multiple TypeKind traversal strategies
@@ -29,7 +31,7 @@ pub(crate) struct TyVarsCollector<'a, C: Extend<TypeVar>>(pub(crate) &'a mut C);
 impl<C: Extend<TypeVar>> TypeInnerVisitor for TyVarsCollector<'_, C> {
     fn visit_ty_kind_end(&mut self, ty: &TypeKind) {
         if let Some(var) = ty.as_variable() {
-            self.0.extend(std::iter::once(*var));
+            self.0.extend(once(*var));
         }
     }
 }
@@ -49,7 +51,7 @@ pub(crate) struct MutVarsCollector<'a, C: Extend<MutVar>>(pub(crate) &'a mut C);
 impl<C: Extend<MutVar>> TypeInnerVisitor for MutVarsCollector<'_, C> {
     fn visit_mut_ty(&mut self, mut_ty: MutType) {
         if let Some(var) = mut_ty.as_variable() {
-            self.0.extend(std::iter::once(*var));
+            self.0.extend(once(*var));
         }
     }
 }
@@ -105,12 +107,12 @@ where
 {
     fn visit_ty_kind_end(&mut self, ty: &TypeKind) {
         if let Some(var) = ty.as_variable() {
-            self.ty_vars.extend(std::iter::once(*var));
+            self.ty_vars.extend(once(*var));
         }
     }
     fn visit_mut_ty(&mut self, mut_ty: MutType) {
         if let Some(var) = mut_ty.as_variable() {
-            self.mut_vars.extend(std::iter::once(*var));
+            self.mut_vars.extend(once(*var));
         }
     }
     fn visit_eff_ty(&mut self, ty: &EffType) {

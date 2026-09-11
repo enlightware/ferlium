@@ -1,3 +1,8 @@
+use super::{
+    SnapshotCallableDefinition, SnapshotError, SnapshotTypeGraphBuilder, SnapshotTypeId,
+    SnapshotTypeScheme,
+    semantic::{SnapshotAttribute, SnapshotConstraint, capture_attribute, materialize_attribute},
+};
 use crate::{
     Location,
     types::{
@@ -7,12 +12,6 @@ use crate::{
             TypeDefVariantDocs,
         },
     },
-};
-
-use super::{
-    SnapshotCallableDefinition, SnapshotError, SnapshotTypeGraphBuilder, SnapshotTypeId,
-    SnapshotTypeScheme,
-    semantic::{SnapshotAttribute, SnapshotConstraint, capture_attribute, materialize_attribute},
 };
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -394,15 +393,16 @@ impl SnapshotTrait {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CompilerSession, compiler::snapshot::NativeTypeCatalog};
+    use crate::{
+        CompilerSession, compiler::snapshot::NativeTypeCatalog, types::r#type::BareNativeTypeB,
+    };
 
     #[test]
     fn std_aliases_type_defs_and_source_traits_round_trip() {
         let session = CompilerSession::new();
         let module = session.std_module();
         let catalog = NativeTypeCatalog::std();
-        let native_name =
-            |native: &crate::types::r#type::BareNativeTypeB| catalog.canonical_name(native);
+        let native_name = |native: &BareNativeTypeB| catalog.canonical_name(native);
         let mut graph = SnapshotTypeGraphBuilder::new(&native_name);
         let aliases = module
             .type_aliases

@@ -1,19 +1,21 @@
+use super::{
+    SnapshotError, SnapshotTypeGraphBuilder, SnapshotTypeId,
+    type_graph::{SnapshotFnType, SnapshotSubscriptMemberType, SnapshotSubscriptType},
+};
 use crate::{
     Location,
     ast::{Attribute, MetaItem},
-    hir::function::CallableDefinition,
+    hir::{function::CallableDefinition, native_functions::NativeResultKnowledge},
     module::TraitId,
     parser::location::InstantiableLocation,
     types::{
         effects::{EffType, Effect, EffectVar},
-        r#type::{CallResultConvention, FnArgType, FnType, SubscriptType, Type, TypeVar},
+        r#type::{
+            CallResultConvention, FnArgType, FnType, SubscriptMemberType, SubscriptType, Type,
+            TypeVar,
+        },
         type_scheme::{ProjectionRequirementKind, PubTypeConstraint, TypeScheme},
     },
-};
-
-use super::{
-    SnapshotError, SnapshotTypeGraphBuilder, SnapshotTypeId,
-    type_graph::{SnapshotFnType, SnapshotSubscriptType},
 };
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -84,7 +86,7 @@ pub(crate) struct SnapshotCallableDefinition {
     pub(crate) result_convention: CallResultConvention,
     pub(crate) result_rooted_in: Option<u32>,
     pub(crate) repeatable_addressor: bool,
-    pub(crate) native_result_knowledge: crate::hir::native_functions::NativeResultKnowledge,
+    pub(crate) native_result_knowledge: NativeResultKnowledge,
     pub(crate) generic_params: Vec<(String, Location)>,
     pub(crate) generic_effect_params: Vec<(String, Location)>,
     pub(crate) arg_names: Vec<String>,
@@ -450,8 +452,8 @@ impl SnapshotFnType {
 
 impl SnapshotSubscriptType {
     pub(crate) fn materialize(&self, types: &[Type]) -> Result<SubscriptType, SnapshotError> {
-        let member = |member: &super::type_graph::SnapshotSubscriptMemberType| {
-            crate::types::r#type::SubscriptMemberType::new(
+        let member = |member: &SnapshotSubscriptMemberType| {
+            SubscriptMemberType::new(
                 materialize_effects(&member.effects),
                 member.result_convention,
             )
@@ -471,16 +473,16 @@ impl SnapshotSubscriptType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CompilerSession, module::function::CallableOrigin};
-
-    use crate::compiler::snapshot::NativeTypeCatalog;
+    use crate::{
+        CompilerSession, compiler::snapshot::NativeTypeCatalog, module::function::CallableOrigin,
+        types::r#type::BareNativeTypeB,
+    };
 
     #[test]
     fn std_callable_definitions_round_trip_through_snapshot_types() {
         let session = CompilerSession::new();
         let catalog = NativeTypeCatalog::std();
-        let native_name =
-            |native: &crate::types::r#type::BareNativeTypeB| catalog.canonical_name(native);
+        let native_name = |native: &BareNativeTypeB| catalog.canonical_name(native);
         let mut graph = SnapshotTypeGraphBuilder::new(&native_name);
 
         let functions = session

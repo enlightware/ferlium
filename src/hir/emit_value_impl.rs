@@ -7,6 +7,9 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
+use indexmap::IndexSet;
+use ustr::{Ustr, ustr};
+
 use crate::{
     FxHashMap, FxHashSet, Location, Modules, ast,
     compiler::error::InternalCompilationError,
@@ -24,20 +27,22 @@ use crate::{
     internal_compilation_error,
     module::{
         LocalFunctionId, Module, ModuleEnv, PendingGeneratedStructuralProjectionSubscripts,
-        PendingModuleFunction, QualifiedNameEnv, TypeDefId, Visibility,
+        PendingModuleFunction, QualifiedNameEnv, TraitId, TypeDefId, Visibility,
         build_capturing_dictionary_value, dictionary_capture_plan, id::Id,
     },
-    std::core_traits_names::VALUE_TRAIT_NAME,
-    std::value::{
-        NO_DERIVE_VALUE_ATTRIBUTE, derive_generic_value_code_entries,
-        function_value_method_function, function_value_method_name, generated_value_evidence_types,
-        generated_value_layout_getter, variant_payload_storage_for_type,
-        variant_payload_storage_type,
+    std::{
+        core_traits_names::VALUE_TRAIT_NAME,
+        value::{
+            NO_DERIVE_VALUE_ATTRIBUTE, derive_generic_value_code_entries,
+            function_value_method_function, function_value_method_name,
+            generated_value_evidence_types, generated_value_layout_getter,
+            variant_payload_storage_for_type, variant_payload_storage_type,
+        },
     },
     types::{
         coherence::check_trait_impl,
         effects::{EffType, EffectVar},
-        r#trait::TraitMethodIndex,
+        r#trait::{TraitAssociatedConstIndex, TraitMethodIndex},
         trait_solver::{TraitSolver, alpha_canonicalize_types, trait_solver_from_module},
         r#type::{Type, TypeDef, TypeKind, TypeVar},
         type_constraints::named_type_constraints_in_types,
@@ -45,8 +50,6 @@ use crate::{
         type_scheme::{PubTypeConstraint, TypeScheme, extra_parameters_from_constraints},
     },
 };
-use indexmap::IndexSet;
-use ustr::Ustr;
 
 /// Return or lazily emit one compiler-provided `Value` method for function values.
 pub(crate) fn function_value_method(
@@ -73,7 +76,7 @@ pub(crate) fn function_value_method(
 /// Emit generated structural `Value` methods for a non-concrete type shape.
 pub(crate) fn generic_value_methods_for_type(
     solver: &mut TraitSolver<'_>,
-    trait_id: crate::module::TraitId,
+    trait_id: TraitId,
     input_tys: &[Type],
     span: Location,
     arena: &mut NodeArena,
@@ -276,7 +279,7 @@ fn has_named_head_for_type_def(ty: Type, type_def: TypeDefId) -> bool {
 
 fn value_impl_for_type_def_already_exists(
     output: &Module,
-    value_trait_id: crate::module::TraitId,
+    value_trait_id: TraitId,
     type_def: TypeDefId,
 ) -> bool {
     output.impls.concrete().keys().any(|key| {
@@ -332,7 +335,7 @@ pub(super) fn emit_auto_value_impls(
         if type_def
             .attributes
             .iter()
-            .any(|attribute| attribute.path.0 == ustr::ustr(NO_DERIVE_VALUE_ATTRIBUTE))
+            .any(|attribute| attribute.path.0 == ustr(NO_DERIVE_VALUE_ATTRIBUTE))
         {
             continue;
         }
@@ -489,7 +492,7 @@ pub(super) fn emit_auto_value_impls(
             let getters = {
                 let mut solver = trait_solver_from_module!(output, others);
                 (0..associated_const_tys.len())
-                    .map(crate::types::r#trait::TraitAssociatedConstIndex::from_index)
+                    .map(TraitAssociatedConstIndex::from_index)
                     .map(|index| {
                         generated_value_layout_getter(input_ty, index, type_def_span, &mut solver)
                     })

@@ -8,12 +8,12 @@
 //
 use std::mem;
 
+use super::unify::UnifiedTypeInference;
 use crate::{
     FxHashMap, FxHashSet,
     format::FormatWith,
-    hir::dictionary::DictionaryReq,
-    hir::{self, FnInstData},
-    module::{LocalDecl, LocalStorage, ModuleEnv},
+    hir::{self, FnInstData, dictionary::DictionaryReq},
+    module::{LocalDecl, LocalStorage, ModuleEnv, PendingModuleFunction},
     types::{
         effects::{EffType, Effect, EffectVar, EffectsInstSubst},
         mutability::{MutType, MutVar},
@@ -26,8 +26,6 @@ use crate::{
         },
     },
 };
-
-use super::unify::UnifiedTypeInference;
 
 /// Instantiation substitution that maps type and effect variables to actual types and effects.
 pub type InstSubst = (TypeInstSubst, EffectsInstSubst);
@@ -68,10 +66,7 @@ impl UnifiedTypeInference {
         NormalizeTypes(self).substitute_mut_type(mut_ty)
     }
 
-    pub fn substitute_in_pending_module_function(
-        &mut self,
-        descr: &mut crate::module::PendingModuleFunction,
-    ) {
+    pub fn substitute_in_pending_module_function(&mut self, descr: &mut PendingModuleFunction) {
         self.substitute_in_fn_type_in_place(&mut descr.definition.ty_scheme.ty);
         self.substitute_in_constraints_in_place(&mut descr.definition.ty_scheme.constraints);
         self.substitute_in_node(&mut descr.code.arena, descr.code.entry_node_id);
@@ -532,12 +527,11 @@ impl TypeSubstituer for NormalizeTypes<'_> {
 
 #[cfg(test)]
 mod tests {
+    use super::UnifiedTypeInference;
     use crate::{
         parser::location::Location,
         types::effects::{EffType, Effect, PrimitiveEffect},
     };
-
-    use super::UnifiedTypeInference;
 
     #[test]
     fn recursive_effect_substitution_reaches_a_fixed_point() {

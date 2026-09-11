@@ -50,7 +50,7 @@ impl From<&MutVal> for bool {
 }
 
 impl Display for MutVal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", ["cst", "mut"][self.0 as usize])
     }
 }
@@ -70,7 +70,7 @@ impl MutVar {
 }
 
 impl Display for MutVar {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}ₘ", type_variable_index_to_string_greek(self.name))
     }
 }
@@ -78,7 +78,7 @@ impl Display for MutVar {
 pub type MutVarKey = MutVar;
 
 pub trait FormatInFnArg {
-    fn format_in_fn_arg(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result;
+    fn format_in_fn_arg(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 
 /// A mutability type, can be a variable or a resolved value.
@@ -136,7 +136,7 @@ impl From<bool> for MutType {
 }
 
 impl Display for MutType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use MutType::*;
         match self {
             Variable(var) => write!(f, "mut?:{var}"),

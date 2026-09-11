@@ -7,7 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use crate::{
-    Location, ast,
+    Location, Modules, ast,
     compiler::error::{
         InternalCompilationError, InvalidSubscriptDefinitionKind, SubscriptDefinitionSubject,
     },
@@ -15,7 +15,7 @@ use crate::{
     module::{
         LocalFunctionId, LocalSubscriptId, Module, ModuleEnv, ProjectionKey, ProjectionOrigin,
         SubscriptDefinition as ModuleSubscriptDefinition, SubscriptMember as ModuleSubscriptMember,
-        SubscriptMemberKind, SubscriptSignature, Visibility, YieldProvenance, id::Id,
+        SubscriptMemberKind, SubscriptSignature, TypeDefId, Visibility, YieldProvenance, id::Id,
     },
     types::r#type::{Type, TypeKind},
 };
@@ -23,7 +23,7 @@ use crate::{
 pub(super) fn predeclare_subscripts(
     output: &mut Module,
     source: &ast::DModule,
-    others: &crate::Modules,
+    others: &Modules,
 ) -> Result<Vec<LocalSubscriptId>, InternalCompilationError> {
     let mut ids = Vec::with_capacity(source.subscripts.len());
     for subscript in &source.subscripts {
@@ -101,7 +101,7 @@ fn validate_subscript_members(
 
 fn projection_key_for_subscript(
     output: &Module,
-    others: &crate::Modules,
+    others: &Modules,
     subscript: &ast::DSubscriptDefinition,
 ) -> Result<Option<ProjectionKey>, InternalCompilationError> {
     let Some((receiver_ty, receiver_span)) = validate_projection_receiver_binding(subscript)?
@@ -128,7 +128,7 @@ fn validate_projection_receiver_type(
     receiver_ty: Type,
     subscript: &ast::DSubscriptDefinition,
     receiver_span: Location,
-) -> Result<crate::module::TypeDefId, InternalCompilationError> {
+) -> Result<TypeDefId, InternalCompilationError> {
     let field = subscript.name;
     let TypeKind::Named(named) = &*receiver_ty.data() else {
         return Err(internal_compilation_error!(InvalidSubscriptDefinition {

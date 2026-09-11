@@ -1,3 +1,7 @@
+use super::{
+    NativeCallableCatalog, SnapshotCallableDefinition, SnapshotError, SnapshotFunctionBody,
+    SnapshotTypeGraphBuilder, SnapshotTypeId, hir::SnapshotDictionaryReq,
+};
 use crate::{
     Location,
     hir::{
@@ -10,11 +14,6 @@ use crate::{
         ResolvedLocalClone, ResolvedLocalDrop,
     },
     types::{mutability::MutType, r#type::Type},
-};
-
-use super::{
-    NativeCallableCatalog, SnapshotCallableDefinition, SnapshotError, SnapshotFunctionBody,
-    SnapshotTypeGraphBuilder, SnapshotTypeId, hir::SnapshotDictionaryReq,
 };
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -260,14 +259,15 @@ impl SnapshotModuleFunction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CompilerSession, compiler::snapshot::NativeTypeCatalog};
+    use crate::{
+        CompilerSession, compiler::snapshot::NativeTypeCatalog, types::r#type::BareNativeTypeB,
+    };
 
     #[test]
     fn all_std_functions_round_trip_with_rebound_bodies() {
         let session = CompilerSession::new();
         let catalog = NativeTypeCatalog::std();
-        let native_name =
-            |native: &crate::types::r#type::BareNativeTypeB| catalog.canonical_name(native);
+        let native_name = |native: &BareNativeTypeB| catalog.canonical_name(native);
         let mut graph = SnapshotTypeGraphBuilder::new(&native_name);
         let functions = session
             .std_module()

@@ -7,24 +7,26 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use derive_new::new;
-use enum_as_inner::EnumAsInner;
 use std::fmt::{self, Display};
 
+use derive_new::new;
+use enum_as_inner::EnumAsInner;
 use ustr::Ustr;
 
+use super::{Desugared, GenericParams, PEffect, Parsed, Path, Phase, TypeSpan, UstrSpan};
 use crate::{
     FxHashMap, FxHashSet, Location,
     compiler::error::InternalCompilationError,
-    format::write_with_separator_and_format_fn,
-    format::{FormatWith, write_identifier, write_with_separator},
+    format::{
+        FormatWith, write_identifier, write_with_separator, write_with_separator_and_format_fn,
+    },
     hir::value::LiteralValue,
     module::{ModuleEnv, TypeDefId, Visibility},
-    types::mutability::MutVal,
-    types::r#type::{Type as IrType, TypeDefShapeDocs},
+    types::{
+        mutability::MutVal,
+        r#type::{Type as IrType, TypeDefShapeDocs},
+    },
 };
-
-use super::{Desugared, GenericParams, PEffect, Parsed, Path, Phase, TypeSpan, UstrSpan};
 
 #[derive(Debug, Clone, Copy, new)]
 pub struct LetBindingPattern {
@@ -228,7 +230,7 @@ pub enum PatternVar {
     Wildcard(Location),
 }
 impl Display for PatternVar {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use PatternVar::*;
         match self {
             Named((name, _)) => write_identifier(f, name.as_str()),
@@ -362,7 +364,7 @@ pub struct Pattern {
 }
 
 impl Pattern {
-    pub fn format_ind(&self, f: &mut std::fmt::Formatter, indent: usize) -> std::fmt::Result {
+    pub fn format_ind(&self, f: &mut fmt::Formatter, indent: usize) -> fmt::Result {
         let indent_str = "  ".repeat(indent);
         use PatternKind::*;
         match &self.kind {

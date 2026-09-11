@@ -4,8 +4,13 @@
 //! Expand source assignments after inference resolves accessor argument passing.
 //! Captures precede the RHS; destination access scopes contain only the final update.
 
+use ustr::ustr;
+
 use super::{self as hir, Node, NodeArena, NodeId, NodeKind, PendingAssignment};
+#[cfg(debug_assertions)]
+use crate::FxHashSet;
 use crate::{
+    Location,
     containers::{SVec2, b},
     hir::function::ArgConvention,
     module::{LocalDecl, LocalDeclId, PendingLocalClone, PendingLocalDrop, id::Id},
@@ -15,7 +20,6 @@ use crate::{
         r#type::{FnArgType, Type},
     },
 };
-use ustr::ustr;
 
 /// Recursively expand pending assignments into ordinary HIR after argument passing is resolved.
 pub(crate) fn lower_pending_assignments(
@@ -114,7 +118,7 @@ struct AssignmentLowering<'a> {
     prefix: Vec<NodeId>,
     cleanup: Vec<LocalDeclId>,
     #[cfg(debug_assertions)]
-    expected_captures: crate::FxHashSet<NodeId>,
+    expected_captures: FxHashSet<NodeId>,
 }
 
 fn argument_is_place(index: usize, passing: ArgConvention, mut_ty: MutType) -> bool {
@@ -227,7 +231,7 @@ impl AssignmentLowering<'_> {
         let value = self.materialize(value);
         let node = self.arena[value].clone();
         let mut local = LocalDecl::new(
-            (ustr("$destination"), crate::Location::new_synthesized()),
+            (ustr("$destination"), Location::new_synthesized()),
             MutType::constant(),
             node.ty,
             None,

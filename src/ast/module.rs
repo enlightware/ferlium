@@ -7,30 +7,26 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use derive_new::new;
 use std::fmt;
 
+use derive_new::new;
 use ustr::Ustr;
 
-use crate::{
-    Location,
-    compiler::error::LocatedError,
-    format::write_with_separator_and_format_fn,
-    format::{FormatWith, write_identifier, write_identifier_list},
-    hir::value::LiteralValue,
-    module::{ModuleEnv, Visibility},
-    types::effects::EffType,
-    types::mutability::FormatInFnArg,
-    types::r#type::Type,
-    types::type_like::TypeLike,
-};
-
-use super::expr::ErrorCollector;
 use super::{
     Attribute, Desugared, ExprArena, ExprId, ExprVisitor, FormatWithIndent, GenericParams,
     MutTypeTypeSpan, PFnArgType, PFnEffects, PTypeConstraint, PTypeSpan, Parsed, Phase,
     TypeConstraintEffectOutput, TypeConstraintInput, TypeConstraintOutput, TypeSpan, UseTree,
-    UstrSpan, VisitExpr, format_effect_binding_value,
+    UstrSpan, VisitExpr, expr::ErrorCollector, format_effect_binding_value,
+};
+use crate::{
+    Location,
+    compiler::error::LocatedError,
+    format::{
+        FormatWith, write_identifier, write_identifier_list, write_with_separator_and_format_fn,
+    },
+    hir::value::LiteralValue,
+    module::{ModuleEnv, Visibility},
+    types::{effects::EffType, mutability::FormatInFnArg, r#type::Type, type_like::TypeLike},
 };
 
 #[derive(Debug, Clone)]
@@ -684,7 +680,7 @@ fn fmt_subscript_definition<P: Phase>(
 }
 
 impl<'a> FormatWith<ModuleEnv<'_>> for ModuleDisplay<'a, Parsed> {
-    fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv) -> std::fmt::Result {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv) -> fmt::Result {
         let module = self.module;
         let arena = self.arena;
         if !module.type_aliases.is_empty() {

@@ -1,14 +1,14 @@
-use crate::{
-    module::{
-        ProjectionEntry, ProjectionKey, ProjectionReceiverKey, SubscriptDefinition,
-        SubscriptMember, SubscriptSignature,
-    },
-    types::r#type::{FnArgType, Type},
-};
-
 use super::{
     SnapshotError, SnapshotTypeGraphBuilder, SnapshotTypeId, semantic::SnapshotConstraint,
     type_graph::SnapshotFnArgType,
+};
+use crate::{
+    Location,
+    module::{
+        ProjectionEntry, ProjectionKey, ProjectionReceiverKey, SubscriptDefinition,
+        SubscriptMember, SubscriptSignature, SubscriptSignatureState, TypeDefId,
+    },
+    types::r#type::{FnArgType, Type},
 };
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -16,8 +16,8 @@ use super::{
 pub(crate) struct SnapshotSubscript {
     args: Vec<SnapshotFnArgType>,
     ret: SnapshotTypeId,
-    generic_params: Vec<(String, crate::Location)>,
-    generic_effect_params: Vec<(String, crate::Location)>,
+    generic_params: Vec<(String, Location)>,
+    generic_effect_params: Vec<(String, Location)>,
     arg_names: Vec<String>,
     constraints: Vec<SnapshotConstraint>,
     doc: Option<String>,
@@ -29,7 +29,7 @@ pub(crate) struct SnapshotSubscript {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SnapshotProjectionReceiver {
     Structural(SnapshotTypeId),
-    Nominal(crate::module::TypeDefId),
+    Nominal(TypeDefId),
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -106,7 +106,7 @@ impl SnapshotSubscript {
 
     pub(crate) fn materialize(&self, types: &[Type]) -> Result<SubscriptDefinition, SnapshotError> {
         Ok(SubscriptDefinition {
-            signature: crate::module::SubscriptSignatureState::Resolved(SubscriptSignature {
+            signature: SubscriptSignatureState::Resolved(SubscriptSignature {
                 args: live_args(&self.args, types)?,
                 ret: live_type(types, self.ret)?,
                 generic_params: self

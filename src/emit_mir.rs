@@ -6,49 +6,49 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::fmt::Write;
+use std::{fmt::Write, mem};
 
-use crate::FxHashMap;
 use ustr::Ustr;
 
-use crate::hir::function::ArgConvention;
-use crate::mir::{
-    Instantiation, Operation, builder::FunctionBuilder, operation::SourceFallibility,
-    terminator::Terminator,
-};
-use crate::module::{
-    EvidenceBindingId, ExtraParameterId, ResolvedLocalClone, ResolvedLocalDrop,
-    ResolvedTakeLocalValueMode,
-};
-use crate::types::r#trait::{
-    TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex,
-};
-use crate::types::r#type::{
-    CallImplType, CallResultConvention, FnType, SubscriptResultConvention, TypeKind,
-};
 use crate::{
-    Location, Modules, containers,
+    FxHashMap, Location, Modules,
+    compiler::MirArtifacts,
+    containers,
     format::FormatWith,
     hir::{
         self, CallArgument, Case, ENode, ENodeArena, Elaborated, GetDictionary, LoopId,
         dictionary::{DictionaryReq, EvidenceBinding, EvidenceBindingSource, StaticEvidence},
+        function::ArgConvention,
         value::LiteralValue,
     },
-    mir::{self, BlockId},
+    mir::{
+        self, BlockId, Instantiation, Operation, builder::FunctionBuilder,
+        operation::SourceFallibility, terminator::Terminator,
+    },
     module::{
-        self, FunctionId, LocalDeclId, LocalFunctionId, Module, ModuleEnv, ModuleId,
-        TraitDictionaryEntry, TraitDictionaryId, TraitImplId, id::Id,
+        self, EvidenceBindingId, ExtraParameterId, FunctionId, LocalDeclId, LocalFunctionId,
+        Module, ModuleEnv, ModuleId, ResolvedLocalClone, ResolvedLocalDrop,
+        ResolvedTakeLocalValueMode, TraitDictionaryEntry, TraitDictionaryId, TraitImplId, id::Id,
     },
     std::{
         STD_MODULE_ID,
         core_traits_names::VALUE_TRAIT_NAME,
+        math::int_type,
         value::{
             VALUE_ALIGN_ASSOC_CONST_INDEX, VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX,
-            VALUE_SIZE_ASSOC_CONST_INDEX, dynamic_product_member_layouts, type_has_static_layout,
+            VALUE_SIZE_ASSOC_CONST_INDEX, dynamic_product_member_layouts,
+            function_value_method_name, type_has_static_layout,
             value_layout_associated_const_values, value_layout_getter_entry,
         },
     },
-    types::{effects::no_effects, r#type::Type, type_properties::concrete_type_is_trivial_copy},
+    types::{
+        effects::{Effect, PrimitiveEffect, no_effects},
+        r#trait::{TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex},
+        r#type::{
+            CallImplType, CallResultConvention, FnType, SubscriptResultConvention, Type, TypeKind,
+        },
+        type_properties::concrete_type_is_trivial_copy,
+    },
 };
 
 /// A textual MIR dump together with best-effort links from rendered MIR ranges back to source.
@@ -118,7 +118,7 @@ fn static_evidence_value(evidence: mir::value::StaticEvidence) -> mir::Value {
 pub(crate) fn emit_mir_with_source_map(
     module: &Module,
     others: &Modules,
-    artifacts: &crate::compiler::MirArtifacts,
+    artifacts: &MirArtifacts,
 ) -> MirText {
     let mut functions: Vec<(Ustr, LocalFunctionId)> = (0..module.function_count())
         .map(LocalFunctionId::from_index)
@@ -694,14 +694,10 @@ impl<'a> Emitter<'a> {
         // The compiler-provided `Value` methods of function types are module-wide named
         // functions, not impl members; resolve the drop sibling by its well-known name.
         if module.get_function_name_by_id(clone.function)
-            == Some(crate::std::value::function_value_method_name(
-                VALUE_CLONE_METHOD_INDEX,
-            ))
+            == Some(function_value_method_name(VALUE_CLONE_METHOD_INDEX))
         {
             let drop_fn = module
-                .get_local_function_id(crate::std::value::function_value_method_name(
-                    VALUE_DROP_METHOD_INDEX,
-                ))
+                .get_local_function_id(function_value_method_name(VALUE_DROP_METHOD_INDEX))
                 .expect("a module with a function-value clone must also provide its drop");
             return self.demand_function(drop_fn, clone.module);
         }
@@ -1022,7 +1018,7 @@ impl<'a> Emitter<'a> {
     /// cleanup action uses `failure_during_cleanup` as its error successor: a second source failure
     /// poisons the executor instead of starting a replacement unwind.
     fn fill_pending_pads(&mut self) {
-        let pads = std::mem::take(&mut self.context.pending_pads);
+        let pads = mem::take(&mut self.context.pending_pads);
         for pad in pads {
             self.context.point = InsertionPoint::End(pad.block);
             debug_assert!(matches!(
@@ -1427,11 +1423,7 @@ impl<'a> Emitter<'a> {
                 data_place.clone(),
             ],
             CallImplType::value(FnType::new_by_val(
-                [
-                    crate::std::math::int_type(),
-                    crate::std::math::int_type(),
-                    crate::std::math::int_type(),
-                ],
+                [int_type(), int_type(), int_type()],
                 fields[data_index].1,
                 no_effects(),
             )),
@@ -1460,8 +1452,8 @@ impl<'a> Emitter<'a> {
                         FnType::new_mut_resolved(
                             [
                                 (fields[data_index].1, true),
-                                (crate::std::math::int_type(), false),
-                                (crate::std::math::int_type(), false),
+                                (int_type(), false),
+                                (int_type(), false),
                             ],
                             element_ty,
                             no_effects(),
@@ -1530,9 +1522,7 @@ impl<'a> Emitter<'a> {
     /// Allocates a fresh `int` slot, stores the constant `value` into it, and returns its place.
     /// Used to materialize the by-pointer integer arguments of synthesized `buffer_*` calls.
     fn int_constant_place(&mut self, span: Location, value: isize) -> mir::Value {
-        let place = self
-            .insert(Operation::alloca(span, crate::std::math::int_type()))
-            .unwrap();
+        let place = self.insert(Operation::alloca(span, int_type())).unwrap();
         let value = self.int_constant(value);
         self.insert(Operation::store(span, value, place.clone()));
         place
@@ -1594,9 +1584,7 @@ impl<'a> Emitter<'a> {
                 Type::function_type(getter_fn_ty.clone()),
             ))
             .unwrap();
-        let result = self
-            .insert(Operation::alloca(span, crate::std::math::int_type()))
-            .unwrap();
+        let result = self.insert(Operation::alloca(span, int_type())).unwrap();
         self.insert(Operation::call(
             span,
             getter_place,
@@ -1608,10 +1596,7 @@ impl<'a> Emitter<'a> {
 
     /// Interns a typed Ferlium `int` in the function-local constant pool.
     fn int_constant(&mut self, value: isize) -> mir::Value {
-        self.immediate_constant(
-            crate::std::math::int_type(),
-            LiteralValue::new_native(value),
-        )
+        self.immediate_constant(int_type(), LiteralValue::new_native(value))
     }
 
     /// Stores the integer constant `value` into the `index`-th field (of type `ty`) of the record
@@ -3444,9 +3429,7 @@ struct DropObligation {
 /// source-error classification.
 fn call_type_is_fallible(ty: &CallImplType) -> bool {
     ty.effects()
-        .contains(crate::types::effects::Effect::Primitive(
-            crate::types::effects::PrimitiveEffect::Fallible,
-        ))
+        .contains(Effect::Primitive(PrimitiveEffect::Fallible))
         || ty.effects().has_variables()
 }
 

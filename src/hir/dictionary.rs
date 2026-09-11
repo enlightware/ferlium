@@ -7,6 +7,8 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
+use std::fmt;
+
 use ustr::Ustr;
 
 use crate::{
@@ -15,7 +17,7 @@ use crate::{
     module::{
         EvidenceBindingId, ExtraParameterId, LocalFunctionId, ModuleEnv,
         PendingGeneratedStructuralProjectionSubscripts, SubscriptId, TraitDictionaryId, TraitId,
-        id::Id,
+        TraitImplId, id::Id,
     },
     types::{
         effects::{EffType, EffectVar},
@@ -273,11 +275,7 @@ impl PartialEq for DictionaryReq {
 impl Eq for DictionaryReq {}
 
 impl FormatWith<ModuleEnv<'_>> for DictionaryReq {
-    fn fmt_with(
-        &self,
-        f: &mut std::fmt::Formatter,
-        env: &crate::module::ModuleEnv<'_>,
-    ) -> std::fmt::Result {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
         use DictionaryReq::*;
         match self {
             ProjectionSubscript {
@@ -622,10 +620,7 @@ impl<'d, 'sr, 'sm> DictElaborationCtx<'d, 'sr, 'sm> {
             };
             let expected = self
                 .trait_solver
-                .get_impl_data_by_id(crate::module::TraitImplId::new(
-                    definition.module_id,
-                    definition.impl_id,
-                ))
+                .get_impl_data_by_id(TraitImplId::new(definition.module_id, definition.impl_id))
                 .dictionary_value
                 .capture_schema();
             assert_eq!(

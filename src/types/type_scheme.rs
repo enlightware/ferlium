@@ -12,39 +12,43 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use crate::{FxHashMap, FxHashSet};
-
-use crate::{
-    Location,
-    ast::UstrSpan,
-    compiler::error::InternalCompilationError,
-    format::{type_variable_index_to_string_latin, type_variable_subscript},
-    hir::dictionary::ExtraParameters,
-    parser::location::InstantiableLocation,
-    std::value::{
-        is_compiler_provided_value_trait_application,
-        is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
-    },
-    types::trait_solver::TraitSolver,
-    types::type_inference::unify::UnifiedTypeInference,
-    types::type_like::{TypeLike, instantiate_types_in_place},
-    types::type_mapper::{BitmapInstantiationMapper, TypeMapper},
-    types::type_visitor::TypeInnerVisitor,
-};
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
 use ustr::Ustr;
 
 use crate::{
-    hir::FnInstData,
-    hir::dictionary::{DictionaryReq, instantiate_dictionary_requirements},
-    module::{ModuleEnv, TraitId},
-    types::effects::{EffType, EffectVar, EffectsInstSubst, no_effects},
-    types::r#type::{
-        FnArgType, SubscriptMemberType, SubscriptResultConvention, SubscriptType, Type,
-        TypeDisplayEnv, TypeInstSubst, TypeVar,
+    FxHashMap, FxHashSet, Location,
+    ast::UstrSpan,
+    compiler::error::InternalCompilationError,
+    format::{type_variable_index_to_string_latin, type_variable_subscript},
+    hir::{
+        FnInstData, NodeArena,
+        dictionary::{DictionaryReq, ExtraParameters, instantiate_dictionary_requirements},
     },
-    types::type_inference::{expr::TypeInference, substitution::InstSubst},
+    module::{ModuleEnv, TraitId},
+    parser::location::InstantiableLocation,
+    std::{
+        STD_MODULE_ID,
+        core_traits_names::{REPR_TRAIT_NAME, VALUE_TRAIT_NAME},
+        value::{
+            is_compiler_provided_value_trait_application,
+            is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
+        },
+    },
+    types::{
+        effects::{EffType, EffectVar, EffectsInstSubst, no_effects},
+        trait_solver::TraitSolver,
+        r#type::{
+            FnArgType, SubscriptMemberType, SubscriptResultConvention, SubscriptType, Type,
+            TypeDisplayEnv, TypeInstSubst, TypeVar,
+        },
+        type_inference::{
+            expr::TypeInference, substitution::InstSubst, unify::UnifiedTypeInference,
+        },
+        type_like::{TypeLike, instantiate_types_in_place},
+        type_mapper::{BitmapInstantiationMapper, TypeMapper},
+        type_visitor::TypeInnerVisitor,
+    },
 };
 
 /// Which projection implementations may satisfy projection evidence.
@@ -333,7 +337,7 @@ impl PubTypeConstraint {
         &self,
         subst: &mut InstSubst,
         trait_solver: &mut TraitSolver<'_>,
-        arena: &mut crate::hir::NodeArena,
+        arena: &mut NodeArena,
     ) -> Result<Option<Self>, InternalCompilationError> {
         let constraint = self.instantiate_simple(subst);
         use PubTypeConstraint::*;
@@ -1127,7 +1131,7 @@ pub(crate) fn normalize_types(tys: &mut [TypeVar]) -> TypeInstSubst {
 }
 
 fn is_std_trait(env: ModuleEnv<'_>, trait_id: TraitId, name: &str) -> bool {
-    trait_id.module == crate::std::STD_MODULE_ID && env.trait_def(trait_id).name == name
+    trait_id.module == STD_MODULE_ID && env.trait_def(trait_id).name == name
 }
 
 /// Extra functions parameters that must be passed to resolve polymorphism for a list of constraints.
@@ -1147,11 +1151,7 @@ pub(crate) fn extra_parameters_from_constraints(
             ..
         } = constraint
         {
-            if is_std_trait(
-                env,
-                *trait_id,
-                crate::std::core_traits_names::REPR_TRAIT_NAME,
-            ) {
+            if is_std_trait(env, *trait_id, REPR_TRAIT_NAME) {
                 let input_ty = input_tys.first().unwrap();
                 let output_ty = output_tys.first().unwrap();
                 let in_var = input_ty.data().as_variable().copied();
@@ -1178,7 +1178,7 @@ pub(crate) fn extra_parameters_from_constraints(
 
     // Process other constraints needing runtime evidence. Variant payload layout obligations are
     // case-qualified uses of ordinary `Value<B>` evidence, not additional runtime parameters.
-    let value_trait_id = env.expect_std_trait_id(crate::std::core_traits_names::VALUE_TRAIT_NAME);
+    let value_trait_id = env.expect_std_trait_id(VALUE_TRAIT_NAME);
     let mut requirements = Vec::new();
     for constraint in constraints {
         let requirement = match constraint {
