@@ -21,18 +21,27 @@ use crate::{
     hir::{
         function::ArgConvention,
         native_functions::{NativeEntry, NativeFailureState, NativeParameter, NativeResult},
-        value::{LiteralValue, Value},
+        value::{LiteralValue, Value, VariantPayloadStorage},
     },
     mir::{
-        self, Function, Operation, OperationKind, ValueId, function::ParameterKind,
+        self, Function, Operation, OperationKind, ValueId,
+        function::ParameterKind,
+        role::{MirType, ValueRoles},
         terminator::TerminatorKind,
+        value::StaticEvidence,
     },
-    module::{FunctionId, ModuleEnv, id::Id},
-    types::r#type::CallResultConvention,
+    module::{DictionaryEntryEvidence, FunctionId, ModuleEnv, TraitDictionaryId, id::Id},
+    std::value::VALUE_CLONE_METHOD_INDEX,
+    types::{
+        r#type::{CallResultConvention, Type, TypeKind},
+        type_inference::substitution::InstSubst,
+        type_like::TypeLike,
+        type_mapper::SimpleInstantiationMapper,
+    },
 };
 use memory::{Address, Memory, Scalar, ScalarKind, StoredValue};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::{fmt::Display, process::abort, rc::Rc};
+use std::{fmt::Display, mem, process::abort, rc::Rc};
 use ustr::Ustr;
 
 fn unsupported(detail: impl Display) -> RuntimeError {
@@ -51,9 +60,166 @@ enum Binding {
     Tag(Ustr),
     Place(Address),
     StackMarker(usize),
+    Evidence(Evidence),
+    Callable(Callable),
+}
+
+/// Non-owning dictionary dispatch metadata; never stored in guest value memory.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Evidence {
+    Dictionary {
+        definition: TraitDictionaryId,
+        captures: Vec<Evidence>,
+        ty: Type,
+    },
+    Storage(bool),
+}
+
+impl Evidence {
+    fn ty(&self) -> Type {
+        match self {
+            Self::Dictionary { ty, .. } => *ty,
+            Self::Storage(_) => ScalarKind::Bool.ty(),
+        }
+    }
+
+    fn layout_type(&self) -> Result<Type, RuntimeError> {
+        // A Value dictionary's clone signature names the witnessed storage type, including
+        // phantom types not recoverable from a value argument. Layout is computed by Memory
+        // from that concrete identity and the current ABI catalog, never from boxed data.
+        let data = self.ty().data();
+        let fields = data
+            .as_tuple()
+            .ok_or_else(|| invalid("expected Value layout evidence"))?;
+        let clone = fields
+            .get(usize::from(VALUE_CLONE_METHOD_INDEX))
+            .ok_or_else(|| invalid("missing Value clone entry"))?
+            .data();
+        let ty = clone
+            .as_function()
+            .ok_or_else(|| invalid("invalid Value clone entry"))?
+            .ret;
+        Ok(ty)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct Callable {
+    function: FunctionId,
+    captures: Vec<Evidence>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Input {
+    Place(Type),
+    Evidence(Evidence),
+}
+
+impl Input {
+    fn ty(&self) -> Type {
+        match self {
+            Self::Place(ty) => *ty,
+            Self::Evidence(evidence) => evidence.ty(),
+        }
+    }
+}
+
+/// Concrete type identities for checked storage, not specialized copies of MIR bodies.
+#[derive(Default)]
+struct RuntimeTypes(InstSubst);
+
+impl RuntimeTypes {
+    fn resolve(&self, ty: Type) -> Type {
+        ty.map(&mut SimpleInstantiationMapper::new(&self.0))
+    }
+
+    fn bind(&mut self, pattern: Type, actual: Type) -> Result<(), RuntimeError> {
+        let mut pending = vec![(pattern, actual)];
+        let mut seen = FxHashSet::default();
+        while let Some((pattern, actual)) = pending.pop() {
+            if pattern == actual || !seen.insert((pattern, actual)) {
+                continue;
+            }
+            let lhs = pattern.data();
+            let rhs = actual.data();
+            use TypeKind::*;
+            let pairs: Vec<_> = match (&*lhs, &*rhs) {
+                (Variable(var), _) => {
+                    if let Some(previous) = self.0.0.insert(*var, actual) {
+                        if previous != actual {
+                            return Err(invalid("inconsistent runtime type evidence"));
+                        }
+                    }
+                    continue;
+                }
+                (Tuple(a), Tuple(b)) if a.len() == b.len() => {
+                    a.iter().copied().zip(b.iter().copied()).collect()
+                }
+                (Record(a), Record(b)) | (Variant(a), Variant(b))
+                    if a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.0 == b.0) =>
+                {
+                    a.iter().zip(b).map(|(a, b)| (a.1, b.1)).collect()
+                }
+                (Named(a), Named(b)) if a.def == b.def && a.params.len() == b.params.len() => a
+                    .params
+                    .iter()
+                    .copied()
+                    .zip(b.params.iter().copied())
+                    .collect(),
+                (Native(a), Native(b))
+                    if a.bare_ty == b.bare_ty && a.arguments.len() == b.arguments.len() =>
+                {
+                    a.arguments
+                        .iter()
+                        .copied()
+                        .zip(b.arguments.iter().copied())
+                        .collect()
+                }
+                // Effect and mutability annotations do not change dictionary storage identity.
+                (Function(a), Function(b)) if a.args.len() == b.args.len() => a
+                    .args
+                    .iter()
+                    .zip(&b.args)
+                    .map(|(a, b)| (a.ty, b.ty))
+                    .chain([(a.ret, b.ret)])
+                    .collect(),
+                _ => return Err(invalid("runtime type mismatch")),
+            };
+            pending.extend(pairs);
+        }
+        Ok(())
+    }
+
+    fn for_call(body: &Function, inputs: &[Input]) -> Result<Self, RuntimeError> {
+        if inputs.len() != body.parameters().len() {
+            return Err(invalid("call arity mismatch"));
+        }
+        let mut types = Self::default();
+        for (parameter, input) in body.parameters().iter().zip(inputs) {
+            if (parameter.kind == ParameterKind::Dictionary) != matches!(input, Input::Evidence(_))
+            {
+                return Err(invalid("call evidence role mismatch"));
+            }
+            types.bind(parameter.ty, input.ty())?;
+        }
+        Ok(types)
+    }
 }
 
 impl Binding {
+    fn evidence(self) -> Result<Evidence, RuntimeError> {
+        match self {
+            Self::Evidence(evidence) => Ok(evidence),
+            Self::Scalar(Scalar::Bool(value)) => Ok(Evidence::Storage(value)),
+            _ => Err(invalid("expected evidence")),
+        }
+    }
+    fn callable(self) -> Result<Callable, RuntimeError> {
+        match self {
+            Self::Callable(callable) => Ok(callable),
+            _ => Err(unsupported("first-class callable storage")),
+        }
+    }
     fn place(&self) -> Result<Address, RuntimeError> {
         match self {
             Self::Place(address) => Ok(*address),
@@ -63,6 +229,7 @@ impl Binding {
     fn scalar(self) -> Result<Scalar, RuntimeError> {
         match self {
             Self::Scalar(value) => Ok(value),
+            Self::Evidence(Evidence::Storage(value)) => Ok(Scalar::Bool(value)),
             _ => Err(invalid("expected a scalar register")),
         }
     }
@@ -83,14 +250,10 @@ pub(crate) fn run_entry(
         limits,
         fuel: limits.execution.fuel_limit,
         depth: 0,
+        session,
+        types: RuntimeTypes::default(),
     };
-    interpreter.check_supported(
-        entry,
-        ModuleEnv::new(
-            session.expect_fresh_module(entry.module),
-            session.raw_modules(),
-        ),
-    )?;
+    interpreter.check_supported(entry)?;
     interpreter
         .memory
         .bind_tags(|tag| session.variant_tag_id(tag));
@@ -136,6 +299,8 @@ struct Interpreter<'a, 'p> {
     limits: ReferenceInterpreterLimits,
     fuel: Option<usize>,
     depth: usize,
+    session: &'a CompilerSession,
+    types: RuntimeTypes,
 }
 
 impl<'a, 'p> Interpreter<'a, 'p> {
@@ -146,17 +311,188 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             .ok_or_else(|| unsupported(format!("native entry {id:?}")))
     }
 
-    /// Capability checking of reachable callees, not another verifier or a whole-std scan.
-    fn check_supported(
-        &mut self,
-        entry: FunctionId,
-        env: ModuleEnv<'_>,
-    ) -> Result<(), RuntimeError> {
-        let mut pending = vec![entry];
+    fn env(&self, id: FunctionId) -> ModuleEnv<'a> {
+        ModuleEnv::new(
+            self.session.expect_fresh_module(id.module),
+            self.session.raw_modules(),
+        )
+    }
+
+    fn dictionary(
+        &self,
+        definition: TraitDictionaryId,
+        captures: Vec<Evidence>,
+    ) -> Result<Evidence, RuntimeError> {
+        let mut pending = captures.iter().map(|e| (e, 1)).collect::<Vec<_>>();
+        let mut count = 0;
+        while let Some((evidence, depth)) = pending.pop() {
+            count += 1;
+            if count > 4096 || depth >= 64 {
+                return Err(unsupported("dictionary capture expansion limit"));
+            }
+            if let Evidence::Dictionary { captures, .. } = evidence {
+                pending.extend(captures.iter().map(|e| (e, depth + 1)));
+            }
+        }
+        let definition_data = self
+            .program
+            .dictionary(definition)
+            .ok_or_else(|| invalid("unresolved dictionary"))?;
+        if captures.len() != definition_data.capture_schema().len() {
+            return Err(invalid("dictionary capture count mismatch"));
+        }
+        let env = ModuleEnv::new(
+            self.session.expect_fresh_module(definition.module_id),
+            self.session.raw_modules(),
+        );
+        let mut types = RuntimeTypes::default();
+        for (requirement, capture) in definition_data.capture_schema().iter().zip(&captures) {
+            types.bind(requirement.to_dict_type_in_env(&env), capture.ty())?;
+        }
+        Ok(Evidence::Dictionary {
+            definition,
+            ty: types.resolve(definition_data.ty()),
+            captures,
+        })
+    }
+
+    fn static_evidence(
+        &self,
+        evidence: &StaticEvidence,
+        depth: usize,
+    ) -> Result<Evidence, RuntimeError> {
+        if depth >= 64 {
+            return Err(unsupported("evidence nesting limit"));
+        }
+        match evidence {
+            StaticEvidence::Dictionary {
+                definition,
+                captures,
+            } => self.dictionary(
+                *definition,
+                captures
+                    .iter()
+                    .map(|e| self.static_evidence(e, depth + 1))
+                    .collect::<Result<_, _>>()?,
+            ),
+            StaticEvidence::VariantPayloadStorage(value) => Ok(Evidence::Storage(*value)),
+            _ => Err(unsupported("subscript evidence")),
+        }
+    }
+
+    fn dictionary_entry(&self, evidence: Evidence, index: usize) -> Result<Callable, RuntimeError> {
+        let Evidence::Dictionary {
+            definition,
+            ref captures,
+            ..
+        } = evidence
+        else {
+            return Err(invalid("expected a dictionary"));
+        };
+        let entry = self
+            .program
+            .dictionary(definition)
+            .and_then(|d| d.entries().get(index))
+            .ok_or_else(|| invalid("missing dictionary entry"))?;
+        Ok(Callable {
+            function: entry.function(),
+            captures: entry
+                .capture_mapping()
+                .iter()
+                .map(|mapping| match mapping {
+                    DictionaryEntryEvidence::Capture(index) => captures
+                        .get(*index)
+                        .cloned()
+                        .ok_or_else(|| invalid("missing dictionary capture")),
+                    DictionaryEntryEvidence::SelfDictionary => Ok(evidence.clone()),
+                })
+                .collect::<Result<_, _>>()?,
+        })
+    }
+
+    /// Resolve only non-owning evidence/callees. No guest instructions or native calls run here.
+    fn symbolic(
+        &self,
+        body: &Function,
+        inputs: &[Input],
+        definitions: &FxHashMap<ValueId, &Operation>,
+        value: &mir::Value,
+        depth: usize,
+    ) -> Result<Binding, RuntimeError> {
+        if depth >= 128 {
+            return Err(unsupported("evidence nesting limit"));
+        }
+        let get = |value| self.symbolic(body, inputs, definitions, value, depth + 1);
+        match value {
+            mir::Value::Dictionary(id) => Ok(Binding::Evidence(self.dictionary(*id, vec![])?)),
+            mir::Value::Evidence(e) => Ok(Binding::Evidence(self.static_evidence(e, 0)?)),
+            mir::Value::Function(function) => Ok(Binding::Callable(Callable {
+                function: *function,
+                captures: vec![],
+            })),
+            mir::Value::Parameter(id) => inputs
+                .get(id.as_index())
+                .and_then(|i| match i {
+                    Input::Evidence(e) => Some(e.clone()),
+                    _ => None,
+                })
+                .map(Binding::Evidence)
+                .ok_or_else(|| {
+                    unsupported("evidence or callees supplied through value parameters")
+                }),
+            mir::Value::Constant(id) => {
+                match Scalar::from_literal(&body.constant(*id).representation)? {
+                    Scalar::Bool(value) => Ok(Binding::Evidence(Evidence::Storage(value))),
+                    _ => Err(invalid("expected storage evidence")),
+                }
+            }
+            mir::Value::Register(id) => {
+                let operation = definitions
+                    .get(id)
+                    .ok_or_else(|| invalid("missing evidence definition"))?;
+                match &operation.kind {
+                    OperationKind::BuildDictionary { definition, .. } => {
+                        let captures = operation
+                            .operands
+                            .iter()
+                            .map(|v| get(v)?.evidence())
+                            .collect::<Result<_, _>>()?;
+                        Ok(Binding::Evidence(self.dictionary(*definition, captures)?))
+                    }
+                    OperationKind::DictEntry { entry_index, .. } => {
+                        Ok(Binding::Callable(self.dictionary_entry(
+                            get(&operation.operands[0])?.evidence()?,
+                            entry_index.as_index(),
+                        )?))
+                    }
+                    OperationKind::Load => get(&operation.operands[0]),
+                    _ => Err(unsupported("data-dependent evidence or callees")),
+                }
+            }
+            _ => Err(unsupported("subscript evidence")),
+        }
+    }
+
+    /// Check each reachable instantiation, including calls in untaken branches. The bound also
+    /// prevents polymorphic recursion from expanding an unbounded preparation graph before fuel.
+    fn check_supported(&mut self, entry: FunctionId) -> Result<(), RuntimeError> {
+        let body = self
+            .program
+            .function(entry)
+            .ok_or_else(|| unsupported("native host entry points"))?;
+        let inputs = body
+            .parameters()
+            .iter()
+            .map(|p| Input::Place(p.ty))
+            .collect::<Vec<_>>();
+        let mut pending = vec![(entry, inputs)];
         let mut visited = FxHashSet::default();
-        while let Some(id) = pending.pop() {
-            if !visited.insert(id) {
+        while let Some((id, inputs)) = pending.pop() {
+            if !visited.insert((id, inputs.clone())) {
                 continue;
+            }
+            if visited.len() > 4096 {
+                return Err(unsupported("generic preparation limit"));
             }
             let Some(body) = self.program.function(id) else {
                 let native = self.native(id)?;
@@ -181,47 +517,139 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             ) {
                 return Err(unsupported("place/yield call conventions"));
             }
-            for parameter in body.parameters() {
-                if parameter.kind == ParameterKind::Dictionary {
-                    return Err(unsupported("generic evidence"));
-                }
-                self.memory.prepare_type(parameter.ty, &env)?;
-            }
-            for constant in body.constants() {
-                self.memory.prepare_type(constant.ty, &env)?;
-                self.memory.literal(constant.ty, &constant.representation)?;
-            }
-            for block in body.blocks() {
-                let block = body.block(block);
-                for operation in block
-                    .operations()
-                    .iter()
-                    .chain(match &block.terminator().kind {
+            let types = RuntimeTypes::for_call(body, &inputs)?;
+            let env = self.env(id);
+            let roles = ValueRoles::derive(body);
+            let operations = body
+                .blocks()
+                .flat_map(|b| {
+                    let b = body.block(b);
+                    b.operations().iter().chain(match &b.terminator().kind {
                         TerminatorKind::Invoke { operation, .. } => Some(operation),
                         _ => None,
                     })
-                {
-                    match operation.kind {
-                        OperationKind::Alloca { ty }
-                        | OperationKind::AddressOffset { ty, .. }
-                        | OperationKind::Clone { ty }
-                        | OperationKind::Drop { ty }
-                        | OperationKind::MoveBytes { ty } => self.memory.prepare_type(ty, &env)?,
-                        OperationKind::AllocaPlace { pointing_to }
-                        | OperationKind::AddressOffsetPlace { pointing_to } => {
-                            self.memory.prepare_type(pointing_to, &env)?
-                        }
-                        OperationKind::RuntimeAlloc { pointee } => {
-                            self.memory.prepare_type(pointee, &env)?
-                        }
-                        OperationKind::Variant { ref metadata, .. } => {
-                            self.memory.prepare_type(metadata.ty, &env)?
-                        }
-                        _ => (),
-                    }
-                    Self::check_operation(operation, &mut pending)?;
+                })
+                .collect::<Vec<_>>();
+            let definitions = operations
+                .iter()
+                .filter_map(|op| op.result_id().map(|id| (id, *op)))
+                .collect();
+            for parameter in body.parameters() {
+                if parameter.kind != ParameterKind::Dictionary {
+                    self.memory
+                        .prepare_type(types.resolve(parameter.ty), &env)?;
                 }
-                match &block.terminator().kind {
+            }
+            for constant in body.constants() {
+                let ty = types.resolve(constant.ty);
+                self.memory.prepare_type(ty, &env)?;
+                self.memory.literal(ty, &constant.representation)?;
+            }
+            for operation in operations {
+                Self::check_operation(operation)?;
+                match &operation.kind {
+                    OperationKind::Alloca { ty }
+                    | OperationKind::AddressOffset { ty, .. }
+                    | OperationKind::Clone { ty }
+                    | OperationKind::Drop { ty }
+                    | OperationKind::MoveBytes { ty } => {
+                        self.memory.prepare_type(types.resolve(*ty), &env)?
+                    }
+                    OperationKind::AllocaPlace { pointing_to }
+                    | OperationKind::AddressOffsetPlace { pointing_to } => self
+                        .memory
+                        .prepare_type(types.resolve(*pointing_to), &env)?,
+                    OperationKind::RuntimeAlloc { pointee } => {
+                        self.memory.prepare_type(types.resolve(*pointee), &env)?
+                    }
+                    OperationKind::Variant { metadata, .. } => {
+                        self.memory.prepare_type(types.resolve(metadata.ty), &env)?
+                    }
+                    OperationKind::BuildDictionary { .. } | OperationKind::DictEntry { .. } => {
+                        self.symbolic(
+                            body,
+                            &inputs,
+                            &definitions,
+                            &mir::Value::Register(operation.result_id().unwrap()),
+                            0,
+                        )?;
+                    }
+                    _ => (),
+                }
+                let witness_index = match &operation.kind {
+                    OperationKind::Alloca { .. } if !operation.operands.is_empty() => Some(0),
+                    OperationKind::Move | OperationKind::Replace
+                        if operation.operands.len() == 3 =>
+                    {
+                        Some(2)
+                    }
+                    OperationKind::Variant {
+                        has_layout_witness: true,
+                        ..
+                    } => Some(operation.operands.len() - 1),
+                    _ => None,
+                };
+                if let Some(index) = witness_index {
+                    let witness = self
+                        .symbolic(body, &inputs, &definitions, &operation.operands[index], 0)?
+                        .evidence()?;
+                    self.memory.prepare_type(witness.layout_type()?, &env)?;
+                }
+                let callee_index = match operation.kind {
+                    OperationKind::Call { .. } => 0,
+                    OperationKind::Clone { .. } => 2,
+                    OperationKind::Drop { .. } => 1,
+                    _ => continue,
+                };
+                let callable = self
+                    .symbolic(
+                        body,
+                        &inputs,
+                        &definitions,
+                        &operation.operands[callee_index],
+                        0,
+                    )?
+                    .callable()?;
+                let mut target_inputs = callable
+                    .captures
+                    .iter()
+                    .map(|e| Input::Evidence(e.clone()))
+                    .collect::<Vec<_>>();
+                let values = if callee_index == 0 {
+                    operation.operands[1..].iter().collect::<Vec<_>>()
+                } else {
+                    operation.operands[callee_index + 1..]
+                        .iter()
+                        .chain(operation.operands[..callee_index].iter())
+                        .collect()
+                };
+                for value in values {
+                    let role = roles
+                        .get(value, body.constants())
+                        .ok_or_else(|| invalid("missing operand role"))?;
+                    let pointee = role.place_pointee_type();
+                    if let Some(mut ty) = pointee {
+                        while let MirType::Pointer(inner) = ty {
+                            ty = *inner;
+                        }
+                        let MirType::Lowered(ty) = ty else {
+                            unreachable!()
+                        };
+                        target_inputs.push(Input::Place(types.resolve(ty)));
+                    } else {
+                        let evidence = self
+                            .symbolic(body, &inputs, &definitions, value, 0)?
+                            .evidence()?;
+                        target_inputs.push(Input::Evidence(evidence));
+                    }
+                }
+                if callee_index == 1 {
+                    target_inputs.push(Input::Place(Type::unit()));
+                }
+                pending.push((callable.function, target_inputs));
+            }
+            for block in body.blocks() {
+                match &body.block(block).terminator().kind {
                     TerminatorKind::Invoke { .. }
                     | TerminatorKind::Goto { .. }
                     | TerminatorKind::CondBr { .. }
@@ -237,46 +665,23 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         Ok(())
     }
 
-    fn check_operation(
-        operation: &Operation,
-        pending: &mut Vec<FunctionId>,
-    ) -> Result<(), RuntimeError> {
-        // Physical preparation already verifies operand arities. These are capability checks:
-        // e.g. a third Move operand is valid MIR, but needs dynamic-layout support here.
+    fn check_operation(operation: &Operation) -> Result<(), RuntimeError> {
+        // Physical preparation already verifies operand arities; this checks execution capabilities.
         use OperationKind::*;
         match &operation.kind {
-            Alloca { .. } => {
-                if !operation.operands.is_empty() {
-                    return Err(unsupported("dynamic layouts"));
-                }
-            }
-            Clone { .. } | Drop { .. } => {
-                let index = if matches!(operation.kind, Clone { .. }) {
-                    2
-                } else {
-                    1
-                };
-                match operation.operands[index] {
-                    mir::Value::Function(id) if operation.operands.len() == index + 1 => {
-                        pending.push(id)
-                    }
-                    _ => return Err(unsupported("indirect lifecycle calls or hidden evidence")),
-                }
-            }
-            Call { .. } => match operation.operands[0] {
-                mir::Value::Function(id) => pending.push(id),
-                _ => return Err(unsupported("indirect calls")),
-            },
             CompareEqual => {
                 let mir::Value::Pattern(pattern) = &operation.operands[1] else {
                     return Err(invalid("expected literal pattern"));
                 };
                 Self::check_pattern(pattern)?;
             }
-            Move | Replace if operation.operands.len() != 2 => {
-                return Err(unsupported("dynamic transfers"));
-            }
-            AddressOffset { .. }
+            Alloca { .. }
+            | Clone { .. }
+            | Drop { .. }
+            | Call { .. }
+            | DictEntry { .. }
+            | BuildDictionary { .. }
+            | AddressOffset { .. }
             | AddressOffsetPlace { .. }
             | AllocaPlace { .. }
             | RuntimeAlloc { .. }
@@ -294,12 +699,8 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             | StackSave
             | StackRestore
             | CheckCallDepth
-            | CheckFuel => (),
-            Variant {
-                storage: Some(_),
-                has_layout_witness: false,
-                ..
-            } => (),
+            | CheckFuel
+            | Variant { .. } => (),
             _ => return Err(unsupported("aggregate, address, or callable operations")),
         }
         Ok(())
@@ -325,13 +726,24 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         let Some(body) = self.program.function(id) else {
             return self.call_native(id, &args);
         };
-        if args.len() != body.parameters().len() {
-            return Err(invalid("call arity mismatch"));
-        }
+        let inputs = args
+            .iter()
+            .map(|arg| match arg {
+                Binding::Evidence(e) => Ok(Input::Evidence(e.clone())),
+                Binding::Scalar(Scalar::Bool(value)) => {
+                    Ok(Input::Evidence(Evidence::Storage(*value)))
+                }
+                _ => Ok(Input::Place(arg.place()?.ty)),
+            })
+            .collect::<Result<Vec<_>, RuntimeError>>()?;
+        let types = RuntimeTypes::for_call(body, &inputs)?;
         for (argument, parameter) in args.iter().zip(body.parameters()) {
+            if parameter.kind == ParameterKind::Dictionary {
+                continue;
+            }
             // Call boundaries retain exact types. Representation-compatible stores are a separate
             // bridge between nominal products and the structural values used to construct them.
-            if argument.place()?.ty != parameter.ty {
+            if argument.place()?.ty != types.resolve(parameter.ty) {
                 return Err(invalid("call argument type mismatch"));
             }
             let pointer_result = parameter.kind == ParameterKind::Return
@@ -342,11 +754,23 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         }
         // Explicit CheckCallDepth operations preserve the boxed executor's source-level policy.
         let marker = self.memory.len();
+        let previous_types = mem::replace(&mut self.types, types);
         self.depth += 1;
         let result = self.run_frame(body, &args, marker);
         self.depth -= 1;
+        self.types = previous_types;
         self.memory.restore(marker);
         result
+    }
+
+    fn invoke(&mut self, callable: Callable, args: Vec<Binding>) -> Result<(), RuntimeError> {
+        let args = callable
+            .captures
+            .into_iter()
+            .map(Binding::Evidence)
+            .chain(args)
+            .collect();
+        self.call(callable.function, args)
     }
 
     fn operand(
@@ -357,14 +781,21 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         operand: &mir::Value,
     ) -> Result<Binding, RuntimeError> {
         match operand {
+            mir::Value::Dictionary(id) => Ok(Binding::Evidence(self.dictionary(*id, vec![])?)),
+            mir::Value::Evidence(e) => Ok(Binding::Evidence(self.static_evidence(e, 0)?)),
+            mir::Value::Function(function) => Ok(Binding::Callable(Callable {
+                function: *function,
+                captures: vec![],
+            })),
             mir::Value::Constant(id) => {
                 let constant = body.constant(*id);
                 if let Ok(scalar) = Scalar::from_literal(&constant.representation) {
                     Ok(Binding::Scalar(scalar))
                 } else {
-                    Ok(Binding::Aggregate(Rc::new(
-                        self.memory.literal(constant.ty, &constant.representation)?,
-                    )))
+                    Ok(Binding::Aggregate(Rc::new(self.memory.literal(
+                        self.types.resolve(constant.ty),
+                        &constant.representation,
+                    )?)))
                 }
             }
             mir::Value::Parameter(id) => args
@@ -483,13 +914,46 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         let operand =
             |index: usize| self.operand(body, args, registers, &operation.operands[index]);
         let place = |index| operand(index)?.place();
+        let witness = match &operation.kind {
+            Alloca { ty } if !operation.operands.is_empty() => Some((0, self.types.resolve(*ty))),
+            Move | Replace if operation.operands.len() == 3 => Some((2, place(0)?.ty)),
+            Variant {
+                metadata,
+                has_layout_witness: true,
+                ..
+            } => Some((
+                operation.operands.len() - 1,
+                self.types.resolve(metadata.payload_ty),
+            )),
+            _ => None,
+        };
+        if let Some((index, ty)) = witness {
+            if operand(index)?.evidence()?.layout_type()? != ty {
+                return Err(invalid("layout evidence differs from storage type"));
+            }
+        }
+        if let Clone { ty } | Drop { ty } | MoveBytes { ty } = &operation.kind {
+            if place(0)?.ty != self.types.resolve(*ty) {
+                return Err(invalid("operation type differs from storage type"));
+            }
+        }
         let result = match &operation.kind {
+            BuildDictionary { definition, .. } => {
+                let captures = (0..operation.operands.len())
+                    .map(|i| operand(i)?.evidence())
+                    .collect::<Result<_, _>>()?;
+                Some(Binding::Evidence(self.dictionary(*definition, captures)?))
+            }
+            DictEntry { entry_index, .. } => Some(Binding::Callable(
+                self.dictionary_entry(operand(0)?.evidence()?, entry_index.as_index())?,
+            )),
             Alloca { ty } => Some(Binding::Place(
-                self.memory.allocate(*ty, Some(operation.span))?,
+                self.memory
+                    .allocate(self.types.resolve(*ty), Some(operation.span))?,
             )),
             AllocaPlace { pointing_to } => Some(Binding::Place(
                 self.memory
-                    .allocate_place(*pointing_to, Some(operation.span))?,
+                    .allocate_place(self.types.resolve(*pointing_to), Some(operation.span))?,
             )),
             RuntimeAlloc { pointee } => {
                 let (Scalar::Int(size), Scalar::Int(align)) =
@@ -502,7 +966,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 let align =
                     usize::try_from(align).map_err(|_| invalid("negative allocation alignment"))?;
                 Some(Binding::Place(self.memory.allocate_runtime(
-                    *pointee,
+                    self.types.resolve(*pointee),
                     size,
                     align,
                     Some(operation.span),
@@ -527,20 +991,23 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 Some(Binding::Place(self.memory.project(
                     place(0)?,
                     offset,
-                    *ty,
+                    self.types.resolve(*ty),
                     *member,
                 )?))
             }
-            Load => {
-                let address = place(0)?;
-                Some(if self.memory.is_pointer_slot(address)? {
-                    Binding::Place(self.memory.read_pointer(address)?)
-                } else if ScalarKind::for_type(address.ty).is_ok() {
-                    Binding::Scalar(self.memory.read(address)?)
-                } else {
-                    Binding::Aggregate(Rc::new(self.memory.read_value(address, false)?))
-                })
-            }
+            Load => match operand(0)? {
+                Binding::Callable(callable) => Some(Binding::Callable(callable)),
+                source => {
+                    let address = source.place()?;
+                    Some(if self.memory.is_pointer_slot(address)? {
+                        Binding::Place(self.memory.read_pointer(address)?)
+                    } else if ScalarKind::for_type(address.ty).is_ok() {
+                        Binding::Scalar(self.memory.read(address)?)
+                    } else {
+                        Binding::Aggregate(Rc::new(self.memory.read_value(address, false)?))
+                    })
+                }
+            },
             Store => {
                 let destination = place(1)?;
                 match operand(0)? {
@@ -593,10 +1060,13 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 None
             }
             Clone { .. } => {
-                let mir::Value::Function(id) = operation.operands[2] else {
-                    unreachable!()
-                };
-                self.call(id, vec![operand(0)?, operand(1)?])
+                let callable = operand(2)?.callable()?;
+                let id = callable.function;
+                let values = (3..operation.operands.len())
+                    .chain(0..2)
+                    .map(operand)
+                    .collect::<Result<_, _>>()?;
+                self.invoke(callable, values)
                     .map_err(|error| error.with_frame(id, operation.span))?;
                 None
             }
@@ -607,15 +1077,17 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 // destructor must only be called once its receiver is fully constructed.
                 // IsInitialized, by contrast, asks whether the entire selected value is present.
                 if self.memory.any_initialized(address)? {
-                    let mir::Value::Function(id) = operation.operands[1] else {
-                        unreachable!()
-                    };
+                    let callable = operand(1)?.callable()?;
+                    let id = callable.function;
+                    let mut values = (2..operation.operands.len())
+                        .map(operand)
+                        .collect::<Result<Vec<_>, _>>()?;
                     let marker = self.memory.len();
                     let result = self
                         .memory
                         .allocate(ScalarKind::Unit.ty(), Some(operation.span))?;
-                    let outcome =
-                        self.call(id, vec![Binding::Place(address), Binding::Place(result)]);
+                    values.extend([Binding::Place(address), Binding::Place(result)]);
+                    let outcome = self.invoke(callable, values);
                     self.memory.restore(marker);
                     outcome.map_err(|error| error.with_frame(id, operation.span))?;
                     self.memory.clear(address)?;
@@ -644,26 +1116,33 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             Variant {
                 tag,
                 metadata,
-                storage: Some(storage),
+                storage,
                 ..
             } => Some(Binding::Aggregate(Rc::new(self.memory.shell(
-                metadata.ty,
+                self.types.resolve(metadata.ty),
                 *tag,
-                *storage,
+                match storage {
+                    Some(storage) => *storage,
+                    None => {
+                        let Scalar::Bool(indirect) = operand(0)?.scalar()? else {
+                            return Err(invalid("expected variant storage evidence"));
+                        };
+                        VariantPayloadStorage::from_indirect(indirect)
+                    }
+                },
             )?))),
             ExtractTag => Some(Binding::Tag(self.memory.tag(place(0)?)?.0)),
             ExtractPayloadIndirection => Some(Binding::Scalar(Scalar::Bool(
                 self.memory.tag(place(0)?)?.1.is_indirect(),
             ))),
             Call { .. } => {
-                let mir::Value::Function(id) = operation.operands[0] else {
-                    unreachable!()
-                };
+                let callable = operand(0)?.callable()?;
+                let id = callable.function;
                 let values = operation.operands[1..]
                     .iter()
                     .map(|value| self.operand(body, args, registers, value))
                     .collect::<Result<Vec<_>, _>>()?;
-                self.call(id, values)
+                self.invoke(callable, values)
                     .map_err(|error| error.with_frame(id, operation.span))?;
                 None
             }
@@ -809,16 +1288,112 @@ impl<'a, 'p> Interpreter<'a, 'p> {
 mod tests {
     use super::*;
     use crate::{Location, mir::physical::program::resolve_physical_program};
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    fn physical_generic_bodies_execute_without_specialization() {
+        use crate::{
+            ExecutionTarget, MirOptimization,
+            mir::physical::lower_physical_mir,
+            module::Path,
+            std::{STD_MODULE_ID, math::int_value},
+        };
+        use ustr::ustr;
+
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Disabled);
+        let support = session.compile(
+            "pub trait Describe<Self> { fn describe(value: Self) -> int; } impl Describe for int { fn describe(value: int) -> int { value } } pub struct Wrapper<T>(T) impl<T> Describe for Wrapper<T> where T: Describe, T: Value { fn describe(value: Wrapper<T>) -> int { describe(value.0) + 1 } } pub fn forward<T>(value: T) -> int where T: Describe, T: Value { describe(value) }
+             pub trait Tag<Self> { fn tag(value: Self) -> int; } impl<A> Tag for Wrapper<A> { fn tag(value: Wrapper<A>) -> int { 42 } } pub fn tagged<T>(value: T) -> int where T: Tag { tag(value) }
+             pub fn tag_wrapped<U>(value: U) -> int { tagged(Wrapper(value)) }",
+            "generic_traits", Path::single_str("generic_traits"),
+        ).unwrap().module_id;
+        session.prepare_execution_target(ExecutionTarget::Mir, support);
+        // Keep this invariant test: ordinary optimized execution can specialize away every
+        // dictionary parameter, even after the physical backend joins the full language suite.
+        for (source, supported) in [
+            "fn duplicate<T>(x: T) -> (T, T) { (x, x) } fn compute(x: int) -> ((int, bool), (int, bool)) { duplicate((x, true)) }",
+            "fn replace<T>(x: &mut T, y: T) { x = y; } fn compute(x: int) -> (int, bool) { let mut p = (1, false); replace(p, (x, true)); p }",
+            "enum List<T> { Nil, Cons(T, List<T>) } fn duplicate<T>(x: T) -> (T, T) { (x, x) } fn compute(x: int) -> (List<int>, List<int>) { duplicate(List::Cons(x, List::Nil)) }",
+            "fn first<T, U>(p: (T, U)) -> T { p.0 } fn compute(x: int) -> (int, bool) { first(((x, true), ())) }",
+            "struct Record<T> { a: bool, b: T, c: int } fn member<T>(p: Record<T>) -> T { p.b } fn compute(x: int) -> (int, bool) { member(Record { a: true, b: (x, false), c: 9 }) }",
+            "fn equal<T>(a: T, b: T) -> bool { a == b } fn compute(x: int) -> bool { equal((x, true), (7, true)) }",
+            "use generic_traits::*; fn compute(x: int) -> int { forward(Wrapper(Wrapper(x))) }",
+            // Tag has no captures: its concrete dictionary type must not inherit the impl's A.
+            "use generic_traits::*; fn compute(x: int) -> int { tagged(Wrapper(x)) }",
+            // Generic construction forwards Tag<Wrapper<U>> as evidence from the concrete caller.
+            "use generic_traits::*; fn compute(x: int) -> int { tag_wrapped(x) }",
+            "enum Choice<T> { Nothing, Item(T) } fn wrap<T>(x: T) -> Choice<T> { Choice::Item(x) } fn unwrap<T>(x: Choice<T>, fallback: T) -> T { match x { Nothing => fallback, Item(v) => v } } fn compute(x: int) -> (int, bool) { unwrap(wrap((x, true)), (0, false)) }",
+            "enum List<T> { Nil, Cons(T, List<T>) } fn fail<T>(value: T, n: int) -> (T, int) { (value, idiv(10, n)) } fn compute(x: int) -> (List<int>, int) { fail(List::Cons(x, List::Nil), x - 7) }",
+            "struct Probe(int) impl Value for Probe { fn eq(a: Probe, b: Probe) -> bool { a.0 == b.0 } fn to_string(a: Probe) -> string { to_string(a.0) } fn hash(a: Probe, s: &mut hasher) { hash(a.0, s) } fn clone(a: Probe) -> Probe { Probe(a.0 + 1) } fn drop(a: &mut Probe) { a.0 = 0; } } fn duplicate<T>(x: T) -> (T, T) { (x, x) } fn compute(x: int) -> int { let p = duplicate(Probe(x)); p.0.0 + p.1.0 }",
+        ].into_iter().map(|source| (source, true)).chain([
+            // The selected dictionary method remains unsupported even in an untaken branch.
+            ("fn maybe<T>(value: T, n: int) -> T { if n == 0 { to_string(value); }; value } fn compute(x: int) -> int { maybe(x, x) }", false),
+        ]) {
+            let module = session
+                .compile(source, "generic", Path::single_str("generic"))
+                .unwrap()
+                .module_id;
+            session.prepare_execution_target(ExecutionTarget::Mir, module);
+            let entry = session
+                .expect_fresh_module(module)
+                .get_local_function_id(ustr("compute"))
+                .unwrap();
+            let expected =
+                session.run_entry(ExecutionTarget::Mir, module, entry, vec![int_value(7)]);
+            let artifacts = [STD_MODULE_ID, support, module].map(|id| {
+                let raw = session
+                    .mir_artifacts_for(id, MirOptimization::Disabled)
+                    .unwrap();
+                lower_physical_mir(
+                    id,
+                    raw,
+                    ModuleEnv::new(session.expect_fresh_module(id), session.raw_modules()),
+                    session.known_callees(),
+                )
+                .unwrap()
+            });
+            let program = resolve_physical_program(artifacts.iter()).unwrap();
+            let actual = run_entry(
+                &program,
+                FunctionId::new(module, entry),
+                &[int_value(7)],
+                ReferenceInterpreterLimits::default(),
+                &session,
+            );
+            if !supported {
+                assert!(matches!(actual, Err(RuntimeError::Backend(_))), "{actual:?}");
+                expected.unwrap().discard_storage();
+                continue;
+            }
+            match (expected, actual) {
+                (Ok(expected), Ok(actual)) => {
+                    assert_eq!(format!("{actual:?}"), format!("{expected:?}"), "{source}");
+                    actual.discard_storage();
+                    expected.discard_storage();
+                }
+                (Err(expected), Err(actual)) => {
+                    assert_eq!(actual.kind(), expected.kind(), "{source}: {actual:?}")
+                }
+                (expected, actual) => panic!("{source}: expected={expected:?}, actual={actual:?}"),
+            }
+        }
+    }
 
     #[test]
     fn physical_scalar_transfers_preserve_absence_and_self_moves() {
         let program = resolve_physical_program([]).unwrap();
+        let session = CompilerSession::new();
         let mut interpreter = Interpreter {
             program: &program,
             memory: Memory::default(),
             limits: ReferenceInterpreterLimits::default(),
             fuel: None,
             depth: 0,
+            session: &session,
+            types: RuntimeTypes::default(),
         };
         let body = Function::new(
             "transfers".into(),
@@ -893,10 +1468,7 @@ mod tests {
                 mir::Value::Register(ValueId::from_index(0)),
                 mir::Value::Pattern(Box::new(pattern)),
             );
-            assert_eq!(
-                Interpreter::check_operation(&operation, &mut Vec::new()).is_ok(),
-                supported
-            );
+            assert_eq!(Interpreter::check_operation(&operation).is_ok(), supported);
         }
     }
 }

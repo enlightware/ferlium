@@ -14,7 +14,7 @@ use crate::{
         DictionaryEntryEvidence, FunctionId, LocalImplId, Module, ModuleId, TraitDictionaryEntry,
         TraitDictionaryId, id::Id,
     },
-    types::r#trait::TraitDictionaryEntryIndex,
+    types::{r#trait::TraitDictionaryEntryIndex, r#type::Type},
 };
 
 use super::evidence::PhysicalEvidenceReferences;
@@ -43,11 +43,16 @@ impl PhysicalDictionaryEntry {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PhysicalDictionaryDefinition {
     id: TraitDictionaryId,
+    ty: Type,
     capture_schema: Box<[DictionaryReq]>,
     entries: Box<[PhysicalDictionaryEntry]>,
 }
 
 impl PhysicalDictionaryDefinition {
+    pub(crate) fn ty(&self) -> Type {
+        self.ty
+    }
+
     pub(crate) fn id(&self) -> TraitDictionaryId {
         self.id
     }
@@ -100,6 +105,7 @@ impl PhysicalDictionaryCatalog {
                     .into_boxed_slice();
                 PhysicalDictionaryDefinition {
                     id,
+                    ty: implementation.dictionary_ty,
                     capture_schema: dictionary.capture_schema().to_vec().into_boxed_slice(),
                     entries,
                 }

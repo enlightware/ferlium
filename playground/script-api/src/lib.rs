@@ -191,6 +191,11 @@ mod tests {
             compiler.run_expr_physical_mir().unwrap().html_message(),
             "true: bool"
         );
+        assert!(compiler.compile("fn duplicate<T>(value: T) -> (T, T) { (value, value) } duplicate((42, true)).1.0").succeeded);
+        assert_eq!(
+            compiler.run_expr_physical_mir().unwrap().html_message(),
+            "42: int"
+        );
         assert!(compiler.compile("40 + 2").succeeded);
         assert_eq!(
             compiler.run_expr_mir(true).unwrap().html_message(),

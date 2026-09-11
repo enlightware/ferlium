@@ -225,6 +225,9 @@ fn physical_mir_value_execution() {
     // differential coverage once physical MIR is complete, retaining any unique cases there.
     let mut session = TestSession::new();
     for source in [
+        "fn duplicate<T>(x: T) -> (T, T) { (x, x) } fn compute(x: int) -> ((int, bool), (int, bool)) { duplicate((x, true)) }",
+        "fn replace<T>(x: &mut T, y: T) { x = y; } fn compute(x: int) -> (int, bool) { let mut p = (1, false); replace(p, (x, true)); p }",
+        "enum List<T> { Nil, Cons(T, List<T>) } fn duplicate<T>(x: T) -> (T, T) { (x, x) } fn compute(x: int) -> (List<int>, List<int>) { duplicate(List::Cons(x, List::Nil)) }",
         "enum Choice { Nothing, Number(int), Pair(bool, int) } fn compute(x: int) -> int { let v = if x == 0 { Choice::Nothing } else { Choice::Pair(true, x) }; match v { Nothing => 0, Number(n) => n, Pair(b, n) => if b { n + 1 } else { n } } }",
         "enum Choice { Nothing, Number(int) } fn compute(x: int) -> (Choice, Choice) { (Choice::Nothing, Choice::Number(x)) }",
         "enum Choice { Nothing, Number(int) } fn compute(x: int) -> int { let mut p = (Choice::Nothing, x); p.0 = Choice::Number(x); match p.0 { Nothing => 0, Number(n) => n } }",
