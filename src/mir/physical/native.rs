@@ -1,7 +1,7 @@
 //! Process-local native requirements, rebuilt when restoring a physical snapshot. Snapshots
 //! separately validate build provenance and the pointer-free layout/transport contracts.
 
-use std::fmt;
+use std::{fmt, iter::once};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -292,7 +292,7 @@ fn lifecycle(
     let ty = layout.ty;
     let key = ConcreteTraitImplKey::new(env.expect_std_trait_id(VALUE_TRAIT_NAME), vec![ty]);
     let mut found = None;
-    for module in std::iter::once(env.current).chain(
+    for module in once(env.current).chain(
         env.modules
             .iter()
             .filter_map(|entry| entry.0.module())
@@ -435,6 +435,7 @@ mod tests {
             r#type::{CallResultConvention, NativeType, bare_native_type},
         },
     };
+    use std::convert::identity;
 
     fn body_with_storage(ty: Type) -> Vec<Option<Function>> {
         let mut builder =
@@ -544,11 +545,7 @@ mod tests {
         );
         let function = module.add_function(
             "identity".into(),
-            NativeFnN::from_rust(std::convert::identity::<isize>).description(
-                ["value"],
-                "",
-                no_effects(),
-            ),
+            NativeFnN::from_rust(identity::<isize>).description(["value"], "", no_effects()),
         );
         let id = FunctionId::new(module.module_id(), function);
         let signature = module.functions[function.as_index()]

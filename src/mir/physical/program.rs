@@ -8,11 +8,12 @@
 
 //! Target-independent assembly and resolution of physical MIR modules.
 
-use std::fmt;
+use std::{error::Error, fmt};
 
 use rustc_hash::FxHashMap;
 
 use crate::{
+    define_id_type,
     hir::native_functions::NativeResult,
     mir::{
         Function, Operation, OperationKind, Value, ValueId, terminator::TerminatorKind,
@@ -29,7 +30,7 @@ use super::{
     static_dictionary_definition, static_subscript,
 };
 
-crate::define_id_type!(
+define_id_type!(
     /// Dense identity of a recursively static evidence value in one resolved physical program.
     ProgramEvidenceId
 );
@@ -287,7 +288,7 @@ impl fmt::Display for PhysicalProgramError {
     }
 }
 
-impl std::error::Error for PhysicalProgramError {}
+impl Error for PhysicalProgramError {}
 
 /// Assemble unchanged physical module artifacts into a resolved executable program view.
 pub(crate) fn resolve_physical_program<'a>(

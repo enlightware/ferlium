@@ -18,22 +18,29 @@ pub(crate) mod program;
 mod subscript;
 mod subscript_lifecycle;
 
-use std::fmt;
+use std::{
+    cmp::{Ordering, Reverse},
+    error::Error,
+    fmt,
+    slice::from_ref,
+};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use ustr::Ustr;
 
+#[cfg(feature = "std-snapshot")]
+use crate::hir::native_functions::NativeLayout;
 use crate::{
     Location,
     compiler::MirArtifacts,
     hir::{
         dictionary::DictionaryReq,
-        function::ArgConvention,
-        native_functions::{NativeContractError, NativeResult, NativeSignature},
+        function::{ArgConvention, CallableDefinition},
+        native_functions::{NativeContractError, NativeEntry, NativeResult, NativeSignature},
         value::{LiteralValue, VariantPayloadStorage},
     },
     mir::{
-        self, Function, Operation, OperationKind, ParameterKind, Value,
+        BlockId, Function, Operation, OperationKind, ParameterId, ParameterKind, Value, ValueId,
         builder::FunctionBuilder,
         edit::FunctionEdit,
         pass::{
@@ -43,11 +50,12 @@ use crate::{
         role::{MirType, ValueRoles},
         terminator::{Terminator, TerminatorKind},
         value::{ConstantId, StaticEvidence},
+        verify::verify_physical_function,
     },
     module::{
         CallableOrigin, DictionaryEntryEvidence, FunctionId, LocalFunctionId, LocalImplId,
         LocalSubscriptId, ModuleEnv, ModuleId, ProjectionIndex, ResolvedValueLayout, SubscriptId,
-        TraitDictionaryId, id::Id,
+        TraitDictionaryEntry, TraitDictionaryId, id::Id,
     },
     std::{
         buffer::buffer_element_type,
@@ -71,9 +79,11 @@ use crate::{
     },
 };
 
+use buffer::BufferEntry;
 use dictionary::PhysicalDictionaryCatalog;
 pub(crate) use dictionary::{PhysicalDictionaryDefinition, PhysicalDictionaryEntry};
 use evidence::{PhysicalEvidenceReferences, try_for_each_static_evidence};
+use native::{NativeRequirementError, NativeRequirements};
 use subscript::PhysicalSubscriptCatalog;
 pub(crate) use subscript::{PhysicalSubscriptDefinition, PhysicalSubscriptMember};
 
@@ -108,7 +118,7 @@ pub(crate) enum BackendReadinessError {
         function: FunctionId,
         error: NativeContractError,
     },
-    NativeRequirement(native::NativeRequirementError),
+    NativeRequirement(NativeRequirementError),
     InvalidNativeInteriorAccess {
         function: FunctionId,
         operation: &'static str,
@@ -332,7 +342,7 @@ impl fmt::Display for BackendReadinessError {
     }
 }
 
-impl std::error::Error for BackendReadinessError {}
+impl Error for BackendReadinessError {}
 
 /// Physical MIR whose readiness invariants have been checked.
 pub(crate) struct BackendReadyMirArtifacts {
@@ -340,22 +350,17 @@ pub(crate) struct BackendReadyMirArtifacts {
     entries: Vec<Option<Function>>,
     /// Derived after every physical transformation. Any later pass that changes function or
     /// evidence-catalog references must rebuild this map before execution.
-    native_requirements: native::NativeRequirements,
+    native_requirements: NativeRequirements,
     dictionaries: PhysicalDictionaryCatalog,
     subscripts: PhysicalSubscriptCatalog,
 }
 
 impl BackendReadyMirArtifacts {
-    pub(crate) fn native_entry(
-        &self,
-        function: FunctionId,
-    ) -> Option<&crate::hir::native_functions::NativeEntry> {
+    pub(crate) fn native_entry(&self, function: FunctionId) -> Option<&NativeEntry> {
         self.native_requirements.entries.get(&function)
     }
     #[cfg(feature = "std-snapshot")]
-    pub(crate) fn native_entries(
-        &self,
-    ) -> impl Iterator<Item = (FunctionId, &crate::hir::native_functions::NativeEntry)> {
+    pub(crate) fn native_entries(&self) -> impl Iterator<Item = (FunctionId, &NativeEntry)> {
         self.native_requirements
             .entries
             .iter()
@@ -365,12 +370,7 @@ impl BackendReadyMirArtifacts {
     #[cfg(feature = "std-snapshot")]
     pub(crate) fn native_layouts(
         &self,
-    ) -> impl Iterator<
-        Item = (
-            crate::hir::native_functions::NativeLayout,
-            Option<(FunctionId, FunctionId)>,
-        ),
-    > + '_ {
+    ) -> impl Iterator<Item = (NativeLayout, Option<(FunctionId, FunctionId)>)> + '_ {
         self.native_requirements
             .types
             .values()
@@ -569,9 +569,8 @@ pub(crate) fn prepare_physical_mir(
     let subscripts = PhysicalSubscriptCatalog::from_module(module, env.current, env, &references);
     let native_signatures =
         collect_native_signatures(&entries, &dictionaries, &subscripts, env, &buffer_entries)?;
-    let native_requirements =
-        native::NativeRequirements::collect(&entries, &native_signatures, env)
-            .map_err(BackendReadinessError::NativeRequirement)?;
+    let native_requirements = NativeRequirements::collect(&entries, &native_signatures, env)
+        .map_err(BackendReadinessError::NativeRequirement)?;
     for (index, body) in entries.iter().enumerate() {
         if let Some(body) = body {
             let id = FunctionId::new(module, LocalFunctionId::from_index(index));
@@ -609,7 +608,7 @@ fn collect_native_signatures(
     dictionaries: &PhysicalDictionaryCatalog,
     subscripts: &PhysicalSubscriptCatalog,
     env: ModuleEnv<'_>,
-    buffer_entries: &FxHashMap<FunctionId, buffer::BufferEntry>,
+    buffer_entries: &FxHashMap<FunctionId, BufferEntry>,
 ) -> Result<FxHashMap<FunctionId, NativeSignature>, BackendReadinessError> {
     let mut referenced = FxHashSet::default();
     // Declared entries remain artifact roots: an embedder can call them even without a MIR use.
@@ -645,7 +644,7 @@ fn collect_native_signatures(
             .and_then(|module| module.get_impl_data(dictionary.impl_id))
         {
             for index in 0..implementation.dictionary_value.entry_count() {
-                let crate::module::TraitDictionaryEntry::Function(function) = implementation
+                let TraitDictionaryEntry::Function(function) = implementation
                     .dictionary_value
                     .entry(TraitDictionaryEntryIndex::from_index(index));
                 referenced.insert(FunctionId::new(dictionary.module_id, function));
@@ -706,7 +705,7 @@ fn collect_native_signatures(
             .code
             .native_entry()
             .ok_or(BackendReadinessError::NativeRequirement(
-                native::NativeRequirementError::MissingEntry(function),
+                NativeRequirementError::MissingEntry(function),
             ))?;
         let signature = {
             entry
@@ -752,7 +751,7 @@ enum PhysicalHelperKey {
 
 #[derive(Clone)]
 struct VariantPayloadProjection {
-    block: mir::BlockId,
+    block: BlockId,
     operation_index: usize,
     operation: Operation,
     variant_ty: Type,
@@ -821,7 +820,7 @@ impl<'a> PhysicalLowerer<'a> {
         let variant_candidates = variant_payload_projections(function, &body, self.env)?;
 
         enum Projection {
-            Product(mir::BlockId, usize, Operation),
+            Product(BlockId, usize, Operation),
             Variant(usize),
         }
         let mut projections = product_candidates
@@ -1152,7 +1151,7 @@ impl<'a> PhysicalLowerer<'a> {
         &mut self,
         function: FunctionId,
         edit: &mut FunctionEdit,
-        block: mir::BlockId,
+        block: BlockId,
         operation_index: usize,
         operation: Operation,
     ) -> Result<(), BackendReadinessError> {
@@ -1473,7 +1472,7 @@ impl<'a> PhysicalLowerer<'a> {
                 .operations
                 .splice(index..=index, operations);
         }
-        cleanups.sort_by_key(|cleanup| std::cmp::Reverse(cleanup.depth));
+        cleanups.sort_by_key(|cleanup| Reverse(cleanup.depth));
         // Recorded store indices refer to the original body. Prepending cleanup storage while
         // processing those stores would shift entry-block indices and splice at the wrong site.
         edit.block_mut(edit.entry())
@@ -1891,7 +1890,7 @@ fn value_drop_variant(
     if mutable_parameters.next().is_some() {
         return None;
     }
-    let parameter = mir::ParameterId::from_index(index);
+    let parameter = ParameterId::from_index(index);
     let variant_ty = body.parameters()[parameter.as_index()].ty;
     let payload_ty = variant_indirect_payload_type(variant_ty, &env)?;
     if !is_value_drop_function(original, &env) {
@@ -1904,11 +1903,7 @@ fn bool_constant(edit: &mut FunctionEdit, value: bool, env: ModuleEnv<'_>) -> Co
     edit.add_constant(bool_type(), LiteralValue::new_native(value), &env)
 }
 
-fn append_edit_result(
-    edit: &mut FunctionEdit,
-    block: mir::BlockId,
-    mut operation: Operation,
-) -> Value {
+fn append_edit_result(edit: &mut FunctionEdit, block: BlockId, mut operation: Operation) -> Value {
     let result = edit
         .assign_new_result(&mut operation)
         .expect("operation produces a result");
@@ -2126,7 +2121,7 @@ fn build_variant_payload_addressor(
 
 fn finish_unit_result(
     builder: &mut FunctionBuilder,
-    block: mir::BlockId,
+    block: BlockId,
     destination: Value,
     span: Location,
     env: ModuleEnv<'_>,
@@ -2212,7 +2207,7 @@ fn build_variant_payload_release(
 
 fn variant_payload_offset_place(
     builder: &mut FunctionBuilder,
-    block: mir::BlockId,
+    block: BlockId,
     static_layout: Option<ResolvedValueLayout>,
     witness: Option<&Value>,
     known: &KnownCallees,
@@ -2249,7 +2244,7 @@ fn variant_payload_offset_place(
 
 fn payload_layout_place(
     builder: &mut FunctionBuilder,
-    block: mir::BlockId,
+    block: BlockId,
     static_layout: Option<ResolvedValueLayout>,
     witness: Option<&Value>,
     associated_const: TraitAssociatedConstIndex,
@@ -2279,7 +2274,7 @@ fn payload_layout_place(
 
 fn int_constant_value(
     builder: &mut FunctionBuilder,
-    block: mir::BlockId,
+    block: BlockId,
     value: isize,
     span: Location,
     env: ModuleEnv<'_>,
@@ -2370,7 +2365,7 @@ fn build_product_addressor(
 #[allow(clippy::too_many_arguments)]
 fn build_positional_product_addressor(
     mut builder: FunctionBuilder,
-    block: mir::BlockId,
+    block: BlockId,
     key: &ProductAddressorKey,
     spec: &ProductLayoutSpec,
     member_witnesses: &[Option<Value>],
@@ -2421,7 +2416,7 @@ fn build_positional_product_addressor(
 #[allow(clippy::too_many_arguments)]
 fn build_compact_record_addressor(
     mut builder: FunctionBuilder,
-    mut block: mir::BlockId,
+    mut block: BlockId,
     key: &ProductAddressorKey,
     spec: &ProductLayoutSpec,
     member_witnesses: &[Option<Value>],
@@ -2500,8 +2495,7 @@ fn build_compact_record_addressor(
         );
         let tag = append_result(&mut builder, block, Operation::extract_tag(span, ordering));
         let mut cases = vec![(Ustr::from(ORDERING_GREATER), add)];
-        if spec.compact_member_precedes(candidate_index, key.field_index, std::cmp::Ordering::Equal)
-        {
+        if spec.compact_member_precedes(candidate_index, key.field_index, Ordering::Equal) {
             cases.push((Ustr::from(ORDERING_EQUAL), add));
         }
         builder.set_terminator(block, Terminator::switch_variant(span, tag, cases, next));
@@ -2534,7 +2528,7 @@ fn build_compact_record_addressor(
 #[allow(clippy::too_many_arguments)]
 fn finish_product_addressor(
     mut builder: FunctionBuilder,
-    block: mir::BlockId,
+    block: BlockId,
     member: ProductMemberLayout,
     base: Value,
     destination: Value,
@@ -2551,11 +2545,7 @@ fn finish_product_addressor(
     builder.finish_unverified()
 }
 
-fn append_result(
-    builder: &mut FunctionBuilder,
-    block: mir::BlockId,
-    operation: Operation,
-) -> Value {
+fn append_result(builder: &mut FunctionBuilder, block: BlockId, operation: Operation) -> Value {
     builder
         .append_operation(block, operation)
         .expect("the generated operation produces a result")
@@ -2563,7 +2553,7 @@ fn append_result(
 
 fn int_constant_place(
     builder: &mut FunctionBuilder,
-    block: mir::BlockId,
+    block: BlockId,
     value: isize,
     span: Location,
     env: ModuleEnv<'_>,
@@ -2579,7 +2569,7 @@ fn int_constant_place(
 
 fn value_layout_place(
     builder: &mut FunctionBuilder,
-    block: mir::BlockId,
+    block: BlockId,
     dictionary: Value,
     associated_const: TraitAssociatedConstIndex,
     span: Location,
@@ -2611,7 +2601,7 @@ fn value_layout_place(
 
 fn member_layout_place(
     builder: &mut FunctionBuilder,
-    block: mir::BlockId,
+    block: BlockId,
     member: ProductMemberLayout,
     witness: Option<&Value>,
     associated_const: TraitAssociatedConstIndex,
@@ -2648,7 +2638,7 @@ fn member_layout_place(
 #[allow(clippy::too_many_arguments)]
 fn add_member_size_to_offset(
     builder: &mut FunctionBuilder,
-    block: mir::BlockId,
+    block: BlockId,
     member: ProductMemberLayout,
     witness: Option<&Value>,
     offset: &Value,
@@ -2672,7 +2662,7 @@ fn add_member_size_to_offset(
 
 fn align_up_place(
     builder: &mut FunctionBuilder,
-    block: mir::BlockId,
+    block: BlockId,
     offset: Value,
     align: Value,
     known: &KnownCallees,
@@ -2702,7 +2692,7 @@ fn align_up_place(
 
 fn int_binary(
     builder: &mut FunctionBuilder,
-    block: mir::BlockId,
+    block: BlockId,
     callee: (FunctionId, &CallImplType),
     left: Value,
     right: Value,
@@ -2714,7 +2704,7 @@ fn int_binary(
 
 fn binary_call(
     builder: &mut FunctionBuilder,
-    block: mir::BlockId,
+    block: BlockId,
     callee: (FunctionId, &CallImplType),
     left: Value,
     right: Value,
@@ -2735,7 +2725,7 @@ fn binary_call(
 
 fn int_unary(
     builder: &mut FunctionBuilder,
-    block: mir::BlockId,
+    block: BlockId,
     callee: (FunctionId, &CallImplType),
     value: Value,
     span: Location,
@@ -2839,7 +2829,7 @@ fn verify_physical_mir(
         }
         // Compiler-generated malformed MIR is an invariant failure, diagnosed by the shared
         // verifier's assertions in every build. Unsupported physical contracts return errors.
-        mir::verify::verify_physical_function(body, env);
+        verify_physical_function(body, env);
     }
     Ok(())
 }
@@ -2847,8 +2837,8 @@ fn verify_physical_mir(
 fn verify_physical_operation(
     artifacts: &BackendReadyMirArtifacts,
     owner: FunctionId,
-    constructed_dictionaries: &FxHashMap<mir::ValueId, TraitDictionaryId>,
-    constructed_subscripts: &FxHashMap<mir::ValueId, ConstructedSubscript>,
+    constructed_dictionaries: &FxHashMap<ValueId, TraitDictionaryId>,
+    constructed_subscripts: &FxHashMap<ValueId, ConstructedSubscript>,
     operation: &Operation,
 ) -> Result<(), BackendReadinessError> {
     // Deliberately exhaustive: every new MIR operation needs a physical execution contract.
@@ -2934,9 +2924,7 @@ fn verify_physical_operation(
     verify_direct_call(artifacts, owner, operation)
 }
 
-fn constructed_dictionary_definitions(
-    body: &Function,
-) -> FxHashMap<mir::ValueId, TraitDictionaryId> {
+fn constructed_dictionary_definitions(body: &Function) -> FxHashMap<ValueId, TraitDictionaryId> {
     let mut definitions = FxHashMap::default();
     for block in body.blocks() {
         let block = body.block(block);
@@ -2952,7 +2940,7 @@ fn constructed_dictionary_definitions(
 
 fn record_constructed_dictionary(
     operation: &Operation,
-    definitions: &mut FxHashMap<mir::ValueId, TraitDictionaryId>,
+    definitions: &mut FxHashMap<ValueId, TraitDictionaryId>,
 ) {
     if let OperationKind::BuildDictionary { definition, .. } = operation.kind {
         let result = operation
@@ -2968,9 +2956,7 @@ struct ConstructedSubscript {
     capture_count: usize,
 }
 
-fn constructed_subscript_definitions(
-    body: &Function,
-) -> FxHashMap<mir::ValueId, ConstructedSubscript> {
+fn constructed_subscript_definitions(body: &Function) -> FxHashMap<ValueId, ConstructedSubscript> {
     let operations = body
         .blocks()
         .flat_map(|block| {
@@ -2979,7 +2965,7 @@ fn constructed_subscript_definitions(
                 .operations()
                 .iter()
                 .chain(match &block.terminator().kind {
-                    TerminatorKind::Invoke { operation, .. } => std::slice::from_ref(operation),
+                    TerminatorKind::Invoke { operation, .. } => from_ref(operation),
                     _ => &[],
                 })
         })
@@ -3105,8 +3091,8 @@ fn verify_subscript_catalog(
 fn verify_evidence_operation(
     artifacts: &BackendReadyMirArtifacts,
     owner: FunctionId,
-    constructed_dictionaries: &FxHashMap<mir::ValueId, TraitDictionaryId>,
-    constructed_subscripts: &FxHashMap<mir::ValueId, ConstructedSubscript>,
+    constructed_dictionaries: &FxHashMap<ValueId, TraitDictionaryId>,
+    constructed_subscripts: &FxHashMap<ValueId, ConstructedSubscript>,
     operation: &Operation,
 ) -> Result<(), BackendReadinessError> {
     if matches!(operation.kind, OperationKind::BuildSubscriptEvidence { .. }) {
@@ -3326,7 +3312,7 @@ fn verify_subscript_reference(
 
 fn static_dictionary_definition(
     value: &Value,
-    constructed_dictionaries: &FxHashMap<mir::ValueId, TraitDictionaryId>,
+    constructed_dictionaries: &FxHashMap<ValueId, TraitDictionaryId>,
 ) -> Option<TraitDictionaryId> {
     match value {
         Value::Dictionary(definition) => Some(*definition),
@@ -3341,7 +3327,7 @@ fn static_dictionary_definition(
 
 fn static_subscript(
     value: &Value,
-    constructed: &FxHashMap<mir::ValueId, ConstructedSubscript>,
+    constructed: &FxHashMap<ValueId, ConstructedSubscript>,
 ) -> Option<ConstructedSubscript> {
     match value {
         Value::Subscript(definition) => Some(ConstructedSubscript {
@@ -3387,11 +3373,8 @@ fn verify_direct_call(
                 actual,
             });
         }
-        let mut definition = crate::hir::function::CallableDefinition::new_infer_quantifiers(
-            ty.fn_ty.clone(),
-            [],
-            "physical native call",
-        );
+        let mut definition =
+            CallableDefinition::new_infer_quantifiers(ty.fn_ty.clone(), [], "physical native call");
         definition.result_convention = ty.result_convention;
         if let NativeResult::Addressor { root, .. } = signature.result {
             definition.result_rooted_in = Some(root);
@@ -3468,16 +3451,22 @@ fn verify_local_function_target(
 
 #[cfg(test)]
 mod tests {
-    use crate::hir::native_functions::NativeOptionalFnN;
+    use super::program::{InternedStaticEvidence, PhysicalProgramError, resolve_physical_program};
+    use std::convert::identity;
+    use ustr::ustr;
 
     use crate::{
         CompilerSession, ExecutionTarget,
         compiler::MirOptimization,
+        hir::native_functions::NativeOptionalFnN,
         module::{
             Module, ModuleEnv, Path, SubscriptDefinition, SubscriptMember, SubscriptSignature,
             TraitDictionaryEntry, Visibility, YieldProvenance,
         },
-        std::{math::int_type, option::option_type, ordering::ordering_type},
+        std::{
+            STD_MODULE_ID, buffer::INVALID_BUFFER_CLONE, math::int_type, option::option_type,
+            ordering::ordering_type,
+        },
         types::effects::no_effects,
         types::{r#type::SubscriptType, type_like::TypeLike},
     };
@@ -3637,8 +3626,8 @@ mod tests {
             .entries
             .push(Some(caller.finish_unverified()));
         assert!(matches!(
-            program::resolve_physical_program([&artifacts, &caller_artifacts]),
-            Err(program::PhysicalProgramError::InvalidCallConvention { .. })
+            resolve_physical_program([&artifacts, &caller_artifacts]),
+            Err(PhysicalProgramError::InvalidCallConvention { .. })
         ));
     }
 
@@ -3692,8 +3681,8 @@ mod tests {
             let env = ModuleEnv::new(session.expect_fresh_module(module), session.raw_modules());
             assert!(matches!(verify_physical_mir(&artifacts, env),
                 Err(BackendReadinessError::InvalidPhysicalProtocol { function, .. }) if function == target));
-            assert!(matches!(program::resolve_physical_program([&artifacts]),
-                Err(program::PhysicalProgramError::InvalidResultParameter { function }) if function == target));
+            assert!(matches!(resolve_physical_program([&artifacts]),
+                Err(PhysicalProgramError::InvalidResultParameter { function }) if function == target));
         }
     }
 
@@ -3792,8 +3781,8 @@ mod tests {
             "adapted_physical_addressor",
         );
         let (artifacts, _) = lower(&mut session, module).unwrap();
-        let (std, _) = lower(&mut session, crate::std::STD_MODULE_ID).unwrap();
-        program::resolve_physical_program([&artifacts, &std]).unwrap();
+        let (std, _) = lower(&mut session, STD_MODULE_ID).unwrap();
+        resolve_physical_program([&artifacts, &std]).unwrap();
     }
 
     #[test]
@@ -3812,7 +3801,7 @@ mod tests {
         let block = callee.add_block();
         callee.set_terminator(block, Terminator::ret(span));
         artifacts.entries.push(Some(callee.finish_unverified()));
-        let argument = Value::Parameter(mir::value::ParameterId::from_index(0));
+        let argument = Value::Parameter(ParameterId::from_index(0));
         let ty = CallImplType::new(
             FnType::new_by_val([int_type()], int_type(), no_effects()),
             CallResultConvention::YIELDED_ONCE,
@@ -3950,8 +3939,8 @@ mod tests {
                     }
                 ))
         );
-        let (std, _) = lower(&mut session, crate::std::STD_MODULE_ID).unwrap();
-        program::resolve_physical_program([&std, &host_physical, &physical]).unwrap();
+        let (std, _) = lower(&mut session, STD_MODULE_ID).unwrap();
+        resolve_physical_program([&std, &host_physical, &physical]).unwrap();
     }
 
     #[test]
@@ -3972,7 +3961,7 @@ mod tests {
         let id = |name| {
             FunctionId::new(
                 std.module_id(),
-                std.get_local_function_id(ustr::ustr(name)).unwrap(),
+                std.get_local_function_id(ustr(name)).unwrap(),
             )
         };
         let size = physical
@@ -4006,12 +3995,8 @@ mod tests {
         let module_id = session.modules().next_id();
         let mut module = Module::new(module_id, Path::single_str("native_roots"));
         let local = module.add_function(
-            ustr::ustr("identity"),
-            NativeFnN::from_rust(std::convert::identity::<isize>).description(
-                ["value"],
-                "",
-                no_effects(),
-            ),
+            ustr("identity"),
+            NativeFnN::from_rust(identity::<isize>).description(["value"], "", no_effects()),
         );
         let function = FunctionId::new(module_id, local);
         let collect = |module: &Module| {
@@ -4068,12 +4053,12 @@ mod tests {
         // not its signature or name, is what authorizes Buffer expansion.
         let boxed = session
             .std_module()
-            .get_function(ustr::ustr("buffer_with_capacity"))
+            .get_function(ustr("buffer_with_capacity"))
             .unwrap();
         module.functions[local.as_index()].code = dyn_clone::clone_box(&*boxed.code);
         assert!(
             matches!(collect(&module), Err(BackendReadinessError::NativeRequirement(
-            native::NativeRequirementError::MissingEntry(id)
+            NativeRequirementError::MissingEntry(id)
         )) if id == function)
         );
     }
@@ -4092,7 +4077,7 @@ mod tests {
         for name in ["idiv", "idiv_euclid"] {
             let id = FunctionId::new(
                 std.module_id(),
-                std.get_local_function_id(ustr::ustr(name)).unwrap(),
+                std.get_local_function_id(ustr(name)).unwrap(),
             );
             let signature = physical
                 .native_signature(id)
@@ -4154,7 +4139,7 @@ mod tests {
         let std = session.std_module();
         let parse_int = FunctionId::new(
             std.module_id(),
-            std.get_local_function_id(ustr::ustr("parse_int"))
+            std.get_local_function_id(ustr("parse_int"))
                 .expect("parse_int should be registered"),
         );
 
@@ -4173,17 +4158,13 @@ mod tests {
         let function = NativeOptionalFnN::from_rust(Some::<isize>, option_type(int_type()))
             .description(["value"], "test optional subscript member", no_effects());
         let signature = SubscriptSignature::from_callable_definition(&function.definition);
-        let function = module.add_function(ustr::ustr("optional_member"), function);
+        let function = module.add_function(ustr("optional_member"), function);
         let mut subscript = SubscriptDefinition::resolved(signature);
         subscript.ref_member = Some(SubscriptMember {
             function,
             provenance: YieldProvenance::YieldedOnce,
         });
-        module.add_subscript(
-            ustr::ustr("optional_subscript"),
-            subscript,
-            Visibility::Module,
-        );
+        module.add_subscript(ustr("optional_subscript"), subscript, Visibility::Module);
         assert_eq!(session.register_module(path, module), module_id);
 
         let (physical, _) = lower(&mut session, module_id).unwrap();
@@ -4213,7 +4194,7 @@ mod tests {
         )
         .expect("test evidence-catalog rebuild should preserve native optional contracts");
         artifacts.native_requirements =
-            native::NativeRequirements::collect(&artifacts.entries, &signatures, env)
+            NativeRequirements::collect(&artifacts.entries, &signatures, env)
                 .expect("test evidence-catalog rebuild should preserve native requirements");
     }
 
@@ -4227,7 +4208,7 @@ mod tests {
         );
         let identity = session
             .expect_fresh_module(module)
-            .get_local_function_id(ustr::ustr("identity"))
+            .get_local_function_id(ustr("identity"))
             .unwrap();
 
         let (physical, _) = lower(&mut session, module).unwrap();
@@ -4288,7 +4269,7 @@ mod tests {
         );
         let subscript = session
             .expect_fresh_module(module)
-            .get_local_subscript_id(ustr::ustr("cell"))
+            .get_local_subscript_id(ustr("cell"))
             .unwrap();
         let (physical, _) = lower(&mut session, module).unwrap();
         let definition = physical
@@ -4367,10 +4348,8 @@ mod tests {
         let span = Location::new_synthesized();
         let subscript_ty =
             Type::subscript_type(SubscriptType::new(vec![], Type::unit(), None, None));
-        let mut builder = FunctionBuilder::new(
-            ustr::ustr("subscript_construction"),
-            CallResultConvention::Value,
-        );
+        let mut builder =
+            FunctionBuilder::new(ustr("subscript_construction"), CallResultConvention::Value);
         let block = builder.add_block();
         let base = Value::Evidence(Box::new(StaticEvidence::Subscript {
             definition,
@@ -4423,8 +4402,7 @@ mod tests {
             .unwrap()
             .id();
         let span = Location::new_synthesized();
-        let mut builder =
-            FunctionBuilder::new(ustr::ustr("bare_subscript"), CallResultConvention::Value);
+        let mut builder = FunctionBuilder::new(ustr("bare_subscript"), CallResultConvention::Value);
         let block = builder.add_block();
         builder.append_operation(
             block,
@@ -4476,7 +4454,7 @@ mod tests {
         );
         let span = Location::new_synthesized();
         let mut builder = FunctionBuilder::new(
-            ustr::ustr("missing_subscript_member"),
+            ustr("missing_subscript_member"),
             CallResultConvention::Value,
         );
         let block = builder.add_block();
@@ -4512,10 +4490,8 @@ mod tests {
             LocalSubscriptId::from_index(0),
         );
         let span = Location::new_synthesized();
-        let mut builder = FunctionBuilder::new(
-            ustr::ustr("unresolved_subscript"),
-            CallResultConvention::Value,
-        );
+        let mut builder =
+            FunctionBuilder::new(ustr("unresolved_subscript"), CallResultConvention::Value);
         let block = builder.add_block();
         builder.append_operation(
             block,
@@ -4531,8 +4507,8 @@ mod tests {
         rebuild_evidence_catalogs(&session, &mut physical);
 
         assert!(matches!(
-            program::resolve_physical_program([&physical]),
-            Err(program::PhysicalProgramError::UnresolvedSubscript { subscript, .. })
+            resolve_physical_program([&physical]),
+            Err(PhysicalProgramError::UnresolvedSubscript { subscript, .. })
                 if subscript == foreign
         ));
     }
@@ -4549,22 +4525,24 @@ mod tests {
             "physical_link",
         );
         let (user, _) = lower(&mut session, module).unwrap();
-        let (std, _) = lower(&mut session, crate::std::STD_MODULE_ID).unwrap();
+        let (std, _) = lower(&mut session, STD_MODULE_ID).unwrap();
 
-        let resolved = program::resolve_physical_program([&user, &std]).unwrap();
+        let resolved = resolve_physical_program([&user, &std]).unwrap();
 
-        assert!(resolved.module(crate::std::STD_MODULE_ID).is_some());
+        assert!(resolved.module(STD_MODULE_ID).is_some());
         assert!(resolved.module(module).is_some());
         assert!(
-            resolved.static_evidence().iter().any(|evidence| matches!(
-                evidence,
-                program::InternedStaticEvidence::Subscript { .. }
-            ))
+            resolved
+                .static_evidence()
+                .iter()
+                .any(|evidence| matches!(evidence, InternedStaticEvidence::Subscript { .. }))
         );
-        assert!(resolved.static_evidence().iter().any(|evidence| matches!(
-            evidence,
-            program::InternedStaticEvidence::Dictionary { .. }
-        )));
+        assert!(
+            resolved
+                .static_evidence()
+                .iter()
+                .any(|evidence| matches!(evidence, InternedStaticEvidence::Dictionary { .. }))
+        );
         assert!(resolved.modules().iter().any(|module| {
             module.entries.iter().flatten().any(|function| {
                 function.blocks().any(|block| {
@@ -4604,11 +4582,10 @@ mod tests {
         let subscript = SubscriptId::new(base, LocalSubscriptId::from_index(0));
         let (base_physical, _) = lower(&mut session, base).unwrap();
         let (user_physical, _) = lower(&mut session, user).unwrap();
-        let (std, _) = lower(&mut session, crate::std::STD_MODULE_ID).unwrap();
+        let (std, _) = lower(&mut session, STD_MODULE_ID).unwrap();
 
         assert!(user_physical.subscript_imports().contains(&subscript));
-        let resolved =
-            program::resolve_physical_program([&user_physical, &std, &base_physical]).unwrap();
+        let resolved = resolve_physical_program([&user_physical, &std, &base_physical]).unwrap();
 
         assert!(resolved.subscript(subscript).is_some());
         assert!(resolved.subscript_member(subscript, true).is_some());
@@ -4618,14 +4595,11 @@ mod tests {
     fn physical_module_records_foreign_dictionary_references() {
         let mut session = CompilerSession::new();
         let module = compile(&mut session, "fn anchor() {}", "dictionary_import");
-        let foreign = TraitDictionaryId::new(crate::std::STD_MODULE_ID, LocalImplId::from_index(0));
-        let nested_foreign =
-            TraitDictionaryId::new(crate::std::STD_MODULE_ID, LocalImplId::from_index(1));
+        let foreign = TraitDictionaryId::new(STD_MODULE_ID, LocalImplId::from_index(0));
+        let nested_foreign = TraitDictionaryId::new(STD_MODULE_ID, LocalImplId::from_index(1));
         let span = Location::new_synthesized();
-        let mut builder = FunctionBuilder::new(
-            ustr::ustr("foreign_dictionary"),
-            CallResultConvention::Value,
-        );
+        let mut builder =
+            FunctionBuilder::new(ustr("foreign_dictionary"), CallResultConvention::Value);
         let entry = builder.add_block();
         builder.append_operation(
             entry,
@@ -4650,7 +4624,7 @@ mod tests {
         let physical = BackendReadyMirArtifacts {
             module,
             entries: entries.into(),
-            native_requirements: native::NativeRequirements::default(),
+            native_requirements: NativeRequirements::default(),
             dictionaries,
             subscripts,
         };
@@ -4682,7 +4656,7 @@ mod tests {
 
         let span = Location::new_synthesized();
         let mut builder = FunctionBuilder::new(
-            ustr::ustr("invalid_dictionary_entry"),
+            ustr("invalid_dictionary_entry"),
             CallResultConvention::Value,
         );
         let block = builder.add_block();
@@ -4727,7 +4701,7 @@ mod tests {
 
     fn append_test_variant_shell(
         builder: &mut FunctionBuilder,
-        block: mir::BlockId,
+        block: BlockId,
         variant_ty: Type,
     ) -> Value {
         builder
@@ -4735,7 +4709,7 @@ mod tests {
                 block,
                 Operation::variant(
                     Location::new_synthesized(),
-                    ustr::ustr("Only"),
+                    ustr("Only"),
                     variant_ty,
                     Type::unit(),
                     Some(VariantPayloadStorage::Inline),
@@ -4751,9 +4725,8 @@ mod tests {
         let mut session = CompilerSession::new();
         let module = compile(&mut session, "fn anchor() {}", "duplicate_shell_store");
         let span = Location::new_synthesized();
-        let variant_ty = Type::variant([(ustr::ustr("Only"), Type::unit())]);
-        let mut builder =
-            FunctionBuilder::new(ustr::ustr("duplicate"), CallResultConvention::Value);
+        let variant_ty = Type::variant([(ustr("Only"), Type::unit())]);
+        let mut builder = FunctionBuilder::new(ustr("duplicate"), CallResultConvention::Value);
         let destination =
             Value::Parameter(builder.add_parameter(variant_ty, ParameterKind::Return));
         let entry = builder.add_block();
@@ -4780,8 +4753,8 @@ mod tests {
         let mut session = CompilerSession::new();
         let module = compile(&mut session, "fn anchor() {}", "invoked_shell_store");
         let span = Location::new_synthesized();
-        let variant_ty = Type::variant([(ustr::ustr("Only"), Type::unit())]);
-        let mut builder = FunctionBuilder::new(ustr::ustr("invoked"), CallResultConvention::Value);
+        let variant_ty = Type::variant([(ustr("Only"), Type::unit())]);
+        let mut builder = FunctionBuilder::new(ustr("invoked"), CallResultConvention::Value);
         let destination =
             Value::Parameter(builder.add_parameter(variant_ty, ParameterKind::Return));
         let entry = builder.add_block();
@@ -4820,7 +4793,7 @@ mod tests {
         );
         let second = session
             .expect_fresh_module(module)
-            .get_local_function_id(ustr::ustr("second"))
+            .get_local_function_id(ustr("second"))
             .unwrap();
         let (physical, _) = lower(&mut session, module).unwrap();
         let body = physical.get(second).unwrap();
@@ -4895,7 +4868,7 @@ mod tests {
                 .then_some(LocalFunctionId::from_index(index))
             })
             .expect("generic projection evidence must retain a structural addressor");
-        let direct = source.get_local_function_id(ustr::ustr("direct")).unwrap();
+        let direct = source.get_local_function_id(ustr("direct")).unwrap();
         let (physical, first_helper) = lower(&mut session, module).unwrap();
         assert!(physical.get(retained).is_some());
         assert_eq!(
@@ -5039,7 +5012,7 @@ mod tests {
         );
         let pair = session
             .expect_fresh_module(module)
-            .get_local_function_id(ustr::ustr("pair"))
+            .get_local_function_id(ustr("pair"))
             .unwrap();
         let (physical, first_helper) = lower(&mut session, module).unwrap();
         let body = physical.get(pair).unwrap();
@@ -5358,7 +5331,7 @@ mod tests {
     #[test]
     fn std_buffer_moves_keep_open_element_types() {
         let mut session = CompilerSession::new();
-        let (physical, _) = lower(&mut session, crate::std::STD_MODULE_ID).unwrap();
+        let (physical, _) = lower(&mut session, STD_MODULE_ID).unwrap();
 
         let env = ModuleEnv::new(session.std_module(), session.raw_modules());
         let entries = buffer::entries(env, session.known_callees());
@@ -5379,7 +5352,7 @@ mod tests {
         }
         let clone_id = entries
             .iter()
-            .find_map(|(id, kind)| matches!(kind, buffer::BufferEntry::Clone).then_some(*id))
+            .find_map(|(id, kind)| matches!(kind, BufferEntry::Clone).then_some(*id))
             .unwrap();
         let clone = physical.get(clone_id.function).unwrap();
         assert_eq!(clone.blocks().count(), 1);
@@ -5387,7 +5360,7 @@ mod tests {
         assert!(matches!(
             clone.block(clone.entry()).terminator().kind,
             TerminatorKind::InvariantFailure { message }
-                if message.as_str() == crate::std::buffer::INVALID_BUFFER_CLONE
+                if message.as_str() == INVALID_BUFFER_CLONE
         ));
         physical.validate_native_runtime(env).unwrap();
 

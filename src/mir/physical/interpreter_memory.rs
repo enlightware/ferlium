@@ -6,6 +6,7 @@
 use super::{invalid, unsupported};
 use crate::{
     Location,
+    compiler::error::SandboxViolationKind,
     eval::RuntimeError,
     hir::{
         native_functions::NativeLayout,
@@ -24,7 +25,8 @@ use crate::{
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
     alloc::{Layout, alloc, dealloc},
-    ptr::NonNull,
+    mem::take,
+    ptr::{NonNull, from_mut},
     rc::Rc,
 };
 use ustr::Ustr;
@@ -104,9 +106,9 @@ impl Scalar {
     pub(super) fn pointer(&mut self) -> *mut u8 {
         match self {
             Self::Unit => NonNull::<u8>::dangling().as_ptr(),
-            Self::Bool(value) => std::ptr::from_mut(value).cast(),
-            Self::Int(value) => std::ptr::from_mut(value).cast(),
-            Self::Float(value) => std::ptr::from_mut(value).cast(),
+            Self::Bool(value) => from_mut(value).cast(),
+            Self::Int(value) => from_mut(value).cast(),
+            Self::Float(value) => from_mut(value).cast(),
         }
     }
     pub(super) fn kind(self) -> ScalarKind {
@@ -418,7 +420,7 @@ impl Allocation {
     }
 
     fn retire_children(&mut self, id: usize) {
-        for child in std::mem::take(&mut self.nodes[id].children) {
+        for child in take(&mut self.nodes[id].children) {
             self.retire_children(child);
             self.nodes[child].live = false;
             self.free_nodes.push(child);
@@ -724,7 +726,7 @@ impl Memory {
     ) -> Result<Address, RuntimeError> {
         if self.live_allocations() >= self.allocation_limit {
             return Err(RuntimeError::new_sandbox_violation(
-                crate::compiler::error::SandboxViolationKind::EnvironmentCellLimitExceeded {
+                SandboxViolationKind::EnvironmentCellLimitExceeded {
                     limit: self.allocation_limit,
                 },
                 span,
@@ -1485,15 +1487,13 @@ impl Memory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::module::{Module, ModuleEnv, ModuleId, path::Path};
 
     #[test]
     fn physical_variant_storage_checks_active_payloads_and_reuses_identities() {
-        let module = crate::module::Module::new(
-            crate::module::ModuleId::from_index(0),
-            crate::module::path::Path::single_str("memory_test"),
-        );
+        let module = Module::new(ModuleId::from_index(0), Path::single_str("memory_test"));
         let modules = Default::default();
-        let env = crate::module::ModuleEnv::new(&module, &modules);
+        let env = ModuleEnv::new(&module, &modules);
         let int = ScalarKind::Int.ty();
         let ty = Type::variant(vec![
             ("A".into(), int),
@@ -1646,12 +1646,9 @@ mod tests {
 
     #[test]
     fn physical_product_preparation_bounds_expansion() {
-        let module = crate::module::Module::new(
-            crate::module::ModuleId::from_index(0),
-            crate::module::path::Path::single_str("memory_test"),
-        );
+        let module = Module::new(ModuleId::from_index(0), Path::single_str("memory_test"));
         let modules = Default::default();
-        let env = crate::module::ModuleEnv::new(&module, &modules);
+        let env = ModuleEnv::new(&module, &modules);
         let int = ScalarKind::Int.ty();
         // A compact type DAG denotes over a million scalar leaves. Reject it before asking
         // the recursive layout recipe to expand that tree, not after allocating the leaf vector.
@@ -1691,12 +1688,9 @@ mod tests {
 
     #[test]
     fn physical_product_compatibility_and_zero_sized_overlap() {
-        let module = crate::module::Module::new(
-            crate::module::ModuleId::from_index(0),
-            crate::module::path::Path::single_str("memory_test"),
-        );
+        let module = Module::new(ModuleId::from_index(0), Path::single_str("memory_test"));
         let modules = Default::default();
-        let env = crate::module::ModuleEnv::new(&module, &modules);
+        let env = ModuleEnv::new(&module, &modules);
         let int = ScalarKind::Int.ty();
         let pair = Type::tuple(vec![int, int]);
         let left = Type::tuple(vec![pair, int]);
@@ -1744,12 +1738,9 @@ mod tests {
 
     #[test]
     fn physical_product_memory_checks_subobjects_and_partial_initialization() {
-        let module = crate::module::Module::new(
-            crate::module::ModuleId::from_index(0),
-            crate::module::path::Path::single("memory_test".into()),
-        );
+        let module = Module::new(ModuleId::from_index(0), Path::single("memory_test".into()));
         let modules = Default::default();
-        let env = crate::module::ModuleEnv::new(&module, &modules);
+        let env = ModuleEnv::new(&module, &modules);
         let ty = Type::record(vec![
             ("a".into(), ScalarKind::Bool.ty()),
             ("b".into(), ScalarKind::Int.ty()),

@@ -30,7 +30,7 @@ pub(super) fn verify(
     original: FunctionId,
     helper_base: FunctionId,
     signatures: &FxHashMap<FunctionId, NativeSignature>,
-    buffers: &FxHashMap<FunctionId, buffer::BufferEntry>,
+    buffers: &FxHashMap<FunctionId, BufferEntry>,
     env: ModuleEnv<'_>,
 ) -> Result<(), BackendReadinessError> {
     let trusted_addressor = |target: FunctionId| {
@@ -61,7 +61,7 @@ pub(super) fn verify(
     if !lifecycle {
         for (index, parameter) in body.parameters().iter().enumerate() {
             if parameter.kind == ParameterKind::Parameter(ArgConvention::MutableRef) {
-                places.insert(Value::Parameter(mir::ParameterId::from_index(index)), LIVE);
+                places.insert(Value::Parameter(ParameterId::from_index(index)), LIVE);
             }
         }
     }
@@ -400,7 +400,7 @@ mod tests {
                         _ => {
                             let subscript = Value::Subscript(SubscriptId::new(
                                 module,
-                                crate::module::LocalSubscriptId::from_index(0),
+                                LocalSubscriptId::from_index(0),
                             ));
                             let operation = if source == 1 {
                                 Operation::subscript_member(span, subscript, mutable, callable_ty)

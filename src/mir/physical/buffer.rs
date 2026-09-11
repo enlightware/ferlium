@@ -12,6 +12,8 @@ use crate::std::{
         VALUE_HASH_METHOD_INDEX, VALUE_TO_STRING_METHOD_INDEX,
     },
 };
+use crate::types::r#trait::TraitMethodIndex;
+use ustr::ustr;
 
 #[derive(Clone, Copy)]
 pub(super) enum BufferEntry {
@@ -48,7 +50,7 @@ pub(super) fn entries(
         let implementation = std
             .get_impl_data(id)
             .expect("std Buffer implementation identity must resolve");
-        let method = |index: crate::types::r#trait::TraitMethodIndex| {
+        let method = |index: TraitMethodIndex| {
             FunctionId::new(
                 STD_MODULE_ID,
                 *implementation
@@ -150,7 +152,7 @@ impl PhysicalLowerer<'_> {
                     &self.env,
                 );
                 let callee = module
-                    .get_local_function_id(ustr::ustr(STRING_FROM_STATIC_FUNCTION_NAME))
+                    .get_local_function_id(ustr(STRING_FROM_STATIC_FUNCTION_NAME))
                     .unwrap();
                 let literal_place = append_result(
                     &mut builder,
@@ -181,7 +183,7 @@ impl PhysicalLowerer<'_> {
             BufferEntry::Clone => {
                 builder.set_terminator(
                     block,
-                    Terminator::invariant_failure(span, ustr::ustr(INVALID_BUFFER_CLONE)),
+                    Terminator::invariant_failure(span, ustr(INVALID_BUFFER_CLONE)),
                 );
                 return self.lower_body(id, id, builder.finish_unverified());
             }

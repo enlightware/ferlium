@@ -21,10 +21,10 @@ use crate::{
     hir::{
         function::ArgConvention,
         native_functions::{NativeEntry, NativeFailureState, NativeParameter, NativeResult},
-        value::Value,
+        value::{LiteralValue, Value},
     },
     mir::{
-        self, Function, Operation, OperationKind, function::ParameterKind,
+        self, Function, Operation, OperationKind, ValueId, function::ParameterKind,
         terminator::TerminatorKind,
     },
     module::{FunctionId, ModuleEnv, id::Id},
@@ -32,9 +32,10 @@ use crate::{
 };
 use memory::{Address, Memory, Scalar, ScalarKind, StoredValue};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::rc::Rc;
+use std::{fmt::Display, process::abort, rc::Rc};
+use ustr::Ustr;
 
-fn unsupported(detail: impl std::fmt::Display) -> RuntimeError {
+fn unsupported(detail: impl Display) -> RuntimeError {
     RuntimeError::Backend(format!(
         "Physical MIR execution does not yet support {detail}"
     ))
@@ -47,7 +48,7 @@ fn invalid(detail: &str) -> RuntimeError {
 enum Binding {
     Scalar(Scalar),
     Aggregate(Rc<StoredValue>),
-    Tag(ustr::Ustr),
+    Tag(Ustr),
     Place(Address),
     StackMarker(usize),
 }
@@ -304,12 +305,12 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         Ok(())
     }
 
-    fn check_pattern(pattern: &crate::hir::value::LiteralValue) -> Result<(), RuntimeError> {
-        if matches!(pattern, crate::hir::value::LiteralValue::VariantTag(_)) {
+    fn check_pattern(pattern: &LiteralValue) -> Result<(), RuntimeError> {
+        if matches!(pattern, LiteralValue::VariantTag(_)) {
             Ok(())
-        } else if let crate::hir::value::LiteralValue::Tuple(fields) = pattern {
+        } else if let LiteralValue::Tuple(fields) = pattern {
             for field in fields.iter() {
-                if matches!(field, crate::hir::value::LiteralValue::VariantTag(_)) {
+                if matches!(field, LiteralValue::VariantTag(_)) {
                     return Err(invalid("symbolic tags are not product values"));
                 }
                 Self::check_pattern(field)?;
@@ -352,7 +353,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         &self,
         body: &Function,
         args: &[Binding],
-        registers: &FxHashMap<mir::ValueId, Binding>,
+        registers: &FxHashMap<ValueId, Binding>,
         operand: &mir::Value,
     ) -> Result<Binding, RuntimeError> {
         match operand {
@@ -463,7 +464,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 }
                 TerminatorKind::InvariantFailure { message } => {
                     eprintln!("Ferlium invariant failure: {message}");
-                    std::process::abort();
+                    abort();
                 }
                 _ => unreachable!("capability check rejected this terminator"),
             }
@@ -474,7 +475,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         &mut self,
         body: &Function,
         args: &[Binding],
-        registers: &mut FxHashMap<mir::ValueId, Binding>,
+        registers: &mut FxHashMap<ValueId, Binding>,
         operation: &Operation,
         frame_base: usize,
     ) -> Result<(), RuntimeError> {
@@ -627,8 +628,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 };
                 let equal = match operand(0)? {
                     Binding::Tag(tag) => {
-                        let crate::hir::value::LiteralValue::VariantTag(pattern) = &**pattern
-                        else {
+                        let LiteralValue::VariantTag(pattern) = &**pattern else {
                             return Err(invalid("expected symbolic tag pattern"));
                         };
                         tag == *pattern
@@ -808,11 +808,11 @@ impl<'a, 'p> Interpreter<'a, 'p> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Location, hir::value::LiteralValue};
+    use crate::{Location, mir::physical::program::resolve_physical_program};
 
     #[test]
     fn physical_scalar_transfers_preserve_absence_and_self_moves() {
-        let program = super::super::program::resolve_physical_program([]).unwrap();
+        let program = resolve_physical_program([]).unwrap();
         let mut interpreter = Interpreter {
             program: &program,
             memory: Memory::default(),
@@ -836,11 +836,11 @@ mod tests {
             .allocate(ScalarKind::Int.ty(), None)
             .unwrap();
         let mut registers = FxHashMap::from_iter([
-            (mir::ValueId::from_index(0), Binding::Place(source)),
-            (mir::ValueId::from_index(1), Binding::Place(destination)),
+            (ValueId::from_index(0), Binding::Place(source)),
+            (ValueId::from_index(1), Binding::Place(destination)),
         ]);
-        let source_operand = mir::Value::Register(mir::ValueId::from_index(0));
-        let destination_operand = mir::Value::Register(mir::ValueId::from_index(1));
+        let source_operand = mir::Value::Register(ValueId::from_index(0));
+        let destination_operand = mir::Value::Register(ValueId::from_index(1));
         let span = Location::new_synthesized();
         let self_move = Operation::move_value(span, source_operand.clone(), source_operand.clone());
         assert!(
@@ -890,7 +890,7 @@ mod tests {
         ] {
             let operation = Operation::compare_eq(
                 Location::new_synthesized(),
-                mir::Value::Register(mir::ValueId::from_index(0)),
+                mir::Value::Register(ValueId::from_index(0)),
                 mir::Value::Pattern(Box::new(pattern)),
             );
             assert_eq!(
