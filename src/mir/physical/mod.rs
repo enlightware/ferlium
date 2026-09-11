@@ -1189,8 +1189,13 @@ impl<'a> PhysicalLowerer<'a> {
                 edit.add_constant(int_type(), LiteralValue::new_native(offset), &self.env);
             let base = operation.operands[0].clone();
             let offset = Value::Constant(constant);
-            let mut replacement =
-                Operation::address_offset(operation.span, base, offset, *field_ty);
+            let mut replacement = Operation::address_offset(
+                operation.span,
+                base,
+                offset,
+                *field_ty,
+                Some(field_index),
+            );
             replacement.assign_result_id(Some(result));
             edit.replace_operation_sequence(block, operation_index, [replacement]);
             return Ok(());
@@ -1251,6 +1256,7 @@ impl<'a> PhysicalLowerer<'a> {
                 candidate.operation.operands[0].clone(),
                 Value::Constant(offset),
                 payload_ty,
+                None,
             );
             replacement.assign_result_id(Some(result));
             edit.replace_operation_sequence(
@@ -1757,7 +1763,7 @@ fn edit_buffer_element_address(
     edit_result(
         edit,
         operations,
-        Operation::address_offset(span, base, offset, element_ty),
+        Operation::address_offset(span, base, offset, element_ty, None),
     )
 }
 
@@ -2093,7 +2099,7 @@ fn build_variant_payload_addressor(
         let inline_address = append_result(
             &mut builder,
             inline,
-            Operation::address_offset(span, base.clone(), inline_offset, payload_ty),
+            Operation::address_offset(span, base.clone(), inline_offset, payload_ty, None),
         );
         builder.append_operation(
             inline,
@@ -2394,6 +2400,7 @@ fn build_positional_product_addressor(
                 base,
                 destination,
                 offset,
+                key.field_index,
                 span,
             );
         }
@@ -2519,10 +2526,12 @@ fn build_compact_record_addressor(
         base,
         destination,
         offset,
+        key.field_index,
         span,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finish_product_addressor(
     mut builder: FunctionBuilder,
     block: mir::BlockId,
@@ -2530,14 +2539,13 @@ fn finish_product_addressor(
     base: Value,
     destination: Value,
     offset: Value,
+    field_index: ProjectionIndex,
     span: Location,
 ) -> Function {
     let byte_offset = append_result(&mut builder, block, Operation::load(span, offset));
-    let address = append_result(
-        &mut builder,
-        block,
-        Operation::address_offset(span, base, byte_offset, member.ty),
-    );
+    let projection =
+        Operation::address_offset(span, base, byte_offset, member.ty, Some(field_index));
+    let address = append_result(&mut builder, block, projection);
     builder.append_operation(block, Operation::store(span, address, destination));
     builder.set_terminator(block, Terminator::ret(span));
     builder.finish_unverified()

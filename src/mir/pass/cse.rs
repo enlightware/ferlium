@@ -81,7 +81,7 @@ use crate::{
         terminator::{Terminator, TerminatorKind},
         value::{ConstantId, ValueId},
     },
-    module::{FunctionId, ModuleEnv, id::Id},
+    module::{FunctionId, ModuleEnv, ProjectionIndex, id::Id},
     types::{
         r#trait::TraitDictionaryEntryIndex,
         r#type::{CallImplType, CallResultConvention, Type},
@@ -1007,7 +1007,10 @@ enum Computation {
         aggregate_ty: Option<Type>,
     },
     /// A byte-address projection derived from its base allocation.
-    AddressOffset { ty: Type },
+    AddressOffset {
+        ty: Type,
+        member: Option<ProjectionIndex>,
+    },
     /// A byte-address projection to a slot containing a place.
     AddressOffsetPlace { pointing_to: Type },
     /// A function place *materialized* from evidence into a freshly allocated cell.
@@ -1031,7 +1034,10 @@ impl Computation {
                 has_layout_witness: *has_layout_witness,
                 aggregate_ty: product.as_deref().map(|product| product.aggregate_ty),
             }),
-            OperationKind::AddressOffset { ty } => Some(Self::AddressOffset { ty: *ty }),
+            OperationKind::AddressOffset { ty, member } => Some(Self::AddressOffset {
+                ty: *ty,
+                member: *member,
+            }),
             OperationKind::AddressOffsetPlace { pointing_to } => Some(Self::AddressOffsetPlace {
                 pointing_to: *pointing_to,
             }),

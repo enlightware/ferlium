@@ -27,7 +27,7 @@ const operationKeywords = new Set([
 ]);
 const contextualKeywords = new Set([
 	"arg", "owned", "extra", "using", "from", "to", "via", "capturing", "error",
-	"size", "align", "by", "storage", "layout", "with", "default",
+	"size", "align", "by", "storage", "layout", "with", "default", "member",
 ]);
 const primitiveTypes = new Set(["bool", "char", "float", "int", "never", "string", "unit"]);
 

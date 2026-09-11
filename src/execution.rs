@@ -68,11 +68,11 @@ impl Default for ExecutionLimits {
     }
 }
 
-/// Limits specific to the boxed HIR and MIR reference interpreters.
+/// Storage limits for the reference interpreters.
 ///
-/// `environment_cell_limit` bounds entries in their shared [`EvalCtx`](crate::eval::EvalCtx)
-/// environment. A cell may indirectly own an arbitrary heap allocation, so this is a bookkeeping
-/// guard rather than a memory quota.
+/// `environment_cell_limit` bounds boxed environment entries or live physical storage allocations.
+/// These units can own additional payload and bookkeeping memory, so this is a storage-count guard,
+/// not a byte-memory quota.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, new)]
 pub struct ReferenceInterpreterLimits {
     pub execution: ExecutionLimits,

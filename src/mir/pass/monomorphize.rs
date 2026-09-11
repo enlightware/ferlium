@@ -1106,7 +1106,7 @@ fn substitute_in_operation(operation: &mut Operation, mapper: &mut impl TypeMapp
                 }
             }
         }
-        OperationKind::AddressOffset { ty } | OperationKind::MoveBytes { ty } => {
+        OperationKind::AddressOffset { ty, .. } | OperationKind::MoveBytes { ty } => {
             *ty = ty.map(mapper)
         }
         OperationKind::AddressOffsetPlace { pointing_to } => *pointing_to = pointing_to.map(mapper),

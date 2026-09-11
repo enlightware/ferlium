@@ -9,7 +9,7 @@ use crate::{
         terminator::{Terminator, TerminatorKind},
         value::{Constant, ConstantId, StaticEvidence},
     },
-    module::{FunctionId, Module, ModuleEnv, SubscriptId, TraitDictionaryId},
+    module::{FunctionId, Module, ModuleEnv, ProjectionIndex, SubscriptId, TraitDictionaryId},
     types::{
         effects::{EffType, Effect},
         r#trait::TraitDictionaryEntryIndex,
@@ -286,6 +286,7 @@ enum SnapshotOperationKind {
     },
     AddressOffset {
         ty: SnapshotTypeId,
+        member: Option<ProjectionIndex>,
     },
     AddressOffsetPlace {
         pointing_to: SnapshotTypeId,
@@ -849,8 +850,9 @@ impl SnapshotOperationKind {
                         .collect()
                 })?,
             },
-            Source::AddressOffset { ty } => Stored::AddressOffset {
+            Source::AddressOffset { ty, member } => Stored::AddressOffset {
                 ty: graph.capture(*ty)?,
+                member: *member,
             },
             Source::AddressOffsetPlace { pointing_to } => Stored::AddressOffsetPlace {
                 pointing_to: graph.capture(*pointing_to)?,
@@ -987,8 +989,9 @@ impl SnapshotOperationKind {
                     })
                     .transpose()?,
             },
-            Stored::AddressOffset { ty } => Runtime::AddressOffset {
+            Stored::AddressOffset { ty, member } => Runtime::AddressOffset {
                 ty: resolve_type(types, *ty)?,
+                member: *member,
             },
             Stored::AddressOffsetPlace { pointing_to } => Runtime::AddressOffsetPlace {
                 pointing_to: resolve_type(types, *pointing_to)?,

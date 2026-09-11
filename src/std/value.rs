@@ -618,7 +618,7 @@ fn payload_storage_in_variant(
     ))
 }
 
-fn structural_variant(
+pub(crate) fn structural_variant(
     variant_ty: Type,
     env: &impl TypeLayoutEnv,
 ) -> Option<(Type, Vec<(Ustr, Type)>)> {

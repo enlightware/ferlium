@@ -337,6 +337,12 @@ an aligned inline place of `A`; `address_offset_place` yields a slot containing 
 retain the base allocation's provenance. Byte-offset expressions use ordinary calls such as
 `Num<int>::add` and `Num<int>::mul`.
 
+Product projections also retain their logical member index, printed as an optional `member N`
+suffix on `address_offset`. Distinct zero-sized fields may share an address but retain independent
+initialization and drop obligations; byte location alone does not identify ownership. A variant
+payload projection selects the active case, and changing cases invalidates views into the previous
+payload.
+
 Checked execution validates allocation lifetime, alignment, bounds, and the type of the selected
 subobject. Transferring a member preserves the initialization state of its siblings. Copying or
 moving a whole product requires all its fields to be initialized; replacement preserves absent

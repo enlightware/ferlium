@@ -14,7 +14,7 @@ mod memory;
 
 use super::program::ResolvedPhysicalProgram;
 use crate::{
-    Location,
+    CompilerSession,
     compiler::error::SandboxViolationKind,
     eval::RuntimeError,
     execution::ReferenceInterpreterLimits,
@@ -28,7 +28,7 @@ use crate::{
         terminator::TerminatorKind,
     },
     module::{FunctionId, ModuleEnv, id::Id},
-    types::r#type::{CallResultConvention, Type},
+    types::r#type::CallResultConvention,
 };
 use memory::{Address, Memory, Scalar, ScalarKind, StoredValue};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -46,7 +46,8 @@ fn invalid(detail: &str) -> RuntimeError {
 #[derive(Clone)]
 enum Binding {
     Scalar(Scalar),
-    Product(Rc<StoredValue>),
+    Aggregate(Rc<StoredValue>),
+    Tag(ustr::Ustr),
     Place(Address),
     StackMarker(usize),
 }
@@ -71,16 +72,27 @@ pub(crate) fn run_entry(
     entry: FunctionId,
     arguments: &[Value],
     limits: ReferenceInterpreterLimits,
-    env: ModuleEnv<'_>,
+    session: &CompilerSession,
 ) -> Result<Value, RuntimeError> {
+    let mut memory = Memory::default();
+    memory.allocation_limit = limits.environment_cell_limit;
     let mut interpreter = Interpreter {
         program,
-        memory: Memory::default(),
+        memory,
         limits,
         fuel: limits.execution.fuel_limit,
         depth: 0,
     };
-    interpreter.check_supported(entry, env)?;
+    interpreter.check_supported(
+        entry,
+        ModuleEnv::new(
+            session.expect_fresh_module(entry.module),
+            session.raw_modules(),
+        ),
+    )?;
+    interpreter
+        .memory
+        .bind_tags(|tag| session.variant_tag_id(tag));
     let body = program
         .function(entry)
         .ok_or_else(|| unsupported("native host entry points"))?;
@@ -101,13 +113,17 @@ pub(crate) fn run_entry(
     let mut bindings = Vec::with_capacity(arguments.len() + 1);
     for (parameter, argument) in parameters.iter().zip(arguments) {
         let value = interpreter.memory.import(parameter.ty, argument)?;
-        let address = interpreter.allocate(parameter.ty, None)?;
+        let address = interpreter.memory.allocate(parameter.ty, None)?;
         interpreter.memory.write_value(address, &value)?;
         bindings.push(Binding::Place(address));
     }
-    let result = interpreter.allocate(result.ty, None)?;
+    let result = interpreter.memory.allocate(result.ty, None)?;
     bindings.push(Binding::Place(result));
-    interpreter.call(entry, bindings)?;
+    let outcome = interpreter.call(entry, bindings);
+    if outcome.is_ok() || matches!(&outcome, Err(RuntimeError::SourceFailure(_))) {
+        interpreter.memory.check_runtime_ownership()?;
+    }
+    outcome?;
     // Semantic cleanup is explicit MIR; native storage leaves need no Rust destructor.
     // Memory reclaims every allocation on both successful and failed exits.
     interpreter.memory.export(result)
@@ -158,7 +174,10 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 }
                 continue;
             };
-            if body.result_convention() != CallResultConvention::Value {
+            if !matches!(
+                body.result_convention(),
+                CallResultConvention::Value | CallResultConvention::ADDRESSOR_PLACE
+            ) {
                 return Err(unsupported("place/yield call conventions"));
             }
             for parameter in body.parameters() {
@@ -183,10 +202,20 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 {
                     match operation.kind {
                         OperationKind::Alloca { ty }
-                        | OperationKind::AddressOffset { ty }
+                        | OperationKind::AddressOffset { ty, .. }
                         | OperationKind::Clone { ty }
                         | OperationKind::Drop { ty }
                         | OperationKind::MoveBytes { ty } => self.memory.prepare_type(ty, &env)?,
+                        OperationKind::AllocaPlace { pointing_to }
+                        | OperationKind::AddressOffsetPlace { pointing_to } => {
+                            self.memory.prepare_type(pointing_to, &env)?
+                        }
+                        OperationKind::RuntimeAlloc { pointee } => {
+                            self.memory.prepare_type(pointee, &env)?
+                        }
+                        OperationKind::Variant { ref metadata, .. } => {
+                            self.memory.prepare_type(metadata.ty, &env)?
+                        }
                         _ => (),
                     }
                     Self::check_operation(operation, &mut pending)?;
@@ -195,11 +224,12 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     TerminatorKind::Invoke { .. }
                     | TerminatorKind::Goto { .. }
                     | TerminatorKind::CondBr { .. }
+                    | TerminatorKind::SwitchVariant { .. }
                     | TerminatorKind::Return
                     | TerminatorKind::PropagateError
                     | TerminatorKind::FailureDuringCleanup
                     | TerminatorKind::InvariantFailure { .. } => (),
-                    _ => return Err(unsupported("variant switches or yielded places")),
+                    _ => return Err(unsupported("yielded places")),
                 }
             }
         }
@@ -246,6 +276,12 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 return Err(unsupported("dynamic transfers"));
             }
             AddressOffset { .. }
+            | AddressOffsetPlace { .. }
+            | AllocaPlace { .. }
+            | RuntimeAlloc { .. }
+            | RuntimeDealloc
+            | ExtractTag
+            | ExtractPayloadIndirection
             | MoveBytes { .. }
             | Load
             | Store
@@ -258,33 +294,30 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             | StackRestore
             | CheckCallDepth
             | CheckFuel => (),
+            Variant {
+                storage: Some(_),
+                has_layout_witness: false,
+                ..
+            } => (),
             _ => return Err(unsupported("aggregate, address, or callable operations")),
         }
         Ok(())
     }
 
     fn check_pattern(pattern: &crate::hir::value::LiteralValue) -> Result<(), RuntimeError> {
-        if let crate::hir::value::LiteralValue::Tuple(fields) = pattern {
+        if matches!(pattern, crate::hir::value::LiteralValue::VariantTag(_)) {
+            Ok(())
+        } else if let crate::hir::value::LiteralValue::Tuple(fields) = pattern {
             for field in fields.iter() {
+                if matches!(field, crate::hir::value::LiteralValue::VariantTag(_)) {
+                    return Err(invalid("symbolic tags are not product values"));
+                }
                 Self::check_pattern(field)?;
             }
             Ok(())
         } else {
             Scalar::from_literal(pattern).map(|_| ())
         }
-    }
-
-    fn allocate(&mut self, ty: Type, span: Option<Location>) -> Result<Address, RuntimeError> {
-        // Reuse the API's existing storage-slot guard; this is not a byte-memory quota.
-        if self.memory.len() >= self.limits.environment_cell_limit {
-            return Err(RuntimeError::new_sandbox_violation(
-                SandboxViolationKind::EnvironmentCellLimitExceeded {
-                    limit: self.limits.environment_cell_limit,
-                },
-                span,
-            ));
-        }
-        self.memory.allocate(ty)
     }
 
     fn call(&mut self, id: FunctionId, args: Vec<Binding>) -> Result<(), RuntimeError> {
@@ -299,6 +332,11 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             // bridge between nominal products and the structural values used to construct them.
             if argument.place()?.ty != parameter.ty {
                 return Err(invalid("call argument type mismatch"));
+            }
+            let pointer_result = parameter.kind == ParameterKind::Return
+                && body.result_convention() == CallResultConvention::ADDRESSOR_PLACE;
+            if self.memory.is_pointer_slot(argument.place()?)? != pointer_result {
+                return Err(invalid("call argument storage role mismatch"));
             }
         }
         // Explicit CheckCallDepth operations preserve the boxed executor's source-level policy.
@@ -323,7 +361,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 if let Ok(scalar) = Scalar::from_literal(&constant.representation) {
                     Ok(Binding::Scalar(scalar))
                 } else {
-                    Ok(Binding::Product(Rc::new(
+                    Ok(Binding::Aggregate(Rc::new(
                         self.memory.literal(constant.ty, &constant.representation)?,
                     )))
                 }
@@ -394,6 +432,19 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                         });
                     }
                 },
+                TerminatorKind::SwitchVariant {
+                    tag,
+                    cases,
+                    default,
+                } => {
+                    let Binding::Tag(tag) = self.operand(body, args, &registers, tag)? else {
+                        return Err(invalid("expected variant tag"));
+                    };
+                    block = cases
+                        .iter()
+                        .find(|(case, _)| *case == tag)
+                        .map_or(*default, |(_, target)| *target);
+                }
                 TerminatorKind::Return => {
                     if pending.is_some() {
                         return Err(invalid("return during source failure"));
@@ -432,31 +483,69 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             |index: usize| self.operand(body, args, registers, &operation.operands[index]);
         let place = |index| operand(index)?.place();
         let result = match &operation.kind {
-            Alloca { ty } => Some(Binding::Place(self.allocate(*ty, Some(operation.span))?)),
-            AddressOffset { ty } => {
+            Alloca { ty } => Some(Binding::Place(
+                self.memory.allocate(*ty, Some(operation.span))?,
+            )),
+            AllocaPlace { pointing_to } => Some(Binding::Place(
+                self.memory
+                    .allocate_place(*pointing_to, Some(operation.span))?,
+            )),
+            RuntimeAlloc { pointee } => {
+                let (Scalar::Int(size), Scalar::Int(align)) =
+                    (operand(0)?.scalar()?, operand(1)?.scalar()?)
+                else {
+                    return Err(invalid("non-integer allocation layout"));
+                };
+                let size =
+                    usize::try_from(size).map_err(|_| invalid("negative allocation size"))?;
+                let align =
+                    usize::try_from(align).map_err(|_| invalid("negative allocation alignment"))?;
+                Some(Binding::Place(self.memory.allocate_runtime(
+                    *pointee,
+                    size,
+                    align,
+                    Some(operation.span),
+                )?))
+            }
+            RuntimeDealloc => {
+                self.memory.deallocate(place(0)?)?;
+                None
+            }
+            AddressOffsetPlace { .. } => {
                 let Scalar::Int(offset) = operand(1)?.scalar()? else {
                     return Err(invalid("non-integer offset"));
                 };
                 let offset = usize::try_from(offset).map_err(|_| invalid("negative offset"))?;
-                Some(Binding::Place(self.memory.offset(
+                Some(Binding::Place(self.memory.pointer_slot(place(0)?, offset)?))
+            }
+            AddressOffset { ty, member } => {
+                let Scalar::Int(offset) = operand(1)?.scalar()? else {
+                    return Err(invalid("non-integer offset"));
+                };
+                let offset = usize::try_from(offset).map_err(|_| invalid("negative offset"))?;
+                Some(Binding::Place(self.memory.project(
                     place(0)?,
                     offset,
                     *ty,
+                    *member,
                 )?))
             }
             Load => {
                 let address = place(0)?;
-                Some(if ScalarKind::for_type(address.ty).is_ok() {
+                Some(if self.memory.is_pointer_slot(address)? {
+                    Binding::Place(self.memory.read_pointer(address)?)
+                } else if ScalarKind::for_type(address.ty).is_ok() {
                     Binding::Scalar(self.memory.read(address)?)
                 } else {
-                    Binding::Product(Rc::new(self.memory.read_value(address, false)?))
+                    Binding::Aggregate(Rc::new(self.memory.read_value(address, false)?))
                 })
             }
             Store => {
                 let destination = place(1)?;
                 match operand(0)? {
                     Binding::Scalar(value) => self.memory.write(destination, value)?,
-                    Binding::Product(value) => self.memory.write_value(destination, &value)?,
+                    Binding::Aggregate(value) => self.memory.write_value(destination, &value)?,
+                    Binding::Place(value) => self.memory.write_pointer(destination, value)?,
                     _ => return Err(invalid("expected a value register")),
                 }
                 None
@@ -521,7 +610,9 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                         unreachable!()
                     };
                     let marker = self.memory.len();
-                    let result = self.allocate(ScalarKind::Unit.ty(), Some(operation.span))?;
+                    let result = self
+                        .memory
+                        .allocate(ScalarKind::Unit.ty(), Some(operation.span))?;
                     let outcome =
                         self.call(id, vec![Binding::Place(address), Binding::Place(result)]);
                     self.memory.restore(marker);
@@ -535,12 +626,35 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     return Err(invalid("expected literal pattern"));
                 };
                 let equal = match operand(0)? {
+                    Binding::Tag(tag) => {
+                        let crate::hir::value::LiteralValue::VariantTag(pattern) = &**pattern
+                        else {
+                            return Err(invalid("expected symbolic tag pattern"));
+                        };
+                        tag == *pattern
+                    }
                     Binding::Place(address) => self.memory.matches(address, pattern)?,
-                    Binding::Product(value) => *value == self.memory.literal(value.ty, pattern)?,
+                    Binding::Aggregate(value) => {
+                        *value == self.memory.literal(value.ty, pattern)?
+                    }
                     value => value.scalar()? == Scalar::from_literal(pattern)?,
                 };
                 Some(Binding::Scalar(Scalar::Bool(equal)))
             }
+            Variant {
+                tag,
+                metadata,
+                storage: Some(storage),
+                ..
+            } => Some(Binding::Aggregate(Rc::new(self.memory.shell(
+                metadata.ty,
+                *tag,
+                *storage,
+            )?))),
+            ExtractTag => Some(Binding::Tag(self.memory.tag(place(0)?)?.0)),
+            ExtractPayloadIndirection => Some(Binding::Scalar(Scalar::Bool(
+                self.memory.tag(place(0)?)?.1.is_indirect(),
+            ))),
             Call { .. } => {
                 let mir::Value::Function(id) = operation.operands[0] else {
                     unreachable!()
@@ -608,13 +722,16 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             return Err(invalid("native arity mismatch"));
         }
         let output = output.place()?;
-        if ScalarKind::for_type(output.ty)? != ScalarKind::for_type(signature.result.ty())? {
+        if self.memory.is_pointer_slot(output)?
+            || ScalarKind::for_type(output.ty)? != ScalarKind::for_type(signature.result.ty())?
+        {
             return Err(invalid("invalid native output storage"));
         }
         let mut addresses = Vec::with_capacity(inputs.len());
         for (input, parameter) in inputs.iter().zip(&signature.parameters) {
             let address = input.place()?;
-            if ScalarKind::for_type(address.ty)? != ScalarKind::for_native(parameter.layout())?
+            if self.memory.is_pointer_slot(address)?
+                || ScalarKind::for_type(address.ty)? != ScalarKind::for_native(parameter.layout())?
                 || !self.memory.initialized(address)?
             {
                 return Err(invalid("invalid native input storage"));
@@ -691,7 +808,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hir::value::LiteralValue;
+    use crate::{Location, hir::value::LiteralValue};
 
     #[test]
     fn physical_scalar_transfers_preserve_absence_and_self_moves() {
@@ -710,8 +827,14 @@ mod tests {
             vec![],
             vec![],
         );
-        let source = interpreter.memory.allocate(ScalarKind::Int.ty()).unwrap();
-        let destination = interpreter.memory.allocate(ScalarKind::Int.ty()).unwrap();
+        let source = interpreter
+            .memory
+            .allocate(ScalarKind::Int.ty(), None)
+            .unwrap();
+        let destination = interpreter
+            .memory
+            .allocate(ScalarKind::Int.ty(), None)
+            .unwrap();
         let mut registers = FxHashMap::from_iter([
             (mir::ValueId::from_index(0), Binding::Place(source)),
             (mir::ValueId::from_index(1), Binding::Place(destination)),
@@ -763,7 +886,7 @@ mod tests {
                 LiteralValue::new_tuple(vec![LiteralValue::new_native(1isize)]),
                 true,
             ),
-            (LiteralValue::new_variant_tag("Some".into()), false),
+            (LiteralValue::new_variant_tag("Some".into()), true),
         ] {
             let operation = Operation::compare_eq(
                 Location::new_synthesized(),

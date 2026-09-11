@@ -249,7 +249,7 @@ impl MirExecutionProfile {
             OperationKind::Alloca { ty }
             | OperationKind::RuntimeAlloc { pointee: ty }
             | OperationKind::Subfield { ty, .. }
-            | OperationKind::AddressOffset { ty }
+            | OperationKind::AddressOffset { ty, .. }
             | OperationKind::DictEntry { ty, .. }
             | OperationKind::SubscriptMember { ty, .. }
             | OperationKind::BuildSubscriptEvidence { ty }

@@ -184,7 +184,7 @@ mod tests {
         );
         assert!(
             compiler
-                .compile("fn second(pair: (int, bool)) -> bool { pair.1 } second((42, true))")
+                .compile("enum List { Nil, Cons(int, List) } fn sum(l: List) -> int { match l { Nil => 0, Cons(n, tail) => n + sum(tail) } } sum(List::Cons(40, List::Cons(2, List::Nil))) == 42")
                 .succeeded
         );
         assert_eq!(

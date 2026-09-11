@@ -44,7 +44,7 @@ use crate::{
     format::FormatWith,
     hir::value::VariantPayloadStorage,
     mir,
-    module::{FunctionId, ModuleEnv, TraitDictionaryId},
+    module::{FunctionId, ModuleEnv, ProjectionIndex, TraitDictionaryId},
     types::{
         effects::{EffType, Effect, PrimitiveEffect},
         r#trait::TraitDictionaryEntryIndex,
@@ -464,18 +464,20 @@ impl Operation {
     ///
     /// `base` is an address-bearing place and `byte_offset` is a materialized Ferlium `int`.
     /// Physical lowering guarantees that the resulting address is within the same allocation and
-    /// aligned for `ty`.
+    /// aligned for `ty`. `member` identifies a logical product field, including zero-sized fields
+    /// that share their byte address with another member.
     pub fn address_offset(
         span: Location,
         base: mir::Value,
         byte_offset: mir::Value,
         ty: Type,
+        member: Option<ProjectionIndex>,
     ) -> Self {
         Operation {
             result_id: None,
             span,
             operands: Box::new([base, byte_offset]),
-            kind: OperationKind::AddressOffset { ty },
+            kind: OperationKind::AddressOffset { ty, member },
         }
     }
 
@@ -1159,7 +1161,11 @@ pub enum OperationKind {
         product: Option<B<ProductProjectionMetadata>>,
     },
     /// Project a place by a physical byte offset while retaining its allocation provenance.
-    AddressOffset { ty: Type },
+    AddressOffset {
+        ty: Type,
+        /// Logical product field, retained to distinguish co-located zero-sized subobjects.
+        member: Option<ProjectionIndex>,
+    },
     /// Project a slot containing a place by a physical byte offset.
     AddressOffsetPlace { pointing_to: Type },
     /// Project a function entry place from a symbolic dictionary.
@@ -1419,7 +1425,7 @@ impl OperationKind {
             }
             Project { yielded: ty, .. }
             | Subfield { ty, .. }
-            | AddressOffset { ty }
+            | AddressOffset { ty, .. }
             | DictEntry { ty, .. }
             | SubscriptMember { ty, .. } => {
                 OperationResult::pointer_to(OperationResult::Lowered(*ty))
@@ -1750,12 +1756,18 @@ impl OperationKind {
                 }
                 Ok(())
             }
-            AddressOffset { .. } => write!(
-                f,
-                "address_offset {} by {}",
-                whole.operands[0].format_with(env),
-                whole.operands[1].format_with(env)
-            ),
+            AddressOffset { member, .. } => {
+                write!(
+                    f,
+                    "address_offset {} by {}",
+                    whole.operands[0].format_with(env),
+                    whole.operands[1].format_with(env)
+                )?;
+                if let Some(member) = member {
+                    write!(f, " member {member}")?;
+                }
+                Ok(())
+            }
             AddressOffsetPlace { .. } => write!(
                 f,
                 "address_offset_place {} by {}",

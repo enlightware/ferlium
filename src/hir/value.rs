@@ -166,7 +166,6 @@ impl VariantPayloadStorage {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn encode_tag_id(self, tag_id: u32) -> u32 {
         assert_eq!(
             tag_id & Self::INDIRECT_TAG_BIT,
@@ -181,7 +180,6 @@ impl VariantPayloadStorage {
             }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn decode_tag(raw_tag: u32) -> (u32, Self) {
         (
             raw_tag & !Self::INDIRECT_TAG_BIT,

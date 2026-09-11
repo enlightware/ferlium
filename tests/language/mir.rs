@@ -91,7 +91,7 @@ fn execution_targets_accept_by_value_arguments() {
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn physical_mir_product_cleanup() {
+fn physical_mir_value_cleanup() {
     // TODO(physical-mir-bridge): Fold into shared cleanup coverage once the full language suite
     // runs on physical MIR, preserving the partial-construction and interrupted-failure cases.
     let mut session = TestSession::new();
@@ -104,10 +104,14 @@ fn physical_mir_product_cleanup() {
         "let p = (Probe(x), Probe(2)); 7",
         "let mut p = (Probe(x), Probe(2)); p.0 = Probe(3); 7",
         "let p = (Probe(x), idiv(1, x)); p.1",
+        "let p = Tree::Leaf(Probe(x)); 7",
+        "let mut p = Tree::Branch(Tree::Leaf(Probe(x)), Tree::Empty); p = Tree::Empty; 7",
+        "let p = Tree::Branch(Tree::Leaf(Probe(x)), Tree::Leaf(Probe(idiv(4, x)))); 7",
     ] {
         let source = format!(
             r#"
             struct Probe(int)
+            enum Tree {{ Empty, Leaf(Probe), Branch(Tree, Tree) }}
             impl Value for Probe {{
                 fn eq(a: Probe, b: Probe) -> bool {{ a.0 == b.0 }}
                 fn to_string(a: Probe) -> string {{ to_string(a.0) }}
@@ -133,7 +137,7 @@ fn physical_mir_product_cleanup() {
                         module_id,
                         entry,
                         vec![int_value(input)],
-                        ReferenceInterpreterLimits::default().with_fuel_limit(Some(100)),
+                        ReferenceInterpreterLimits::default().with_fuel_limit(Some(1000)),
                     )
                     .map(|value| {
                         let result = *value.as_primitive_ty::<isize>().unwrap();
@@ -143,20 +147,54 @@ fn physical_mir_product_cleanup() {
                     .map_err(|error| (error.kind(), error.source_failure().is_some()))
             });
             assert_eq!(outcomes[0], outcomes[1], "{body}, input={input}");
-            assert_eq!(outcomes[1].is_ok(), input != 0);
+            assert_eq!(
+                outcomes[1].is_ok(),
+                input != 0,
+                "{body}, input={input}: {:?}",
+                outcomes[1]
+            );
         }
     }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn physical_mir_product_host_arguments() {
+fn physical_mir_value_host_arguments() {
     // TODO(physical-mir-bridge): Fold into shared execution-target argument tests once physical
     // MIR supports the full suite; remove this separate differential fixture.
+    fn product() -> Value {
+        Value::tuple(vec![
+            int_value(7),
+            Value::tuple(vec![Value::native(true), int_value(11)]),
+        ])
+    }
+    fn list() -> Value {
+        (0..8).fold(Value::unit_variant("Nil".into()), |tail, n| {
+            Value::variant_with_storage(
+                "Cons".into(),
+                ferlium::hir::value::VariantPayloadStorage::Indirect,
+                Value::tuple(vec![int_value(n), tail]),
+            )
+        })
+    }
     let mut session = TestSession::new();
-    for source in [
-        "fn compute(p: (int, (bool, int))) -> (int, (bool, int)) { p }",
-        "fn compute(p: (int, (bool, int))) -> (bool, int) { (p.1.0, p.0 + p.1.1) }",
+    for (source, argument) in [
+        (
+            "fn compute(p: (int, (bool, int))) -> (int, (bool, int)) { p }",
+            product as fn() -> Value,
+        ),
+        (
+            "fn compute(p: (int, (bool, int))) -> (bool, int) { (p.1.0, p.0 + p.1.1) }",
+            product,
+        ),
+        (
+            "enum List { Nil, Cons(int, List) } fn compute(p: List) -> List { p }",
+            list,
+        ),
+        (
+            "enum List { Nil, Cons(int, List) } fn compute(p: List) -> int { match p { Nil => 0, Cons(n, tail) => n } }",
+            list,
+        ),
     ] {
         let module_id = session.compile(source).module_id;
         let entry = session
@@ -166,13 +204,9 @@ fn physical_mir_product_host_arguments() {
             .unwrap();
         let mut results = [ExecutionTarget::Mir, ExecutionTarget::PhysicalMir]
             .map(|target| {
-                let argument = Value::tuple(vec![
-                    int_value(7),
-                    Value::tuple(vec![Value::native(true), int_value(11)]),
-                ]);
                 session
                     .session_mut()
-                    .run_entry(target, module_id, entry, vec![argument])
+                    .run_entry(target, module_id, entry, vec![argument()])
                     .unwrap()
             })
             .into_iter();
@@ -191,6 +225,16 @@ fn physical_mir_value_execution() {
     // differential coverage once physical MIR is complete, retaining any unique cases there.
     let mut session = TestSession::new();
     for source in [
+        "enum Choice { Nothing, Number(int), Pair(bool, int) } fn compute(x: int) -> int { let v = if x == 0 { Choice::Nothing } else { Choice::Pair(true, x) }; match v { Nothing => 0, Number(n) => n, Pair(b, n) => if b { n + 1 } else { n } } }",
+        "enum Choice { Nothing, Number(int) } fn compute(x: int) -> (Choice, Choice) { (Choice::Nothing, Choice::Number(x)) }",
+        "enum Choice { Nothing, Number(int) } fn compute(x: int) -> int { let mut p = (Choice::Nothing, x); p.0 = Choice::Number(x); match p.0 { Nothing => 0, Number(n) => n } }",
+        "enum List { Nil, Cons(int, List) } fn make(n: int) -> List { if n == 0 { List::Nil } else { List::Cons(n, make(n - 1)) } } fn sum(l: List) -> int { match l { Nil => 0, Cons(n, tail) => n + sum(tail) } } fn compute(x: int) -> int { sum(make(x)) }",
+        "enum List { Nil, Cons(int, List) } fn compute(x: int) -> List { List::Cons(x, List::Cons(x + 1, List::Nil)) }",
+        "enum List { Nil, Cons(int, List) } fn compute(x: int) -> int { let mut p = List::Cons(x, List::Nil); let q = p; p = List::Nil; match q { Nil => 0, Cons(n, tail) => n } }",
+        "enum List { Nil, Cons(int, List) } fn compute(x: int) -> List { List::Cons(idiv(10, x), List::Nil) }",
+        "fn compute(x: int) -> ((), (), int) { let mut p = ((), (), x); p.0 = (); p.1 = (); p }",
+        "struct Empty {} fn compute(x: int) -> (Empty, Empty, int) { let mut p = (Empty{}, Empty{}, x); p.0 = Empty{}; p }",
+        "enum Node { End, Link(int, Node), Pair(Node, Node) } fn compute(x: int) -> int { let mut p = Node::Pair(Node::End, Node::End); p = Node::Link(x, Node::End); match p { Link(n, tail) => n, _ => 0 } }",
         "fn compute(x: int) -> (int, bool, float) { (x + 1, x > 2, 3.5) }",
         "fn compute(x: int) -> int { let mut pair = (x, (true, x + 1)); pair.1.1 += 2; pair.0 + pair.1.1 }",
         "fn compute(x: int) -> int { let mut r = { a: true, b: x, c: false }; r.b += 2; if r.a { r.b } else { 0 } }",

@@ -493,10 +493,7 @@ pub struct CompilerSession {
     variant_tags: RefCell<VariantTags>,
 }
 
-// Reserved for physical ABI lowering. Both reference interpreters deliberately retain symbolic
-// tags, so this table is otherwise exercised only by its contract test until a machine backend uses
-// it (see `doc/abi.md` § "Tag representation").
-#[cfg_attr(not(test), allow(dead_code))]
+// Physical execution resolves symbolic MIR tags through this session-local ABI table.
 #[derive(Debug, Default)]
 struct VariantTags {
     names: Vec<Ustr>,
@@ -624,7 +621,6 @@ impl CompilerSession {
     }
 
     /// Resolve a symbolic variant tag to this compilation session's compact discriminant.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn variant_tag_id(&self, tag: Ustr) -> u32 {
         self.variant_tags.borrow_mut().intern(tag)
     }
@@ -1373,13 +1369,13 @@ impl CompilerSession {
                 .prepare_physical_program(module_id)
                 .and_then(|program| {
                     // Preparation established a fresh dependency closure. The borrowed program
-                    // prevents a revision change while execution resolves named product types.
+                    // prevents a revision change while execution resolves named types.
                     crate::mir::physical::interpreter::run_entry(
                         &program,
                         FunctionId::new(module_id, entry),
                         &arguments,
                         limits,
-                        ModuleEnv::new(self.expect_fresh_module(module_id), self.raw_modules()),
+                        self,
                     )
                 });
             // Reclaim host-owned arguments on every exit, including unsupported inputs and
