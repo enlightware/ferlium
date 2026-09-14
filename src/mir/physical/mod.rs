@@ -1013,10 +1013,15 @@ impl<'a> PhysicalLowerer<'a> {
                     &mut replacement,
                     Operation::load(span, arguments[2].clone()),
                 );
+                let count = edit_result(
+                    edit,
+                    &mut replacement,
+                    Operation::load(span, arguments[0].clone()),
+                );
                 let allocation = edit_result(
                     edit,
                     &mut replacement,
-                    Operation::runtime_alloc(span, element_ty, total, align),
+                    Operation::runtime_alloc_array(span, element_ty, total, align, count),
                 );
                 let slot = edit_buffer_pointer_slot(
                     edit,
@@ -1136,7 +1141,7 @@ impl<'a> PhysicalLowerer<'a> {
                 let empty = edit_result(
                     edit,
                     &mut replacement,
-                    Operation::runtime_alloc(span, element_ty, zero, one),
+                    Operation::runtime_alloc_array(span, element_ty, zero.clone(), one, zero),
                 );
                 replacement.push(Operation::store(span, empty, source));
                 edit_store_unit(edit, &mut replacement, destination, span, self.env);
@@ -1757,12 +1762,20 @@ fn edit_buffer_element_address(
 ) -> Value {
     let pointer_slot = edit_buffer_pointer_slot(edit, operations, buffer, element_ty, span, env);
     let base = edit_result(edit, operations, Operation::load(span, pointer_slot));
-    let offset = edit_int_binary(edit, operations, known.int_mul(), index, element_size, span);
+    let offset = edit_int_binary(
+        edit,
+        operations,
+        known.int_mul(),
+        index.clone(),
+        element_size,
+        span,
+    );
     let offset = edit_result(edit, operations, Operation::load(span, offset));
+    let index = edit_result(edit, operations, Operation::load(span, index));
     edit_result(
         edit,
         operations,
-        Operation::address_offset(span, base, offset, element_ty, None),
+        Operation::address_offset_indexed(span, base, offset, index, element_ty),
     )
 }
 
@@ -5343,7 +5356,7 @@ mod tests {
         let entries = buffer::entries(env, session.known_callees());
         assert_eq!(
             entries.len(),
-            11,
+            12,
             "all storage, Value and Inspect Buffer entries have lowering"
         );
         for id in entries.keys() {

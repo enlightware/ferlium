@@ -17,7 +17,7 @@ use ferlium::{
     hir::value::Value,
     mir::interpreter::Interpreter,
     module::ShowModuleWithOptions,
-    std::string::String as NativeString,
+    std::{array::array_value_from_vec, string::String as NativeString},
 };
 
 use crate::harness::{
@@ -174,6 +174,9 @@ fn physical_mir_value_host_arguments() {
     fn native_string() -> Value {
         Value::native(NativeString::new("hello"))
     }
+    fn native_array() -> Value {
+        array_value_from_vec(vec![native_string(), native_string()])
+    }
     fn list() -> Value {
         (0..8).fold(Value::unit_variant("Nil".into()), |tail, n| {
             Value::variant_with_storage(
@@ -190,6 +193,11 @@ fn physical_mir_value_host_arguments() {
             product as fn() -> Value,
         ),
         ("fn compute(p: string) -> string { p }", native_string),
+        ("fn compute(p: [string]) -> [string] { p }", native_array),
+        (
+            "fn compute(p: [string]) -> [string] { let mut a = p; push(a, \"extra\"); a }",
+            native_array,
+        ),
         (
             "fn compute(p: string) -> (string, string) { (p, p) }",
             native_string,
@@ -235,7 +243,21 @@ fn physical_mir_value_execution() {
     // TODO(physical-mir-bridge): Replace this supported-subset matrix with shared language-suite
     // differential coverage once physical MIR is complete, retaining any unique cases there.
     let mut session = TestSession::with_native_members();
+    session.allow_experimental();
     for source in [
+        "fn compute(x: int) -> int { let f = |y| y + x; f(2) + f(3) }",
+        "fn apply(f: (int) -> int, n: int) -> int { f(n) } fn compute(x: int) -> int { apply(|y| y + x, 2) }",
+        "fn compute(x: int) -> int { let mut f = |y| y + x; let g = f; f = |y| y * 2; f(3) + g(4) }",
+        "fn make(x: int) -> (int) -> int { |y| x + y } fn compute(x: int) -> int { let f = make(x); f(2) }",
+        "subscript cell(x: &mut int) -> int { ref mut { return x } } fn compute(x: int) -> int { let mut n = x; let s = cell; n->[s] += 2; n }",
+        "subscript cell(x: &mut int) -> int { ref mut { let mut v = x; yield v; x = v + 1; } } fn compute(x: int) -> int { let mut n = x; let s = cell; n->[s] += 2; n }",
+        "subscript cell(x: &mut int) -> int { ref mut { let mut v = x; yield v; x = v; } } fn compute(x: int) -> int { let mut n = x; n->[cell] = idiv(10, x); n }",
+        "fn compute(x: int) -> int { let mut a = [x, 2, 3]; a[1] += x; a[0] + a[1] + a[2] }",
+        "fn compute(x: int) -> int { let mut a = [x]; push(a, 2); push(a, 3); let b = a; a[0] = 10; b[0] + a[0] }",
+        "fn compute(x: int) -> [int] { let mut a = [x, 2, 3]; push(a, 4); a }",
+        "fn compute(x: int) -> int { let mut a = [(), (), ()]; push(a, ()); a[1] = (); len(a) }",
+        r#"fn compute(x: int) -> [string] { let mut a = [to_string(x), "two"]; push(a, "three"); let b = a; a[0] = "changed"; b }"#,
+        r#"fn compute(x: int) -> string { let s = to_string(x); let f = || s; let g = f; "{f()}{g()}" }"#,
         r#"fn compute(x: int) -> string { "hello {x}" }"#,
         r#"fn compute(x: int) -> int { match parse_int(if x == 0 { "bad" } else { to_string(x) }) { Some(n) => n, None => -1 } }"#,
         r#"fn compute(x: int) -> (Option<string>, Option<string>, Option<string>) { let mut it = split_iterator(to_string(x), if x == 0 { "" } else { "," }); (next(it), next(it), next(it)) }"#,

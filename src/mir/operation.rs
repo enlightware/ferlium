@@ -277,6 +277,22 @@ impl Operation {
         }
     }
 
+    /// Allocates repeated storage, retaining its element count even for zero-sized elements.
+    pub fn runtime_alloc_array(
+        span: Location,
+        pointee: Type,
+        size: mir::Value,
+        align: mir::Value,
+        count: mir::Value,
+    ) -> Self {
+        Self {
+            result_id: None,
+            span,
+            operands: Box::new([size, align, count]),
+            kind: OperationKind::RuntimeAlloc { pointee },
+        }
+    }
+
     /// Deallocates the run-time allocation identified by `address`.
     ///
     /// The target runtime recovers the allocation's byte extent and alignment from the address;
@@ -495,6 +511,22 @@ impl Operation {
             span,
             operands: Box::new([base, byte_offset]),
             kind: OperationKind::AddressOffsetPlace { pointing_to },
+        }
+    }
+
+    /// Addresses one repeated element, preserving its logical index alongside its byte offset.
+    pub fn address_offset_indexed(
+        span: Location,
+        base: mir::Value,
+        byte_offset: mir::Value,
+        index: mir::Value,
+        ty: Type,
+    ) -> Self {
+        Operation {
+            result_id: None,
+            span,
+            operands: Box::new([base, byte_offset, index]),
+            kind: OperationKind::AddressOffset { ty, member: None },
         }
     }
 
@@ -1483,10 +1515,9 @@ impl OperationKind {
             AllocaPlace { .. } => {
                 assert!(whole.operands.is_empty(), "alloca_place takes no operands")
             }
-            RuntimeAlloc { .. } => assert_eq!(
-                whole.operands.len(),
-                2,
-                "runtime_alloc takes the byte size and alignment"
+            RuntimeAlloc { .. } => assert!(
+                matches!(whole.operands.len(), 2 | 3),
+                "runtime_alloc takes size, alignment, and optionally an element count"
             ),
             RuntimeDealloc => assert_eq!(
                 whole.operands.len(),
@@ -1540,10 +1571,9 @@ impl OperationKind {
                     "subfield takes the aggregate place, the int field-index value, and optional layout evidence"
                 );
             }
-            AddressOffset { .. } => assert_eq!(
-                whole.operands.len(),
-                2,
-                "address_offset takes a base place and a materialized byte offset"
+            AddressOffset { member, .. } => assert!(
+                whole.operands.len() == 2 || (whole.operands.len() == 3 && member.is_none()),
+                "address_offset takes a base, byte offset, and optionally an element index"
             ),
             AddressOffsetPlace { .. } => assert_eq!(
                 whole.operands.len(),
@@ -1699,13 +1729,19 @@ impl OperationKind {
             AllocaPlace { pointing_to } => {
                 write!(f, "alloca_place {}", pointing_to.format_with(env))
             }
-            RuntimeAlloc { pointee } => write!(
-                f,
-                "runtime_alloc {} size {} align {}",
-                pointee.format_with(env),
-                whole.operands[0].format_with(env),
-                whole.operands[1].format_with(env)
-            ),
+            RuntimeAlloc { pointee } => {
+                write!(
+                    f,
+                    "runtime_alloc {} size {} align {}",
+                    pointee.format_with(env),
+                    whole.operands[0].format_with(env),
+                    whole.operands[1].format_with(env)
+                )?;
+                if let Some(count) = whole.operands.get(2) {
+                    write!(f, " count {}", count.format_with(env))?;
+                }
+                Ok(())
+            }
             RuntimeDealloc => write!(f, "runtime_dealloc {}", whole.operands[0].format_with(env)),
             Call { ty, metadata } => {
                 write!(f, "call ")?;
@@ -1769,6 +1805,9 @@ impl OperationKind {
                 )?;
                 if let Some(member) = member {
                     write!(f, " member {member}")?;
+                }
+                if let Some(index) = whole.operands.get(2) {
+                    write!(f, " index {}", index.format_with(env))?;
                 }
                 Ok(())
             }

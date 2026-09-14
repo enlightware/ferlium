@@ -75,6 +75,7 @@ impl<A> Value for [A] where A: Value {
 		loop {
 			let len = array_len(target);
 			if len <= 0 {
+				buffer_drop(target.data);
 				return ();
 			};
 			let index = len - 1;

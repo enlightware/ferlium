@@ -109,6 +109,10 @@ impl Buffer {
         self.slots.len()
     }
 
+    pub(crate) fn slots_mut(&mut self) -> &mut [Value] {
+        &mut self.slots
+    }
+
     pub fn get(&self, index: usize) -> Option<&Value> {
         self.slots.get(index)
     }
@@ -522,6 +526,16 @@ pub fn add_to_module(to: &mut Module) {
     to.add_private_unsafe_function(ustr("buffer_move"), buffer_move_descr());
     to.add_private_unsafe_function(ustr("buffer_move_into"), buffer_move_into_descr());
     to.add_private_unsafe_function(ustr("buffer_take"), buffer_take_descr());
+    to.add_private_unsafe_function(
+        ustr("buffer_drop"),
+        native_function(
+            FnType::new_mut_resolved([(buffer_type(gen0), true)], Type::unit(), no_effects()),
+            [],
+            ["target"],
+            "Releases a buffer after all its elements have been consumed.",
+            BufferPrimitive::Drop,
+        ),
+    );
 }
 
 #[cfg(test)]

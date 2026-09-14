@@ -367,6 +367,7 @@ impl KnownCallees {
                 KnownCallee::BufferMoveInto,
             ),
             (resolver.function("buffer_take"), KnownCallee::BufferTake),
+            (resolver.function("buffer_drop"), KnownCallee::BufferDrop),
             (
                 resolver.blanket_method(
                     VALUE_TRAIT_NAME,
@@ -672,7 +673,7 @@ mod tests {
         let session = CompilerSession::new();
         assert_eq!(
             known_callees(&session).by_id.len(),
-            28,
+            29,
             "two known callees resolved to the same function id"
         );
     }
@@ -686,7 +687,7 @@ mod tests {
                 .values()
                 .filter(|callee| callee.is_buffer())
                 .count(),
-            6,
+            7,
             "two Buffer callees resolved to the same function id"
         );
     }

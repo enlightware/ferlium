@@ -432,7 +432,10 @@ impl TypeInference {
                     got_span: expr_span,
                 }));
             }
-            input_tys.iter().map(|(ty, _)| *ty).collect::<Vec<_>>()
+            input_tys
+                .iter()
+                .map(|(ty, _)| ty.map(&mut AnnotationTypeMapper::new(self, env.annotation_subst)))
+                .collect::<Vec<_>>()
         } else {
             self.fresh_type_var_tys(trait_def.input_type_count() as usize)
         };
@@ -5394,12 +5397,17 @@ impl TypeInference {
         // Pre-extract the children we need to recurse into so we can drop the borrow on the arena before the recursive call.
         // Avoids cloning the whole `NodeKind` just to satisfy the borrow checker.
         let children: SmallVec<[NodeId; 4]> = match &env.ir_arena[value].kind {
-            Immediate(_) | GetFunction(_) | GetSubscript(_) | GetTraitMethod(_) => return false,
+            Immediate(_) => return false,
+            // First-class values can acquire hidden evidence during elaboration. Even when all
+            // source captures are trivial, their owned environment still needs reclamation.
+            GetFunction(_)
+            | GetSubscript(_)
+            | GetTraitMethod(_)
+            | BuildClosure(_)
+            | BuildSubscriptValue(_) => return true,
             Variant(variant) => smallvec![variant.payload],
             Block(block) => block.tail_node().into_iter().collect(),
             Tuple(nodes) | Record(nodes) => nodes.iter().copied().collect(),
-            BuildClosure(closure) => closure.captures.iter().copied().collect(),
-            BuildSubscriptValue(_) => return false,
             _ => return self.type_needs_semantic_drop(env, ty),
         };
         children

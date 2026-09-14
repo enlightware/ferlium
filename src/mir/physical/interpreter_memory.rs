@@ -15,6 +15,7 @@ use crate::{
     mir::physical::dictionary::{DictionaryReference, EvidenceEnvironmentLayout},
     module::{ProjectionIndex, id::Id},
     std::{
+        buffer::{Buffer, buffer_element_type},
         math::Float,
         value::{
             TypeLayoutEnv, product_layout_spec, product_member_types, structural_variant,
@@ -207,6 +208,14 @@ enum StoredData {
     Variant(Option<(Ustr, Box<StoredValue>)>),
     Pointer(Option<Address>),
     Native(Option<Rc<NativeBytes>>),
+    Callable(Option<CallableReference>),
+}
+
+/// ABI callable identity with checked provenance for its uniquely owned environment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) struct CallableReference {
+    pub(super) descriptor: u32,
+    pub(super) environment: Option<Address>,
 }
 
 /// Inert transfer bytes, including possibly uninitialized Rust padding. An owning snapshot is
@@ -261,12 +270,20 @@ struct StorageLayout {
     layout: Layout,
     depth: usize,
     nodes: usize,
-    members: Option<Vec<(usize, Rc<StorageLayout>)>>,
-    cases: Option<Vec<VariantCase>>,
-    pointer: bool,
-    native: Option<NativeStorage>,
+    kind: StorageKind,
     // Static scalar extents, used to validate the ABI layout before any unsafe access.
     leaves: Vec<(usize, ScalarKind)>,
+}
+
+/// Mutually exclusive storage shapes; products and sequences both contain logical subobjects.
+enum StorageKind {
+    Scalar(ScalarKind),
+    Product(Vec<(usize, Rc<StorageLayout>)>),
+    Variant(Vec<VariantCase>),
+    Pointer,
+    Native(NativeStorage),
+    Callable,
+    Sequence(Vec<(usize, Rc<StorageLayout>)>),
 }
 
 fn check_extent(parent: Layout, offset: usize, child: Layout) -> Result<(), RuntimeError> {
@@ -289,10 +306,7 @@ impl StorageLayout {
             layout: kind.layout(),
             depth: 0,
             nodes: 1,
-            members: None,
-            cases: None,
-            pointer: false,
-            native: None,
+            kind: StorageKind::Scalar(kind),
             leaves: vec![(0, kind)],
         }
     }
@@ -303,10 +317,7 @@ impl StorageLayout {
             layout: Layout::new::<*mut u8>(),
             depth: 0,
             nodes: 1,
-            members: None,
-            cases: None,
-            pointer: true,
-            native: None,
+            kind: StorageKind::Pointer,
             leaves: vec![],
         }
     }
@@ -316,6 +327,13 @@ impl StorageLayout {
         layout: Layout,
         members: Vec<(usize, Rc<StorageLayout>)>,
     ) -> Result<Self, RuntimeError> {
+        Self::aggregate(ty, layout, StorageKind::Product(members))
+    }
+
+    fn aggregate(ty: Type, layout: Layout, kind: StorageKind) -> Result<Self, RuntimeError> {
+        let (StorageKind::Product(members) | StorageKind::Sequence(members)) = &kind else {
+            return Err(invalid("aggregate layout requires subobjects"));
+        };
         let depth = 1 + members.iter().map(|(_, m)| m.depth).max().unwrap_or(0);
         if depth > MAX_STORAGE_DEPTH {
             return Err(unsupported("product storage nesting limit"));
@@ -326,7 +344,7 @@ impl StorageLayout {
         }
         let mut leaves = Vec::new();
         let mut extents = Vec::new();
-        for (offset, member) in &members {
+        for (offset, member) in members {
             check_extent(layout, *offset, member.layout)?;
             if member.layout.size() != 0 {
                 extents.push((*offset, offset + member.layout.size()));
@@ -352,39 +370,55 @@ impl StorageLayout {
             layout,
             depth,
             nodes,
-            members: Some(members),
-            cases: None,
-            pointer: false,
-            native: None,
+            kind,
             leaves,
         })
     }
 
     fn representation_compatible(&self, other: &Self) -> bool {
-        if self.native.is_some() || other.native.is_some() {
-            return self.ty == other.ty
-                && self.layout == other.layout
-                && self.native.is_some() == other.native.is_some();
-        }
-        if self.layout != other.layout || self.pointer != other.pointer {
+        if self.layout != other.layout {
             return false;
         }
-        match (&self.members, &other.members, &self.cases, &other.cases) {
-            (Some(left), Some(right), _, _) => {
+        use StorageKind::*;
+        match (&self.kind, &other.kind) {
+            (Product(left), Product(right)) | (Sequence(left), Sequence(right)) => {
                 left.len() == right.len()
                     && left
                         .iter()
                         .zip(right)
                         .all(|((a, l), (b, r))| a == b && l.representation_compatible(r))
             }
-            (None, None, Some(left), Some(right)) => {
+            (Variant(left), Variant(right)) => {
                 left.len() == right.len()
                     && left.iter().zip(right).all(|(l, r)| {
                         l.tag == r.tag && l.payload == r.payload && l.storage == r.storage
                     })
             }
-            (None, None, None, None) => self.leaves == other.leaves,
+            (Scalar(left), Scalar(right)) => left == right,
+            (Native(_), Native(_)) => self.ty == other.ty,
+            (Pointer, Pointer) | (Callable, Callable) => true,
             _ => false,
+        }
+    }
+
+    fn members(&self) -> Option<&[(usize, Rc<StorageLayout>)]> {
+        match &self.kind {
+            StorageKind::Product(members) | StorageKind::Sequence(members) => Some(members),
+            _ => None,
+        }
+    }
+
+    fn cases(&self) -> Option<&[VariantCase]> {
+        match &self.kind {
+            StorageKind::Variant(cases) => Some(cases),
+            _ => None,
+        }
+    }
+
+    fn native(&self) -> Option<NativeStorage> {
+        match self.kind {
+            StorageKind::Native(native) => Some(native),
+            _ => None,
         }
     }
 }
@@ -402,20 +436,30 @@ enum StorageState {
     Pointer(Option<Address>),
     /// Owning opaque values carry a transfer identity; copyable natives use Value instead.
     Native(Option<NativeOwnerId>),
+    Callable(Option<CallableReference>),
 }
 
 impl StorageState {
     fn absent(shape: &StorageLayout) -> Self {
-        if shape.pointer {
-            Self::Pointer(None)
-        } else if shape.native.is_some_and(|n| !n.copy) {
-            Self::Native(None)
-        } else if shape.cases.is_some() {
-            Self::Variant(None)
-        } else if shape.members.as_ref().is_some_and(|m| !m.is_empty()) {
-            Self::Product
-        } else {
-            Self::Value(false)
+        match &shape.kind {
+            StorageKind::Scalar(_) => Self::Value(false),
+            StorageKind::Product(members) | StorageKind::Sequence(members) => {
+                if members.is_empty() {
+                    Self::Value(false)
+                } else {
+                    Self::Product
+                }
+            }
+            StorageKind::Variant(_) => Self::Variant(None),
+            StorageKind::Pointer => Self::Pointer(None),
+            StorageKind::Native(native) => {
+                if native.copy {
+                    Self::Value(false)
+                } else {
+                    Self::Native(None)
+                }
+            }
+            StorageKind::Callable => Self::Callable(None),
         }
     }
 
@@ -426,6 +470,7 @@ impl StorageState {
             Self::Variant(tag) => tag.is_some(),
             Self::Pointer(pointer) => pointer.is_some(),
             Self::Native(owner) => owner.is_some(),
+            Self::Callable(value) => value.is_some(),
         }
     }
 }
@@ -499,7 +544,7 @@ impl Allocation {
             self.nodes.push(node);
             self.nodes.len() - 1
         };
-        if let Some(members) = &shape.members {
+        if let Some(members) = shape.members() {
             for (inner, member) in members {
                 let child = self.add_node(member.clone(), offset + inner)?;
                 self.nodes[id].children.push(child);
@@ -678,10 +723,7 @@ impl Memory {
                 layout: layout_value,
                 depth: 0,
                 nodes: 1,
-                members: None,
-                cases: None,
-                pointer: false,
-                native: Some(NativeStorage { copy, export }),
+                kind: StorageKind::Native(NativeStorage { copy, export }),
                 leaves: vec![],
             }),
         );
@@ -850,7 +892,7 @@ impl Memory {
 
     pub(super) fn prepare_output(&mut self, address: Address) -> Result<(), RuntimeError> {
         self.check_write(address)?;
-        if self.node(address)?.shape.native.is_some_and(|n| !n.copy)
+        if self.node(address)?.shape.native().is_some_and(|n| !n.copy)
             && self.any_initialized(address)?
         {
             return Err(invalid("native output overwrites a live owner"));
@@ -872,8 +914,7 @@ impl Memory {
         let tag = Ustr::from(if present { "Some" } else { "None" });
         let shape = self.shape(output.ty)?;
         let case = shape
-            .cases
-            .as_ref()
+            .cases()
             .and_then(|cases| cases.iter().find(|c| c.tag == tag))
             .ok_or_else(|| invalid("invalid native optional result"))?;
         let mut value = if present {
@@ -1145,7 +1186,29 @@ impl Memory {
         }
         active.push(ty);
         let span = Location::new_synthesized();
-        if let Some((_, cases)) = structural_variant(ty, env) {
+        if matches!(&*ty.data(), TypeKind::Function(_) | TypeKind::Subscript(_)) {
+            self.layouts.insert(
+                ty,
+                Rc::new(StorageLayout {
+                    ty,
+                    layout: Layout::new::<DictionaryReference>(),
+                    depth: 0,
+                    nodes: 1,
+                    kind: StorageKind::Callable,
+                    leaves: vec![],
+                }),
+            );
+        } else if let Some(element) = buffer_element_type(ty) {
+            pending.push(element);
+            self.layouts.insert(
+                ty,
+                Rc::new(StorageLayout::product(
+                    ty,
+                    Layout::new::<*mut u8>(),
+                    vec![(0, Rc::new(StorageLayout::pointer(element)))],
+                )?),
+            );
+        } else if let Some((_, cases)) = structural_variant(ty, env) {
             if cases.len() > MAX_STORAGE_LEAVES {
                 return Err(unsupported("variant case limit"));
             }
@@ -1199,10 +1262,7 @@ impl Memory {
                     layout,
                     depth,
                     nodes,
-                    members: None,
-                    cases: Some(prepared),
-                    pointer: false,
-                    native: None,
+                    kind: StorageKind::Variant(prepared),
                     leaves: vec![],
                 }),
             );
@@ -1300,7 +1360,12 @@ impl Memory {
                     .iter()
                     .map(|&child| self.address(address.allocation, child)),
             );
-            if let StorageState::Pointer(Some(pointer)) = node.state {
+            let owned = match node.state {
+                StorageState::Pointer(pointer) => pointer,
+                StorageState::Callable(Some(reference)) => reference.environment,
+                _ => None,
+            };
+            if let Some(pointer) = owned {
                 if self.allocation(pointer)?.heap {
                     if pointer.node != 0 {
                         return Err(invalid("owning pointer is not an allocation base"));
@@ -1371,6 +1436,134 @@ impl Memory {
     ) -> Result<Address, RuntimeError> {
         self.allocate_shape(self.shape(ty)?, false, span)
     }
+
+    pub(super) fn member(&self, address: Address, index: usize) -> Result<Address, RuntimeError> {
+        let child = *self
+            .node(address)?
+            .children
+            .get(index)
+            .ok_or_else(|| invalid("invalid member index"))?;
+        Ok(self.address(address.allocation, child))
+    }
+
+    fn validate_callable(&self, reference: CallableReference) -> Result<(), RuntimeError> {
+        if let Some(environment) = reference.environment {
+            self.allocation(environment)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn callable_value(ty: Type, reference: CallableReference) -> StoredValue {
+        StoredValue {
+            ty,
+            data: StoredData::Callable(Some(reference)),
+        }
+    }
+
+    pub(super) fn read_callable(
+        &self,
+        address: Address,
+    ) -> Result<CallableReference, RuntimeError> {
+        let StorageState::Callable(Some(reference)) = self.node(address)?.state else {
+            return Err(invalid("expected initialized callable"));
+        };
+        self.validate_callable(reference)?;
+        Ok(reference)
+    }
+
+    /// One owning environment allocation: evidence references precede the owned capture tuple.
+    pub(super) fn allocate_callable_environment(
+        &mut self,
+        evidence: &[Evidence],
+        values: Type,
+        span: Location,
+    ) -> Result<(Address, Address), RuntimeError> {
+        let mut layout = Layout::from_size_align(0, 1).unwrap();
+        let mut fields = Vec::new();
+        for capture in evidence {
+            let field = match capture {
+                Evidence::Storage(_) => Layout::new::<bool>(),
+                Evidence::Physical { .. } => Layout::new::<DictionaryReference>(),
+                _ => return Err(invalid("symbolic callable evidence")),
+            };
+            let (next, offset) = layout
+                .extend(field)
+                .map_err(|_| invalid("callable layout overflow"))?;
+            layout = next;
+            fields.push(offset);
+        }
+        let shape = self.shape(values)?;
+        let (layout, offset) = layout
+            .extend(shape.layout)
+            .map_err(|_| invalid("callable layout overflow"))?;
+        let root = StorageLayout::product(values, layout.pad_to_align(), vec![(offset, shape)])?;
+        let environment = self.allocate_shape(Rc::new(root), true, Some(span))?;
+        for (index, (capture, offset)) in evidence.iter().zip(fields).enumerate() {
+            if let Err(error) = self.retain_evidence(capture) {
+                for retained in &evidence[..index] {
+                    self.release_evidence(retained)?;
+                }
+                self.release(environment.allocation);
+                return Err(error);
+            }
+            let pointer = self.pointer(environment)?;
+            // SAFETY: each aligned field's extent was computed by Layout::extend above.
+            unsafe {
+                match capture {
+                    Evidence::Storage(value) => pointer.add(offset).cast::<bool>().write(*value),
+                    Evidence::Physical { reference, .. } => {
+                        pointer
+                            .add(offset)
+                            .cast::<u32>()
+                            .write(reference.descriptor);
+                        pointer
+                            .add(offset + offset_of!(DictionaryReference, environment))
+                            .cast::<usize>()
+                            .write(reference.environment);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+        Ok((environment, self.member(environment, 0)?))
+    }
+
+    pub(super) fn build_array(
+        &mut self,
+        destination: Address,
+        element: Type,
+        values: &[StoredValue],
+        span: Location,
+    ) -> Result<(), RuntimeError> {
+        let layout = self.shape(element)?.layout;
+        let size = layout
+            .size()
+            .checked_mul(values.len())
+            .ok_or_else(|| invalid("array size overflow"))?;
+        let data =
+            self.allocate_sequence(element, size, layout.align(), values.len(), Some(span))?;
+        for (index, value) in values.iter().enumerate() {
+            let slot = self.sequence_element(data, index * layout.size(), index, element)?;
+            self.write_value(slot, value)?;
+        }
+        self.write(
+            self.member(destination, 0)?,
+            Scalar::Int(values.len() as isize),
+        )?;
+        self.write_pointer(self.pointer_slot(self.member(destination, 1)?, 0)?, data)?;
+        self.write(
+            self.member(destination, 2)?,
+            Scalar::Int(values.len() as isize),
+        )?;
+        self.write(self.member(destination, 3)?, Scalar::Int(0))
+    }
+
+    pub(super) fn scalar_value(value: Scalar) -> StoredValue {
+        StoredValue {
+            ty: value.kind().ty(),
+            data: StoredData::Scalar(Some(value)),
+        }
+    }
     pub(super) fn check_type_layout(
         &self,
         ty: Type,
@@ -1423,6 +1616,57 @@ impl Memory {
             return Err(invalid("runtime allocation differs from pointee layout"));
         }
         self.allocate_shape(shape, true, span)
+    }
+
+    pub(super) fn allocate_sequence(
+        &mut self,
+        ty: Type,
+        size: usize,
+        align: usize,
+        count: usize,
+        span: Option<Location>,
+    ) -> Result<Address, RuntimeError> {
+        let shape = self.shape(ty)?;
+        if !(count == 0 && size == 0 && align == 1)
+            && (shape.layout.size().checked_mul(count) != Some(size)
+                || shape.layout.align() != align)
+        {
+            return Err(invalid("buffer allocation differs from element layout"));
+        }
+        if count > (MAX_STORAGE_NODES - 1) / shape.nodes {
+            return Err(unsupported("buffer storage subobject limit"));
+        }
+        if !shape.leaves.is_empty() && count > MAX_STORAGE_LEAVES / shape.leaves.len() {
+            return Err(unsupported("buffer storage leaf limit"));
+        }
+        if count != 0 && shape.depth >= MAX_STORAGE_DEPTH {
+            return Err(unsupported("buffer storage nesting limit"));
+        }
+        let layout =
+            Layout::from_size_align(size, align).map_err(|_| invalid("invalid runtime layout"))?;
+        let members = (0..count)
+            .map(|i| (i * shape.layout.size(), shape.clone()))
+            .collect();
+        let array = StorageLayout::aggregate(ty, layout, StorageKind::Sequence(members))?;
+        self.allocate_shape(Rc::new(array), true, span)
+    }
+
+    pub(super) fn sequence_element(
+        &self,
+        base: Address,
+        offset: usize,
+        index: usize,
+        ty: Type,
+    ) -> Result<Address, RuntimeError> {
+        let node = self.node(base)?;
+        if !matches!(node.shape.kind, StorageKind::Sequence(_)) || base.node != 0 {
+            return Err(invalid("expected buffer allocation base"));
+        }
+        let address = self.member(base, index)?;
+        if address.offset != offset || address.ty != ty {
+            return Err(invalid("buffer element offset mismatch"));
+        }
+        Ok(address)
     }
     fn allocate_shape(
         &mut self,
@@ -1480,6 +1724,14 @@ impl Memory {
 
     fn ensure_no_owned_payloads(&self, address: Address) -> Result<(), RuntimeError> {
         let node = self.node(address)?;
+        if let StorageState::Callable(Some(reference)) = node.state
+            && let Some(environment) = reference.environment
+            && self.allocation(environment).is_ok()
+        {
+            return Err(invalid(
+                "releasing storage with an owned callable environment",
+            ));
+        }
         if let StorageState::Pointer(Some(pointer)) = node.state {
             if self
                 .allocation(pointer)
@@ -1574,8 +1826,26 @@ impl Memory {
             .offset
             .checked_add(offset)
             .ok_or_else(|| invalid("offset overflow"))?;
+        // Repeated runtime storage has an allocation-wide root and distinct element nodes.
+        if matches!(node.shape.kind, StorageKind::Sequence(_)) {
+            if member.is_some() {
+                return Err(invalid("member projection of repeated storage"));
+            }
+            let mut matching = node
+                .children
+                .iter()
+                .map(|&child| self.address(base.allocation, child))
+                .filter(|address| address.offset == target && address.ty == ty);
+            let address = matching
+                .next()
+                .ok_or_else(|| invalid("buffer index outside allocation"))?;
+            if matching.next().is_some() {
+                return Err(invalid("ambiguous buffer offset requires an element index"));
+            }
+            return Ok(address);
+        }
         if let Some(member) = member {
-            if node.shape.members.is_none() {
+            if node.shape.members().is_none() {
                 return Err(invalid("member projection of non-product"));
             }
             let child = *node
@@ -1589,13 +1859,16 @@ impl Memory {
             return Ok(address);
         }
         // A variant projection selects its active inline payload, never a stale/inactive case.
-        if node.shape.cases.is_some() {
+        if node.shape.cases().is_some() {
             let child = *node
                 .children
                 .first()
                 .ok_or_else(|| invalid("projection of absent variant"))?;
             let address = self.address(base.allocation, child);
-            if address.offset == target && address.ty == ty && !self.node(address)?.shape.pointer {
+            if address.offset == target
+                && address.ty == ty
+                && !matches!(self.node(address)?.shape.kind, StorageKind::Pointer)
+            {
                 return Ok(address);
             }
             return Err(invalid("invalid active payload projection"));
@@ -1624,7 +1897,7 @@ impl Memory {
             let address = self.address(base.allocation, child);
             if address.offset == offset && address.ty == ty {
                 found.push(address);
-            } else if self.node(address)?.shape.members.is_some() {
+            } else if self.node(address)?.shape.members().is_some() {
                 self.find_subobjects(address, offset, ty, found)?;
             }
         }
@@ -1636,7 +1909,10 @@ impl Memory {
         offset: usize,
     ) -> Result<Address, RuntimeError> {
         let node = self.node(base)?;
-        if node.shape.cases.is_none() {
+        if buffer_element_type(base.ty).is_some() && offset == 0 {
+            return Ok(self.address(base.allocation, node.children[0]));
+        }
+        if node.shape.cases().is_none() {
             return Err(invalid("pointer-slot projection of non-variant"));
         }
         let child = *node
@@ -1644,7 +1920,7 @@ impl Memory {
             .first()
             .ok_or_else(|| invalid("absent variant shell"))?;
         let address = self.address(base.allocation, child);
-        if !self.node(address)?.shape.pointer
+        if !matches!(self.node(address)?.shape.kind, StorageKind::Pointer)
             || base.offset.checked_add(offset) != Some(address.offset)
         {
             return Err(invalid("invalid indirect payload slot"));
@@ -1656,7 +1932,10 @@ impl Memory {
         Ok(self.node(address)?.shape.layout.size())
     }
     pub(super) fn is_pointer_slot(&self, address: Address) -> Result<bool, RuntimeError> {
-        Ok(self.node(address)?.shape.pointer)
+        Ok(matches!(
+            self.node(address)?.shape.kind,
+            StorageKind::Pointer
+        ))
     }
     pub(super) fn overlaps(&self, a: Address, b: Address) -> Result<bool, RuntimeError> {
         self.allocation(a)?;
@@ -1812,13 +2091,13 @@ impl Memory {
     }
     pub(super) fn mark_initialized(&mut self, address: Address) -> Result<(), RuntimeError> {
         self.check_write(address)?;
-        if address.interior && self.node(address)?.shape.native.is_none_or(|n| n.copy) {
+        if address.interior && self.node(address)?.shape.native().is_none_or(|n| n.copy) {
             return Ok(());
         }
         if self.any_initialized(address)? {
             return Err(invalid("overwriting initialized storage"));
         }
-        if self.node(address)?.shape.native.is_some_and(|n| !n.copy) {
+        if self.node(address)?.shape.native().is_some_and(|n| !n.copy) {
             self.generation = self
                 .generation
                 .checked_next()
@@ -1840,7 +2119,7 @@ impl Memory {
             return Ok(());
         }
         let node = self.node_mut(address)?;
-        if !matches!(node.state, StorageState::Value(_)) || node.shape.members.is_some() {
+        if !matches!(node.state, StorageState::Value(_)) || node.shape.members().is_some() {
             return Err(invalid("native initialization requires scalar storage"));
         }
         node.state = StorageState::Value(true);
@@ -1862,7 +2141,7 @@ impl Memory {
             .checked_next()
             .ok_or_else(|| invalid("native borrow identity exhausted"))?;
         node.state = StorageState::absent(&node.shape);
-        if node.shape.cases.is_some() {
+        if node.shape.cases().is_some() {
             self.allocations[address.allocation]
                 .as_mut()
                 .unwrap()
@@ -1872,8 +2151,10 @@ impl Memory {
     }
 
     pub(super) fn read(&self, address: Address) -> Result<Scalar, RuntimeError> {
-        let kind = ScalarKind::for_type(address.ty)?;
-        if self.node(address)?.shape.pointer || !self.initialized(address)? {
+        let StorageKind::Scalar(kind) = self.node(address)?.shape.kind else {
+            return Err(invalid("expected scalar storage"));
+        };
+        if !self.initialized(address)? {
             return Err(invalid("read of uninitialized scalar storage"));
         }
         let pointer = self.pointer(address)?;
@@ -1905,7 +2186,8 @@ impl Memory {
         address: Address,
         value: Address,
     ) -> Result<(), RuntimeError> {
-        if !self.node(address)?.shape.pointer || address.ty != value.ty {
+        if !matches!(self.node(address)?.shape.kind, StorageKind::Pointer) || address.ty != value.ty
+        {
             return Err(invalid("pointer store type mismatch"));
         }
         let pointer = self.pointer(value)?;
@@ -1928,8 +2210,7 @@ impl Memory {
         };
         let case = node
             .shape
-            .cases
-            .as_ref()
+            .cases()
             .and_then(|cases| cases.iter().find(|c| c.tag == tag))
             .ok_or_else(|| invalid("invalid variant tag"))?;
         let pointer = self.pointer(address)?;
@@ -1949,8 +2230,7 @@ impl Memory {
     ) -> Result<StoredValue, RuntimeError> {
         let shape = self.shape(ty)?;
         let case = shape
-            .cases
-            .as_ref()
+            .cases()
             .and_then(|cases| cases.iter().find(|c| c.tag == tag))
             .ok_or_else(|| invalid("variant case absent from type"))?;
         if case.storage != storage {
@@ -1975,20 +2255,19 @@ impl Memory {
         })
     }
     fn absent(shape: &StorageLayout) -> StoredValue {
-        let data = if let Some(members) = &shape.members {
-            if members.is_empty() {
-                StoredData::Empty(false)
-            } else {
-                StoredData::Product(members.iter().map(|(_, m)| Self::absent(m)).collect())
+        let data = match &shape.kind {
+            StorageKind::Scalar(_) => StoredData::Scalar(None),
+            StorageKind::Product(members) | StorageKind::Sequence(members) => {
+                if members.is_empty() {
+                    StoredData::Empty(false)
+                } else {
+                    StoredData::Product(members.iter().map(|(_, m)| Self::absent(m)).collect())
+                }
             }
-        } else if shape.cases.is_some() {
-            StoredData::Variant(None)
-        } else if shape.pointer {
-            StoredData::Pointer(None)
-        } else if shape.native.is_some() {
-            StoredData::Native(None)
-        } else {
-            StoredData::Scalar(None)
+            StorageKind::Variant(_) => StoredData::Variant(None),
+            StorageKind::Pointer => StoredData::Pointer(None),
+            StorageKind::Native(_) => StoredData::Native(None),
+            StorageKind::Callable => StoredData::Callable(None),
         };
         StoredValue { ty: shape.ty, data }
     }
@@ -1998,7 +2277,7 @@ impl Memory {
         allow_absent: bool,
     ) -> Result<StoredValue, RuntimeError> {
         let node = self.node(address)?;
-        if node.shape.native.is_some() {
+        if node.shape.native().is_some() {
             let present = node.state.locally_present();
             if !present && !allow_absent {
                 return Err(invalid("read of absent native storage"));
@@ -2031,6 +2310,14 @@ impl Memory {
             });
         }
         let data = match node.state {
+            StorageState::Callable(value) => {
+                if let Some(reference) = value {
+                    self.validate_callable(reference)?;
+                } else if !allow_absent {
+                    return Err(invalid("read of absent callable"));
+                }
+                StoredData::Callable(value)
+            }
             StorageState::Native(_) => unreachable!("native storage handled above"),
             StorageState::Pointer(pointer) => {
                 if !allow_absent && pointer.is_none() {
@@ -2064,7 +2351,7 @@ impl Memory {
             }
             StorageState::Value(present) => {
                 // Empty products carry presence even though their payload extent is zero.
-                if node.shape.members.is_some() {
+                if node.shape.members().is_some() {
                     if !allow_absent && !present {
                         return Err(invalid("read of absent empty product"));
                     }
@@ -2135,6 +2422,30 @@ impl Memory {
         }
         self.invalidate_receiver_snapshots(address)?;
         match &value.data {
+            StoredData::Callable(value) => {
+                let Some(reference) = value else {
+                    return self.clear(address);
+                };
+                if !matches!(shape.kind, StorageKind::Callable) {
+                    return Err(invalid("expected callable storage"));
+                }
+                self.validate_callable(*reference)?;
+                let environment = reference
+                    .environment
+                    .map(|a| self.pointer(a))
+                    .transpose()?
+                    .map_or(0, |p| p as usize);
+                let pointer = self.pointer(address)?;
+                // SAFETY: callable layout and both field extents are fixed by repr(C).
+                unsafe {
+                    pointer.cast::<u32>().write(reference.descriptor);
+                    pointer
+                        .add(offset_of!(DictionaryReference, environment))
+                        .cast::<usize>()
+                        .write(environment);
+                }
+                self.node_mut(address)?.state = StorageState::Callable(Some(*reference));
+            }
             StoredData::Native(value) => {
                 let Some(value) = value else {
                     return self.clear(address);
@@ -2143,7 +2454,7 @@ impl Memory {
                     return Err(invalid("cannot move out of a native member"));
                 }
                 self.revoke_members(address);
-                if value.bytes.len() != shape.layout.size() || shape.native.is_none() {
+                if value.bytes.len() != shape.layout.size() || shape.native().is_none() {
                     return Err(invalid("native snapshot layout mismatch"));
                 }
                 if let Some((id, revision)) = value.owner {
@@ -2172,7 +2483,7 @@ impl Memory {
                     }
                     self.node_mut(address)?.state = StorageState::Native(Some(id));
                 } else {
-                    if !shape.native.unwrap().copy {
+                    if !shape.native().unwrap().copy {
                         return Err(invalid("owning native snapshot has no owner"));
                     }
                     self.node_mut(address)?.state = StorageState::Value(true);
@@ -2188,7 +2499,7 @@ impl Memory {
                 };
             }
             StoredData::Empty(present) => {
-                if shape.members.as_ref().is_none_or(|m| !m.is_empty()) {
+                if shape.members().is_none_or(|m| !m.is_empty()) {
                     return Err(invalid("expected empty product storage"));
                 }
                 self.node_mut(address)?.state = StorageState::Value(*present);
@@ -2197,7 +2508,7 @@ impl Memory {
                 let Some(value) = value else {
                     return self.clear(address);
                 };
-                if shape.leaves.first().map(|(_, kind)| *kind) != Some(value.kind()) {
+                if !matches!(shape.kind, StorageKind::Scalar(kind) if kind == value.kind()) {
                     return Err(invalid("scalar store type mismatch"));
                 }
                 let pointer = self.pointer(address)?;
@@ -2234,8 +2545,7 @@ impl Memory {
                     return self.clear(address);
                 };
                 let case = shape
-                    .cases
-                    .as_ref()
+                    .cases()
                     .and_then(|cases| cases.iter().find(|c| c.tag == *tag))
                     .ok_or_else(|| invalid("invalid variant snapshot tag"))?;
                 if self.node(address)?.state != StorageState::Variant(Some(*tag)) {
@@ -2272,12 +2582,48 @@ impl Memory {
         Ok(())
     }
 
+    /// Reject unsupported boundary signatures, including callable types nested in aggregates.
+    pub(super) fn validate_host_type(&self, ty: Type) -> Result<(), RuntimeError> {
+        let mut pending = vec![ty];
+        let mut seen = FxHashSet::default();
+        while let Some(ty) = pending.pop() {
+            if !seen.insert(ty) {
+                continue;
+            }
+            let shape = self.shape(ty)?;
+            if matches!(shape.kind, StorageKind::Callable) {
+                return Err(unsupported("host callable arguments or results"));
+            }
+            if let Some(element) = buffer_element_type(ty) {
+                pending.push(element);
+            } else if let Some(members) = shape.members() {
+                pending.extend(members.iter().map(|(_, member)| member.ty));
+            } else if let Some(cases) = shape.cases() {
+                pending.extend(cases.iter().map(|case| case.payload));
+            }
+        }
+        Ok(())
+    }
+
     /// Reject malformed host values before importing any argument can transfer native ownership.
     pub(super) fn validate_import(&self, ty: Type, value: &Value) -> Result<(), RuntimeError> {
         let mut pending = vec![(ty, value)];
         while let Some((ty, value)) = pending.pop() {
             let shape = self.shape(ty)?;
-            if let Some(members) = &shape.members {
+            if matches!(shape.kind, StorageKind::Callable) {
+                return Err(unsupported("host callable arguments"));
+            }
+            if let Some(element) = buffer_element_type(ty) {
+                let buffer = value
+                    .as_primitive_ty::<Buffer>()
+                    .expect("expected host Buffer");
+                pending.extend((0..buffer.capacity()).filter_map(|i| {
+                    buffer
+                        .get(i)
+                        .filter(|v| !matches!(v, Value::Uninit))
+                        .map(|v| (element, v))
+                }));
+            } else if let Some(members) = shape.members() {
                 let fields = value.as_tuple().expect("expected product host value");
                 assert_eq!(fields.len(), members.len(), "host product arity mismatch");
                 pending.extend(
@@ -2286,7 +2632,7 @@ impl Memory {
                         .zip(fields.iter())
                         .map(|((_, m), field)| (m.ty, field)),
                 );
-            } else if let Some(cases) = &shape.cases {
+            } else if let Some(cases) = shape.cases() {
                 let tag = value.variant_tag().expect("expected variant host value");
                 let case = cases
                     .iter()
@@ -2297,7 +2643,7 @@ impl Memory {
                 } else {
                     assert_eq!(case.payload, Type::unit(), "missing host variant payload");
                 }
-            } else if shape.native.is_some() {
+            } else if shape.native().is_some() {
                 let Value::Native(native) = value else {
                     panic!("expected native host value");
                 };
@@ -2330,6 +2676,8 @@ impl Memory {
     ) -> Result<StoredValue, RuntimeError> {
         enum Task<'a> {
             Visit(Type, &'a mut Value),
+            Absent(Type),
+            Buffer(Type, Type, usize),
             Product(Type, usize),
             Variant(Type, Ustr, Type, VariantPayloadStorage),
         }
@@ -2339,7 +2687,22 @@ impl Memory {
             match task {
                 Task::Visit(ty, value) => {
                     let shape = self.shape(ty)?;
-                    if let Some(members) = &shape.members {
+                    if matches!(shape.kind, StorageKind::Callable) {
+                        return Err(unsupported("host callable arguments"));
+                    }
+                    if let Some(element) = buffer_element_type(ty) {
+                        let buffer = value
+                            .as_primitive_ty_mut::<Buffer>()
+                            .expect("validated host Buffer");
+                        tasks.push(Task::Buffer(ty, element, buffer.capacity()));
+                        tasks.extend(buffer.slots_mut().iter_mut().rev().map(|v| {
+                            if matches!(v, Value::Uninit) {
+                                Task::Absent(element)
+                            } else {
+                                Task::Visit(element, v)
+                            }
+                        }));
+                    } else if let Some(members) = shape.members() {
                         let fields = value
                             .as_tuple_mut()
                             .ok_or_else(|| invalid("expected product host value"))?;
@@ -2354,7 +2717,7 @@ impl Memory {
                                 .rev()
                                 .map(|((_, m), field)| Task::Visit(m.ty, field)),
                         );
-                    } else if let Some(cases) = &shape.cases {
+                    } else if let Some(cases) = shape.cases() {
                         let tag = value
                             .variant_tag()
                             .ok_or_else(|| invalid("expected variant host value"))?;
@@ -2376,7 +2739,7 @@ impl Memory {
                         } else {
                             return Err(invalid("missing host variant payload"));
                         }
-                    } else if shape.native.is_some() {
+                    } else if shape.native().is_some() {
                         let Value::Native(native) = value else {
                             return Err(invalid("expected native host value"));
                         };
@@ -2405,6 +2768,27 @@ impl Memory {
                             data: StoredData::Scalar(Some(scalar)),
                         });
                     }
+                }
+                Task::Absent(ty) => values.push(Self::absent(self.shape(ty)?.as_ref())),
+                Task::Buffer(ty, element, count) => {
+                    let layout = self.shape(element)?.layout;
+                    let size = layout
+                        .size()
+                        .checked_mul(count)
+                        .ok_or_else(|| invalid("host buffer size overflow"))?;
+                    let base =
+                        self.allocate_sequence(element, size, layout.align(), count, None)?;
+                    for (index, value) in values.split_off(values.len() - count).iter().enumerate()
+                    {
+                        self.write_value(self.member(base, index)?, value)?;
+                    }
+                    values.push(StoredValue {
+                        ty,
+                        data: StoredData::Product(vec![StoredValue {
+                            ty: element,
+                            data: StoredData::Pointer(Some(base)),
+                        }]),
+                    });
                 }
                 Task::Product(ty, count) => {
                     let data = if count == 0 {
@@ -2437,6 +2821,8 @@ impl Memory {
     pub(super) fn export(&mut self, address: Address) -> Result<Value, RuntimeError> {
         enum Task {
             Visit(Address),
+            Absent,
+            Buffer(Address, usize),
             Product(Address, usize),
             Variant(Address, Ustr, VariantPayloadStorage, bool),
         }
@@ -2451,7 +2837,22 @@ impl Memory {
                             return Err(invalid("cyclic owning payload"));
                         }
                         let node = self.node(address)?;
-                        if node.shape.members.is_some() {
+                        if matches!(node.shape.kind, StorageKind::Callable) {
+                            return Err(unsupported("host callable results"));
+                        }
+                        if buffer_element_type(address.ty).is_some() {
+                            let base = self.read_pointer(self.pointer_slot(address, 0)?)?;
+                            let children = &self.node(base)?.children;
+                            tasks.push(Task::Buffer(address, children.len()));
+                            for &child in children.iter().rev() {
+                                let slot = self.address(base.allocation, child);
+                                tasks.push(if self.any_initialized(slot)? {
+                                    Task::Visit(slot)
+                                } else {
+                                    Task::Absent
+                                });
+                            }
+                        } else if node.shape.members().is_some() {
                             if !self.initialized(address)? {
                                 return Err(invalid("export of absent product"));
                             }
@@ -2459,7 +2860,7 @@ impl Memory {
                             tasks.extend(node.children.iter().rev().map(|&child| {
                                 Task::Visit(self.address(address.allocation, child))
                             }));
-                        } else if node.shape.cases.is_some() {
+                        } else if node.shape.cases().is_some() {
                             let (tag, storage) = self.tag(address)?;
                             let mut payload = self.address(address.allocation, node.children[0]);
                             if storage.is_indirect() {
@@ -2472,7 +2873,7 @@ impl Memory {
                                 payload.ty == Type::unit(),
                             ));
                             tasks.push(Task::Visit(payload));
-                        } else if let Some(native) = node.shape.native {
+                        } else if let Some(native) = node.shape.native() {
                             let take = native
                                 .export
                                 .ok_or_else(|| unsupported("native host export glue"))?;
@@ -2492,6 +2893,12 @@ impl Memory {
                             values.push(self.read(address)?.boxed());
                             active.remove(&address);
                         }
+                    }
+                    Task::Absent => values.push(Value::uninit()),
+                    Task::Buffer(address, count) => {
+                        let fields = values.split_off(values.len() - count);
+                        values.push(Value::native(Buffer::from_vec(fields)));
+                        active.remove(&address);
                     }
                     Task::Product(address, count) => {
                         let fields = values.split_off(values.len() - count);
@@ -2524,7 +2931,7 @@ impl Memory {
         literal: &LiteralValue,
     ) -> Result<StoredValue, RuntimeError> {
         let shape = self.shape(ty)?;
-        let data = if let Some(members) = &shape.members {
+        let data = if let Some(members) = shape.members() {
             let LiteralValue::Tuple(fields) = literal else {
                 return Err(invalid("expected product literal"));
             };
@@ -2542,7 +2949,7 @@ impl Memory {
                         .collect::<Result<_, _>>()?,
                 )
             }
-        } else if shape.native.is_some_and(|n| n.copy) {
+        } else if shape.native().is_some_and(|n| n.copy) {
             let LiteralValue::Native(value) = literal else {
                 return Err(invalid("expected native literal"));
             };
@@ -2983,6 +3390,131 @@ mod tests {
     }
 
     #[test]
+    fn physical_callable_environments_have_unique_owners() {
+        use crate::types::{effects::no_effects, r#type::FnType};
+
+        let module = Module::new(ModuleId::from_index(0), Path::single_str("memory_test"));
+        let modules = Default::default();
+        let env = ModuleEnv::new(&module, &modules);
+        let ty = Type::function_type(FnType::new_by_val([], Type::unit(), no_effects()));
+        let mut memory = Memory::default();
+        memory.prepare_type(ty, &env).unwrap();
+        // The allocation is a sequence, even though its element type is callable.
+        let layout = memory.shape(ty).unwrap().layout;
+        let array = memory
+            .allocate_sequence(ty, 2 * layout.size(), layout.align(), 2, None)
+            .unwrap();
+        let captureless = Memory::callable_value(
+            ty,
+            CallableReference {
+                descriptor: 1,
+                environment: None,
+            },
+        );
+        for index in 0..2 {
+            memory
+                .write_value(memory.member(array, index).unwrap(), &captureless)
+                .unwrap();
+        }
+        assert!(memory.initialized(array).unwrap());
+        memory.deallocate(array).unwrap();
+        // A valid internal callable is not a supported host-boundary value, even when nested.
+        let nested = Type::tuple(vec![ty]);
+        memory.prepare_type(nested, &env).unwrap();
+        assert!(memory.validate_host_type(ty).is_err());
+        assert!(memory.validate_host_type(nested).is_err());
+        assert!(memory.validate_import(ty, &Value::unit()).is_err());
+        let (environment, values) = memory
+            .allocate_callable_environment(&[], Type::unit(), Location::new_synthesized())
+            .unwrap();
+        memory.write(values, Scalar::Unit).unwrap();
+        let value = Memory::callable_value(
+            ty,
+            CallableReference {
+                descriptor: 1,
+                environment: Some(environment),
+            },
+        );
+        let owner = memory.allocate(ty, None).unwrap();
+        memory.write_value(owner, &value).unwrap();
+        assert!(memory.export(owner).is_err());
+        assert_eq!(
+            memory.read_callable(owner).unwrap(),
+            match value.data {
+                StoredData::Callable(Some(reference)) => reference,
+                _ => unreachable!(),
+            }
+        );
+        memory.check_runtime_ownership().unwrap();
+        let duplicate = memory.allocate(ty, None).unwrap();
+        memory.write_value(duplicate, &value).unwrap();
+        assert!(memory.check_runtime_ownership().is_err());
+        memory.clear(duplicate).unwrap();
+        memory.check_runtime_ownership().unwrap();
+        memory.deallocate(environment).unwrap();
+        assert!(memory.read_callable(owner).is_err());
+        memory.clear(owner).unwrap();
+        memory.restore(0);
+        memory.check_runtime_ownership().unwrap();
+    }
+
+    #[test]
+    fn physical_buffer_slots_preserve_zero_sized_identity() {
+        for (ty, value) in [
+            (Type::unit(), Scalar::Unit),
+            (ScalarKind::Int.ty(), Scalar::Int(42)),
+        ] {
+            let mut memory = Memory::default();
+            let layout = memory.shape(ty).unwrap().layout;
+            let base = memory
+                .allocate_sequence(ty, layout.size() * 3, layout.align(), 3, None)
+                .unwrap();
+            let first = memory.sequence_element(base, 0, 0, ty).unwrap();
+            assert!(
+                memory
+                    .project(base, 0, ty, Some(ProjectionIndex::from_index(0)))
+                    .is_err()
+            );
+            let second = memory.sequence_element(base, layout.size(), 1, ty).unwrap();
+            assert_ne!(first, second);
+            assert!(!memory.overlaps(first, second).unwrap());
+            memory.write(first, value).unwrap();
+            memory.write(second, value).unwrap();
+            memory.clear(first).unwrap();
+            assert_eq!(memory.read(second).unwrap(), value);
+            assert!(
+                memory
+                    .sequence_element(base, layout.size() * 3, 3, ty)
+                    .is_err()
+            );
+            if layout.size() == 0 {
+                assert_eq!(
+                    memory.pointer(first).unwrap(),
+                    memory.pointer(second).unwrap()
+                );
+                assert!(memory.project(base, 0, ty, None).is_err());
+            } else {
+                assert!(memory.sequence_element(base, 0, 1, ty).is_err());
+            }
+            memory.deallocate(base).unwrap();
+            assert!(memory.read(second).is_err());
+            memory.check_runtime_ownership().unwrap();
+            let count = MAX_STORAGE_LEAVES + 1;
+            let error = memory
+                .allocate_sequence(ty, layout.size() * count, layout.align(), count, None)
+                .unwrap_err();
+            assert!(
+                matches!(error, RuntimeError::Backend(message) if message.contains("buffer storage leaf limit"))
+            );
+            assert!(
+                memory
+                    .allocate_sequence(ty, 0, layout.align(), MAX_STORAGE_NODES + 1, None)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn physical_product_layout_validation() {
         let int = Rc::new(StorageLayout::scalar(ScalarKind::Int.ty(), ScalarKind::Int));
         let boolean = Rc::new(StorageLayout::scalar(
@@ -3018,10 +3550,7 @@ mod tests {
                 layout,
                 depth: 1,
                 nodes: 1,
-                members: Some(vec![]),
-                cases: None,
-                pointer: false,
-                native: None,
+                kind: StorageKind::Product(vec![]),
                 leaves: vec![(offset, ScalarKind::Int)],
             });
             assert!(StorageLayout::product(ty, layout, vec![(0, malformed)]).is_err());

@@ -35,6 +35,14 @@ define_id_type!(
     ProgramEvidenceId
 );
 
+/// Module-qualified descriptor identity before assembly assigns a target index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Descriptor {
+    Dictionary(TraitDictionaryId),
+    Function(FunctionId),
+    Subscript(SubscriptId),
+}
+
 /// One hash-consed static evidence value in a resolved physical program.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum InternedStaticEvidence {
@@ -57,17 +65,28 @@ pub(crate) struct ResolvedPhysicalProgram<'a> {
     modules: Box<[&'a BackendReadyMirArtifacts]>,
     static_evidence: Box<[InternedStaticEvidence]>,
     evidence_ids: FxHashMap<InternedStaticEvidence, ProgramEvidenceId>,
-    descriptors: Box<[TraitDictionaryId]>,
-    descriptor_ids: FxHashMap<TraitDictionaryId, u32>,
+    descriptors: Box<[Descriptor]>,
+    descriptor_ids: FxHashMap<Descriptor, u32>,
 }
 
 impl ResolvedPhysicalProgram<'_> {
     pub(crate) fn descriptor_index(&self, id: TraitDictionaryId) -> Option<u32> {
+        self.reference_index(Descriptor::Dictionary(id))
+    }
+
+    pub(crate) fn reference_index(&self, id: Descriptor) -> Option<u32> {
         self.descriptor_ids.get(&id).copied()
     }
 
+    pub(crate) fn reference_descriptor(&self, index: u32) -> Option<Descriptor> {
+        self.descriptors.get(index as usize).copied()
+    }
+
     pub(crate) fn descriptor(&self, index: u32) -> Option<&PhysicalDictionaryDefinition> {
-        self.dictionary(*self.descriptors.get(index as usize)?)
+        let Descriptor::Dictionary(id) = self.reference_descriptor(index)? else {
+            return None;
+        };
+        self.dictionary(id)
     }
 
     pub(crate) fn modules(&self) -> &[&BackendReadyMirArtifacts] {
@@ -327,7 +346,24 @@ pub(crate) fn resolve_physical_program<'a>(
     let descriptors = program
         .modules()
         .iter()
-        .flat_map(|module| module.dictionaries().iter().map(|d| d.id()))
+        .flat_map(|module| {
+            module
+                .dictionaries()
+                .iter()
+                .map(|d| Descriptor::Dictionary(d.id()))
+                .chain(
+                    module
+                        .subscripts()
+                        .iter()
+                        .map(|s| Descriptor::Subscript(s.id())),
+                )
+                .chain((0..module.entry_count()).map(|i| {
+                    Descriptor::Function(FunctionId::new(
+                        module.module(),
+                        LocalFunctionId::from_index(i),
+                    ))
+                }))
+        })
         .collect::<Box<[_]>>();
     program.descriptor_ids = descriptors
         .iter()

@@ -7,12 +7,14 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 
 //! Checked physical-MIR execution. Boxed values exist only at the host boundary.
-//! Unsupported reachable contracts are rejected before execution, even in untaken branches.
+//! Statically known callees are checked up front; stored callees are prepared on dispatch.
 
 use super::{
-    dictionary::DictionaryReference,
-    interpreter_memory::{Address, Generation, Memory, Scalar, ScalarKind, StoredValue},
-    program::{InternedStaticEvidence, ProgramEvidenceId, ResolvedPhysicalProgram},
+    dictionary::{DictionaryReference, EvidenceEnvironmentLayout},
+    interpreter_memory::{
+        Address, CallableReference, Generation, Memory, Scalar, ScalarKind, StoredValue,
+    },
+    program::{Descriptor, InternedStaticEvidence, ProgramEvidenceId, ResolvedPhysicalProgram},
 };
 use crate::{
     CompilerSession, Location,
@@ -27,14 +29,16 @@ use crate::{
         value::{LiteralValue, Value, VariantPayloadStorage},
     },
     mir::{
-        self, Function, Operation, OperationKind, ValueId,
+        self, BlockId, Function, Operation, OperationKind, ValueId,
         function::ParameterKind,
         role::{MirType, ValueRoles},
         terminator::TerminatorKind,
         value::StaticEvidence,
     },
-    module::{DictionaryEntryEvidence, FunctionId, ModuleEnv, TraitDictionaryId, id::Id},
-    std::value::VALUE_CLONE_METHOD_INDEX,
+    module::{
+        DictionaryEntryEvidence, FunctionId, ModuleEnv, SubscriptId, TraitDictionaryId, id::Id,
+    },
+    std::value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX},
     types::{
         r#type::{CallResultConvention, Type, TypeKind},
         type_inference::substitution::InstSubst,
@@ -65,6 +69,7 @@ enum Binding {
     StackMarker(usize),
     Evidence(Evidence),
     Callable(Callable),
+    Projected(Address, usize),
 }
 
 /// Symbolic dictionaries are used only by capability analysis; execution uses ABI references.
@@ -80,13 +85,20 @@ pub(super) enum Evidence {
         captures: Vec<Evidence>,
         ty: Type,
     },
+    Subscript {
+        definition: SubscriptId,
+        captures: Vec<Evidence>,
+        ty: Type,
+    },
     Storage(bool),
 }
 
 impl Evidence {
     pub(super) fn ty(&self) -> Type {
         match self {
-            Self::Dictionary { ty, .. } | Self::Physical { ty, .. } => *ty,
+            Self::Dictionary { ty, .. }
+            | Self::Physical { ty, .. }
+            | Self::Subscript { ty, .. } => *ty,
             Self::Storage(_) => ScalarKind::Bool.ty(),
         }
     }
@@ -114,6 +126,30 @@ impl Evidence {
 struct Callable {
     function: FunctionId,
     captures: Vec<Evidence>,
+    environment: Option<Address>,
+}
+
+/// Metadata checks the descriptor's environment; captured values themselves live in ABI memory.
+#[derive(Clone)]
+struct CallableEnvironment {
+    evidence: Vec<Evidence>,
+    hidden_count: usize,
+    values: Address,
+    value_dictionary: Option<Evidence>,
+}
+
+struct SuspendedFrame {
+    function: FunctionId,
+    args: Vec<Binding>,
+    registers: FxHashMap<ValueId, Binding>,
+    resume: BlockId,
+    base: usize,
+    types: RuntimeTypes,
+}
+
+enum FrameExit {
+    Returned,
+    Yielded(Address, BlockId),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -190,6 +226,13 @@ impl RuntimeTypes {
                     .map(|(a, b)| (a.ty, b.ty))
                     .chain([(a.ret, b.ret)])
                     .collect(),
+                (Subscript(a), Subscript(b)) if a.args.len() == b.args.len() => a
+                    .args
+                    .iter()
+                    .zip(&b.args)
+                    .map(|(a, b)| (a.ty, b.ty))
+                    .chain([(a.ret, b.ret)])
+                    .collect(),
                 _ => return Err(invalid("runtime type mismatch")),
             };
             pending.extend(pairs);
@@ -205,7 +248,10 @@ impl RuntimeTypes {
         for (parameter, input) in body.parameters().iter().zip(inputs) {
             if (parameter.kind == ParameterKind::Dictionary) != matches!(input, Input::Evidence(_))
             {
-                return Err(invalid("call evidence role mismatch"));
+                return Err(invalid(&format!(
+                    "call evidence role mismatch in {}: {:?}",
+                    body.name, parameter.kind
+                )));
             }
             types.bind(parameter.ty, input.ty())?;
         }
@@ -237,7 +283,7 @@ impl Binding {
     }
     fn place(&self) -> Result<Address, RuntimeError> {
         match self {
-            Self::Place(address) => Ok(*address),
+            Self::Place(address) | Self::Projected(address, _) => Ok(*address),
             _ => Err(invalid("expected a place")),
         }
     }
@@ -268,6 +314,10 @@ pub(crate) fn run_entry(
         session,
         types: RuntimeTypes::default(),
         static_evidence: FxHashMap::default(),
+        environments: FxHashMap::default(),
+        prepared: FxHashSet::default(),
+        prepared_monomorphic: FxHashSet::default(),
+        projections: Vec::new(),
     };
     interpreter.prepare_native_storage()?;
     interpreter.check_supported(entry)?;
@@ -293,6 +343,11 @@ pub(crate) fn run_entry(
         )
     }) {
         return Err(unsupported("this host entry signature"));
+    }
+    // A script signature may be valid internally but unsupported at the boxed host boundary.
+    // Validate the entire boundary before transferring any arguments or executing guest code.
+    for parameter in body.parameters() {
+        interpreter.memory.validate_host_type(parameter.ty)?;
     }
     for (parameter, argument) in parameters.iter().zip(arguments.iter()) {
         interpreter.memory.validate_import(parameter.ty, argument)?;
@@ -328,9 +383,462 @@ struct Interpreter<'a, 'p> {
     session: &'a CompilerSession,
     types: RuntimeTypes,
     static_evidence: FxHashMap<ProgramEvidenceId, Evidence>,
+    environments: FxHashMap<Address, Rc<CallableEnvironment>>,
+    prepared: FxHashSet<(FunctionId, Vec<Type>)>,
+    prepared_monomorphic: FxHashSet<FunctionId>,
+    projections: Vec<Option<SuspendedFrame>>,
 }
 
 impl<'a, 'p> Interpreter<'a, 'p> {
+    fn prepare_frame(
+        &mut self,
+        id: FunctionId,
+        body: &Function,
+        types: &RuntimeTypes,
+    ) -> Result<(), RuntimeError> {
+        if self.prepared_monomorphic.contains(&id) {
+            return Ok(());
+        }
+        let key = (
+            id,
+            body.parameters()
+                .iter()
+                .map(|p| types.resolve(p.ty))
+                .collect(),
+        );
+        if self.prepared.contains(&key) {
+            return Ok(());
+        }
+        if self.prepared.len() >= 4096 {
+            return Err(unsupported("generic preparation limit"));
+        }
+        let env = self.env(id);
+        for parameter in body.parameters() {
+            if parameter.kind != ParameterKind::Dictionary {
+                self.memory
+                    .prepare_type(types.resolve(parameter.ty), &env)?;
+            }
+        }
+        for constant in body.constants() {
+            let ty = types.resolve(constant.ty);
+            self.memory.prepare_type(ty, &env)?;
+            self.memory.literal(ty, &constant.representation)?;
+        }
+        let mut evidence = FxHashSet::default();
+        for block in body.blocks() {
+            let block = body.block(block);
+            if !matches!(block.terminator().kind, TerminatorKind::Invoke { .. }) {
+                evidence.extend(
+                    block
+                        .terminator()
+                        .operands()
+                        .iter()
+                        .filter_map(|v| self.program.evidence_id(v)),
+                );
+            }
+            for operation in block
+                .operations()
+                .iter()
+                .chain(match &block.terminator().kind {
+                    TerminatorKind::Invoke { operation, .. } => Some(operation),
+                    _ => None,
+                })
+            {
+                Self::check_operation(operation)?;
+                match &operation.kind {
+                    OperationKind::Alloca { ty }
+                    | OperationKind::AddressOffset { ty, .. }
+                    | OperationKind::Clone { ty }
+                    | OperationKind::Drop { ty }
+                    | OperationKind::MoveBytes { ty }
+                    | OperationKind::BuildClosure { ty, .. }
+                    | OperationKind::BuildSubscript { ty }
+                    | OperationKind::CloneSubscriptEnv { ty }
+                    | OperationKind::CloneClosureEnv { ty } => {
+                        self.memory.prepare_type(types.resolve(*ty), &env)?
+                    }
+                    OperationKind::AllocaPlace { pointing_to }
+                    | OperationKind::AddressOffsetPlace { pointing_to } => self
+                        .memory
+                        .prepare_type(types.resolve(*pointing_to), &env)?,
+                    OperationKind::RuntimeAlloc { pointee } => {
+                        self.memory.prepare_type(types.resolve(*pointee), &env)?
+                    }
+                    OperationKind::Variant { metadata, .. } => {
+                        self.memory.prepare_type(types.resolve(metadata.ty), &env)?
+                    }
+                    _ => (),
+                }
+                evidence.extend(
+                    operation
+                        .operands
+                        .iter()
+                        .filter_map(|v| self.program.evidence_id(v)),
+                );
+            }
+        }
+        self.prepare_static_evidence(evidence)?;
+        self.memory
+            .bind_tags(|tag| self.session.variant_tag_id(tag));
+        if body.parameters().iter().all(|p| p.ty.is_constant()) {
+            self.prepared_monomorphic.insert(id);
+        }
+        self.prepared.insert(key);
+        Ok(())
+    }
+
+    fn build_subscript_evidence(
+        &mut self,
+        definition: SubscriptId,
+        captures: Vec<Evidence>,
+        ty: Option<Type>,
+        is_static: bool,
+        span: Option<Location>,
+    ) -> Result<Evidence, RuntimeError> {
+        let module = self.session.expect_fresh_module(definition.module);
+        let scheme = module
+            .get_subscript_by_id(definition.subscript)
+            .and_then(|s| s.type_scheme(module))
+            .ok_or_else(|| invalid("missing subscript signature"))?;
+        let env = ModuleEnv::new(module, self.session.raw_modules());
+        let extra = scheme.extra_parameters(env);
+        let mut types = RuntimeTypes::default();
+        let capture_types = extra
+            .requirements
+            .iter()
+            .map(|r| r.to_dict_type_in_env(&env))
+            .collect::<Vec<_>>();
+        if !captures.is_empty() && capture_types.len() != captures.len() {
+            return Err(invalid("subscript capture count mismatch"));
+        }
+        for (pattern, actual) in capture_types.iter().zip(&captures) {
+            types.bind(*pattern, actual.ty())?;
+        }
+        let ty = ty.unwrap_or_else(|| types.resolve(Type::subscript_type(scheme.ty)));
+        let layout = EvidenceEnvironmentLayout::new(
+            captures.iter().map(|e| matches!(e, Evidence::Storage(_))),
+        )
+        .map_err(|_| invalid("subscript evidence layout overflow"))?;
+        let descriptor = self
+            .program
+            .reference_index(Descriptor::Subscript(definition))
+            .ok_or_else(|| invalid("missing subscript descriptor"))?;
+        self.memory
+            .allocate_evidence(descriptor, ty, &layout, &captures, is_static, span)
+    }
+
+    fn resolve_callable(&self, binding: Binding) -> Result<Callable, RuntimeError> {
+        match binding {
+            Binding::Callable(callable) => Ok(callable),
+            Binding::Place(address) => {
+                let reference = self.memory.read_callable(address)?;
+                let Some(Descriptor::Function(function)) =
+                    self.program.reference_descriptor(reference.descriptor)
+                else {
+                    return Err(invalid("expected function descriptor"));
+                };
+                let captures = match reference.environment {
+                    Some(environment) => {
+                        let env = self
+                            .environments
+                            .get(&environment)
+                            .ok_or_else(|| invalid("stale callable environment"))?;
+                        env.evidence[..env.hidden_count].to_vec()
+                    }
+                    None => vec![],
+                };
+                Ok(Callable {
+                    function,
+                    captures,
+                    environment: reference.environment,
+                })
+            }
+            _ => Err(invalid("expected callable")),
+        }
+    }
+
+    fn own_callable(
+        &mut self,
+        descriptor: Descriptor,
+        hidden: Vec<Evidence>,
+        dictionary: Option<Evidence>,
+        captures: &[Address],
+        ty: Type,
+        span: Location,
+    ) -> Result<StoredValue, RuntimeError> {
+        let descriptor = self
+            .program
+            .reference_index(descriptor)
+            .ok_or_else(|| invalid("missing callable descriptor"))?;
+        let mut evidence = hidden.clone();
+        evidence.extend(dictionary.iter().cloned());
+        let environment = if evidence.is_empty() && captures.is_empty() {
+            None
+        } else {
+            let values_ty = dictionary
+                .as_ref()
+                .map(Evidence::layout_type)
+                .transpose()?
+                .unwrap_or(Type::unit());
+            self.memory
+                .prepare_type(values_ty, &self.session.module_env())?;
+            let (environment, values) = self
+                .memory
+                .allocate_callable_environment(&evidence, values_ty, span)?;
+            if captures.is_empty() {
+                self.memory.write(values, Scalar::Unit)?;
+            }
+            for (index, &capture) in captures.iter().enumerate() {
+                self.memory.check_consume(capture)?;
+                let value = self.memory.read_value(capture, false)?;
+                self.memory
+                    .write_value(self.memory.member(values, index)?, &value)?;
+                self.memory.clear(capture)?;
+            }
+            self.environments.insert(
+                environment,
+                Rc::new(CallableEnvironment {
+                    evidence,
+                    hidden_count: hidden.len(),
+                    values,
+                    value_dictionary: dictionary,
+                }),
+            );
+            Some(environment)
+        };
+        Ok(Memory::callable_value(
+            ty,
+            CallableReference {
+                descriptor,
+                environment,
+            },
+        ))
+    }
+
+    fn drop_capture_tuple(
+        &mut self,
+        dictionary: Evidence,
+        values: Address,
+        span: Location,
+    ) -> Result<(), RuntimeError> {
+        let callable = self.dictionary_entry(dictionary, VALUE_DROP_METHOD_INDEX.as_index())?;
+        let marker = self.memory.len();
+        let output = self.memory.allocate(Type::unit(), Some(span))?;
+        let result = self.invoke(
+            callable,
+            vec![Binding::Place(values), Binding::Place(output)],
+        );
+        self.memory.restore(marker);
+        result
+    }
+
+    fn clone_callable(
+        &mut self,
+        source: Address,
+        ty: Type,
+        span: Location,
+    ) -> Result<StoredValue, RuntimeError> {
+        let reference = self.memory.read_callable(source)?;
+        let Some(environment) = reference.environment else {
+            return Ok(Memory::callable_value(ty, reference));
+        };
+        let env = self
+            .environments
+            .get(&environment)
+            .cloned()
+            .ok_or_else(|| invalid("stale callable environment"))?;
+        let (fresh, values) =
+            self.memory
+                .allocate_callable_environment(&env.evidence, env.values.ty, span)?;
+        self.environments.insert(
+            fresh,
+            Rc::new(CallableEnvironment {
+                values,
+                ..(*env).clone()
+            }),
+        );
+        let result = if let Some(dictionary) = env.value_dictionary.clone() {
+            let callable =
+                self.dictionary_entry(dictionary, VALUE_CLONE_METHOD_INDEX.as_index())?;
+            self.invoke(
+                callable,
+                vec![Binding::Place(env.values), Binding::Place(values)],
+            )
+        } else {
+            self.memory.write(values, Scalar::Unit)
+        };
+        if let Err(error) = result {
+            if matches!(error, RuntimeError::SourceFailure(_)) {
+                // A failed clone cleans its partially constructed result; release only the
+                // environment allocation and its retained evidence, not the source captures.
+                self.release_callable_environment(fresh)?;
+            }
+            return Err(error);
+        }
+        Ok(Memory::callable_value(
+            ty,
+            CallableReference {
+                environment: Some(fresh),
+                ..reference
+            },
+        ))
+    }
+
+    fn drop_callable(&mut self, address: Address, span: Location) -> Result<(), RuntimeError> {
+        let reference = self.memory.read_callable(address)?;
+        // Detach before running guest drop: a failing destructor must not leave a live callable
+        // pointing at partially destroyed captures.
+        self.memory.check_consume(address)?;
+        self.memory.clear(address)?;
+        if let Some(environment) = reference.environment {
+            let env = self
+                .environments
+                .get(&environment)
+                .cloned()
+                .ok_or_else(|| invalid("stale callable environment"))?;
+            let result = if let Some(dictionary) = env.value_dictionary.clone() {
+                self.drop_capture_tuple(dictionary, env.values, span)
+            } else {
+                Ok(())
+            };
+            // Do not attempt further reclamation after poisoning or an internal backend error.
+            if result
+                .as_ref()
+                .is_err_and(|e| !matches!(e, RuntimeError::SourceFailure(_)))
+            {
+                return result;
+            }
+            let cleanup = self.release_callable_environment(environment);
+            return match (result, cleanup) {
+                (Ok(()), result) | (result, Ok(())) => result,
+                (Err(initial), Err(cleanup)) => Err(initial.interrupted_by(cleanup)),
+            };
+        }
+        Ok(())
+    }
+
+    fn release_callable_environment(&mut self, environment: Address) -> Result<(), RuntimeError> {
+        self.memory.deallocate(environment)?;
+        let env = self
+            .environments
+            .remove(&environment)
+            .ok_or_else(|| invalid("stale callable environment"))?;
+        for evidence in &env.evidence {
+            self.memory.release_evidence(evidence)?;
+        }
+        Ok(())
+    }
+
+    fn project_call(
+        &mut self,
+        callable: Callable,
+        args: Vec<Binding>,
+        yielded: Type,
+        span: Location,
+    ) -> Result<Binding, RuntimeError> {
+        let base = self.memory.len();
+        let output = self.memory.allocate_place(yielded, Some(span))?;
+        let mut args = callable
+            .captures
+            .into_iter()
+            .map(Binding::Evidence)
+            .chain(args)
+            .collect::<Vec<_>>();
+        args.push(Binding::Place(output));
+        let Some(body) = self.program.function(callable.function) else {
+            let result = self
+                .call_native(callable.function, &args)
+                .and_then(|()| self.memory.read_pointer(output));
+            self.memory.restore(base);
+            return result.map(Binding::Place);
+        };
+        if body.result_convention() == CallResultConvention::ADDRESSOR_PLACE {
+            let result = self
+                .call(callable.function, args)
+                .and_then(|()| self.memory.read_pointer(output));
+            self.memory.restore(base);
+            return result.map(Binding::Place);
+        }
+        if body.result_convention() != CallResultConvention::YIELDED_ONCE {
+            return Err(invalid("project requires a place-returning entry"));
+        }
+        let inputs = args
+            .iter()
+            .map(|arg| match arg {
+                Binding::Evidence(e) => Ok(Input::Evidence(e.clone())),
+                _ => Ok(Input::Place(arg.place()?.ty)),
+            })
+            .collect::<Result<Vec<_>, RuntimeError>>()?;
+        let types = RuntimeTypes::for_call(body, &inputs)?;
+        self.prepare_frame(callable.function, body, &types)?;
+        let previous = mem::replace(&mut self.types, types);
+        self.depth += 1;
+        let mut registers = FxHashMap::default();
+        let outcome = self.run_blocks(body, &args, &mut registers, base, body.entry());
+        let types = mem::replace(&mut self.types, previous);
+        match outcome {
+            Ok(FrameExit::Yielded(address, resume)) => {
+                let index = self
+                    .projections
+                    .iter()
+                    .position(Option::is_none)
+                    .unwrap_or(self.projections.len());
+                let frame = Some(SuspendedFrame {
+                    function: callable.function,
+                    args,
+                    registers,
+                    resume,
+                    base,
+                    types,
+                });
+                if index == self.projections.len() {
+                    self.projections.push(frame);
+                } else {
+                    self.projections[index] = frame;
+                }
+                Ok(Binding::Projected(address, index))
+            }
+            outcome => {
+                self.depth -= 1;
+                for binding in registers.values() {
+                    self.release_binding(binding)?;
+                }
+                self.memory.restore(base);
+                outcome.and_then(|_| Err(invalid("scoped accessor returned without yielding")))
+            }
+        }
+    }
+
+    fn end_project(&mut self, index: usize) -> Result<(), RuntimeError> {
+        let mut frame = self
+            .projections
+            .get_mut(index)
+            .and_then(Option::take)
+            .ok_or_else(|| invalid("projection already ended"))?;
+        let body = self
+            .program
+            .function(frame.function)
+            .ok_or_else(|| invalid("missing suspended entry"))?;
+        let previous = mem::replace(&mut self.types, frame.types);
+        let outcome = self.run_blocks(
+            body,
+            &frame.args,
+            &mut frame.registers,
+            frame.base,
+            frame.resume,
+        );
+        self.types = previous;
+        self.depth -= 1;
+        for binding in frame.registers.values() {
+            self.release_binding(binding)?;
+        }
+        self.memory.restore(frame.base);
+        match outcome? {
+            FrameExit::Returned => Ok(()),
+            FrameExit::Yielded(..) => Err(invalid("scoped accessor yielded twice")),
+        }
+    }
+
     fn build_evidence(
         &mut self,
         definition: TraitDictionaryId,
@@ -383,6 +891,9 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         let mut required = required.into_iter().collect::<Vec<_>>();
         required.sort_unstable_by_key(|id| id.as_index());
         for id in required {
+            if self.static_evidence.contains_key(&id) {
+                continue;
+            }
             let evidence = &self.program.static_evidence()[id.as_index()];
             let value = match evidence {
                 InternedStaticEvidence::Dictionary {
@@ -396,8 +907,15 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     self.build_evidence(*definition, captures, true, None)?
                 }
                 InternedStaticEvidence::VariantPayloadStorage(value) => Evidence::Storage(*value),
-                InternedStaticEvidence::Subscript { .. } => {
-                    return Err(unsupported("subscript evidence"));
+                InternedStaticEvidence::Subscript {
+                    definition,
+                    captures,
+                } => {
+                    let captures = captures
+                        .iter()
+                        .map(|id| self.static_evidence[id].clone())
+                        .collect();
+                    self.build_subscript_evidence(*definition, captures, None, true, None)?
                 }
             };
             self.static_evidence.insert(id, value);
@@ -526,8 +1044,44 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     .collect::<Result<_, _>>()?,
             ),
             StaticEvidence::VariantPayloadStorage(value) => Ok(Evidence::Storage(*value)),
-            _ => Err(unsupported("subscript evidence")),
+            StaticEvidence::Subscript {
+                definition,
+                captures,
+            } => {
+                let captures = captures
+                    .iter()
+                    .map(|e| self.symbolic_static_evidence(e, depth + 1))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.symbolic_subscript(*definition, captures)
+            }
         }
+    }
+
+    fn symbolic_subscript(
+        &self,
+        definition: SubscriptId,
+        captures: Vec<Evidence>,
+    ) -> Result<Evidence, RuntimeError> {
+        let module = self.session.expect_fresh_module(definition.module);
+        let scheme = module
+            .get_subscript_by_id(definition.subscript)
+            .and_then(|s| s.type_scheme(module))
+            .ok_or_else(|| invalid("missing subscript signature"))?;
+        let env = ModuleEnv::new(module, self.session.raw_modules());
+        let mut types = RuntimeTypes::default();
+        for (requirement, capture) in scheme
+            .extra_parameters(env)
+            .requirements
+            .iter()
+            .zip(&captures)
+        {
+            types.bind(requirement.to_dict_type_in_env(&env), capture.ty())?;
+        }
+        Ok(Evidence::Subscript {
+            definition,
+            captures,
+            ty: types.resolve(Type::subscript_type(scheme.ty)),
+        })
     }
 
     fn dictionary_entry(&self, evidence: Evidence, index: usize) -> Result<Callable, RuntimeError> {
@@ -553,6 +1107,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             .ok_or_else(|| invalid("missing dictionary entry"))?;
         Ok(Callable {
             function: entry.function(),
+            environment: None,
             captures: entry
                 .capture_mapping()
                 .iter()
@@ -567,7 +1122,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         })
     }
 
-    /// Resolve only non-owning evidence/callees. No guest instructions or native calls run here.
+    /// Resolve non-owning evidence/callees without execution; None means data-dependent.
     fn symbolic(
         &self,
         body: &Function,
@@ -575,63 +1130,103 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         definitions: &FxHashMap<ValueId, &Operation>,
         value: &mir::Value,
         depth: usize,
-    ) -> Result<Binding, RuntimeError> {
+    ) -> Result<Option<Binding>, RuntimeError> {
         if depth >= 128 {
             return Err(unsupported("evidence nesting limit"));
         }
         let get = |value| self.symbolic(body, inputs, definitions, value, depth + 1);
-        match value {
-            mir::Value::Dictionary(id) => {
-                Ok(Binding::Evidence(self.symbolic_dictionary(*id, vec![])?))
-            }
-            mir::Value::Evidence(e) => Ok(Binding::Evidence(self.symbolic_static_evidence(e, 0)?)),
-            mir::Value::Function(function) => Ok(Binding::Callable(Callable {
+        let binding = match value {
+            mir::Value::Subscript(id) => Binding::Evidence(self.symbolic_subscript(*id, vec![])?),
+            mir::Value::Dictionary(id) => Binding::Evidence(self.symbolic_dictionary(*id, vec![])?),
+            mir::Value::Evidence(e) => Binding::Evidence(self.symbolic_static_evidence(e, 0)?),
+            mir::Value::Function(function) => Binding::Callable(Callable {
                 function: *function,
                 captures: vec![],
-            })),
-            mir::Value::Parameter(id) => inputs
-                .get(id.as_index())
-                .and_then(|i| match i {
-                    Input::Evidence(e) => Some(e.clone()),
-                    _ => None,
-                })
-                .map(Binding::Evidence)
-                .ok_or_else(|| {
-                    unsupported("evidence or callees supplied through value parameters")
-                }),
+                environment: None,
+            }),
+            mir::Value::Parameter(id) => match inputs.get(id.as_index()) {
+                Some(Input::Evidence(e)) => Binding::Evidence(e.clone()),
+                Some(Input::Place(_)) => return Ok(None),
+                None => return Err(invalid("missing symbolic parameter")),
+            },
             mir::Value::Constant(id) => {
                 match Scalar::from_literal(&body.constant(*id).representation)? {
-                    Scalar::Bool(value) => Ok(Binding::Evidence(Evidence::Storage(value))),
-                    _ => Err(invalid("expected storage evidence")),
+                    Scalar::Bool(value) => Binding::Evidence(Evidence::Storage(value)),
+                    _ => return Err(invalid("expected storage evidence")),
                 }
             }
             mir::Value::Register(id) => {
                 let operation = definitions
                     .get(id)
                     .ok_or_else(|| invalid("missing evidence definition"))?;
+                if !matches!(
+                    operation.kind,
+                    OperationKind::BuildSubscriptEvidence { .. }
+                        | OperationKind::BorrowSubscriptMember { .. }
+                        | OperationKind::BuildDictionary { .. }
+                        | OperationKind::DictEntry { .. }
+                        | OperationKind::Load
+                ) {
+                    return Ok(None);
+                }
+                let mut operands = Vec::with_capacity(operation.operands.len());
+                for operand in &operation.operands {
+                    let Some(binding) = get(operand)? else {
+                        return Ok(None);
+                    };
+                    operands.push(binding);
+                }
+                let get = |index: usize| operands[index].clone().evidence();
                 match &operation.kind {
+                    OperationKind::BuildSubscriptEvidence { .. } => {
+                        let Evidence::Subscript {
+                            definition,
+                            mut captures,
+                            ..
+                        } = get(0)?
+                        else {
+                            return Err(invalid("expected subscript evidence"));
+                        };
+                        captures.extend(
+                            (1..operands.len())
+                                .map(get)
+                                .collect::<Result<Vec<_>, _>>()?,
+                        );
+                        Binding::Evidence(self.symbolic_subscript(definition, captures)?)
+                    }
+                    OperationKind::BorrowSubscriptMember { mut_member, .. } => {
+                        let Evidence::Subscript {
+                            definition,
+                            captures,
+                            ..
+                        } = get(0)?
+                        else {
+                            return Err(invalid("expected subscript evidence"));
+                        };
+                        let member = self
+                            .program
+                            .subscript_member(definition, *mut_member)
+                            .ok_or_else(|| invalid("missing subscript member"))?;
+                        Binding::Callable(Callable {
+                            function: member.function(),
+                            captures,
+                            environment: None,
+                        })
+                    }
                     OperationKind::BuildDictionary { definition, .. } => {
-                        let captures = operation
-                            .operands
-                            .iter()
-                            .map(|v| get(v)?.evidence())
-                            .collect::<Result<_, _>>()?;
-                        Ok(Binding::Evidence(
-                            self.symbolic_dictionary(*definition, captures)?,
-                        ))
+                        let captures = (0..operands.len()).map(get).collect::<Result<_, _>>()?;
+                        Binding::Evidence(self.symbolic_dictionary(*definition, captures)?)
                     }
                     OperationKind::DictEntry { entry_index, .. } => {
-                        Ok(Binding::Callable(self.dictionary_entry(
-                            get(&operation.operands[0])?.evidence()?,
-                            entry_index.as_index(),
-                        )?))
+                        Binding::Callable(self.dictionary_entry(get(0)?, entry_index.as_index())?)
                     }
-                    OperationKind::Load => get(&operation.operands[0]),
-                    _ => Err(unsupported("data-dependent evidence or callees")),
+                    OperationKind::Load => operands.remove(0),
+                    _ => unreachable!(),
                 }
             }
-            _ => Err(unsupported("subscript evidence")),
-        }
+            _ => return Err(invalid("unexpected symbolic operand")),
+        };
+        Ok(Some(binding))
     }
 
     /// Bind the current runtime's native layouts and host-boundary move-out glue.
@@ -667,8 +1262,8 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         Ok(())
     }
 
-    /// Check each reachable instantiation, including calls in untaken branches. The bound also
-    /// prevents polymorphic recursion from expanding an unbounded preparation graph before fuel.
+    /// Check statically reachable instantiations, including untaken branches. Stored callees are
+    /// prepared on dispatch; the bound prevents unbounded preparation before fuel accounting.
     fn check_supported(&mut self, entry: FunctionId) -> Result<(), RuntimeError> {
         let body = self
             .program
@@ -681,7 +1276,6 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             .collect::<Vec<_>>();
         let mut pending = vec![(entry, inputs)];
         let mut visited = FxHashSet::default();
-        let mut required_evidence = FxHashSet::default();
         while let Some((id, inputs)) = pending.pop() {
             if !visited.insert((id, inputs.clone())) {
                 continue;
@@ -715,11 +1309,14 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             };
             if !matches!(
                 body.result_convention(),
-                CallResultConvention::Value | CallResultConvention::ADDRESSOR_PLACE
+                CallResultConvention::Value
+                    | CallResultConvention::ADDRESSOR_PLACE
+                    | CallResultConvention::YIELDED_ONCE
             ) {
                 return Err(unsupported("place/yield call conventions"));
             }
             let types = RuntimeTypes::for_call(body, &inputs)?;
+            self.prepare_frame(id, body, &types)?;
             let env = self.env(id);
             let roles = ValueRoles::derive(body);
             let operations = body
@@ -736,53 +1333,18 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 .iter()
                 .filter_map(|op| op.result_id().map(|id| (id, *op)))
                 .collect();
-            for parameter in body.parameters() {
-                if parameter.kind != ParameterKind::Dictionary {
-                    self.memory
-                        .prepare_type(types.resolve(parameter.ty), &env)?;
-                }
-            }
-            for constant in body.constants() {
-                let ty = types.resolve(constant.ty);
-                self.memory.prepare_type(ty, &env)?;
-                self.memory.literal(ty, &constant.representation)?;
-            }
             for operation in operations {
-                Self::check_operation(operation)?;
-                required_evidence.extend(
-                    operation
-                        .operands
-                        .iter()
-                        .filter_map(|v| self.program.evidence_id(v)),
-                );
-                match &operation.kind {
-                    OperationKind::Alloca { ty }
-                    | OperationKind::AddressOffset { ty, .. }
-                    | OperationKind::Clone { ty }
-                    | OperationKind::Drop { ty }
-                    | OperationKind::MoveBytes { ty } => {
-                        self.memory.prepare_type(types.resolve(*ty), &env)?
-                    }
-                    OperationKind::AllocaPlace { pointing_to }
-                    | OperationKind::AddressOffsetPlace { pointing_to } => self
-                        .memory
-                        .prepare_type(types.resolve(*pointing_to), &env)?,
-                    OperationKind::RuntimeAlloc { pointee } => {
-                        self.memory.prepare_type(types.resolve(*pointee), &env)?
-                    }
-                    OperationKind::Variant { metadata, .. } => {
-                        self.memory.prepare_type(types.resolve(metadata.ty), &env)?
-                    }
-                    OperationKind::BuildDictionary { .. } | OperationKind::DictEntry { .. } => {
-                        self.symbolic(
-                            body,
-                            &inputs,
-                            &definitions,
-                            &mir::Value::Register(operation.result_id().unwrap()),
-                            0,
-                        )?;
-                    }
-                    _ => (),
+                if matches!(
+                    operation.kind,
+                    OperationKind::BuildDictionary { .. } | OperationKind::DictEntry { .. }
+                ) {
+                    self.symbolic(
+                        body,
+                        &inputs,
+                        &definitions,
+                        &mir::Value::Register(operation.result_id().unwrap()),
+                        0,
+                    )?;
                 }
                 let witness_index = match &operation.kind {
                     OperationKind::Alloca { .. } if !operation.operands.is_empty() => Some(0),
@@ -800,6 +1362,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 if let Some(index) = witness_index {
                     let witness = self
                         .symbolic(body, &inputs, &definitions, &operation.operands[index], 0)?
+                        .ok_or_else(|| unsupported("data-dependent layout evidence"))?
                         .evidence()?;
                     self.memory.prepare_type(witness.layout_type()?, &env)?;
                     for entry in self.layout_entries(&witness)? {
@@ -819,15 +1382,17 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     OperationKind::Drop { .. } => 1,
                     _ => continue,
                 };
-                let callable = self
-                    .symbolic(
-                        body,
-                        &inputs,
-                        &definitions,
-                        &operation.operands[callee_index],
-                        0,
-                    )?
-                    .callable()?;
+                let Some(callable) = self.symbolic(
+                    body,
+                    &inputs,
+                    &definitions,
+                    &operation.operands[callee_index],
+                    0,
+                )?
+                else {
+                    continue;
+                };
+                let callable = callable.callable()?;
                 let mut target_inputs = callable
                     .captures
                     .iter()
@@ -857,6 +1422,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     } else {
                         let evidence = self
                             .symbolic(body, &inputs, &definitions, value, 0)?
+                            .ok_or_else(|| unsupported("data-dependent call evidence"))?
                             .evidence()?;
                         target_inputs.push(Input::Evidence(evidence));
                     }
@@ -866,28 +1432,8 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 }
                 pending.push((callable.function, target_inputs));
             }
-            for block in body.blocks() {
-                let terminator = body.block(block).terminator();
-                required_evidence.extend(
-                    terminator
-                        .operands()
-                        .iter()
-                        .filter_map(|v| self.program.evidence_id(v)),
-                );
-                match &terminator.kind {
-                    TerminatorKind::Invoke { .. }
-                    | TerminatorKind::Goto { .. }
-                    | TerminatorKind::CondBr { .. }
-                    | TerminatorKind::SwitchVariant { .. }
-                    | TerminatorKind::Return
-                    | TerminatorKind::PropagateError
-                    | TerminatorKind::FailureDuringCleanup
-                    | TerminatorKind::InvariantFailure { .. } => (),
-                    _ => return Err(unsupported("yielded places")),
-                }
-            }
         }
-        self.prepare_static_evidence(required_evidence)
+        Ok(())
     }
 
     fn check_operation(operation: &Operation) -> Result<(), RuntimeError> {
@@ -901,6 +1447,17 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 Self::check_pattern(pattern)?;
             }
             Alloca { .. }
+            | BuildArray { .. }
+            | BuildClosure { .. }
+            | CloneClosureEnv { .. }
+            | DropClosureEnv
+            | BuildSubscriptEvidence { .. }
+            | BuildSubscript { .. }
+            | CloneSubscriptEnv { .. }
+            | DropSubscriptEnv
+            | BorrowSubscriptMember { .. }
+            | Project { .. }
+            | EndProject
             | Clone { .. }
             | Drop { .. }
             | Call { .. }
@@ -962,15 +1519,12 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             })
             .collect::<Result<Vec<_>, RuntimeError>>()?;
         let types = RuntimeTypes::for_call(body, &inputs)?;
+        self.prepare_frame(id, body, &types)?;
         for (argument, parameter) in args.iter().zip(body.parameters()) {
             if parameter.kind == ParameterKind::Dictionary {
                 continue;
             }
-            // Call boundaries retain exact types. Representation-compatible stores are a separate
-            // bridge between nominal products and the structural values used to construct them.
-            if argument.place()?.ty != types.resolve(parameter.ty) {
-                return Err(invalid("call argument type mismatch"));
-            }
+            // for_call checks runtime type identities; callable effect annotations are erased.
             let pointer_result = parameter.kind == ParameterKind::Return
                 && body.result_convention() == CallResultConvention::ADDRESSOR_PLACE;
             if self.memory.is_pointer_slot(argument.place()?)? != pointer_result {
@@ -989,6 +1543,59 @@ impl<'a, 'p> Interpreter<'a, 'p> {
     }
 
     fn invoke(&mut self, callable: Callable, args: Vec<Binding>) -> Result<(), RuntimeError> {
+        if let Some(environment) = callable.environment {
+            let env = self
+                .environments
+                .get(&environment)
+                .cloned()
+                .ok_or_else(|| invalid("stale callable environment"))?;
+            if let Some(dictionary) = env.value_dictionary.clone() {
+                let span = Location::new_synthesized();
+                let marker = self.memory.len();
+                let temporary = self.memory.allocate(env.values.ty, Some(span))?;
+                let clone =
+                    self.dictionary_entry(dictionary.clone(), VALUE_CLONE_METHOD_INDEX.as_index())?;
+                let cloned = self.invoke(
+                    clone,
+                    vec![Binding::Place(env.values), Binding::Place(temporary)],
+                );
+                if let Err(error) = cloned {
+                    self.memory.restore(marker);
+                    return Err(error);
+                }
+                let count = env
+                    .values
+                    .ty
+                    .data()
+                    .as_tuple()
+                    .ok_or_else(|| invalid("closure capture tuple expected"))?
+                    .len();
+                let values = (0..count)
+                    .map(|i| self.memory.member(temporary, i).map(Binding::Place))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let leading = callable
+                    .captures
+                    .into_iter()
+                    .map(Binding::Evidence)
+                    .chain(values)
+                    .chain(args)
+                    .collect();
+                let result = self.call(callable.function, leading);
+                let cleanup = if result
+                    .as_ref()
+                    .is_err_and(|e| !matches!(e, RuntimeError::SourceFailure(_)))
+                {
+                    Ok(())
+                } else {
+                    self.drop_capture_tuple(dictionary, temporary, span)
+                };
+                self.memory.restore(marker);
+                return match (result, cleanup) {
+                    (Ok(()), result) | (result, Ok(())) => result,
+                    (Err(initial), Err(cleanup)) => Err(initial.interrupted_by(cleanup)),
+                };
+            }
+        }
         let args = callable
             .captures
             .into_iter()
@@ -1006,7 +1613,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         operand: &mir::Value,
     ) -> Result<Binding, RuntimeError> {
         match operand {
-            mir::Value::Dictionary(_) | mir::Value::Evidence(_) => {
+            mir::Value::Dictionary(_) | mir::Value::Evidence(_) | mir::Value::Subscript(_) => {
                 let id = self
                     .program
                     .evidence_id(operand)
@@ -1020,6 +1627,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             mir::Value::Function(function) => Ok(Binding::Callable(Callable {
                 function: *function,
                 captures: vec![],
+                environment: None,
             })),
             mir::Value::Constant(id) => {
                 let constant = body.constant(*id);
@@ -1051,13 +1659,16 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         frame_base: usize,
     ) -> Result<(), RuntimeError> {
         let mut registers = FxHashMap::default();
-        let result = self.run_blocks(body, args, &mut registers, frame_base);
+        let result = self.run_blocks(body, args, &mut registers, frame_base, body.entry());
         // Evidence registers own references independently of stack storage. In particular, CSE
         // may reuse a pure dictionary construction across StackRestore boundaries.
         for binding in registers.values() {
             self.release_binding(binding)?;
         }
-        result
+        match result? {
+            FrameExit::Returned => Ok(()),
+            FrameExit::Yielded(..) => Err(invalid("ordinary call yielded a place")),
+        }
     }
 
     fn run_blocks(
@@ -1066,8 +1677,8 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         args: &[Binding],
         registers: &mut FxHashMap<ValueId, Binding>,
         frame_base: usize,
-    ) -> Result<(), RuntimeError> {
-        let mut block = body.entry();
+        mut block: BlockId,
+    ) -> Result<FrameExit, RuntimeError> {
         let mut pending: Option<RuntimeError> = None;
         let mut secondary: Option<RuntimeError> = None;
         loop {
@@ -1131,7 +1742,16 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     if pending.is_some() {
                         return Err(invalid("return during source failure"));
                     }
-                    return Ok(());
+                    return Ok(FrameExit::Returned);
+                }
+                TerminatorKind::Yield { place, resume } => {
+                    if pending.is_some() {
+                        return Err(invalid("yield during failure cleanup"));
+                    }
+                    return Ok(FrameExit::Yielded(
+                        self.operand(body, args, registers, place)?.place()?,
+                        *resume,
+                    ));
                 }
                 TerminatorKind::PropagateError => {
                     return Err(pending.ok_or_else(|| invalid("no failure to propagate"))?);
@@ -1147,7 +1767,6 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     eprintln!("Ferlium invariant failure: {message}");
                     abort();
                 }
-                _ => unreachable!("capability check rejected this terminator"),
             }
         }
     }
@@ -1199,6 +1818,161 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             }
         }
         let result = match &operation.kind {
+            Project { yielded, .. } => {
+                let callable = self.resolve_callable(operand(0)?)?;
+                let arguments = (1..operation.operands.len())
+                    .map(operand)
+                    .collect::<Result<Vec<_>, _>>()?;
+                Some(self.project_call(
+                    callable,
+                    arguments,
+                    self.types.resolve(*yielded),
+                    operation.span,
+                )?)
+            }
+            EndProject => {
+                if let Binding::Projected(_, index) = operand(0)? {
+                    self.end_project(index)?;
+                }
+                None
+            }
+            BuildClosure {
+                function,
+                num_hidden_dicts,
+                has_env_dict,
+                ty,
+            } => {
+                let hidden = (0..*num_hidden_dicts as usize)
+                    .map(|i| operand(i)?.evidence())
+                    .collect::<Result<Vec<_>, _>>()?;
+                let end = operation.operands.len() - usize::from(*has_env_dict);
+                let captures = (*num_hidden_dicts as usize..end)
+                    .map(place)
+                    .collect::<Result<Vec<_>, _>>()?;
+                let dictionary = if *has_env_dict {
+                    Some(operand(end)?.evidence()?)
+                } else {
+                    None
+                };
+                let value = self.own_callable(
+                    Descriptor::Function(*function),
+                    hidden,
+                    dictionary,
+                    &captures,
+                    self.types.resolve(*ty),
+                    operation.span,
+                )?;
+                Some(Binding::Aggregate(Rc::new(value)))
+            }
+            CloneClosureEnv { ty } | CloneSubscriptEnv { ty } => {
+                let source = place(0)?;
+                Some(Binding::Aggregate(Rc::new(self.clone_callable(
+                    source,
+                    self.types.resolve(*ty),
+                    operation.span,
+                )?)))
+            }
+            DropClosureEnv | DropSubscriptEnv => {
+                self.drop_callable(place(0)?, operation.span)?;
+                None
+            }
+            BuildSubscriptEvidence { ty } => {
+                let evidence = operand(0)?.evidence()?;
+                let Evidence::Physical { reference, .. } = evidence else {
+                    return Err(invalid("expected subscript evidence"));
+                };
+                let Some(Descriptor::Subscript(definition)) =
+                    self.program.reference_descriptor(reference.descriptor)
+                else {
+                    return Err(invalid("expected subscript descriptor"));
+                };
+                let mut captures = self.memory.evidence_captures(&evidence)?;
+                captures.extend(
+                    (1..operation.operands.len())
+                        .map(|i| operand(i)?.evidence())
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
+                Some(Binding::Evidence(self.build_subscript_evidence(
+                    definition,
+                    captures,
+                    Some(self.types.resolve(*ty)),
+                    false,
+                    Some(operation.span),
+                )?))
+            }
+            BuildSubscript { ty } => {
+                let evidence = operand(0)?.evidence()?;
+                let Evidence::Physical { reference, .. } = evidence else {
+                    return Err(invalid("expected subscript evidence"));
+                };
+                let descriptor = self
+                    .program
+                    .reference_descriptor(reference.descriptor)
+                    .ok_or_else(|| invalid("missing subscript descriptor"))?;
+                let hidden = self.memory.evidence_captures(&evidence)?;
+                let value = self.own_callable(
+                    descriptor,
+                    hidden,
+                    None,
+                    &[],
+                    self.types.resolve(*ty),
+                    operation.span,
+                )?;
+                Some(Binding::Aggregate(Rc::new(value)))
+            }
+            BorrowSubscriptMember { mut_member, .. } => {
+                let (descriptor, captures, environment) = match operand(0)? {
+                    Binding::Evidence(evidence @ Evidence::Physical { reference, .. }) => (
+                        reference.descriptor,
+                        self.memory.evidence_captures(&evidence)?,
+                        None,
+                    ),
+                    Binding::Place(address) => {
+                        let reference = self.memory.read_callable(address)?;
+                        let captures = reference
+                            .environment
+                            .map(|a| {
+                                self.environments
+                                    .get(&a)
+                                    .map(|e| e.evidence[..e.hidden_count].to_vec())
+                                    .ok_or_else(|| invalid("stale subscript environment"))
+                            })
+                            .transpose()?
+                            .unwrap_or_default();
+                        (reference.descriptor, captures, reference.environment)
+                    }
+                    _ => return Err(invalid("expected subscript")),
+                };
+                let Some(Descriptor::Subscript(definition)) =
+                    self.program.reference_descriptor(descriptor)
+                else {
+                    return Err(invalid("expected subscript descriptor"));
+                };
+                let member = self
+                    .program
+                    .subscript_member(definition, *mut_member)
+                    .ok_or_else(|| invalid("missing subscript member"))?;
+                Some(Binding::Callable(Callable {
+                    function: member.function(),
+                    captures,
+                    environment,
+                }))
+            }
+            BuildArray { element_ty } => {
+                let element = self.types.resolve(*element_ty);
+                let values = (0..operation.operands.len() - 1)
+                    .map(|i| match operand(i)? {
+                        Binding::Scalar(value) => Ok(Memory::scalar_value(value)),
+                        Binding::Aggregate(value) => Ok((*value).clone()),
+                        Binding::Place(address) => self.memory.read_value(address, false),
+                        _ => Err(invalid("invalid array element")),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let destination = place(operation.operands.len() - 1)?;
+                self.memory
+                    .build_array(destination, element, &values, operation.span)?;
+                None
+            }
             BuildDictionary { definition, .. } => {
                 let captures = (0..operation.operands.len())
                     .map(|i| operand(i)?.evidence())
@@ -1234,12 +2008,28 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     usize::try_from(size).map_err(|_| invalid("negative allocation size"))?;
                 let align =
                     usize::try_from(align).map_err(|_| invalid("negative allocation alignment"))?;
-                Some(Binding::Place(self.memory.allocate_runtime(
-                    self.types.resolve(*pointee),
-                    size,
-                    align,
-                    Some(operation.span),
-                )?))
+                let pointee = self.types.resolve(*pointee);
+                if operation.operands.len() == 3 {
+                    let Scalar::Int(count) = operand(2)?.scalar()? else {
+                        return Err(invalid("non-integer element count"));
+                    };
+                    let count =
+                        usize::try_from(count).map_err(|_| invalid("negative element count"))?;
+                    Some(Binding::Place(self.memory.allocate_sequence(
+                        pointee,
+                        size,
+                        align,
+                        count,
+                        Some(operation.span),
+                    )?))
+                } else {
+                    Some(Binding::Place(self.memory.allocate_runtime(
+                        pointee,
+                        size,
+                        align,
+                        Some(operation.span),
+                    )?))
+                }
             }
             RuntimeDealloc => {
                 self.memory.deallocate(place(0)?)?;
@@ -1257,12 +2047,26 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     return Err(invalid("non-integer offset"));
                 };
                 let offset = usize::try_from(offset).map_err(|_| invalid("negative offset"))?;
-                Some(Binding::Place(self.memory.project(
-                    place(0)?,
-                    offset,
-                    self.types.resolve(*ty),
-                    *member,
-                )?))
+                if operation.operands.len() == 3 {
+                    let Scalar::Int(index) = operand(2)?.scalar()? else {
+                        return Err(invalid("non-integer element index"));
+                    };
+                    let index =
+                        usize::try_from(index).map_err(|_| invalid("negative element index"))?;
+                    Some(Binding::Place(self.memory.sequence_element(
+                        place(0)?,
+                        offset,
+                        index,
+                        self.types.resolve(*ty),
+                    )?))
+                } else {
+                    Some(Binding::Place(self.memory.project(
+                        place(0)?,
+                        offset,
+                        self.types.resolve(*ty),
+                        *member,
+                    )?))
+                }
             }
             Load => match operand(0)? {
                 Binding::Callable(callable) => Some(Binding::Callable(callable)),
@@ -1283,6 +2087,17 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     Binding::Scalar(value) => self.memory.write(destination, value)?,
                     Binding::Aggregate(value) => self.memory.write_value(destination, &value)?,
                     Binding::Place(value) => self.memory.write_pointer(destination, value)?,
+                    Binding::Callable(callable) => {
+                        let value = self.own_callable(
+                            Descriptor::Function(callable.function),
+                            callable.captures,
+                            None,
+                            &[],
+                            destination.ty,
+                            operation.span,
+                        )?;
+                        self.memory.write_value(destination, &value)?;
+                    }
                     _ => return Err(invalid("expected a value register")),
                 }
                 None
@@ -1335,7 +2150,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 None
             }
             Clone { .. } => {
-                let callable = operand(2)?.callable()?;
+                let callable = self.resolve_callable(operand(2)?)?;
                 let id = callable.function;
                 let values = (3..operation.operands.len())
                     .chain(0..2)
@@ -1352,7 +2167,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 // destructor must only be called once its receiver is fully constructed.
                 // IsInitialized, by contrast, asks whether the entire selected value is present.
                 if self.memory.any_initialized(address)? {
-                    let callable = operand(1)?.callable()?;
+                    let callable = self.resolve_callable(operand(1)?)?;
                     let id = callable.function;
                     let mut values = (2..operation.operands.len())
                         .map(operand)
@@ -1411,7 +2226,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 self.memory.tag(place(0)?)?.1.is_indirect(),
             ))),
             Call { .. } => {
-                let callable = operand(0)?.callable()?;
+                let callable = self.resolve_callable(operand(0)?)?;
                 let id = callable.function;
                 let values = operation.operands[1..]
                     .iter()
@@ -1459,7 +2274,10 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         };
         if let Some(value) = result {
             // Construction transfers its initial owner; other results retain borrowed evidence.
-            if !matches!(operation.kind, BuildDictionary { .. }) {
+            if !matches!(
+                operation.kind,
+                BuildDictionary { .. } | BuildSubscriptEvidence { .. }
+            ) {
                 self.retain_binding(&value)?;
             }
             if let Some(previous) = registers.insert(
@@ -1644,6 +2462,10 @@ mod tests {
             session: &session,
             types: RuntimeTypes::default(),
             static_evidence: FxHashMap::default(),
+            environments: FxHashMap::default(),
+            prepared: FxHashSet::default(),
+            prepared_monomorphic: FxHashSet::default(),
+            projections: Vec::new(),
         };
         interpreter
             .check_supported(FunctionId::new(module, entry))
@@ -1667,16 +2489,24 @@ mod tests {
 
         let mut session = CompilerSession::new();
         session.set_mir_optimization(MirOptimization::Disabled);
+        session.set_allow_experimental(true);
         let support = session.compile(
             "pub trait Describe<Self> { fn describe(value: Self) -> int; } impl Describe for int { fn describe(value: int) -> int { value } } pub struct Wrapper<T>(T) impl<T> Describe for Wrapper<T> where T: Describe, T: Value { fn describe(value: Wrapper<T>) -> int { describe(value.0) + 1 } } pub fn forward<T>(value: T) -> int where T: Describe, T: Value { describe(value) }
              pub trait Tag<Self> { fn tag(value: Self) -> int; } impl<A> Tag for Wrapper<A> { fn tag(value: Wrapper<A>) -> int { 42 } } pub fn tagged<T>(value: T) -> int where T: Tag { tag(value) }
-             pub fn tag_wrapped<U>(value: U) -> int { tagged(Wrapper(value)) }",
+             pub fn tag_wrapped<U>(value: U) -> int { tagged(Wrapper(value)) }
+             pub subscript cell<T>(x: &mut T) -> T where T: Value { ref { let v = x; yield v; } mut { let mut v = x; yield v; x = v; } }",
             "generic_traits", Path::single_str("generic_traits"),
         ).unwrap().module_id;
         session.prepare_execution_target(ExecutionTarget::Mir, support);
         // Keep this invariant test: ordinary optimized execution can specialize away every
         // dictionary parameter, even after the physical backend joins the full language suite.
-        for (source, supported) in [
+        for source in [
+            "use generic_traits::cell; fn set<T>(value: &mut T, replacement: T) { let s = cell; let t = s; value->[t] = replacement; } fn compute(x: int) -> int { let mut n = x; set(n, x + 1); n }",
+            "fn compute(x: int) -> int { let f = to_string; len(f(x)) }",
+            "fn make<T>(value: T) -> () -> T { || value } fn compute(x: int) -> int { let f = make(x); let g = f; g() }",
+            "fn make_array<T>(value: T) -> [T] { let mut a = [value]; array_append(a, value); a } fn compute(x: int) -> [int] { make_array(x) }",
+            "fn maybe<T>(value: T, n: int) -> T { if n == 0 { to_string(value); }; value } fn compute(x: int) -> int { maybe(x, x) }",
+            "fn maybe<T>(value: T, n: int) -> T { if n == 0 { let f = |x| x; f(value); }; value } fn compute(x: int) -> int { maybe(x, x) }",
             "fn duplicate<T>(x: T) -> (T, T) { (x, x) } fn compute(x: int) -> ((int, bool), (int, bool)) { duplicate((x, true)) }",
             // Repeated constructions overwrite evidence registers; their owners must not accumulate.
             "fn repeat<T>(x: T) -> T { let mut n = 0; loop { let pair = (x, x); if n == 3 { return pair.0; }; n += 1; } } fn compute(x: int) -> (int, bool) { repeat((x, true)) }",
@@ -1693,11 +2523,7 @@ mod tests {
             "enum Choice<T> { Nothing, Item(T) } fn wrap<T>(x: T) -> Choice<T> { Choice::Item(x) } fn unwrap<T>(x: Choice<T>, fallback: T) -> T { match x { Nothing => fallback, Item(v) => v } } fn compute(x: int) -> (int, bool) { unwrap(wrap((x, true)), (0, false)) }",
             "enum List<T> { Nil, Cons(T, List<T>) } fn fail<T>(value: T, n: int) -> (T, int) { (value, idiv(10, n)) } fn compute(x: int) -> (List<int>, int) { fail(List::Cons(x, List::Nil), x - 7) }",
             "struct Probe(int) impl Value for Probe { fn eq(a: Probe, b: Probe) -> bool { a.0 == b.0 } fn to_string(a: Probe) -> string { to_string(a.0) } fn hash(a: Probe, s: &mut hasher) { hash(a.0, s) } fn clone(a: Probe) -> Probe { Probe(a.0 + 1) } fn drop(a: &mut Probe) { a.0 = 0; } } fn duplicate<T>(x: T) -> (T, T) { (x, x) } fn compute(x: int) -> int { let p = duplicate(Probe(x)); p.0.0 + p.1.0 }",
-        ].into_iter().map(|source| (source, true)).chain([
-            ("fn maybe<T>(value: T, n: int) -> T { if n == 0 { to_string(value); }; value } fn compute(x: int) -> int { maybe(x, x) }", true),
-            // Capability preparation still visits unsupported calls in untaken branches.
-            ("fn maybe<T>(value: T, n: int) -> T { if n == 0 { let f = |x| x; f(value); }; value } fn compute(x: int) -> int { maybe(x, x) }", false),
-        ]) {
+        ] {
             let module = session
                 .compile(source, "generic", Path::single_str("generic"))
                 .unwrap()
@@ -1729,11 +2555,6 @@ mod tests {
                 ReferenceInterpreterLimits::default(),
                 &session,
             );
-            if !supported {
-                assert!(matches!(actual, Err(RuntimeError::Backend(_))), "{actual:?}");
-                expected.unwrap().discard_storage();
-                continue;
-            }
             match (expected, actual) {
                 (Ok(expected), Ok(actual)) => {
                     assert_eq!(format!("{actual:?}"), format!("{expected:?}"), "{source}");
@@ -1745,6 +2566,105 @@ mod tests {
                 }
                 (expected, actual) => panic!("{source}: expected={expected:?}, actual={actual:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn physical_callable_drop_failure_detaches_environment() {
+        use crate::{
+            ExecutionTarget, MirOptimization,
+            compiler::error::{RuntimeErrorKind, SourceFailureKind},
+            mir::physical::lower_physical_mir,
+            module::Path,
+            std::{STD_MODULE_ID, math::int_value},
+        };
+        use ustr::ustr;
+
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Disabled);
+        let module = session
+            .compile(
+                r#"
+            struct Bomb(int)
+            impl Value for Bomb {
+                fn eq(a: Bomb, b: Bomb) -> bool { a.0 == b.0 }
+                fn to_string(a: Bomb) -> string { to_string(a.0) }
+                fn hash(a: Bomb, s: &mut hasher) { hash(a.0, s) }
+                fn clone(a: Bomb) -> Bomb { Bomb(a.0 - 1) }
+                fn drop(a: &mut Bomb) { () }
+            }
+            fn fail_drop(a: &mut Bomb) { idiv(1, a.0); }
+            pub fn compute(x: int) -> int {
+                let bomb = Bomb(x); let f = || bomb.0; x
+            }
+            pub fn unwind(x: int) -> int {
+                let bomb = Bomb(x); let f = || bomb.0; idiv(1, 0)
+            }
+            "#,
+                "drop_failure",
+                Path::single_str("drop_failure"),
+            )
+            .unwrap()
+            .module_id;
+        session.prepare_execution_target(ExecutionTarget::Mir, module);
+        let compiled = session.expect_fresh_module(module);
+        let fail = compiled.get_local_function_id(ustr("fail_drop")).unwrap();
+        let mut artifacts = [STD_MODULE_ID, module].map(|id| {
+            lower_physical_mir(
+                id,
+                session
+                    .mir_artifacts_for(id, MirOptimization::Disabled)
+                    .unwrap(),
+                ModuleEnv::new(session.expect_fresh_module(id), session.raw_modules()),
+                session.known_callees(),
+            )
+            .unwrap()
+        });
+        // Source-level Value::drop is pure. Inject a failing body to exercise defensive cleanup
+        // without weakening that contract or adding an invalid native ABI fixture.
+        let failure = artifacts[1].entries[fail.as_index()]
+            .as_ref()
+            .unwrap()
+            .clone();
+        let targets = artifacts[1]
+            .entries
+            .iter_mut()
+            .enumerate()
+            .filter(|(index, body)| {
+                *index != fail.as_index()
+                    && body.as_ref().is_some_and(|body| {
+                        body.name.contains("drop")
+                            && body.parameters().len() == failure.parameters().len()
+                            && body
+                                .parameters()
+                                .iter()
+                                .zip(failure.parameters())
+                                .all(|(a, b)| a.ty == b.ty && a.kind == b.kind)
+                    })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(targets.len(), 1);
+        for (_, body) in targets {
+            *body = Some(failure.clone());
+        }
+        let program = resolve_physical_program(artifacts.iter()).unwrap();
+        for (name, expected) in [
+            (
+                "compute",
+                RuntimeErrorKind::SourceFailure(SourceFailureKind::DivisionByZero),
+            ),
+            ("unwind", RuntimeErrorKind::FailureDuringCleanup),
+        ] {
+            let entry = compiled.get_local_function_id(ustr(name)).unwrap();
+            let error = run_entry(
+                &program,
+                FunctionId::new(module, entry),
+                &mut [int_value(1)],
+                ReferenceInterpreterLimits::default(),
+                &session,
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), expected, "{name}: {error:?}");
         }
     }
 
@@ -1761,6 +2681,10 @@ mod tests {
             session: &session,
             types: RuntimeTypes::default(),
             static_evidence: FxHashMap::default(),
+            environments: FxHashMap::default(),
+            prepared: FxHashSet::default(),
+            prepared_monomorphic: FxHashSet::default(),
+            projections: Vec::new(),
         };
         let body = Function::new(
             "transfers".into(),

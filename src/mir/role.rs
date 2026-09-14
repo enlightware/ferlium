@@ -584,7 +584,7 @@ pub(crate) fn check_operand_roles(
             }
         }
         OperationKind::RuntimeAlloc { .. } => {
-            for index in 0..2 {
+            for index in 0..operands.len() {
                 let role = role(index);
                 assert!(
                     matches!(
@@ -736,6 +736,9 @@ pub(crate) fn check_operand_roles(
         OperationKind::AddressOffset { .. } | OperationKind::AddressOffsetPlace { .. } => {
             place(0);
             value(1);
+            if operands.len() == 3 {
+                value(2);
+            }
         }
         OperationKind::DictEntry { .. }
         | OperationKind::SubscriptMember { .. }

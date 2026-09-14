@@ -1307,7 +1307,7 @@ fn testing_module(
 /// or many (see `doc/runtime-sandboxing.md`). A drop counter declared pure gets folded to whatever
 /// it happened to read during compilation.
 fn test_effect_module(module_id: ModuleId) -> Module {
-    let mut module = Module::new(module_id, Path::single_str("effects"));
+    let mut module = Module::new(module_id, Path::single_str("effects_native"));
     module.add_function(
         "read".into(),
         NativeFn0::from_rust(|| ()).description(
@@ -1330,22 +1330,6 @@ fn test_effect_module(module_id: ModuleId) -> Module {
             [],
             "Performs both read and write effects.",
             effects(&[PrimitiveEffect::Read, PrimitiveEffect::Write]),
-        ),
-    );
-    module.add_function(
-        "take_read".into(),
-        InterpreterFixture::Ignore.description(
-            ["value"],
-            "Takes a first-class function that performs a read effect, and fake call it.",
-            FnType::new_by_val(
-                [Type::function_type(FnType::new(
-                    vec![],
-                    Type::unit(),
-                    effect(PrimitiveEffect::Read),
-                ))],
-                Type::unit(),
-                effect(PrimitiveEffect::Read),
-            ),
         ),
     );
     module
@@ -1546,9 +1530,20 @@ impl TestSession {
         );
         compiler_session.register_module(Path::single_str("testing"), testing_module);
         compiler_session.register_module(
-            Path::single_str("effects"),
+            Path::single_str("effects_native"),
             test_effect_module(compiler_session.modules().next_id()),
         );
+        // Constrain callback effects without passing a callable across the native boundary.
+        compiler_session
+            .compile(
+                "pub fn read() { effects_native::read() }
+                 pub fn write() { effects_native::write() }
+                 pub fn read_write() { effects_native::read_write() }
+                 pub fn take_read(f: (() -> () ! read)) { read() }",
+                "effects.fer",
+                Path::single_str("effects"),
+            )
+            .unwrap();
         compiler_session.register_module(
             Path::single_str("props"),
             test_property_module(compiler_session.modules().next_id()),

@@ -315,7 +315,7 @@ unit result.
 Physical MIR exposes the compiled runtime boundary directly:
 
 ```text
-runtime_alloc<A>(byte_size: int, align: int) -> *A
+runtime_alloc<A>(byte_size: int, align: int [, count: int]) -> *A
 runtime_dealloc(address: *A)
 ```
 
@@ -323,7 +323,8 @@ The result is a materialized pointer value; the pointee type describes the stora
 it, while the explicit byte size gives the allocation its extent. An array of `A` therefore also
 receives `*A`. Allocation is fresh, uninitialized and owned until transferred or deallocated.
 Deallocation accepts the materialized allocation pointer, and a zero-byte allocation remains valid
-and reclaimable. Both operations are pinned.
+and reclaimable. Repeated storage also carries its element count, including for zero-sized elements.
+Both operations are pinned.
 
 ### Typed byte addressing
 
@@ -331,6 +332,7 @@ Physical MIR adds two representation-level address operations:
 
 ```text
 address_offset<A>(base_address, byte_offset: int) -> place A
+address_offset<A>(base_address, byte_offset: int, index: int) -> place A
 address_offset_place<A>(base_address, byte_offset: int) -> place *A
 ```
 
@@ -340,8 +342,9 @@ an aligned inline place of `A`; `address_offset_place` yields a slot containing 
 retain the base allocation's provenance. Byte-offset expressions use ordinary calls such as
 `Num<int>::add` and `Num<int>::mul`.
 
-Product projections also retain their logical member index, printed as an optional `member N`
-suffix on `address_offset`. Distinct zero-sized fields may share an address but retain independent
+Product projections retain a static member index as instruction metadata, printed as `member N`.
+Repeated-element projections instead take a third operand, printed as `index I`. These forms are
+mutually exclusive. Distinct zero-sized subobjects may share an address but retain independent
 initialization and drop obligations; byte location alone does not identify ownership. A variant
 payload projection selects the active case, and changing cases invalidates views into the previous
 payload.
