@@ -11,13 +11,67 @@
 use crate::{
     hir::dictionary::DictionaryReq,
     module::{
-        DictionaryEntryEvidence, FunctionId, LocalImplId, Module, ModuleId, TraitDictionaryEntry,
-        TraitDictionaryId, id::Id,
+        DictionaryEntryEvidence, FunctionId, LocalImplId, Module, ModuleEnv, ModuleId,
+        TraitDictionaryEntry, TraitDictionaryId, id::Id,
+    },
+    std::{
+        core_traits_names::VALUE_TRAIT_NAME,
+        value::{VALUE_ALIGN_ASSOC_CONST_INDEX, VALUE_SIZE_ASSOC_CONST_INDEX},
     },
     types::{r#trait::TraitDictionaryEntryIndex, r#type::Type},
 };
 
 use super::evidence::PhysicalEvidenceReferences;
+use std::{
+    alloc::{Layout, LayoutError},
+    rc::Rc,
+};
+
+/// ABI descriptor/environment pair. Module-qualified symbols are relocated before storage.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct DictionaryReference {
+    pub(crate) descriptor: u32,
+    pub(crate) environment: usize,
+}
+
+/// Ordered physical capture fields, following a pointer-sized reference count (zero for static data).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct EvidenceEnvironmentLayout {
+    pub(crate) allocation: Layout,
+    pub(crate) fields: Rc<[EvidenceCaptureField]>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EvidenceCaptureField {
+    pub(crate) offset: usize,
+    /// A one-byte variant-storage choice; other captures use the descriptor/environment pair.
+    pub(crate) is_storage_flag: bool,
+}
+
+impl EvidenceEnvironmentLayout {
+    pub(crate) fn new(storage_flags: impl IntoIterator<Item = bool>) -> Result<Self, LayoutError> {
+        let mut allocation = Layout::new::<usize>();
+        let mut fields = Vec::new();
+        for storage in storage_flags {
+            let field = if storage {
+                Layout::new::<bool>()
+            } else {
+                Layout::new::<DictionaryReference>()
+            };
+            let (layout, offset) = allocation.extend(field)?;
+            allocation = layout;
+            fields.push(EvidenceCaptureField {
+                offset,
+                is_storage_flag: storage,
+            });
+        }
+        Ok(Self {
+            allocation: allocation.pad_to_align(),
+            fields: fields.into(),
+        })
+    }
+}
 
 /// One entry in a module-owned physical dictionary definition.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,12 +93,15 @@ impl PhysicalDictionaryEntry {
 /// A relocatable dictionary definition owned by one physical MIR module.
 ///
 /// Function and dictionary identities remain module-qualified. Later whole-program assembly may
-/// deduplicate definitions without consulting semantic HIR; executors assign target indexes.
+/// deduplicate definitions and assign descriptor indexes without consulting semantic HIR.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PhysicalDictionaryDefinition {
     id: TraitDictionaryId,
     ty: Type,
     capture_schema: Box<[DictionaryReq]>,
+    capture_types: Box<[Type]>,
+    environment: EvidenceEnvironmentLayout,
+    layout_entries: Option<[usize; 2]>,
     entries: Box<[PhysicalDictionaryEntry]>,
 }
 
@@ -59,6 +116,18 @@ impl PhysicalDictionaryDefinition {
 
     pub(crate) fn capture_schema(&self) -> &[DictionaryReq] {
         &self.capture_schema
+    }
+
+    pub(crate) fn capture_types(&self) -> &[Type] {
+        &self.capture_types
+    }
+
+    pub(crate) fn environment(&self) -> &EvidenceEnvironmentLayout {
+        &self.environment
+    }
+
+    pub(crate) fn layout_entries(&self) -> Option<[usize; 2]> {
+        self.layout_entries
     }
 
     pub(crate) fn entries(&self) -> &[PhysicalDictionaryEntry] {
@@ -78,6 +147,7 @@ impl PhysicalDictionaryCatalog {
     pub(super) fn from_module(
         module: ModuleId,
         source: &Module,
+        env: ModuleEnv<'_>,
         references: &PhysicalEvidenceReferences,
     ) -> Self {
         assert_eq!(source.module_id(), module);
@@ -107,6 +177,28 @@ impl PhysicalDictionaryCatalog {
                     id,
                     ty: implementation.dictionary_ty,
                     capture_schema: dictionary.capture_schema().to_vec().into_boxed_slice(),
+                    capture_types: dictionary
+                        .capture_schema()
+                        .iter()
+                        .map(|r| r.to_dict_type_in_env(&env))
+                        .collect(),
+                    environment: EvidenceEnvironmentLayout::new(
+                        dictionary
+                            .capture_schema()
+                            .iter()
+                            .map(|r| matches!(r, DictionaryReq::VariantPayloadIndirection { .. })),
+                    )
+                    .expect("dictionary environment layout fits the target"),
+                    layout_entries: (implementation.trait_id
+                        == env.expect_std_trait_id(VALUE_TRAIT_NAME))
+                    .then(|| {
+                        let definition = env.trait_def(implementation.trait_id);
+                        [VALUE_SIZE_ASSOC_CONST_INDEX, VALUE_ALIGN_ASSOC_CONST_INDEX].map(|index| {
+                            definition
+                                .dictionary_associated_const_index(index)
+                                .as_index()
+                        })
+                    }),
                     entries,
                 }
             })

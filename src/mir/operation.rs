@@ -547,6 +547,9 @@ impl Operation {
     }
 
     /// Closes a dictionary definition over its ordered hidden-evidence captures.
+    /// Physical construction retains its captures; evidence values keep their environments alive
+    /// independently of stack regions. Selected entry values retain their required evidence;
+    /// invocation borrows that evidence without cloning source values.
     pub fn build_dictionary(
         span: Location,
         definition: TraitDictionaryId,

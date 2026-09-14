@@ -565,7 +565,8 @@ pub(crate) fn prepare_physical_mir(
     let helper_base = FunctionId::new(module, LocalFunctionId::from_index(semantic.entry_count()));
     let buffer_entries = buffer::entries(env, known);
     let references = PhysicalEvidenceReferences::collect(&entries);
-    let dictionaries = PhysicalDictionaryCatalog::from_module(module, env.current, &references);
+    let dictionaries =
+        PhysicalDictionaryCatalog::from_module(module, env.current, env, &references);
     let subscripts = PhysicalSubscriptCatalog::from_module(module, env.current, env, &references);
     let native_signatures =
         collect_native_signatures(&entries, &dictionaries, &subscripts, env, &buffer_entries)?;
@@ -4003,7 +4004,7 @@ mod tests {
             let env = ModuleEnv::new(module, session.raw_modules());
             let references = PhysicalEvidenceReferences::default();
             let dictionaries =
-                PhysicalDictionaryCatalog::from_module(module_id, module, &references);
+                PhysicalDictionaryCatalog::from_module(module_id, module, env, &references);
             let subscripts =
                 PhysicalSubscriptCatalog::from_module(module_id, module, env, &references);
             collect_native_signatures(
@@ -4182,7 +4183,7 @@ mod tests {
         let source = session.expect_fresh_module(artifacts.module);
         let env = ModuleEnv::new(source, session.raw_modules());
         artifacts.dictionaries =
-            PhysicalDictionaryCatalog::from_module(artifacts.module, source, &references);
+            PhysicalDictionaryCatalog::from_module(artifacts.module, source, env, &references);
         artifacts.subscripts =
             PhysicalSubscriptCatalog::from_module(artifacts.module, source, env, &references);
         let signatures = collect_native_signatures(
@@ -4528,6 +4529,12 @@ mod tests {
         let (std, _) = lower(&mut session, STD_MODULE_ID).unwrap();
 
         let resolved = resolve_physical_program([&user, &std]).unwrap();
+        let mut descriptor_indexes = FxHashSet::default();
+        for definition in std.dictionaries().iter().chain(user.dictionaries()) {
+            let index = resolved.descriptor_index(definition.id()).unwrap();
+            assert!(descriptor_indexes.insert(index));
+            assert_eq!(resolved.descriptor(index).unwrap().id(), definition.id());
+        }
 
         assert!(resolved.module(STD_MODULE_ID).is_some());
         assert!(resolved.module(module).is_some());
@@ -4619,7 +4626,7 @@ mod tests {
         let references = PhysicalEvidenceReferences::collect(&entries);
         let source = session.expect_fresh_module(module);
         let env = ModuleEnv::new(source, session.raw_modules());
-        let dictionaries = PhysicalDictionaryCatalog::from_module(module, source, &references);
+        let dictionaries = PhysicalDictionaryCatalog::from_module(module, source, env, &references);
         let subscripts = PhysicalSubscriptCatalog::from_module(module, source, env, &references);
         let physical = BackendReadyMirArtifacts {
             module,

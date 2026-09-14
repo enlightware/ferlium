@@ -254,20 +254,23 @@ Malformed compiler-generated MIR can trigger an internal verifier panic, includi
 builds; embedders must not assume such invariant failures are recoverable compilation errors.
 
 Each physical module owns relocatable dictionary and subscript catalogs. A dictionary definition
-records its stable identity, capture schema, entry functions, and entry-to-capture mappings. A
-subscript definition records its identity, capture schema, optional `ref` and `mut` functions, and
+records its stable identity, physical capture layout, entry functions, and entry-to-capture mappings.
+A subscript definition records its identity, capture schema, optional `ref` and `mut` functions, and
 their provenance. Foreign references form explicit import lists. Local metadata and resolved
 imports must agree on capture counts, entry contracts, and available members, independently of
 semantic HIR storage.
 
 A target-independent assembly step creates a `ResolvedPhysicalProgram` over the independently
 lowered artifacts. It resolves function and evidence imports without rewriting or merging their
-MIR bodies. Stable module-qualified identities remain available; an executor may assign target
-indexes or concrete addresses from the catalogs.
+MIR bodies. Stable module-qualified identities remain available alongside resolved dictionary
+descriptor indexes; executors materialize target addresses from the catalogs.
 
-Backend-ready MIR may retain symbolic operands, `DictEntry`, variant construction, and
-`extract_tag`. Each executor supplies their target representation. Interpreter-only native calls
-and target-lowered value representations must be resolved.
+Backend-ready MIR may retain symbolic operands, dictionary construction and entry selection,
+variant construction, and `extract_tag`, with representations fixed by the target ABI. Dictionary
+construction retains captured evidence; live evidence values keep their environments alive
+independently of stack regions. Calls borrow evidence, and releasing its owners follows the
+[ABI evidence lifetime contract](abi.md#dictionary-evidence). Interpreter-only native calls and
+target-lowered value representations must be resolved.
 
 Physical artifacts retain native ABI contracts under the existing `FunctionId`, including native
 dependencies reached through evidence catalogs and first-class values. This lets executors lower

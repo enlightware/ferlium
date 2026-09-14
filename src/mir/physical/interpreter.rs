@@ -12,9 +12,12 @@
 #[path = "interpreter_memory.rs"]
 mod memory;
 
-use super::program::ResolvedPhysicalProgram;
+use super::{
+    dictionary::DictionaryReference,
+    program::{InternedStaticEvidence, ProgramEvidenceId, ResolvedPhysicalProgram},
+};
 use crate::{
-    CompilerSession,
+    CompilerSession, Location,
     compiler::error::SandboxViolationKind,
     eval::RuntimeError,
     execution::ReferenceInterpreterLimits,
@@ -41,7 +44,7 @@ use crate::{
 };
 use memory::{Address, Memory, Scalar, ScalarKind, StoredValue};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::{fmt::Display, mem, process::abort, rc::Rc};
+use std::{borrow::Cow, fmt::Display, mem, process::abort, rc::Rc, slice::from_ref};
 use ustr::Ustr;
 
 fn unsupported(detail: impl Display) -> RuntimeError {
@@ -64,9 +67,14 @@ enum Binding {
     Callable(Callable),
 }
 
-/// Non-owning dictionary dispatch metadata; never stored in guest value memory.
+/// Symbolic dictionaries are used only by capability analysis; execution uses ABI references.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Evidence {
+    Physical {
+        reference: DictionaryReference,
+        generation: u64,
+        ty: Type,
+    },
     Dictionary {
         definition: TraitDictionaryId,
         captures: Vec<Evidence>,
@@ -78,15 +86,14 @@ enum Evidence {
 impl Evidence {
     fn ty(&self) -> Type {
         match self {
-            Self::Dictionary { ty, .. } => *ty,
+            Self::Dictionary { ty, .. } | Self::Physical { ty, .. } => *ty,
             Self::Storage(_) => ScalarKind::Bool.ty(),
         }
     }
 
     fn layout_type(&self) -> Result<Type, RuntimeError> {
-        // A Value dictionary's clone signature names the witnessed storage type, including
-        // phantom types not recoverable from a value argument. Layout is computed by Memory
-        // from that concrete identity and the current ABI catalog, never from boxed data.
+        // The clone signature names the type checked by the memory harness, including phantom
+        // types. Executable size/alignment come from the dictionary's layout entries.
         let data = self.ty().data();
         let fields = data
             .as_tuple()
@@ -207,6 +214,14 @@ impl RuntimeTypes {
 }
 
 impl Binding {
+    fn evidence_references(&self) -> &[Evidence] {
+        match self {
+            Self::Evidence(evidence) => from_ref(evidence),
+            Self::Callable(callable) => &callable.captures,
+            _ => &[],
+        }
+    }
+
     fn evidence(self) -> Result<Evidence, RuntimeError> {
         match self {
             Self::Evidence(evidence) => Ok(evidence),
@@ -252,6 +267,7 @@ pub(crate) fn run_entry(
         depth: 0,
         session,
         types: RuntimeTypes::default(),
+        static_evidence: FxHashMap::default(),
     };
     interpreter.check_supported(entry)?;
     interpreter
@@ -301,9 +317,137 @@ struct Interpreter<'a, 'p> {
     depth: usize,
     session: &'a CompilerSession,
     types: RuntimeTypes,
+    static_evidence: FxHashMap<ProgramEvidenceId, Evidence>,
 }
 
 impl<'a, 'p> Interpreter<'a, 'p> {
+    fn build_evidence(
+        &mut self,
+        definition: TraitDictionaryId,
+        captures: Vec<Evidence>,
+        is_static: bool,
+        span: Option<Location>,
+    ) -> Result<Evidence, RuntimeError> {
+        let metadata = self
+            .program
+            .dictionary(definition)
+            .ok_or_else(|| invalid("unresolved dictionary"))?;
+        let mut types = RuntimeTypes::default();
+        if metadata.capture_types().len() != captures.len() {
+            return Err(invalid("dictionary capture count mismatch"));
+        }
+        for (ty, capture) in metadata.capture_types().iter().zip(&captures) {
+            types.bind(*ty, capture.ty())?;
+        }
+        self.memory.allocate_evidence(
+            self.program
+                .descriptor_index(definition)
+                .ok_or_else(|| invalid("unresolved descriptor"))?,
+            types.resolve(metadata.ty()),
+            metadata.environment(),
+            &captures,
+            is_static,
+            span,
+        )
+    }
+
+    fn prepare_static_evidence(
+        &mut self,
+        mut required: FxHashSet<ProgramEvidenceId>,
+    ) -> Result<(), RuntimeError> {
+        let mut pending = required.iter().copied().collect::<Vec<_>>();
+        while let Some(id) = pending.pop() {
+            let captures = match &self.program.static_evidence()[id.as_index()] {
+                InternedStaticEvidence::Dictionary { captures, .. }
+                | InternedStaticEvidence::Subscript { captures, .. } => captures,
+                InternedStaticEvidence::VariantPayloadStorage(_) => continue,
+            };
+            for &capture in captures {
+                if required.insert(capture) {
+                    pending.push(capture);
+                }
+            }
+        }
+        // Assembly interns children before parents. Sorting just the reachable dependency closure
+        // preserves that order without scanning or materializing unrelated program evidence.
+        let mut required = required.into_iter().collect::<Vec<_>>();
+        required.sort_unstable_by_key(|id| id.as_index());
+        for id in required {
+            let evidence = &self.program.static_evidence()[id.as_index()];
+            let value = match evidence {
+                InternedStaticEvidence::Dictionary {
+                    definition,
+                    captures,
+                } => {
+                    let captures = captures
+                        .iter()
+                        .map(|id| self.static_evidence[id].clone())
+                        .collect();
+                    self.build_evidence(*definition, captures, true, None)?
+                }
+                InternedStaticEvidence::VariantPayloadStorage(value) => Evidence::Storage(*value),
+                InternedStaticEvidence::Subscript { .. } => {
+                    return Err(unsupported("subscript evidence"));
+                }
+            };
+            self.static_evidence.insert(id, value);
+        }
+        Ok(())
+    }
+
+    fn retain_binding(&mut self, binding: &Binding) -> Result<(), RuntimeError> {
+        for (index, evidence) in binding.evidence_references().iter().enumerate() {
+            if let Err(error) = self.memory.retain_evidence(evidence) {
+                for retained in &binding.evidence_references()[..index] {
+                    self.memory.release_evidence(retained)?;
+                }
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    fn release_binding(&mut self, binding: &Binding) -> Result<(), RuntimeError> {
+        for evidence in binding.evidence_references() {
+            self.memory.release_evidence(evidence)?;
+        }
+        Ok(())
+    }
+
+    fn layout_entries(&self, evidence: &Evidence) -> Result<[usize; 2], RuntimeError> {
+        let definition = match evidence {
+            Evidence::Dictionary { definition, .. } => self.program.dictionary(*definition),
+            Evidence::Physical { reference, .. } => self.program.descriptor(reference.descriptor),
+            _ => None,
+        };
+        definition
+            .and_then(|d| d.layout_entries())
+            .ok_or_else(|| invalid("expected Value layout evidence"))
+    }
+
+    fn witness_layout(
+        &mut self,
+        evidence: Evidence,
+        span: Location,
+    ) -> Result<[usize; 2], RuntimeError> {
+        let mut layout = [0; 2];
+        for (index, entry) in self.layout_entries(&evidence)?.into_iter().enumerate() {
+            let callable = self.dictionary_entry(evidence.clone(), entry)?;
+            let marker = self.memory.len();
+            let output = self.memory.allocate(ScalarKind::Int.ty(), Some(span))?;
+            let result = self
+                .invoke(callable, vec![Binding::Place(output)])
+                .and_then(|()| self.memory.read(output));
+            self.memory.restore(marker);
+            let Scalar::Int(value) = result? else {
+                return Err(invalid("non-integer layout witness"));
+            };
+            layout[index] =
+                usize::try_from(value).map_err(|_| invalid("negative layout witness"))?;
+        }
+        Ok(layout)
+    }
+
     fn native(&self, id: FunctionId) -> Result<&'a NativeEntry, RuntimeError> {
         self.program
             .module(id.module)
@@ -318,7 +462,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         )
     }
 
-    fn dictionary(
+    fn symbolic_dictionary(
         &self,
         definition: TraitDictionaryId,
         captures: Vec<Evidence>,
@@ -341,13 +485,9 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         if captures.len() != definition_data.capture_schema().len() {
             return Err(invalid("dictionary capture count mismatch"));
         }
-        let env = ModuleEnv::new(
-            self.session.expect_fresh_module(definition.module_id),
-            self.session.raw_modules(),
-        );
         let mut types = RuntimeTypes::default();
-        for (requirement, capture) in definition_data.capture_schema().iter().zip(&captures) {
-            types.bind(requirement.to_dict_type_in_env(&env), capture.ty())?;
+        for (ty, capture) in definition_data.capture_types().iter().zip(&captures) {
+            types.bind(*ty, capture.ty())?;
         }
         Ok(Evidence::Dictionary {
             definition,
@@ -356,7 +496,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         })
     }
 
-    fn static_evidence(
+    fn symbolic_static_evidence(
         &self,
         evidence: &StaticEvidence,
         depth: usize,
@@ -368,11 +508,11 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             StaticEvidence::Dictionary {
                 definition,
                 captures,
-            } => self.dictionary(
+            } => self.symbolic_dictionary(
                 *definition,
                 captures
                     .iter()
-                    .map(|e| self.static_evidence(e, depth + 1))
+                    .map(|e| self.symbolic_static_evidence(e, depth + 1))
                     .collect::<Result<_, _>>()?,
             ),
             StaticEvidence::VariantPayloadStorage(value) => Ok(Evidence::Storage(*value)),
@@ -381,18 +521,25 @@ impl<'a, 'p> Interpreter<'a, 'p> {
     }
 
     fn dictionary_entry(&self, evidence: Evidence, index: usize) -> Result<Callable, RuntimeError> {
-        let Evidence::Dictionary {
-            definition,
-            ref captures,
-            ..
-        } = evidence
-        else {
-            return Err(invalid("expected a dictionary"));
+        let (definition, captures) = match &evidence {
+            Evidence::Physical { reference, .. } => (
+                self.program.descriptor(reference.descriptor),
+                Cow::Owned(self.memory.evidence_captures(&evidence)?),
+            ),
+            Evidence::Dictionary {
+                definition,
+                captures,
+                ..
+            } => (
+                self.program.dictionary(*definition),
+                Cow::Borrowed(captures.as_slice()),
+            ),
+            _ => return Err(invalid("expected a dictionary")),
         };
-        let entry = self
-            .program
-            .dictionary(definition)
-            .and_then(|d| d.entries().get(index))
+        let entry = definition
+            .ok_or_else(|| invalid("unresolved dictionary"))?
+            .entries()
+            .get(index)
             .ok_or_else(|| invalid("missing dictionary entry"))?;
         Ok(Callable {
             function: entry.function(),
@@ -424,8 +571,10 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         }
         let get = |value| self.symbolic(body, inputs, definitions, value, depth + 1);
         match value {
-            mir::Value::Dictionary(id) => Ok(Binding::Evidence(self.dictionary(*id, vec![])?)),
-            mir::Value::Evidence(e) => Ok(Binding::Evidence(self.static_evidence(e, 0)?)),
+            mir::Value::Dictionary(id) => {
+                Ok(Binding::Evidence(self.symbolic_dictionary(*id, vec![])?))
+            }
+            mir::Value::Evidence(e) => Ok(Binding::Evidence(self.symbolic_static_evidence(e, 0)?)),
             mir::Value::Function(function) => Ok(Binding::Callable(Callable {
                 function: *function,
                 captures: vec![],
@@ -457,7 +606,9 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                             .iter()
                             .map(|v| get(v)?.evidence())
                             .collect::<Result<_, _>>()?;
-                        Ok(Binding::Evidence(self.dictionary(*definition, captures)?))
+                        Ok(Binding::Evidence(
+                            self.symbolic_dictionary(*definition, captures)?,
+                        ))
                     }
                     OperationKind::DictEntry { entry_index, .. } => {
                         Ok(Binding::Callable(self.dictionary_entry(
@@ -487,6 +638,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             .collect::<Vec<_>>();
         let mut pending = vec![(entry, inputs)];
         let mut visited = FxHashSet::default();
+        let mut required_evidence = FxHashSet::default();
         while let Some((id, inputs)) = pending.pop() {
             if !visited.insert((id, inputs.clone())) {
                 continue;
@@ -547,6 +699,12 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             }
             for operation in operations {
                 Self::check_operation(operation)?;
+                required_evidence.extend(
+                    operation
+                        .operands
+                        .iter()
+                        .filter_map(|v| self.program.evidence_id(v)),
+                );
                 match &operation.kind {
                     OperationKind::Alloca { ty }
                     | OperationKind::AddressOffset { ty, .. }
@@ -594,6 +752,16 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                         .symbolic(body, &inputs, &definitions, &operation.operands[index], 0)?
                         .evidence()?;
                     self.memory.prepare_type(witness.layout_type()?, &env)?;
+                    for entry in self.layout_entries(&witness)? {
+                        let callable = self.dictionary_entry(witness.clone(), entry)?;
+                        let mut inputs = callable
+                            .captures
+                            .into_iter()
+                            .map(Input::Evidence)
+                            .collect::<Vec<_>>();
+                        inputs.push(Input::Place(ScalarKind::Int.ty()));
+                        pending.push((callable.function, inputs));
+                    }
                 }
                 let callee_index = match operation.kind {
                     OperationKind::Call { .. } => 0,
@@ -649,7 +817,14 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 pending.push((callable.function, target_inputs));
             }
             for block in body.blocks() {
-                match &body.block(block).terminator().kind {
+                let terminator = body.block(block).terminator();
+                required_evidence.extend(
+                    terminator
+                        .operands()
+                        .iter()
+                        .filter_map(|v| self.program.evidence_id(v)),
+                );
+                match &terminator.kind {
                     TerminatorKind::Invoke { .. }
                     | TerminatorKind::Goto { .. }
                     | TerminatorKind::CondBr { .. }
@@ -662,7 +837,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 }
             }
         }
-        Ok(())
+        self.prepare_static_evidence(required_evidence)
     }
 
     fn check_operation(operation: &Operation) -> Result<(), RuntimeError> {
@@ -781,8 +956,17 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         operand: &mir::Value,
     ) -> Result<Binding, RuntimeError> {
         match operand {
-            mir::Value::Dictionary(id) => Ok(Binding::Evidence(self.dictionary(*id, vec![])?)),
-            mir::Value::Evidence(e) => Ok(Binding::Evidence(self.static_evidence(e, 0)?)),
+            mir::Value::Dictionary(_) | mir::Value::Evidence(_) => {
+                let id = self
+                    .program
+                    .evidence_id(operand)
+                    .ok_or_else(|| invalid("unresolved static evidence"))?;
+                self.static_evidence
+                    .get(&id)
+                    .cloned()
+                    .map(Binding::Evidence)
+                    .ok_or_else(|| invalid("unprepared static evidence"))
+            }
             mir::Value::Function(function) => Ok(Binding::Callable(Callable {
                 function: *function,
                 captures: vec![],
@@ -817,13 +1001,29 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         frame_base: usize,
     ) -> Result<(), RuntimeError> {
         let mut registers = FxHashMap::default();
+        let result = self.run_blocks(body, args, &mut registers, frame_base);
+        // Evidence registers own references independently of stack storage. In particular, CSE
+        // may reuse a pure dictionary construction across StackRestore boundaries.
+        for binding in registers.values() {
+            self.release_binding(binding)?;
+        }
+        result
+    }
+
+    fn run_blocks(
+        &mut self,
+        body: &Function,
+        args: &[Binding],
+        registers: &mut FxHashMap<ValueId, Binding>,
+        frame_base: usize,
+    ) -> Result<(), RuntimeError> {
         let mut block = body.entry();
         let mut pending: Option<RuntimeError> = None;
         let mut secondary: Option<RuntimeError> = None;
         loop {
             let current = body.block(block);
             for operation in current.operations() {
-                self.operation(body, args, &mut registers, operation, frame_base)
+                self.operation(body, args, registers, operation, frame_base)
                     .map_err(|error| match pending.take() {
                         Some(initial) => initial.interrupted_by(error),
                         None => error,
@@ -837,7 +1037,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     else_target,
                 } => {
                     let Scalar::Bool(taken) =
-                        self.operand(body, args, &registers, condition)?.scalar()?
+                        self.operand(body, args, registers, condition)?.scalar()?
                     else {
                         return Err(invalid("non-boolean branch condition"));
                     };
@@ -847,7 +1047,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     operation,
                     normal,
                     error,
-                } => match self.operation(body, args, &mut registers, operation, frame_base) {
+                } => match self.operation(body, args, registers, operation, frame_base) {
                     Ok(()) => block = *normal,
                     Err(failure @ RuntimeError::SourceFailure(_)) => {
                         if pending.is_none() {
@@ -869,7 +1069,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     cases,
                     default,
                 } => {
-                    let Binding::Tag(tag) = self.operand(body, args, &registers, tag)? else {
+                    let Binding::Tag(tag) = self.operand(body, args, registers, tag)? else {
                         return Err(invalid("expected variant tag"));
                     };
                     block = cases
@@ -927,11 +1127,22 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             )),
             _ => None,
         };
-        if let Some((index, ty)) = witness {
-            if operand(index)?.evidence()?.layout_type()? != ty {
+        let witnessed_layout = if let Some((index, ty)) = witness {
+            let evidence = operand(index)?.evidence()?;
+            if evidence.layout_type()? != ty {
                 return Err(invalid("layout evidence differs from storage type"));
             }
-        }
+            let layout = self.witness_layout(evidence, operation.span)?;
+            if matches!(operation.kind, Variant { .. }) {
+                self.memory.check_type_layout(ty, layout[0], layout[1])?;
+            }
+            Some(layout)
+        } else {
+            None
+        };
+        let operand =
+            |index: usize| self.operand(body, args, registers, &operation.operands[index]);
+        let place = |index| operand(index)?.place();
         if let Clone { ty } | Drop { ty } | MoveBytes { ty } = &operation.kind {
             if place(0)?.ty != self.types.resolve(*ty) {
                 return Err(invalid("operation type differs from storage type"));
@@ -942,15 +1153,23 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 let captures = (0..operation.operands.len())
                     .map(|i| operand(i)?.evidence())
                     .collect::<Result<_, _>>()?;
-                Some(Binding::Evidence(self.dictionary(*definition, captures)?))
+                let evidence =
+                    self.build_evidence(*definition, captures, false, Some(operation.span))?;
+                Some(Binding::Evidence(evidence))
             }
             DictEntry { entry_index, .. } => Some(Binding::Callable(
                 self.dictionary_entry(operand(0)?.evidence()?, entry_index.as_index())?,
             )),
-            Alloca { ty } => Some(Binding::Place(
-                self.memory
-                    .allocate(self.types.resolve(*ty), Some(operation.span))?,
-            )),
+            Alloca { ty } => {
+                let ty = self.types.resolve(*ty);
+                Some(Binding::Place(match witnessed_layout {
+                    Some([size, align]) => {
+                        self.memory
+                            .allocate_witnessed(ty, size, align, Some(operation.span))?
+                    }
+                    None => self.memory.allocate(ty, Some(operation.span))?,
+                }))
+            }
             AllocaPlace { pointing_to } => Some(Binding::Place(
                 self.memory
                     .allocate_place(self.types.resolve(*pointing_to), Some(operation.span))?,
@@ -1028,6 +1247,9 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             Memcpy | Move | MoveBytes { .. } => {
                 let source = place(0)?;
                 let destination = place(1)?;
+                if let Some([size, align]) = witnessed_layout {
+                    self.memory.check_layout(source, size, align)?;
+                }
                 if matches!(operation.kind, MoveBytes { .. }) {
                     let Scalar::Int(size) = operand(2)?.scalar()? else {
                         return Err(invalid("non-integer transfer size"));
@@ -1049,6 +1271,9 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             Replace => {
                 let source = place(0)?;
                 let destination = place(1)?;
+                if let Some([size, align]) = witnessed_layout {
+                    self.memory.check_layout(source, size, align)?;
+                }
                 // Replacement exchanges ownership of the same type; it is not a structural cast.
                 if self.memory.overlaps(source, destination)? || source.ty != destination.ty {
                     return Err(invalid("invalid replacement storage"));
@@ -1183,10 +1408,16 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             _ => unreachable!("capability check rejected this operation"),
         };
         if let Some(value) = result {
-            registers.insert(
+            // Construction transfers its initial owner; other results retain borrowed evidence.
+            if !matches!(operation.kind, BuildDictionary { .. }) {
+                self.retain_binding(&value)?;
+            }
+            if let Some(previous) = registers.insert(
                 operation.result_id().expect("value-producing operation"),
                 value,
-            );
+            ) {
+                self.release_binding(&previous)?;
+            }
         }
         Ok(())
     }
@@ -1291,6 +1522,41 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     use wasm_bindgen_test::wasm_bindgen_test;
 
+    #[test]
+    fn physical_static_evidence_preparation_is_entry_scoped() {
+        use crate::module::Path;
+        use ustr::ustr;
+
+        let mut session = CompilerSession::new();
+        let module = session.compile(
+            "pub fn compute() -> int { 42 } pub fn unused(x: int) -> string { to_string((x, true)) }",
+            "evidence_scope", Path::single_str("evidence_scope"),
+        ).unwrap().module_id;
+        let entry = session
+            .expect_fresh_module(module)
+            .get_local_function_id(ustr("compute"))
+            .unwrap();
+        let program = session.prepare_physical_program(module).unwrap();
+        assert!(!program.static_evidence().is_empty());
+        let mut interpreter = Interpreter {
+            program: &program,
+            memory: Memory::default(),
+            limits: ReferenceInterpreterLimits::default(),
+            fuel: None,
+            depth: 0,
+            session: &session,
+            types: RuntimeTypes::default(),
+            static_evidence: FxHashMap::default(),
+        };
+        interpreter
+            .check_supported(FunctionId::new(module, entry))
+            .unwrap();
+        assert!(
+            interpreter.static_evidence.is_empty(),
+            "a scalar entry needs none of the program's static evidence"
+        );
+    }
+
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn physical_generic_bodies_execute_without_specialization() {
@@ -1315,6 +1581,8 @@ mod tests {
         // dictionary parameter, even after the physical backend joins the full language suite.
         for (source, supported) in [
             "fn duplicate<T>(x: T) -> (T, T) { (x, x) } fn compute(x: int) -> ((int, bool), (int, bool)) { duplicate((x, true)) }",
+            // Repeated constructions overwrite evidence registers; their owners must not accumulate.
+            "fn repeat<T>(x: T) -> T { let mut n = 0; loop { let pair = (x, x); if n == 3 { return pair.0; }; n += 1; } } fn compute(x: int) -> (int, bool) { repeat((x, true)) }",
             "fn replace<T>(x: &mut T, y: T) { x = y; } fn compute(x: int) -> (int, bool) { let mut p = (1, false); replace(p, (x, true)); p }",
             "enum List<T> { Nil, Cons(T, List<T>) } fn duplicate<T>(x: T) -> (T, T) { (x, x) } fn compute(x: int) -> (List<int>, List<int>) { duplicate(List::Cons(x, List::Nil)) }",
             "fn first<T, U>(p: (T, U)) -> T { p.0 } fn compute(x: int) -> (int, bool) { first(((x, true), ())) }",
@@ -1394,6 +1662,7 @@ mod tests {
             depth: 0,
             session: &session,
             types: RuntimeTypes::default(),
+            static_evidence: FxHashMap::default(),
         };
         let body = Function::new(
             "transfers".into(),

@@ -3,7 +3,7 @@
 
 //! ABI-layout storage with checked provenance, logical subobjects and initialization.
 
-use super::{invalid, unsupported};
+use super::{Evidence, invalid, unsupported};
 use crate::{
     Location,
     compiler::error::SandboxViolationKind,
@@ -12,6 +12,7 @@ use crate::{
         native_functions::NativeLayout,
         value::{LiteralValue, Value, VariantPayloadStorage},
     },
+    mir::physical::dictionary::{DictionaryReference, EvidenceEnvironmentLayout},
     module::{ProjectionIndex, id::Id},
     std::{
         math::Float,
@@ -25,7 +26,7 @@ use crate::{
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
     alloc::{Layout, alloc, dealloc},
-    mem::take,
+    mem::{offset_of, size_of, take},
     ptr::{NonNull, from_mut},
     rc::Rc,
 };
@@ -436,8 +437,86 @@ impl Drop for Allocation {
     }
 }
 
+/// ABI bytes own the count and captures; types and generations only validate their interpretation.
+struct EvidenceAllocation {
+    /// Pointer-aligned ABI bytes, including the reference-count header and capture fields.
+    words: Box<[usize]>,
+    /// Field extents and representations selected by shared physical lowering.
+    layout: EvidenceEnvironmentLayout,
+    /// Resolved descriptor expected by references to this environment.
+    descriptor: u32,
+    /// Identity stamp rejecting pointers to a previous allocation at the same address.
+    generation: u64,
+    /// Type and pointer-provenance checks for each stored capture, not executable evidence.
+    captures: Box<[(Type, u64)]>,
+}
+
+impl EvidenceAllocation {
+    fn read<T: Copy>(&self, offset: usize) -> T {
+        assert!(
+            offset
+                .checked_add(size_of::<T>())
+                .is_some_and(|end| end <= self.layout.allocation.size())
+        );
+        // SAFETY: all callers select initialized scalar fields from the checked ABI layout.
+        // Unaligned access also supports byte-sized fields between dictionary references.
+        unsafe {
+            self.words
+                .as_ptr()
+                .cast::<u8>()
+                .add(offset)
+                .cast::<T>()
+                .read_unaligned()
+        }
+    }
+
+    fn write<T: Copy>(&mut self, offset: usize, value: T) {
+        assert!(
+            offset
+                .checked_add(size_of::<T>())
+                .is_some_and(|end| end <= self.layout.allocation.size())
+        );
+        // SAFETY: the extent is checked above and the exclusive borrow excludes concurrent access.
+        unsafe {
+            self.words
+                .as_mut_ptr()
+                .cast::<u8>()
+                .add(offset)
+                .cast::<T>()
+                .write_unaligned(value)
+        };
+    }
+
+    fn captures(&self) -> Vec<Evidence> {
+        self.layout
+            .fields
+            .iter()
+            .zip(&self.captures)
+            .map(|(field, &(ty, generation))| {
+                if field.is_storage_flag {
+                    Evidence::Storage(self.read::<u8>(field.offset) != 0)
+                } else {
+                    Evidence::Physical {
+                        reference: DictionaryReference {
+                            descriptor: self.read(field.offset),
+                            environment: self
+                                .read(field.offset + offset_of!(DictionaryReference, environment)),
+                        },
+                        generation,
+                        ty,
+                    }
+                }
+            })
+            .collect()
+    }
+}
+
 /// Checked storage and ABI layout metadata for one interpreter invocation.
 pub(super) struct Memory {
+    /// Evidence environments keyed by their target-sized base address.
+    evidence: FxHashMap<usize, EvidenceAllocation>,
+    /// Dynamic evidence allocations charged to the shared cell budget.
+    live_evidence: usize,
     /// Allocation slots; released entries are empty until reused.
     allocations: Vec<Option<Allocation>>,
     /// Released allocation-slot indices available for reuse.
@@ -470,6 +549,8 @@ impl Default for Memory {
             Rc::new(StorageLayout::scalar(Type::never(), ScalarKind::Unit)),
         );
         Self {
+            evidence: FxHashMap::default(),
+            live_evidence: 0,
             allocations: vec![],
             free_allocations: vec![],
             stack: vec![],
@@ -482,6 +563,211 @@ impl Default for Memory {
 }
 
 impl Memory {
+    fn evidence_allocation(
+        &self,
+        value: &Evidence,
+    ) -> Result<Option<&EvidenceAllocation>, RuntimeError> {
+        let Evidence::Physical {
+            reference,
+            generation,
+            ..
+        } = value
+        else {
+            return Err(invalid("expected physical dictionary"));
+        };
+        if reference.environment == 0 {
+            return Ok(None);
+        }
+        let allocation = self
+            .evidence
+            .get(&reference.environment)
+            .filter(|a| a.generation == *generation && a.descriptor == reference.descriptor)
+            .ok_or_else(|| invalid("stale evidence environment"))?;
+        Ok(Some(allocation))
+    }
+
+    pub(super) fn evidence_captures(
+        &self,
+        value: &Evidence,
+    ) -> Result<Vec<Evidence>, RuntimeError> {
+        Ok(self
+            .evidence_allocation(value)?
+            .map_or_else(Vec::new, |a| a.captures()))
+    }
+
+    fn evidence_allocation_mut(
+        &mut self,
+        reference: DictionaryReference,
+        generation: u64,
+    ) -> Result<&mut EvidenceAllocation, RuntimeError> {
+        self.evidence
+            .get_mut(&reference.environment)
+            .filter(|a| a.generation == generation && a.descriptor == reference.descriptor)
+            .ok_or_else(|| invalid("stale evidence environment"))
+    }
+
+    pub(super) fn allocate_evidence(
+        &mut self,
+        descriptor: u32,
+        ty: Type,
+        layout: &EvidenceEnvironmentLayout,
+        captures: &[Evidence],
+        is_static: bool,
+        span: Option<Location>,
+    ) -> Result<Evidence, RuntimeError> {
+        if layout.fields.len() != captures.len() {
+            return Err(invalid("evidence environment capture count mismatch"));
+        }
+        for (field, capture) in layout.fields.iter().zip(captures) {
+            match (field.is_storage_flag, capture) {
+                (true, Evidence::Storage(_)) => (),
+                (false, Evidence::Physical { .. }) => {
+                    if let Some(allocation) = self.evidence_allocation(capture)?
+                        && is_static
+                        && allocation.read::<usize>(0) != 0
+                    {
+                        return Err(invalid("static evidence captures dynamic evidence"));
+                    }
+                }
+                _ => return Err(invalid("evidence capture representation mismatch")),
+            }
+        }
+        if captures.is_empty() {
+            return Ok(Evidence::Physical {
+                reference: DictionaryReference {
+                    descriptor,
+                    environment: 0,
+                },
+                generation: 0,
+                ty,
+            });
+        }
+        if !is_static {
+            self.check_allocation_limit(span)?;
+        }
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| invalid("allocation identity exhausted"))?;
+        let mut words = Vec::new();
+        let count = layout.allocation.size().div_ceil(size_of::<usize>());
+        words
+            .try_reserve_exact(count)
+            .map_err(|_| invalid("physical evidence allocation failed"))?;
+        words.resize(count, 0);
+        let mut allocation = EvidenceAllocation {
+            words: words.into_boxed_slice(),
+            layout: layout.clone(),
+            descriptor,
+            generation: self.generation,
+            captures: captures
+                .iter()
+                .map(|e| {
+                    (
+                        e.ty(),
+                        match e {
+                            Evidence::Physical { generation, .. } => *generation,
+                            _ => 0,
+                        },
+                    )
+                })
+                .collect(),
+        };
+        allocation.write(0, if is_static { 0usize } else { 1usize });
+        for (index, (field, capture)) in layout.fields.iter().zip(captures).enumerate() {
+            if !is_static {
+                if let Err(error) = self.retain_evidence(capture) {
+                    for retained in &captures[..index] {
+                        self.release_evidence(retained)?;
+                    }
+                    return Err(error);
+                }
+            }
+            match capture {
+                Evidence::Storage(value) => allocation.write(field.offset, u8::from(*value)),
+                Evidence::Physical { reference, .. } => {
+                    allocation.write(field.offset, reference.descriptor);
+                    allocation.write(
+                        field.offset + offset_of!(DictionaryReference, environment),
+                        reference.environment,
+                    );
+                }
+                _ => unreachable!("capture representations checked above"),
+            }
+        }
+        let environment = allocation.words.as_ptr() as usize;
+        let generation = allocation.generation;
+        self.evidence.insert(environment, allocation);
+        self.live_evidence += usize::from(!is_static);
+        Ok(Evidence::Physical {
+            reference: DictionaryReference {
+                descriptor,
+                environment,
+            },
+            generation,
+            ty,
+        })
+    }
+
+    pub(super) fn retain_evidence(&mut self, value: &Evidence) -> Result<(), RuntimeError> {
+        let Evidence::Physical {
+            reference,
+            generation,
+            ..
+        } = value
+        else {
+            return if matches!(value, Evidence::Storage(_)) {
+                Ok(())
+            } else {
+                Err(invalid("symbolic evidence at execution"))
+            };
+        };
+        if reference.environment == 0 {
+            return Ok(());
+        }
+        let allocation = self.evidence_allocation_mut(*reference, *generation)?;
+        if allocation.read::<usize>(0) != 0 {
+            let count = allocation
+                .read::<usize>(0)
+                .checked_add(1)
+                .ok_or_else(|| invalid("evidence reference count overflow"))?;
+            allocation.write(0, count);
+        }
+        Ok(())
+    }
+
+    pub(super) fn release_evidence(&mut self, value: &Evidence) -> Result<(), RuntimeError> {
+        let mut pending = vec![value.clone()];
+        while let Some(value) = pending.pop() {
+            let Evidence::Physical {
+                reference,
+                generation,
+                ..
+            } = value
+            else {
+                continue;
+            };
+            if reference.environment == 0 {
+                continue;
+            }
+            let allocation = self.evidence_allocation_mut(reference, generation)?;
+            if allocation.read::<usize>(0) == 0 {
+                continue;
+            }
+            let count = allocation
+                .read::<usize>(0)
+                .checked_sub(1)
+                .ok_or_else(|| invalid("evidence reference count underflow"))?;
+            allocation.write(0, count);
+            if count == 0 {
+                pending.extend(allocation.captures());
+                self.evidence.remove(&reference.environment);
+                self.live_evidence -= 1;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn prepare_type(
         &mut self,
         ty: Type,
@@ -636,6 +922,9 @@ impl Memory {
     /// root, or have been explicitly released. At this boundary temporary borrowed pointer slots
     /// have been reclaimed: each remaining heap-pointer edge must be the payload's unique owner.
     pub(super) fn check_runtime_ownership(&self) -> Result<(), RuntimeError> {
+        if self.live_evidence != 0 {
+            return Err(invalid("evidence environment lost its owner"));
+        }
         let mut pending = self
             .stack
             .iter()
@@ -678,7 +967,18 @@ impl Memory {
         self.stack.len()
     }
     fn live_allocations(&self) -> usize {
-        self.allocations.len() - self.free_allocations.len()
+        self.allocations.len() - self.free_allocations.len() + self.live_evidence
+    }
+    fn check_allocation_limit(&self, span: Option<Location>) -> Result<(), RuntimeError> {
+        if self.live_allocations() >= self.allocation_limit {
+            return Err(RuntimeError::new_sandbox_violation(
+                SandboxViolationKind::EnvironmentCellLimitExceeded {
+                    limit: self.allocation_limit,
+                },
+                span,
+            ));
+        }
+        Ok(())
     }
     pub(super) fn restore(&mut self, marker: usize) {
         while self.stack.len() > marker {
@@ -696,6 +996,39 @@ impl Memory {
         ty: Type,
         span: Option<Location>,
     ) -> Result<Address, RuntimeError> {
+        self.allocate_shape(self.shape(ty)?, false, span)
+    }
+    pub(super) fn check_type_layout(
+        &self,
+        ty: Type,
+        size: usize,
+        align: usize,
+    ) -> Result<(), RuntimeError> {
+        let layout = self.shape(ty)?.layout;
+        if layout.size() != size || layout.align() != align {
+            return Err(invalid(
+                "layout witness differs from checked storage layout",
+            ));
+        }
+        Ok(())
+    }
+    pub(super) fn check_layout(
+        &self,
+        address: Address,
+        size: usize,
+        align: usize,
+    ) -> Result<(), RuntimeError> {
+        self.allocation(address)?;
+        self.check_type_layout(address.ty, size, align)
+    }
+    pub(super) fn allocate_witnessed(
+        &mut self,
+        ty: Type,
+        size: usize,
+        align: usize,
+        span: Option<Location>,
+    ) -> Result<Address, RuntimeError> {
+        self.check_type_layout(ty, size, align)?;
         self.allocate_shape(self.shape(ty)?, false, span)
     }
     pub(super) fn allocate_place(
@@ -724,14 +1057,7 @@ impl Memory {
         heap: bool,
         span: Option<Location>,
     ) -> Result<Address, RuntimeError> {
-        if self.live_allocations() >= self.allocation_limit {
-            return Err(RuntimeError::new_sandbox_violation(
-                SandboxViolationKind::EnvironmentCellLimitExceeded {
-                    limit: self.allocation_limit,
-                },
-                span,
-            ));
-        }
+        self.check_allocation_limit(span)?;
         self.generation = self
             .generation
             .checked_add(1)
@@ -1488,6 +1814,170 @@ impl Memory {
 mod tests {
     use super::*;
     use crate::module::{Module, ModuleEnv, ModuleId, path::Path};
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    fn physical_evidence_shares_transitive_captures() {
+        let mut memory = Memory::default();
+        let leaf_layout = EvidenceEnvironmentLayout::new([true]).unwrap();
+        let pair_layout = EvidenceEnvironmentLayout::new([false, false]).unwrap();
+        let leaf = memory
+            .allocate_evidence(
+                7,
+                Type::unit(),
+                &leaf_layout,
+                &[Evidence::Storage(true)],
+                false,
+                None,
+            )
+            .unwrap();
+        let parent = memory
+            .allocate_evidence(
+                11,
+                Type::unit(),
+                &pair_layout,
+                &[leaf.clone(), leaf.clone()],
+                false,
+                None,
+            )
+            .unwrap();
+        let Evidence::Physical { reference, .. } = &leaf else {
+            unreachable!()
+        };
+        assert_eq!(memory.evidence[&reference.environment].read::<usize>(0), 3);
+        let Evidence::Physical {
+            reference: parent_ref,
+            ..
+        } = &parent
+        else {
+            unreachable!()
+        };
+        let bytes = &memory.evidence[&parent_ref.environment];
+        assert_eq!(bytes.read::<u32>(pair_layout.fields[0].offset), 7);
+        assert_eq!(
+            bytes.read::<usize>(
+                pair_layout.fields[0].offset + offset_of!(DictionaryReference, environment)
+            ),
+            reference.environment
+        );
+        assert_eq!(
+            memory.evidence_captures(&parent).unwrap(),
+            vec![leaf.clone(), leaf.clone()]
+        );
+
+        // Model an escaping capture: releasing the constructing owner must leave the retained
+        // environment and both of its shared prerequisite edges alive.
+        memory.retain_evidence(&parent).unwrap();
+        memory.release_evidence(&parent).unwrap();
+        memory.release_evidence(&leaf).unwrap();
+        assert_eq!(memory.evidence[&reference.environment].read::<usize>(0), 2);
+        assert_eq!(
+            memory.evidence_captures(&leaf).unwrap(),
+            vec![Evidence::Storage(true)]
+        );
+        memory.release_evidence(&parent).unwrap();
+        memory.check_runtime_ownership().unwrap();
+        assert!(memory.evidence_captures(&leaf).is_err());
+        assert!(memory.release_evidence(&parent).is_err());
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    fn physical_evidence_static_lifetimes_and_failed_capture() {
+        let mut memory = Memory::default();
+        let layout = EvidenceEnvironmentLayout::new([true]).unwrap();
+        let parent_layout = EvidenceEnvironmentLayout::new([false, false]).unwrap();
+        let static_value = memory
+            .allocate_evidence(
+                1,
+                Type::unit(),
+                &layout,
+                &[Evidence::Storage(false)],
+                true,
+                None,
+            )
+            .unwrap();
+        memory.retain_evidence(&static_value).unwrap();
+        memory.release_evidence(&static_value).unwrap();
+        assert_eq!(
+            memory.evidence_captures(&static_value).unwrap(),
+            vec![Evidence::Storage(false)]
+        );
+
+        let leaf = memory
+            .allocate_evidence(
+                2,
+                Type::unit(),
+                &layout,
+                &[Evidence::Storage(true)],
+                false,
+                None,
+            )
+            .unwrap();
+        assert!(
+            memory
+                .allocate_evidence(
+                    3,
+                    Type::unit(),
+                    &parent_layout,
+                    &[static_value.clone(), leaf.clone()],
+                    true,
+                    None
+                )
+                .is_err()
+        );
+
+        // A repeated capture can overflow after an earlier retain succeeded; rollback must
+        // restore that earlier retain, rather than leaking a partially constructed environment.
+        let Evidence::Physical { reference, .. } = &leaf else {
+            unreachable!()
+        };
+        memory
+            .evidence
+            .get_mut(&reference.environment)
+            .unwrap()
+            .write(0, usize::MAX - 1);
+        assert!(
+            memory
+                .allocate_evidence(
+                    3,
+                    Type::unit(),
+                    &parent_layout,
+                    &[leaf.clone(), leaf.clone()],
+                    false,
+                    None
+                )
+                .is_err()
+        );
+        assert_eq!(
+            memory.evidence[&reference.environment].read::<usize>(0),
+            usize::MAX - 1
+        );
+        memory
+            .evidence
+            .get_mut(&reference.environment)
+            .unwrap()
+            .write(0, 1usize);
+
+        let span = Location::new_synthesized();
+        memory.allocation_limit = 1;
+        let error = memory
+            .allocate_evidence(
+                3,
+                Type::unit(),
+                &parent_layout,
+                &[static_value, leaf.clone()],
+                false,
+                Some(span),
+            )
+            .unwrap_err();
+        assert!(matches!(error, RuntimeError::SandboxViolation(_)));
+        assert!(memory.allocate(ScalarKind::Int.ty(), Some(span)).is_err());
+        memory.release_evidence(&leaf).unwrap();
+        memory.check_runtime_ownership().unwrap();
+    }
 
     #[test]
     fn physical_variant_storage_checks_active_payloads_and_reuses_identities() {

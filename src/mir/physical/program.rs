@@ -57,9 +57,19 @@ pub(crate) struct ResolvedPhysicalProgram<'a> {
     modules: Box<[&'a BackendReadyMirArtifacts]>,
     static_evidence: Box<[InternedStaticEvidence]>,
     evidence_ids: FxHashMap<InternedStaticEvidence, ProgramEvidenceId>,
+    descriptors: Box<[TraitDictionaryId]>,
+    descriptor_ids: FxHashMap<TraitDictionaryId, u32>,
 }
 
 impl ResolvedPhysicalProgram<'_> {
+    pub(crate) fn descriptor_index(&self, id: TraitDictionaryId) -> Option<u32> {
+        self.descriptor_ids.get(&id).copied()
+    }
+
+    pub(crate) fn descriptor(&self, index: u32) -> Option<&PhysicalDictionaryDefinition> {
+        self.dictionary(*self.descriptors.get(index as usize)?)
+    }
+
     pub(crate) fn modules(&self) -> &[&BackendReadyMirArtifacts] {
         &self.modules
     }
@@ -106,6 +116,7 @@ impl ResolvedPhysicalProgram<'_> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PhysicalProgramError {
+    DescriptorIndexOverflow,
     DuplicateModule(ModuleId),
     UnresolvedFunction {
         owner: FunctionId,
@@ -171,6 +182,9 @@ pub(crate) enum PhysicalProgramError {
 impl fmt::Display for PhysicalProgramError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::DescriptorIndexOverflow => {
+                write!(f, "physical descriptor table exceeds u32 indexes")
+            }
             Self::InvalidResultParameter { function } => write!(
                 f,
                 "resolved physical entry {function:?} requires exactly one trailing result parameter"
@@ -305,8 +319,27 @@ pub(crate) fn resolve_physical_program<'a>(
         modules: modules.into_boxed_slice(),
         static_evidence: Box::new([]),
         evidence_ids: FxHashMap::default(),
+        descriptors: Box::new([]),
+        descriptor_ids: FxHashMap::default(),
     };
     verify_program(&program)?;
+
+    let descriptors = program
+        .modules()
+        .iter()
+        .flat_map(|module| module.dictionaries().iter().map(|d| d.id()))
+        .collect::<Box<[_]>>();
+    program.descriptor_ids = descriptors
+        .iter()
+        .enumerate()
+        .map(|(index, id)| {
+            Ok((
+                *id,
+                u32::try_from(index).map_err(|_| PhysicalProgramError::DescriptorIndexOverflow)?,
+            ))
+        })
+        .collect::<Result<_, PhysicalProgramError>>()?;
+    program.descriptors = descriptors;
 
     let mut interner = EvidenceInterner::default();
     for module in program.modules() {
@@ -814,6 +847,8 @@ mod tests {
             modules: Box::new([]),
             static_evidence,
             evidence_ids,
+            descriptors: Box::new([]),
+            descriptor_ids: Default::default(),
         };
         assert_eq!(
             program.evidence_id(&Value::Evidence(Box::new(evidence))),
