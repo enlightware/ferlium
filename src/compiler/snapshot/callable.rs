@@ -10,6 +10,7 @@ use crate::{
         function::{Function, ScriptFunction, StructuralFieldAddressor},
     },
     module::{ModuleFunction, ProjectionIndex, function::CallableOrigin},
+    primitive::BufferPrimitive,
 };
 
 /// Process-local implementations indexed by their stable canonical module names.
@@ -74,6 +75,7 @@ pub(crate) enum SnapshotFunctionBody {
     Native {
         canonical_name: String,
     },
+    BufferPrimitive(BufferPrimitive),
     StructuralFieldAddressor {
         field_index: u32,
         hidden_argument_count: usize,
@@ -112,6 +114,7 @@ impl SnapshotFunctionBody {
                     hidden_argument_count,
                 }
             }
+            CallableOrigin::BufferPrimitive(primitive) => Self::BufferPrimitive(primitive),
             CallableOrigin::Transient => return Err(SnapshotError::TransientCallable),
         })
     }
@@ -143,6 +146,10 @@ impl SnapshotFunctionBody {
                 }) as Function,
                 CallableOrigin::Script,
             ),
+            Self::BufferPrimitive(primitive) => (
+                b(*primitive) as Function,
+                CallableOrigin::BufferPrimitive(*primitive),
+            ),
             Self::Native { canonical_name } => (
                 catalog.resolve(canonical_name)?,
                 CallableOrigin::Native {
@@ -168,7 +175,7 @@ impl SnapshotFunctionBody {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::CompilerSession;
+    use crate::{CompilerSession, std::buffer::expected_primitives};
 
     #[test]
     fn std_native_callable_bodies_round_trip_by_canonical_name() {
@@ -190,6 +197,26 @@ mod tests {
                 restored.visible_parameter_passing(),
                 function.code.visible_parameter_passing()
             );
+            assert_eq!(
+                restored.runtime_argument_passing(),
+                function.code.runtime_argument_passing()
+            );
+        }
+    }
+
+    #[test]
+    fn buffer_intrinsic_bodies_round_trip_without_native_bindings() {
+        let session = CompilerSession::new();
+        let catalog = NativeCallableCatalog::default();
+        for (id, primitive) in expected_primitives(session.std_module()) {
+            let function = session.std_module().get_function_by_id(id).unwrap();
+            assert_eq!(function.origin, CallableOrigin::BufferPrimitive(primitive));
+            let body = SnapshotFunctionBody::capture(function).unwrap();
+            let bytes = postcard::to_allocvec(&body).unwrap();
+            let body: SnapshotFunctionBody = postcard::from_bytes(&bytes).unwrap();
+            let (restored, origin) = body.materialize(&catalog, 0).unwrap();
+            assert_eq!(origin, function.origin);
+            assert_eq!(origin, CallableOrigin::BufferPrimitive(primitive));
             assert_eq!(
                 restored.runtime_argument_passing(),
                 function.code.runtime_argument_passing()

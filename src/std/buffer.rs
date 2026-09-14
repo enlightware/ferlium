@@ -11,19 +11,10 @@ use std::{any::TypeId, mem};
 use ustr::ustr;
 
 use crate::{
-    compiler::error::SourceFailureKind,
     containers::b,
-    eval::{
-        EvalControlFlowResult, EvalCtx, PlaceResult, RuntimeError, ValOrMut, ValOrMutArgs, cont,
-    },
-    hir::{
-        function::{
-            ArgConvention, Callable, CallableDefinition, Function, extract_trivial_native_input,
-        },
-        value::{NativeValueType, Value},
-    },
-    module::{BlanketTraitImplSubKey, Module, ModuleFunction},
-    place::Place,
+    hir::function::{CallableDefinition, Function},
+    module::{BlanketTraitImplSubKey, CallableOrigin, Module, ModuleFunction, TraitId},
+    primitive::BufferPrimitive,
     std::core_traits_names::{INSPECT_TRAIT_NAME, VALUE_TRAIT_NAME},
     types::{
         effects::no_effects,
@@ -35,32 +26,12 @@ use crate::{
     },
 };
 
-const LET: ArgConvention = ArgConvention::Let;
-const MUTABLE_REF: ArgConvention = ArgConvention::MutableRef;
+/// Boxed interpreter representation, re-exported for existing embedders.
+pub use crate::eval::buffer::Buffer;
+#[cfg(test)]
+use crate::module::{LocalFunctionId, id::Id};
 
-use super::value::native_layout_associated_consts;
-
-pub(crate) const INVALID_BUFFER_CLONE: &str =
-    "Buffer::clone should never be called; arrays must clone their initialized elements";
-
-/// Fixed-size typed storage block used by the Ferlium `Array<T>` implementation.
-#[derive(Debug)]
-pub struct Buffer {
-    slots: Vec<Value>,
-}
-
-impl NativeValueType for Buffer {}
-
-impl Drop for Buffer {
-    fn drop(&mut self) {
-        // Normal Array cleanup has already consumed its elements. Poisoning skips that cleanup,
-        // so any remaining boxed payloads must be reclaimed here without running Ferlium code.
-        // Value contains ManuallyDrop payloads: dropping Vec<Value> alone would leak them.
-        for value in self.slots.drain(..) {
-            value.discard_storage();
-        }
-    }
-}
+use super::{STD_MODULE_ID, value::native_layout_associated_consts};
 
 /// The compiled representation of a `Buffer<T>`: one owning pointer to the element storage.
 ///
@@ -94,51 +65,6 @@ pub(crate) fn buffer_bare_native_type() -> BareNativeTypeB {
     b(BufferBareNativeType)
 }
 
-impl Buffer {
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            slots: (0..capacity).map(|_| Value::uninit()).collect(),
-        }
-    }
-
-    pub fn from_vec(values: Vec<Value>) -> Self {
-        Self { slots: values }
-    }
-
-    pub fn capacity(&self) -> usize {
-        self.slots.len()
-    }
-
-    pub(crate) fn slots_mut(&mut self) -> &mut [Value] {
-        &mut self.slots
-    }
-
-    pub fn get(&self, index: usize) -> Option<&Value> {
-        self.slots.get(index)
-    }
-
-    pub fn get_signed(&self, index: isize) -> Option<&Value> {
-        usize::try_from(index)
-            .ok()
-            .and_then(|index| self.get(index))
-    }
-
-    pub fn get_mut(&mut self, index: usize) -> Option<&mut Value> {
-        self.slots.get_mut(index)
-    }
-
-    pub fn get_mut_signed(&mut self, index: isize) -> Option<&mut Value> {
-        usize::try_from(index)
-            .ok()
-            .and_then(|index| self.get_mut(index))
-    }
-
-    pub fn take(&mut self, index: usize) -> Option<Value> {
-        self.get_mut(index)
-            .map(|slot| mem::replace(slot, Value::uninit()))
-    }
-}
-
 pub(crate) fn buffer_type(element_ty: Type) -> Type {
     Type::native_type(NativeType {
         bare_ty: buffer_bare_native_type(),
@@ -161,149 +87,25 @@ pub(crate) fn buffer_element_type(ty: Type) -> Option<Type> {
     }
 }
 
-/// Boxed execution of private Buffer operations. These are compiler primitives, not Rust
-/// host entries: physical lowering replaces storage operations with MIR instructions.
-#[derive(Clone, Copy, Debug)]
-enum BufferPrimitive {
-    Slot,
-    WithCapacity,
-    MoveInto,
-    Move,
-    Take,
-    Equal,
-    ToString,
-    Hash,
-    Clone,
-    Drop,
-}
-
-impl Callable for BufferPrimitive {
-    fn call(
-        &self,
-        args: Vec<ValOrMut>,
-        ctx: &mut EvalCtx,
-        _: &[crate::module::ELocalDecl],
-    ) -> EvalControlFlowResult {
-        let mut args = ValOrMutArgs::new(args);
-        match self {
-            Self::Slot => buffer_slot(args, ctx),
-            Self::WithCapacity => {
-                let capacity = int_from_arg(
-                    args.next().unwrap(),
-                    ctx,
-                    "buffer capacity should be an int",
-                );
-                let _size = int_from_arg(
-                    args.next().unwrap(),
-                    ctx,
-                    "buffer element size should be an int",
-                );
-                let _align = int_from_arg(
-                    args.next().unwrap(),
-                    ctx,
-                    "buffer alignment should be an int",
-                );
-                cont(Value::native(buffer_with_capacity(capacity)))
-            }
-            Self::MoveInto => buffer_move_into(args, ctx),
-            Self::Move => buffer_move(args, ctx),
-            Self::Take => buffer_take(args, ctx),
-            Self::Equal => cont(Value::native(false)),
-            Self::ToString => cont(Value::native(super::string::String::new("<buffer>"))),
-            Self::Hash | Self::Drop => cont(Value::unit()),
-            Self::Clone => panic!("{INVALID_BUFFER_CLONE}"),
-        }
-    }
-    fn runtime_argument_passing(&self) -> Option<&[ArgConvention]> {
-        Some(match self {
-            Self::Slot | Self::Take => &[MUTABLE_REF, LET, LET],
-            Self::WithCapacity => &[LET, LET, LET],
-            Self::MoveInto => &[MUTABLE_REF, LET, MUTABLE_REF, LET, LET],
-            Self::Move => &[MUTABLE_REF, MUTABLE_REF],
-            Self::Equal => &[LET, LET],
-            Self::ToString | Self::Clone => &[LET],
-            Self::Hash => &[LET, MUTABLE_REF],
-            Self::Drop => &[MUTABLE_REF],
-        })
-    }
-    fn format_ind(
-        &self,
-        f: &mut std::fmt::Formatter,
-        _: &[crate::module::ELocalDecl],
-        _: &crate::module::ModuleEnv,
-        spacing: usize,
-        indent: usize,
-    ) -> std::fmt::Result {
-        write!(
-            f,
-            "{}{}Buffer::{self:?}",
-            "  ".repeat(spacing),
-            "⎸ ".repeat(indent)
-        )
-    }
-}
-
-fn native_function(
+fn primitive_function(
     ty: FnType,
     constraints: impl Into<Vec<PubTypeConstraint>>,
     arg_names: impl IntoIterator<Item = &'static str>,
     doc: &'static str,
-    code: impl Callable + Clone + 'static,
+    primitive: BufferPrimitive,
 ) -> ModuleFunction {
-    ModuleFunction::new(
+    let mut function = ModuleFunction::new(
         CallableDefinition::new(
             TypeScheme::new_infer_quantifiers_with_constraints(ty, constraints.into()),
             arg_names.into_iter().map(ustr::Ustr::from).collect(),
             Some(String::from(doc)),
         ),
-        Box::new(code),
+        Box::new(primitive),
         None,
         Vec::new(),
-    )
-}
-
-fn place_from_arg(arg: ValOrMut) -> Result<Place, RuntimeError> {
-    match arg {
-        ValOrMut::Mut(place) => Ok(place),
-        ValOrMut::Val(value) => {
-            value.discard_storage();
-            Err(RuntimeError::new_native(
-                SourceFailureKind::InvalidArgument("buffer".into()),
-            ))
-        }
-        ValOrMut::Dictionary(_) | ValOrMut::Ref(_) => Err(RuntimeError::new_native(
-            SourceFailureKind::InvalidArgument("buffer".into()),
-        )),
-    }
-}
-
-fn buffer_slot_place(buffer: ValOrMut, index: isize) -> Result<Place, RuntimeError> {
-    let mut place = place_from_arg(buffer)?;
-    place.push_index(index);
-    Ok(place)
-}
-
-fn int_from_arg(arg: ValOrMut, ctx: &mut EvalCtx<'_>, expected: &'static str) -> isize {
-    let result = extract_trivial_native_input::<isize>(&arg, ctx).expect(expected);
-    arg.discard_storage();
-    result
-}
-
-fn buffer_slot(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResult {
-    let buffer = args.next().unwrap();
-    let index = int_from_arg(
-        args.next().unwrap(),
-        ctx,
-        "buffer slot index should be an int",
     );
-    let _element_size = int_from_arg(
-        args.next().unwrap(),
-        ctx,
-        "buffer element size should be an int",
-    );
-    cont(Value::native(PlaceResult::new(buffer_slot_place(
-        buffer, index,
-    )?)))
+    function.origin = CallableOrigin::BufferPrimitive(primitive);
+    function
 }
 
 fn buffer_slot_descr() -> ModuleFunction {
@@ -317,7 +119,7 @@ fn buffer_slot_descr() -> ModuleFunction {
         gen0,
         no_effects(),
     );
-    ModuleFunction::new(
+    let mut function = ModuleFunction::new(
         CallableDefinition::new_with_generic_params_and_attributes(
             TypeScheme::new_infer_quantifiers(ty),
             Vec::new(),
@@ -334,16 +136,14 @@ fn buffer_slot_descr() -> ModuleFunction {
         Box::new(BufferPrimitive::Slot),
         None,
         Vec::new(),
-    )
-}
-
-fn buffer_with_capacity(capacity: isize) -> Buffer {
-    Buffer::with_capacity(capacity.max(0) as usize)
+    );
+    function.origin = CallableOrigin::BufferPrimitive(BufferPrimitive::Slot);
+    function
 }
 
 fn buffer_with_capacity_descr() -> ModuleFunction {
     let gen0 = Type::variable_id(0);
-    native_function(
+    primitive_function(
         FnType::new_by_val(
             [
                 super::math::int_type(),
@@ -360,42 +160,9 @@ fn buffer_with_capacity_descr() -> ModuleFunction {
     )
 }
 
-fn buffer_move_into(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResult {
-    let mut source = place_from_arg(args.next().unwrap())?;
-    let source_index = int_from_arg(
-        args.next().unwrap(),
-        ctx,
-        "buffer source index should be an int",
-    );
-    let mut target = place_from_arg(args.next().unwrap())?;
-    let target_index = int_from_arg(
-        args.next().unwrap(),
-        ctx,
-        "buffer target index should be an int",
-    );
-    let _element_size = int_from_arg(
-        args.next().unwrap(),
-        ctx,
-        "buffer element size should be an int",
-    );
-    source.push_index(source_index);
-    target.push_index(target_index);
-    let value = {
-        let source = source.boxed_mut(ctx).map_err(RuntimeError::new_native)?;
-        mem::replace(source, Value::uninit())
-    };
-    let target = target.boxed_mut(ctx).map_err(RuntimeError::new_native)?;
-    assert!(
-        matches!(target, Value::Uninit),
-        "buffer_move_into target slot must be uninitialized"
-    );
-    *target = value;
-    cont(Value::unit())
-}
-
 fn buffer_move_into_descr() -> ModuleFunction {
     let gen0 = Type::variable_id(0);
-    native_function(
+    primitive_function(
         FnType::new_mut_resolved(
             [
                 (buffer_type(gen0), true),
@@ -420,22 +187,9 @@ fn buffer_move_into_descr() -> ModuleFunction {
     )
 }
 
-fn buffer_move(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResult {
-    let source = place_from_arg(args.next().unwrap())?;
-    let target = place_from_arg(args.next().unwrap())?;
-    let value = {
-        let source = source.boxed_mut(ctx).map_err(RuntimeError::new_native)?;
-        mem::replace(source, Value::native(Buffer::with_capacity(0)))
-    };
-    let target = target.boxed_mut(ctx).map_err(RuntimeError::new_native)?;
-    let old = mem::replace(target, value);
-    old.discard_storage();
-    cont(Value::unit())
-}
-
 fn buffer_move_descr() -> ModuleFunction {
     let gen0 = Type::variable_id(0);
-    native_function(
+    primitive_function(
         FnType::new_mut_resolved(
             [(buffer_type(gen0), true), (buffer_type(gen0), true)],
             Type::unit(),
@@ -448,25 +202,9 @@ fn buffer_move_descr() -> ModuleFunction {
     )
 }
 
-fn buffer_take(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResult {
-    let mut source = place_from_arg(args.next().unwrap())?;
-    let index = int_from_arg(args.next().unwrap(), ctx, "buffer index should be an int");
-    let _element_size = int_from_arg(
-        args.next().unwrap(),
-        ctx,
-        "buffer element size should be an int",
-    );
-    source.push_index(index);
-    let value = {
-        let source = source.boxed_mut(ctx).map_err(RuntimeError::new_native)?;
-        mem::replace(source, Value::uninit())
-    };
-    cont(value)
-}
-
 fn buffer_take_descr() -> ModuleFunction {
     let gen0 = Type::variable_id(0);
-    native_function(
+    primitive_function(
         FnType::new_mut_resolved(
             [
                 (buffer_type(gen0), true),
@@ -483,11 +221,39 @@ fn buffer_take_descr() -> ModuleFunction {
     )
 }
 
+/// Assign compiler identities to the methods just registered for the exact Buffer impl.
+/// Keep this authority inside std registration rather than exposing it through `Callable`.
+fn set_impl_origins(to: &mut Module, trait_id: TraitId, primitives: &[BufferPrimitive]) {
+    let implementations = to.get_blanket_impl_by_key(&trait_id).unwrap();
+    let (_, &impl_id) = implementations
+        .iter()
+        .find(|(key, _)| key.input_tys == [buffer_type(Type::variable_id(0))])
+        .expect("the Buffer implementation was just registered");
+    let methods = to.get_impl_data(impl_id).unwrap().methods.clone();
+    assert_eq!(methods.len(), primitives.len());
+    for (method, &primitive) in methods.into_iter().zip(primitives) {
+        to.get_function_by_id_mut(method).unwrap().origin =
+            CallableOrigin::BufferPrimitive(primitive);
+    }
+}
+
 pub fn add_to_module(to: &mut Module) {
+    assert_eq!(
+        to.module_id(),
+        STD_MODULE_ID,
+        "Buffer intrinsics belong to std"
+    );
     let value_trait_id = to.expect_std_trait_id_in_current_module(VALUE_TRAIT_NAME);
     let inspect_trait_id = to.expect_std_trait_id_in_current_module(INSPECT_TRAIT_NAME);
     to.add_unsafe_bare_native_type_alias_str("Buffer", buffer_bare_native_type());
     let gen0 = Type::variable_id(0);
+    let value_primitives = [
+        BufferPrimitive::Equal,
+        BufferPrimitive::ToString,
+        BufferPrimitive::Hash,
+        BufferPrimitive::Clone,
+        BufferPrimitive::Drop,
+    ];
     to.add_blanket_impl_no_locals(
         value_trait_id,
         BlanketTraitImplSubKey {
@@ -501,14 +267,10 @@ pub fn add_to_module(to: &mut Module) {
         // interpreter's `Vec<Value>` representation, and derived from the same `BufferRepr` as the
         // ABI identity so the two agree by construction.
         native_layout_associated_consts::<BufferRepr>(),
-        [
-            Box::new(BufferPrimitive::Equal) as Function,
-            Box::new(BufferPrimitive::ToString) as Function,
-            Box::new(BufferPrimitive::Hash) as Function,
-            Box::new(BufferPrimitive::Clone) as Function,
-            Box::new(BufferPrimitive::Drop) as Function,
-        ],
+        value_primitives.map(|primitive| Box::new(primitive) as Function),
     );
+    set_impl_origins(to, value_trait_id, &value_primitives);
+    let inspect_primitives = [BufferPrimitive::ToString];
     to.add_blanket_impl_no_locals(
         inspect_trait_id,
         BlanketTraitImplSubKey {
@@ -519,8 +281,9 @@ pub fn add_to_module(to: &mut Module) {
         },
         [],
         [],
-        [Box::new(BufferPrimitive::ToString) as Function],
+        inspect_primitives.map(|primitive| Box::new(primitive) as Function),
     );
+    set_impl_origins(to, inspect_trait_id, &inspect_primitives);
     to.add_private_unsafe_addressor_subscript(ustr("buffer_slot"), buffer_slot_descr());
     to.add_private_unsafe_function(ustr("buffer_with_capacity"), buffer_with_capacity_descr());
     to.add_private_unsafe_function(ustr("buffer_move"), buffer_move_descr());
@@ -528,7 +291,7 @@ pub fn add_to_module(to: &mut Module) {
     to.add_private_unsafe_function(ustr("buffer_take"), buffer_take_descr());
     to.add_private_unsafe_function(
         ustr("buffer_drop"),
-        native_function(
+        primitive_function(
             FnType::new_mut_resolved([(buffer_type(gen0), true)], Type::unit(), no_effects()),
             [],
             ["target"],
@@ -538,42 +301,49 @@ pub fn add_to_module(to: &mut Module) {
     );
 }
 
+/// Resolve the intended registrations by their source identities, independently of origin tags.
 #[cfg(test)]
-mod reclamation_tests {
-    use super::*;
-    use std::{cell::Cell, rc::Rc};
-
-    #[derive(Debug)]
-    struct DropTracked(Rc<Cell<usize>>);
-    impl NativeValueType for DropTracked {}
-    impl Drop for DropTracked {
-        fn drop(&mut self) {
-            self.0.set(self.0.get() + 1);
-        }
+pub(crate) fn expected_primitives(to: &Module) -> Vec<(LocalFunctionId, BufferPrimitive)> {
+    let mut expected = vec![(
+        to.get_subscript(ustr("buffer_slot"))
+            .unwrap()
+            .mut_member
+            .as_ref()
+            .unwrap()
+            .function,
+        BufferPrimitive::Slot,
+    )];
+    for (name, primitive) in [
+        ("buffer_with_capacity", BufferPrimitive::WithCapacity),
+        ("buffer_move_into", BufferPrimitive::MoveInto),
+        ("buffer_move", BufferPrimitive::Move),
+        ("buffer_take", BufferPrimitive::Take),
+        ("buffer_drop", BufferPrimitive::Drop),
+    ] {
+        expected.push((to.get_local_function_id(ustr(name)).unwrap(), primitive));
     }
-
-    #[test]
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    fn buffer_reclamation_preserves_moved_values_and_skips_cleared_slots() {
-        let count = Rc::new(Cell::new(0));
-        let mut buffer = Buffer::from_vec(
-            (0..3)
-                .map(|_| Value::native(DropTracked(count.clone())))
-                .collect(),
-        );
-        let moved = buffer.take(0).unwrap();
-        buffer.take(1).unwrap().discard_storage();
-        assert_eq!(count.get(), 1);
-
-        drop(buffer);
-        assert_eq!(count.get(), 2, "only the remaining live slot is reclaimed");
-        assert!(moved.as_primitive_ty::<DropTracked>().is_some());
-        moved.discard_storage();
-        assert_eq!(
-            count.get(),
-            3,
-            "the moved payload remains independently owned"
-        );
-        assert_eq!(Rc::strong_count(&count), 1);
+    for (trait_name, method_name, primitive) in [
+        (VALUE_TRAIT_NAME, "eq", BufferPrimitive::Equal),
+        (VALUE_TRAIT_NAME, "to_string", BufferPrimitive::ToString),
+        (VALUE_TRAIT_NAME, "hash", BufferPrimitive::Hash),
+        (VALUE_TRAIT_NAME, "clone", BufferPrimitive::Clone),
+        (VALUE_TRAIT_NAME, "drop", BufferPrimitive::Drop),
+        (INSPECT_TRAIT_NAME, "inspect", BufferPrimitive::ToString),
+    ] {
+        let trait_id = to.expect_std_trait_id_in_current_module(trait_name);
+        let method = to
+            .trait_def(trait_id)
+            .method_index(ustr(method_name))
+            .unwrap();
+        let implementations = to.get_blanket_impl_by_key(&trait_id).unwrap();
+        let (_, &impl_id) = implementations
+            .iter()
+            .find(|(key, _)| key.input_tys == [buffer_type(Type::variable_id(0))])
+            .unwrap();
+        expected.push((
+            to.get_impl_data(impl_id).unwrap().methods[method.as_index()],
+            primitive,
+        ));
     }
+    expected
 }

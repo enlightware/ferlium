@@ -46,7 +46,7 @@ use crate::{
         edit::FunctionEdit,
         pass::{
             dataflow::{Root, escaping_roots},
-            known_callee::{KnownCallee, KnownCallees},
+            known_callee::KnownCallees,
         },
         role::{MirType, ValueRoles},
         terminator::{Terminator, TerminatorKind},
@@ -58,7 +58,9 @@ use crate::{
         LocalSubscriptId, ModuleEnv, ModuleId, ProjectionIndex, ResolvedValueLayout, SubscriptId,
         TraitDictionaryEntry, TraitDictionaryId, id::Id,
     },
+    primitive::BufferPrimitive,
     std::{
+        STD_MODULE_ID,
         buffer::buffer_element_type,
         core_traits_names::VALUE_TRAIT_NAME,
         logic::bool_type,
@@ -80,7 +82,6 @@ use crate::{
     },
 };
 
-use buffer::BufferEntry;
 use dictionary::PhysicalDictionaryCatalog;
 pub(crate) use dictionary::{PhysicalDictionaryDefinition, PhysicalDictionaryEntry};
 use evidence::{PhysicalEvidenceReferences, try_for_each_static_evidence};
@@ -468,7 +469,7 @@ pub(crate) fn lower_physical_mir(
     let mut entries = semantic.cloned_entries();
     let helper_base = FunctionId::new(module, LocalFunctionId::from_index(entries.len()));
     let mut lowerer = PhysicalLowerer::new(helper_base, env, known);
-    let buffer_entries = buffer::entries(env, known);
+    let buffer_entries = buffer::entries(env);
     for (index, specialization) in semantic.specializations().iter().enumerate() {
         let local = LocalFunctionId::from_index(semantic.len() + index);
         lowerer
@@ -550,7 +551,7 @@ pub(crate) fn lower_physical_mir(
         }
     }
     entries.extend(lowerer.helpers.into_iter().map(Some));
-    prepare_physical_mir(entries, semantic, env, known)
+    prepare_physical_mir(entries, semantic, env)
 }
 
 /// Rebuild process-local bindings and derived catalogs, then verify lowered or restored bodies.
@@ -558,11 +559,10 @@ pub(crate) fn prepare_physical_mir(
     entries: Vec<Option<Function>>,
     semantic: &MirArtifacts,
     env: ModuleEnv<'_>,
-    known: &KnownCallees,
 ) -> Result<BackendReadyMirArtifacts, BackendReadinessError> {
     let module = env.current.module_id();
     let helper_base = FunctionId::new(module, LocalFunctionId::from_index(semantic.entry_count()));
-    let buffer_entries = buffer::entries(env, known);
+    let buffer_entries = buffer::entries(env);
     let references = PhysicalEvidenceReferences::collect(&entries);
     let dictionaries =
         PhysicalDictionaryCatalog::from_module(module, env.current, env, &references);
@@ -608,7 +608,7 @@ fn collect_native_signatures(
     dictionaries: &PhysicalDictionaryCatalog,
     subscripts: &PhysicalSubscriptCatalog,
     env: ModuleEnv<'_>,
-    buffer_entries: &FxHashMap<FunctionId, BufferEntry>,
+    buffer_entries: &FxHashMap<FunctionId, BufferPrimitive>,
 ) -> Result<FxHashMap<FunctionId, NativeSignature>, BackendReadinessError> {
     let mut referenced = FxHashSet::default();
     // Declared entries remain artifact roots: an embedder can call them even without a MIR use.
@@ -862,16 +862,25 @@ impl<'a> PhysicalLowerer<'a> {
         Ok(edit.finish_unverified())
     }
 
-    fn buffer_callee(&self, operation: &Operation) -> Option<KnownCallee> {
+    fn buffer_callee(&self, operation: &Operation) -> Option<BufferPrimitive> {
         if !matches!(operation.kind, OperationKind::Call { .. }) {
             return None;
         }
         let Some(Value::Function(callee)) = operation.operands.first() else {
             return None;
         };
-        self.known
-            .resolve(*callee, |id| self.originals.get(&id).copied())
-            .filter(|callee| callee.is_buffer())
+        let callee = self.originals.get(callee).copied().unwrap_or(*callee);
+        if callee.module != STD_MODULE_ID {
+            return None;
+        }
+        let function = self
+            .env
+            .module_by_id(callee.module)?
+            .get_function_by_id(callee.function)?;
+        match function.origin {
+            CallableOrigin::BufferPrimitive(primitive) if primitive.is_storage() => Some(primitive),
+            _ => None,
+        }
     }
 
     fn lower_buffer_calls(
@@ -880,7 +889,7 @@ impl<'a> PhysicalLowerer<'a> {
         edit: &mut FunctionEdit,
     ) -> Result<(), BackendReadinessError> {
         enum Candidate {
-            Call(KnownCallee, Operation),
+            Call(BufferPrimitive, Operation),
             Drop(Operation),
         }
 
@@ -910,7 +919,7 @@ impl<'a> PhysicalLowerer<'a> {
 
         for (block, index, candidate) in candidates.into_iter().rev() {
             match candidate {
-                Candidate::Call(KnownCallee::BufferDrop, mut operation) => {
+                Candidate::Call(BufferPrimitive::Drop, mut operation) => {
                     let buffer_ty = buffer_call_type(&operation, 1, function)?.fn_ty.args[0].ty;
                     let element_ty = buffer_element_type(buffer_ty)
                         .ok_or(BackendReadinessError::InvalidBufferCall { function })?;
@@ -953,16 +962,16 @@ impl<'a> PhysicalLowerer<'a> {
     fn expand_buffer_call(
         &self,
         function: FunctionId,
-        callee: KnownCallee,
+        callee: BufferPrimitive,
         operation: Operation,
         edit: &mut FunctionEdit,
     ) -> Result<Vec<Operation>, BackendReadinessError> {
         let expected = match callee {
-            KnownCallee::BufferSlot | KnownCallee::BufferWithCapacity => 3,
-            KnownCallee::BufferMove => 2,
-            KnownCallee::BufferMoveInto => 5,
-            KnownCallee::BufferTake => 3,
-            KnownCallee::BufferDrop => unreachable!(),
+            BufferPrimitive::Slot | BufferPrimitive::WithCapacity => 3,
+            BufferPrimitive::Move => 2,
+            BufferPrimitive::MoveInto => 5,
+            BufferPrimitive::Take => 3,
+            BufferPrimitive::Drop => unreachable!(),
             _ => unreachable!("only Buffer callees reach Buffer expansion"),
         };
         let call_ty = buffer_call_type(&operation, expected, function)?;
@@ -970,35 +979,35 @@ impl<'a> PhysicalLowerer<'a> {
         let destination = operation.operands[expected + 1].clone();
         let span = operation.span;
         let element_ty = match callee {
-            KnownCallee::BufferSlot | KnownCallee::BufferTake => {
+            BufferPrimitive::Slot | BufferPrimitive::Take => {
                 let element_ty = buffer_argument_element_type(call_ty, 0, function)?;
                 if call_ty.ret() != element_ty {
                     return Err(BackendReadinessError::InvalidBufferCall { function });
                 }
                 element_ty
             }
-            KnownCallee::BufferWithCapacity => buffer_element_type(call_ty.ret())
+            BufferPrimitive::WithCapacity => buffer_element_type(call_ty.ret())
                 .ok_or(BackendReadinessError::InvalidBufferCall { function })?,
-            KnownCallee::BufferMove => {
+            BufferPrimitive::Move => {
                 let element_ty = buffer_argument_element_type(call_ty, 0, function)?;
                 if buffer_argument_element_type(call_ty, 1, function)? != element_ty {
                     return Err(BackendReadinessError::InvalidBufferCall { function });
                 }
                 element_ty
             }
-            KnownCallee::BufferMoveInto => {
+            BufferPrimitive::MoveInto => {
                 let element_ty = buffer_argument_element_type(call_ty, 0, function)?;
                 if buffer_argument_element_type(call_ty, 2, function)? != element_ty {
                     return Err(BackendReadinessError::InvalidBufferCall { function });
                 }
                 element_ty
             }
-            KnownCallee::BufferDrop => unreachable!(),
+            BufferPrimitive::Drop => unreachable!(),
             _ => unreachable!("only Buffer callees reach Buffer expansion"),
         };
         let mut replacement = Vec::new();
         match callee {
-            KnownCallee::BufferWithCapacity => {
+            BufferPrimitive::WithCapacity => {
                 let total = edit_int_binary(
                     edit,
                     &mut replacement,
@@ -1033,7 +1042,7 @@ impl<'a> PhysicalLowerer<'a> {
                 );
                 replacement.push(Operation::store(span, allocation, slot));
             }
-            KnownCallee::BufferSlot => {
+            BufferPrimitive::Slot => {
                 let address = edit_buffer_element_address(
                     edit,
                     &mut replacement,
@@ -1047,7 +1056,7 @@ impl<'a> PhysicalLowerer<'a> {
                 );
                 replacement.push(Operation::store(span, address, destination));
             }
-            KnownCallee::BufferTake => {
+            BufferPrimitive::Take => {
                 let address = edit_buffer_element_address(
                     edit,
                     &mut replacement,
@@ -1072,7 +1081,7 @@ impl<'a> PhysicalLowerer<'a> {
                     size,
                 ));
             }
-            KnownCallee::BufferMoveInto => {
+            BufferPrimitive::MoveInto => {
                 let source_element = edit_buffer_element_address(
                     edit,
                     &mut replacement,
@@ -1109,7 +1118,7 @@ impl<'a> PhysicalLowerer<'a> {
                 ));
                 edit_store_unit(edit, &mut replacement, destination, span, self.env);
             }
-            KnownCallee::BufferMove => {
+            BufferPrimitive::Move => {
                 let source = edit_buffer_pointer_slot(
                     edit,
                     &mut replacement,
@@ -1146,7 +1155,7 @@ impl<'a> PhysicalLowerer<'a> {
                 replacement.push(Operation::store(span, empty, source));
                 edit_store_unit(edit, &mut replacement, destination, span, self.env);
             }
-            KnownCallee::BufferDrop => unreachable!(),
+            BufferPrimitive::Drop => unreachable!(),
             _ => unreachable!("only Buffer callees reach Buffer expansion"),
         }
         Ok(replacement)
@@ -3477,7 +3486,7 @@ mod tests {
             TraitDictionaryEntry, Visibility, YieldProvenance,
         },
         std::{
-            STD_MODULE_ID, buffer::INVALID_BUFFER_CLONE, math::int_type, option::option_type,
+            STD_MODULE_ID, buffer::expected_primitives, math::int_type, option::option_type,
             ordering::ordering_type,
         },
         types::effects::no_effects,
@@ -3485,6 +3494,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::primitive::INVALID_BUFFER_CLONE;
 
     fn compile(session: &mut CompilerSession, source: &str, name: &str) -> ModuleId {
         session
@@ -4024,7 +4034,7 @@ mod tests {
                 &dictionaries,
                 &subscripts,
                 env,
-                &buffer::entries(env, session.known_callees()),
+                &buffer::entries(env),
             )
         };
         assert!(
@@ -4203,7 +4213,7 @@ mod tests {
             &artifacts.dictionaries,
             &artifacts.subscripts,
             env,
-            &buffer::entries(env, session.known_callees()),
+            &buffer::entries(env),
         )
         .expect("test evidence-catalog rebuild should preserve native optional contracts");
         artifacts.native_requirements =
@@ -5341,9 +5351,14 @@ mod tests {
                 return false;
             };
             session
-                .known_callees()
-                .resolve(*callee, |_| None)
-                .is_some_and(KnownCallee::is_buffer)
+                .raw_modules()
+                .get(callee.module)
+                .and_then(|entry| entry.module())
+                .and_then(|module| module.get_function_by_id(callee.function))
+                .is_some_and(|function| {
+                    matches!(function.origin,
+                    CallableOrigin::BufferPrimitive(primitive) if primitive.is_storage())
+                })
         }));
     }
 
@@ -5353,25 +5368,24 @@ mod tests {
         let (physical, _) = lower(&mut session, STD_MODULE_ID).unwrap();
 
         let env = ModuleEnv::new(session.std_module(), session.raw_modules());
-        let entries = buffer::entries(env, session.known_callees());
-        assert_eq!(
-            entries.len(),
-            12,
-            "all storage, Value and Inspect Buffer entries have lowering"
-        );
-        for id in entries.keys() {
+        let entries = buffer::entries(env);
+        let expected = expected_primitives(session.std_module());
+        assert_eq!(entries.len(), expected.len());
+        for (local, primitive) in expected {
+            let id = FunctionId::new(STD_MODULE_ID, local);
+            assert_eq!(entries.get(&id), Some(&primitive));
             assert!(
                 physical.get(id.function).is_some(),
                 "retained Buffer entry {id:?} needs a physical body"
             );
             assert!(
-                physical.native_signature(*id).is_none(),
+                physical.native_signature(id).is_none(),
                 "do not dispatch back to a boxed primitive"
             );
         }
         let clone_id = entries
             .iter()
-            .find_map(|(id, kind)| matches!(kind, BufferEntry::Clone).then_some(*id))
+            .find_map(|(id, kind)| matches!(kind, BufferPrimitive::Clone).then_some(*id))
             .unwrap();
         let clone = physical.get(clone_id.function).unwrap();
         assert_eq!(clone.blocks().count(), 1);
@@ -5398,9 +5412,14 @@ mod tests {
                 return false;
             };
             session
-                .known_callees()
-                .resolve(*callee, |_| None)
-                .is_some_and(KnownCallee::is_buffer)
+                .raw_modules()
+                .get(callee.module)
+                .and_then(|entry| entry.module())
+                .and_then(|module| module.get_function_by_id(callee.function))
+                .is_some_and(|function| {
+                    matches!(function.origin,
+                    CallableOrigin::BufferPrimitive(primitive) if primitive.is_storage())
+                })
         }));
     }
 }

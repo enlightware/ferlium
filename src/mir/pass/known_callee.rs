@@ -46,15 +46,13 @@ use ustr::ustr;
 use crate::{
     Modules,
     module::{
-        FunctionId, LocalFunctionId, Module, ProjectionIndex, TypeDefId, id::Id,
+        CallableOrigin, FunctionId, LocalFunctionId, Module, ProjectionIndex, TypeDefId, id::Id,
         trait_impl::ConcreteTraitImplKey,
     },
+    primitive::BufferPrimitive,
     std::{
         STD_MODULE_ID,
-        buffer::buffer_type,
-        core_traits_names::{
-            BITS_TRAIT_NAME, ITERATOR_TRAIT_NAME, NUM_TRAIT_NAME, ORD_TRAIT_NAME, VALUE_TRAIT_NAME,
-        },
+        core_traits_names::{BITS_TRAIT_NAME, ITERATOR_TRAIT_NAME, NUM_TRAIT_NAME, ORD_TRAIT_NAME},
         math::{float_type, int_type},
     },
     types::{
@@ -153,18 +151,10 @@ pub(crate) enum KnownCallee {
     /// `Iterator<RangeInclusiveIterator>::next(iterator)` — as [`RangeNext`](Self::RangeNext), with
     /// an inclusive bound.
     RangeInclusiveNext,
-    /// The mutable member of the private `buffer_slot` subscript.
-    BufferSlot,
-    /// The private `buffer_with_capacity` storage constructor.
-    BufferWithCapacity,
-    /// The private whole-buffer ownership transfer.
-    BufferMove,
-    /// The private element ownership transfer between Buffer slots.
-    BufferMoveInto,
-    /// The private element ownership transfer out of a Buffer slot.
-    BufferTake,
-    /// `Value<Buffer<A>>::drop`.
-    BufferDrop,
+    /// Compiler-owned buffer storage operations do not capture their argument places.
+    /// `relations::analyze` uses known-callee membership to exclude these calls from escaping
+    /// roots, retaining facts about sibling array fields while accounting for argument writes.
+    Buffer(BufferPrimitive),
 }
 
 impl KnownCallee {
@@ -192,19 +182,6 @@ impl KnownCallee {
                 | Self::FloatCmp
                 | Self::FloatCmpCode
                 | Self::BoolNot
-        )
-    }
-
-    /// Whether physical lowering replaces this private Buffer operation.
-    pub(crate) fn is_buffer(self) -> bool {
-        matches!(
-            self,
-            Self::BufferSlot
-                | Self::BufferWithCapacity
-                | Self::BufferMove
-                | Self::BufferMoveInto
-                | Self::BufferTake
-                | Self::BufferDrop
         )
     }
 }
@@ -353,32 +330,24 @@ impl KnownCallees {
                 resolver.method(ITERATOR_TRAIT_NAME, range_inclusive_iterator, "next"),
                 KnownCallee::RangeInclusiveNext,
             ),
-            (
-                resolver.subscript_mut_member("buffer_slot"),
-                KnownCallee::BufferSlot,
-            ),
-            (
-                resolver.function("buffer_with_capacity"),
-                KnownCallee::BufferWithCapacity,
-            ),
-            (resolver.function("buffer_move"), KnownCallee::BufferMove),
-            (
-                resolver.function("buffer_move_into"),
-                KnownCallee::BufferMoveInto,
-            ),
-            (resolver.function("buffer_take"), KnownCallee::BufferTake),
-            (resolver.function("buffer_drop"), KnownCallee::BufferDrop),
-            (
-                resolver.blanket_method(
-                    VALUE_TRAIT_NAME,
-                    buffer_type(Type::variable_id(0)),
-                    "drop",
-                ),
-                KnownCallee::BufferDrop,
-            ),
         ];
+        let mut by_id: FxHashMap<_, _> = entries.into_iter().collect();
+        by_id.extend(resolver.std_module.functions.iter().enumerate().filter_map(
+            |(index, function)| {
+                let CallableOrigin::BufferPrimitive(primitive) = function.origin else {
+                    return None;
+                };
+                if !primitive.is_storage() {
+                    return None;
+                }
+                Some((
+                    FunctionId::new(STD_MODULE_ID, LocalFunctionId::from_index(index)),
+                    KnownCallee::Buffer(primitive),
+                ))
+            },
+        ));
         Self {
-            by_id: entries.into_iter().collect(),
+            by_id,
             int_add,
             int_add_ty: resolver.call_impl_type(int_add),
             int_sub,
@@ -659,7 +628,7 @@ impl Resolver<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CompilerSession, module::Path, module::id::Id};
+    use crate::{CompilerSession, module::Path, module::id::Id, std::buffer::expected_primitives};
 
     fn known_callees(session: &CompilerSession) -> &KnownCallees {
         session.known_callees()
@@ -681,15 +650,34 @@ mod tests {
     #[test]
     fn each_buffer_callee_has_its_own_identity() {
         let session = CompilerSession::new();
-        assert_eq!(
-            known_callees(&session)
-                .by_id
-                .values()
-                .filter(|callee| callee.is_buffer())
-                .count(),
-            7,
-            "two Buffer callees resolved to the same function id"
+        let table = known_callees(&session);
+        for (function, primitive) in expected_primitives(session.std_module()) {
+            let id = FunctionId::new(STD_MODULE_ID, function);
+            assert_eq!(
+                table.resolve(id, |_| None),
+                primitive
+                    .is_storage()
+                    .then_some(KnownCallee::Buffer(primitive)),
+                "unexpected optimizer contract for Buffer::{primitive:?} at {id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn buffer_resolution_sees_through_specialization() {
+        let session = CompilerSession::new();
+        let table = known_callees(&session);
+        let (&known, &operation) = table
+            .by_id
+            .iter()
+            .find(|(_, callee)| matches!(callee, KnownCallee::Buffer(_)))
+            .expect("the Buffer table is not empty");
+        let specialized = FunctionId::new(
+            STD_MODULE_ID,
+            LocalFunctionId::from_index(session.std_module().function_count()),
         );
+        assert_eq!(table.resolve(specialized, |_| None), None);
+        assert_eq!(table.resolve(specialized, |_| Some(known)), Some(operation));
     }
 
     /// The identities must be the ones a compiled call actually names, which nothing but a
@@ -737,23 +725,6 @@ mod tests {
             Some(semantics),
             "canonicalizing to a known original must yield that original's semantics"
         );
-    }
-
-    #[test]
-    fn buffer_resolution_sees_through_specialization() {
-        let session = CompilerSession::new();
-        let table = known_callees(&session);
-        let (&known, &operation) = table
-            .by_id
-            .iter()
-            .find(|(_, callee)| callee.is_buffer())
-            .expect("the Buffer table is not empty");
-        let specialized = FunctionId::new(
-            STD_MODULE_ID,
-            LocalFunctionId::from_index(session.std_module().function_count()),
-        );
-        assert_eq!(table.resolve(specialized, |_| None), None);
-        assert_eq!(table.resolve(specialized, |_| Some(known)), Some(operation));
     }
 
     /// Field positions must come from the type, never from the declaration. Records are laid out

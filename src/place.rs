@@ -12,10 +12,10 @@ use std::{collections::VecDeque, ptr::NonNull, rc::Rc};
 
 use crate::{
     compiler::error::SourceFailureKind,
+    eval::buffer,
     eval::{EvalCtx, ValOrMut},
     format::{FormatWith, write_with_separator},
     hir::value::{NativeValue, Value, ValueRef},
-    std::buffer,
 };
 
 /// Borrowed storage in a boxed interpreter. Native members have no boxed `Value` slot.

@@ -413,6 +413,8 @@ pub trait Callable: DynClone {
     fn native_entry(&self) -> Option<&NativeEntry> {
         None
     }
+    /// Execute a script or host callback. Compiler intrinsics are dispatched by `EvalCtx`
+    /// before this hook and provide only callable metadata.
     fn call(
         &self,
         args: Vec<ValOrMut>,

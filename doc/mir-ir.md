@@ -368,11 +368,23 @@ Moving a complete variant transfers its owning pointer; cloning requires a new a
 Destruction drops the live payload before releasing its allocation. Cleanup of a failed partial
 construction drops only initialized members and releases nested allocations from inner to outer.
 
+Private std Buffer functions carry a crate-private `BufferPrimitive` identity, including the slot
+addressor and the `Value`/`Inspect` methods. The standard library registers their signatures and
+addressor contracts and assigns the identities internally; it supplies no native executable entry.
+HIR and boxed MIR share the Buffer intrinsics and boxed storage in `src/eval/buffer.rs`.
+Physical lowering uses the same identities to expand storage calls and build retained bodies for
+addressors, dictionaries and first-class references. Snapshots preserve these identities directly,
+without native callable rebinding.
+
 Physical `Buffer<A>` storage is one owning `*A` slot, with the backing layout specified in
 [abi.md](abi.md#arrays). Taking and transferring elements use `move_bytes<A>`; a slot-to-slot
 transfer requires an absent destination. Whole-buffer movement releases the target allocation,
 transfers the source pointer, and leaves a valid zero-byte allocation in the source. Buffer
 destruction releases the allocation and clears the pointer slot.
+Boxed Buffer destruction likewise releases storage immediately and clears its owning value slot.
+Normal boxed destruction checks in debug builds that every element slot was consumed.
+Its Rust storage destructor also reclaims any remaining payload storage during poisoning, without
+running Ferlium destructors.
 
 ### First-class subscript environments
 

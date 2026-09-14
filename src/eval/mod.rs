@@ -6,6 +6,12 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
+//! Evaluation support shared by the boxed interpreters, together with HIR node execution.
+//! Compiler intrinsics are dispatched here; their storage-specific implementations live in
+//! child modules.
+
+pub mod buffer;
+
 use std::{collections::VecDeque, mem};
 
 use enum_as_inner::EnumAsInner;
@@ -28,10 +34,11 @@ use crate::{
         SubscriptValue, Value,
     },
     module::{
-        ELocalDecl as LocalDecl, EvidenceBindingId, FunctionId, LocalDebugVisibility, LocalDeclId,
-        LocalFunctionId, ModuleFunction, ModuleId, ProjectionIndex, ResolvedLocalClone,
-        ResolvedLocalDrop, ResolvedTakeLocalValueMode, ResolvedValueLayout, SubscriptId,
-        TraitDictionary, TraitDictionaryEntry, TraitDictionaryId, TraitImplId,
+        CallableOrigin, ELocalDecl as LocalDecl, EvidenceBindingId, FunctionId,
+        LocalDebugVisibility, LocalDeclId, LocalFunctionId, ModuleFunction, ModuleId,
+        ProjectionIndex, ResolvedLocalClone, ResolvedLocalDrop, ResolvedTakeLocalValueMode,
+        ResolvedValueLayout, SubscriptId, TraitDictionary, TraitDictionaryEntry, TraitDictionaryId,
+        TraitImplId,
     },
     types::{
         r#trait::{TraitDictionaryEntryIndex, TraitMethodIndex},
@@ -930,7 +937,12 @@ impl<'a> EvalCtx<'a> {
             prepared.extend(arguments);
             prepared
         };
-        let result = function_data.code.call(arguments, self, locals);
+        let result = match function_data.origin {
+            CallableOrigin::BufferPrimitive(primitive) => {
+                buffer::eval_buffer_primitive(primitive, arguments, self)
+            }
+            _ => function_data.code.call(arguments, self, locals),
+        };
         if let Some(extra_start) = extra_start {
             self.extra_parameters.truncate(extra_start);
         }

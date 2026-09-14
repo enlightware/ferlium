@@ -1828,7 +1828,9 @@ mod tests {
         let session = CompilerSession::new();
         for (index, function) in session.std_module().functions.iter().enumerate() {
             match function.origin {
-                CallableOrigin::Script | CallableOrigin::StructuralFieldAddressor { .. } => {}
+                CallableOrigin::Script
+                | CallableOrigin::StructuralFieldAddressor { .. }
+                | CallableOrigin::BufferPrimitive(_) => {}
                 CallableOrigin::Native {
                     canonical_name: Some(_),
                 } => {}

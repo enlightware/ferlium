@@ -44,6 +44,7 @@ use crate::{
     },
     internal_compilation_error,
     module::{FunctionDebugInfo, ModuleEnv, ModuleId, id::Id},
+    primitive::BufferPrimitive,
     types::{
         mutability::MutType,
         r#type::{FnArgType, Type},
@@ -516,6 +517,7 @@ pub(crate) enum CallableOrigin {
     Script,
     Native { canonical_name: Option<Ustr> },
     StructuralFieldAddressor { field_index: ProjectionIndex },
+    BufferPrimitive(BufferPrimitive),
     Transient,
 }
 

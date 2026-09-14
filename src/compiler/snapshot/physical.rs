@@ -96,6 +96,7 @@ impl CompiledPhysicalMirSnapshot {
                     matches!(
                         function.origin,
                         CallableOrigin::StructuralFieldAddressor { .. }
+                            | CallableOrigin::BufferPrimitive(_)
                     )
                 });
             if requires_body && body.is_none() {
@@ -122,7 +123,6 @@ impl CompiledPhysicalMirSnapshot {
                 functions,
                 optimized,
                 ModuleEnv::new(module, session.raw_modules()),
-                session.known_callees(),
             )
         }))
         .map_err(|_| SnapshotError::InvalidMir("physical MIR verification failed".into()))?
@@ -278,7 +278,7 @@ mod tests {
     use crate::{
         compiler::{MirOptimization, artifacts::ensure_optimized_mir_artifacts},
         mir::physical::lower_physical_mir,
-        std::STD_MODULE_ID,
+        std::{STD_MODULE_ID, buffer::expected_primitives},
     };
 
     #[test]
@@ -343,6 +343,15 @@ mod tests {
         assert!(
             matches!(restore(&stale), Err(SnapshotError::InvalidMir(message)) if message.contains("layout/ABI"))
         );
+        for (function, primitive) in expected_primitives(module) {
+            let mut malformed = decoded.clone();
+            malformed.functions[function.as_index()] = None;
+            assert!(
+                matches!(restore(&malformed), Err(SnapshotError::InvalidMir(message))
+                    if message.contains("required body")),
+                "a snapshot must retain the body of Buffer::{primitive:?}"
+            );
+        }
         let mut malformed = decoded;
         malformed.functions.clear();
         assert!(matches!(

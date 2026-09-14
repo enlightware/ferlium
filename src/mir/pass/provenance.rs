@@ -19,9 +19,9 @@
 //! its own frame ends at the return. Being derived, it can be recomputed and checked rather than
 //! trusted.
 //!
-//! Natives are the exception and the only place the fact is asserted: `buffer_slot` computes its
-//! address in Rust, so it declares [`CallableDefinition::result_rooted_in`] instead. That is the one
-//! surface where this can be wrong.
+//! Host addressors and compiler intrinsics are the exception: their address computations have no
+//! semantic MIR body to analyze. For example, `buffer_slot` declares
+//! [`CallableDefinition::result_rooted_in`] as part of its intrinsic contract.
 //!
 use rustc_hash::FxHashMap;
 
@@ -594,8 +594,8 @@ mod tests {
 
     /// The case the whole analysis exists for, and the one that needs the call graph: over the
     /// standard library, `array_index::ref_mut` roots in its array — but only by way of
-    /// `buffer_slot`, a native whose address computation is in Rust and which therefore *declares*
-    /// its own root. One derived link on top of one declared one.
+    /// `buffer_slot`, an intrinsic which *declares* its own root. One derived link on top of one
+    /// declared one.
     #[test]
     fn a_nested_addressor_inherits_the_root_through_the_callee() {
         let session = CompilerSession::new();

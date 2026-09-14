@@ -11,8 +11,8 @@
 //! The interpreter exists to check that `emit_mir` lowers HIR to *semantically correct* MIR: it
 //! runs a lowered [`mir::Function`] and produces the value the function computes. It reuses the HIR
 //! interpreter's memory substrate — a MIR *place* (pointer) is a [`Place`] and the heap is
-//! the [`EvalCtx`]'s `environment`. Native (std) callees are delegated to the HIR interpreter; MIR
-//! (script) callees are interpreted recursively so their own lowering is exercised too.
+//! the [`EvalCtx`]'s `environment`. Host callbacks and compiler intrinsics use the shared evaluator;
+//! MIR (script) callees are interpreted recursively so their own lowering is exercised too.
 
 #[cfg(debug_assertions)]
 use std::fmt;
@@ -29,7 +29,7 @@ use crate::{
     containers::b,
     eval::{
         ControlFlow, EvalControlFlowResult, EvalCtx, PlaceResult, RuntimeError, ValOrMut, ValueRef,
-        call_value_clone_for_temp, call_value_drop_for_temp,
+        buffer, call_value_clone_for_temp, call_value_drop_for_temp,
     },
     execution::ReferenceInterpreterLimits,
     hir::{
@@ -48,7 +48,7 @@ use crate::{
         id::Id,
     },
     place::Place,
-    std::{array::array_value_from_vec, buffer},
+    std::array::array_value_from_vec,
     types::{
         r#trait::TraitDictionaryEntryIndex,
         r#type::{Type, TypeKind},

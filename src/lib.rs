@@ -27,6 +27,7 @@ pub mod mir;
 pub mod module;
 pub mod parser;
 pub mod place;
+mod primitive;
 pub mod std;
 mod sync;
 pub mod types;

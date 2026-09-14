@@ -8,9 +8,10 @@
 //
 use crate::{
     cached_ty,
+    eval::buffer::Buffer,
     hir::value::Value,
     module::{LocalTypeDefId, TypeDefId},
-    std::{STD_MODULE_ID, buffer::Buffer, math::int_type},
+    std::{STD_MODULE_ID, math::int_type},
     types::r#type::Type,
 };
 

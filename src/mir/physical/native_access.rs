@@ -30,7 +30,7 @@ pub(super) fn verify(
     original: FunctionId,
     helper_base: FunctionId,
     signatures: &FxHashMap<FunctionId, NativeSignature>,
-    buffers: &FxHashMap<FunctionId, BufferEntry>,
+    buffers: &FxHashMap<FunctionId, BufferPrimitive>,
     env: ModuleEnv<'_>,
 ) -> Result<(), BackendReadinessError> {
     let trusted_addressor = |target: FunctionId| {

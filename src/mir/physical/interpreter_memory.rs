@@ -7,7 +7,7 @@ use super::interpreter::{Evidence, invalid, unsupported};
 use crate::{
     Location,
     compiler::error::SandboxViolationKind,
-    eval::RuntimeError,
+    eval::{RuntimeError, buffer::Buffer},
     hir::{
         native_functions::NativeLayout,
         value::{LiteralNativeValue, LiteralValue, Value, VariantPayloadStorage},
@@ -15,7 +15,7 @@ use crate::{
     mir::physical::dictionary::{DictionaryReference, EvidenceEnvironmentLayout},
     module::{ProjectionIndex, id::Id},
     std::{
-        buffer::{Buffer, buffer_element_type},
+        buffer::buffer_element_type,
         math::Float,
         value::{
             TypeLayoutEnv, product_layout_spec, product_member_types, structural_variant,
