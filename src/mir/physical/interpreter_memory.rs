@@ -38,6 +38,41 @@ const MAX_STORAGE_LEAVES: usize = 4096;
 const MAX_STORAGE_DEPTH: usize = 64;
 const MAX_STORAGE_NODES: usize = 16384;
 
+macro_rules! define_stamp_type {
+    ($(#[$meta:meta])* $visibility:vis $name:ident) => {
+        $(#[$meta])*
+        #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+        $visibility struct $name(u64);
+
+        impl $name {
+            fn checked_next(self) -> Option<Self> {
+                self.0.checked_add(1).map(Self)
+            }
+        }
+    };
+}
+
+define_stamp_type!(
+    /// Distinguishes successive allocations even when their storage addresses are reused.
+    pub(super) Generation
+);
+define_stamp_type!(
+    /// Distinguishes successive subobjects occupying the same logical node slot.
+    NodeVersion
+);
+define_stamp_type!(
+    /// Invalidates native member views when their receiver's borrow changes.
+    BorrowEpoch
+);
+define_stamp_type!(
+    /// Invalidates native transfer snapshots after mutation or ownership transfer.
+    NativeRevision
+);
+
+/// Identifies a native value's unique owner using the shared allocation identity source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct NativeOwnerId(Generation);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum ScalarKind {
     Unit,
@@ -180,7 +215,7 @@ enum StoredData {
 struct NativeBytes {
     bytes: Box<[MaybeUninit<u8>]>,
     /// Identity and revision of the sole owner, absent for TrivialCopy data.
-    owner: Option<(u64, u64)>,
+    owner: Option<(NativeOwnerId, NativeRevision)>,
     interior: bool,
 }
 
@@ -192,7 +227,7 @@ impl PartialEq for NativeBytes {
 
 struct NativeOwner {
     address: Address,
-    revision: u64,
+    revision: NativeRevision,
 }
 
 #[derive(Clone, Copy)]
@@ -204,9 +239,9 @@ struct NativeStorage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct Address {
     allocation: usize,
-    generation: u64,
+    generation: Generation,
     node: usize,
-    version: u64,
+    version: NodeVersion,
     offset: usize,
     pub(super) ty: Type,
     readonly: bool,
@@ -366,7 +401,7 @@ enum StorageState {
     /// An initialized pointer slot records its checked provenance.
     Pointer(Option<Address>),
     /// Owning opaque values carry a transfer identity; copyable natives use Value instead.
-    Native(Option<u64>),
+    Native(Option<NativeOwnerId>),
 }
 
 impl StorageState {
@@ -403,9 +438,9 @@ struct StorageNode {
     /// Byte offset from the allocation base.
     offset: usize,
     /// Identity stamp preventing reused node slots from reviving old addresses.
-    version: u64,
+    version: NodeVersion,
     /// Changes when an opaque receiver may invalidate previously returned member pointers.
-    borrow_epoch: u64,
+    borrow_epoch: BorrowEpoch,
     /// Whether this subobject identity is active rather than retired.
     live: bool,
     /// Kind-specific initialization; nonempty products use their children.
@@ -425,17 +460,17 @@ struct Allocation {
     /// Retired node indices available for reuse.
     free_nodes: Vec<usize>,
     /// Monotonic counter assigning fresh identities to subobject nodes.
-    version: u64,
+    version: NodeVersion,
     /// Allocation identity stamp preventing stale addresses after allocation-slot reuse.
-    generation: u64,
+    generation: Generation,
     /// Whether lifetime follows `runtime_dealloc` rather than stack restoration.
     heap: bool,
     /// Receiver and borrow epoch of a native view; borrowed bytes are never deallocated here.
-    borrowed: Option<(Address, u64)>,
+    borrowed: Option<(Address, BorrowEpoch)>,
     /// Direct native views rooted in this allocation.
     borrowers: FxHashSet<usize>,
     /// Native identities currently owned by this allocation or view.
-    native_owners: FxHashSet<u64>,
+    native_owners: FxHashSet<NativeOwnerId>,
 }
 
 impl Allocation {
@@ -443,13 +478,13 @@ impl Allocation {
         check_extent(self.layout, offset, shape.layout)?;
         self.version = self
             .version
-            .checked_add(1)
+            .checked_next()
             .ok_or_else(|| invalid("subobject identity exhausted"))?;
         let node = StorageNode {
             shape: shape.clone(),
             offset,
             version: self.version,
-            borrow_epoch: 0,
+            borrow_epoch: BorrowEpoch::default(),
             live: true,
             state: StorageState::absent(&shape),
             children: vec![],
@@ -501,9 +536,9 @@ struct EvidenceAllocation {
     /// Resolved descriptor expected by references to this environment.
     descriptor: u32,
     /// Identity stamp rejecting pointers to a previous allocation at the same address.
-    generation: u64,
+    generation: Generation,
     /// Type and pointer-provenance checks for each stored capture, not executable evidence.
-    captures: Box<[(Type, u64)]>,
+    captures: Box<[(Type, Generation)]>,
 }
 
 impl EvidenceAllocation {
@@ -583,11 +618,11 @@ pub(super) struct Memory {
     /// Symbolic variant tags mapped to their ABI discriminant identities.
     tags: FxHashMap<Ustr, u32>,
     /// Monotonic counter assigning fresh allocation identities.
-    generation: u64,
+    generation: Generation,
     /// Maximum live allocation count, not a byte-memory quota.
     pub(super) allocation_limit: usize,
     /// Unique live owners of opaque native values; snapshots transfer but never duplicate them.
-    native_owners: FxHashMap<u64, NativeOwner>,
+    native_owners: FxHashMap<NativeOwnerId, NativeOwner>,
     /// Lost ownership remains an error after its containing stack storage has been reclaimed.
     lost_native: bool,
 }
@@ -615,7 +650,7 @@ impl Default for Memory {
             stack: vec![],
             layouts,
             tags: FxHashMap::default(),
-            generation: 0,
+            generation: Generation::default(),
             allocation_limit: usize::MAX,
             native_owners: FxHashMap::default(),
             lost_native: false,
@@ -653,7 +688,7 @@ impl Memory {
         Ok(())
     }
 
-    fn native_identity(&self, address: Address) -> Result<Option<u64>, RuntimeError> {
+    fn native_identity(&self, address: Address) -> Result<Option<NativeOwnerId>, RuntimeError> {
         let node = self.node(address)?;
         self.node_native_identity(address, node)
     }
@@ -662,7 +697,7 @@ impl Memory {
         &self,
         address: Address,
         node: &StorageNode,
-    ) -> Result<Option<u64>, RuntimeError> {
+    ) -> Result<Option<NativeOwnerId>, RuntimeError> {
         if let StorageState::Native(Some(id)) = node.state {
             let owner = self
                 .native_owners
@@ -716,7 +751,7 @@ impl Memory {
         let node = self.node_mut(address)?;
         node.borrow_epoch = node
             .borrow_epoch
-            .checked_add(1)
+            .checked_next()
             .ok_or_else(|| invalid("native borrow identity exhausted"))?;
         self.revoke_members(address);
         Ok(())
@@ -731,7 +766,7 @@ impl Memory {
             let owner = self.native_owners.get_mut(&id).unwrap();
             owner.revision = owner
                 .revision
-                .checked_add(1)
+                .checked_next()
                 .ok_or_else(|| invalid("native transfer identity exhausted"))?;
         }
         self.invalidate_receiver_snapshots(address)?;
@@ -745,7 +780,7 @@ impl Memory {
                 let owner = self.native_owners.get_mut(&id).unwrap();
                 owner.revision = owner
                     .revision
-                    .checked_add(1)
+                    .checked_next()
                     .ok_or_else(|| invalid("native transfer identity exhausted"))?;
             }
             address = root;
@@ -907,7 +942,7 @@ impl Memory {
     fn evidence_allocation_mut(
         &mut self,
         reference: DictionaryReference,
-        generation: u64,
+        generation: Generation,
     ) -> Result<&mut EvidenceAllocation, RuntimeError> {
         self.evidence
             .get_mut(&reference.environment)
@@ -947,7 +982,7 @@ impl Memory {
                     descriptor,
                     environment: 0,
                 },
-                generation: 0,
+                generation: Generation::default(),
                 ty,
             });
         }
@@ -956,7 +991,7 @@ impl Memory {
         }
         self.generation = self
             .generation
-            .checked_add(1)
+            .checked_next()
             .ok_or_else(|| invalid("allocation identity exhausted"))?;
         let mut words = Vec::new();
         let count = layout.allocation.size().div_ceil(size_of::<usize>());
@@ -976,7 +1011,7 @@ impl Memory {
                         e.ty(),
                         match e {
                             Evidence::Physical { generation, .. } => *generation,
-                            _ => 0,
+                            _ => Generation::default(),
                         },
                     )
                 })
@@ -1398,7 +1433,7 @@ impl Memory {
         self.check_allocation_limit(span)?;
         self.generation = self
             .generation
-            .checked_add(1)
+            .checked_next()
             .ok_or_else(|| invalid("allocation identity exhausted"))?;
         let layout =
             Layout::from_size_align(shape.layout.size().max(1), shape.layout.align()).unwrap();
@@ -1410,7 +1445,7 @@ impl Memory {
             layout,
             nodes: vec![],
             free_nodes: vec![],
-            version: 0,
+            version: NodeVersion::default(),
             generation: self.generation,
             heap,
             borrowed: None,
@@ -1715,14 +1750,14 @@ impl Memory {
         self.check_allocation_limit(Some(span))?;
         self.generation = self
             .generation
-            .checked_add(1)
+            .checked_next()
             .ok_or_else(|| invalid("allocation identity exhausted"))?;
         let mut allocation = Allocation {
             pointer,
             layout: shape.layout,
             nodes: vec![],
             free_nodes: vec![],
-            version: 0,
+            version: NodeVersion::default(),
             generation: self.generation,
             heap: false,
             borrowed: Some((root, self.node(root)?.borrow_epoch)),
@@ -1786,14 +1821,14 @@ impl Memory {
         if self.node(address)?.shape.native.is_some_and(|n| !n.copy) {
             self.generation = self
                 .generation
-                .checked_add(1)
+                .checked_next()
                 .ok_or_else(|| invalid("native identity exhausted"))?;
-            let id = self.generation;
+            let id = NativeOwnerId(self.generation);
             self.native_owners.insert(
                 id,
                 NativeOwner {
                     address,
-                    revision: 0,
+                    revision: NativeRevision::default(),
                 },
             );
             self.allocations[address.allocation]
@@ -1824,7 +1859,7 @@ impl Memory {
         let node = self.node_mut(address)?;
         node.borrow_epoch = node
             .borrow_epoch
-            .checked_add(1)
+            .checked_next()
             .ok_or_else(|| invalid("native borrow identity exhausted"))?;
         node.state = StorageState::absent(&node.shape);
         if node.shape.cases.is_some() {
@@ -2120,7 +2155,7 @@ impl Memory {
                         return Err(invalid("reused or invalidated native transfer snapshot"));
                     }
                     owner.revision = revision
-                        .checked_add(1)
+                        .checked_next()
                         .ok_or_else(|| invalid("native transfer identity exhausted"))?;
                     let previous = replace(&mut owner.address, address);
                     if previous.allocation != address.allocation {

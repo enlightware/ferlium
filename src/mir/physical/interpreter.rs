@@ -45,7 +45,7 @@ use crate::{
         type_properties::concrete_type_is_trivial_copy,
     },
 };
-use memory::{Address, Memory, Scalar, ScalarKind, StoredValue};
+use memory::{Address, Generation, Memory, Scalar, ScalarKind, StoredValue};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{borrow::Cow, fmt::Display, mem, process::abort, ptr, rc::Rc, slice::from_ref};
 use ustr::Ustr;
@@ -75,7 +75,7 @@ enum Binding {
 enum Evidence {
     Physical {
         reference: DictionaryReference,
-        generation: u64,
+        generation: Generation,
         ty: Type,
     },
     Dictionary {
