@@ -87,9 +87,7 @@ use std::{
 
 use ustr::ustr;
 
-#[path = "native_addressors.rs"]
-mod addressors;
-pub use addressors::*;
+pub use super::native_addressors::*;
 
 use super::function::{self, ArgConvention, CallArgsStorageGuard, Callable, CallableDefinition};
 use crate::{
@@ -159,7 +157,7 @@ impl NativeFailureState {
         }
     }
 
-    fn finish(&mut self, status: u32) -> Result<(), RuntimeError> {
+    pub(super) fn finish(&mut self, status: u32) -> Result<(), RuntimeError> {
         if status == 0 {
             assert!(
                 self.is_empty(),
@@ -464,11 +462,11 @@ type PhysicalInvoke = unsafe fn(
 ) -> Result<NativeCallOutcome, RuntimeError>;
 
 impl NativeEntry {
-    fn with_physical(mut self, invoke: PhysicalInvoke) -> Self {
+    pub(super) fn with_physical(mut self, invoke: PhysicalInvoke) -> Self {
         self.physical = Some(invoke);
         self
     }
-    fn new(address: *const (), signature: NativeSignature) -> Self {
+    pub(super) fn new(address: *const (), signature: NativeSignature) -> Self {
         Self {
             address,
             signature,
@@ -530,7 +528,7 @@ impl NativeEntry {
     }
 }
 
-mod sealed {
+pub(super) mod sealed {
     pub trait Argument {}
     pub trait Result {}
     pub trait Entry {}
@@ -750,13 +748,13 @@ pub trait EntryFunction: sealed::Entry + Clone + 'static {
 
 #[derive(Clone)]
 pub struct NativeCallable<E: EntryFunction> {
-    function: E,
+    pub(super) function: E,
     entry: NativeEntry,
     passing: Vec<ArgConvention>,
 }
 
 impl<E: EntryFunction> NativeCallable<E> {
-    fn new(function: E) -> Self {
+    pub(super) fn new(function: E) -> Self {
         let entry = function.entry();
         let passing = entry
             .signature

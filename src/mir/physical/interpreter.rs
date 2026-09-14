@@ -9,11 +9,9 @@
 //! Checked physical-MIR execution. Boxed values exist only at the host boundary.
 //! Unsupported reachable contracts are rejected before execution, even in untaken branches.
 
-#[path = "interpreter_memory.rs"]
-mod memory;
-
 use super::{
     dictionary::DictionaryReference,
+    interpreter_memory::{Address, Generation, Memory, Scalar, ScalarKind, StoredValue},
     program::{InternedStaticEvidence, ProgramEvidenceId, ResolvedPhysicalProgram},
 };
 use crate::{
@@ -45,17 +43,16 @@ use crate::{
         type_properties::concrete_type_is_trivial_copy,
     },
 };
-use memory::{Address, Generation, Memory, Scalar, ScalarKind, StoredValue};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{borrow::Cow, fmt::Display, mem, process::abort, ptr, rc::Rc, slice::from_ref};
 use ustr::Ustr;
 
-fn unsupported(detail: impl Display) -> RuntimeError {
+pub(super) fn unsupported(detail: impl Display) -> RuntimeError {
     RuntimeError::Backend(format!(
         "Physical MIR execution does not yet support {detail}"
     ))
 }
-fn invalid(detail: &str) -> RuntimeError {
+pub(super) fn invalid(detail: &str) -> RuntimeError {
     RuntimeError::Backend(format!("Invalid physical MIR execution: {detail}"))
 }
 
@@ -72,7 +69,7 @@ enum Binding {
 
 /// Symbolic dictionaries are used only by capability analysis; execution uses ABI references.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum Evidence {
+pub(super) enum Evidence {
     Physical {
         reference: DictionaryReference,
         generation: Generation,
@@ -87,7 +84,7 @@ enum Evidence {
 }
 
 impl Evidence {
-    fn ty(&self) -> Type {
+    pub(super) fn ty(&self) -> Type {
         match self {
             Self::Dictionary { ty, .. } | Self::Physical { ty, .. } => *ty,
             Self::Storage(_) => ScalarKind::Bool.ty(),

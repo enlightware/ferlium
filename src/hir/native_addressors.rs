@@ -1,7 +1,14 @@
 //! Native member entries use raw pointers: the returned borrow survives the C call.
-use super::*;
+use std::mem::{self, MaybeUninit};
+
+use super::{
+    function,
+    native_functions::{sealed, *},
+};
 use crate::{
-    eval::PlaceResult,
+    compiler::error::SourceFailureKind,
+    eval::{EvalControlFlowResult, EvalCtx, PlaceResult, RuntimeError, ValOrMut, cont},
+    hir::value::{NativeValue, Value},
     place::{NativeMember, Place},
 };
 
@@ -206,8 +213,11 @@ mod tests {
 
     use super::*;
     use crate::{
-        CompilerSession, compiler::error::RuntimeErrorKind, eval::EvalCtx,
-        hir::value::NativeValueType, types::effects::no_effects,
+        CompilerSession,
+        compiler::error::RuntimeErrorKind,
+        eval::EvalCtx,
+        hir::value::NativeValueType,
+        types::{effects::no_effects, r#type::CallResultConvention},
     };
 
     unsafe extern "C" fn shared(value: *const isize) -> *const isize {

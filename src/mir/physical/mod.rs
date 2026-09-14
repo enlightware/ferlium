@@ -12,6 +12,7 @@ mod buffer;
 mod dictionary;
 mod evidence;
 pub(crate) mod interpreter;
+mod interpreter_memory;
 mod native;
 mod native_access;
 pub(crate) mod program;

@@ -3,7 +3,7 @@
 
 //! ABI-layout storage with checked provenance, logical subobjects and initialization.
 
-use super::{Evidence, invalid, unsupported};
+use super::interpreter::{Evidence, invalid, unsupported};
 use crate::{
     Location,
     compiler::error::SandboxViolationKind,
