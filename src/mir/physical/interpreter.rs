@@ -23,7 +23,9 @@ use crate::{
     execution::ReferenceInterpreterLimits,
     hir::{
         function::ArgConvention,
-        native_functions::{NativeEntry, NativeFailureState, NativeParameter, NativeResult},
+        native_functions::{
+            NativeCallOutcome, NativeEntry, NativeFailureState, NativeParameter, NativeResult,
+        },
         value::{LiteralValue, Value, VariantPayloadStorage},
     },
     mir::{
@@ -40,11 +42,12 @@ use crate::{
         type_inference::substitution::InstSubst,
         type_like::TypeLike,
         type_mapper::SimpleInstantiationMapper,
+        type_properties::concrete_type_is_trivial_copy,
     },
 };
 use memory::{Address, Memory, Scalar, ScalarKind, StoredValue};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::{borrow::Cow, fmt::Display, mem, process::abort, rc::Rc, slice::from_ref};
+use std::{borrow::Cow, fmt::Display, mem, process::abort, ptr, rc::Rc, slice::from_ref};
 use ustr::Ustr;
 
 fn unsupported(detail: impl Display) -> RuntimeError {
@@ -253,7 +256,7 @@ impl Binding {
 pub(crate) fn run_entry(
     program: &ResolvedPhysicalProgram,
     entry: FunctionId,
-    arguments: &[Value],
+    arguments: &mut [Value],
     limits: ReferenceInterpreterLimits,
     session: &CompilerSession,
 ) -> Result<Value, RuntimeError> {
@@ -269,6 +272,7 @@ pub(crate) fn run_entry(
         types: RuntimeTypes::default(),
         static_evidence: FxHashMap::default(),
     };
+    interpreter.prepare_native_storage()?;
     interpreter.check_supported(entry)?;
     interpreter
         .memory
@@ -280,15 +284,21 @@ pub(crate) fn run_entry(
         .parameters()
         .split_last()
         .ok_or_else(|| invalid("missing result parameter"))?;
-    if parameters.len() != arguments.len()
-        || parameters.iter().any(|p| {
-            !matches!(
-                p.kind,
-                ParameterKind::Parameter(ArgConvention::Let) | ParameterKind::Owned
-            )
-        })
-    {
+    assert_eq!(
+        parameters.len(),
+        arguments.len(),
+        "host argument count mismatch"
+    );
+    if parameters.iter().any(|p| {
+        !matches!(
+            p.kind,
+            ParameterKind::Parameter(ArgConvention::Let) | ParameterKind::Owned
+        )
+    }) {
         return Err(unsupported("this host entry signature"));
+    }
+    for (parameter, argument) in parameters.iter().zip(arguments.iter()) {
+        interpreter.memory.validate_import(parameter.ty, argument)?;
     }
     let mut bindings = Vec::with_capacity(arguments.len() + 1);
     for (parameter, argument) in parameters.iter().zip(arguments) {
@@ -303,10 +313,13 @@ pub(crate) fn run_entry(
     if outcome.is_ok() || matches!(&outcome, Err(RuntimeError::SourceFailure(_))) {
         interpreter.memory.check_runtime_ownership()?;
     }
-    outcome?;
-    // Semantic cleanup is explicit MIR; native storage leaves need no Rust destructor.
-    // Memory reclaims every allocation on both successful and failed exits.
-    interpreter.memory.export(result)
+    // Export transfers native ownership. Storage teardown never runs Ferlium cleanup; reclamation
+    // of native-owned allocations/resources after poisoning belongs to the runtime-domain layer.
+    let result = outcome.and_then(|()| interpreter.memory.export(result));
+    if result.is_ok() || matches!(&result, Err(RuntimeError::SourceFailure(_))) {
+        interpreter.memory.reclaim_host_natives()?;
+    }
+    result
 }
 
 struct Interpreter<'a, 'p> {
@@ -624,6 +637,39 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         }
     }
 
+    /// Bind the current runtime's native layouts and host-boundary move-out glue.
+    fn prepare_native_storage(&mut self) -> Result<(), RuntimeError> {
+        let mut exports = FxHashMap::default();
+        for module in self.program.modules() {
+            for (_, native) in module.native_entries() {
+                if let Some(export) = native.host_output() {
+                    let ty = match native.signature().result {
+                        NativeResult::Output(layout)
+                        | NativeResult::Optional {
+                            payload: layout, ..
+                        } => layout.ty,
+                        _ => continue,
+                    };
+                    exports.insert(ty, export);
+                }
+            }
+        }
+        for module in self.program.modules() {
+            let env = ModuleEnv::new(
+                self.session.expect_fresh_module(module.module()),
+                self.session.raw_modules(),
+            );
+            for (layout, _) in module.native_layouts() {
+                self.memory.prepare_native(
+                    layout,
+                    concrete_type_is_trivial_copy(layout.ty, &env),
+                    exports.get(&layout.ty).copied(),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     /// Check each reachable instantiation, including calls in untaken branches. The bound also
     /// prevents polymorphic recursion from expanding an unbounded preparation graph before fuel.
     fn check_supported(&mut self, entry: FunctionId) -> Result<(), RuntimeError> {
@@ -651,15 +697,22 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 if !native.supports_physical_call() {
                     return Err(unsupported("this native adapter"));
                 }
+                let env = self.env(id);
                 for parameter in &native.signature().parameters {
-                    ScalarKind::for_native(parameter.layout())?;
+                    self.memory.prepare_type(parameter.layout().ty, &env)?;
                 }
                 match native.signature().result {
                     NativeResult::Scalar(layout, _) | NativeResult::Output(layout) => {
-                        ScalarKind::for_native(layout)?;
+                        self.memory.prepare_type(layout.ty, &env)?;
                     }
                     NativeResult::Unit | NativeResult::Never => (),
-                    _ => return Err(unsupported("optional or addressor native results")),
+                    NativeResult::Optional { payload, ty } => {
+                        self.memory.prepare_type(payload.ty, &env)?;
+                        self.memory.prepare_type(ty, &env)?;
+                    }
+                    NativeResult::Addressor { pointee, .. } => {
+                        self.memory.prepare_type(pointee.ty, &env)?;
+                    }
                 }
                 continue;
             };
@@ -1247,6 +1300,9 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             Memcpy | Move | MoveBytes { .. } => {
                 let source = place(0)?;
                 let destination = place(1)?;
+                if matches!(operation.kind, Move | MoveBytes { .. }) && source != destination {
+                    self.memory.check_consume(source)?;
+                }
                 if let Some([size, align]) = witnessed_layout {
                     self.memory.check_layout(source, size, align)?;
                 }
@@ -1278,10 +1334,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 if self.memory.overlaps(source, destination)? || source.ty != destination.ty {
                     return Err(invalid("invalid replacement storage"));
                 }
-                let replacement = self.memory.read_value(source, false)?;
-                let old = self.memory.read_value(destination, true)?;
-                self.memory.write_value(destination, &replacement)?;
-                self.memory.write_value(source, &old)?;
+                self.memory.replace_value(source, destination)?;
                 None
             }
             Clone { .. } => {
@@ -1432,19 +1485,18 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             return Err(invalid("native arity mismatch"));
         }
         let output = output.place()?;
-        if self.memory.is_pointer_slot(output)?
-            || ScalarKind::for_type(output.ty)? != ScalarKind::for_type(signature.result.ty())?
-        {
+        let addressor = matches!(signature.result, NativeResult::Addressor { .. });
+        if self.memory.is_pointer_slot(output)? != addressor || output.ty != signature.result.ty() {
             return Err(invalid("invalid native output storage"));
         }
         let mut addresses = Vec::with_capacity(inputs.len());
         for (input, parameter) in inputs.iter().zip(&signature.parameters) {
             let address = input.place()?;
-            if self.memory.is_pointer_slot(address)?
-                || ScalarKind::for_type(address.ty)? != ScalarKind::for_native(parameter.layout())?
-                || !self.memory.initialized(address)?
-            {
-                return Err(invalid("invalid native input storage"));
+            self.memory.check_native(address, parameter.layout())?;
+            match parameter {
+                NativeParameter::Mutable(_) => self.memory.check_write(address)?,
+                NativeParameter::Consuming(_) => self.memory.check_consume(address)?,
+                _ => (),
             }
             if self.memory.overlaps(address, output)?
                 && !matches!(parameter, NativeParameter::Scalar(..))
@@ -1486,6 +1538,14 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 }
             })
             .collect::<Result<Vec<_>, RuntimeError>>()?;
+        // Invalidate saved opaque bytes before any mutable native access, also on source failure.
+        for (address, parameter) in addresses.iter().zip(&signature.parameters) {
+            match parameter {
+                NativeParameter::Mutable(_) => self.memory.native_mutated(*address)?,
+                NativeParameter::Shared(_) => self.memory.invalidate_native_snapshot(*address)?,
+                _ => (),
+            }
+        }
         let pointers = addresses
             .iter()
             .zip(&mut scalars)
@@ -1494,23 +1554,63 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 None => self.memory.pointer(*address),
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let output_pointer = self.memory.pointer(output)?;
+        let marker = self.memory.len();
+        let payload = match signature.result {
+            NativeResult::Optional { payload, .. } => Some(self.memory.allocate(payload.ty, None)?),
+            _ => None,
+        };
+        let mut member_pointer: *mut u8 = ptr::null_mut();
+        let output_pointer = if addressor {
+            ptr::from_mut(&mut member_pointer).cast()
+        } else {
+            self.memory.pointer(payload.unwrap_or(output))?
+        };
         // TrivialCopy result slots may be reused. Present an absent output to the C protocol,
         // and only mark it initialized after success (also when the previous result was live).
-        self.memory.clear(output)?;
+        self.memory.prepare_output(output)?;
         let mut failure = NativeFailureState::default();
         // SAFETY: layouts, initialization, liveness and disjointness were checked above. Addresses
         // are stable; no interpreter storage access occurs until the adapter's Rust borrows end.
-        unsafe { native.invoke_physical(&pointers, output_pointer, &mut failure) }?;
+        let outcome = unsafe { native.invoke_physical(&pointers, output_pointer, &mut failure) }?;
         if signature.result == NativeResult::Never {
             return Err(invalid("never native returned success"));
         }
         for (address, parameter) in addresses.iter().zip(&signature.parameters) {
             if matches!(parameter, NativeParameter::Consuming(_)) {
-                self.memory.clear(*address)?;
+                self.memory.consume_native(*address)?;
             }
         }
-        self.memory.mark_initialized(output)?;
+        if let NativeResult::Addressor {
+            pointee,
+            root,
+            mutable,
+        } = signature.result
+        {
+            // SAFETY: the typed adapter and unsafe registration establish a live rooted member;
+            // Memory additionally checks alignment, receiver lifetime, and access permissions.
+            let member = unsafe {
+                self.memory.native_member(
+                    addresses[root as usize],
+                    member_pointer,
+                    pointee.ty,
+                    mutable,
+                    Location::new_synthesized(),
+                )
+            }?;
+            self.memory.write_pointer(output, member)?;
+        } else if let Some(payload) = payload {
+            let present = match outcome {
+                NativeCallOutcome::Initialized => {
+                    self.memory.mark_initialized(payload)?;
+                    true
+                }
+                NativeCallOutcome::Absent => false,
+            };
+            self.memory.finish_optional(output, payload, present)?;
+            self.memory.restore(marker);
+        } else {
+            self.memory.mark_initialized(output)?;
+        }
         Ok(())
     }
 }
@@ -1597,8 +1697,9 @@ mod tests {
             "enum List<T> { Nil, Cons(T, List<T>) } fn fail<T>(value: T, n: int) -> (T, int) { (value, idiv(10, n)) } fn compute(x: int) -> (List<int>, int) { fail(List::Cons(x, List::Nil), x - 7) }",
             "struct Probe(int) impl Value for Probe { fn eq(a: Probe, b: Probe) -> bool { a.0 == b.0 } fn to_string(a: Probe) -> string { to_string(a.0) } fn hash(a: Probe, s: &mut hasher) { hash(a.0, s) } fn clone(a: Probe) -> Probe { Probe(a.0 + 1) } fn drop(a: &mut Probe) { a.0 = 0; } } fn duplicate<T>(x: T) -> (T, T) { (x, x) } fn compute(x: int) -> int { let p = duplicate(Probe(x)); p.0.0 + p.1.0 }",
         ].into_iter().map(|source| (source, true)).chain([
-            // The selected dictionary method remains unsupported even in an untaken branch.
-            ("fn maybe<T>(value: T, n: int) -> T { if n == 0 { to_string(value); }; value } fn compute(x: int) -> int { maybe(x, x) }", false),
+            ("fn maybe<T>(value: T, n: int) -> T { if n == 0 { to_string(value); }; value } fn compute(x: int) -> int { maybe(x, x) }", true),
+            // Capability preparation still visits unsupported calls in untaken branches.
+            ("fn maybe<T>(value: T, n: int) -> T { if n == 0 { let f = |x| x; f(value); }; value } fn compute(x: int) -> int { maybe(x, x) }", false),
         ]) {
             let module = session
                 .compile(source, "generic", Path::single_str("generic"))
@@ -1627,7 +1728,7 @@ mod tests {
             let actual = run_entry(
                 &program,
                 FunctionId::new(module, entry),
-                &[int_value(7)],
+                &mut [int_value(7)],
                 ReferenceInterpreterLimits::default(),
                 &session,
             );

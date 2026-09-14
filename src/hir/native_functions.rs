@@ -443,10 +443,25 @@ pub struct NativeEntry {
     signature: NativeSignature,
     result_knowledge: NativeResultKnowledge,
     physical: Option<PhysicalInvoke>,
+    /// Typed move-out glue for the boxed host boundary, not a guest clone operation.
+    host_output: Option<unsafe fn(*mut u8) -> Value>,
 }
 
-type PhysicalInvoke =
-    unsafe fn(*const (), &[*mut u8], *mut u8, &mut NativeFailureState) -> Result<(), RuntimeError>;
+/// Output state after a successful physical native call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeCallOutcome {
+    /// The output is initialized, including zero-sized unit results.
+    Initialized,
+    /// An optional result has no payload; output storage remains absent.
+    Absent,
+}
+
+type PhysicalInvoke = unsafe fn(
+    *const (),
+    &[*mut u8],
+    *mut u8,
+    &mut NativeFailureState,
+) -> Result<NativeCallOutcome, RuntimeError>;
 
 impl NativeEntry {
     fn with_physical(mut self, invoke: PhysicalInvoke) -> Self {
@@ -459,6 +474,7 @@ impl NativeEntry {
             signature,
             result_knowledge: NativeResultKnowledge::Unknown,
             physical: None,
+            host_output: None,
         }
     }
 
@@ -480,18 +496,32 @@ impl NativeEntry {
         self.physical.is_some()
     }
 
+    fn with_host_output<O: NativeStoredResult>(mut self) -> Self {
+        unsafe fn take<O: NativeStoredResult>(pointer: *mut u8) -> Value {
+            // SAFETY: the host bridge transfers one initialized value of the registered type.
+            O::boxed(unsafe { pointer.cast::<O>().read() })
+        }
+        self.host_output = Some(take::<O>);
+        self
+    }
+
+    pub(crate) fn host_output(&self) -> Option<unsafe fn(*mut u8) -> Value> {
+        self.host_output
+    }
+
     /// Invoke the original typed C entry without boxed values.
     ///
     /// # Safety
     /// Inputs must match the signature, be aligned, initialized and live, and obey its aliasing
-    /// permissions. Output must be disjoint, aligned, uninitialized result storage. All pointers
-    /// remain valid throughout the call. Success initializes output; failure leaves it absent.
+    /// permissions. Output must be disjoint, aligned result storage with no owned value to destroy.
+    /// TrivialCopy storage may be reused. All pointers must remain valid throughout the call.
+    /// Failure leaves output absent.
     pub(crate) unsafe fn invoke_physical(
         &self,
         inputs: &[*mut u8],
         output: *mut u8,
         failure: &mut NativeFailureState,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<NativeCallOutcome, RuntimeError> {
         let invoke = self
             .physical
             .expect("physical entry was checked before execution");
@@ -896,14 +926,14 @@ macro_rules! entries {
         impl<$($arg: NativeArgument,)* R: NativeDirectResult> EntryFunction for $direct<$($arg,)* R> {
             fn entry(&self) -> NativeEntry {
                 #[allow(unused_variables)]
-                unsafe fn invoke<$($arg: NativeArgument,)* R: NativeDirectResult>(address: *const (), inputs: &[*mut u8], output: *mut u8, failure: &mut NativeFailureState) -> Result<(), RuntimeError> {
+                unsafe fn invoke<$($arg: NativeArgument,)* R: NativeDirectResult>(address: *const (), inputs: &[*mut u8], output: *mut u8, failure: &mut NativeFailureState) -> Result<NativeCallOutcome, RuntimeError> {
                     // SAFETY: this adapter is paired only with this exact monomorphized C entry;
                     // the executor validates all storage and aliasing before entering it.
                     unsafe {
                         let function: for<'a> extern "C" fn($($arg::Borrowed<'a>),*) -> R = std::mem::transmute(address);
                         output.cast::<R>().write(function($($arg::borrow_physical(inputs[$index])),*));
                     }
-                    Ok(())
+                    Ok(NativeCallOutcome::Initialized)
                 }
                 NativeEntry::new(self.0 as *const (), NativeSignature {
                     failure: NativeFailureConvention::Infallible,
@@ -954,18 +984,18 @@ macro_rules! entries {
         impl<$($arg: NativeArgument,)* O: NativeStoredResult> EntryFunction for $output<$($arg,)* O> {
             fn entry(&self) -> NativeEntry {
                 #[allow(unused_variables)]
-                unsafe fn invoke<$($arg: NativeArgument,)* O: NativeStoredResult>(address: *const (), inputs: &[*mut u8], output: *mut u8, failure: &mut NativeFailureState) -> Result<(), RuntimeError> {
+                unsafe fn invoke<$($arg: NativeArgument,)* O: NativeStoredResult>(address: *const (), inputs: &[*mut u8], output: *mut u8, failure: &mut NativeFailureState) -> Result<NativeCallOutcome, RuntimeError> {
                     // SAFETY: paired with the exact entry type; the executor checked the storage.
                     unsafe {
                         let function: for<'a> extern "C" fn($($arg::Borrowed<'a>,)* &mut MaybeUninit<O>) = std::mem::transmute(address);
                         function($($arg::borrow_physical(inputs[$index]),)* &mut *output.cast::<MaybeUninit<O>>());
                     }
-                    Ok(())
+                    Ok(NativeCallOutcome::Initialized)
                 }
                 NativeEntry::new(self.0 as *const (), NativeSignature {
                     failure: NativeFailureConvention::Infallible,
                     parameters: vec![$($arg::parameter()),*], result: NativeResult::Output(O::layout()),
-                }).with_physical(invoke::<$($arg,)* O>)
+                }).with_physical(invoke::<$($arg,)* O>).with_host_output::<O>()
             }
             #[allow(unused_variables)]
             fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalControlFlowResult {
@@ -1050,13 +1080,13 @@ macro_rules! fallible_entries {
         impl<$($arg: NativeArgument),*> EntryFunction for $unit<$($arg),*> {
             fn entry(&self) -> NativeEntry {
                 #[allow(unused_variables)]
-                unsafe fn invoke<$($arg: NativeArgument),*>(address: *const (), inputs: &[*mut u8], output: *mut u8, failure: &mut NativeFailureState) -> Result<(), RuntimeError> {
+                unsafe fn invoke<$($arg: NativeArgument),*>(address: *const (), inputs: &[*mut u8], output: *mut u8, failure: &mut NativeFailureState) -> Result<NativeCallOutcome, RuntimeError> {
                     // SAFETY: paired with the exact entry type; the executor checked the storage.
                     let status = unsafe {
                         let function: for<'a> extern "C" fn(&mut NativeFailureState $(, $arg::Borrowed<'a>)*) -> u32 = std::mem::transmute(address);
                         function(failure $(, $arg::borrow_physical(inputs[$index]))*)
                     };
-                    failure.finish(status)
+                    failure.finish(status).map(|()| NativeCallOutcome::Initialized)
                 }
                 NativeEntry::new(self.function as *const (), NativeSignature {
                     failure: NativeFailureConvention::StatusWithState,
@@ -1118,18 +1148,18 @@ macro_rules! fallible_entries {
         impl<$($arg: NativeArgument,)* O: NativeStoredResult> EntryFunction for $output<$($arg,)* O> {
             fn entry(&self) -> NativeEntry {
                 #[allow(unused_variables)]
-                unsafe fn invoke<$($arg: NativeArgument,)* O: NativeStoredResult>(address: *const (), inputs: &[*mut u8], output: *mut u8, failure: &mut NativeFailureState) -> Result<(), RuntimeError> {
+                unsafe fn invoke<$($arg: NativeArgument,)* O: NativeStoredResult>(address: *const (), inputs: &[*mut u8], output: *mut u8, failure: &mut NativeFailureState) -> Result<NativeCallOutcome, RuntimeError> {
                     // SAFETY: paired with the exact entry type; the executor checked the storage.
                     let status = unsafe {
                         let function: for<'a> extern "C" fn(&mut NativeFailureState, $($arg::Borrowed<'a>,)* &mut MaybeUninit<O>) -> u32 = std::mem::transmute(address);
                         function(failure, $($arg::borrow_physical(inputs[$index]),)* &mut *output.cast::<MaybeUninit<O>>())
                     };
-                    failure.finish(status)
+                    failure.finish(status).map(|()| NativeCallOutcome::Initialized)
                 }
                 NativeEntry::new(self.0 as *const (), NativeSignature {
                     failure: NativeFailureConvention::StatusWithState,
                     parameters: vec![$($arg::parameter()),*], result: NativeResult::Output(O::layout()),
-                }).with_physical(invoke::<$($arg,)* O>)
+                }).with_physical(invoke::<$($arg,)* O>).with_host_output::<O>()
             }
             fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalControlFlowResult {
                 let _ = args;
@@ -1214,14 +1244,14 @@ impl<T: 'static> EntryFunction for NativeDropFn<T> {
             inputs: &[*mut u8],
             _: *mut u8,
             _: &mut NativeFailureState,
-        ) -> Result<(), RuntimeError> {
+        ) -> Result<NativeCallOutcome, RuntimeError> {
             // SAFETY: this adapter is paired with exactly native_value_drop<T>'s entry type;
             // the executor provides an initialized, exclusively accessible T.
             unsafe {
                 let function: unsafe extern "C" fn(*mut T) = mem::transmute(address);
                 function(inputs[0].cast::<T>());
             }
-            Ok(())
+            Ok(NativeCallOutcome::Initialized)
         }
         NativeEntry::new(
             self.0 as *const (),
@@ -1374,6 +1404,27 @@ impl<A: NativeArgument, O: NativeStoredResult> NativeOptionalFn1<A, O> {
 impl<A: NativeArgument, O: NativeStoredResult> sealed::Entry for NativeOptionalFn1<A, O> {}
 impl<A: NativeArgument, O: NativeStoredResult> EntryFunction for NativeOptionalFn1<A, O> {
     fn entry(&self) -> NativeEntry {
+        unsafe fn invoke<A: NativeArgument, O: NativeStoredResult>(
+            address: *const (),
+            inputs: &[*mut u8],
+            output: *mut u8,
+            _: &mut NativeFailureState,
+        ) -> Result<NativeCallOutcome, RuntimeError> {
+            // SAFETY: paired with the registered C signature; storage is checked by the executor.
+            let present = unsafe {
+                let function: for<'a> extern "C" fn(A::Borrowed<'a>, &mut MaybeUninit<O>) -> bool =
+                    mem::transmute(address);
+                function(
+                    A::borrow_physical(inputs[0]),
+                    &mut *output.cast::<MaybeUninit<O>>(),
+                )
+            };
+            Ok(if present {
+                NativeCallOutcome::Initialized
+            } else {
+                NativeCallOutcome::Absent
+            })
+        }
         NativeEntry::new(
             self.function as *const (),
             NativeSignature {
@@ -1385,6 +1436,8 @@ impl<A: NativeArgument, O: NativeStoredResult> EntryFunction for NativeOptionalF
                 },
             },
         )
+        .with_physical(invoke::<A, O>)
+        .with_host_output::<O>()
     }
     fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalControlFlowResult {
         let mut arg = A::extract(&args[0], ctx).map_err(RuntimeError::new_native)?;
@@ -1449,13 +1502,15 @@ mod tests {
         // SAFETY: distinct, aligned native scalars with the exact registered layouts. The output
         // is absent and these local allocations stay live across the adapter call.
         unsafe {
-            add.entry
+            let outcome = add
+                .entry
                 .invoke_physical(
                     &[ptr::from_mut(&mut a).cast(), ptr::from_mut(&mut b).cast()],
                     output.as_mut_ptr().cast(),
                     &mut failure,
                 )
                 .unwrap();
+            assert_eq!(outcome, NativeCallOutcome::Initialized);
             assert_eq!(output.assume_init().into_inner(), 3.75);
         }
 
@@ -1485,7 +1540,7 @@ mod tests {
             );
             assert!(failure.is_empty());
             b = 2;
-            divide
+            let outcome = divide
                 .entry
                 .invoke_physical(
                     &[ptr::from_mut(&mut a).cast(), ptr::from_mut(&mut b).cast()],
@@ -1493,6 +1548,7 @@ mod tests {
                     &mut failure,
                 )
                 .unwrap();
+            assert_eq!(outcome, NativeCallOutcome::Initialized);
             assert_eq!(output.assume_init(), 21);
         }
     }

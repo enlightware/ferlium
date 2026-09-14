@@ -28,15 +28,15 @@ use std::{
 use rustc_hash::{FxHashMap, FxHashSet};
 use ustr::Ustr;
 
-#[cfg(feature = "std-snapshot")]
-use crate::hir::native_functions::NativeLayout;
 use crate::{
     Location,
     compiler::MirArtifacts,
     hir::{
         dictionary::DictionaryReq,
         function::{ArgConvention, CallableDefinition},
-        native_functions::{NativeContractError, NativeEntry, NativeResult, NativeSignature},
+        native_functions::{
+            NativeContractError, NativeEntry, NativeLayout, NativeResult, NativeSignature,
+        },
         value::{LiteralValue, VariantPayloadStorage},
     },
     mir::{
@@ -359,7 +359,6 @@ impl BackendReadyMirArtifacts {
     pub(crate) fn native_entry(&self, function: FunctionId) -> Option<&NativeEntry> {
         self.native_requirements.entries.get(&function)
     }
-    #[cfg(feature = "std-snapshot")]
     pub(crate) fn native_entries(&self) -> impl Iterator<Item = (FunctionId, &NativeEntry)> {
         self.native_requirements
             .entries
@@ -367,7 +366,6 @@ impl BackendReadyMirArtifacts {
             .map(|(&id, entry)| (id, entry))
     }
 
-    #[cfg(feature = "std-snapshot")]
     pub(crate) fn native_layouts(
         &self,
     ) -> impl Iterator<Item = (NativeLayout, Option<(FunctionId, FunctionId)>)> + '_ {

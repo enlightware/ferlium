@@ -38,7 +38,12 @@ use ferlium::{
     types::type_scheme::{PubTypeConstraint, TypeScheme},
 };
 use regex::Regex;
-use std::{cell::RefCell, fmt, sync::LazyLock, sync::atomic::AtomicIsize};
+use std::{
+    cell::{Cell, RefCell},
+    fmt,
+    sync::LazyLock,
+    sync::atomic::AtomicIsize,
+};
 use ustr::ustr;
 
 #[derive(Debug)]
@@ -744,9 +749,11 @@ fn witnessed_type_def(test_assoc_trait: TraitId) -> TypeDef {
     }
 }
 
-static TRACKED_CLONES: AtomicIsize = AtomicIsize::new(0);
-static TRACKED_DROPS: AtomicIsize = AtomicIsize::new(0);
-static TRACKED_NATIVE_DROPS: AtomicIsize = AtomicIsize::new(0);
+thread_local! {
+    static TRACKED_CLONES: Cell<isize> = const { Cell::new(0) };
+    static TRACKED_DROPS: Cell<isize> = const { Cell::new(0) };
+    static TRACKED_NATIVE_DROPS: Cell<isize> = const { Cell::new(0) };
+}
 
 #[derive(Debug)]
 pub struct CloneTrackedNative(isize);
@@ -755,13 +762,13 @@ impl NativeValueType for CloneTrackedNative {}
 
 impl Drop for CloneTrackedNative {
     fn drop(&mut self) {
-        TRACKED_NATIVE_DROPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        TRACKED_NATIVE_DROPS.set(TRACKED_NATIVE_DROPS.get() + 1);
     }
 }
 
 impl Clone for CloneTrackedNative {
     fn clone(&self) -> Self {
-        TRACKED_CLONES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        TRACKED_CLONES.set(TRACKED_CLONES.get() + 1);
         Self(self.0)
     }
 }
@@ -805,11 +812,11 @@ extern "C" fn clone_tracked_payload(value: &CloneTrackedNative) -> isize {
 }
 
 extern "C" fn reset_clone_tracked_clones() {
-    TRACKED_CLONES.store(0, std::sync::atomic::Ordering::Relaxed);
+    TRACKED_CLONES.set(0);
 }
 
 extern "C" fn clone_tracked_clone_count() -> isize {
-    TRACKED_CLONES.load(std::sync::atomic::Ordering::Relaxed)
+    TRACKED_CLONES.get()
 }
 
 extern "C" fn equal_clone_tracked(left: &CloneTrackedNative, right: &CloneTrackedNative) -> bool {
@@ -832,12 +839,12 @@ unsafe extern "C" fn drop_clone_tracked(target: *mut CloneTrackedNative) {
     unsafe { target.drop_in_place() };
 }
 
-extern "C" fn reset_native_drops() {
-    TRACKED_NATIVE_DROPS.store(0, std::sync::atomic::Ordering::Relaxed);
+pub(crate) extern "C" fn reset_native_drops() {
+    TRACKED_NATIVE_DROPS.set(0);
 }
 
-extern "C" fn native_drop_count() -> isize {
-    TRACKED_NATIVE_DROPS.load(std::sync::atomic::Ordering::Relaxed)
+pub(crate) extern "C" fn native_drop_count() -> isize {
+    TRACKED_NATIVE_DROPS.get()
 }
 
 fn clone_tracked_value_clone_function() -> Function {
@@ -850,24 +857,16 @@ fn clone_tracked_value_drop_function() -> Function {
 }
 
 extern "C" fn record_tracked_drop(value: isize) {
-    // Wrapping arithmetic: the log accumulates across every test of the process until a test
-    // resets it (wasm runs the whole suite in one process), so an unread log can exceed `isize`
-    // — 32-bit on wasm. Tests that assert the log reset it first, and their short logs are exact.
-    TRACKED_DROPS
-        .fetch_update(
-            std::sync::atomic::Ordering::Relaxed,
-            std::sync::atomic::Ordering::Relaxed,
-            |old| Some(old.wrapping_mul(10).wrapping_add(value)),
-        )
-        .unwrap();
+    // Unread logs can overflow, particularly on wasm32. Tests reset before asserting short logs.
+    TRACKED_DROPS.set(TRACKED_DROPS.get().wrapping_mul(10).wrapping_add(value));
 }
 
 extern "C" fn reset_tracked_drops() {
-    TRACKED_DROPS.store(0, std::sync::atomic::Ordering::Relaxed);
+    TRACKED_DROPS.set(0);
 }
 
 extern "C" fn tracked_drop_log() -> isize {
-    TRACKED_DROPS.load(std::sync::atomic::Ordering::Relaxed)
+    TRACKED_DROPS.get()
 }
 
 #[derive(Clone)]
@@ -908,13 +907,7 @@ impl Callable for ConstrainedNativeProbe {
     }
 }
 
-fn testing_module(
-    module_id: ModuleId,
-    iterator_trait: TraitId,
-    value_trait_id: TraitId,
-    value_trait_def: &Trait,
-) -> Module {
-    let mut module = Module::new(module_id, Path::single_str("testing"));
+fn add_tracked_members(module: &mut Module) {
     use ferlium::hir::native_functions::{
         NativeAddressorMut, NativeAddressorRef, NativeFallibleAddressorMut,
     };
@@ -972,6 +965,100 @@ fn testing_module(
             ),
         );
     }
+}
+
+fn add_tracked_value(module: &mut Module, value_trait_id: TraitId, value_trait_def: &Trait) {
+    module.add_concrete_impl_for_trait_def_no_locals(
+        value_trait_id,
+        value_trait_def,
+        [Type::primitive::<CloneTrackedNative>()],
+        [],
+        [
+            LiteralValue::new_native(std::mem::size_of::<CloneTrackedNative>() as isize),
+            LiteralValue::new_native(std::mem::align_of::<CloneTrackedNative>() as isize),
+        ],
+        [
+            Box::new(NativeFnRR::new(equal_clone_tracked)) as Function,
+            Box::new(NativeOutFnR::from_rust(clone_tracked_to_string)) as Function,
+            Box::new(NativeFnRM::new(hash_clone_tracked)) as Function,
+            clone_tracked_value_clone_function(),
+            clone_tracked_value_drop_function(),
+        ],
+    );
+}
+
+fn add_tracked_functions(module: &mut Module) {
+    module.add_function(
+        "make_clone_tracked".into(),
+        NativeOutFn0::from_rust(make_clone_tracked).description(
+            [],
+            "Creates a clone-counting native test value.",
+            no_effects(),
+        ),
+    );
+    module.add_function(
+        "clone_tracked_payload".into(),
+        NativeFnR::new(clone_tracked_payload).description(
+            ["value"],
+            "Returns the payload of a clone-counting native test value.",
+            no_effects(),
+        ),
+    );
+    module.add_function(
+        "reset_clone_tracked_clones".into(),
+        NativeFn0::new(reset_clone_tracked_clones).description(
+            [],
+            "Resets the clone counter for clone-counting native test values.",
+            effect(PrimitiveEffect::Write),
+        ),
+    );
+    module.add_function(
+        "clone_tracked_clone_count".into(),
+        NativeFn0::new(clone_tracked_clone_count).description(
+            [],
+            "Returns the clone counter for clone-counting native test values.",
+            effect(PrimitiveEffect::Read),
+        ),
+    );
+    module.add_function(
+        "reset_native_drops".into(),
+        NativeFn0::new(reset_native_drops).description(
+            [],
+            "Resets the Rust destructor counter for native test values.",
+            effect(PrimitiveEffect::Write),
+        ),
+    );
+    module.add_function(
+        "native_drop_count".into(),
+        NativeFn0::new(native_drop_count).description(
+            [],
+            "Returns the Rust destructor counter for native test values.",
+            effect(PrimitiveEffect::Read),
+        ),
+    );
+}
+
+// The physical bridge needs native fixtures without the module's boxed-only probes.
+fn native_testing_module(
+    module_id: ModuleId,
+    value_trait_id: TraitId,
+    value_trait_def: &Trait,
+) -> Module {
+    let mut module = Module::new(module_id, Path::single_str("testing"));
+    add_tracked_members(&mut module);
+    add_tracked_value(&mut module, value_trait_id, value_trait_def);
+    add_tracked_functions(&mut module);
+    module
+}
+
+fn testing_module(
+    module_id: ModuleId,
+    iterator_trait: TraitId,
+    value_trait_id: TraitId,
+    value_trait_def: &Trait,
+) -> Module {
+    let mut module = Module::new(module_id, Path::single_str("testing"));
+    add_tracked_members(&mut module);
     let test_assoc_trait = test_assoc_trait();
     let test_witnessed_project_trait = test_witnessed_project_trait();
     let test_assoc_trait_id = TraitId::new(module_id, module.add_trait(test_assoc_trait));
@@ -1134,23 +1221,7 @@ fn testing_module(
         [],
         [Box::new(InterpreterFixture::Zero) as Function],
     );
-    module.add_concrete_impl_for_trait_def_no_locals(
-        value_trait_id,
-        value_trait_def,
-        [Type::primitive::<CloneTrackedNative>()],
-        [],
-        [
-            LiteralValue::new_native(std::mem::size_of::<CloneTrackedNative>() as isize),
-            LiteralValue::new_native(std::mem::align_of::<CloneTrackedNative>() as isize),
-        ],
-        [
-            Box::new(NativeFnRR::new(equal_clone_tracked)) as Function,
-            Box::new(NativeOutFnR::from_rust(clone_tracked_to_string)) as Function,
-            Box::new(NativeFnRM::new(hash_clone_tracked)) as Function,
-            clone_tracked_value_clone_function(),
-            clone_tracked_value_drop_function(),
-        ],
-    );
+    add_tracked_value(&mut module, value_trait_id, value_trait_def);
     let generic_ty = Type::variable_id(0);
     module.add_function(
         "constrained_native_probe".into(),
@@ -1201,54 +1272,7 @@ fn testing_module(
             FnType::new_by_val([int_type(), int_type()], pair_variant_type, no_effects()),
         ),
     );
-    module.add_function(
-        "make_clone_tracked".into(),
-        NativeOutFn0::from_rust(make_clone_tracked).description(
-            [],
-            "Creates a clone-counting native test value.",
-            no_effects(),
-        ),
-    );
-    module.add_function(
-        "clone_tracked_payload".into(),
-        NativeFnR::new(clone_tracked_payload).description(
-            ["value"],
-            "Returns the payload of a clone-counting native test value.",
-            no_effects(),
-        ),
-    );
-    module.add_function(
-        "reset_clone_tracked_clones".into(),
-        NativeFn0::new(reset_clone_tracked_clones).description(
-            [],
-            "Resets the clone counter for clone-counting native test values.",
-            effect(PrimitiveEffect::Write),
-        ),
-    );
-    module.add_function(
-        "clone_tracked_clone_count".into(),
-        NativeFn0::new(clone_tracked_clone_count).description(
-            [],
-            "Returns the clone counter for clone-counting native test values.",
-            effect(PrimitiveEffect::Read),
-        ),
-    );
-    module.add_function(
-        "reset_native_drops".into(),
-        NativeFn0::new(reset_native_drops).description(
-            [],
-            "Resets the Rust destructor counter for native test values.",
-            effect(PrimitiveEffect::Write),
-        ),
-    );
-    module.add_function(
-        "native_drop_count".into(),
-        NativeFn0::new(native_drop_count).description(
-            [],
-            "Returns the Rust destructor counter for native test values.",
-            effect(PrimitiveEffect::Read),
-        ),
-    );
+    add_tracked_functions(&mut module);
     module.add_function(
         "record_tracked_drop".into(),
         // Declared pure because Value::drop has no effects. Unit calls are not folded away.
@@ -1480,6 +1504,25 @@ pub struct TestSession {
     modes: Vec<RunMode>,
 }
 impl TestSession {
+    /// Create a session with only the native value/member fixtures supported by physical MIR.
+    pub fn with_native_members() -> Self {
+        let mut session = CompilerSession::new();
+        let value = session
+            .std_module()
+            .get_trait_id_str(VALUE_TRAIT_NAME)
+            .unwrap();
+        let module = native_testing_module(
+            session.modules().next_id(),
+            value,
+            session.std_module().trait_def(value),
+        );
+        session.register_module(Path::single_str("testing"), module);
+        Self {
+            session,
+            modes: RunMode::ALL.to_vec(),
+        }
+    }
+
     /// Create a new test session with std, testing, effects and props modules registered.
     ///
     /// Every snippet run through the session is executed under every [`RunMode`] — the HIR

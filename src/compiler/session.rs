@@ -1361,7 +1361,8 @@ impl CompilerSession {
     /// Interpret an already-compiled entry through the selected reference backend.
     ///
     /// The entry must accept only caller-owned by-value arguments and cannot require hidden
-    /// dictionary parameters.
+    /// dictionary parameters. Argument count and representations must match the entry signature;
+    /// invalid host setup may panic rather than produce a guest runtime error.
     pub fn run_entry(
         &mut self,
         target: ExecutionTarget,
@@ -1385,7 +1386,7 @@ impl CompilerSession {
         target: ExecutionTarget,
         module_id: ModuleId,
         entry: LocalFunctionId,
-        arguments: Vec<Value>,
+        mut arguments: Vec<Value>,
         limits: ReferenceInterpreterLimits,
     ) -> Result<Value, RuntimeError> {
         if target == ExecutionTarget::PhysicalMir {
@@ -1397,13 +1398,13 @@ impl CompilerSession {
                     physical_interpreter::run_entry(
                         &program,
                         FunctionId::new(module_id, entry),
-                        &arguments,
+                        &mut arguments,
                         limits,
                         self,
                     )
                 });
-            // Reclaim host-owned arguments on every exit, including unsupported inputs and
-            // preparation failures.
+            // Reclaim argument storage not transferred into physical memory, including inputs
+            // rejected during preparation. Transferred native values follow the runtime's policy.
             for argument in arguments {
                 argument.discard_storage();
             }

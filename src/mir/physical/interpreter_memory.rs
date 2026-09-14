@@ -10,7 +10,7 @@ use crate::{
     eval::RuntimeError,
     hir::{
         native_functions::NativeLayout,
-        value::{LiteralValue, Value, VariantPayloadStorage},
+        value::{LiteralNativeValue, LiteralValue, Value, VariantPayloadStorage},
     },
     mir::physical::dictionary::{DictionaryReference, EvidenceEnvironmentLayout},
     module::{ProjectionIndex, id::Id},
@@ -21,13 +21,13 @@ use crate::{
             value_layout_for_type, variant_payload_offset, variant_payload_storage_for_type,
         },
     },
-    types::r#type::Type,
+    types::r#type::{Type, TypeKind},
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
     alloc::{Layout, alloc, dealloc},
-    mem::{offset_of, size_of, take},
-    ptr::{NonNull, from_mut},
+    mem::{ManuallyDrop, MaybeUninit, offset_of, replace, size_of, take},
+    ptr::{self, NonNull, from_mut},
     rc::Rc,
 };
 use ustr::Ustr;
@@ -171,6 +171,34 @@ enum StoredData {
     Empty(bool),
     Variant(Option<(Ustr, Box<StoredValue>)>),
     Pointer(Option<Address>),
+    Native(Option<Rc<NativeBytes>>),
+}
+
+/// Inert transfer bytes, including possibly uninitialized Rust padding. An owning snapshot is
+/// single-use: the identity's revision must still match when it is installed in another place.
+#[derive(Debug)]
+struct NativeBytes {
+    bytes: Box<[MaybeUninit<u8>]>,
+    /// Identity and revision of the sole owner, absent for TrivialCopy data.
+    owner: Option<(u64, u64)>,
+    interior: bool,
+}
+
+impl PartialEq for NativeBytes {
+    fn eq(&self, other: &Self) -> bool {
+        ptr::eq(self, other)
+    }
+}
+
+struct NativeOwner {
+    address: Address,
+    revision: u64,
+}
+
+#[derive(Clone, Copy)]
+struct NativeStorage {
+    copy: bool,
+    export: Option<unsafe fn(*mut u8) -> Value>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -181,6 +209,8 @@ pub(super) struct Address {
     version: u64,
     offset: usize,
     pub(super) ty: Type,
+    readonly: bool,
+    interior: bool,
 }
 
 struct VariantCase {
@@ -199,6 +229,7 @@ struct StorageLayout {
     members: Option<Vec<(usize, Rc<StorageLayout>)>>,
     cases: Option<Vec<VariantCase>>,
     pointer: bool,
+    native: Option<NativeStorage>,
     // Static scalar extents, used to validate the ABI layout before any unsafe access.
     leaves: Vec<(usize, ScalarKind)>,
 }
@@ -226,6 +257,7 @@ impl StorageLayout {
             members: None,
             cases: None,
             pointer: false,
+            native: None,
             leaves: vec![(0, kind)],
         }
     }
@@ -239,6 +271,7 @@ impl StorageLayout {
             members: None,
             cases: None,
             pointer: true,
+            native: None,
             leaves: vec![],
         }
     }
@@ -287,11 +320,17 @@ impl StorageLayout {
             members: Some(members),
             cases: None,
             pointer: false,
+            native: None,
             leaves,
         })
     }
 
     fn representation_compatible(&self, other: &Self) -> bool {
+        if self.native.is_some() || other.native.is_some() {
+            return self.ty == other.ty
+                && self.layout == other.layout
+                && self.native.is_some() == other.native.is_some();
+        }
         if self.layout != other.layout || self.pointer != other.pointer {
             return false;
         }
@@ -326,12 +365,16 @@ enum StorageState {
     Variant(Option<Ustr>),
     /// An initialized pointer slot records its checked provenance.
     Pointer(Option<Address>),
+    /// Owning opaque values carry a transfer identity; copyable natives use Value instead.
+    Native(Option<u64>),
 }
 
 impl StorageState {
     fn absent(shape: &StorageLayout) -> Self {
         if shape.pointer {
             Self::Pointer(None)
+        } else if shape.native.is_some_and(|n| !n.copy) {
+            Self::Native(None)
         } else if shape.cases.is_some() {
             Self::Variant(None)
         } else if shape.members.as_ref().is_some_and(|m| !m.is_empty()) {
@@ -347,6 +390,7 @@ impl StorageState {
             Self::Product => false,
             Self::Variant(tag) => tag.is_some(),
             Self::Pointer(pointer) => pointer.is_some(),
+            Self::Native(owner) => owner.is_some(),
         }
     }
 }
@@ -360,6 +404,8 @@ struct StorageNode {
     offset: usize,
     /// Identity stamp preventing reused node slots from reviving old addresses.
     version: u64,
+    /// Changes when an opaque receiver may invalidate previously returned member pointers.
+    borrow_epoch: u64,
     /// Whether this subobject identity is active rather than retired.
     live: bool,
     /// Kind-specific initialization; nonempty products use their children.
@@ -384,6 +430,12 @@ struct Allocation {
     generation: u64,
     /// Whether lifetime follows `runtime_dealloc` rather than stack restoration.
     heap: bool,
+    /// Receiver and borrow epoch of a native view; borrowed bytes are never deallocated here.
+    borrowed: Option<(Address, u64)>,
+    /// Direct native views rooted in this allocation.
+    borrowers: FxHashSet<usize>,
+    /// Native identities currently owned by this allocation or view.
+    native_owners: FxHashSet<u64>,
 }
 
 impl Allocation {
@@ -397,6 +449,7 @@ impl Allocation {
             shape: shape.clone(),
             offset,
             version: self.version,
+            borrow_epoch: 0,
             live: true,
             state: StorageState::absent(&shape),
             children: vec![],
@@ -431,9 +484,11 @@ impl Allocation {
 
 impl Drop for Allocation {
     fn drop(&mut self) {
-        // SAFETY: this owner holds exactly the allocation returned by alloc. Guest destruction is
-        // explicit MIR; scalar/tag/pointer representations have no Rust destructor.
-        unsafe { dealloc(self.pointer.as_ptr(), self.layout) };
+        if self.borrowed.is_none() {
+            // SAFETY: only owned allocations come from alloc. Semantic destruction is explicit
+            // MIR; teardown frees storage, not Rust-owned children or external resources.
+            unsafe { dealloc(self.pointer.as_ptr(), self.layout) };
+        }
     }
 }
 
@@ -531,6 +586,10 @@ pub(super) struct Memory {
     generation: u64,
     /// Maximum live allocation count, not a byte-memory quota.
     pub(super) allocation_limit: usize,
+    /// Unique live owners of opaque native values; snapshots transfer but never duplicate them.
+    native_owners: FxHashMap<u64, NativeOwner>,
+    /// Lost ownership remains an error after its containing stack storage has been reclaimed.
+    lost_native: bool,
 }
 
 impl Default for Memory {
@@ -558,11 +617,261 @@ impl Default for Memory {
             tags: FxHashMap::default(),
             generation: 0,
             allocation_limit: usize::MAX,
+            native_owners: FxHashMap::default(),
+            lost_native: false,
         }
     }
 }
 
 impl Memory {
+    pub(super) fn prepare_native(
+        &mut self,
+        layout: NativeLayout,
+        copy: bool,
+        export: Option<unsafe fn(*mut u8) -> Value>,
+    ) -> Result<(), RuntimeError> {
+        if ScalarKind::for_type(layout.ty).is_ok() {
+            ScalarKind::for_native(layout)?;
+            return Ok(());
+        }
+        let layout_value = Layout::from_size_align(layout.size, layout.align)
+            .map_err(|_| invalid("invalid native layout"))?;
+        self.layouts.insert(
+            layout.ty,
+            Rc::new(StorageLayout {
+                ty: layout.ty,
+                layout: layout_value,
+                depth: 0,
+                nodes: 1,
+                members: None,
+                cases: None,
+                pointer: false,
+                native: Some(NativeStorage { copy, export }),
+                leaves: vec![],
+            }),
+        );
+        Ok(())
+    }
+
+    fn native_identity(&self, address: Address) -> Result<Option<u64>, RuntimeError> {
+        let node = self.node(address)?;
+        self.node_native_identity(address, node)
+    }
+
+    fn node_native_identity(
+        &self,
+        address: Address,
+        node: &StorageNode,
+    ) -> Result<Option<u64>, RuntimeError> {
+        if let StorageState::Native(Some(id)) = node.state {
+            let owner = self
+                .native_owners
+                .get(&id)
+                .ok_or_else(|| invalid("use of destroyed native value"))?;
+            if !Self::same_place(owner.address, address) {
+                return Err(invalid("use of transferred native value"));
+            }
+            Ok(Some(id))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn same_place(mut a: Address, mut b: Address) -> bool {
+        a.readonly = false;
+        b.readonly = false;
+        a.interior = false;
+        b.interior = false;
+        a == b
+    }
+
+    pub(super) fn check_write(&self, address: Address) -> Result<(), RuntimeError> {
+        self.allocation(address)?;
+        if address.readonly {
+            return Err(invalid("write through a shared native member"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn check_native(
+        &self,
+        address: Address,
+        layout: NativeLayout,
+    ) -> Result<(), RuntimeError> {
+        self.check_layout(address, layout.size, layout.align)?;
+        if address.ty != layout.ty
+            || self.is_pointer_slot(address)?
+            || !self.initialized(address)?
+        {
+            return Err(invalid("invalid native input storage"));
+        }
+        self.native_identity(address)?;
+        Ok(())
+    }
+
+    /// Mutable access invalidates earlier byte snapshots, without changing place identity.
+    pub(super) fn native_mutated(&mut self, address: Address) -> Result<(), RuntimeError> {
+        self.check_write(address)?;
+        self.invalidate_native_snapshot(address)?;
+        let node = self.node_mut(address)?;
+        node.borrow_epoch = node
+            .borrow_epoch
+            .checked_add(1)
+            .ok_or_else(|| invalid("native borrow identity exhausted"))?;
+        self.revoke_members(address);
+        Ok(())
+    }
+
+    /// Even shared Rust access may update private interior-mutable bookkeeping.
+    pub(super) fn invalidate_native_snapshot(
+        &mut self,
+        address: Address,
+    ) -> Result<(), RuntimeError> {
+        if let Some(id) = self.native_identity(address)? {
+            let owner = self.native_owners.get_mut(&id).unwrap();
+            owner.revision = owner
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| invalid("native transfer identity exhausted"))?;
+        }
+        self.invalidate_receiver_snapshots(address)?;
+        Ok(())
+    }
+
+    fn invalidate_receiver_snapshots(&mut self, mut address: Address) -> Result<(), RuntimeError> {
+        while let Some((root, _)) = self.allocation(address)?.borrowed {
+            // A member write also invalidates snapshots of its opaque receiver.
+            if let Some(id) = self.native_identity(root)? {
+                let owner = self.native_owners.get_mut(&id).unwrap();
+                owner.revision = owner
+                    .revision
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("native transfer identity exhausted"))?;
+            }
+            address = root;
+        }
+        Ok(())
+    }
+
+    fn revoke_members(&mut self, root: Address) {
+        let children = self.allocations[root.allocation]
+            .as_ref()
+            .unwrap()
+            .borrowers
+            .iter()
+            .copied()
+            .filter(|&id| {
+                let (parent, _) = self.allocations[id].as_ref().unwrap().borrowed.unwrap();
+                Self::same_place(parent, root)
+            })
+            .collect::<Vec<_>>();
+        for id in children {
+            self.release(id);
+        }
+    }
+
+    pub(super) fn consume_native(&mut self, address: Address) -> Result<(), RuntimeError> {
+        self.check_consume(address)?;
+        if let Some(id) = self.native_identity(address)? {
+            self.native_owners.remove(&id);
+            self.allocations[address.allocation]
+                .as_mut()
+                .unwrap()
+                .native_owners
+                .remove(&id);
+        }
+        self.clear(address)
+    }
+
+    pub(super) fn check_consume(&self, address: Address) -> Result<(), RuntimeError> {
+        self.check_write(address)?;
+        if address.interior {
+            return Err(invalid("cannot consume a native member"));
+        }
+        Ok(())
+    }
+
+    /// Host arguments are borrowed by entry calls. Their remaining Rust values belong to the
+    /// host boundary, not to MIR cleanup. Never use this path to continue cleanup after poisoning.
+    pub(super) fn reclaim_host_natives(&mut self) -> Result<(), RuntimeError> {
+        let addresses = self
+            .native_owners
+            .values()
+            .filter_map(|owner| {
+                self.allocations[owner.address.allocation]
+                    .as_ref()
+                    .filter(|a| a.borrowed.is_none())
+                    .map(|_| owner.address)
+            })
+            .collect::<Vec<_>>();
+        for mut address in addresses {
+            address.interior = false;
+            address.readonly = false;
+            let value = self.export(address)?;
+            value.discard_storage();
+        }
+        Ok(())
+    }
+
+    pub(super) fn prepare_output(&mut self, address: Address) -> Result<(), RuntimeError> {
+        self.check_write(address)?;
+        if self.node(address)?.shape.native.is_some_and(|n| !n.copy)
+            && self.any_initialized(address)?
+        {
+            return Err(invalid("native output overwrites a live owner"));
+        }
+        if address.interior {
+            // Complete TrivialCopy writes preserve the enclosing Rust value's initialization.
+            self.invalidate_receiver_snapshots(address)?;
+            return Ok(());
+        }
+        self.clear(address)
+    }
+
+    pub(super) fn finish_optional(
+        &mut self,
+        output: Address,
+        payload: Address,
+        present: bool,
+    ) -> Result<(), RuntimeError> {
+        let tag = Ustr::from(if present { "Some" } else { "None" });
+        let shape = self.shape(output.ty)?;
+        let case = shape
+            .cases
+            .as_ref()
+            .and_then(|cases| cases.iter().find(|c| c.tag == tag))
+            .ok_or_else(|| invalid("invalid native optional result"))?;
+        let mut value = if present {
+            StoredValue {
+                ty: case.payload,
+                data: StoredData::Product(vec![self.read_value(payload, false)?]),
+            }
+        } else {
+            StoredValue {
+                ty: Type::unit(),
+                data: StoredData::Scalar(Some(Scalar::Unit)),
+            }
+        };
+        if case.storage.is_indirect() {
+            let address = self.allocate_shape(self.shape(case.payload)?, true, None)?;
+            self.write_value(address, &value)?;
+            value = StoredValue {
+                ty: case.payload,
+                data: StoredData::Pointer(Some(address)),
+            };
+        }
+        self.write_value(
+            output,
+            &StoredValue {
+                ty: output.ty,
+                data: StoredData::Variant(Some((tag, Box::new(value)))),
+            },
+        )?;
+        if present {
+            self.clear(payload)?;
+        }
+        Ok(())
+    }
     fn evidence_allocation(
         &self,
         value: &Evidence,
@@ -858,6 +1167,7 @@ impl Memory {
                     members: None,
                     cases: Some(prepared),
                     pointer: false,
+                    native: None,
                     leaves: vec![],
                 }),
             );
@@ -922,6 +1232,19 @@ impl Memory {
     /// root, or have been explicitly released. At this boundary temporary borrowed pointer slots
     /// have been reclaimed: each remaining heap-pointer edge must be the payload's unique owner.
     pub(super) fn check_runtime_ownership(&self) -> Result<(), RuntimeError> {
+        if self.lost_native {
+            return Err(invalid("native value lost its owner"));
+        }
+        for (&id, owner) in &self.native_owners {
+            if self.allocations[owner.address.allocation]
+                .as_ref()
+                .is_some_and(|a| a.borrowed.is_none())
+            {
+                if self.native_identity(owner.address)? != Some(id) {
+                    return Err(invalid("native value overwritten without destruction"));
+                }
+            }
+        }
         if self.live_evidence != 0 {
             return Err(invalid("evidence environment lost its owner"));
         }
@@ -987,7 +1310,22 @@ impl Memory {
         }
     }
     fn release(&mut self, id: usize) {
-        self.allocations[id] = None;
+        let children = take(&mut self.allocations[id].as_mut().unwrap().borrowers);
+        for child in children {
+            self.release(child);
+        }
+        let allocation = self.allocations[id].take().unwrap();
+        if let Some((root, _)) = allocation.borrowed {
+            self.allocations[root.allocation]
+                .as_mut()
+                .unwrap()
+                .borrowers
+                .remove(&id);
+        }
+        for owner in &allocation.native_owners {
+            self.native_owners.remove(owner);
+            self.lost_native |= allocation.borrowed.is_none();
+        }
         self.free_allocations.push(id);
     }
 
@@ -1075,6 +1413,9 @@ impl Memory {
             version: 0,
             generation: self.generation,
             heap,
+            borrowed: None,
+            borrowers: FxHashSet::default(),
+            native_owners: FxHashSet::default(),
         };
         allocation.add_node(shape, 0)?;
         let id = if let Some(id) = self.free_allocations.pop() {
@@ -1128,9 +1469,27 @@ impl Memory {
             version: view.version,
             offset: view.offset,
             ty: view.shape.ty,
+            readonly: false,
+            interior: false,
         }
     }
     fn allocation(&self, address: Address) -> Result<&Allocation, RuntimeError> {
+        let allocation = self.allocation_shallow(address)?;
+        let mut current = allocation;
+        // Validate each receiver once; recursive node/initialization queries multiply the work
+        // at every level. Native receivers are leaves, so presence is local to their node.
+        while let Some((root, epoch)) = current.borrowed {
+            current = self.allocation_shallow(root)?;
+            let node = &current.nodes[root.node];
+            if node.borrow_epoch != epoch || !node.state.locally_present() {
+                return Err(invalid("native member outlived its receiver borrow"));
+            }
+            self.node_native_identity(root, node)?;
+        }
+        Ok(allocation)
+    }
+
+    fn allocation_shallow(&self, address: Address) -> Result<&Allocation, RuntimeError> {
         let allocation = self
             .allocations
             .get(address.allocation)
@@ -1268,7 +1627,22 @@ impl Memory {
         self.allocation(a)?;
         self.allocation(b)?;
         if a.allocation != b.allocation {
-            return Ok(false);
+            // Rooting implies possible overlap even when a receiver owns its member out of line.
+            if let Some((root, _)) = self.allocation(a)?.borrowed {
+                if self.overlaps(root, b)? {
+                    return Ok(true);
+                }
+            }
+            if let Some((root, _)) = self.allocation(b)?.borrowed {
+                if self.overlaps(a, root)? {
+                    return Ok(true);
+                }
+            }
+            let left = self.pointer(a)? as usize;
+            let right = self.pointer(b)? as usize;
+            return Ok(left == right
+                || (left < right.saturating_add(self.size(b)?)
+                    && right < left.saturating_add(self.size(a)?)));
         }
         fn contains(owner: &Allocation, root: usize, node: usize) -> bool {
             root == node
@@ -1284,6 +1658,95 @@ impl Memory {
         let owner = self.allocation(address)?;
         // SAFETY: allocation() validates lifetime, logical identity, bounds and alignment.
         Ok(unsafe { owner.pointer.as_ptr().add(address.offset) })
+    }
+
+    /// Registration guarantees validity of the foreign pointer. We check its layout, root
+    /// lifetime and permissions; no assumption is made that it lies within the receiver bytes.
+    pub(super) unsafe fn native_member(
+        &mut self,
+        root: Address,
+        pointer: *mut u8,
+        ty: Type,
+        mutable: bool,
+        span: Location,
+    ) -> Result<Address, RuntimeError> {
+        self.native_identity(root)?;
+        if !self.initialized(root)? || (mutable && root.readonly) {
+            return Err(invalid("invalid native member receiver"));
+        }
+        let shape = self.shape(ty)?;
+        let pointer = NonNull::new(pointer).ok_or_else(|| invalid("null native member"))?;
+        if !(pointer.as_ptr() as usize).is_multiple_of(shape.layout.align()) {
+            return Err(invalid("misaligned native member"));
+        }
+        let mut depth = 0;
+        let mut ancestor = root;
+        loop {
+            if ancestor.ty == ty && self.pointer(ancestor)? == pointer.as_ptr() {
+                ancestor.readonly |= !mutable;
+                ancestor.interior = true;
+                return Ok(ancestor);
+            }
+            let Some((parent, _)) = self.allocation(ancestor)?.borrowed else {
+                break;
+            };
+            depth += 1;
+            if depth >= MAX_STORAGE_DEPTH {
+                return Err(unsupported("native member nesting limit"));
+            }
+            ancestor = parent;
+        }
+        for &id in &self.allocation(root)?.borrowers {
+            if let Some(allocation) = &self.allocations[id] {
+                if allocation.pointer == pointer
+                    && allocation.nodes[0].shape.ty == ty
+                    && allocation.borrowed.is_some_and(|(r, epoch)| {
+                        Self::same_place(r, root)
+                            && self.node(root).is_ok_and(|n| n.borrow_epoch == epoch)
+                    })
+                {
+                    let mut address = self.address(id, 0);
+                    address.readonly = !mutable || root.readonly;
+                    address.interior = true;
+                    return Ok(address);
+                }
+            }
+        }
+        self.check_allocation_limit(Some(span))?;
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| invalid("allocation identity exhausted"))?;
+        let mut allocation = Allocation {
+            pointer,
+            layout: shape.layout,
+            nodes: vec![],
+            free_nodes: vec![],
+            version: 0,
+            generation: self.generation,
+            heap: false,
+            borrowed: Some((root, self.node(root)?.borrow_epoch)),
+            borrowers: FxHashSet::default(),
+            native_owners: FxHashSet::default(),
+        };
+        allocation.add_node(shape, 0)?;
+        let id = if let Some(id) = self.free_allocations.pop() {
+            self.allocations[id] = Some(allocation);
+            id
+        } else {
+            self.allocations.push(Some(allocation));
+            self.allocations.len() - 1
+        };
+        let mut address = self.address(id, 0);
+        self.allocations[root.allocation]
+            .as_mut()
+            .unwrap()
+            .borrowers
+            .insert(id);
+        self.mark_initialized(address)?;
+        address.readonly = !mutable || root.readonly;
+        address.interior = true;
+        Ok(address)
     }
 
     pub(super) fn initialized(&self, address: Address) -> Result<bool, RuntimeError> {
@@ -1313,8 +1776,33 @@ impl Memory {
         Ok(false)
     }
     pub(super) fn mark_initialized(&mut self, address: Address) -> Result<(), RuntimeError> {
+        self.check_write(address)?;
+        if address.interior && self.node(address)?.shape.native.is_none_or(|n| n.copy) {
+            return Ok(());
+        }
         if self.any_initialized(address)? {
             return Err(invalid("overwriting initialized storage"));
+        }
+        if self.node(address)?.shape.native.is_some_and(|n| !n.copy) {
+            self.generation = self
+                .generation
+                .checked_add(1)
+                .ok_or_else(|| invalid("native identity exhausted"))?;
+            let id = self.generation;
+            self.native_owners.insert(
+                id,
+                NativeOwner {
+                    address,
+                    revision: 0,
+                },
+            );
+            self.allocations[address.allocation]
+                .as_mut()
+                .unwrap()
+                .native_owners
+                .insert(id);
+            self.node_mut(address)?.state = StorageState::Native(Some(id));
+            return Ok(());
         }
         let node = self.node_mut(address)?;
         if !matches!(node.state, StorageState::Value(_)) || node.shape.members.is_some() {
@@ -1324,11 +1812,20 @@ impl Memory {
         Ok(())
     }
     pub(super) fn clear(&mut self, address: Address) -> Result<(), RuntimeError> {
+        self.check_write(address)?;
+        if address.interior {
+            return Err(invalid("native members must remain initialized"));
+        }
+        self.revoke_members(address);
         let children = self.node(address)?.children.clone();
         for child in children {
             self.clear(self.address(address.allocation, child))?;
         }
         let node = self.node_mut(address)?;
+        node.borrow_epoch = node
+            .borrow_epoch
+            .checked_add(1)
+            .ok_or_else(|| invalid("native borrow identity exhausted"))?;
         node.state = StorageState::absent(&node.shape);
         if node.shape.cases.is_some() {
             self.allocations[address.allocation]
@@ -1453,6 +1950,8 @@ impl Memory {
             StoredData::Variant(None)
         } else if shape.pointer {
             StoredData::Pointer(None)
+        } else if shape.native.is_some() {
+            StoredData::Native(None)
         } else {
             StoredData::Scalar(None)
         };
@@ -1464,7 +1963,40 @@ impl Memory {
         allow_absent: bool,
     ) -> Result<StoredValue, RuntimeError> {
         let node = self.node(address)?;
+        if node.shape.native.is_some() {
+            let present = node.state.locally_present();
+            if !present && !allow_absent {
+                return Err(invalid("read of absent native storage"));
+            }
+            let value = if present {
+                let identity = self.native_identity(address)?;
+                let owner = identity.map(|id| (id, self.native_owners[&id].revision));
+                let mut bytes =
+                    vec![MaybeUninit::uninit(); node.shape.layout.size()].into_boxed_slice();
+                // SAFETY: this copies initialized payload and possibly uninitialized padding as
+                // MaybeUninit bytes. The snapshot never independently invokes Rust destruction.
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        self.pointer(address)?.cast::<MaybeUninit<u8>>(),
+                        bytes.as_mut_ptr(),
+                        bytes.len(),
+                    )
+                };
+                Some(Rc::new(NativeBytes {
+                    bytes,
+                    owner,
+                    interior: address.interior,
+                }))
+            } else {
+                None
+            };
+            return Ok(StoredValue {
+                ty: address.ty,
+                data: StoredData::Native(value),
+            });
+        }
         let data = match node.state {
+            StorageState::Native(_) => unreachable!("native storage handled above"),
             StorageState::Pointer(pointer) => {
                 if !allow_absent && pointer.is_none() {
                     return Err(invalid("read of absent pointer"));
@@ -1533,6 +2065,30 @@ impl Memory {
         address: Address,
         value: &StoredValue,
     ) -> Result<(), RuntimeError> {
+        self.write_value_inner(address, value, false)
+    }
+
+    pub(super) fn replace_value(
+        &mut self,
+        source: Address,
+        destination: Address,
+    ) -> Result<(), RuntimeError> {
+        self.check_consume(source)?;
+        self.check_write(destination)?;
+        let replacement = self.read_value(source, false)?;
+        let old = self.read_value(destination, true)?;
+        // The old member is detached only as part of a complete replacement, never a move-out.
+        self.write_value_inner(destination, &replacement, true)?;
+        self.write_value_inner(source, &old, true)
+    }
+
+    fn write_value_inner(
+        &mut self,
+        address: Address,
+        value: &StoredValue,
+        replacement: bool,
+    ) -> Result<(), RuntimeError> {
+        self.check_write(address)?;
         let shape = self.node(address)?.shape.clone();
         let source = if matches!(value.data, StoredData::Pointer(_)) {
             Rc::new(StorageLayout::pointer(value.ty))
@@ -1542,7 +2098,60 @@ impl Memory {
         if !shape.representation_compatible(&source) {
             return Err(invalid("store representation mismatch"));
         }
+        self.invalidate_receiver_snapshots(address)?;
         match &value.data {
+            StoredData::Native(value) => {
+                let Some(value) = value else {
+                    return self.clear(address);
+                };
+                if value.interior && value.owner.is_some() && !replacement {
+                    return Err(invalid("cannot move out of a native member"));
+                }
+                self.revoke_members(address);
+                if value.bytes.len() != shape.layout.size() || shape.native.is_none() {
+                    return Err(invalid("native snapshot layout mismatch"));
+                }
+                if let Some((id, revision)) = value.owner {
+                    let owner = self
+                        .native_owners
+                        .get_mut(&id)
+                        .ok_or_else(|| invalid("snapshot of destroyed native value"))?;
+                    if owner.revision != revision {
+                        return Err(invalid("reused or invalidated native transfer snapshot"));
+                    }
+                    owner.revision = revision
+                        .checked_add(1)
+                        .ok_or_else(|| invalid("native transfer identity exhausted"))?;
+                    let previous = replace(&mut owner.address, address);
+                    if previous.allocation != address.allocation {
+                        self.allocations[previous.allocation]
+                            .as_mut()
+                            .unwrap()
+                            .native_owners
+                            .remove(&id);
+                        self.allocations[address.allocation]
+                            .as_mut()
+                            .unwrap()
+                            .native_owners
+                            .insert(id);
+                    }
+                    self.node_mut(address)?.state = StorageState::Native(Some(id));
+                } else {
+                    if !shape.native.unwrap().copy {
+                        return Err(invalid("owning native snapshot has no owner"));
+                    }
+                    self.node_mut(address)?.state = StorageState::Value(true);
+                }
+                // SAFETY: same registered representation, disjoint inert snapshot bytes. Its
+                // unique ownership ticket was transferred before making these bytes accessible.
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        value.bytes.as_ptr(),
+                        self.pointer(address)?.cast::<MaybeUninit<u8>>(),
+                        value.bytes.len(),
+                    )
+                };
+            }
             StoredData::Empty(present) => {
                 if shape.members.as_ref().is_none_or(|m| !m.is_empty()) {
                     return Err(invalid("expected empty product storage"));
@@ -1578,7 +2187,11 @@ impl Memory {
                     return Err(invalid("product snapshot arity mismatch"));
                 }
                 for (child, field) in children.into_iter().zip(fields) {
-                    self.write_value(self.address(address.allocation, child), field)?;
+                    self.write_value_inner(
+                        self.address(address.allocation, child),
+                        field,
+                        replacement,
+                    )?;
                 }
             }
             StoredData::Variant(value) => {
@@ -1614,7 +2227,60 @@ impl Memory {
                 }
                 self.node_mut(address)?.state = StorageState::Variant(Some(*tag));
                 let child = self.node(address)?.children[0];
-                self.write_value(self.address(address.allocation, child), payload)?;
+                self.write_value_inner(
+                    self.address(address.allocation, child),
+                    payload,
+                    replacement,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Reject malformed host values before importing any argument can transfer native ownership.
+    pub(super) fn validate_import(&self, ty: Type, value: &Value) -> Result<(), RuntimeError> {
+        let mut pending = vec![(ty, value)];
+        while let Some((ty, value)) = pending.pop() {
+            let shape = self.shape(ty)?;
+            if let Some(members) = &shape.members {
+                let fields = value.as_tuple().expect("expected product host value");
+                assert_eq!(fields.len(), members.len(), "host product arity mismatch");
+                pending.extend(
+                    members
+                        .iter()
+                        .zip(fields.iter())
+                        .map(|((_, m), field)| (m.ty, field)),
+                );
+            } else if let Some(cases) = &shape.cases {
+                let tag = value.variant_tag().expect("expected variant host value");
+                let case = cases
+                    .iter()
+                    .find(|c| c.tag == tag)
+                    .expect("host variant case mismatch");
+                if let Some(payload) = value.variant_payload() {
+                    pending.push((case.payload, payload));
+                } else {
+                    assert_eq!(case.payload, Type::unit(), "missing host variant payload");
+                }
+            } else if shape.native.is_some() {
+                let Value::Native(native) = value else {
+                    panic!("expected native host value");
+                };
+                let TypeKind::Native(native_ty) = &*ty.data() else {
+                    return Err(invalid("expected native type"));
+                };
+                assert_eq!(
+                    native_ty.bare_ty.value_type_id(),
+                    Some(native.as_any().type_id()),
+                    "host native type mismatch"
+                );
+            } else {
+                let scalar = Scalar::from_value(value).expect("expected scalar host value");
+                assert_eq!(
+                    ScalarKind::for_type(ty)?,
+                    scalar.kind(),
+                    "host scalar type mismatch"
+                );
             }
         }
         Ok(())
@@ -1622,13 +2288,16 @@ impl Memory {
 
     /// Host conversion uses an explicit worklist: recursive payload depth must not consume the
     /// Rust stack. Inline layout recursion remains bounded independently during preparation.
-    pub(super) fn import(&mut self, ty: Type, value: &Value) -> Result<StoredValue, RuntimeError> {
+    pub(super) fn import(
+        &mut self,
+        ty: Type,
+        value: &mut Value,
+    ) -> Result<StoredValue, RuntimeError> {
         enum Task<'a> {
-            Visit(Type, &'a Value),
+            Visit(Type, &'a mut Value),
             Product(Type, usize),
             Variant(Type, Ustr, Type, VariantPayloadStorage),
         }
-        let unit = Value::unit();
         let mut tasks = vec![Task::Visit(ty, value)];
         let mut values: Vec<StoredValue> = Vec::new();
         while let Some(task) = tasks.pop() {
@@ -1637,7 +2306,7 @@ impl Memory {
                     let shape = self.shape(ty)?;
                     if let Some(members) = &shape.members {
                         let fields = value
-                            .as_tuple()
+                            .as_tuple_mut()
                             .ok_or_else(|| invalid("expected product host value"))?;
                         if fields.len() != members.len() {
                             return Err(invalid("host product arity mismatch"));
@@ -1646,7 +2315,7 @@ impl Memory {
                         tasks.extend(
                             members
                                 .iter()
-                                .zip(fields.iter())
+                                .zip(fields.iter_mut())
                                 .rev()
                                 .map(|((_, m), field)| Task::Visit(m.ty, field)),
                         );
@@ -1658,9 +2327,39 @@ impl Memory {
                             .iter()
                             .find(|c| c.tag == tag)
                             .ok_or_else(|| invalid("host variant case mismatch"))?;
-                        let payload = value.variant_payload().unwrap_or(&unit);
                         tasks.push(Task::Variant(ty, tag, case.payload, case.storage));
-                        tasks.push(Task::Visit(case.payload, payload));
+                        if value.variant_payload().is_some() {
+                            tasks.push(Task::Visit(
+                                case.payload,
+                                value.variant_payload_mut().unwrap(),
+                            ));
+                        } else if case.payload == Type::unit() {
+                            values.push(StoredValue {
+                                ty: case.payload,
+                                data: StoredData::Scalar(Some(Scalar::Unit)),
+                            });
+                        } else {
+                            return Err(invalid("missing host variant payload"));
+                        }
+                    } else if shape.native.is_some() {
+                        let Value::Native(native) = value else {
+                            return Err(invalid("expected native host value"));
+                        };
+                        let TypeKind::Native(native_ty) = &*ty.data() else {
+                            return Err(invalid("expected native type"));
+                        };
+                        if native_ty.bare_ty.value_type_id() != Some(native.as_any().type_id()) {
+                            return Err(invalid("host native type mismatch"));
+                        }
+                        let address = self.allocate(ty, None)?;
+                        let pointer = self.pointer(address)?;
+                        let Value::Native(native) = replace(value, Value::uninit()) else {
+                            unreachable!()
+                        };
+                        // SAFETY: checked concrete Rust identity and matching aligned storage.
+                        unsafe { ManuallyDrop::into_inner(native).move_to(pointer) };
+                        self.mark_initialized(address)?;
+                        values.push(self.read_value(address, false)?);
                     } else {
                         let scalar = Scalar::from_value(value)?;
                         if ScalarKind::for_type(ty)? != scalar.kind() {
@@ -1700,7 +2399,7 @@ impl Memory {
         Ok(values.pop().unwrap())
     }
 
-    pub(super) fn export(&self, address: Address) -> Result<Value, RuntimeError> {
+    pub(super) fn export(&mut self, address: Address) -> Result<Value, RuntimeError> {
         enum Task {
             Visit(Address),
             Product(Address, usize),
@@ -1738,6 +2437,22 @@ impl Memory {
                                 payload.ty == Type::unit(),
                             ));
                             tasks.push(Task::Visit(payload));
+                        } else if let Some(native) = node.shape.native {
+                            let take = native
+                                .export
+                                .ok_or_else(|| unsupported("native host export glue"))?;
+                            if !self.initialized(address)? {
+                                return Err(invalid("export of absent native value"));
+                            }
+                            self.native_identity(address)?;
+                            let pointer = self.pointer(address)?;
+                            // Complete permission checks and detach ownership before moving Rust
+                            // storage out. No fallible bookkeeping may follow the typed take.
+                            self.consume_native(address)?;
+                            // SAFETY: registered boxer, checked unique ownership, bytes still live.
+                            let value = unsafe { take(pointer) };
+                            values.push(value);
+                            active.remove(&address);
                         } else {
                             values.push(self.read(address)?.boxed());
                             active.remove(&address);
@@ -1792,6 +2507,24 @@ impl Memory {
                         .collect::<Result<_, _>>()?,
                 )
             }
+        } else if shape.native.is_some_and(|n| n.copy) {
+            let LiteralValue::Native(value) = literal else {
+                return Err(invalid("expected native literal"));
+            };
+            if value.native_type() != ty {
+                return Err(invalid("native literal type mismatch"));
+            }
+            let mut bytes = vec![MaybeUninit::uninit(); shape.layout.size()].into_boxed_slice();
+            let pointer =
+                LiteralNativeValue::as_any(value.as_ref()) as *const _ as *const MaybeUninit<u8>;
+            // SAFETY: literal's exact registered Rust type matches the destination; Copy permits
+            // duplication, and MaybeUninit preserves padding without interpreting it.
+            unsafe { ptr::copy_nonoverlapping(pointer, bytes.as_mut_ptr(), bytes.len()) };
+            StoredData::Native(Some(Rc::new(NativeBytes {
+                bytes,
+                owner: None,
+                interior: false,
+            })))
         } else {
             let scalar = Scalar::from_literal(literal)?;
             if ScalarKind::for_type(ty)? != scalar.kind() {
@@ -1813,9 +2546,134 @@ impl Memory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::module::{Module, ModuleEnv, ModuleId, path::Path};
+    use crate::{
+        hir::value::NativeValueType,
+        module::{Module, ModuleEnv, ModuleId, path::Path},
+    };
     #[cfg(target_arch = "wasm32")]
     use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    fn physical_native_ownership_and_foreign_members() {
+        let mut memory = Memory::default();
+        let layout = NativeLayout::of::<Box<isize>>();
+        memory.prepare_native(layout, false, None).unwrap();
+        let root = memory.allocate(layout.ty, None).unwrap();
+        let destination = memory.allocate(layout.ty, None).unwrap();
+        let root_pointer = memory.pointer(root).unwrap().cast::<Box<isize>>();
+        // SAFETY: exclusive, absent storage with exactly Box<isize>'s layout.
+        unsafe { root_pointer.write(Box::new(7)) };
+        memory.mark_initialized(root).unwrap();
+        // SAFETY: the initialized Box owns this pointee throughout the rooted borrow.
+        let pointer = unsafe { ptr::from_mut(&mut **root_pointer).cast() };
+        let span = Location::new_synthesized();
+        let marker = memory.len();
+        let member =
+            unsafe { memory.native_member(root, pointer, ScalarKind::Int.ty(), true, span) }
+                .unwrap();
+        let shared =
+            unsafe { memory.native_member(root, pointer, ScalarKind::Int.ty(), false, span) }
+                .unwrap();
+        // Borrow bookkeeping follows the receiver, not the frame which called the addressor.
+        memory.restore(marker);
+        assert_eq!(memory.read(shared).unwrap(), Scalar::Int(7));
+        assert!(memory.write(shared, Scalar::Int(9)).is_err());
+        assert!(memory.check_consume(member).is_err());
+        let stale_snapshot = memory.read_value(root, false).unwrap();
+        memory.write(member, Scalar::Int(9)).unwrap();
+        assert!(memory.write_value(destination, &stale_snapshot).is_err());
+        assert!(memory.overlaps(root, member).unwrap());
+        // A rooted native member may be the receiver itself, but is still not movable-out.
+        let self_member =
+            unsafe { memory.native_member(root, root_pointer.cast(), layout.ty, true, span) }
+                .unwrap();
+        let interior = memory.read_value(self_member, false).unwrap();
+        assert!(memory.write_value(destination, &interior).is_err());
+
+        let moved = memory.read_value(root, false).unwrap();
+        memory.write_value(destination, &moved).unwrap();
+        assert!(memory.read_value(root, false).is_err());
+        assert!(memory.read(member).is_err());
+        assert!(memory.write_value(root, &moved).is_err());
+        memory.clear(root).unwrap();
+        memory.check_native(destination, layout).unwrap();
+        let pointer = memory.pointer(destination).unwrap().cast::<Box<isize>>();
+        // SAFETY: the checked transfer left exactly one live Box in destination.
+        unsafe {
+            assert_eq!(**pointer, 9);
+            pointer.drop_in_place();
+        }
+        memory.consume_native(destination).unwrap();
+        assert!(memory.write_value(root, &moved).is_err());
+        memory.check_runtime_ownership().unwrap();
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    fn physical_nested_native_members_and_export_permissions() {
+        use std::cell::Cell;
+
+        thread_local! {
+            static EXPORTS: Cell<usize> = const { Cell::new(0) };
+        }
+        EXPORTS.set(0);
+        #[derive(Debug)]
+        struct Link(Option<Box<Link>>);
+        impl NativeValueType for Link {}
+        unsafe fn export(pointer: *mut u8) -> Value {
+            EXPORTS.set(EXPORTS.get() + 1);
+            // SAFETY: the registered export contract supplies one owned, initialized Link.
+            Value::native(unsafe { pointer.cast::<Link>().read() })
+        }
+
+        let mut memory = Memory::default();
+        let layout = NativeLayout::of::<Link>();
+        memory.prepare_native(layout, false, Some(export)).unwrap();
+        let root = memory.allocate(layout.ty, None).unwrap();
+        let mut chain = Link(None);
+        for _ in 0..32 {
+            chain = Link(Some(Box::new(chain)));
+        }
+        let mut pointer = memory.pointer(root).unwrap().cast::<Link>();
+        // SAFETY: exclusive absent Link storage.
+        unsafe { pointer.write(chain) };
+        memory.mark_initialized(root).unwrap();
+        let mut shared = root;
+        shared.readonly = true;
+        assert!(memory.export(shared).is_err());
+        assert_eq!(EXPORTS.get(), 0);
+        memory.check_native(root, layout).unwrap();
+
+        let mut member = root;
+        // Each addressor reaches a separately allocated child owned by its receiver. Deep
+        // nesting must not multiply receiver-validation work at each level.
+        // SAFETY: pointer starts at the initialized root and follows its live, exclusive children.
+        while let Some(child) = unsafe { &mut *pointer }.0.as_deref_mut() {
+            pointer = ptr::from_mut(child);
+            // SAFETY: the root owns the whole chain and no link is changed during these borrows.
+            member = unsafe {
+                memory.native_member(
+                    member,
+                    pointer.cast(),
+                    layout.ty,
+                    true,
+                    Location::new_synthesized(),
+                )
+            }
+            .unwrap();
+        }
+        memory.check_native(member, layout).unwrap();
+        assert_eq!(memory.native_owners.len(), 33);
+        memory.native_mutated(root).unwrap();
+        assert!(memory.check_native(member, layout).is_err());
+        assert_eq!(memory.native_owners.len(), 1);
+        assert_eq!(memory.live_allocations(), 1);
+        memory.export(root).unwrap().discard_storage();
+        assert_eq!(EXPORTS.get(), 1);
+        memory.restore(0);
+        memory.check_runtime_ownership().unwrap();
+    }
 
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
@@ -2128,6 +2986,7 @@ mod tests {
                 members: Some(vec![]),
                 cases: None,
                 pointer: false,
+                native: None,
                 leaves: vec![(offset, ScalarKind::Int)],
             });
             assert!(StorageLayout::product(ty, layout, vec![(0, malformed)]).is_err());
@@ -2264,8 +3123,8 @@ mod tests {
         assert_eq!(memory.read_value(copy, true).unwrap(), partial);
         memory.write(fields[1], Scalar::Int(42)).unwrap();
         assert!(memory.initialized(whole).unwrap());
-        let exported = memory.export(whole).unwrap();
-        let imported = memory.import(ty, &exported).unwrap();
+        let mut exported = memory.export(whole).unwrap();
+        let imported = memory.import(ty, &mut exported).unwrap();
         assert_eq!(memory.read_value(whole, false).unwrap(), imported);
         exported.discard_storage();
         assert!(memory.overlaps(whole, fields[0]).unwrap());

@@ -39,6 +39,22 @@ macro_rules! addressor {
         impl<T: NativeValue, M: NativeValue> sealed::Entry for $name<T, M> {}
         impl<T: NativeValue, M: NativeValue> EntryFunction for $name<T, M> {
             fn entry(&self) -> NativeEntry {
+                unsafe fn invoke<T: NativeValue, M: NativeValue>(
+                    address: *const (),
+                    inputs: &[*mut u8],
+                    output: *mut u8,
+                    _: &mut NativeFailureState,
+                ) -> Result<NativeCallOutcome, RuntimeError> {
+                    // SAFETY: the executor validates the rooted receiver and pointer-result slot.
+                    unsafe {
+                        let function: unsafe extern "C" fn($pointer) -> $result =
+                            mem::transmute(address);
+                        output
+                            .cast::<$result>()
+                            .write(function(inputs[0].cast::<T>() as $pointer));
+                    }
+                    Ok(NativeCallOutcome::Initialized)
+                }
                 NativeEntry::new(
                     self.0 as *const (),
                     NativeSignature {
@@ -51,6 +67,7 @@ macro_rules! addressor {
                         },
                     },
                 )
+                .with_physical(invoke::<T, M>)
             }
             fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalControlFlowResult {
                 let root = receiver_place(&args[0], ctx)?;
@@ -104,6 +121,29 @@ macro_rules! addressor {
         impl<T: NativeValue, M: NativeValue> sealed::Entry for $fallible<T, M> {}
         impl<T: NativeValue, M: NativeValue> EntryFunction for $fallible<T, M> {
             fn entry(&self) -> NativeEntry {
+                unsafe fn invoke<T: NativeValue, M: NativeValue>(
+                    address: *const (),
+                    inputs: &[*mut u8],
+                    output: *mut u8,
+                    failure: &mut NativeFailureState,
+                ) -> Result<NativeCallOutcome, RuntimeError> {
+                    // SAFETY: same typed receiver and disjoint pointer-result contract as above.
+                    let status = unsafe {
+                        let function: unsafe extern "C" fn(
+                            &mut NativeFailureState,
+                            $pointer,
+                            &mut MaybeUninit<$result>,
+                        ) -> u32 = mem::transmute(address);
+                        function(
+                            failure,
+                            inputs[0].cast::<T>() as $pointer,
+                            &mut *output.cast::<MaybeUninit<$result>>(),
+                        )
+                    };
+                    failure
+                        .finish(status)
+                        .map(|()| NativeCallOutcome::Initialized)
+                }
                 NativeEntry::new(
                     self.0 as *const (),
                     NativeSignature {
@@ -116,6 +156,7 @@ macro_rules! addressor {
                         },
                     },
                 )
+                .with_physical(invoke::<T, M>)
             }
             fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalControlFlowResult {
                 let root = receiver_place(&args[0], ctx)?;

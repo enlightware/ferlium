@@ -56,6 +56,11 @@ pub trait NativeValue: NativeValueType {
     fn as_any(&self) -> &dyn Any;
     fn as_mut_any(&mut self) -> &mut dyn Any;
     fn into_any(self: B<Self>) -> B<dyn Any>;
+    /// Move the host value into matching, aligned, uninitialized ABI storage.
+    ///
+    /// # Safety
+    /// `output` must have the layout of the concrete value and exclusive write access.
+    unsafe fn move_to(self: B<Self>, output: *mut u8);
 }
 
 impl<T: NativeValueType> NativeValue for T {
@@ -69,6 +74,11 @@ impl<T: NativeValueType> NativeValue for T {
 
     fn into_any(self: B<Self>) -> B<dyn Any> {
         self
+    }
+
+    unsafe fn move_to(self: B<Self>, output: *mut u8) {
+        // SAFETY: the caller provides matching uninitialized storage; moving out frees only Box.
+        unsafe { output.cast::<T>().write(*self) };
     }
 }
 

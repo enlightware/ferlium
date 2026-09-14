@@ -17,9 +17,12 @@ use ferlium::{
     hir::value::Value,
     mir::interpreter::Interpreter,
     module::ShowModuleWithOptions,
+    std::string::String as NativeString,
 };
 
-use crate::harness::{TestSession, bool, expected_tuple, int, int_value};
+use crate::harness::{
+    TestSession, bool, expected_tuple, int, int_value, native_drop_count, reset_native_drops,
+};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -168,6 +171,9 @@ fn physical_mir_value_host_arguments() {
             Value::tuple(vec![Value::native(true), int_value(11)]),
         ])
     }
+    fn native_string() -> Value {
+        Value::native(NativeString::new("hello"))
+    }
     fn list() -> Value {
         (0..8).fold(Value::unit_variant("Nil".into()), |tail, n| {
             Value::variant_with_storage(
@@ -182,6 +188,11 @@ fn physical_mir_value_host_arguments() {
         (
             "fn compute(p: (int, (bool, int))) -> (int, (bool, int)) { p }",
             product as fn() -> Value,
+        ),
+        ("fn compute(p: string) -> string { p }", native_string),
+        (
+            "fn compute(p: string) -> (string, string) { (p, p) }",
+            native_string,
         ),
         (
             "fn compute(p: (int, (bool, int))) -> (bool, int) { (p.1.0, p.0 + p.1.1) }",
@@ -223,8 +234,18 @@ fn physical_mir_value_host_arguments() {
 fn physical_mir_value_execution() {
     // TODO(physical-mir-bridge): Replace this supported-subset matrix with shared language-suite
     // differential coverage once physical MIR is complete, retaining any unique cases there.
-    let mut session = TestSession::new();
+    let mut session = TestSession::with_native_members();
     for source in [
+        r#"fn compute(x: int) -> string { "hello {x}" }"#,
+        r#"fn compute(x: int) -> int { match parse_int(if x == 0 { "bad" } else { to_string(x) }) { Some(n) => n, None => -1 } }"#,
+        r#"fn compute(x: int) -> (Option<string>, Option<string>, Option<string>) { let mut it = split_iterator(to_string(x), if x == 0 { "" } else { "," }); (next(it), next(it), next(it)) }"#,
+        r#"fn duplicate<T>(x: T) -> (T, T) { (x, x) } fn compute(x: int) -> (string, string) { duplicate(to_string(x)) }"#,
+        r#"enum Tree { Empty, Leaf(string), Branch(Tree, Tree) } fn compute(x: int) -> Tree { let mut p = Tree::Branch(Tree::Leaf(to_string(x)), Tree::Empty); let q = p; p = Tree::Empty; q }"#,
+        r#"fn compute(x: int) -> int { let p = (to_string(x), idiv(10, x)); p.1 }"#,
+        r#"fn compute(x: int) -> int { let mut value = testing::make_clone_tracked(); value.payload += x; value.self_member.payload }"#,
+        r#"fn assign<T>(slot: &mut T, value: T) { slot = value; } fn compute(x: int) -> int { let mut value = testing::make_clone_tracked(); assign(value.self_member.payload, x); value.readonly }"#,
+        r#"fn compute(x: int) -> int { testing::reset_native_drops(); let during = { let mut value = testing::make_clone_tracked(); value.self_member = testing::make_clone_tracked(); testing::native_drop_count() }; during * 10 + testing::native_drop_count() }"#,
+        r#"fn compute(x: int) -> int { let mut value = testing::make_clone_tracked(); value.checked_payload = -x; value.checked_payload }"#,
         "fn duplicate<T>(x: T) -> (T, T) { (x, x) } fn compute(x: int) -> ((int, bool), (int, bool)) { duplicate((x, true)) }",
         "fn replace<T>(x: &mut T, y: T) { x = y; } fn compute(x: int) -> (int, bool) { let mut p = (1, false); replace(p, (x, true)); p }",
         "enum List<T> { Nil, Cons(T, List<T>) } fn duplicate<T>(x: T) -> (T, T) { (x, x) } fn compute(x: int) -> (List<int>, List<int>) { duplicate(List::Cons(x, List::Nil)) }",
@@ -278,19 +299,27 @@ fn physical_mir_value_execution() {
             .expect_fresh_module(module_id)
             .get_local_function_id(ustr::ustr("compute"))
             .unwrap();
+        // Keep compilation/constant-evaluation side effects outside runtime lifecycle counts.
+        session
+            .session_mut()
+            .prepare_execution_target(ExecutionTarget::PhysicalMir, module_id);
         for input in [0, 2, 7] {
+            reset_native_drops();
             let boxed = session.session_mut().run_entry(
                 ExecutionTarget::Mir,
                 module_id,
                 entry,
                 vec![int_value(input)],
             );
+            let boxed_drops = native_drop_count();
+            reset_native_drops();
             let physical = session.session_mut().run_entry(
                 ExecutionTarget::PhysicalMir,
                 module_id,
                 entry,
                 vec![int_value(input)],
             );
+            assert_eq!(native_drop_count(), boxed_drops, "{source}, input={input}");
             match (boxed, physical) {
                 (Ok(expected), Ok(actual)) => {
                     crate::harness::assert_value_eq(&actual, &expected);
@@ -305,7 +334,7 @@ fn physical_mir_value_execution() {
                     session
                         .session()
                         .emit_physical_mir_module(module_id)
-                        .unwrap()
+                        .unwrap_or_else(|error| format!("{error:?}"))
                 ),
             }
         }
