@@ -1,3 +1,6 @@
+// Copyright 2026 Enlightware GmbH
+// SPDX-License-Identifier: Apache-2.0
+
 //! Bodies for retained compiler-owned Buffer entries. Direct calls still use the local expansion;
 //! dictionaries, addressors and first-class references keep their original function identities.
 

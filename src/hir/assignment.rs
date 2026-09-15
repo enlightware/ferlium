@@ -1,5 +1,5 @@
 // Copyright 2026 Enlightware GmbH
-// Licensed under the Apache License, Version 2.0.
+// SPDX-License-Identifier: Apache-2.0
 
 //! Expand source assignments after inference resolves accessor argument passing.
 //! Captures precede the RHS; destination access scopes contain only the final update.

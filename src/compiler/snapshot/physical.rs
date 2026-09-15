@@ -1,3 +1,6 @@
+// Copyright 2026 Enlightware GmbH
+// SPDX-License-Identifier: Apache-2.0
+
 //! Physical bodies are persistent; native pointers and derived evidence catalogs are not.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};

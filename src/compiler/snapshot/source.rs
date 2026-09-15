@@ -1,3 +1,6 @@
+// Copyright 2026 Enlightware GmbH
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::parser::location::SourceTable;
 
 /// Stable source-table data. Line indexes are derived again rather than persisted.

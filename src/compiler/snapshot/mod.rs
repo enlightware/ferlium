@@ -1,3 +1,6 @@
+// Copyright 2026 Enlightware GmbH
+// SPDX-License-Identifier: Apache-2.0
+
 //! Stable, process-independent representations of compiled compiler data.
 //!
 //! Snapshot DTOs deliberately live outside the runtime structures. In particular, they never

@@ -1,3 +1,6 @@
+// Copyright 2026 Enlightware GmbH
+// SPDX-License-Identifier: Apache-2.0
+
 //! Portable representation of standard-library MIR artifacts.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};

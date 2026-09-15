@@ -1,3 +1,6 @@
+// Copyright 2026 Enlightware GmbH
+// SPDX-License-Identifier: Apache-2.0
+
 use super::{
     NativeCallableCatalog, SnapshotError, SnapshotHirArena, SnapshotModuleFunction,
     SnapshotProjection, SnapshotSubscript, SnapshotTrait, SnapshotTraitImpls, SnapshotTypeAlias,

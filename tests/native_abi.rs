@@ -1,3 +1,6 @@
+// Copyright 2026 Enlightware GmbH
+// SPDX-License-Identifier: Apache-2.0
+
 //! Native execution of the same Rust entries whose Wasm signatures are checked separately.
 
 #![cfg(not(target_arch = "wasm32"))]

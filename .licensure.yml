@@ -11,7 +11,13 @@ licenses:
     ident: Apache-2.0
     authors:
       - name: Enlightware GmbH
-    auto_template: true
+    template: |
+      Copyright [year] [name of author]
+      SPDX-License-Identifier: [ident]
+    unwrap_text: false
+    replaces:
+      - '(?ms)^// Copyright [0-9 ,\-]+ Enlightware GmbH\n(?://\n)?// Licensed under the Apache License, Version 2\.0 .*?limitations under the License\.\n(?://\n)?'
+      - '(?m)^// Copyright [0-9 ,\-]+ Enlightware GmbH\n// Licensed under the Apache License, Version 2\.0\.\n'
 
 comments:
   - extensions:
@@ -22,7 +28,7 @@ comments:
     commenter:
       type: line
       comment_char: "//"
-      trailing_lines: 0
+      trailing_lines: 1
   - extensions:
       - css
       - cpp
@@ -50,4 +56,3 @@ comments:
       type: line
       comment_char: '#'
       trailing_lines: 0
-

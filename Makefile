@@ -129,5 +129,4 @@ validate-book:
 	cargo run --example validate_book docs/book/en/
 
 update-license-headers:
-	licensure --in-place `find . -name "*.rs"`
-	licensure --in-place `find playground/src -name "*.ts"` playground/*.ts
+	git ls-files --cached --others --exclude-standard -z -- '*.rs' '*.ts' | xargs -0 -r licensure --in-place

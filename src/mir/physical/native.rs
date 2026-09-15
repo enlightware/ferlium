@@ -1,3 +1,6 @@
+// Copyright 2026 Enlightware GmbH
+// SPDX-License-Identifier: Apache-2.0
+
 //! Process-local native requirements, rebuilt when restoring a physical snapshot. Snapshots
 //! separately validate build provenance and the pointer-free layout/transport contracts.
 

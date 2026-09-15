@@ -1,3 +1,6 @@
+// Copyright 2026 Enlightware GmbH
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{module::ModuleId, std::STD_MODULE_ID};
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

@@ -1,3 +1,6 @@
+// Copyright 2026 Enlightware GmbH
+// SPDX-License-Identifier: Apache-2.0
+
 //! Access contracts for initialized borrowed storage. No operation may open an initialization
 //! gap in a native member, including when it flows through ordinary generic mutable parameters.
 

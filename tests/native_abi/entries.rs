@@ -1,3 +1,6 @@
+// Copyright 2026 Enlightware GmbH
+// SPDX-License-Identifier: Apache-2.0
+
 //! Standalone ABI fixtures, also compiled directly by `check_wasm.py`.
 //! These model entry transport, not production native registration or failure-state policy.
 
