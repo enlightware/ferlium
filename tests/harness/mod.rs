@@ -1002,19 +1002,6 @@ fn add_tracked_functions(module: &mut Module) {
     );
 }
 
-// The physical bridge needs native fixtures without the module's boxed-only probes.
-fn native_testing_module(
-    module_id: ModuleId,
-    value_trait_id: TraitId,
-    value_trait_def: &Trait,
-) -> Module {
-    let mut module = Module::new(module_id, Path::single_str("testing"));
-    add_tracked_members(&mut module);
-    add_tracked_value(&mut module, value_trait_id, value_trait_def);
-    add_tracked_functions(&mut module);
-    module
-}
-
 fn testing_module(
     module_id: ModuleId,
     iterator_trait: TraitId,
@@ -1367,29 +1354,10 @@ impl TestSession {
         self.session.set_allow_unsafe(true);
     }
 
-    /// Create a session with only the native value/member fixtures supported by physical MIR.
-    pub fn with_native_members() -> Self {
-        let mut session = CompilerSession::new();
-        let value = session
-            .std_module()
-            .get_trait_id_str(VALUE_TRAIT_NAME)
-            .unwrap();
-        let module = native_testing_module(
-            session.modules().next_id(),
-            value,
-            session.std_module().trait_def(value),
-        );
-        session.register_module(Path::single_str("testing"), module);
-        Self {
-            session,
-            modes: RunMode::ALL.to_vec(),
-        }
-    }
-
     /// Create a new test session with std, testing, effects and props modules registered.
     ///
     /// Every snippet run through the session is executed under every [`RunMode`] — the HIR
-    /// interpreter, the MIR interpreter, and the MIR interpreter on optimized bodies — which are
+    /// interpreter, raw MIR, optimized MIR, and physical MIR — which are
     /// asserted to agree (see [`TestSession::try_compile_and_run_value`]).
     pub fn new() -> Self {
         let mut compiler_session = CompilerSession::new();

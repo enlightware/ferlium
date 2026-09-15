@@ -158,8 +158,7 @@ mod tests {
     fn physical_mir_inspection_and_execution_in_browser() {
         set_panic_hook();
         let mut compiler = PlaygroundCompiler::new();
-        let source =
-            "fn second(pair: (int, bool)) -> bool { pair.1 } print(\"😀\"); second((42, true))";
+        let source = "// 😀\nfn second(pair: (int, bool)) -> bool { pair.1 } second((42, true))";
         assert!(compiler.compile(source).succeeded);
         let physical = compiler.physical_mir_text().unwrap();
         assert!(physical.text.contains("address_offset"));
@@ -170,31 +169,9 @@ mod tests {
                 && entry.source_from <= entry.source_to
                 && entry.source_to as usize <= source.encode_utf16().count()
         }));
-        // TODO(physical-mir-bridge): Replace this temporary unsupported-execution assertion with
-        // success once supported; keep the browser execution and UTF-16 source-map coverage.
-        let error = compiler
-            .run_expr_physical_mir()
-            .unwrap()
-            .error_content()
-            .unwrap();
-        assert!(
-            error.complete.contains("does not yet support"),
-            "{}",
-            error.complete
-        );
-        assert!(
-            compiler
-                .compile("enum List { Nil, Cons(int, List) } fn sum(l: List) -> int { match l { Nil => 0, Cons(n, tail) => n + sum(tail) } } sum(List::Cons(40, List::Cons(2, List::Nil))) == 42")
-                .succeeded
-        );
         assert_eq!(
             compiler.run_expr_physical_mir().unwrap().html_message(),
             "true: bool"
-        );
-        assert!(compiler.compile("fn duplicate<T>(value: T) -> (T, T) { (value, value) } duplicate((42, true)).1.0").succeeded);
-        assert_eq!(
-            compiler.run_expr_physical_mir().unwrap().html_message(),
-            "42: int"
         );
         assert!(compiler.compile("40 + 2").succeeded);
         assert_eq!(

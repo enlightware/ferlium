@@ -20,9 +20,7 @@ use ferlium::{
     std::{array::array_value_from_vec, string::String as NativeString},
 };
 
-use crate::harness::{
-    TestSession, bool, expected_tuple, int, int_value, native_drop_count, reset_native_drops,
-};
+use crate::harness::{TestSession, assert_value_eq, bool, expected_tuple, int, int_value};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -94,9 +92,7 @@ fn execution_targets_accept_by_value_arguments() {
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn physical_mir_value_cleanup() {
-    // TODO(physical-mir-bridge): Fold into shared cleanup coverage once the full language suite
-    // runs on physical MIR, preserving the partial-construction and interrupted-failure cases.
+fn mir_execution_targets_preserve_partial_construction_cleanup_failures() {
     let mut session = TestSession::new();
     session.allow_unsafe();
     session
@@ -163,9 +159,7 @@ fn physical_mir_value_cleanup() {
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn physical_mir_value_host_arguments() {
-    // TODO(physical-mir-bridge): Fold into shared execution-target argument tests once physical
-    // MIR supports the full suite; remove this separate differential fixture.
+fn execution_targets_accept_owned_host_arguments() {
     fn product() -> Value {
         Value::tuple(vec![
             int_value(7),
@@ -222,7 +216,7 @@ fn physical_mir_value_host_arguments() {
             .expect_fresh_module(module_id)
             .get_local_function_id(ustr::ustr("compute"))
             .unwrap();
-        let mut results = [ExecutionTarget::Mir, ExecutionTarget::PhysicalMir]
+        let mut results = ExecutionTarget::ALL
             .map(|target| {
                 session
                     .session_mut()
@@ -231,199 +225,17 @@ fn physical_mir_value_host_arguments() {
             })
             .into_iter();
         let expected = results.next().unwrap();
-        let actual = results.next().unwrap();
-        crate::harness::assert_value_eq(&actual, &expected);
+        for actual in results {
+            assert_value_eq(&actual, &expected);
+            actual.discard_storage();
+        }
         expected.discard_storage();
-        actual.discard_storage();
     }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn physical_mir_value_execution() {
-    // TODO(physical-mir-bridge): Replace this supported-subset matrix with shared language-suite
-    // differential coverage once physical MIR is complete, retaining any unique cases there.
-    let mut session = TestSession::with_native_members();
-    session.allow_unsafe();
-    session.allow_experimental();
-    for source in [
-        "fn compute(x: int) -> int { let f = |y| y + x; f(2) + f(3) }",
-        "fn apply(f: (int) -> int, n: int) -> int { f(n) } fn compute(x: int) -> int { apply(|y| y + x, 2) }",
-        "fn compute(x: int) -> int { let mut f = |y| y + x; let g = f; f = |y| y * 2; f(3) + g(4) }",
-        "fn make(x: int) -> (int) -> int { |y| x + y } fn compute(x: int) -> int { let f = make(x); f(2) }",
-        "subscript cell(x: &mut int) -> int { ref mut { return x } } fn compute(x: int) -> int { let mut n = x; let s = cell; n->[s] += 2; n }",
-        "subscript cell(x: &mut int) -> int { ref mut { let mut v = x; yield v; x = v + 1; } } fn compute(x: int) -> int { let mut n = x; let s = cell; n->[s] += 2; n }",
-        "subscript cell(x: &mut int) -> int { ref mut { let mut v = x; yield v; x = v; } } fn compute(x: int) -> int { let mut n = x; n->[cell] = idiv(10, x); n }",
-        "fn compute(x: int) -> int { let mut a = [x, 2, 3]; a[1] += x; a[0] + a[1] + a[2] }",
-        "fn compute(x: int) -> int { let mut a = [x]; push(a, 2); push(a, 3); let b = a; a[0] = 10; b[0] + a[0] }",
-        "fn compute(x: int) -> [int] { let mut a = [x, 2, 3]; push(a, 4); a }",
-        "fn compute(x: int) -> int { let mut a = [(), (), ()]; push(a, ()); a[1] = (); len(a) }",
-        r#"fn compute(x: int) -> [string] { let mut a = [to_string(x), "two"]; push(a, "three"); let b = a; a[0] = "changed"; b }"#,
-        r#"fn compute(x: int) -> string { let s = to_string(x); let f = || s; let g = f; "{f()}{g()}" }"#,
-        r#"fn compute(x: int) -> string { "hello {x}" }"#,
-        r#"fn compute(x: int) -> int { match parse_int(if x == 0 { "bad" } else { to_string(x) }) { Some(n) => n, None => -1 } }"#,
-        r#"fn compute(x: int) -> (Option<string>, Option<string>, Option<string>) { let mut it = split_iterator(to_string(x), if x == 0 { "" } else { "," }); (next(it), next(it), next(it)) }"#,
-        r#"fn duplicate<T>(x: T) -> (T, T) { (x, x) } fn compute(x: int) -> (string, string) { duplicate(to_string(x)) }"#,
-        r#"enum Tree { Empty, Leaf(string), Branch(Tree, Tree) } fn compute(x: int) -> Tree { let mut p = Tree::Branch(Tree::Leaf(to_string(x)), Tree::Empty); let q = p; p = Tree::Empty; q }"#,
-        r#"fn compute(x: int) -> int { let p = (to_string(x), idiv(10, x)); p.1 }"#,
-        r#"fn compute(x: int) -> int { let mut value = testing::make_clone_tracked(); value.payload += x; value.self_member.payload }"#,
-        r#"fn assign<T>(slot: &mut T, value: T) { slot = value; } fn compute(x: int) -> int { let mut value = testing::make_clone_tracked(); assign(value.self_member.payload, x); value.readonly }"#,
-        r#"fn compute(x: int) -> int { testing::reset_native_drops(); let during = { let mut value = testing::make_clone_tracked(); value.self_member = testing::make_clone_tracked(); testing::native_drop_count() }; during * 10 + testing::native_drop_count() }"#,
-        r#"fn compute(x: int) -> int { let mut value = testing::make_clone_tracked(); value.checked_payload = -x; value.checked_payload }"#,
-        "fn duplicate<T>(x: T) -> (T, T) { (x, x) } fn compute(x: int) -> ((int, bool), (int, bool)) { duplicate((x, true)) }",
-        "fn replace<T>(x: &mut T, y: T) { x = y; } fn compute(x: int) -> (int, bool) { let mut p = (1, false); replace(p, (x, true)); p }",
-        "enum List<T> { Nil, Cons(T, List<T>) } fn duplicate<T>(x: T) -> (T, T) { (x, x) } fn compute(x: int) -> (List<int>, List<int>) { duplicate(List::Cons(x, List::Nil)) }",
-        "enum Choice { Nothing, Number(int), Pair(bool, int) } fn compute(x: int) -> int { let v = if x == 0 { Choice::Nothing } else { Choice::Pair(true, x) }; match v { Nothing => 0, Number(n) => n, Pair(b, n) => if b { n + 1 } else { n } } }",
-        "enum Choice { Nothing, Number(int) } fn compute(x: int) -> (Choice, Choice) { (Choice::Nothing, Choice::Number(x)) }",
-        "enum Choice { Nothing, Number(int) } fn compute(x: int) -> int { let mut p = (Choice::Nothing, x); p.0 = Choice::Number(x); match p.0 { Nothing => 0, Number(n) => n } }",
-        "enum List { Nil, Cons(int, List) } fn make(n: int) -> List { if n == 0 { List::Nil } else { List::Cons(n, make(n - 1)) } } fn sum(l: List) -> int { match l { Nil => 0, Cons(n, tail) => n + sum(tail) } } fn compute(x: int) -> int { sum(make(x)) }",
-        "enum List { Nil, Cons(int, List) } fn compute(x: int) -> List { List::Cons(x, List::Cons(x + 1, List::Nil)) }",
-        "enum List { Nil, Cons(int, List) } fn compute(x: int) -> int { let mut p = List::Cons(x, List::Nil); let q = p; p = List::Nil; match q { Nil => 0, Cons(n, tail) => n } }",
-        "enum List { Nil, Cons(int, List) } fn compute(x: int) -> List { List::Cons(idiv(10, x), List::Nil) }",
-        "fn compute(x: int) -> ((), (), int) { let mut p = ((), (), x); p.0 = (); p.1 = (); p }",
-        "struct Empty {} fn compute(x: int) -> (Empty, Empty, int) { let mut p = (Empty{}, Empty{}, x); p.0 = Empty{}; p }",
-        "enum Node { End, Link(int, Node), Pair(Node, Node) } fn compute(x: int) -> int { let mut p = Node::Pair(Node::End, Node::End); p = Node::Link(x, Node::End); match p { Link(n, tail) => n, _ => 0 } }",
-        "fn compute(x: int) -> (int, bool, float) { (x + 1, x > 2, 3.5) }",
-        "fn compute(x: int) -> int { let mut pair = (x, (true, x + 1)); pair.1.1 += 2; pair.0 + pair.1.1 }",
-        "fn compute(x: int) -> int { let mut r = { a: true, b: x, c: false }; r.b += 2; if r.a { r.b } else { 0 } }",
-        "fn pair(x: int) -> (int, int) { (x, x + 1) } fn compute(x: int) -> (int, int) { pair(x) }",
-        "fn adjust(p: &mut (int, bool), x: int) { p.0 += x; p.1 = true; } fn compute(x: int) -> (int, bool) { let mut p = (1, false); adjust(p, x); p }",
-        "struct Pair { a: bool, b: int } fn compute(x: int) -> Pair { Pair { a: true, b: x } }",
-        "fn compute(x: int) -> (int, int) { let mut p = (1, 2); if x > 0 { p = (x, x + 1); }; p }",
-        "fn compute(x: int) -> int { let p = (x, idiv(100, x)); p.0 + p.1 }",
-        "fn compute(x: int) -> ((), int, ()) { ((), x, ()) }",
-        "fn compute(x: int) -> int { let p = ((1, true), (2, false)); if x > 0 { p.0.0 } else { p.1.0 } }",
-        r#"
-        struct Probe(int)
-        impl Value for Probe {
-            fn eq(a: Probe, b: Probe) -> bool { a.0 == b.0 }
-            fn to_string(a: Probe) -> string { to_string(a.0) }
-            fn hash(a: Probe, s: &mut hasher) { hash(a.0, s) }
-            fn clone(a: Probe) -> Probe { Probe(a.0 + 1) }
-            fn drop(a: &mut Probe) { a.0 = 0; }
-        }
-        fn compute(x: int) -> int {
-            let mut p = (Probe(x), Probe(2)); let q = p; p.0 = Probe(3);
-            p.0.0 + q.0.0 + q.1.0
-        }
-        "#,
-        "fn compute(x: int) -> int { x + 2 }",
-        "fn compute(x: int) -> int { if x > 3 { x * 2 } else { x - 1 } }",
-        "fn twice(x: int) -> int { x + x } fn compute(x: int) -> int { twice(x) + 1 }",
-        "fn compute(x: int) -> int { if x <= 1 { 1 } else { x * compute(x - 1) } }",
-        "fn set(x: &mut int, value: int) { x = value; } fn compute(x: int) -> int { let mut n = x; set(n, x + 1); n }",
-        "fn compute(x: int) -> int { match x { 0 => 11, 2 => 12, _ => 13 } }",
-        "fn compute(x: int) -> int { let mut n = x; let mut sum = 0; loop { if n == 0 { break }; sum += n; n -= 1; }; sum }",
-        "fn compute(x: int) -> int { idiv(100, x) }",
-        "fn compute(x: int) -> int { rem(100, x) }",
-    ] {
-        let module_id = session.compile(source).module_id;
-        let entry = session
-            .session()
-            .expect_fresh_module(module_id)
-            .get_local_function_id(ustr::ustr("compute"))
-            .unwrap();
-        // Keep compilation/constant-evaluation side effects outside runtime lifecycle counts.
-        session
-            .session_mut()
-            .prepare_execution_target(ExecutionTarget::PhysicalMir, module_id);
-        for input in [0, 2, 7] {
-            reset_native_drops();
-            let boxed = session.session_mut().run_entry(
-                ExecutionTarget::Mir,
-                module_id,
-                entry,
-                vec![int_value(input)],
-            );
-            let boxed_drops = native_drop_count();
-            reset_native_drops();
-            let physical = session.session_mut().run_entry(
-                ExecutionTarget::PhysicalMir,
-                module_id,
-                entry,
-                vec![int_value(input)],
-            );
-            assert_eq!(native_drop_count(), boxed_drops, "{source}, input={input}");
-            match (boxed, physical) {
-                (Ok(expected), Ok(actual)) => {
-                    crate::harness::assert_value_eq(&actual, &expected);
-                    expected.discard_storage();
-                    actual.discard_storage();
-                }
-                (Err(expected), Err(actual)) => {
-                    assert_eq!(actual.kind(), expected.kind(), "{source}")
-                }
-                (expected, actual) => panic!(
-                    "{source} input={input}: boxed={expected:?}, physical={actual:?}\n{}",
-                    session
-                        .session()
-                        .emit_physical_mir_module(module_id)
-                        .unwrap_or_else(|error| format!("{error:?}"))
-                ),
-            }
-        }
-    }
-
-    for (source, input) in [
-        (
-            "fn compute(x: float) -> float { (x + 2.5) * 3.0 }",
-            ferlium::std::math::float_value(1.25),
-        ),
-        (
-            "fn compute(x: float) -> bool { x > 0.5 }",
-            ferlium::std::math::float_value(1.25),
-        ),
-        (
-            "fn compute(x: float) -> float { x / 0.0 }",
-            ferlium::std::math::float_value(1.25),
-        ),
-        ("fn compute(x: bool) -> bool { not x }", Value::native(true)),
-        ("fn compute(x: ()) { x }", Value::unit()),
-    ] {
-        let module_id = session.compile(source).module_id;
-        let entry = session
-            .session()
-            .expect_fresh_module(module_id)
-            .get_local_function_id(ustr::ustr("compute"))
-            .unwrap();
-        // Host input is a scalar, so its representation copy has no ownership effects.
-        let boxed_input = if let Some(value) = input.as_primitive_ty::<ferlium::std::math::Float>()
-        {
-            Value::native(*value)
-        } else if let Some(value) = input.as_primitive_ty::<bool>() {
-            Value::native(*value)
-        } else {
-            Value::unit()
-        };
-        let expected = session.session_mut().run_entry(
-            ExecutionTarget::Mir,
-            module_id,
-            entry,
-            vec![boxed_input],
-        );
-        let actual = session.session_mut().run_entry(
-            ExecutionTarget::PhysicalMir,
-            module_id,
-            entry,
-            vec![input],
-        );
-        match (expected, actual) {
-            (Ok(expected), Ok(actual)) => {
-                crate::harness::assert_value_eq(&actual, &expected);
-                expected.discard_storage();
-                actual.discard_storage();
-            }
-            (Err(expected), Err(actual)) => assert_eq!(actual.kind(), expected.kind(), "{source}"),
-            (expected, actual) => panic!("{source}: boxed={expected:?}, physical={actual:?}"),
-        }
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn physical_mir_limits() {
-    // TODO(physical-mir-bridge): Merge into shared backend limit tests once physical MIR supports
-    // the full suite, retaining the call-depth boundary comparison.
+fn execution_targets_enforce_storage_and_execution_limits() {
     let mut session = TestSession::new();
     for (source, limits, expected) in [
         (
@@ -437,7 +249,7 @@ fn physical_mir_limits() {
             SandboxViolationKind::CallDepthLimitExceeded { limit: 4 },
         ),
         (
-            "fn main() -> int { 42 }",
+            "fn main() -> int { let mut n = 0; loop { n += 1; if n == 42 { break }; }; n }",
             ReferenceInterpreterLimits::default().with_environment_cell_limit(0),
             SandboxViolationKind::EnvironmentCellLimitExceeded { limit: 0 },
         ),
@@ -448,20 +260,22 @@ fn physical_mir_limits() {
             .expect_fresh_module(module_id)
             .get_local_function_id(ustr::ustr("main"))
             .unwrap();
-        let error = session
-            .session_mut()
-            .run_entry_with_limits(
-                ExecutionTarget::PhysicalMir,
-                module_id,
-                entry,
-                vec![],
-                limits,
-            )
-            .unwrap_err();
-        assert_eq!(error.kind(), RuntimeErrorKind::SandboxViolation(expected));
-        assert!(error.is_poisoning());
+        let expected = RuntimeErrorKind::SandboxViolation(expected);
+        for target in ExecutionTarget::ALL {
+            let error = session
+                .session_mut()
+                .run_entry_with_limits(target, module_id, entry, vec![], limits)
+                .unwrap_err();
+            assert_eq!(error.kind(), expected);
+            assert!(error.is_poisoning());
+        }
     }
+}
 
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn mir_execution_targets_agree_on_call_depth_boundary() {
+    let mut session = TestSession::new();
     // Compare the boundary, not just the eventual failure of an infinite recursion. Both backends
     // use optimized MIR so optimizer-induced differences in check placement do not obscure it.
     session
