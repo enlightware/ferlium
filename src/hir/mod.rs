@@ -18,6 +18,7 @@ pub(crate) mod emit_subscripts;
 pub(crate) mod emit_value_impl;
 pub mod function;
 pub(crate) mod hir_syn;
+pub mod interpreter;
 pub(crate) mod r#match;
 mod native_addressors;
 pub mod native_functions;

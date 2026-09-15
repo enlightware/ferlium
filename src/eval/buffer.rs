@@ -10,9 +10,7 @@
 
 use std::mem;
 
-use super::{
-    EvalControlFlowResult, EvalCtx, PlaceResult, RuntimeError, ValOrMut, ValOrMutArgs, cont,
-};
+use super::{EvalCtx, EvalResult, PlaceResult, RuntimeError, ValOrMut, ValOrMutArgs};
 use crate::{
     compiler::error::SourceFailureKind,
     hir::{
@@ -92,7 +90,7 @@ pub(super) fn eval_buffer_primitive(
     primitive: BufferPrimitive,
     args: Vec<ValOrMut>,
     ctx: &mut EvalCtx,
-) -> EvalControlFlowResult {
+) -> EvalResult {
     let mut args = ValOrMutArgs::new(args);
     match primitive {
         BufferPrimitive::Slot => buffer_slot(args, ctx),
@@ -112,16 +110,16 @@ pub(super) fn eval_buffer_primitive(
                 ctx,
                 "buffer alignment should be an int",
             );
-            cont(Value::native(Buffer::with_capacity(
+            Ok(Value::native(Buffer::with_capacity(
                 capacity.max(0) as usize
             )))
         }
         BufferPrimitive::MoveInto => buffer_move_into(args, ctx),
         BufferPrimitive::Move => buffer_move(args, ctx),
         BufferPrimitive::Take => buffer_take(args, ctx),
-        BufferPrimitive::Equal => cont(Value::native(false)),
-        BufferPrimitive::ToString => cont(Value::native(FerliumString::new("<buffer>"))),
-        BufferPrimitive::Hash => cont(Value::unit()),
+        BufferPrimitive::Equal => Ok(Value::native(false)),
+        BufferPrimitive::ToString => Ok(Value::native(FerliumString::new("<buffer>"))),
+        BufferPrimitive::Hash => Ok(Value::unit()),
         BufferPrimitive::Drop => {
             let target = place_from_arg(args.next().unwrap())?;
             let target = target.boxed_mut(ctx).map_err(RuntimeError::new_native)?;
@@ -136,7 +134,7 @@ pub(super) fn eval_buffer_primitive(
             );
             let old = mem::replace(target, Value::uninit());
             old.discard_storage();
-            cont(Value::unit())
+            Ok(Value::unit())
         }
         BufferPrimitive::Clone => panic!("{INVALID_BUFFER_CLONE}"),
     }
@@ -169,7 +167,7 @@ fn int_from_arg(arg: ValOrMut, ctx: &mut EvalCtx<'_>, expected: &'static str) ->
     result
 }
 
-fn buffer_slot(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResult {
+fn buffer_slot(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalResult {
     let buffer = args.next().unwrap();
     let index = int_from_arg(
         args.next().unwrap(),
@@ -181,12 +179,12 @@ fn buffer_slot(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResu
         ctx,
         "buffer element size should be an int",
     );
-    cont(Value::native(PlaceResult::new(buffer_slot_place(
+    Ok(Value::native(PlaceResult::new(buffer_slot_place(
         buffer, index,
     )?)))
 }
 
-fn buffer_move_into(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResult {
+fn buffer_move_into(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalResult {
     let mut source = place_from_arg(args.next().unwrap())?;
     let source_index = int_from_arg(
         args.next().unwrap(),
@@ -216,10 +214,10 @@ fn buffer_move_into(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlo
         "buffer_move_into target slot must be uninitialized"
     );
     *target = value;
-    cont(Value::unit())
+    Ok(Value::unit())
 }
 
-fn buffer_move(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResult {
+fn buffer_move(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalResult {
     let source = place_from_arg(args.next().unwrap())?;
     let target = place_from_arg(args.next().unwrap())?;
     let value = {
@@ -229,10 +227,10 @@ fn buffer_move(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResu
     let target = target.boxed_mut(ctx).map_err(RuntimeError::new_native)?;
     let old = mem::replace(target, value);
     old.discard_storage();
-    cont(Value::unit())
+    Ok(Value::unit())
 }
 
-fn buffer_take(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResult {
+fn buffer_take(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalResult {
     let mut source = place_from_arg(args.next().unwrap())?;
     let index = int_from_arg(args.next().unwrap(), ctx, "buffer index should be an int");
     let _element_size = int_from_arg(
@@ -245,15 +243,13 @@ fn buffer_take(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResu
         let source = source.boxed_mut(ctx).map_err(RuntimeError::new_native)?;
         mem::replace(source, Value::uninit())
     };
-    cont(value)
+    Ok(value)
 }
 
 #[cfg(test)]
 mod reclamation_tests {
     use super::*;
-    use crate::{
-        CompilerSession, Location, eval::ControlFlow, module::FunctionId, std::STD_MODULE_ID,
-    };
+    use crate::{CompilerSession, Location, module::FunctionId, std::STD_MODULE_ID};
     use std::{cell::Cell, rc::Rc};
     use ustr::ustr;
 
@@ -286,8 +282,9 @@ mod reclamation_tests {
             )
         };
         let taken = ctx
-            .call_function_id(
+            .call_native(
                 function("buffer_take"),
+                Vec::new(),
                 vec![
                     ValOrMut::Mut(Place::boxed(0)),
                     ValOrMut::from_primitive(0isize),
@@ -296,19 +293,14 @@ mod reclamation_tests {
                 Location::new_synthesized(),
             )
             .unwrap();
-        let ControlFlow::Continue(taken) = taken else {
-            panic!("take must return its element")
-        };
         let result = ctx
-            .call_function_id(
+            .call_native(
                 function("buffer_drop"),
+                Vec::new(),
                 vec![ValOrMut::Mut(Place::boxed(0))],
                 Location::new_synthesized(),
             )
             .unwrap();
-        let ControlFlow::Continue(result) = result else {
-            panic!("drop must return unit")
-        };
         result.discard_storage();
         assert!(
             matches!(ctx.environment[0], ValOrMut::Val(Value::Uninit)),

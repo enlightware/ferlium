@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{
     compiler::error::SourceFailureKind,
-    eval::{EvalControlFlowResult, EvalCtx, PlaceResult, RuntimeError, ValOrMut, cont},
+    eval::{EvalCtx, EvalResult, PlaceResult, RuntimeError, ValOrMut},
     hir::value::{NativeValue, Value},
     place::{NativeMember, Place},
 };
@@ -76,7 +76,7 @@ macro_rules! addressor {
                 )
                 .with_physical(invoke::<T, M>)
             }
-            fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalControlFlowResult {
+            fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalResult {
                 let root = receiver_place(&args[0], ctx)?;
                 let pointer = if $mutable {
                     args[0]
@@ -93,7 +93,7 @@ macro_rules! addressor {
                 // unsafe registration guarantees the returned member contract.
                 let pointer = unsafe { (self.0)(pointer as $pointer) };
                 let place = unsafe { NativeMember::place(root, pointer as *mut M, $mutable) };
-                cont(Value::native(PlaceResult::new(place)))
+                Ok(Value::native(PlaceResult::new(place)))
             }
         }
 
@@ -165,7 +165,7 @@ macro_rules! addressor {
                 )
                 .with_physical(invoke::<T, M>)
             }
-            fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalControlFlowResult {
+            fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalResult {
                 let root = receiver_place(&args[0], ctx)?;
                 let pointer = if $mutable {
                     args[0]
@@ -184,7 +184,7 @@ macro_rules! addressor {
                 failure.finish(status)?;
                 let place =
                     unsafe { NativeMember::place(root, output.assume_init() as *mut M, $mutable) };
-                cont(Value::native(PlaceResult::new(place)))
+                Ok(Value::native(PlaceResult::new(place)))
             }
         }
     };
@@ -321,7 +321,6 @@ mod tests {
             .function
             .invoke(&[ValOrMut::Mut(root.clone())], &mut ctx)
             .unwrap()
-            .into_value()
             .into_primitive_ty::<PlaceResult>()
             .unwrap()
             .place()
@@ -337,7 +336,6 @@ mod tests {
             .function
             .invoke(&[ValOrMut::Mut(root)], &mut ctx)
             .unwrap()
-            .into_value()
             .into_primitive_ty::<PlaceResult>()
             .unwrap()
             .place()
@@ -397,7 +395,6 @@ mod tests {
             .function
             .invoke(&[ValOrMut::Mut(root.clone())], &mut ctx)
             .unwrap()
-            .into_value()
             .into_primitive_ty::<PlaceResult>()
             .unwrap()
             .place()

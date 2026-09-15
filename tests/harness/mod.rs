@@ -10,7 +10,7 @@ use ferlium::{
     CompilationOutput, CompilerSession, ExecutionTarget, FxHashSet, Location, MirOptimization,
     SourceTable,
     compiler::error::{CompilationError, SourceFailureKind},
-    eval::{EvalControlFlowResult, EvalCtx, EvalResult, RuntimeError, ValOrMut, cont},
+    eval::{EvalCtx, EvalResult, RuntimeError, ValOrMut},
     hir::function::{ArgConvention, Callable, CallableDefinition, Function},
     hir::native_functions::{
         NativeDropFn, NativeFn0, NativeFnN, NativeFnR, NativeFnRM, NativeFnRR, NativeOptionalFnN,
@@ -873,12 +873,7 @@ extern "C" fn tracked_drop_log() -> isize {
 struct ConstrainedNativeProbe;
 
 impl Callable for ConstrainedNativeProbe {
-    fn call(
-        &self,
-        args: Vec<ValOrMut>,
-        _ctx: &mut EvalCtx,
-        _locals: &[ELocalDecl],
-    ) -> EvalControlFlowResult {
+    fn call(&self, args: Vec<ValOrMut>, _ctx: &mut EvalCtx) -> EvalResult {
         let mut args = args.into_iter();
         assert!(matches!(args.next(), Some(ValOrMut::Dictionary(_))));
         match args.next() {
@@ -887,7 +882,7 @@ impl Callable for ConstrainedNativeProbe {
             Some(ValOrMut::Dictionary(_)) | None => panic!("expected one visible value argument"),
         }
         assert!(args.next().is_none());
-        cont(Value::native(42isize))
+        Ok(Value::native(42isize))
     }
 
     fn visible_parameter_passing(&self) -> Option<&[ArgConvention]> {
@@ -2152,12 +2147,7 @@ impl InterpreterFixture {
     }
 }
 impl Callable for InterpreterFixture {
-    fn call(
-        &self,
-        args: Vec<ValOrMut>,
-        ctx: &mut EvalCtx,
-        _: &[ELocalDecl],
-    ) -> EvalControlFlowResult {
+    fn call(&self, args: Vec<ValOrMut>, ctx: &mut EvalCtx) -> EvalResult {
         let result = match self {
             Self::Ignore => Value::unit(),
             Self::Zero => Value::native(0isize),
@@ -2183,7 +2173,7 @@ impl Callable for InterpreterFixture {
                 value.discard_storage();
             }
         }
-        cont(result)
+        Ok(result)
     }
     fn runtime_argument_passing(&self) -> Option<&[ArgConvention]> {
         Some(match self {

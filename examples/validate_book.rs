@@ -18,8 +18,8 @@ use std::process;
 
 use directories::ProjectDirs;
 use ferlium::CompilationError;
-use ferlium::eval::eval_function;
-use ferlium::eval::{ControlFlow, RuntimeError};
+use ferlium::eval::RuntimeError;
+use ferlium::hir::interpreter::eval_function;
 use ferlium::{CompilationOutput, CompilerSession};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use sha2::{Digest, Sha256};
@@ -443,9 +443,7 @@ fn try_compile_and_run(
         .map_err(RunError::Compilation)?;
 
     if let Some(expr) = expr {
-        eval_function(module, expr, vec![], session)
-            .map(ControlFlow::into_value)
-            .map_err(RunError::Runtime)?;
+        eval_function(module, expr, vec![], session).map_err(RunError::Runtime)?;
     }
 
     Ok(())

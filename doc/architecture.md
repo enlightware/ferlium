@@ -42,7 +42,8 @@ lowering with native pointers and runtime wrappers.
 - `ast/`: parsed and desugared AST definitions, AST visitors, AST utilities, and AST pretty-printing.
 - `desugar/`: parsed-AST-to-desugared-AST lowering for syntax conveniences and module-level definitions.
 - `types/`: type representation, effects, mutability, type inference, trait solving, coherence, substitutions, visitors, and schemes.
-- `hir/`: the typed high-level IR, HIR synthesis helpers, AST-to-HIR emission, borrow checking, dictionary passing, function representation, pattern-match lowering helpers, and runtime values.
+- `hir/`: the typed high-level IR, its tree-walking interpreter, HIR synthesis helpers, AST-to-HIR emission, borrow checking, dictionary passing, function representation, pattern-match lowering helpers, and runtime values.
+- `eval/`: shared boxed storage, native and intrinsic call boundaries, and execution-domain limits and poisoning.
 - `mir/`: the typed middle-level IR, including canonical functions, the construction-only builder,
   operations, terminators, values, verification, rewriting passes, and the MIR reference
   interpreter.
@@ -84,6 +85,9 @@ them stale rather than allowing code compiled against different revisions to exe
 
 The boxed HIR and MIR interpreters share storage, native adapters, and Buffer intrinsics, but
 execute script calls in their own IR, including implicit capture cloning and destruction.
+Each interpreter owns its frame state; a yielded HIR accessor retains its frame until resumed
+or abandoned. Each interpreter dispatches its script calls; the shared runtime dispatches only
+native and intrinsic calls. Call boundaries return a value or runtime error, not HIR control transfers.
 HIR and MIR interpretation share `ExecutionLimits`; their boxed reference implementations add an
 environment-cell guard. Runtime failure and poisoning semantics are specified in
 [runtime-sandboxing.md](runtime-sandboxing.md), while the distinction between that guard and a real

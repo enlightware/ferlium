@@ -92,7 +92,7 @@ pub use super::native_addressors::*;
 use super::function::{self, ArgConvention, CallArgsStorageGuard, Callable, CallableDefinition};
 use crate::{
     compiler::error::SourceFailureKind,
-    eval::{EvalControlFlowResult, EvalCtx, RuntimeError, ValOrMut, cont},
+    eval::{EvalCtx, EvalResult, RuntimeError, ValOrMut},
     hir::value::{NativeValue, Value},
     module::{ELocalDecl, ModuleEnv, ModuleFunction},
     std::math::Float,
@@ -743,7 +743,7 @@ impl<T: NativeValue> NativeStoredResult for T {
 /// Implementation detail shared by every typed arity and result protocol.
 pub trait EntryFunction: sealed::Entry + Clone + 'static {
     fn entry(&self) -> NativeEntry;
-    fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalControlFlowResult;
+    fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalResult;
 }
 
 #[derive(Clone)]
@@ -822,12 +822,7 @@ impl<E: EntryFunction> Callable for NativeCallable<E> {
             _ => None,
         }
     }
-    fn call(
-        &self,
-        args: Vec<ValOrMut>,
-        ctx: &mut EvalCtx,
-        _locals: &[ELocalDecl],
-    ) -> EvalControlFlowResult {
+    fn call(&self, args: Vec<ValOrMut>, ctx: &mut EvalCtx) -> EvalResult {
         let args = CallArgsStorageGuard::new(args);
         assert_eq!(
             args.args.len(),
@@ -939,12 +934,12 @@ macro_rules! entries {
                 }).with_physical(invoke::<$($arg,)* R>)
             }
             #[allow(unused_variables)]
-            fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalControlFlowResult {
+            fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalResult {
                 $(let mut $value = $arg::extract(&args[$index], ctx).map_err(RuntimeError::new_native)?;)*
                 // SAFETY: the guarded arguments remain live; Ferlium borrowing establishes
                 // disjoint mutable pointees. Extraction holds no EvalCtx borrow across the call.
                 let result = (self.0)($(unsafe { $arg::borrow(&mut $value) }),*);
-                cont(result.boxed())
+                Ok(result.boxed())
             }
         }
 
@@ -996,14 +991,14 @@ macro_rules! entries {
                 }).with_physical(invoke::<$($arg,)* O>).with_host_output::<O>()
             }
             #[allow(unused_variables)]
-            fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalControlFlowResult {
+            fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalResult {
                 $(let mut $value = $arg::extract(&args[$index], ctx).map_err(RuntimeError::new_native)?;)*
                 let mut output = MaybeUninit::uninit();
                 // SAFETY: arguments remain live and satisfy Ferlium borrowing; all interpreter
                 // lookups finish before creating these call-scoped references.
                 (self.0)($(unsafe { $arg::borrow(&mut $value) },)* &mut output);
                 // SAFETY: the registered entry leaves an initialized output on normal return.
-                cont(NativeStoredResult::boxed(unsafe { output.assume_init() }))
+                Ok(NativeStoredResult::boxed(unsafe { output.assume_init() }))
             }
         }
     };
@@ -1091,7 +1086,7 @@ macro_rules! fallible_entries {
                     parameters: vec![$($arg::parameter()),*], result: self.result,
                 }).with_physical(invoke::<$($arg),*>)
             }
-            fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalControlFlowResult {
+            fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalResult {
                 let _ = args;
                 $(let mut $value = $arg::extract(&args[$index], ctx).map_err(RuntimeError::new_native)?;)*
                 assert!(ctx.native_failure.is_empty(), "native call started with an unhandled failure");
@@ -1100,7 +1095,7 @@ macro_rules! fallible_entries {
                 let status = (self.function)(&mut ctx.native_failure $(, unsafe { $arg::borrow(&mut $value) })*);
                 ctx.native_failure.finish(status)?;
                 assert_ne!(self.result, NativeResult::Never, "never native entry returned success");
-                cont(Value::unit())
+                Ok(Value::unit())
             }
         }
 
@@ -1159,7 +1154,7 @@ macro_rules! fallible_entries {
                     parameters: vec![$($arg::parameter()),*], result: NativeResult::Output(O::layout()),
                 }).with_physical(invoke::<$($arg,)* O>).with_host_output::<O>()
             }
-            fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalControlFlowResult {
+            fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalResult {
                 let _ = args;
                 $(let mut $value = $arg::extract(&args[$index], ctx).map_err(RuntimeError::new_native)?;)*
                 let mut output = MaybeUninit::uninit();
@@ -1169,7 +1164,7 @@ macro_rules! fallible_entries {
                 let status = (self.0)(&mut ctx.native_failure, $(unsafe { $arg::borrow(&mut $value) },)* &mut output);
                 ctx.native_failure.finish(status)?;
                 // SAFETY: only success reaches here, and registration guarantees initialization.
-                cont(NativeStoredResult::boxed(unsafe { output.assume_init() }))
+                Ok(NativeStoredResult::boxed(unsafe { output.assume_init() }))
             }
         }
     };
@@ -1262,13 +1257,13 @@ impl<T: 'static> EntryFunction for NativeDropFn<T> {
         .with_physical(invoke::<T>)
     }
 
-    fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalControlFlowResult {
+    fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalResult {
         let mut storage =
             take_native_drop_target::<T>(&args[0], ctx).map_err(RuntimeError::new_native)?;
         // SAFETY: the payload is initialized, aligned, exclusively owned and detached from ctx.
         // Registration guarantees consumption without freeing this stack storage.
         unsafe { (self.0)(storage.as_mut_ptr()) };
-        cont(Value::unit())
+        Ok(Value::unit())
     }
 }
 
@@ -1437,12 +1432,12 @@ impl<A: NativeArgument, O: NativeStoredResult> EntryFunction for NativeOptionalF
         .with_physical(invoke::<A, O>)
         .with_host_output::<O>()
     }
-    fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalControlFlowResult {
+    fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalResult {
         let mut arg = A::extract(&args[0], ctx).map_err(RuntimeError::new_native)?;
         let mut output = MaybeUninit::uninit();
         // SAFETY: all lookups are complete and the guarded argument remains live and borrowed.
         let present = (self.function)(unsafe { A::borrow(&mut arg) }, &mut output);
-        cont(if present {
+        Ok(if present {
             // SAFETY: registration guarantees initialization exactly on true.
             let value = NativeStoredResult::boxed(unsafe { output.assume_init() });
             Value::tuple_variant(ustr("Some"), [value])
@@ -1478,7 +1473,6 @@ mod tests {
     use crate::{
         CompilerSession,
         compiler::error::RuntimeErrorKind,
-        eval::ControlFlow,
         hir::value::NativeValueType,
         module::{Module, ModuleId, Path, id::Id},
         place::Place,
@@ -1580,10 +1574,8 @@ mod tests {
                         ValOrMut::Val(Value::native(HostU32(b))),
                     ],
                     &mut ctx,
-                    &[],
                 )
                 .unwrap()
-                .into_value()
                 .into_primitive_ty::<isize>()
                 .unwrap();
             assert_eq!(value, expected);
@@ -1639,9 +1631,8 @@ mod tests {
             path: vec![0],
         };
         function
-            .call(vec![ValOrMut::Mut(place.clone())], &mut ctx, &[])
+            .call(vec![ValOrMut::Mut(place.clone())], &mut ctx)
             .unwrap()
-            .into_value()
             .discard_storage();
 
         assert_eq!(count.get(), 1, "destruction must run during Value::drop");
@@ -1671,7 +1662,6 @@ mod tests {
                 path: vec![],
             })],
             &mut ctx,
-            &[],
         );
     }
 
@@ -1763,7 +1753,6 @@ mod tests {
                     path: vec![],
                 })],
                 &mut ctx,
-                &[],
             );
             return;
         }
@@ -1837,10 +1826,7 @@ mod tests {
                 root: 0,
                 path: vec![],
             });
-            let value = function
-                .call(vec![arg], &mut ctx, &[])
-                .unwrap()
-                .into_value();
+            let value = function.call(vec![arg], &mut ctx).unwrap();
             assert_eq!(
                 function::literal_of_trivial_copy_native(&value).unwrap(),
                 function::literal_of_trivial_copy_native(ctx.environment[0].as_val().unwrap())
@@ -1917,13 +1903,8 @@ mod tests {
         let session = CompilerSession::new_empty_for_tests();
         let mut ctx = EvalCtx::new(ModuleId::from_index(0), &session);
         let result = clone
-            .call(
-                vec![ValOrMut::Val(Value::native(input.clone()))],
-                &mut ctx,
-                &[],
-            )
-            .unwrap()
-            .into_value();
+            .call(vec![ValOrMut::Val(Value::native(input.clone()))], &mut ctx)
+            .unwrap();
         assert_eq!(result.into_primitive_ty::<String>().unwrap(), input);
         assert!(ctx.native_failure.is_empty());
     }
@@ -2015,10 +1996,8 @@ mod tests {
                     .call(
                         vec![ValOrMut::Val(Value::native(Float::new(value).unwrap()))],
                         &mut ctx,
-                        &[],
                     )
-                    .unwrap()
-                    .into_value();
+                    .unwrap();
                 assert_eq!(
                     result
                         .as_primitive_ty::<Float>()
@@ -2093,16 +2072,12 @@ mod tests {
                 NativeScalar::Float
             )]
         );
-        let result = float
+        let value = float
             .call(
                 vec![ValOrMut::Val(Value::native(Float::new(1.25).unwrap()))],
                 &mut ctx,
-                &[],
             )
             .unwrap();
-        let ControlFlow::Continue(value) = result else {
-            panic!("native returned control flow")
-        };
         assert_eq!(value.as_primitive_ty::<Float>().unwrap().into_inner(), 2.5);
         value.discard_storage();
     }
@@ -2151,7 +2126,6 @@ mod tests {
             .call(
                 (0..3).map(|index| ValOrMut::Mut(place(index))).collect(),
                 &mut ctx,
-                &[],
             )
             .unwrap_err();
         assert_eq!(
@@ -2197,17 +2171,14 @@ mod tests {
                 function.native_entry().unwrap().signature.result,
                 NativeResult::Output(NativeLayout::of::<Owned>())
             );
-            let result = function
-                .call(vec![ValOrMut::Val(Value::native(input))], &mut ctx, &[])
+            let value = function
+                .call(vec![ValOrMut::Val(Value::native(input))], &mut ctx)
                 .unwrap();
             assert_eq!(
                 drops.get(),
                 1,
                 "owned call argument must be reclaimed after the entry returns"
             );
-            let ControlFlow::Continue(value) = result else {
-                panic!("native returned control flow")
-            };
             assert_eq!(
                 value.as_primitive_ty::<Owned>().unwrap().text,
                 "native storage"
@@ -2351,7 +2322,6 @@ mod tests {
                         ValOrMut::Val(Value::native(succeed)),
                     ],
                     &mut ctx,
-                    &[],
                 );
                 if succeed {
                     assert_eq!(
@@ -2359,7 +2329,7 @@ mod tests {
                         before + 1,
                         "the input is reclaimed before returning"
                     );
-                    let output = result.unwrap().into_value();
+                    let output = result.unwrap();
                     assert_eq!(output.as_primitive_ty::<Owned>().unwrap().text, "payload");
                     output.discard_storage();
                 } else {
@@ -2416,9 +2386,8 @@ mod tests {
         let function = unsafe { NativeFallibleOutFnN::new(nested_state) };
         for (ctx, address) in [(&mut outer, outer_address), (&mut nested, nested_address)] {
             let result = function
-                .call(vec![ValOrMut::Val(Value::native(address))], ctx, &[])
-                .unwrap()
-                .into_value();
+                .call(vec![ValOrMut::Val(Value::native(address))], ctx)
+                .unwrap();
             assert_eq!(result.as_primitive_ty::<isize>(), Some(&42));
             result.discard_storage();
         }
@@ -2454,9 +2423,8 @@ mod tests {
                     drops: drops.clone(),
                 };
                 let result = function
-                    .call(vec![ValOrMut::Val(Value::native(input))], &mut ctx, &[])
-                    .unwrap()
-                    .into_value();
+                    .call(vec![ValOrMut::Val(Value::native(input))], &mut ctx)
+                    .unwrap();
                 result.discard_storage();
                 assert_eq!(drops.get(), expected_drops);
                 assert_eq!(Rc::strong_count(&drops), 1);

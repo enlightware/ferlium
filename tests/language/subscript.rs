@@ -4418,6 +4418,37 @@ fn parameterized_named_subscript_instantiates_at_use_sites() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn yielded_generic_frame_keeps_evidence_across_module_calls() {
+    let mut session = experimental_session();
+    session
+        .try_compile_module(
+            "access",
+            "pub fn relay<T>(value: T) -> T where T: Value { value }",
+        )
+        .unwrap();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            subscript cell<T>(slot: &mut T) -> T where T: Value {
+                mut {
+                    let mut local = slot;
+                    yield local;
+                    slot = local
+                }
+            }
+            fn replace<T>(slot: &mut T, value: T) where T: Value {
+                let unrelated = access::relay((42, true));
+                slot = value
+            }
+            let mut slot = "before";
+            replace(slot->[cell], "after");
+            slot
+        "# }),
+        string("after")
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn first_class_subscript_value_captures_hidden_evidence() {
     let value = run_experimental_subscript_source(indoc! { r#"
             subscript cell<T>(slot: &mut T) -> T

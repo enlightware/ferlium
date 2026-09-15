@@ -27,10 +27,7 @@ use crate::{
     CompilerSession, Location,
     compiler::MirOptimization,
     containers::b,
-    eval::{
-        ControlFlow, EvalControlFlowResult, EvalCtx, PlaceResult, RuntimeError, ValOrMut, ValueRef,
-        buffer,
-    },
+    eval::{EvalCtx, PlaceResult, RuntimeError, ValOrMut, ValueRef, buffer},
     execution::ReferenceInterpreterLimits,
     hir::{
         function::{ArgConvention, copy_boxed_trivial_copy_native, literal_of_trivial_copy_native},
@@ -470,13 +467,7 @@ impl<'a> Interpreter<'a> {
                 CallArgument::Dictionary(id) => args.push(ValOrMut::Dictionary(id)),
             }
         }
-        let result = self
-            .ctx
-            .call_resolved_function_with_extra(callee, vec![], args, span)?;
-        match result {
-            ControlFlow::Continue(value) => Ok(value),
-            ControlFlow::Transfer(_) => panic!("unexpected control transfer from a native call"),
-        }
+        self.ctx.call_native(callee, vec![], args, span)
     }
 
     /// The HIR record describing `callee`, following a specialization to its original.
@@ -888,10 +879,10 @@ impl<'a> Interpreter<'a> {
                 self.restore_stack(marker);
             }
             OperationKind::CheckCallDepth => {
-                self.exec_runtime_check(|ctx| ctx.check_call_depth(span))?;
+                self.ctx.check_call_depth(span)?;
             }
             OperationKind::CheckFuel => {
-                self.exec_runtime_check(|ctx| ctx.check_fuel(span))?;
+                self.ctx.check_fuel(span)?;
             }
             OperationKind::BuildClosure {
                 function,
@@ -917,19 +908,6 @@ impl<'a> Interpreter<'a> {
             }
         }
         Ok(())
-    }
-
-    fn exec_runtime_check(
-        &mut self,
-        check: impl FnOnce(&mut EvalCtx<'a>) -> EvalControlFlowResult,
-    ) -> Result<(), RuntimeError> {
-        match check(&mut self.ctx) {
-            Ok(result) => {
-                result.into_value().discard_storage();
-                Ok(())
-            }
-            Err(error) => Err(error),
-        }
     }
 
     /// Executes a `subfield` operation. The field index is the `int` value at operand `1` — a
@@ -1339,7 +1317,7 @@ impl<'a> Interpreter<'a> {
             // delegate rotates its own ambient module internally, so the MIR interpreter never
             // touches `ctx.module_id` (its IR is fully module-resolved).
             self.ctx
-                .call_resolved_function_with_extra(
+                .call_native(
                     FunctionId {
                         module,
                         function: identity,
@@ -1348,12 +1326,7 @@ impl<'a> Interpreter<'a> {
                     vec![ValOrMut::Mut(target.clone())],
                     span,
                 )
-                .map(|result| match result {
-                    ControlFlow::Continue(v) => v.discard_storage(),
-                    ControlFlow::Transfer(_) => {
-                        panic!("unexpected control transfer from a drop")
-                    }
-                })
+                .map(Value::discard_storage)
         };
 
         // Once a semantic-drop action starts, its target lifetime has ended even if the call
@@ -1564,7 +1537,7 @@ impl<'a> Interpreter<'a> {
                     }
                 }
             }
-            let result = self.ctx.call_resolved_function_with_extra(
+            let value = self.ctx.call_native(
                 FunctionId {
                     module: key.module,
                     function: key.identity,
@@ -1572,13 +1545,7 @@ impl<'a> Interpreter<'a> {
                 vec![],
                 args,
                 span,
-            );
-            let value = match result? {
-                ControlFlow::Continue(v) => v,
-                ControlFlow::Transfer(_) => {
-                    panic!("unexpected control transfer from a native call")
-                }
-            };
+            )?;
             let place = value
                 .as_primitive_ty::<PlaceResult>()
                 .expect("an addressor member must return a place")
@@ -1963,7 +1930,7 @@ impl<'a> Interpreter<'a> {
         // Delegate to the shared runtime with the callee's module given explicitly; the delegate
         // rotates its own ambient module internally, so the MIR interpreter never touches
         // `ctx.module_id` (its IR is fully module-resolved).
-        let result = self.ctx.call_resolved_function_with_extra(
+        let value = self.ctx.call_native(
             FunctionId {
                 module: callee_module,
                 function: callee_identity,
@@ -1971,17 +1938,12 @@ impl<'a> Interpreter<'a> {
             vec![],
             args,
             span,
-        );
-        let value = match result? {
-            ControlFlow::Continue(v) => v,
-            ControlFlow::Transfer(_) => panic!("unexpected control transfer from a native call"),
-        };
+        )?;
         self.store(value, &ret_place)?;
         Ok(())
     }
 
-    /// Applies the closure at `place` (borrowed, not consumed), mirroring
-    /// [`EvalCtx::call_function_value`]: the captured environment is cloned into a fresh temporary
+    /// Applies the closure at `place` (borrowed, not consumed): its environment is cloned into a fresh temporary
     /// (so per-call mutations do not persist into the stored closure — closures are stateless across
     /// calls), the environment slots are prepended as leading by-pointer arguments, the body runs,
     /// then the environment temporary is dropped. The closure itself stays in `place` (and is dropped

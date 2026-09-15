@@ -19,9 +19,10 @@ use ferlium::{
         CompilationErrorImpl, DuplicatedVariantContext, InvalidLoopControlKind, LoopControlKind,
         MutabilityMustBeWhat, RuntimeErrorKind, SandboxViolationKind, SourceFailureKind,
     },
-    eval::{EvalCtx, eval_function_with_ctx},
+    eval::EvalCtx,
     execution::ReferenceInterpreterLimits,
     format::FormatWith,
+    hir::interpreter::eval_function_with_ctx,
     hir::value::Value,
     hir::{ENodeArena, ENodeId, NodeKind},
     std::{

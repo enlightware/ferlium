@@ -90,14 +90,14 @@ macro_rules! call_fn {
             } else {
                 let mut ctx = $crate::eval::EvalCtx::new(__module_id, __session);
                 let args_vec = vec![ $( $crate::eval::ValOrMut::Val($val) ),* ];
-                let ret = ctx
-                    .call_function_id(
-                        function_id,
-                        args_vec,
-                        $crate::Location::new_synthesized(),
-                    )
-                    .map_err(|err| format!("Execution error: {}", err.kind()))?
-                    .into_value();
+                let ret = $crate::hir::interpreter::call_function(
+                    function_id,
+                    Vec::new(),
+                    args_vec,
+                    $crate::Location::new_synthesized(),
+                    &mut ctx,
+                )
+                .map_err(|err| format!("Execution error: {}", err.kind()))?;
                 Ok(ret)
             }
         })

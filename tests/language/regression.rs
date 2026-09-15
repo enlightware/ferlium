@@ -11,7 +11,7 @@ use ustr::ustr;
 
 use ferlium::compiler::error::{CompilationErrorImpl, MutabilityMustBeWhat, SourceFailureKind};
 use ferlium::hir::value::Value;
-use ferlium::{Compiler, Path, eval::eval_function};
+use ferlium::{Compiler, Path, hir::interpreter::eval_function};
 use test_log::test;
 
 use indoc::indoc;
@@ -445,9 +445,8 @@ fn value_to_string_arrays_by_logical_contents() {
             .ty_scheme
             .ty
             .ret;
-        let value = eval_function(module_and_expr.module_id, expr, vec![], compiler_session)
-            .unwrap()
-            .into_value();
+        let value =
+            eval_function(module_and_expr.module_id, expr, vec![], compiler_session).unwrap();
         (value, ty)
     };
     assert_eq!(
@@ -469,9 +468,8 @@ fn value_to_string_arrays_by_logical_contents() {
             .ty_scheme
             .ty
             .ret;
-        let value = eval_function(module_and_expr.module_id, expr, vec![], compiler_session)
-            .unwrap()
-            .into_value();
+        let value =
+            eval_function(module_and_expr.module_id, expr, vec![], compiler_session).unwrap();
         (value, ty)
     };
     assert_eq!(

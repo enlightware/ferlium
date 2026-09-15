@@ -11,7 +11,7 @@
 use std::fmt;
 
 use crate::{
-    eval::{EvalControlFlowResult, EvalCtx, ValOrMut},
+    eval::{EvalCtx, EvalResult, ValOrMut},
     hir::function::{ArgConvention, Callable},
     module::{ELocalDecl, ModuleEnv},
 };
@@ -55,12 +55,7 @@ impl BufferPrimitive {
 }
 
 impl Callable for BufferPrimitive {
-    fn call(
-        &self,
-        _args: Vec<ValOrMut>,
-        _ctx: &mut EvalCtx,
-        _locals: &[ELocalDecl],
-    ) -> EvalControlFlowResult {
+    fn call(&self, _args: Vec<ValOrMut>, _ctx: &mut EvalCtx) -> EvalResult {
         unreachable!("Buffer primitives must be dispatched by the interpreter")
     }
     fn runtime_argument_passing(&self) -> Option<&[ArgConvention]> {

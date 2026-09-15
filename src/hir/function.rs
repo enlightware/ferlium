@@ -22,10 +22,7 @@ use crate::{
     Location,
     ast::{Attribute, MetaItem, UstrSpan},
     compiler::error::SourceFailureKind,
-    eval::{
-        ControlFlow, EvalControlFlowResult, EvalCtx, PlaceResult, RuntimeError, ValOrMut, cont,
-        drop_frame_owned_locals_on_error, eval_node_with_ctx,
-    },
+    eval::{EvalCtx, EvalResult, PlaceResult, RuntimeError, ValOrMut},
     format::{FormatWith, escape_identifier, format_generic_param_list, write_identifier},
     hir::{
         self, ENodeId, UNodeArena, UNodeId,
@@ -402,8 +399,6 @@ impl FormatWith<ModuleEnv<'_>> for (&CallableDefinition, Ustr) {
     }
 }
 
-type CallCtx<'a> = EvalCtx<'a>;
-
 /// A function that can be called
 pub trait Callable: DynClone {
     /// Native entry address and ABI contract, when available.
@@ -413,14 +408,10 @@ pub trait Callable: DynClone {
     fn native_entry(&self) -> Option<&NativeEntry> {
         None
     }
-    /// Execute a script or host callback. Compiler intrinsics are dispatched by `EvalCtx`
-    /// before this hook and provide only callable metadata.
-    fn call(
-        &self,
-        args: Vec<ValOrMut>,
-        _ctx: &mut CallCtx,
-        locals: &[ELocalDecl],
-    ) -> EvalControlFlowResult;
+    /// Executes a host callback; script and intrinsic entries are dispatched from their metadata.
+    fn call(&self, _args: Vec<ValOrMut>, _ctx: &mut EvalCtx) -> EvalResult {
+        panic!("script and intrinsic execution require resolved function metadata")
+    }
     fn as_script(&self) -> Option<&ScriptFunction> {
         // Default implementation, which is reimplemented in `ScriptFunction`.
         None
@@ -470,16 +461,16 @@ impl Debug for dyn Callable {
 dyn_clone::clone_trait_object!(Callable);
 
 /// Owns prepared call arguments until they are borrowed or transferred into a frame.
-pub(super) struct CallArgsStorageGuard {
-    pub(super) args: Vec<ValOrMut>,
+pub(crate) struct CallArgsStorageGuard {
+    pub(crate) args: Vec<ValOrMut>,
 }
 
 impl CallArgsStorageGuard {
-    pub(super) fn new(args: Vec<ValOrMut>) -> Self {
+    pub(crate) fn new(args: Vec<ValOrMut>) -> Self {
         Self { args }
     }
 
-    fn into_vec(mut self) -> Vec<ValOrMut> {
+    pub(crate) fn take(&mut self) -> Vec<ValOrMut> {
         mem::take(&mut self.args)
     }
 }
@@ -541,13 +532,8 @@ pub fn arg_conventions_for_args(args: &[FnArgType]) -> Vec<ArgConvention> {
 pub struct VoidFunction;
 
 impl Callable for VoidFunction {
-    fn call(
-        &self,
-        _args: Vec<ValOrMut>,
-        _ctx: &mut CallCtx,
-        _locals: &[ELocalDecl],
-    ) -> EvalControlFlowResult {
-        Ok(ControlFlow::Continue(Value::unit()))
+    fn call(&self, _args: Vec<ValOrMut>, _ctx: &mut EvalCtx) -> EvalResult {
+        Ok(Value::unit())
     }
 
     fn format_ind(
@@ -574,70 +560,12 @@ pub struct ScriptFunction {
     /// Number of ordinary runtime arguments expected by this body.
     ///
     /// This includes closure-environment slots prepended when calling a function value, but not
-    /// dictionary/evidence parameters, which are passed separately through the extra-parameter frame.
+    /// dictionary/evidence parameters, which are materialized in the HIR frame separately.
     pub runtime_arg_count: usize,
     // pub monomorphised: HashMap<Vec<Type>, hir::Node>,
 }
 
 impl Callable for ScriptFunction {
-    fn call(
-        &self,
-        args: Vec<ValOrMut>,
-        ctx: &mut CallCtx,
-        locals_arg: &[ELocalDecl],
-    ) -> EvalControlFlowResult {
-        let args = CallArgsStorageGuard::new(args);
-        let arg_count = args.args.len();
-        #[cfg(debug_assertions)]
-        if args.args.len() != self.runtime_arg_count {
-            eprintln!(
-                "BUG\ngot {} runtime args: {:?}\nexpected {}",
-                args.args.len(),
-                args.args,
-                self.runtime_arg_count,
-            );
-        }
-        assert_eq!(args.args.len(), self.runtime_arg_count);
-        let arena = &ctx
-            .compiler_session()
-            .expect_fresh_module(ctx.module_id)
-            .hir_arena;
-        if ctx.environment.len().saturating_add(arg_count) > ctx.environment_cell_limit {
-            return Err(ctx.environment_cell_limit_error(Some(arena[self.entry_node_id].span)));
-        }
-
-        let old_frame_base = ctx.frame_base;
-        ctx.frame_base = ctx.environment.len();
-        ctx.environment.extend(args.into_vec());
-        ctx.call_depth += 1;
-
-        let ret = match eval_node_with_ctx(arena, self.entry_node_id, ctx, locals_arg) {
-            Ok(ret) => Ok(ret),
-            Err(error) => Err(ctx.cleanup_after_error(error, |ctx| {
-                drop_frame_owned_locals_on_error(ctx, locals_arg, arena[self.entry_node_id].span)
-            })),
-        };
-
-        ctx.call_depth -= 1;
-        if ret.is_ok() {
-            let expected_len = ctx.frame_base + arg_count;
-            if ctx.environment.len() > expected_len
-                && ctx.environment[expected_len..]
-                    .iter()
-                    .all(|entry| matches!(entry, ValOrMut::Val(Value::Uninit)))
-            {
-                ctx.truncate_environment_storage(expected_len);
-            }
-            assert_eq!(ctx.environment.len(), expected_len);
-        }
-        ctx.truncate_environment_storage(ctx.frame_base);
-        ctx.frame_base = old_frame_base;
-
-        let ret = ret?;
-        // Convert Return to Continue at function boundary
-        // (return statements should only escape the current function, not propagate to callers)
-        Ok(ControlFlow::Continue(ret.into_value()))
-    }
     fn as_script(&self) -> Option<&ScriptFunction> {
         Some(self)
     }
@@ -728,12 +656,7 @@ impl StructuralFieldAddressor {
 }
 
 impl Callable for StructuralFieldAddressor {
-    fn call(
-        &self,
-        mut args: Vec<ValOrMut>,
-        _ctx: &mut CallCtx,
-        _locals: &[ELocalDecl],
-    ) -> EvalControlFlowResult {
+    fn call(&self, mut args: Vec<ValOrMut>, _ctx: &mut EvalCtx) -> EvalResult {
         debug_assert_eq!(args.len(), self.runtime_argument_passing.len());
         let receiver = args.pop().expect("structural field receiver should exist");
         debug_assert!(
@@ -759,7 +682,7 @@ impl Callable for StructuralFieldAddressor {
             isize::try_from(self.index.as_u32())
                 .expect("structural projection index fits the interpreter place path"),
         );
-        cont(Value::native(PlaceResult::new(place)))
+        Ok(Value::native(PlaceResult::new(place)))
     }
 
     fn runtime_argument_passing(&self) -> Option<&[ArgConvention]> {
@@ -847,7 +770,7 @@ pub(crate) fn copy_boxed_trivial_copy_native<'a>(value: impl Into<ValueRef<'a>>)
 
 pub fn extract_trivial_native_input<T: NativeTrivialCopy>(
     arg: &ValOrMut,
-    ctx: &mut CallCtx,
+    ctx: &mut EvalCtx,
 ) -> Result<T, SourceFailureKind> {
     match arg.as_primitive::<T>(ctx)? {
         Some(value) => Ok(*value),
@@ -861,7 +784,7 @@ pub fn extract_trivial_native_input<T: NativeTrivialCopy>(
 
 pub fn extract_native_ref<'m, T: 'static>(
     arg: &'m ValOrMut,
-    ctx: &'m mut CallCtx,
+    ctx: &'m mut EvalCtx,
 ) -> Result<&'m T, SourceFailureKind> {
     match arg.as_primitive::<T>(ctx)? {
         Some(value) => Ok(value),
@@ -883,7 +806,6 @@ mod tests {
     use super::*;
     use crate::{
         CompilerSession,
-        eval::ControlFlow,
         hir::{CallArgument, Elaborated, native_functions::NativeFnR, value::NativeValueType},
         module::{ModuleId, id::Id},
     };
@@ -925,16 +847,12 @@ mod tests {
         let mut ctx = EvalCtx::new(ModuleId::from_index(0), &session);
         let function = NativeFnR::new(observe_value);
 
-        let result = function
+        let value = function
             .call(
                 vec![ValOrMut::Val(Value::native(NativeArgDropTracked))],
                 &mut ctx,
-                &[],
             )
             .unwrap();
-        let ControlFlow::Continue(value) = result else {
-            panic!("native test function should not return early");
-        };
         value.discard_storage();
 
         assert_eq!(NATIVE_ARG_DROP_COUNT.load(Ordering::Relaxed), 1);

@@ -4145,7 +4145,7 @@ mod tests {
     use super::*;
     use crate::{
         CompilerSession,
-        eval::{EvalControlFlowResult, EvalCtx, ValOrMut},
+        eval::{EvalCtx, EvalResult, ValOrMut},
         hir::function::{ArgConvention, Callable, Function},
         module::{BlanketTraitImplSubKey, ELocalDecl, Path},
         std::{core_traits_names::VALUE_TRAIT_NAME, math::int_type, new_module_using_std},
@@ -4160,12 +4160,7 @@ mod tests {
     struct UnexecutedEffectMethod;
 
     impl Callable for UnexecutedEffectMethod {
-        fn call(
-            &self,
-            _: Vec<ValOrMut>,
-            _: &mut EvalCtx,
-            _: &[ELocalDecl],
-        ) -> EvalControlFlowResult {
+        fn call(&self, _: Vec<ValOrMut>, _: &mut EvalCtx) -> EvalResult {
             unreachable!("the effect-cache test only queries method types")
         }
         fn runtime_argument_passing(&self) -> Option<&[ArgConvention]> {

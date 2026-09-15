@@ -44,9 +44,10 @@ use crate::{
         },
     },
     define_id_type, emit_mir,
-    eval::{ControlFlow, EvalCtx, RuntimeError, ValOrMut, eval_function_with_ctx},
+    eval::{EvalCtx, RuntimeError, ValOrMut},
     execution::{DEFAULT_INTERACTIVE_FUEL_LIMIT, ExecutionTarget, ReferenceInterpreterLimits},
     format::FormatWith,
+    hir::interpreter::eval_function_with_ctx,
     hir::{
         self,
         emit_expr::emit_expr_entry_with_private_impls,
@@ -878,9 +879,7 @@ impl CompilerSession {
                 entry_id,
                 values.into_iter().map(ValOrMut::Val).collect(),
                 &mut ctx,
-            )
-            .map(|value| value.into_value())
-            {
+            ) {
                 Ok(value) => Ok(value),
                 Err(error) => Err(format!(
                     "{}",
@@ -1420,7 +1419,6 @@ impl CompilerSession {
                     arguments.into_iter().map(ValOrMut::Val).collect(),
                     &mut ctx,
                 )
-                .map(ControlFlow::into_value)
             }
             ExecutionTarget::Mir => {
                 let mut interp = Interpreter::with_limits(module_id, self, limits);

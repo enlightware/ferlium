@@ -434,16 +434,11 @@ impl FormatWith<EvalCtx<'_>> for Place {
                 native.receiver().format_with(data)
             ),
             Place::Boxed { root, path } => {
-                let ctx = data;
-                let relative_index = *root as isize - ctx.frame_base as isize;
-                write!(f, "@{relative_index}")?;
+                write!(f, "@{root}")?;
                 if !path.is_empty() {
                     write!(f, ".")?;
                 }
                 write_with_separator(path, ".", f)?;
-                if relative_index < 0 {
-                    write!(f, " (in a previous frame)")?;
-                }
                 Ok(())
             }
         }

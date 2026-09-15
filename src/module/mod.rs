@@ -2659,7 +2659,7 @@ pub(crate) fn fmt_ordered_quantifiers(f: &mut fmt::Formatter<'_>, count: u32) ->
 pub(crate) mod tests {
     use super::*;
     use crate::{
-        eval::{EvalControlFlowResult, EvalCtx, ValOrMut, cont},
+        eval::{EvalCtx, EvalResult, ValOrMut},
         hir::{
             function::{ArgConvention, Callable},
             native_functions::NativeOptionalFnN,
@@ -2674,16 +2674,11 @@ pub(crate) mod tests {
     struct OptionalWithoutNativeEntry;
 
     impl Callable for OptionalWithoutNativeEntry {
-        fn call(
-            &self,
-            args: Vec<ValOrMut>,
-            _: &mut EvalCtx,
-            _: &[ELocalDecl],
-        ) -> EvalControlFlowResult {
+        fn call(&self, args: Vec<ValOrMut>, _: &mut EvalCtx) -> EvalResult {
             for arg in args {
                 arg.discard_storage();
             }
-            cont(Value::unit_variant(ustr("None")))
+            Ok(Value::unit_variant(ustr("None")))
         }
         fn runtime_argument_passing(&self) -> Option<&[ArgConvention]> {
             Some(&[])
