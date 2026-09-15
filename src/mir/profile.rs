@@ -318,6 +318,9 @@ mod tests {
             operation::OperationKindDiscriminant as Op,
             terminator::TerminatorKindDiscriminant as Term,
         },
+        module::{FunctionId, TraitDictionaryEntry, id::Id},
+        std::value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX},
+        types::r#trait::TraitDictionaryEntryIndex,
     };
 
     #[test]
@@ -378,5 +381,90 @@ mod tests {
         assert!(profile.total().total() > 0);
         let attributed: u64 = profile.functions().map(|(_, counts)| counts.total()).sum();
         assert_eq!(attributed, profile.total().total());
+    }
+
+    #[test]
+    fn interpreter_profile_includes_capture_methods_across_modules() {
+        for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+            let mut session = CompilerSession::new();
+            session.set_mir_optimization(optimization);
+            let support = session
+                .compile_for(
+                    ExecutionTarget::Mir,
+                    "pub fn make<T>(value: T) where T: Value { || value }
+                     pub fn sample(x: int) { make(x) }",
+                    "captures",
+                    Path::single_str("captures"),
+                )
+                .unwrap()
+                .module_id;
+            let module_id = session
+                .compile_for(
+                    ExecutionTarget::Mir,
+                    "pub fn main(x: int) -> int {
+                        let f = captures::make(x);
+                        let g = f;
+                        f() + g()
+                    }",
+                    "profile",
+                    Path::single_str("profile"),
+                )
+                .unwrap()
+                .module_id;
+            let entry = session
+                .expect_fresh_module(module_id)
+                .get_local_function_id(ustr("main"))
+                .unwrap();
+            let sample = session
+                .expect_fresh_module(support)
+                .get_local_function_id(ustr("sample"))
+                .unwrap();
+            let closure = session
+                .run_entry(
+                    ExecutionTarget::Mir,
+                    support,
+                    sample,
+                    vec![Value::native(10isize)],
+                )
+                .unwrap();
+            let dictionary = closure
+                .as_function()
+                .unwrap()
+                .closure_env_value_dictionary
+                .as_ref()
+                .unwrap();
+            let definition = dictionary.definition;
+            let methods = &session
+                .expect_fresh_module(definition.module_id)
+                .get_impl_data(definition.impl_id)
+                .unwrap()
+                .dictionary_value;
+            let expected = [VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX].map(|method| {
+                let TraitDictionaryEntry::Function(function) =
+                    methods.entry(TraitDictionaryEntryIndex::from_index(method.as_index()));
+                FunctionId::new(definition.module_id, function)
+            });
+            closure.discard_storage();
+            let (result, profile) = session
+                .run_mir_entry_profiled(module_id, entry, vec![Value::native(10isize)])
+                .unwrap();
+            assert_eq!(result.into_primitive_ty::<isize>().unwrap(), 20);
+
+            // Capture management must contribute actual instructions from the selected MIR
+            // artifacts, including the recursively dispatched tuple clone/drop methods.
+            for method in expected {
+                assert!(
+                    profile.functions().any(|(key, counts)| {
+                        session.hir_identity_of(
+                            FunctionId::new(key.module, key.identity),
+                            optimization,
+                        ) == method
+                            && counts.total() > 0
+                    }),
+                    "{optimization:?}: missing {method:?} in {profile}"
+                );
+            }
+            assert!(profile.functions().any(|(key, _)| key.module == support));
+        }
     }
 }

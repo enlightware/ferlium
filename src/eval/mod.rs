@@ -2203,7 +2203,7 @@ fn call_value_clone_with(
     Ok(call(ctx, vec![source])?.into_value())
 }
 
-pub(crate) fn call_value_clone_for_temp(
+fn call_value_clone_for_temp(
     ctx: &mut EvalCtx,
     dictionary: ClosedTraitDictionary,
     source: ValOrMut,
@@ -2233,7 +2233,7 @@ fn call_value_clone_dispatch_for_temp(
     })
 }
 
-pub(crate) fn call_value_drop_for_temp(
+fn call_value_drop_for_temp(
     ctx: &mut EvalCtx,
     dictionary: ClosedTraitDictionary,
     target: ValOrMut,

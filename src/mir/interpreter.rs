@@ -9,10 +9,10 @@
 //! A reference interpreter for the MIR form of Ferlium.
 //!
 //! The interpreter exists to check that `emit_mir` lowers HIR to *semantically correct* MIR: it
-//! runs a lowered [`mir::Function`] and produces the value the function computes. It reuses the HIR
-//! interpreter's memory substrate — a MIR *place* (pointer) is a [`Place`] and the heap is
-//! the [`EvalCtx`]'s `environment`. Host callbacks and compiler intrinsics use the shared evaluator;
-//! MIR (script) callees are interpreted recursively so their own lowering is exercised too.
+//! runs a lowered [`mir::Function`] and produces the value the function computes. It shares boxed
+//! storage with HIR — a MIR *place* (pointer) is a [`Place`] and the heap is [`EvalCtx`]'s
+//! `environment`. Native callbacks and Buffer intrinsics use the shared runtime; script callees,
+//! including capture clone/drop methods, execute the selected MIR stage recursively.
 
 #[cfg(debug_assertions)]
 use std::fmt;
@@ -29,7 +29,7 @@ use crate::{
     containers::b,
     eval::{
         ControlFlow, EvalControlFlowResult, EvalCtx, PlaceResult, RuntimeError, ValOrMut, ValueRef,
-        buffer, call_value_clone_for_temp, call_value_drop_for_temp,
+        buffer,
     },
     execution::ReferenceInterpreterLimits,
     hir::{
@@ -48,7 +48,10 @@ use crate::{
         id::Id,
     },
     place::Place,
-    std::array::array_value_from_vec,
+    std::{
+        array::array_value_from_vec,
+        value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX},
+    },
     types::{
         r#trait::TraitDictionaryEntryIndex,
         r#type::{Type, TypeKind},
@@ -376,8 +379,8 @@ impl<'a> Interpreter<'a> {
     ///
     /// Both callee kinds are handled, and the **native** one is the one that matters: natives have
     /// no MIR body, yet they are what compile-time evaluation overwhelmingly reaches — every
-    /// arithmetic operator is a native `Num` impl function. A native is delegated to the HIR
-    /// interpreter and returns its result directly instead of writing through an out-pointer,
+    /// arithmetic operator is a native `Num` impl function. A native uses the shared runtime
+    /// and returns its result directly instead of writing through an out-pointer,
     /// exactly as in [`exec_resolved_native_call`](Self::exec_resolved_native_call).
     ///
     /// On any failure the arguments and every cell allocated here are reclaimed before returning.
@@ -1332,7 +1335,7 @@ impl<'a> Interpreter<'a> {
                 Err(error) => Err(error),
             }
         } else {
-            // Delegate to the HIR interpreter with the callee's module given explicitly; the
+            // Delegate to the shared runtime with the callee's module given explicitly; the
             // delegate rotates its own ambient module internally, so the MIR interpreter never
             // touches `ctx.module_id` (its IR is fully module-resolved).
             self.ctx
@@ -1866,7 +1869,7 @@ impl<'a> Interpreter<'a> {
     }
 
     /// The native branch of [`exec_resolved_call`](Self::exec_resolved_call): marshals the extra
-    /// (evidence) arguments and the visible arguments, delegates to the HIR interpreter, then
+    /// (evidence) arguments and the visible arguments, delegates to the shared runtime, then
     /// writes the returned value through the return out-pointer. Kept out of the script call path
     /// so the recursion's per-frame stack stays small.
     #[inline(never)]
@@ -1884,7 +1887,7 @@ impl<'a> Interpreter<'a> {
         let f = self.hir_function(callee_module, callee_identity);
 
         // Native callee: marshal the extra (dictionary) arguments and the visible arguments,
-        // delegate to the HIR interpreter, then write the returned value through the return
+        // delegate to the shared runtime, then write the returned value through the return
         // out-pointer.
         //
         // A call's operands are laid out as `[extra dictionaries…, visible args…, return
@@ -1957,7 +1960,7 @@ impl<'a> Interpreter<'a> {
             }
         }
 
-        // Delegate to the HIR interpreter with the callee's module given explicitly; the delegate
+        // Delegate to the shared runtime with the callee's module given explicitly; the delegate
         // rotates its own ambient module internally, so the MIR interpreter never touches
         // `ctx.module_id` (its IR is fully module-resolved).
         let result = self.ctx.call_resolved_function_with_extra(
@@ -1990,6 +1993,19 @@ impl<'a> Interpreter<'a> {
         arg_ops: &[mir::Value],
         span: Location,
     ) -> Result<(), RuntimeError> {
+        let marker = self.ctx.environment.len();
+        let result = self.exec_closure_call_inner(slots, place, arg_ops, span);
+        self.reclaim_frame_storage(marker);
+        result
+    }
+
+    fn exec_closure_call_inner(
+        &mut self,
+        slots: &mut FxHashMap<mir::Value, Binding>,
+        place: &Place,
+        arg_ops: &[mir::Value],
+        span: Location,
+    ) -> Result<(), RuntimeError> {
         let (module_id, function_id, hidden_args, env_len, env_dict, env_ptr) = {
             let fv = place
                 .target_ref(&self.ctx)
@@ -2008,32 +2024,11 @@ impl<'a> Interpreter<'a> {
             )
         };
 
-        // The marker captured before allocating any temporary (the materialized subscript-evidence
-        // cells and the cloned environment) lets us reclaim them — and the callee's frame storage —
-        // afterwards.
-        let marker = self.ctx.environment.len();
-
         // Prepend the closure's hidden `@extra` dictionary evidence, in signature order: a trait
         // dictionary binds to its interned id; subscript evidence is materialized into a cell and
         // passed by place (mirroring `eval::evidence_arg_to_val_or_mut`). These come ahead of the
         // environment slots, matching the lambda signature `[@extra dicts…, captures…, visible…, ret]`.
-        let mut leading: Vec<Binding> = Vec::with_capacity(hidden_args.len() + env_len);
-        for arg in &hidden_args {
-            match arg {
-                HiddenEvidenceArgValue::TraitDictionary(id) => {
-                    leading.push(Binding::Dictionary(id.clone()));
-                }
-                HiddenEvidenceArgValue::Subscript(subscript) => {
-                    let place =
-                        self.alloc_cell(Value::subscript_value(subscript.as_ref().clone()), span)?;
-                    leading.push(Binding::Place(place));
-                }
-                HiddenEvidenceArgValue::VariantPayloadStorage(storage) => {
-                    let place = self.alloc_cell(Value::native(storage.is_indirect()), span)?;
-                    leading.push(Binding::Place(place));
-                }
-            }
-        }
+        let mut leading = self.hidden_evidence_bindings(&hidden_args, span)?;
 
         // Clone the captured environment into a fresh environment temporary. `env_ptr` points into
         // the closure's heap box (stable across `environment` growth).
@@ -2042,11 +2037,9 @@ impl<'a> Interpreter<'a> {
         self.check_environment_cell_capacity(span)?;
         let cloned_env = match env_dict.clone() {
             // SAFETY: `env_ptr` targets the closure's environment, which lives in its heap box (stable
-            // across `environment` growth) at `place`; `call_value_clone_for_temp` borrows `ctx`, and
+            // across `environment` growth) at `place`; the clone call borrows its source, and
             // stack discipline keeps `place` from being mutably aliased during the call.
-            Some(dict) => {
-                call_value_clone_for_temp(&mut self.ctx, dict, ValOrMut::Ref(env_ptr), span)?
-            }
+            Some(dict) => self.clone_capture_environment(dict, env_ptr, span)?,
             None => Value::uninit(),
         };
         let env_idx = self.alloc_cell(cloned_env, span)?.boxed_parts().0;
@@ -2067,9 +2060,8 @@ impl<'a> Interpreter<'a> {
             span,
         );
 
-        // Drop the cloned environment temporary (running the captures' `Value::drop`), then reclaim
-        // every cell allocated since the marker (the temporary's husk and the callee's frame). The
-        // closure itself is left untouched in `place`.
+        // Drop the cloned environment temporary; the outer scope reclaims its backing storage.
+        // The closure itself is left untouched in `place`.
         let drop_result = if call_result.as_ref().is_err_and(RuntimeError::is_poisoning) {
             self.discard_place_storage(&Place::Boxed {
                 root: env_idx,
@@ -2083,24 +2075,10 @@ impl<'a> Interpreter<'a> {
                         root: env_idx,
                         path: vec![],
                     };
-                    match call_value_drop_for_temp(
-                        &mut self.ctx,
-                        dict,
-                        ValOrMut::Mut(target.clone()),
-                        span,
-                    ) {
-                        Ok(ControlFlow::Continue(v)) => {
-                            v.discard_storage();
-                            Ok(())
-                        }
-                        Ok(ControlFlow::Transfer(_)) => {
-                            panic!("unexpected control transfer from a closure environment drop")
-                        }
+                    match self.drop_capture_environment(dict, ValOrMut::Mut(target.clone()), span) {
+                        Ok(()) => Ok(()),
                         Err(err) => {
-                            // A non-returning semantic drop leaves its target live or partially dropped.
-                            // Reclaim the temporary's Rust backing storage explicitly before
-                            // `restore_stack`: the stack-restore assertion is reserved for genuine MIR
-                            // lowering leaks, not an already-observed cleanup failure.
+                            // Failed semantic cleanup must not be retried.
                             self.discard_place_storage(&target);
                             Err(err)
                         }
@@ -2109,8 +2087,6 @@ impl<'a> Interpreter<'a> {
                 None => Ok(()),
             }
         };
-        self.restore_stack(marker);
-
         match (call_result, drop_result) {
             (Ok(()), Ok(())) => Ok(()),
             (Ok(()), Err(error)) | (Err(error), Ok(())) => Err(error),
@@ -2186,11 +2162,9 @@ impl<'a> Interpreter<'a> {
             )
         };
         // SAFETY: `env_ptr` targets the source closure's environment, which lives in its heap box
-        // (stable across `environment` growth); `call_value_clone_for_temp` borrows `ctx` only.
+        // (stable across `environment` growth); the clone call only borrows the source.
         let closure_env = match env_dict.clone() {
-            Some(dict) => {
-                call_value_clone_for_temp(&mut self.ctx, dict, ValOrMut::Ref(env_ptr), span)?
-            }
+            Some(dict) => self.clone_capture_environment(dict, env_ptr, span)?,
             None => Value::unit(),
         };
         Ok(Value::function_value(FunctionValue {
@@ -2230,13 +2204,105 @@ impl<'a> Interpreter<'a> {
         let Some((dict, captures)) = captured else {
             return Ok(());
         };
-        match call_value_drop_for_temp(&mut self.ctx, dict, ValOrMut::Val(captures), span)? {
-            ControlFlow::Continue(v) => v.discard_storage(),
-            ControlFlow::Transfer(_) => {
-                panic!("unexpected control transfer from a closure environment drop")
-            }
-        }
-        Ok(())
+        self.drop_capture_environment(dict, ValOrMut::Val(captures), span)
+    }
+
+    /// Borrows the stable, boxed capture environment for the duration of its MIR clone call.
+    fn clone_capture_environment(
+        &mut self,
+        dictionary: ClosedTraitDictionary,
+        source: *const Value,
+        span: Location,
+    ) -> Result<Value, RuntimeError> {
+        let marker = self.ctx.environment.len();
+        let result = (|| {
+            // SAFETY: the caller keeps the boxed closure alive and unmodified until this
+            // marker is reclaimed, including across allocations and recursive clone calls.
+            let source = self.alloc_argument_cell(ValOrMut::Ref(source), span)?;
+            let init = husk_like(
+                source
+                    .target_ref(&self.ctx)
+                    .expect("capture clone source must be addressable")
+                    .as_boxed()
+                    .expect("captures require boxed storage"),
+            );
+            let output = self.alloc_cell(init, span)?;
+            self.call_capture_method(
+                dictionary,
+                TraitDictionaryEntryIndex::from_index(VALUE_CLONE_METHOD_INDEX.as_index()),
+                source,
+                output.clone(),
+                span,
+            )?;
+            Ok(self.take(&output))
+        })();
+        self.reclaim_frame_storage(marker);
+        result
+    }
+
+    /// Drops captures through MIR and reclaims owned scratch storage on every exit.
+    fn drop_capture_environment(
+        &mut self,
+        dictionary: ClosedTraitDictionary,
+        target: ValOrMut,
+        span: Location,
+    ) -> Result<(), RuntimeError> {
+        let marker = self.ctx.environment.len();
+        let result = (|| {
+            let target = match target {
+                ValOrMut::Mut(place) => place,
+                ValOrMut::Val(value) => self.alloc_cell(value, span)?,
+                _ => panic!("capture drop requires owned or mutable storage"),
+            };
+            let output = self.alloc_cell(Value::uninit(), span)?;
+            self.call_capture_method(
+                dictionary,
+                TraitDictionaryEntryIndex::from_index(VALUE_DROP_METHOD_INDEX.as_index()),
+                target.clone(),
+                output,
+                span,
+            )?;
+            self.discard_place_storage(&target);
+            Ok(())
+        })();
+        self.reclaim_frame_storage(marker);
+        result
+    }
+
+    /// Uses the same entry captures and script/native dispatch as an explicit MIR dictionary call.
+    fn call_capture_method(
+        &mut self,
+        dictionary: ClosedTraitDictionary,
+        entry: TraitDictionaryEntryIndex,
+        source: Place,
+        output: Place,
+        span: Location,
+    ) -> Result<(), RuntimeError> {
+        let definition = self.ctx.dictionary_value(&dictionary);
+        let TraitDictionaryEntry::Function(function) = definition.entry(entry);
+        let captures = definition
+            .project_entry_captures(entry, &dictionary.captures, || {
+                HiddenEvidenceArgValue::TraitDictionary(dictionary.clone())
+            })
+            .expect("validated dictionary entry capture mapping");
+        let leading = self.hidden_evidence_bindings(&captures, span)?;
+        let operands = [
+            mir::Value::Parameter(ParameterId::from_index(0)),
+            mir::Value::Parameter(ParameterId::from_index(1)),
+        ];
+        let mut slots = FxHashMap::from_iter([
+            (operands[0].clone(), Binding::Place(source)),
+            (operands[1].clone(), Binding::Place(output)),
+        ]);
+        self.exec_resolved_call(
+            &mut slots,
+            dictionary.definition.module_id,
+            function,
+            leading,
+            0,
+            &operands,
+            span,
+        )
     }
 
     /// Resolves a `drop` operation's callee operand to the `(module, function)` it targets, per the
@@ -2370,12 +2436,21 @@ impl<'a> Interpreter<'a> {
     /// Exhaustion poisons the executor and bypasses MIR cleanup. The host-side reclamation path
     /// releases known boxed roots without running Ferlium code.
     fn alloc_cell(&mut self, init: Value, span: Location) -> Result<Place, RuntimeError> {
+        self.alloc_argument_cell(ValOrMut::Val(init), span)
+    }
+
+    /// Allocates a counted runtime cell; borrowed contents remain owned by their referent.
+    fn alloc_argument_cell(
+        &mut self,
+        init: ValOrMut,
+        span: Location,
+    ) -> Result<Place, RuntimeError> {
         if let Err(error) = self.check_environment_cell_capacity(span) {
             init.discard_storage();
             return Err(error);
         }
         let target = self.ctx.environment.len();
-        self.ctx.environment.push(ValOrMut::Val(init));
+        self.ctx.environment.push(init);
         // The only place a cell is pushed, so the high-water mark is exact without a check
         // anywhere else. Reclamation lowers `len` again but never the recorded peak.
         if let Some(profile) = &mut self.profile {
@@ -3106,6 +3181,80 @@ mod fatal_exit_tests {
             output.status
         );
         assert!(stderr.contains(MESSAGE), "{stderr}");
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use ustr::ustr;
+
+    use super::*;
+    use crate::{
+        ExecutionTarget, Path,
+        compiler::error::{RuntimeErrorKind, SandboxViolationKind},
+    };
+
+    #[test]
+    fn capture_clone_setup_failure_reclaims_scratch_but_keeps_the_borrowed_environment() {
+        let mut session = CompilerSession::new();
+        let module = session
+            .compile_for(
+                ExecutionTarget::Mir,
+                "fn reader<T>(record: T) { || record.x }
+                 pub fn make() -> (() -> int) { reader({ x: 7 }) }",
+                "captures",
+                Path::single_str("captures"),
+            )
+            .unwrap()
+            .module_id;
+        let make = session
+            .expect_fresh_module(module)
+            .get_local_function_id(ustr("make"))
+            .unwrap();
+        let span = Location::new_synthesized();
+
+        // Fail at captured subscript evidence allocation, the pre-clone capacity check,
+        // or clone output allocation, without unwinding the surrounding caller frame.
+        for spare_cells in 0..=2 {
+            let mut interpreter = Interpreter::new(module, &session);
+            let closure = interpreter.run_main(module, make).unwrap();
+            assert_eq!(
+                closure
+                    .as_function()
+                    .unwrap()
+                    .hidden_args
+                    .iter()
+                    .filter(|arg| matches!(arg, HiddenEvidenceArgValue::Subscript(_)))
+                    .count(),
+                1
+            );
+            let source = interpreter.alloc_cell(closure, span).unwrap();
+            let output = interpreter.alloc_cell(Value::uninit(), span).unwrap();
+            let marker = interpreter.ctx.environment.len();
+            let limit = marker + spare_cells;
+            interpreter.ctx.environment_cell_limit = limit;
+            let operand = mir::Value::Parameter(ParameterId::from_index(0));
+            let mut slots = FxHashMap::from_iter([(operand.clone(), Binding::Place(output))]);
+            let error = interpreter
+                .exec_closure_call(&mut slots, &source, &[operand], span)
+                .unwrap_err();
+            assert_eq!(
+                error.kind(),
+                RuntimeErrorKind::SandboxViolation(
+                    SandboxViolationKind::EnvironmentCellLimitExceeded { limit }
+                )
+            );
+            assert!(interpreter.is_poisoned());
+            assert_eq!(interpreter.ctx.environment.len(), marker);
+            assert_eq!(interpreter.ctx.call_depth, 0);
+            let value = source.target_ref(&interpreter.ctx).unwrap();
+            let captures = &value.as_boxed().unwrap().as_function().unwrap().closure_env;
+            assert_eq!(
+                captures.as_tuple().unwrap()[0].as_tuple().unwrap()[0].as_primitive_ty::<isize>(),
+                Some(&7)
+            );
+            interpreter.reclaim_frame_storage(0);
+        }
     }
 }
 

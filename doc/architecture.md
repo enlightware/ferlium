@@ -82,6 +82,8 @@ Replacing a compiled module revision marks its transitive consumers stale. A suc
 cascade-recompiles source-backed consumers against the new revision; a failed replacement leaves
 them stale rather than allowing code compiled against different revisions to execute together.
 
+The boxed HIR and MIR interpreters share storage, native adapters, and Buffer intrinsics, but
+execute script calls in their own IR, including implicit capture cloning and destruction.
 HIR and MIR interpretation share `ExecutionLimits`; their boxed reference implementations add an
 environment-cell guard. Runtime failure and poisoning semantics are specified in
 [runtime-sandboxing.md](runtime-sandboxing.md), while the distinction between that guard and a real

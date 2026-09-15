@@ -555,32 +555,40 @@ fn sandbox_violation_during_source_failure_cleanup_retains_both_causes() {
                     let bomb = Bomb(0);
                     idiv(1, 0)
                 }
+
+                fn captured() -> int {
+                    let bomb = Bomb(0);
+                    let f = || idiv(1, bomb.0);
+                    f()
+                }
             "#,
         )
         .module_id;
-    let main_id = session
-        .session()
-        .expect_fresh_module(module_id)
-        .get_local_function_id(ustr::ustr("main"))
-        .expect("test source should define `main`");
     let limits = ReferenceInterpreterLimits::default().with_fuel_limit(Some(0));
 
-    for target in ExecutionTarget::REFERENCE {
-        let error = session
-            .session_mut()
-            .run_entry_with_limits(target, module_id, main_id, vec![], limits)
-            .expect_err("the source failure's cleanup must exhaust fuel");
-        let violation = error
-            .sandbox_violation()
-            .expect("cleanup fuel exhaustion must be a sandbox violation");
-        assert_eq!(violation.kind(), SandboxViolationKind::FuelExhausted);
-        assert_eq!(
-            violation
-                .interrupted_source_failure()
-                .expect("the interrupted source failure must be retained")
-                .kind(),
-            SourceFailureKind::DivisionByZero
-        );
+    for name in ["main", "captured"] {
+        let entry = session
+            .session()
+            .expect_fresh_module(module_id)
+            .get_local_function_id(name.into())
+            .unwrap();
+        for target in ExecutionTarget::REFERENCE {
+            let error = session
+                .session_mut()
+                .run_entry_with_limits(target, module_id, entry, vec![], limits)
+                .expect_err("the source failure's cleanup must exhaust fuel");
+            let violation = error
+                .sandbox_violation()
+                .expect("cleanup fuel exhaustion must be a sandbox violation");
+            assert_eq!(violation.kind(), SandboxViolationKind::FuelExhausted);
+            assert_eq!(
+                violation
+                    .interrupted_source_failure()
+                    .expect("the interrupted source failure must be retained")
+                    .kind(),
+                SourceFailureKind::DivisionByZero
+            );
+        }
     }
 }
 
