@@ -3,7 +3,10 @@
 
 //! ABI-layout storage with checked provenance, logical subobjects and initialization.
 
-use super::interpreter::{Evidence, invalid, unsupported};
+use super::{
+    interpreter::{Evidence, invalid, unsupported},
+    same_storage_type,
+};
 use crate::{
     Location,
     compiler::error::SandboxViolationKind,
@@ -17,6 +20,7 @@ use crate::{
     std::{
         buffer::buffer_element_type,
         math::Float,
+        string::{StaticStr, String as NativeString},
         value::{
             TypeLayoutEnv, product_layout_spec, product_member_types, structural_variant,
             value_layout_for_type, variant_payload_offset, variant_payload_storage_for_type,
@@ -391,7 +395,9 @@ impl StorageLayout {
             (Variant(left), Variant(right)) => {
                 left.len() == right.len()
                     && left.iter().zip(right).all(|(l, r)| {
-                        l.tag == r.tag && l.payload == r.payload && l.storage == r.storage
+                        l.tag == r.tag
+                            && same_storage_type(l.payload, r.payload)
+                            && l.storage == r.storage
                     })
             }
             (Scalar(left), Scalar(right)) => left == right,
@@ -404,6 +410,13 @@ impl StorageLayout {
     fn members(&self) -> Option<&[(usize, Rc<StorageLayout>)]> {
         match &self.kind {
             StorageKind::Product(members) | StorageKind::Sequence(members) => Some(members),
+            _ => None,
+        }
+    }
+
+    fn scalar_kind(&self) -> Option<ScalarKind> {
+        match self.kind {
+            StorageKind::Scalar(kind) => Some(kind),
             _ => None,
         }
     }
@@ -1077,7 +1090,6 @@ impl Memory {
                         reference.environment,
                     );
                 }
-                _ => unreachable!("capture representations checked above"),
             }
         }
         let environment = allocation.words.as_ptr() as usize;
@@ -1186,7 +1198,18 @@ impl Memory {
         }
         active.push(ty);
         let span = Location::new_synthesized();
-        if matches!(&*ty.data(), TypeKind::Function(_) | TypeKind::Subscript(_)) {
+        let named = ty.data().as_named().cloned();
+        let repr_scalar = named.and_then(|named| {
+            ScalarKind::for_type(
+                env.type_def(named.def)
+                    .instantiated_shape_with_effects(&named.params, &named.effect_params),
+            )
+            .ok()
+        });
+        if let Some(kind) = repr_scalar {
+            self.layouts
+                .insert(ty, Rc::new(StorageLayout::scalar(ty, kind)));
+        } else if matches!(&*ty.data(), TypeKind::Function(_) | TypeKind::Subscript(_)) {
             self.layouts.insert(
                 ty,
                 Rc::new(StorageLayout {
@@ -1317,6 +1340,15 @@ impl Memory {
             .ok_or_else(|| unsupported("unprepared storage type"))
     }
 
+    pub(super) fn compatible_types(&self, left: Type, right: Type) -> Result<bool, RuntimeError> {
+        if same_storage_type(left, right) {
+            return Ok(true);
+        }
+        let left = self.shape(left)?;
+        let right = self.shape(right)?;
+        Ok(left.representation_compatible(&right))
+    }
+
     pub(super) fn bind_tags(&mut self, mut intern: impl FnMut(Ustr) -> u32) {
         for (tag, id) in &mut self.tags {
             *id = intern(*tag);
@@ -1389,6 +1421,7 @@ impl Memory {
     pub(super) fn len(&self) -> usize {
         self.stack.len()
     }
+
     fn live_allocations(&self) -> usize {
         self.allocations.len() - self.free_allocations.len() + self.live_evidence
     }
@@ -1484,7 +1517,6 @@ impl Memory {
             let field = match capture {
                 Evidence::Storage(_) => Layout::new::<bool>(),
                 Evidence::Physical { .. } => Layout::new::<DictionaryReference>(),
-                _ => return Err(invalid("symbolic callable evidence")),
             };
             let (next, offset) = layout
                 .extend(field)
@@ -1521,7 +1553,6 @@ impl Memory {
                             .cast::<usize>()
                             .write(reference.environment);
                     }
-                    _ => unreachable!(),
                 }
             }
         }
@@ -1853,7 +1884,7 @@ impl Memory {
                 .get(member.as_index())
                 .ok_or_else(|| invalid("invalid product member"))?;
             let address = self.address(base.allocation, child);
-            if address.offset != target || address.ty != ty {
+            if address.offset != target || !same_storage_type(address.ty, ty) {
                 return Err(invalid("member projection layout mismatch"));
             }
             return Ok(address);
@@ -1866,7 +1897,7 @@ impl Memory {
                 .ok_or_else(|| invalid("projection of absent variant"))?;
             let address = self.address(base.allocation, child);
             if address.offset == target
-                && address.ty == ty
+                && same_storage_type(address.ty, ty)
                 && !matches!(self.node(address)?.shape.kind, StorageKind::Pointer)
             {
                 return Ok(address);
@@ -2186,7 +2217,8 @@ impl Memory {
         address: Address,
         value: Address,
     ) -> Result<(), RuntimeError> {
-        if !matches!(self.node(address)?.shape.kind, StorageKind::Pointer) || address.ty != value.ty
+        if !matches!(self.node(address)?.shape.kind, StorageKind::Pointer)
+            || !same_storage_type(address.ty, value.ty)
         {
             return Err(invalid("pointer store type mismatch"));
         }
@@ -2658,8 +2690,8 @@ impl Memory {
             } else {
                 let scalar = Scalar::from_value(value).expect("expected scalar host value");
                 assert_eq!(
-                    ScalarKind::for_type(ty)?,
-                    scalar.kind(),
+                    shape.scalar_kind(),
+                    Some(scalar.kind()),
                     "host scalar type mismatch"
                 );
             }
@@ -2760,7 +2792,7 @@ impl Memory {
                         values.push(self.read_value(address, false)?);
                     } else {
                         let scalar = Scalar::from_value(value)?;
-                        if ScalarKind::for_type(ty)? != scalar.kind() {
+                        if shape.scalar_kind() != Some(scalar.kind()) {
                             return Err(invalid("host scalar type mismatch"));
                         }
                         values.push(StoredValue {
@@ -2969,7 +3001,7 @@ impl Memory {
             })))
         } else {
             let scalar = Scalar::from_literal(literal)?;
-            if ScalarKind::for_type(ty)? != scalar.kind() {
+            if shape.scalar_kind() != Some(scalar.kind()) {
                 return Err(invalid("literal scalar type mismatch"));
             }
             StoredData::Scalar(Some(scalar))
@@ -2981,6 +3013,24 @@ impl Memory {
         address: Address,
         literal: &LiteralValue,
     ) -> Result<bool, RuntimeError> {
+        if let Some(expected) = literal.as_primitive_ty::<StaticStr>() {
+            self.check_native(address, NativeLayout::of::<NativeString>())?;
+            // SAFETY: checked initialized storage has exactly the registered Rust string layout.
+            let actual = unsafe { &*self.pointer(address)?.cast::<NativeString>() };
+            return Ok(expected.as_str() == actual.as_ref());
+        }
+        if let LiteralValue::Tuple(fields) = literal {
+            let node = self.node(address)?;
+            if node.shape.members().is_none() || node.children.len() != fields.len() {
+                return Err(invalid("literal product arity mismatch"));
+            }
+            for (index, field) in fields.iter().enumerate() {
+                if !self.matches(self.member(address, index)?, field)? {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
         Ok(self.read_value(address, false)? == self.literal(address.ty, literal)?)
     }
 }

@@ -576,14 +576,14 @@ fn desugar_default_variant(
 
 fn validate_type_def_attributes(
     type_def: &ast::PTypeDef,
-    is_std_module: bool,
+    unsafe_allowed: bool,
 ) -> Result<(), InternalCompilationError> {
     let mut has_no_derive_value = false;
     let mut has_private_repr = false;
     for attribute in &type_def.attributes {
         match attribute.path.0.as_str() {
             NO_DERIVE_VALUE_ATTRIBUTE => {
-                if !is_std_module {
+                if !unsafe_allowed {
                     return Err(
                         InternalCompilationError::new_unsafe_feature_use_not_allowed(
                             UnsafeFeature::TypeAttribute(attribute.path.0),
@@ -967,7 +967,7 @@ impl PTypeDef {
         env: &ModuleEnv<'_>,
         modules_used: &mut FxHashSet<ModuleId>,
     ) -> Result<HirTypeDef, InternalCompilationError> {
-        validate_type_def_attributes(self, env.current.module_id() == STD_MODULE_ID)?;
+        validate_type_def_attributes(self, env.allows_unsafe())?;
         let generic_ty_params = extend_generic_ty_params(
             &GenericTyParams::default(),
             self.generic_params.type_params(),

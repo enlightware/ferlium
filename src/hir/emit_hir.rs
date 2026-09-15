@@ -53,7 +53,9 @@ use ustr::Ustr;
 use crate::{
     ast::{self, *},
     compiler::{
-        CompilationCapabilities, diagnostics::CompilationWarning, error::InternalCompilationError,
+        CompilationCapabilities,
+        diagnostics::CompilationWarning,
+        error::{InternalCompilationError, UnsafeFeature},
     },
     containers::{b, iterable_to_string},
     format::FormatWith,
@@ -77,8 +79,9 @@ use crate::{
         build_dictionary_value, id::Id,
     },
     std::{
-        STD_MODULE_ID, core_traits_names::VALUE_TRAIT_NAME,
-        value::is_compiler_provided_value_trait_application,
+        STD_MODULE_ID,
+        core_traits_names::VALUE_TRAIT_NAME,
+        value::{is_compiler_provided_value_trait_application, is_value_trait},
     },
     types::{
         coherence::check_trait_impl,
@@ -947,7 +950,26 @@ fn emit_module_contents(
     validate_name_uniqueness(&source)?;
 
     // First desugar the module.
-    let (source, desugared_arena, sorted_sccs) = source.desugar(output, others, parsed_arena)?;
+    let (source, desugared_arena, sorted_sccs) =
+        source.desugar(output, others, parsed_arena, capabilities)?;
+
+    // This gate applies only to explicit source impls, never compiler-derived ownership glue.
+    if !capabilities.allows_unsafe(output.module_id()) {
+        let env = ModuleEnv::new(output, others);
+        for imp in &source.impls {
+            if let Some((_, trait_id)) =
+                env.trait_id_with_module(&Path::single_tuple(imp.trait_name))?
+                && is_value_trait(trait_id, env.trait_def(trait_id))
+            {
+                return Err(
+                    InternalCompilationError::new_unsafe_feature_use_not_allowed(
+                        UnsafeFeature::TraitImplementation(VALUE_TRAIT_NAME.into()),
+                        imp.span,
+                    ),
+                );
+            }
+        }
+    }
 
     // Pre-registration pass: for trait impls with an explicit `for ConcreteType` annotation,
     // register a stub implementation before processing any function SCCs. This allows module

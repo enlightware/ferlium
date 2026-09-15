@@ -179,7 +179,9 @@ where
 		}
 	}
 
-	fn drop(target: &mut HashSet<V>) {}
+	fn drop(target: &mut HashSet<V>) {
+		array_drop_storage(target.buckets);
+	}
 }
 
 impl<V> Inspect for HashSet<V>
@@ -201,39 +203,6 @@ where
 	hash: hash,
 	key: K,
 	value: V,
-}
-
-impl<K, V> Value for HashMapEntry<K, V>
-where
-	K: Value,
-	V: Value
-{
-	fn eq(left: HashMapEntry<K, V>, right: HashMapEntry<K, V>) -> bool {
-		eq(left.key, right.key) and eq(left.value, right.value)
-	}
-
-	fn to_string(value: HashMapEntry<K, V>) -> string {
-		let mut rendered = to_string(value.key);
-		string_push_str(rendered, " => ");
-		string_push_str(rendered, to_string(value.value));
-		rendered
-	}
-
-	fn hash(value: HashMapEntry<K, V>, state: &mut hasher) {
-		hasher_write_string(state, "hash_map_entry");
-		hash(value.key, state);
-		hash(value.value, state);
-	}
-
-	fn clone(source: HashMapEntry<K, V>) -> HashMapEntry<K, V> {
-		HashMapEntry {
-			hash: source.hash,
-			key: source.key,
-			value: source.value,
-		}
-	}
-
-	fn drop(target: &mut HashMapEntry<K, V>) {}
 }
 
 impl<K, V> Inspect for HashMapEntry<K, V>
@@ -477,7 +446,9 @@ where
 		}
 	}
 
-	fn drop(target: &mut HashMap<K, V>) {}
+	fn drop(target: &mut HashMap<K, V>) {
+		array_drop_storage(target.buckets);
+	}
 }
 
 impl<K, V> Inspect for HashMap<K, V>

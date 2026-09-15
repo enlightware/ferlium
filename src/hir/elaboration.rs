@@ -17,7 +17,8 @@ use crate::{
         borrow_checker::BorrowContext,
         dictionary::{
             DictElaborationCtx, DictionaryReq, EvidenceBindingSource, ExtraParameters,
-            LateFunctionInstData, StaticEvidence, find_projection_subscript_dict_index,
+            LateFunctionInstData, StaticEvidence, VariantLayoutRelation,
+            find_projection_subscript_dict_index,
             find_projection_subscript_dict_index_for_receiver_ty, find_trait_impl_dict_index,
             find_variant_payload_indirection_index, instantiate_dictionary_requirements,
         },
@@ -495,21 +496,21 @@ fn structural_projection_field_index(
     let ty_kind = ty_data.clone();
     drop(ty_data);
     let structural = match ty_kind {
-        TypeKind::Record(fields) => {
-            return fields
-                .iter()
-                .position(|candidate| candidate.0 == field)
-                .map(ProjectionIndex::from_index);
-        }
         TypeKind::Named(named) => solver
             .type_def(named.def)
             .instantiated_shape_with_effects(&named.params, &named.effect_params),
-        _ => return None,
+        _ => ty,
     };
     let structural_data = structural.data();
-    let index = structural_data
-        .as_record()
-        .and_then(|fields| fields.iter().position(|candidate| candidate.0 == field));
+    let index = match &*structural_data {
+        TypeKind::Record(fields) => fields.iter().position(|candidate| candidate.0 == field),
+        TypeKind::Tuple(fields) => field
+            .as_str()
+            .parse::<usize>()
+            .ok()
+            .filter(|&i| i < fields.len()),
+        _ => None,
+    };
     drop(structural_data);
     index.map(ProjectionIndex::from_index)
 }
@@ -562,7 +563,7 @@ fn extra_arg_kind_from_inst_data(
                     let ty_kind = ty_data.clone();
                     drop(ty_data);
                     let node_kind = match ty_kind {
-                        Record(_) | Named(_) => {
+                        Tuple(_) | Record(_) | Named(_) => {
                             let index = structural_projection_field_index(
                                 ty,
                                 *name,
@@ -605,7 +606,7 @@ fn extra_arg_kind_from_inst_data(
                             })
                         }
                         _ => {
-                            panic!("ProjectionSubscript dictionary should have a variable or record type");
+                            panic!("ProjectionSubscript dictionary should have a variable or product type");
                         }
                     };
                     (node_kind, expected_node_ty)
@@ -896,8 +897,8 @@ struct VariantRequirementSubstitution {
 }
 
 fn search_variant_requirement_substitutions(
-    requirements: &[VariantRequirement],
-    caller: &[VariantRequirement],
+    requirements: &[VariantLayoutRelation],
+    caller: &[VariantLayoutRelation],
     remaining: &mut Vec<usize>,
     subst: VariantRequirementSubstitution,
     solutions: &mut Vec<VariantRequirementSubstitution>,
@@ -944,11 +945,11 @@ fn search_variant_requirement_substitutions(
 }
 
 fn compatible_variant_requirement_substitutions(
-    requirement: VariantRequirement,
-    caller: &[VariantRequirement],
+    requirement: VariantLayoutRelation,
+    caller: &[VariantLayoutRelation],
     subst: &VariantRequirementSubstitution,
 ) -> Vec<VariantRequirementSubstitution> {
-    let VariantRequirement {
+    let VariantLayoutRelation {
         variant_ty,
         tag,
         payload_ty,
@@ -960,7 +961,7 @@ fn compatible_variant_requirement_substitutions(
             if subst.used_caller_requirements.contains(&candidate_index) {
                 return None;
             }
-            let VariantRequirement {
+            let VariantLayoutRelation {
                 variant_ty: candidate_variant_ty,
                 tag: candidate_tag,
                 payload_ty: candidate_payload_ty,
@@ -1006,30 +1007,26 @@ fn compatible_variant_requirement_substitutions(
         .collect()
 }
 
-#[derive(Clone, Copy)]
-struct VariantRequirement {
-    variant_ty: Type,
-    tag: Ustr,
-    payload_ty: Type,
-}
-
-fn variant_requirements(parameters: &ExtraParameters) -> Vec<VariantRequirement> {
-    parameters
-        .requirements
-        .iter()
-        .filter_map(|requirement| match requirement {
-            DictionaryReq::VariantPayloadIndirection {
-                variant_ty,
-                tag,
-                payload_ty,
-            } => Some(VariantRequirement {
+fn variant_requirements(parameters: &ExtraParameters) -> Vec<VariantLayoutRelation> {
+    let mut relations = parameters.variant_layouts.clone();
+    for requirement in &parameters.requirements {
+        if let DictionaryReq::VariantPayloadIndirection {
+            variant_ty,
+            tag,
+            payload_ty,
+        } = requirement
+        {
+            let relation = VariantLayoutRelation {
                 variant_ty: *variant_ty,
                 tag: *tag,
                 payload_ty: *payload_ty,
-            }),
-            _ => None,
-        })
-        .collect()
+            };
+            if !relations.contains(&relation) {
+                relations.push(relation);
+            }
+        }
+    }
+    relations
 }
 
 /// Reconstruct effect-variable instantiation while walking corresponding type surfaces.
@@ -1208,7 +1205,9 @@ fn bind_call_type_instantiation(
         return *bound == actual;
     }
     correspondence.insert(pattern, actual);
-    if pattern == actual {
+    // Callee and caller variables have separate scopes even when their interned IDs coincide.
+    // Walk open structures to bind/check their leaves instead of assuming an identity mapping.
+    if pattern == actual && pattern.is_constant() {
         return true;
     }
     if !active.insert((pattern, actual)) {
@@ -2672,6 +2671,17 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     ty_data
                 };
                 match &*ty_data {
+                    Tuple(fields) => {
+                        let index = field_name
+                            .as_str()
+                            .parse::<usize>()
+                            .expect("tuple field index");
+                        assert!(
+                            index < fields.len(),
+                            "tuple field must have been checked by inference"
+                        );
+                        Project(HirProject::new(child, ProjectionIndex::from_index(index)))
+                    }
                     Record(record) => {
                         if let Some(index) = record.iter().position(|field| field.0 == field_name) {
                             Project(HirProject::new(child, ProjectionIndex::from_index(index)))
@@ -2716,7 +2726,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                         )
                     }
                     _ => {
-                        panic!("FieldAccess should have a record or variable type");
+                        panic!("FieldAccess should have a product or variable type");
                     }
                 }
             }
@@ -2881,6 +2891,7 @@ mod tests {
         ExtraParameters {
             requirements,
             repr_map: FxHashMap::default(),
+            variant_layouts: Vec::new(),
         }
     }
 
@@ -3142,6 +3153,7 @@ mod tests {
         let dicts = ExtraParameters {
             requirements: vec![],
             repr_map: FxHashMap::default(),
+            variant_layouts: Vec::new(),
         };
         let generated_projection_subscripts =
             PendingGeneratedStructuralProjectionSubscripts::new(&current_module);
@@ -3250,6 +3262,7 @@ mod tests {
         let dicts = ExtraParameters {
             requirements: vec![],
             repr_map: FxHashMap::default(),
+            variant_layouts: Vec::new(),
         };
         let generated_projection_subscripts =
             PendingGeneratedStructuralProjectionSubscripts::new(&current_module);
@@ -3324,6 +3337,7 @@ mod tests {
                 vec![],
             )],
             repr_map: FxHashMap::default(),
+            variant_layouts: Vec::new(),
         };
         let generated_projection_subscripts =
             PendingGeneratedStructuralProjectionSubscripts::new(&current_module);

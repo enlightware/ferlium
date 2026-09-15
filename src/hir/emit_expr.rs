@@ -112,31 +112,6 @@ impl PendingExprEntry {
     }
 }
 
-/// Emit HIR for an expression and return its root node.
-/// Note: the expression might not be safe to use if it has unbound constraints or type variables.
-pub fn emit_expr_unsafe(
-    source: PExprId,
-    parsed_arena: &PExprArena,
-    module: &mut Module,
-    others: &Modules,
-    locals: Vec<LocalDecl>,
-) -> Result<hir::ENodeId, InternalCompilationError> {
-    let mut warnings = Vec::new();
-    emit_expr_unsafe_with_options(
-        source,
-        parsed_arena,
-        module,
-        others,
-        locals,
-        ExprEmissionOptions {
-            capabilities: CompilationCapabilities::default(),
-            private_impl_module: None,
-        },
-        &mut warnings,
-    )
-    .map(|pending| pending.expr)
-}
-
 fn emit_expr_unsafe_with_options(
     source: PExprId,
     parsed_arena: &PExprArena,
@@ -183,7 +158,7 @@ fn emit_expr_unsafe_inner(
     );
 
     // Create a list of all available trait implementations.
-    let module_env = ModuleEnv::new(module, others);
+    let module_env = ModuleEnv::new(module, others).with_capabilities(capabilities);
     let expr_span = parsed_arena[source].span;
 
     // First desugar the expression.

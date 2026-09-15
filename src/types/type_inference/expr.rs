@@ -10,7 +10,7 @@ use std::{borrow::Borrow, iter::once, slice::from_ref};
 
 use derive_new::new;
 use ena::unify::InPlaceUnificationTable;
-use smallvec::{SmallVec, smallvec};
+use smallvec::SmallVec;
 use ustr::{Ustr, ustr};
 
 use super::{effect_solver::EffectConstraintOrigin, substitution::InstSubst};
@@ -56,7 +56,6 @@ use crate::{
     },
     parser::location::Location,
     std::{
-        STD_MODULE_ID,
         core_traits_names::{REPR_TRAIT_NAME, VALUE_TRAIT_NAME},
         math::int_type,
         string::{STRING_FROM_STATIC_FUNCTION_NAME, StaticStr, static_str_type, string_type},
@@ -1559,10 +1558,18 @@ impl TypeInference {
                         index_span,
                         element_ty,
                     ));
-                    let node = K::Project(HirProject::new(
-                        tuple_node_id,
-                        ProjectionIndex::from_index(index),
-                    ));
+                    let node = if tuple_node_ty.data().as_tuple().is_some() {
+                        K::Project(HirProject::new(
+                            tuple_node_id,
+                            ProjectionIndex::from_index(index),
+                        ))
+                    } else {
+                        K::FieldAccess(HirFieldAccess::new(
+                            tuple_node_id,
+                            ustr(&index.to_string()),
+                            SubscriptMemberKind::Ref,
+                        ))
+                    };
                     (node, element_ty, tuple_mut, effects)
                 }
             }
@@ -1784,7 +1791,7 @@ impl TypeInference {
                 return Ok((value_id, MutType::constant()));
             }
             EffectsUnsafe(expr) => {
-                if env.current_module_id() != STD_MODULE_ID {
+                if !env.module_env.allows_unsafe() {
                     return Err(
                         InternalCompilationError::new_unsafe_feature_use_not_allowed(
                             UnsafeFeature::EffectsUnsafe,
@@ -2000,7 +2007,7 @@ impl TypeInference {
         }
         match env.ast_arena[expr].kind.clone() {
             ExprKind::EffectsUnsafe(inner) => {
-                if env.current_module_id() != STD_MODULE_ID {
+                if !env.module_env.allows_unsafe() {
                     return Err(
                         InternalCompilationError::new_unsafe_feature_use_not_allowed(
                             UnsafeFeature::EffectsUnsafe,
@@ -3310,11 +3317,13 @@ impl TypeInference {
         Ok((node, element_ty, record_mut, uses_projection_evidence))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn infer_project_from_tuple_node(
         &mut self,
         env: &mut TypingEnv,
         tuple_node_id: NodeId,
         tuple_mut: MutType,
+        mode: SubscriptMemberKind,
         base_span: Location,
         index: (usize, Location),
         expr_span: Location,
@@ -3340,15 +3349,21 @@ impl TypeInference {
         self.add_pub_constraint(PubTypeConstraint::new_tuple_at_index_is(
             tuple_ty, base_span, index, index_span, element_ty,
         ));
-        let node = env.ir_arena.alloc(hir::Node::new(
+        let kind = if tuple_node_ty.data().as_tuple().is_some() {
             NodeKind::Project(HirProject::new(
                 tuple_node_id,
                 ProjectionIndex::from_index(index),
-            )),
-            element_ty,
-            effects,
-            expr_span,
-        ));
+            ))
+        } else {
+            NodeKind::FieldAccess(HirFieldAccess::new(
+                tuple_node_id,
+                ustr(&index.to_string()),
+                mode,
+            ))
+        };
+        let node = env
+            .ir_arena
+            .alloc(hir::Node::new(kind, element_ty, effects, expr_span));
         Ok((node, element_ty, tuple_mut))
     }
 
@@ -3598,7 +3613,7 @@ impl TypeInference {
                 expr_span: step_span,
             } => {
                 let (next_node, next_ty, next_mut) = self.infer_project_from_tuple_node(
-                    env, place_node, place_mut, *base_span, *index, *step_span,
+                    env, place_node, place_mut, mode, *base_span, *index, *step_span,
                 )?;
                 self.infer_access_chain_steps_with_body(
                     env,
@@ -5405,7 +5420,8 @@ impl TypeInference {
             | GetTraitMethod(_)
             | BuildClosure(_)
             | BuildSubscriptValue(_) => return true,
-            Variant(variant) => smallvec![variant.payload],
+            // Even a payload made only of trivial leaves can own recursive backing storage.
+            Variant(_) => return self.type_needs_semantic_drop(env, ty),
             Block(block) => block.tail_node().into_iter().collect(),
             Tuple(nodes) | Record(nodes) => nodes.iter().copied().collect(),
             _ => return self.type_needs_semantic_drop(env, ty),
@@ -5547,10 +5563,7 @@ impl TypeInference {
 
     /// Infers a call to a compiler builtin.
     ///
-    /// Gated to the standard library by the same rule that gates every other unsafe item, rather
-    /// than by `effects_unsafe`: the obligation here is about memory, not effects, and
-    /// `is_unsafe_item_unavailable_in_current_context` already keys on exactly "comes from std and
-    /// is unsafe". A caller outside std is refused before its arguments are even inferred.
+    /// Requires trusted-source permission independently of `effects_unsafe`.
     fn infer_builtin(
         &mut self,
         env: &mut TypingEnv,
@@ -5559,7 +5572,7 @@ impl TypeInference {
         args: &[DExprId],
         expr_span: Location,
     ) -> Result<(NodeId, MutType), InternalCompilationError> {
-        if env.current_module_id() != STD_MODULE_ID {
+        if !env.module_env.allows_unsafe() {
             return Err(
                 InternalCompilationError::new_unsafe_feature_use_not_allowed(
                     UnsafeFeature::Function(ustr(builtin.name())),

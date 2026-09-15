@@ -327,6 +327,7 @@ fn incrementing_clone_probe_value_impl() -> &'static str {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_clone_returns_owned_array_without_extra_drop() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -398,6 +399,7 @@ fn named_generic_struct_auto_derives_value() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn lexical_drop_runs_at_block_exit() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -417,6 +419,7 @@ fn lexical_drop_runs_at_block_exit() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn lexical_drops_run_in_reverse_order() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -437,6 +440,7 @@ fn lexical_drops_run_in_reverse_order() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn lexical_drop_runs_on_loop_break() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -457,6 +461,7 @@ fn lexical_drop_runs_on_loop_break() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn discarded_owned_temporary_is_dropped_before_break() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -476,6 +481,7 @@ fn discarded_owned_temporary_is_dropped_before_break() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn call_argument_temp_is_dropped_when_later_argument_breaks() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -500,6 +506,7 @@ fn call_argument_temp_is_dropped_when_later_argument_breaks() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn match_scrutinee_temporary_is_dropped() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -519,6 +526,7 @@ fn match_scrutinee_temporary_is_dropped() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn lexical_drop_runs_on_loop_continue() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -541,6 +549,7 @@ fn lexical_drop_runs_on_loop_continue() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn lexical_drop_runs_on_outer_loop_break() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -563,6 +572,7 @@ fn lexical_drop_runs_on_outer_loop_break() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn lexical_drop_runs_on_outer_loop_continue() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -588,6 +598,7 @@ fn lexical_drop_runs_on_outer_loop_continue() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn closure_drop_drops_captured_values() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -846,6 +857,7 @@ fn indexed_array_literal_owned_temp_uses_semantic_drop() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn compile_time_evaluation_runs_drops_while_compiling() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     session.only_optimized_mode();
     let source = format!(
         r#"
@@ -867,6 +879,7 @@ fn compile_time_evaluation_runs_drops_while_compiling() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn lexical_drops_run_before_early_return() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     // Counts drops of a pure function's locals, which compile-time evaluation would perform
     // while compiling; see `TestSession::without_optimized_mode`.
     session.without_optimized_mode();
@@ -891,6 +904,7 @@ fn lexical_drops_run_before_early_return() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn block_result_moves_owned_local_without_dropping_it() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     // Counts drops of a pure function's locals, which compile-time evaluation would perform
     // while compiling; see `TestSession::without_optimized_mode`.
     session.without_optimized_mode();
@@ -916,6 +930,7 @@ fn block_result_moves_owned_local_without_dropping_it() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn return_moves_owned_local_without_dropping_it() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     // Counts drops of a pure function's locals, which compile-time evaluation would perform
     // while compiling; see `TestSession::without_optimized_mode`.
     session.without_optimized_mode();
@@ -941,6 +956,7 @@ fn return_moves_owned_local_without_dropping_it() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn return_value_is_not_wrapped_in_cleanup_block() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -971,6 +987,7 @@ fn return_value_is_not_wrapped_in_cleanup_block() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn break_moves_owned_loop_local_without_dropping_it() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -991,6 +1008,7 @@ fn break_moves_owned_loop_local_without_dropping_it() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn labeled_break_moves_target_loop_local_and_drops_intervening_locals() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -1014,6 +1032,7 @@ fn labeled_break_moves_target_loop_local_and_drops_intervening_locals() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn break_clones_owned_outer_local_when_loop_does_not_exit_its_scope() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -1033,6 +1052,7 @@ fn break_clones_owned_outer_local_when_loop_does_not_exit_its_scope() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn generic_mut_let_drop_uses_value_dictionary() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     // This asserts exact calls to the deliberately observable `Probe::drop`; dead-lifetime
     // elimination is entitled to remove `owned`'s clone and drop under the `Value` law.
     session.without_optimized_mode();
@@ -1060,6 +1080,7 @@ fn generic_mut_let_drop_uses_value_dictionary() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn assignment_overwrite_drops_old_value() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -1080,6 +1101,7 @@ fn assignment_overwrite_drops_old_value() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn field_assignment_overwrite_drops_old_value() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -1102,6 +1124,7 @@ fn field_assignment_overwrite_drops_old_value() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn owned_function_argument_is_dropped_at_function_exit() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -1122,6 +1145,7 @@ fn owned_function_argument_is_dropped_at_function_exit() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn alias_bindings_are_not_dropped_separately() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -1142,6 +1166,7 @@ fn alias_bindings_are_not_dropped_separately() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn let_binding_from_mutable_generic_place_owns_snapshot() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -1167,6 +1192,7 @@ fn let_binding_from_mutable_generic_place_owns_snapshot() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn generic_let_from_mutable_place_uses_value_clone_and_owns_snapshot() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -1196,6 +1222,7 @@ fn generic_let_from_mutable_place_uses_value_clone_and_owns_snapshot() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn generic_owned_argument_from_mutable_place_uses_value_clone_and_owns_snapshot() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -1426,6 +1453,7 @@ fn inferred_projection_materialization_resolves_to_trivial_copy_after_unificatio
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn unused_owned_temporary_is_dropped() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -1445,6 +1473,7 @@ fn unused_owned_temporary_is_dropped() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn temporary_array_index_let_base_is_dropped() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -1465,6 +1494,7 @@ fn temporary_array_index_let_base_is_dropped() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn temporary_tuple_projection_let_base_is_dropped() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -1485,6 +1515,7 @@ fn temporary_tuple_projection_let_base_is_dropped() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn temporary_record_projection_let_base_is_dropped() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -1507,6 +1538,7 @@ fn temporary_record_projection_let_base_is_dropped() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_index_base_temp_is_dropped_when_later_argument_returns() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     // Counts drops of a pure function's locals, which compile-time evaluation would perform
     // while compiling; see `TestSession::without_optimized_mode`. Folding reaches this one only
     // since source-fallible calls became foldable — the array index used to hold it back.
@@ -1535,6 +1567,7 @@ fn array_index_base_temp_is_dropped_when_later_argument_returns() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn discarded_owned_temporary_is_dropped_before_early_return() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     // Counts drops of a pure function's locals, which compile-time evaluation would perform
     // while compiling; see `TestSession::without_optimized_mode`.
     session.without_optimized_mode();
@@ -1560,6 +1593,7 @@ fn discarded_owned_temporary_is_dropped_before_early_return() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn call_argument_temp_is_dropped_when_later_argument_returns() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     // Counts drops of a pure function's locals, which compile-time evaluation would perform
     // while compiling; see `TestSession::without_optimized_mode`.
     session.without_optimized_mode();
@@ -1589,6 +1623,7 @@ fn call_argument_temp_is_dropped_when_later_argument_returns() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn call_argument_temp_is_dropped_when_later_argument_returns_at_runtime() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     // Counts drops of a pure function's locals, which compile-time evaluation would perform
     // while compiling; see `TestSession::without_optimized_mode`.
     session.without_optimized_mode();
@@ -1618,6 +1653,7 @@ fn call_argument_temp_is_dropped_when_later_argument_returns_at_runtime() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn call_argument_temp_is_dropped_when_later_argument_errors_at_runtime() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let erroring = format!(
         r#"
         {}
@@ -1643,6 +1679,7 @@ fn call_argument_temp_is_dropped_when_later_argument_errors_at_runtime() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn tuple_element_temp_is_dropped_when_later_element_returns() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     // Counts drops of a pure function's locals, which compile-time evaluation would perform
     // while compiling; see `TestSession::without_optimized_mode`.
     session.without_optimized_mode();
@@ -1666,6 +1703,7 @@ fn tuple_element_temp_is_dropped_when_later_element_returns() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn lexical_drop_runs_on_runtime_error() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -1691,6 +1729,7 @@ fn lexical_drop_runs_on_runtime_error() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn generic_value_drop_runs_on_runtime_error() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     // This asserts exact calls to the deliberately observable `Probe::drop`; ownership forwarding
     // is entitled to replace the clone and caller drop with a move under the `Value` law.
     session.without_optimized_mode();
@@ -1727,6 +1766,7 @@ fn fallible_value_clone_impl_is_rejected() {
     // whose `clone`/`drop` body is fallible is a compile error (the trait declares an empty effect
     // row). This pins the invariant the MIR lowering relies on.
     let mut session = TestSession::new();
+    session.allow_unsafe();
     session.fail_compilation(
         r#"
         struct Probe(int)
@@ -1749,6 +1789,7 @@ fn nested_scope_drops_run_innermost_first_on_runtime_error() {
     // dropped first, then the outer one. Runs under both backends, so the MIR landing-pad chain is
     // checked against the HIR interpreter's frame unwind.
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -1775,6 +1816,7 @@ fn cross_frame_drops_run_callee_first_on_runtime_error() {
     // An abort deep in a callee unwinds the callee's frame (running its pad) before re-raising into
     // the caller's frame (running its pad): the callee local is dropped first, then the caller's.
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -1800,6 +1842,7 @@ fn cross_frame_drops_run_callee_first_on_runtime_error() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn auto_derived_struct_value_clone_uses_field_clone() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     assert_val_eq!(
         session.run(
             r#"
@@ -1839,6 +1882,7 @@ fn auto_derived_struct_value_clone_uses_field_clone() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn named_generic_enum_auto_derives_value() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     assert_val_eq!(
         session.run(
             r#"
@@ -1891,6 +1935,7 @@ fn named_generic_enum_auto_derives_value() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn auto_derived_nested_value_drop_uses_member_drop() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}
@@ -1917,6 +1962,7 @@ fn auto_derived_nested_value_drop_uses_member_drop() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn explicit_concrete_value_impl_suppresses_auto_blanket_impl() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     assert_val_eq!(
         session.run(
             r#"
@@ -1955,6 +2001,7 @@ fn explicit_concrete_value_impl_suppresses_auto_blanket_impl() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn value_impl_for_foreign_named_adt_is_rejected() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     session
         .try_compile_module("a", "pub struct Foreign(int)")
         .unwrap();
@@ -2105,6 +2152,7 @@ fn managed_overlap_snapshot_is_owned_and_semantically_dropped() {
     );
 
     let mut compile_session = TestSession::new();
+    compile_session.allow_unsafe();
     let compiled = compile_session.compile(&source);
     let expr = compiled.expr.expect("expected root expression");
     let module = compile_session
@@ -2135,6 +2183,7 @@ fn managed_overlap_snapshot_is_owned_and_semantically_dropped() {
     )));
 
     let mut run_session = TestSession::new();
+    run_session.allow_unsafe();
     // The snapshot clones 2 to 3 and is dropped immediately after the call;
     // the original is then dropped as 9 at the end of its block.
     assert_val_eq!(run_session.run(&source), int(39039));
@@ -2323,6 +2372,7 @@ fn disjoint_later_argument_write_does_not_snapshot_let_argument() {
     );
 
     let mut session = TestSession::new();
+    session.allow_unsafe();
     // The custom clone increments Probe's payload. A spurious snapshot would therefore return 3.
     assert_val_eq!(session.run(&source), int(2));
 }
@@ -2360,6 +2410,7 @@ fn managed_argument_materialization_preserves_left_to_right_evaluation() {
     );
 
     let mut session = TestSession::new();
+    session.allow_unsafe();
     // Both the result and the side-effect log encode 1, 2, 3. In particular, materializing the
     // managed middle argument must not move its evaluation ahead of the first direct argument.
     assert_val_eq!(session.run(&source), int(123123));
@@ -3029,6 +3080,7 @@ fn named_type_with_custom_value_impl_is_not_trivial_copy() {
     "#;
 
     let mut compile_session = TestSession::new();
+    compile_session.allow_unsafe();
     let module = compile_session.compile_and_get_module(source);
     assert_eq!(
         module
@@ -3047,6 +3099,7 @@ fn named_type_with_custom_value_impl_is_not_trivial_copy() {
     )));
 
     let mut run_session = TestSession::new();
+    run_session.allow_unsafe();
     assert_val_eq!(run_session.run(source), int(11));
 }
 
@@ -3054,6 +3107,7 @@ fn named_type_with_custom_value_impl_is_not_trivial_copy() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn custom_value_impl_remains_non_trivial_copy_across_modules() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     session
         .try_compile_module(
             "base",
@@ -3269,6 +3323,7 @@ fn hir_prints_operator_static_apply_argument_names() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn discarded_empty_struct_temporary_runs_semantic_drop() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = r#"
         struct Empty {}
 
@@ -3295,6 +3350,7 @@ fn discarded_empty_struct_temporary_runs_semantic_drop() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn discarded_nonempty_struct_temporary_runs_semantic_drop() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = r#"
         struct NonEmpty { value: int }
 
@@ -3321,6 +3377,7 @@ fn discarded_nonempty_struct_temporary_runs_semantic_drop() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn discarded_bool_struct_temporary_runs_semantic_drop() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = r#"
         struct Wrap { value: bool }
 
@@ -3399,6 +3456,7 @@ const EMPTY_VALUE_STRUCT: &str = r#"
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn owned_empty_struct_is_dropped_once_at_scope_exit() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         "{EMPTY_VALUE_STRUCT}
         fn g() {{ let x = E{{}}; }}
@@ -3437,6 +3495,7 @@ fn reassigned_mutable_literal_initialized_local_is_dropped_at_scope_exit() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn reassigned_empty_struct_drops_old_and_final_value() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         "{EMPTY_VALUE_STRUCT}
         fn g() {{ let mut x = E{{}}; x = E{{}}; }}
@@ -3454,6 +3513,7 @@ fn reassigned_empty_struct_drops_old_and_final_value() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn moved_empty_struct_is_dropped_once_by_the_new_owner() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         "{EMPTY_VALUE_STRUCT}
         fn mk() -> E {{ E{{}} }}
@@ -3471,6 +3531,7 @@ fn moved_empty_struct_is_dropped_once_by_the_new_owner() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn empty_struct_field_is_dropped_with_its_record() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         "{EMPTY_VALUE_STRUCT}
         struct W {{ e: E, n: int }}
@@ -3487,6 +3548,7 @@ fn empty_struct_field_is_dropped_with_its_record() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn unconstructed_empty_struct_is_not_dropped() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         "{EMPTY_VALUE_STRUCT}
         fn f(c: bool) -> int {{ if c {{ let x = E{{}}; 1 }} else {{ 2 }} }}
@@ -3508,6 +3570,7 @@ fn all_unit_aggregate_with_custom_drop_is_dropped() {
     // unit leaf as a husk, this aggregate would look dead and its `Value::drop` would be skipped —
     // diverging from the HIR interpreter. This pins that the custom drop runs exactly once.
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = r#"
         struct Marker(())
         impl Value for Marker {
@@ -3533,6 +3596,7 @@ fn aggregate_with_unit_field_dropped_once_on_error_after_field_borrow() {
     // keeps `is_drop_husk` from treating the live aggregate as a husk, while the (never-produced)
     // partially-moved state would be the only way it could go wrong. Runs under both backends.
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = format!(
         r#"
         {}

@@ -11,7 +11,7 @@ use ustr::{Ustr, ustr};
 use crate::{
     FxHashMap, Location,
     ast::{self, UstrSpan},
-    compiler::{MirOptimization, error::InternalCompilationError},
+    compiler::{CompilationCapabilities, MirOptimization, error::InternalCompilationError},
     format::FormatWith,
     hir::function::CallableDefinition,
     internal_compilation_error,
@@ -77,6 +77,7 @@ fn visible_projection_entry(
 pub struct ModuleEnv<'m> {
     pub(crate) current: &'m Module,
     pub(crate) modules: &'m Modules,
+    unsafe_allowed: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -554,7 +555,20 @@ impl<'m> QualifiedNameEnv<'m> {
 
 impl<'m> ModuleEnv<'m> {
     pub(crate) fn new(current: &'m Module, modules: &'m Modules) -> Self {
-        Self { current, modules }
+        Self {
+            current,
+            modules,
+            unsafe_allowed: CompilationCapabilities::default().allows_unsafe(current.module_id()),
+        }
+    }
+
+    pub(crate) fn with_capabilities(mut self, capabilities: CompilationCapabilities) -> Self {
+        self.unsafe_allowed = capabilities.allows_unsafe(self.current.module_id());
+        self
+    }
+
+    pub(crate) fn allows_unsafe(&self) -> bool {
+        self.unsafe_allowed
     }
 
     /// Resolve a module identity while treating the completed candidate module as current.
@@ -733,7 +747,7 @@ impl<'m> ModuleEnv<'m> {
         module_id: Option<ModuleId>,
         name: Ustr,
     ) -> bool {
-        if self.current.module_id() == STD_MODULE_ID {
+        if self.allows_unsafe() {
             return false;
         }
 

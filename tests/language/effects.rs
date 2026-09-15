@@ -13,14 +13,9 @@ use ustr::ustr;
 
 use crate::harness::{TestSession, int};
 use ferlium::{
-    compiler::{
-        error::{CompilationErrorImpl, UnsafeFeature},
-        test_support::raw_modules,
-    },
-    hir::test_support::emit_expr_unsafe,
+    compiler::error::{CompilationErrorImpl, UnsafeFeature},
     module::{LocalImplId, id::Id},
-    parse_module_and_expr,
-    std::{core_traits_names::DESERIALIZE_TRAIT_NAME, new_module_using_std},
+    std::core_traits_names::DESERIALIZE_TRAIT_NAME,
     types::effects::*,
 };
 
@@ -278,26 +273,16 @@ fn effects_unsafe_is_rejected_in_user_code() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn effects_unsafe_erases_effects_in_std_context() {
-    let session = TestSession::new();
-    let source_id = session.source_table().next_id();
-    let mod_src = "effects_unsafe { 1 / 0 }";
-    let (_module, expr, arena) = parse_module_and_expr(mod_src, source_id, true)
-        .expect("std-context expression should parse");
-    let mut module = new_module_using_std(
-        ferlium::module::ModuleId::new(0),
-        ferlium::module::Path::single_str("$effects_unsafe_test"),
+fn effects_unsafe_erases_effects_in_trusted_code() {
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    test_expr(&mut session, "effects_unsafe { 1 / 0 }", EffType::empty());
+    test_mod(
+        &mut session,
+        "fn f(x: int) { effects_unsafe { idiv(1, x) } }",
+        "f",
+        EffType::empty(),
     );
-    let root = emit_expr_unsafe(
-        expr.expect("expected expression"),
-        &arena,
-        &mut module,
-        raw_modules(session.session()),
-        vec![],
-    )
-    .expect("std-context expression should compile");
-
-    assert_eq!(module.hir_arena[root].effects, EffType::empty());
 }
 
 #[test]
@@ -548,10 +533,10 @@ fn trait_output_effects_can_join_multiple_effect_variables() {
     let mut session = TestSession::new();
 
     let concrete_src = indoc! {r#"
-        fn pure_join() -> int { let x: int = 1; let y: int = 2; testing::TestEffJoin::eff_join((x, y)) }
-        fn read_join() -> int { let x: int = 1; testing::TestEffJoin::eff_join((x, true)) }
-        fn write_join() -> int { let x: int = 1; testing::TestEffJoin::eff_join((x, "s")) }
-        fn read_write_join() -> int { testing::TestEffJoin::eff_join((true, "s")) }
+        fn pure_join() -> int { let x: int = 1; let y: int = 2; testing::TestEffJoin::eff_join(testing::EffPair(x, y)) }
+        fn read_join() -> int { let x: int = 1; testing::TestEffJoin::eff_join(testing::EffPair(x, true)) }
+        fn write_join() -> int { let x: int = 1; testing::TestEffJoin::eff_join(testing::EffPair(x, "s")) }
+        fn read_write_join() -> int { testing::TestEffJoin::eff_join(testing::EffPair(true, "s")) }
     "#};
     test_mod(&mut session, concrete_src, "pure_join", EffType::empty());
     test_mod(&mut session, concrete_src, "read_join", effect(Read));
@@ -564,7 +549,7 @@ fn trait_output_effects_can_join_multiple_effect_variables() {
     );
 
     let generic_src = indoc! {r#"
-        fn generic_join(a, b) { testing::TestEffJoin::eff_join((a, b)) }
+        fn generic_join(a, b) { testing::TestEffJoin::eff_join(testing::EffPair(a, b)) }
         fn call_pure() -> int { let x: int = 1; let y: int = 2; generic_join(x, y) }
         fn call_read() -> int { let x: int = 1; generic_join(x, true) }
         fn call_write() -> int { let x: int = 1; generic_join(x, "s") }

@@ -34,6 +34,11 @@ So the substitution is stored at the moment it is created. At that point its val
 variables; the end-of-inference substitution pass rewrites them into the types unification solved,
 by the same walk that already concretizes the dictionary requirements.
 
+Recursive calls may precede finalization of the callee's requirements. Their late instantiation
+retains the relationships between variant types and case payloads, even when those relationships
+need no separate runtime parameter. Caller and callee variable numbers belong to different scopes;
+coinciding numbers alone do not establish a correspondence.
+
 Compiler-generated blanket-method thunks have a second, analogous source: matching the blanket
 implementation already computes its substitution. The trait solver preserves that result and
 projects the generic method's quantifiers through it when building the forwarding call. Blanket

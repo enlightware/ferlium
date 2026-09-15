@@ -1131,6 +1131,29 @@ fn tuple_projection() {
         session.run("fn a(x) { x.0 } fn b(x) { x.1 } fn c(x) { (a(x), b(x)) } c((1,2))"),
         int_tuple!(1, 2)
     );
+    // Keep the receiver shape open across a module boundary, including mutable forwarding.
+    session
+        .try_compile_module(
+            "tuple_ops",
+            indoc! { r#"
+                pub fn second<T>(value: T) { value.1 }
+                pub fn set_second<T>(value: &mut T, item: int) { value.1 = item; }
+                pub fn forward<T>(value: &mut T) { set_second(value, 42); }
+            "# },
+        )
+        .unwrap();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            use tuple_ops::*;
+            struct Pair((), int)
+            let mut tuple = ("prefix", 0);
+            let mut named = Pair((), 0);
+            forward(tuple);
+            forward(named);
+            (second(tuple), second(named))
+        "# }),
+        int_tuple!(42, 42)
+    );
 }
 
 #[test]
@@ -1910,11 +1933,13 @@ fn generic_record_projection_hir_uses_subscript_evidence() {
             fn use_explicit_get_x() { get_x({x: 40, y: 2}) }
             fn get_y(record) { record.y }
             fn use_inferred_get_y() { get_y({x: 40, y: 2}) }
+            fn get_second<T>(tuple: T) { tuple.1 }
+            fn use_get_second() { get_second((true, 42)) }
         "# })
         .module_id;
     let module = session.session().expect_fresh_module(module_id);
 
-    for function_name in ["get_x", "get_y"] {
+    for function_name in ["get_x", "get_y", "get_second"] {
         let function = module
             .get_function(ustr::ustr(function_name))
             .expect("projection function should be compiled");
@@ -3349,6 +3374,7 @@ fn properties() {
     set_array_property_value(int_a![]);
     assert_val_eq!(session.run("@props::my_scope.my_array"), int_a![]);
     session.run("@props::my_scope.my_array = [1, 2]");
+    assert_val_eq!(get_array_property_value(), int_a![1, 2]);
     assert_val_eq!(session.run("@props::my_scope.my_array"), int_a![1, 2]);
     session.run("@props::my_scope.my_array = concat(@props::my_scope.my_array, [3, 4])");
     assert_val_eq!(session.run("@props::my_scope.my_array"), int_a![1, 2, 3, 4]);

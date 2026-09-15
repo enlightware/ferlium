@@ -30,6 +30,7 @@ fn add_chunks(
     let other_modules = Modules::default();
     let capabilities = CompilationCapabilities {
         allow_experimental: true,
+        ..CompilationCapabilities::default()
     };
     for (name, code) in chunks {
         to = add_code_to_module_with_capabilities(

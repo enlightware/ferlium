@@ -409,6 +409,7 @@ fn ferlium_function_inputs_follow_interpreter_calling_convention() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn mutable_let_initialization_uses_value_clone() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     assert_val_eq!(
         session.run(
             r#"
@@ -834,6 +835,7 @@ fn array_value_clone_uses_element_value_clone() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_drop_drops_elements() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     assert_val_eq!(
         session.run(
             r#"
@@ -2761,9 +2763,8 @@ fn string_normalization() {
 }
 
 /// `builtin::init_place` writes into storage holding no value, so calling it on a place that does
-/// hold one leaks that value silently — no drop runs. Only the standard library may reach it, and
-/// the gate is the ordinary unsafe-item one rather than `effects_unsafe`: the obligation is about
-/// memory, not effects.
+/// hold one leaks that value silently — no drop runs. It requires trusted-source permission,
+/// independently of `effects_unsafe`: the obligation is about memory, not effects.
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn init_place_builtin_is_rejected_in_user_code() {
@@ -2779,6 +2780,19 @@ fn init_place_builtin_is_rejected_in_user_code() {
             );
         }
         other => panic!("expected UnsafeFeatureUseNotAllowed error, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_collections_drop_owned_storage() {
+    let mut session = TestSession::new();
+    // A host read keeps construction and destruction at runtime in every backend.
+    for source in [
+        "let mut set = hash_set_new(); set_insert(set, to_string(@props::my_scope.my_var)); let copy = set; len(copy)",
+        "let mut map = hash_map_new(); map_insert(map, to_string(@props::my_scope.my_var), [to_string(@props::my_scope.my_var)]); let copy = map; len(copy)",
+    ] {
+        assert_val_eq!(session.run(source), int(1));
     }
 }
 

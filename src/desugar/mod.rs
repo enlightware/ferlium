@@ -28,10 +28,13 @@ use crate::{
         PTypeAlias, PTypeDef, Parsed, Path, Pattern, PatternConstraintKind, PatternKind,
         PatternVar, ProjectData, StructLiteralData, TypeAscriptionData, UnnamedArg, UstrSpan,
     },
-    compiler::error::{
-        DuplicatedFieldContext, DuplicatedVariantContext, GenericParamsOwner, InfiniteTypeKind,
-        InternalCompilationError, InvalidEnumDefaultAttributeKind, InvalidGenericParamsKind,
-        InvalidTraitConstraintKind, WhatIsNotAProductType, WhichProductTypeIsNot,
+    compiler::{
+        CompilationCapabilities,
+        error::{
+            DuplicatedFieldContext, DuplicatedVariantContext, GenericParamsOwner, InfiniteTypeKind,
+            InternalCompilationError, InvalidEnumDefaultAttributeKind, InvalidGenericParamsKind,
+            InvalidTraitConstraintKind, WhatIsNotAProductType, WhichProductTypeIsNot,
+        },
     },
     containers::b,
     graph::{find_strongly_connected_components, topological_sort_sccs},

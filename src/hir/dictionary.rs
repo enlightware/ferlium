@@ -355,6 +355,14 @@ pub struct EvidenceBinding {
     pub source: EvidenceBindingSource,
 }
 
+/// Compile-time relationship used to reconstruct evidence at late recursive calls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VariantLayoutRelation {
+    pub variant_ty: Type,
+    pub tag: Ustr,
+    pub payload_ty: Type,
+}
+
 /// Data structure to hold extra parameters for a function.
 #[derive(Clone, Debug)]
 pub struct ExtraParameters {
@@ -364,6 +372,8 @@ pub struct ExtraParameters {
     /// A map from type variables to other type variables containing their representation type.
     /// This is used to resolve type variables when looking up field dict indices.
     pub repr_map: FxHashMap<TypeVar, TypeVar>,
+    /// Case relationships do not occupy runtime parameter slots.
+    pub variant_layouts: Vec<VariantLayoutRelation>,
 }
 
 impl ExtraParameters {

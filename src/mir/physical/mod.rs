@@ -78,7 +78,7 @@ use crate::{
     types::{
         effects::no_effects,
         r#trait::{TraitAssociatedConstIndex, TraitDictionaryEntryIndex},
-        r#type::{CallImplType, CallResultConvention, FnType, Type},
+        r#type::{CallImplType, CallResultConvention, FnType, Type, TypeKind},
     },
 };
 
@@ -88,6 +88,67 @@ use evidence::{PhysicalEvidenceReferences, try_for_each_static_evidence};
 use native::{NativeRequirementError, NativeRequirements};
 use subscript::PhysicalSubscriptCatalog;
 pub(crate) use subscript::{PhysicalSubscriptDefinition, PhysicalSubscriptMember};
+
+/// Effect annotations do not distinguish stored values, including nested callable signatures.
+pub(super) fn same_storage_type(left: Type, right: Type) -> bool {
+    if left == right {
+        return true;
+    }
+    let mut pending = vec![(left, right)];
+    let mut seen = FxHashSet::default();
+    while let Some((left, right)) = pending.pop() {
+        if left == right || !seen.insert((left, right)) {
+            continue;
+        }
+        let left = left.data();
+        let right = right.data();
+        use TypeKind::*;
+        match (&*left, &*right) {
+            (Tuple(a), Tuple(b)) if a.len() == b.len() => {
+                pending.extend(a.iter().copied().zip(b.iter().copied()))
+            }
+            (Record(a), Record(b)) | (Variant(a), Variant(b))
+                if a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.0 == b.0) =>
+            {
+                pending.extend(a.iter().zip(b).map(|(a, b)| (a.1, b.1)))
+            }
+            (Named(a), Named(b)) if a.def == b.def && a.params.len() == b.params.len() => {
+                pending.extend(a.params.iter().copied().zip(b.params.iter().copied()))
+            }
+            (Native(a), Native(b))
+                if a.bare_ty == b.bare_ty && a.arguments.len() == b.arguments.len() =>
+            {
+                pending.extend(a.arguments.iter().copied().zip(b.arguments.iter().copied()))
+            }
+            (Function(a), Function(b))
+                if a.args.len() == b.args.len()
+                    && a.args
+                        .iter()
+                        .zip(&b.args)
+                        .all(|(a, b)| a.mut_ty == b.mut_ty) =>
+            {
+                pending.extend(a.args.iter().zip(&b.args).map(|(a, b)| (a.ty, b.ty)));
+                pending.push((a.ret, b.ret));
+            }
+            (Subscript(a), Subscript(b))
+                if a.args.len() == b.args.len()
+                    && a.args
+                        .iter()
+                        .zip(&b.args)
+                        .all(|(a, b)| a.mut_ty == b.mut_ty)
+                    && a.ref_member.as_ref().map(|m| m.result_convention)
+                        == b.ref_member.as_ref().map(|m| m.result_convention)
+                    && a.mut_member.as_ref().map(|m| m.result_convention)
+                        == b.mut_member.as_ref().map(|m| m.result_convention) =>
+            {
+                pending.extend(a.args.iter().zip(&b.args).map(|(a, b)| (a.ty, b.ty)));
+                pending.push((a.ret, b.ret));
+            }
+            _ => return false,
+        }
+    }
+    true
+}
 
 /// A physical-lowering or readiness failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -496,7 +557,7 @@ pub(crate) fn lower_physical_mir(
             if spec
                 .members
                 .get(field_index.as_index())
-                .is_none_or(|member| member.ty != signature.ret)
+                .is_none_or(|member| !same_storage_type(member.ty, signature.ret))
             {
                 return Err(BackendReadinessError::InvalidProductProjection { function });
             }
@@ -1184,7 +1245,7 @@ impl<'a> PhysicalLowerer<'a> {
         let Some(member) = spec.members.get(field_index.as_index()).copied() else {
             return Err(BackendReadinessError::InvalidProductProjection { function });
         };
-        if member.ty != *field_ty {
+        if !same_storage_type(member.ty, *field_ty) {
             return Err(BackendReadinessError::InvalidProductProjection { function });
         }
         let expected_witnesses = spec.dynamic_member_layouts();

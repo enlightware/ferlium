@@ -135,8 +135,8 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
         };
 
         // Helper to create a sequence-shaped DataValue alternative.
-        let build_serialize_to_seq = |arena: &mut NodeArena, nodes, tag| {
-            let array_ty = array_type(data_value_type());
+        let build_serialize_to_seq = |arena: &mut NodeArena, nodes, element_ty, tag| {
+            let array_ty = array_type(element_ty);
             let array_node = n(arena, array(nodes), array_ty);
             let payload_ty = tuple_type([array_ty]);
             let payload = n(arena, tuple([array_node]), payload_ty);
@@ -212,7 +212,12 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                     )
                 })
                 .collect::<Result<SVec2<_>, _>>()?;
-            Some(build_serialize_to_seq(arena, nodes, "Tuple"))
+            Some(build_serialize_to_seq(
+                arena,
+                nodes,
+                data_value_type(),
+                "Tuple",
+            ))
         } else if let TypeKind::Record(fields) = ty_data {
             /*
             Example source code for serialization of a record:
@@ -267,7 +272,12 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                     Ok(entry)
                 })
                 .collect::<Result<SVec2<_>, _>>()?;
-            Some(build_serialize_to_seq(arena, nodes, "Record"))
+            Some(build_serialize_to_seq(
+                arena,
+                nodes,
+                data_value_record_entry_type(),
+                "Record",
+            ))
         } else if let TypeKind::Variant(variants) = ty_data {
             // Store Ferlium enum variants explicitly in the serialization data model.
             /*

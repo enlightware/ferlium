@@ -576,6 +576,7 @@ impl NamedTypeGraph {
         self,
         output: &mut Module,
         others: &Modules,
+        capabilities: CompilationCapabilities,
     ) -> Result<FxHashSet<ModuleId>, InternalCompilationError> {
         let NamedTypeGraph {
             ty_names,
@@ -602,6 +603,7 @@ impl NamedTypeGraph {
                     &ty_refs,
                     output,
                     others,
+                    capabilities,
                     &mut modules_used,
                 )?;
                 continue;
@@ -611,7 +613,7 @@ impl NamedTypeGraph {
             let desugared = {
                 // Keep the immutable environment borrow short so the output module can
                 // be updated after each acyclic declaration.
-                let env = ModuleEnv::new(output, others);
+                let env = ModuleEnv::new(output, others).with_capabilities(capabilities);
                 ty_refs[scc[0]].desugar_acyclic(&env, &mut modules_used)?
             };
             match desugared {
@@ -793,6 +795,7 @@ fn fill_recursive_type_defs_in_scc(
     ty_refs: &[NamedTypeData],
     output: &mut Module,
     others: &Modules,
+    capabilities: CompilationCapabilities,
     modules_used: &mut FxHashSet<ModuleId>,
     type_defs: &FxHashMap<Ustr, TypeDefId>,
 ) -> Result<(), InternalCompilationError> {
@@ -802,7 +805,7 @@ fn fill_recursive_type_defs_in_scc(
         };
         let type_def = type_defs[&def.name.0];
         let desugared = {
-            let env = ModuleEnv::new(output, others);
+            let env = ModuleEnv::new(output, others).with_capabilities(capabilities);
             def.desugar_data(&env, modules_used)?
         };
         output.fill_type_def(type_def, desugared);
@@ -816,6 +819,7 @@ fn desugar_recursive_named_type_scc(
     ty_refs: &[NamedTypeData],
     output: &mut Module,
     others: &Modules,
+    capabilities: CompilationCapabilities,
     modules_used: &mut FxHashSet<ModuleId>,
 ) -> Result<(), InternalCompilationError> {
     // Recursive SCC lowering has one common shape:
@@ -839,7 +843,7 @@ fn desugar_recursive_named_type_scc(
         // in the module, and are also passed directly to the builder so aliases
         // can refer to those nominal handles before their bodies are filled.
         let entries = {
-            let env = ModuleEnv::new(output, others);
+            let env = ModuleEnv::new(output, others).with_capabilities(capabilities);
             desugar_recursive_aliases_in_scc(
                 scc,
                 ty_refs,
@@ -865,7 +869,15 @@ fn desugar_recursive_named_type_scc(
         // Once aliases have been published, type definition bodies can resolve
         // aliases and nominal definitions from the same SCC through the normal
         // module environment.
-        fill_recursive_type_defs_in_scc(scc, ty_refs, output, others, modules_used, &type_defs)?;
+        fill_recursive_type_defs_in_scc(
+            scc,
+            ty_refs,
+            output,
+            others,
+            capabilities,
+            modules_used,
+            &type_defs,
+        )?;
     }
 
     Ok(())
@@ -894,6 +906,7 @@ impl PModule {
         output: &mut Module,
         others: &Modules,
         parsed_arena: &PExprArena,
+        capabilities: CompilationCapabilities,
     ) -> Result<(DModule, DExprArena, ModuleImplementationSccs), InternalCompilationError> {
         // Flatten uses from self and check for conflicts with local definitions.
         let local_names = self.own_symbols().collect();
@@ -911,14 +924,14 @@ impl PModule {
         resolve_imports(&uses, &local_names, &resolver, &mut output.uses)?;
 
         let type_graph = build_named_type_graph(type_aliases, type_defs)?;
-        let mut modules_used = type_graph.desugar(output, others)?;
-        let mut env = ModuleEnv::new(output, others);
+        let mut modules_used = type_graph.desugar(output, others, capabilities)?;
+        let mut env = ModuleEnv::new(output, others).with_capabilities(capabilities);
 
         for trait_def in traits {
             let visibility = trait_def.visibility;
             output
                 .add_trait_with_visibility(trait_def.desugar(&env, &mut modules_used)?, visibility);
-            env = ModuleEnv::new(output, others);
+            env = ModuleEnv::new(output, others).with_capabilities(capabilities);
         }
 
         // Desugar functions

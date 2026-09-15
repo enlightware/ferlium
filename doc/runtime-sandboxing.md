@@ -4,6 +4,12 @@ Ferlium separates source failures from host-enforced sandbox limits. MIR cleanup
 described in [mir-error-propagation.md](mir-error-propagation.md); memory accounting is described in
 [runtime-memory-limits.md](runtime-memory-limits.md).
 
+Unsafe language features require host permission (`allow_unsafe`, disabled by default); the standard
+library is trusted. This permission covers effect erasure, unsafe storage operations and attributes,
+and custom `Value` implementations. Trusted code must uphold their effect, termination, ownership
+and layout contracts. The permission is independent of experimental-feature access and cannot be
+enabled by Ferlium source.
+
 ## Runtime outcomes
 
 Once guest execution starts, there are three outcomes besides successful return:

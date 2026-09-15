@@ -50,7 +50,7 @@ use crate::{
         SubscriptMemberFunctionKind, SubscriptMemberKind, SubscriptSignature, TraitId, Visibility,
         YieldProvenance, id::Id,
     },
-    std::{STD_MODULE_ID, core_traits_names::VALUE_TRAIT_NAME},
+    std::core_traits_names::VALUE_TRAIT_NAME,
     types::{
         effects::{EffType, Effect, EffectVar, EffectsInstSubst},
         mutability::MutType,
@@ -215,7 +215,7 @@ fn normalize_effect_vars(vars: &mut [EffectVar]) -> EffectsInstSubst {
 fn validate_function_attributes(
     attributes: &[ast::Attribute],
     function_name: Ustr,
-    is_std_module: bool,
+    unsafe_allowed: bool,
 ) -> Result<FunctionAttributes, InternalCompilationError> {
     let mut no_fuel_check = false;
     let mut inline = false;
@@ -223,7 +223,7 @@ fn validate_function_attributes(
         let attr_name = attribute.path.0;
         match attr_name.as_str() {
             "no_fuel_check" => {
-                if !is_std_module {
+                if !unsafe_allowed {
                     return Err(
                         InternalCompilationError::new_unsafe_feature_use_not_allowed(
                             UnsafeFeature::FunctionAttribute(attr_name),
@@ -894,8 +894,11 @@ where
         for constraint in where_clause {
             ty_inf.add_pub_constraint(constraint.map(&mut mapper));
         }
-        let attrs =
-            validate_function_attributes(attributes, name.0, output.module_id() == STD_MODULE_ID)?;
+        let attrs = validate_function_attributes(
+            attributes,
+            name.0,
+            capabilities.allows_unsafe(output.module_id()),
+        )?;
         let effects = ty_inf.fresh_effect_var_ty();
         let return_convention = kind.return_convention();
         let fn_type = FnType::new(args_ty, ret_ty_ty, effects.clone());
@@ -1009,7 +1012,7 @@ where
     {
         let function = input.function;
         let descr = output.get_function_by_id(*id).unwrap();
-        let module_env = ModuleEnv::new(output, others);
+        let module_env = ModuleEnv::new(output, others).with_capabilities(capabilities);
         let mut new_deps = FxHashSet::default();
         let expected_ret_ty = descr.definition.ty_scheme.ty.ret;
         let expected_span = descr.spans.as_ref().unwrap().args_span;

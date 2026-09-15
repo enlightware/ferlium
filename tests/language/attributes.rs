@@ -322,3 +322,22 @@ fn no_fuel_check_attribute_is_rejected_in_user_code() {
         other => panic!("expected unsafe feature error, got {other:?}"),
     }
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trusted_source_can_use_unsafe_features() {
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    session.compile(indoc! { r#"
+        #[no_derive_value]
+        struct Storage(int)
+
+        #[no_derive_value]
+        enum Chain { End, Link(Chain) }
+
+        #[no_fuel_check]
+        fn initialize(target: &mut int) {
+            builtin::init_place(target, 1);
+        }
+    "# });
+}

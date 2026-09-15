@@ -23,7 +23,10 @@ use crate::{
     format::{type_variable_index_to_string_latin, type_variable_subscript},
     hir::{
         FnInstData, NodeArena,
-        dictionary::{DictionaryReq, ExtraParameters, instantiate_dictionary_requirements},
+        dictionary::{
+            DictionaryReq, ExtraParameters, VariantLayoutRelation,
+            instantiate_dictionary_requirements,
+        },
     },
     module::{ModuleEnv, TraitId},
     parser::location::InstantiableLocation,
@@ -178,7 +181,20 @@ impl PubTypeConstraint {
                 output_tys.clone(),
                 output_effs.clone(),
             )),
-            Self::TupleAtIndexIs { .. } => None,
+            Self::TupleAtIndexIs {
+                tuple_ty,
+                tuple_span,
+                index,
+                index_span,
+                element_ty,
+            } => Self::new_structural_projection_subscript_is(
+                *tuple_ty,
+                tuple_span.use_site,
+                Ustr::from(index.to_string().as_str()),
+                index_span.use_site,
+                *element_ty,
+            )
+            .dictionary_requirement_key(value_trait_id),
         }
     }
 
@@ -1180,9 +1196,32 @@ pub(crate) fn extra_parameters_from_constraints(
     // case-qualified uses of ordinary `Value<B>` evidence, not additional runtime parameters.
     let value_trait_id = env.expect_std_trait_id(VALUE_TRAIT_NAME);
     let mut requirements = Vec::new();
+    let mut variant_layouts = Vec::new();
     for constraint in constraints {
+        if let TypeHasVariant {
+            variant_ty,
+            tag,
+            payload_ty,
+            ..
+        }
+        | VariantPayloadLayout {
+            variant_ty,
+            tag,
+            payload_ty,
+            ..
+        } = constraint
+        {
+            let relation = VariantLayoutRelation {
+                variant_ty: *variant_ty,
+                tag: *tag,
+                payload_ty: *payload_ty,
+            };
+            if !variant_layouts.contains(&relation) {
+                variant_layouts.push(relation);
+            }
+        }
         let requirement = match constraint {
-            ProjectionSubscriptIs { .. } | TypeHasVariant { .. } => {
+            TupleAtIndexIs { .. } | ProjectionSubscriptIs { .. } | TypeHasVariant { .. } => {
                 constraint.dictionary_requirement_key(value_trait_id)
             }
             // This inference-only obligation activates the external `Value` leaves of the payload.
@@ -1214,7 +1253,6 @@ pub(crate) fn extra_parameters_from_constraints(
                     (!requirements.contains(&requirement)).then_some(requirement)
                 }
             }
-            _ => None,
         };
         if let Some(requirement) = requirement {
             requirements.push(requirement);
@@ -1224,5 +1262,6 @@ pub(crate) fn extra_parameters_from_constraints(
     ExtraParameters {
         requirements,
         repr_map,
+        variant_layouts,
     }
 }

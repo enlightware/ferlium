@@ -174,13 +174,13 @@ Before dictionary elaboration, `Unknown` means the final type is needed to choos
 `LocalClone` resolves to one of:
 
 - `TrivialCopy`, which copies a concrete value representation without `Value::clone`.
-- `Static(FunctionId)`, which calls a concrete generated or user-provided `Value::clone`.
+- `Static(FunctionId)`, which calls a concrete generated or trusted `Value::clone`.
 - `Dictionary(EvidenceBindingId)`, which loads `Value::clone` from a closed evidence binding.
 
 `LocalDrop` resolves to one of:
 
 - `Skip`, which reclaims storage without semantic `Value::drop`.
-- `Static(FunctionId)`, which calls a concrete generated or user-provided `Value::drop`.
+- `Static(FunctionId)`, which calls a concrete generated or trusted `Value::drop`.
 - `Dictionary(EvidenceBindingId)`, which loads `Value::drop` from a closed evidence binding.
 
 The `Value` method signatures are:
@@ -199,6 +199,9 @@ the type and `Value` are publicly nameable, that implementation is selectable by
 its generated method bodies remain private to the defining module. Consequently a public type with
 a private representation shares one canonical ownership implementation without exposing that
 representation or permitting a consumer to define a competing implementation.
+Safe source cannot provide custom `Value` implementations or layout constants. Trusted source and
+native registrations must uphold the ownership and layout contracts, including destruction of
+owned members and backing storage.
 Generated clone and drop bodies use the same concrete `TrivialCopy` predicate as ordinary ownership
 elaboration: a qualifying value is cloned by copying its whole representation and needs no semantic
 drop, while generic or managed structure retains member-wise `Value` dispatch.

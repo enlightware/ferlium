@@ -41,12 +41,29 @@ pub use session::{
 #[doc(hidden)]
 pub mod test_support {
     use crate::{
-        compiler::{CompilationRevision, CompilerSession, Modules, SourceVersion},
-        module::ModuleId,
+        compiler::{
+            CompilationError, CompilationRevision, CompilerSession, SourceVersion,
+            add_code_to_module_with_capabilities,
+        },
+        module::{Module, ModuleId},
     };
 
-    pub fn raw_modules(session: &CompilerSession) -> &Modules {
-        &session.modules
+    /// Add script fixtures alongside a test module's typed native entries.
+    pub fn add_module_source(
+        session: &mut CompilerSession,
+        module: Module,
+        source: &str,
+    ) -> Result<Module, CompilationError> {
+        let module_id = module.module_id();
+        add_code_to_module_with_capabilities(
+            "<fixture>",
+            source,
+            module,
+            module_id,
+            &session.modules,
+            &mut session.source_table,
+            session.capabilities,
+        )
     }
 
     pub fn module_entry_exists(session: &CompilerSession, module_id: ModuleId) -> bool {

@@ -4645,6 +4645,7 @@ fn named_subscript_body_error_runs_epilogue_before_propagating() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn named_subscript_slide_error_unwinds_caller_owned_locals() {
     let mut session = experimental_session();
+    session.allow_unsafe();
     let source = indoc! { r#"
         struct Probe(int)
 
@@ -4684,6 +4685,7 @@ fn named_subscript_slide_error_unwinds_caller_owned_locals() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn named_subscript_slide_error_cleans_accessor_argument_temporaries() {
     let mut session = experimental_session();
+    session.allow_unsafe();
     let source = indoc! { r#"
         struct Probe(int)
 
@@ -4722,6 +4724,7 @@ fn named_subscript_slide_error_cleans_accessor_argument_temporaries() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn named_subscript_slide_error_during_unwind_poisons_without_outer_semantic_cleanup() {
     let mut session = experimental_session();
+    session.allow_unsafe();
     let source = indoc! { r#"
         struct Probe(int)
 
@@ -4807,6 +4810,7 @@ fn named_subscript_prologue_error_skips_epilogue() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn named_subscript_prologue_error_unwinds_caller_owned_locals() {
     let mut session = experimental_session();
+    session.allow_unsafe();
     let source = indoc! { r#"
         struct Probe(int)
 

@@ -248,8 +248,8 @@ subscript-member selection must instead be expanded before this boundary.
 Readiness verification checks structural and ownership contracts that survive lowering, supported
 operations, and agreement between call sites and physical entries. It does not prove raw-memory
 safety: physical execution must additionally enforce allocation bounds, alignment, initialization,
-storage lifetimes, and native argument aliasing. An executor must reject unsupported reachable
-contracts before execution, without silently falling back to another execution representation.
+storage lifetimes, and native argument aliasing. Unsupported execution contracts must report an
+error without silently falling back to another execution representation.
 Malformed compiler-generated MIR can trigger an internal verifier panic, including in release
 builds; embedders must not assume such invariant failures are recoverable compilation errors.
 
@@ -355,7 +355,8 @@ moving a whole product requires all its fields to be initialized; replacement pr
 fields of the displaced value. Padding bytes are not value data and need not be initialized or read.
 
 Logical product projections lower to typed byte addresses using the aggregate's layout and any
-`Value` witnesses required by open inline member layouts.
+`Value` witnesses required by open inline member layouts. When the product shape itself is unknown,
+tuple indices and record fields use projection-subscript evidence instead.
 
 Variant-payload addressors inspect the indirection bit stored in the active tag when the storage
 mode is not statically uniform. Inline payloads use their case-specific aligned byte offset.

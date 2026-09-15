@@ -483,7 +483,6 @@ fn define_enum_types() {
             ChangeColor(int, int, int),
             Callback((int) -> int)
         }
-
         // Empty enum
         enum Empty {}
     "# };
@@ -2383,7 +2382,6 @@ fn create_mix_enum_values() {
             Move { x: int, y: int },
             Write(string),
             ChangeColor(int, int, int),
-            Callback((int) -> int)
         }
     "# };
 
@@ -2407,8 +2405,21 @@ fn create_mix_enum_values() {
         variant_raw("ChangeColor", tuple!(int(255), int(0), int(0)))
     );
 
-    let value = session.run(&format!("{mod_src} Message::Callback(|x| x + 1)"));
-    assert_eq!(value.variant_tag().unwrap(), ustr("Callback"));
+    // A callable case makes the entire enum unsuitable for host export, even when inactive.
+    // Keep its execution in script, separate from the named-enum export checks above.
+    assert_val_eq!(
+        session.run(indoc! {r#"
+            enum Message { Quit, Callback((int) -> int) }
+            fn observe(message: Message) {
+                match message {
+                    Message::Quit => Quit,
+                    Message::Callback(f) => Callback(f(41)),
+                }
+            }
+            observe(Message::Callback(|x| x + 1))
+        "#}),
+        variant_raw("Callback", tuple!(int(42)))
+    );
 }
 
 #[test]

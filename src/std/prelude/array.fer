@@ -71,24 +71,28 @@ impl<A> Value for [A] where A: Value {
 
 	#[no_fuel_check]
 	fn drop(target: &mut [A]) {
-		let element_size = Value::<A>::SIZE;
-		loop {
-			let len = array_len(target);
-			if len <= 0 {
-				buffer_drop(target.data);
-				return ();
-			};
-			let index = len - 1;
-			// Moving the element out and letting the temporary die is the drop: it goes through
-			// the ordinary drop machinery, which MIR sees, rather than through a native holding a
-			// runtime dictionary, which it does not. `buffer_take` never took a dictionary.
-			buffer_take(
-				target.data,
-				array_physical_offset_unchecked(target, index),
-				element_size,
-			);
-			target.len -= 1;
-		}
+		array_drop_storage(target);
+	}
+}
+
+/// Destroys the elements and backing storage; the receiver must not be used afterwards.
+#[no_fuel_check]
+fn array_drop_storage<A>(target: &mut [A]) where A: Value {
+	let element_size = Value::<A>::SIZE;
+	loop {
+		let len = array_len(target);
+		if len <= 0 {
+			buffer_drop(target.data);
+			return ();
+		};
+		let index = len - 1;
+		// Taking the element into a discarded temporary runs its ordinary semantic drop.
+		buffer_take(
+			target.data,
+			array_physical_offset_unchecked(target, index),
+			element_size,
+		);
+		target.len -= 1;
 	}
 }
 

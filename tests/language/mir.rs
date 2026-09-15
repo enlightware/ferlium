@@ -98,6 +98,7 @@ fn physical_mir_value_cleanup() {
     // TODO(physical-mir-bridge): Fold into shared cleanup coverage once the full language suite
     // runs on physical MIR, preserving the partial-construction and interrupted-failure cases.
     let mut session = TestSession::new();
+    session.allow_unsafe();
     session
         .session_mut()
         .set_mir_optimization(ferlium::compiler::MirOptimization::Enabled);
@@ -243,6 +244,7 @@ fn physical_mir_value_execution() {
     // TODO(physical-mir-bridge): Replace this supported-subset matrix with shared language-suite
     // differential coverage once physical MIR is complete, retaining any unique cases there.
     let mut session = TestSession::with_native_members();
+    session.allow_unsafe();
     session.allow_experimental();
     for source in [
         "fn compute(x: int) -> int { let f = |y| y + x; f(2) + f(3) }",
@@ -538,6 +540,7 @@ fn execution_targets_use_configured_limits() {
 #[test]
 fn sandbox_violation_during_source_failure_cleanup_retains_both_causes() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let module_id = session
         .compile(
             r#"
@@ -627,6 +630,7 @@ fn assert_fuel_violation_during_cleanup(
 #[test]
 fn sandbox_violation_during_inline_return_cleanup_reclaims_storage() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     assert_fuel_violation_during_cleanup(
         &mut session,
         r#"
@@ -667,6 +671,7 @@ fn sandbox_violation_during_inline_return_cleanup_reclaims_storage() {
 #[test]
 fn sandbox_violation_during_assignment_drop_reclaims_storage() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     assert_fuel_violation_during_cleanup(
         &mut session,
         r#"
@@ -998,6 +1003,7 @@ fn mir_environment_cell_limit_stops_allocation_and_leaves_session_usable() {
 #[test]
 fn sandbox_violation_during_closure_environment_drop_reclaims_the_temporary() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let module_id = session
         .compile(
             r#"
@@ -1080,6 +1086,7 @@ fn mir_completed_recursive_frames_reclaim_storage() {
 #[test]
 fn reused_mir_interpreter_reclaims_dropped_frames() {
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let source = r#"
         struct Probe(int)
 
@@ -2489,6 +2496,7 @@ fn std::Value<<test>::Wrapper>::to_string#impl:7f6f6750(%p0: @arg let Wrapper, %
 fn copy_struct_with_explicit_clone() {
     // Copying a struct with explicit clone function - should call Value::clone
     let mut session = TestSession::new();
+    session.allow_unsafe();
     let mir = session.emit_mir(
         r#"
             struct Probe(int)
@@ -3608,13 +3616,15 @@ fn closure_over_generic_in_concrete_caller_runs() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn closure_over_constrained_native_runs() {
+fn closure_over_constrained_function_runs() {
+    // Closed native ABI entries cannot take trait constraints; exercise captured evidence
+    // with an ordinary source function instead of a boxed-only native stub.
     let mut session = TestSession::new();
-    let source = "fn use_probe() { let f = testing::constrained_native_probe; f(0) } use_probe()";
+    let source = "fn use_probe() { let f = testing::constrained_probe; f(0) } use_probe()";
     let out = session.emit_mir(source);
     assert!(
-        out.contains("build_closure testing::constrained_native_probe(dict("),
-        "expected the constrained native's dictionary to be captured, got:\n{out}"
+        out.contains("build_closure testing::constrained_probe(dict("),
+        "expected the constrained function's dictionary to be captured, got:\n{out}"
     );
     assert_val_eq!(session.run(source), int(42));
 }

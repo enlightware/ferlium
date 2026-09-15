@@ -27,10 +27,7 @@ pub(crate) mod value_dispatch;
 
 #[doc(hidden)]
 pub mod test_support {
-    pub use crate::hir::{
-        emit_expr::emit_expr_unsafe,
-        emit_hir::{EmitModuleFrom, emit_module},
-    };
+    pub use crate::hir::emit_hir::{EmitModuleFrom, emit_module};
 }
 
 use std::fmt;
@@ -495,7 +492,7 @@ impl<P: HirPhase> Project<P> {
     }
 }
 
-/// Access a record-like value at a statically known field.
+/// Access a product field; tuple fields use their decimal index as the field name.
 #[derive(Debug, Clone, Copy, new)]
 pub struct FieldAccess<P: HirPhase = Unelaborated> {
     pub value: NodeId<P>,

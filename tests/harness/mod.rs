@@ -10,18 +10,16 @@ use ferlium::{
     CompilationOutput, CompilerSession, ExecutionTarget, FxHashSet, Location, MirOptimization,
     SourceTable,
     compiler::error::{CompilationError, SourceFailureKind},
-    eval::{EvalCtx, EvalResult, RuntimeError, ValOrMut},
-    hir::function::{ArgConvention, Callable, CallableDefinition, Function},
+    compiler::test_support::add_module_source,
+    eval::{EvalResult, RuntimeError},
+    hir::function::{CallableDefinition, Function},
     hir::native_functions::{
         NativeDropFn, NativeFn0, NativeFnN, NativeFnR, NativeFnRM, NativeFnRR, NativeOptionalFnN,
         NativeOutFn0, NativeOutFnN, NativeOutFnR,
     },
     hir::value::{LiteralValue, NativeValueType, Value},
     hir::{ENodeArena, ENodeId, NodeKind},
-    module::{
-        BlanketTraitImplSubKey, ELocalDecl, Module, ModuleEnv, ModuleFunction, ModuleId, Path,
-        TraitId,
-    },
+    module::{Module, ModuleEnv, ModuleId, Path, TraitId},
     std::core_traits_names::{ITERATOR_TRAIT_NAME, VALUE_TRAIT_NAME},
     std::{
         array::{array_type, array_value_from_vec},
@@ -401,22 +399,25 @@ pub enum RunMode {
     Mir,
     /// The MIR interpreter on optimized bodies (partial evaluation).
     OptimizedMir,
+    /// The physical MIR interpreter on ABI-lowered optimized bodies.
+    PhysicalMir,
 }
 
 impl RunMode {
-    pub const ALL: [Self; 3] = [Self::Hir, Self::Mir, Self::OptimizedMir];
+    pub const ALL: [Self; 4] = [Self::Hir, Self::Mir, Self::OptimizedMir, Self::PhysicalMir];
 
     fn target(self) -> ExecutionTarget {
         match self {
             Self::Hir => ExecutionTarget::Hir,
             Self::Mir | Self::OptimizedMir => ExecutionTarget::Mir,
+            Self::PhysicalMir => ExecutionTarget::PhysicalMir,
         }
     }
 
     fn optimization(self) -> MirOptimization {
         match self {
             Self::Hir | Self::Mir => MirOptimization::Disabled,
-            Self::OptimizedMir => MirOptimization::Enabled,
+            Self::OptimizedMir | Self::PhysicalMir => MirOptimization::Enabled,
         }
     }
 
@@ -425,6 +426,7 @@ impl RunMode {
             Self::Hir => "the HIR interpreter",
             Self::Mir => "the MIR backend",
             Self::OptimizedMir => "the optimized MIR backend",
+            Self::PhysicalMir => "the physical MIR backend",
         }
     }
 }
@@ -450,7 +452,7 @@ fn assert_outcomes_agree(
             assert_eq!(
                 actual.kind(),
                 expected.kind(),
-                "{label} raised a different runtime error than the HIR interpreter"
+                "{label} raised a different runtime error than the HIR interpreter: {actual:?}"
             );
             match (
                 expected.failure_during_cleanup(),
@@ -869,39 +871,6 @@ extern "C" fn tracked_drop_log() -> isize {
     TRACKED_DROPS.get()
 }
 
-#[derive(Clone)]
-struct ConstrainedNativeProbe;
-
-impl Callable for ConstrainedNativeProbe {
-    fn call(&self, args: Vec<ValOrMut>, _ctx: &mut EvalCtx) -> EvalResult {
-        let mut args = args.into_iter();
-        assert!(matches!(args.next(), Some(ValOrMut::Dictionary(_))));
-        match args.next() {
-            Some(ValOrMut::Val(value)) => value.discard_storage(),
-            Some(ValOrMut::Mut(_) | ValOrMut::Ref(_)) => {}
-            Some(ValOrMut::Dictionary(_)) | None => panic!("expected one visible value argument"),
-        }
-        assert!(args.next().is_none());
-        Ok(Value::native(42isize))
-    }
-
-    fn visible_parameter_passing(&self) -> Option<&[ArgConvention]> {
-        Some(&[ArgConvention::Let])
-    }
-
-    fn format_ind(
-        &self,
-        f: &mut std::fmt::Formatter,
-        _locals: &[ELocalDecl],
-        _env: &ModuleEnv<'_>,
-        spacing: usize,
-        indent: usize,
-    ) -> std::fmt::Result {
-        let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
-        write!(f, "{indent_str}ConstrainedNativeProbe")
-    }
-}
-
 fn add_tracked_members(module: &mut Module) {
     use ferlium::hir::native_functions::{
         NativeAddressorMut, NativeAddressorRef, NativeFallibleAddressorMut,
@@ -1057,8 +1026,7 @@ fn testing_module(
     let test_assoc_trait = test_assoc_trait();
     let test_witnessed_project_trait = test_witnessed_project_trait();
     let test_assoc_trait_id = TraitId::new(module_id, module.add_trait(test_assoc_trait));
-    let test_witnessed_project_trait_id =
-        TraitId::new(module_id, module.add_trait(test_witnessed_project_trait));
+    module.add_trait(test_witnessed_project_trait);
     let option_type_def = option_type_def();
     let map_iterator_type_def = map_iterator_type_def(iterator_trait);
     let witnessed_type_def = witnessed_type_def(test_assoc_trait_id);
@@ -1084,28 +1052,7 @@ fn testing_module(
     );
     let option_type_def_id = module.add_type_def(option_type_def.name, option_type_def);
     module.add_type_def(map_iterator_type_def.name, map_iterator_type_def);
-    let witnessed_type_def_id = module.add_type_def(witnessed_type_def.name, witnessed_type_def);
-    module.add_blanket_impl_no_locals(
-        test_witnessed_project_trait_id,
-        BlanketTraitImplSubKey {
-            input_tys: vec![Type::named(
-                witnessed_type_def_id,
-                [Type::variable_id(0), Type::variable_id(1)],
-            )],
-            ty_var_count: 2,
-            eff_var_count: 0,
-            constraints: vec![PubTypeConstraint::new_have_trait(
-                test_assoc_trait_id,
-                vec![Type::variable_id(0)],
-                vec![Type::variable_id(1)],
-                vec![],
-                Location::new_synthesized(),
-            )],
-        },
-        vec![Type::variable_id(1)],
-        [],
-        [Box::new(InterpreterFixture::Ignore) as Function],
-    );
+    module.add_type_def(witnessed_type_def.name, witnessed_type_def);
     // Test trait with an output effect slot: a pure impl for int, an impl with
     // the read effect for bool, and a blanket impl over Option<T> forwarding
     // the effect of the inner type.
@@ -1142,25 +1089,6 @@ fn testing_module(
             })) as Function,
         ],
     );
-    module.add_blanket_impl_with_effects_no_locals(
-        test_eff_trait_id,
-        BlanketTraitImplSubKey {
-            input_tys: vec![Type::named(option_type_def_id, [Type::variable_id(0)])],
-            ty_var_count: 2,
-            eff_var_count: 0,
-            constraints: vec![PubTypeConstraint::new_have_trait(
-                test_eff_trait_id,
-                vec![Type::variable_id(0)],
-                vec![Type::variable_id(1)],
-                vec![EffType::single_variable_id(0)],
-                Location::new_synthesized(),
-            )],
-        },
-        vec![Type::variable_id(1)],
-        vec![EffType::single_variable_id(0)],
-        [],
-        [Box::new(InterpreterFixture::Ignore) as Function],
-    );
     // Test trait with two output effect slots: the bool impl has different
     // effects in each slot, so any slot transposition swaps the methods'
     // effects and is caught by the tests.
@@ -1187,59 +1115,8 @@ fn testing_module(
             )) as Function,
         ],
     );
-    let test_eff_join_trait_id = TraitId::new(module_id, module.add_trait(test_eff_join_trait()));
-    module.add_blanket_impl_with_effects_no_locals(
-        test_eff_join_trait_id,
-        BlanketTraitImplSubKey {
-            input_tys: vec![Type::tuple([Type::variable_id(0), Type::variable_id(1)])],
-            ty_var_count: 4,
-            eff_var_count: 0,
-            constraints: vec![
-                PubTypeConstraint::new_have_trait(
-                    test_eff_trait_id,
-                    vec![Type::variable_id(0)],
-                    vec![Type::variable_id(2)],
-                    vec![EffType::single_variable_id(1)],
-                    Location::new_synthesized(),
-                ),
-                PubTypeConstraint::new_have_trait(
-                    test_eff_trait_id,
-                    vec![Type::variable_id(1)],
-                    vec![Type::variable_id(3)],
-                    vec![EffType::single_variable_id(2)],
-                    Location::new_synthesized(),
-                ),
-            ],
-        },
-        [],
-        [EffType::single_variable_id(1).union(&EffType::single_variable_id(2))],
-        [],
-        [Box::new(InterpreterFixture::Zero) as Function],
-    );
+    module.add_trait(test_eff_join_trait());
     add_tracked_value(&mut module, value_trait_id, value_trait_def);
-    let generic_ty = Type::variable_id(0);
-    module.add_function(
-        "constrained_native_probe".into(),
-        ModuleFunction::new_without_spans_nor_locals(
-            CallableDefinition::new(
-                TypeScheme::new_infer_quantifiers_with_constraints(
-                    FnType::new_by_val([generic_ty], int_type(), no_effects()),
-                    vec![PubTypeConstraint::new_have_trait(
-                        value_trait_id,
-                        vec![generic_ty],
-                        vec![],
-                        vec![],
-                        Location::new_synthesized(),
-                    )],
-                ),
-                vec![ustr("value")],
-                Some(String::from(
-                    "Test-only constrained native used to exercise first-class evidence capture.",
-                )),
-            ),
-            Box::new(ConstrainedNativeProbe),
-        ),
-    );
     module.add_function(
         "some_int".into(),
         NativeOptionalFnN::from_rust(Some::<isize>, Type::named(option_type_def_id, [int_type()]))
@@ -1257,15 +1134,6 @@ fn testing_module(
                 "Wraps a boolean into an Option variant.",
                 no_effects(),
             ),
-    );
-    let pair_variant_type = variant_type([("Pair", Type::tuple([int_type(), int_type()]))]);
-    module.add_function(
-        "pair".into(),
-        InterpreterFixture::Pair.description(
-            ["first", "second"],
-            "Creates a Pair variant from two integers.",
-            FnType::new_by_val([int_type(), int_type()], pair_variant_type, no_effects()),
-        ),
     );
     add_tracked_functions(&mut module);
     module.add_function(
@@ -1353,26 +1221,25 @@ pub fn get_array_property_value() -> Value {
     INT_ARRAY_PROPERTY_VALUE.with(|cell| int_vec_to_array_value(&cell.borrow()))
 }
 
-fn get_array_property_value_value() -> Value {
-    get_array_property_value()
+extern "C" fn array_property_len() -> isize {
+    INT_ARRAY_PROPERTY_VALUE.with(|cell| cell.borrow().len() as isize)
 }
 
-fn set_array_property_value_value_ref(value: &Value) {
-    INT_ARRAY_PROPERTY_VALUE.with(|cell| *cell.borrow_mut() = int_vec_from_array_value(value));
+extern "C" fn array_property_get(index: isize) -> isize {
+    INT_ARRAY_PROPERTY_VALUE.with(|cell| cell.borrow()[index as usize])
 }
 
-/// A snapshot of the harness's externally-mutable `@props` fixtures (`my_scope.my_var` and
-/// `my_scope.my_array`), used to give both backends the same preconditions in the fused
-/// HIR-and-MIR dual-run.
-///
-/// That run executes one snippet through the HIR interpreter and then through the MIR interpreter in
-/// a single pass. A snippet that mutates an `@props` fixture (e.g. `@props::my_scope.my_var += 1`)
-/// would otherwise apply that effect twice — once per backend — so the MIR run would start from the
-/// state the HIR run left behind, the two results would diverge spuriously, and the residual state
-/// would be doubly applied. Capturing the fixtures before the HIR run and restoring them before the
-/// MIR run lets both backends observe the same starting state and leaves exactly one logical
-/// application of the effects behind (matching a single interpreter run). These fixtures are the
-/// only program-mutable external state in the harness; the `effects` module's natives are no-ops.
+extern "C" fn array_property_clear() {
+    INT_ARRAY_PROPERTY_VALUE.with(|cell| cell.borrow_mut().clear());
+}
+
+extern "C" fn array_property_push(value: isize) {
+    INT_ARRAY_PROPERTY_VALUE.with(|cell| cell.borrow_mut().push(value));
+}
+
+/// External property state, restored before each backend and compared after execution.
+/// The reference outcome is restored last so a snippet applies its effects only once.
+#[derive(Debug, PartialEq, Eq)]
 struct PropertyFixtures {
     int_property: isize,
     int_array_property: Vec<isize>,
@@ -1436,23 +1303,35 @@ fn test_property_module(module_id: ModuleId) -> Module {
         ),
     );
     module.add_function(
-        "@get my_scope.my_array".into(),
-        InterpreterFixture::GetArray.description(
+        "array_len".into(),
+        NativeFn0::new(array_property_len).description(
             [],
-            "Gets the value of my_scope.my_array.",
-            FnType::new_by_val([], array_type(int_type()), effect(PrimitiveEffect::Read)),
+            "Array fixture length.",
+            effect(PrimitiveEffect::Read),
         ),
     );
     module.add_function(
-        "@set my_scope.my_array".into(),
-        InterpreterFixture::SetArray.description(
+        "array_get".into(),
+        NativeFnN::new(array_property_get).description(
+            ["index"],
+            "Array fixture element.",
+            effect(PrimitiveEffect::Read),
+        ),
+    );
+    module.add_function(
+        "array_clear".into(),
+        NativeFn0::new(array_property_clear).description(
+            [],
+            "Clear the array fixture.",
+            effect(PrimitiveEffect::Write),
+        ),
+    );
+    module.add_function(
+        "array_push".into(),
+        NativeFnN::new(array_property_push).description(
             ["value"],
-            "Sets the value of my_scope.my_array.",
-            FnType::new_by_val(
-                [array_type(int_type())],
-                Type::unit(),
-                effect(PrimitiveEffect::Write),
-            ),
+            "Append to the array fixture.",
+            effect(PrimitiveEffect::Write),
         ),
     );
     module
@@ -1483,6 +1362,11 @@ pub struct TestSession {
     modes: Vec<RunMode>,
 }
 impl TestSession {
+    /// Opt trusted fixtures into unsafe language features, including custom ownership methods.
+    pub fn allow_unsafe(&mut self) {
+        self.session.set_allow_unsafe(true);
+    }
+
     /// Create a session with only the native value/member fixtures supported by physical MIR.
     pub fn with_native_members() -> Self {
         let mut session = CompilerSession::new();
@@ -1523,6 +1407,30 @@ impl TestSession {
             std_value_trait,
             compiler_session.std_module().trait_def(std_value_trait),
         );
+        let testing_module = add_module_source(
+            &mut compiler_session,
+            testing_module,
+            r#"
+            use std::*;
+            impl<A, B> TestWitnessedProject for <Self = Witnessed<A, B> |-> Output = B>
+                where A: TestAssoc<Output = B> {
+                fn witness_project(value: Witnessed<A, B>) -> B { project(value.0) }
+            }
+            impl<A, B ! F> TestEff for <Self = Option<A> |-> Output = B ! E = F>
+                where A: TestEff<Output = B ! E = F> {
+                // Typing-only fixture: there is no B to return for an absent A.
+                fn eff_project(value: Option<A>) -> B { loop {} }
+            }
+            pub struct EffPair<A, B>(A, B)
+            impl<A, B, X, Y ! F, G> TestEffJoin for <Self = EffPair<A, B> |-> ! E = (F, G)>
+                where A: TestEff<Output = X ! E = F>, B: TestEff<Output = Y ! E = G> {
+                fn eff_join(value: EffPair<A, B>) -> int { 0 }
+            }
+            pub fn constrained_probe<T>(value: T) -> int where T: Value { 42 }
+            pub fn pair(first: int, second: int) -> Pair(int, int) { Pair(first, second) }
+            "#,
+        )
+        .unwrap();
         compiler_session.register_module(Path::single_str("testing"), testing_module);
         compiler_session.register_module(
             Path::single_str("effects_native"),
@@ -1539,10 +1447,31 @@ impl TestSession {
                 Path::single_str("effects"),
             )
             .unwrap();
-        compiler_session.register_module(
-            Path::single_str("props"),
-            test_property_module(compiler_session.modules().next_id()),
-        );
+        let properties = test_property_module(compiler_session.modules().next_id());
+        let mut properties = add_module_source(
+            &mut compiler_session,
+            properties,
+            r#"
+            use std::*;
+            fn get_array() -> [int] {
+                let mut value = [];
+                for i in 0..array_len() { array_append(value, array_get(i)); };
+                value
+            }
+            fn set_array(value: [int]) { array_clear(); for item in value { array_push(item); } }
+        "#,
+        )
+        .unwrap();
+        for (name, function) in [
+            ("@get my_scope.my_array", "get_array"),
+            ("@set my_scope.my_array", "set_array"),
+        ] {
+            properties.add_function(
+                ustr(name),
+                properties.get_function(ustr(function)).unwrap().clone(),
+            );
+        }
+        compiler_session.register_module(Path::single_str("props"), properties);
         add_deep_modules(&mut compiler_session);
         Self {
             session: compiler_session,
@@ -1758,17 +1687,32 @@ impl TestSession {
                 let fixtures = PropertyFixtures::capture();
                 let selected = self.session.mir_optimization();
                 let modes = self.modes.clone();
+                let mut expected_effects = None;
                 let results: Vec<_> = modes
                     .iter()
                     .map(|mode| {
                         fixtures.restore();
                         self.session.set_mir_optimization(mode.optimization());
-                        self.session
+                        let result = self
+                            .session
                             .run_entry(mode.target(), module_id, expr, vec![])
-                            .map_err(Error::Runtime)
+                            .map_err(Error::Runtime);
+                        let effects = PropertyFixtures::capture();
+                        if let Some(expected) = &expected_effects {
+                            assert_eq!(
+                                expected,
+                                &effects,
+                                "{} changed the property fixtures differently",
+                                mode.label()
+                            );
+                        } else {
+                            expected_effects = Some(effects);
+                        }
+                        result
                     })
                     .collect();
                 self.session.set_mir_optimization(selected);
+                expected_effects.unwrap().restore();
 
                 // The first mode — the HIR interpreter unless a test says otherwise — is the
                 // reference every other one is checked against.
@@ -2115,81 +2059,4 @@ macro_rules! array {
             $crate::harness::expected_array_infer(values)
         }
     };
-}
-
-/// Synthetic interpreter operations for compiler tests involving unresolved generic/structural
-/// types. Host-native ABI tests use typed C entries above; these fixtures carry no native entry.
-#[derive(Clone, Copy, Debug)]
-enum InterpreterFixture {
-    Ignore,
-    Zero,
-    Pair,
-    GetArray,
-    SetArray,
-}
-impl InterpreterFixture {
-    fn description(
-        self,
-        names: impl IntoIterator<Item = &'static str>,
-        doc: &'static str,
-        ty: FnType,
-    ) -> ModuleFunction {
-        ModuleFunction::new(
-            CallableDefinition::new(
-                TypeScheme::new_infer_quantifiers(ty),
-                names.into_iter().map(ustr).collect(),
-                Some(doc.into()),
-            ),
-            Box::new(self),
-            None,
-            Vec::new(),
-        )
-    }
-}
-impl Callable for InterpreterFixture {
-    fn call(&self, args: Vec<ValOrMut>, ctx: &mut EvalCtx) -> EvalResult {
-        let result = match self {
-            Self::Ignore => Value::unit(),
-            Self::Zero => Value::native(0isize),
-            Self::Pair => {
-                let a = *args[0].as_primitive::<isize>(ctx).unwrap().unwrap();
-                let b = *args[1].as_primitive::<isize>(ctx).unwrap().unwrap();
-                Value::tuple_variant(ustr("Pair"), [Value::native(a), Value::native(b)])
-            }
-            Self::GetArray => get_array_property_value_value(),
-            Self::SetArray => {
-                set_array_property_value_value_ref(
-                    args[0]
-                        .as_value_ref(ctx)
-                        .unwrap()
-                        .as_boxed()
-                        .expect("array needs boxed storage"),
-                );
-                Value::unit()
-            }
-        };
-        for arg in args {
-            if let ValOrMut::Val(value) = arg {
-                value.discard_storage();
-            }
-        }
-        Ok(result)
-    }
-    fn runtime_argument_passing(&self) -> Option<&[ArgConvention]> {
-        Some(match self {
-            Self::GetArray => &[],
-            Self::Pair => &[ArgConvention::Let, ArgConvention::Let],
-            _ => &[ArgConvention::Let],
-        })
-    }
-    fn format_ind(
-        &self,
-        f: &mut std::fmt::Formatter,
-        _: &[ELocalDecl],
-        _: &ModuleEnv,
-        _: usize,
-        _: usize,
-    ) -> std::fmt::Result {
-        write!(f, "InterpreterFixture::{self:?}")
-    }
 }

@@ -743,6 +743,7 @@ pub enum UnsafeFeature {
     TypeAlias(Ustr),
     FunctionAttribute(Ustr),
     TypeAttribute(Ustr),
+    TraitImplementation(Ustr),
 }
 
 impl Display for UnsafeFeature {
@@ -754,6 +755,7 @@ impl Display for UnsafeFeature {
             UnsafeFeature::TypeAlias(name) => write!(f, "type alias `{name}`"),
             UnsafeFeature::FunctionAttribute(name) => write!(f, "function attribute `#[{name}]`"),
             UnsafeFeature::TypeAttribute(name) => write!(f, "type attribute `#[{name}]`"),
+            UnsafeFeature::TraitImplementation(name) => write!(f, "custom `{name}` implementation"),
         }
     }
 }

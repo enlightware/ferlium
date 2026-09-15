@@ -548,6 +548,14 @@ impl VariantTags {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CompilationCapabilities {
     pub allow_experimental: bool,
+    /// Permit unsafe language features in trusted source; never enable for untrusted input.
+    pub allow_unsafe: bool,
+}
+
+impl CompilationCapabilities {
+    pub(crate) fn allows_unsafe(self, module: ModuleId) -> bool {
+        module == STD_MODULE_ID || self.allow_unsafe
+    }
 }
 
 /// Cached expensive portion of a pristine compiler session.
@@ -696,6 +704,12 @@ impl CompilerSession {
         self.capabilities.allow_experimental = allow;
     }
 
+    /// Allow unsafe features in subsequent compilations of trusted source.
+    /// Disabling this does not revoke previously compiled code.
+    pub fn set_allow_unsafe(&mut self, allow: bool) {
+        self.capabilities.allow_unsafe = allow;
+    }
+
     /// Get a read-only view of modules in this compilation session.
     pub fn modules(&self) -> ModuleRegistry<'_> {
         ModuleRegistry::new(&self.modules)
@@ -778,10 +792,7 @@ impl CompilerSession {
     /// Get a module environment, with an empty module including the standard library
     /// for debugging purposes.
     pub fn module_env(&self) -> ModuleEnv<'_> {
-        ModuleEnv {
-            modules: &self.modules,
-            current: self.expect_fresh_module(self.empty_std_user),
-        }
+        ModuleEnv::new(self.expect_fresh_module(self.empty_std_user), &self.modules)
     }
 
     /// Get the standard library module.
