@@ -860,7 +860,7 @@ a backend anything the surviving marker does not; peak cell use is unchanged.
 
 ## Dynamic profiling
 
-`mir::profile` counts every operation and terminator executed by the MIR reference interpreter. It
+`mir::profile` counts every operation and terminator executed by either MIR interpreter. It
 provides totals, per-function counts and per-type counts where an operation carries a concrete type;
 calls are split into direct and indirect dispatch. Instruction identities reuse the Strum-generated
 discriminants of `OperationKind` and `TerminatorKind`, so the profiler does not maintain a second IR
@@ -877,10 +877,36 @@ When standard output is a terminal, decreases are green, increases red and uncha
 headings and totals are emphasized. Redirected output is always plain, and `NO_COLOR` disables color
 explicitly.
 
+`make profile-physical-mir` (the same runner with `--physical`) compares expanded physical MIR with
+post-expansion optimization, keeping its optimized semantic input fixed. It supports the same
+`WORKLOADS` selection and reports dynamic instructions, peak allocation cells, and static operation
+counts over the prepared module dependency closure. Static counts include uncalled bodies and
+helpers and operations inside `Invoke`, but exclude terminators. Allocation cells are not bytes and
+are not directly comparable to boxed environment cells.
+Neither count is a substitute for timing or a native instruction benchmark.
+
 The report orders instructions by broad cost shape — semantic/callee-dependent, size-dependent,
 fixed storage, addressing/evidence, scalar/control, then interpreter scaffolding — but assigns no
 weights. Native-call cost is callee-dependent and representation-copy cost is type-dependent, so a
 single synthetic MIR score would assert backend costs the interpreter cannot establish.
+
+## Post-expansion optimization
+
+Physical MIR reuses shared folding, CSE, inlining, storage, control-flow, and stack-region cleanup
+passes. Stage-specific callee lookup reads immutable inputs: raw semantic bodies for semantic
+optimization, expanded module-local bodies and helpers for physical optimization. Foreign physical
+bodies remain opaque. Generic specialization and constructive semantic reification do not run on
+physical bodies; arithmetic/boolean identities and constant integer arithmetic need no script
+evaluation. Both stages fold constant wrapping integer addition, subtraction, multiplication and
+negation directly, without invoking the boxed constant evaluator.
+Physical inlining targets newly expanded helpers and primitive implementations, not another round
+of source-function inlining after the semantic stage has spent its growth budget.
+
+Address analysis preserves logical member identities and is conservative where it cannot prove an
+exact place. Equal byte offsets alone do not establish identity or disjointness. Derived catalogs
+are rebuilt and physical verification runs before the optimized artifact is published or cached.
+`CompilerSession::set_physical_mir_optimization` selects expanded or optimized physical artifacts
+independently of the semantic MIR setting; the expanded comparison stage is built only on request.
 
 ## Budgets
 

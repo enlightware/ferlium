@@ -240,6 +240,9 @@ their externally visible identity. Generated helpers are ordinary entries in the
 Semantic and physical stages use the same MIR structures, and shared operations retain their
 meaning. Partially lowered bodies are not valid input to physical executors.
 
+Shared optimization may run again after physical expansion. Rewrites preserve physical place and
+ownership contracts; transformed artifacts are reverified before execution or backend emission.
+
 Physical MIR retains shared ownership, callable, and control-flow operations with physical storage
 semantics; it is not machine instruction-level IR. In particular, `clone`, `drop`, scoped
 `project`/`yield`, and `invoke` remain valid. Unresolved semantic field projections and semantic

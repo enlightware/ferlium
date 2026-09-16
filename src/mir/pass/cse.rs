@@ -44,8 +44,10 @@
 //! **The numbering merges two place-producing operations, which differ in what keeps them valid.**
 //! A `subfield` *derives* a place from its operand: the base's root and path with one index
 //! appended, holding no storage of its own. It is valid exactly where its base is, and the base is
-//! valid at the duplicate — that is what the duplicate reads too. Registers are single-assignment,
-//! so no intervening write invalidates it; there is no kill for it at all. A `dict_entry` instead
+//! valid at the duplicate — that is what the duplicate reads too. Physical `address_offset` views
+//! additionally depend on subobject lifetimes: replacing a variant can invalidate a view without
+//! changing its base register. Those computations are reused only within a block and across
+//! operations known not to change storage. A `dict_entry` instead
 //! *materializes* the function value into a freshly allocated cell, so what it yields lives in the
 //! current stack region: a `stack_restore` between two occurrences pops it, and a merged register
 //! would name storage that is gone. That is not hypothetical — it is what `bank_account` did before
@@ -1098,6 +1100,7 @@ pub(crate) fn eliminate_common_subexpressions(func: &Function) -> Option<Functio
         available: FxHashMap::default(),
         merged: FxHashMap::default(),
         removed: FxHashMap::default(),
+        saw_physical_address: false,
     };
     numbering.walk(func.entry());
     let Numbering {
@@ -1159,6 +1162,8 @@ struct Numbering<'a> {
     /// an expression is looked up under already-canonical operands — so this needs no chasing.
     merged: FxHashMap<ValueId, ValueId>,
     removed: FxHashMap<BlockId, FxHashSet<OperationIndex>>,
+    /// Semantic bodies need no physical lifetime invalidation scans.
+    saw_physical_address: bool,
 }
 
 impl Numbering<'_> {
@@ -1195,7 +1200,30 @@ impl Numbering<'_> {
     }
 
     fn number_block(&mut self, block: BlockId, undo: &mut Vec<(Expression, Option<Available>)>) {
+        // A dominating address may have been invalidated on a non-dominating predecessor. Until
+        // physical lifetime availability is modelled, number physical views within blocks only.
+        self.forget_physical_addresses(undo);
         for (index, operation) in self.func.block(block).operations().iter().enumerate() {
+            if !matches!(
+                operation.kind,
+                OperationKind::Alloca { .. }
+                    | OperationKind::AllocaPlace { .. }
+                    | OperationKind::Load
+                    | OperationKind::CompareEqual
+                    | OperationKind::ExtractTag
+                    | OperationKind::ExtractPayloadIndirection
+                    | OperationKind::IsInitialized
+                    | OperationKind::AddressOffset { .. }
+                    | OperationKind::AddressOffsetPlace { .. }
+                    | OperationKind::DictEntry { .. }
+                    | OperationKind::BuildDictionary { .. }
+                    | OperationKind::BuildSubscriptEvidence { .. }
+                    | OperationKind::StackSave
+                    | OperationKind::CheckCallDepth
+                    | OperationKind::CheckFuel
+            ) {
+                self.forget_physical_addresses(undo);
+            }
             // Popping a stack region frees every cell allocated inside it, so a materialized place
             // does not survive one. A scoped accessor is opaque enough to count as one too.
             if matches!(
@@ -1210,6 +1238,10 @@ impl Numbering<'_> {
             let Some(computation) = Computation::of(&operation.kind) else {
                 continue;
             };
+            self.saw_physical_address |= matches!(
+                computation,
+                Computation::AddressOffset { .. } | Computation::AddressOffsetPlace { .. }
+            );
             let result = operation
                 .result_id()
                 .expect("a place-producing operation defines a result");
@@ -1263,6 +1295,23 @@ impl Numbering<'_> {
             }
         });
     }
+
+    fn forget_physical_addresses(&mut self, undo: &mut Vec<(Expression, Option<Available>)>) {
+        if !self.saw_physical_address {
+            return;
+        }
+        self.available.retain(|expression, available| {
+            if matches!(
+                expression.computation,
+                Computation::AddressOffset { .. } | Computation::AddressOffsetPlace { .. }
+            ) {
+                undo.push((expression.clone(), Some(*available)));
+                false
+            } else {
+                true
+            }
+        });
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1273,10 +1322,73 @@ enum Enter {
 
 #[cfg(test)]
 mod tests {
-    use super::{has_duplicate_call_fingerprint, has_multiple_numberable_computations};
-    use crate::{
-        CompilerSession, ExecutionTarget, MirOptimization, mir::Function, module::Path, ustr,
+    use super::{
+        eliminate_common_subexpressions, has_duplicate_call_fingerprint,
+        has_multiple_numberable_computations,
     };
+    use crate::{
+        CompilerSession, ExecutionTarget, Location, MirOptimization,
+        hir::function::ArgConvention,
+        mir::{
+            self, Function, Operation, OperationKind, ParameterKind, builder::FunctionBuilder,
+            terminator::Terminator, verify::verify_physical_function,
+        },
+        module::{Path, ProjectionIndex, id::Id},
+        std::math::int_type,
+        types::r#type::Type,
+        ustr,
+    };
+
+    #[test]
+    fn physical_addresses_preserve_member_identity_and_lifetimes() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new(ustr("physical_addresses"), Default::default());
+        let base = mir::Value::Parameter(builder.add_parameter(
+            Type::tuple(vec![Type::unit(), Type::unit()]),
+            ParameterKind::Parameter(ArgConvention::MutableRef),
+        ));
+        let offset = mir::Value::Parameter(
+            builder.add_parameter(int_type(), ParameterKind::Parameter(ArgConvention::Let)),
+        );
+        let entry = builder.add_block();
+        let next = builder.add_block();
+        let offset = builder
+            .append_operation(entry, Operation::load(span, offset))
+            .unwrap();
+        let address = |member| {
+            Operation::address_offset(
+                span,
+                base.clone(),
+                offset.clone(),
+                Type::unit(),
+                Some(ProjectionIndex::from_index(member)),
+            )
+        };
+        builder.append_operation(entry, address(0));
+        builder.append_operation(entry, address(0)); // The only reusable view.
+        builder.append_operation(entry, address(1)); // Same bytes, different zero-sized field.
+        builder.append_operation(entry, Operation::clear(span, base.clone()));
+        builder.append_operation(entry, address(0)); // A storage change invalidates prior views.
+        builder.set_terminator(entry, Terminator::goto(span, next));
+        builder.append_operation(next, address(0)); // No cross-block lifetime proof yet.
+        builder.set_terminator(next, Terminator::ret(span));
+        let body = builder.finish_unverified();
+        verify_physical_function(&body, env);
+        let optimized = eliminate_common_subexpressions(&body).expect("one repeated address");
+        verify_physical_function(&optimized, env);
+        let addresses = |block| {
+            optimized
+                .block(block)
+                .operations()
+                .iter()
+                .filter(|operation| matches!(operation.kind, OperationKind::AddressOffset { .. }))
+                .count()
+        };
+        assert_eq!(addresses(entry), 3);
+        assert_eq!(addresses(next), 1);
+    }
 
     fn optimized(src: &str) -> String {
         let mut session = CompilerSession::new();

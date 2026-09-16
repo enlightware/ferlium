@@ -27,7 +27,7 @@ use crate::{
     },
     mir::{
         self, BlockId, Function, Operation, OperationKind, ValueId, function::ParameterKind,
-        terminator::TerminatorKind,
+        interpreter::FunctionKey, profile::MirExecutionProfile, terminator::TerminatorKind,
     },
     module::{
         DictionaryEntryEvidence, FunctionId, ModuleEnv, SubscriptId, TraitDictionaryId, id::Id,
@@ -340,8 +340,20 @@ pub(crate) fn run_entry(
     limits: ReferenceInterpreterLimits,
     session: &CompilerSession,
 ) -> Result<Value, RuntimeError> {
+    run_entry_with_profile(program, entry, arguments, limits, session, None)
+}
+
+pub(crate) fn run_entry_with_profile(
+    program: &ResolvedPhysicalProgram,
+    entry: FunctionId,
+    arguments: &mut [Value],
+    limits: ReferenceInterpreterLimits,
+    session: &CompilerSession,
+    profile: Option<&mut MirExecutionProfile>,
+) -> Result<Value, RuntimeError> {
     let mut memory = Memory::default();
     memory.allocation_limit = limits.environment_cell_limit;
+    memory.peak_allocations = profile.as_ref().map(|_| 0);
     let mut interpreter = Interpreter {
         program,
         memory,
@@ -355,6 +367,7 @@ pub(crate) fn run_entry(
         prepared: FxHashSet::default(),
         prepared_monomorphic: FxHashSet::default(),
         projections: Vec::new(),
+        profile,
     };
     interpreter.prepare_native_storage()?;
     let body = program
@@ -405,10 +418,14 @@ pub(crate) fn run_entry(
     if result.is_ok() || matches!(&result, Err(RuntimeError::SourceFailure(_))) {
         interpreter.memory.reclaim_host_natives()?;
     }
+    if let Some(profile) = interpreter.profile {
+        profile.record_cell_high_water(interpreter.memory.peak_allocations.unwrap());
+    }
     result
 }
 
 struct Interpreter<'a, 'p> {
+    profile: Option<&'a mut MirExecutionProfile>,
     program: &'a ResolvedPhysicalProgram<'p>,
     memory: Memory,
     limits: ReferenceInterpreterLimits,
@@ -835,7 +852,14 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         let previous = mem::replace(&mut self.types, types);
         self.depth += 1;
         let mut registers = FxHashMap::default();
-        let outcome = self.run_blocks(body, &args, &mut registers, base, body.entry());
+        let outcome = self.run_blocks(
+            callable.function,
+            body,
+            &args,
+            &mut registers,
+            base,
+            body.entry(),
+        );
         let types = mem::replace(&mut self.types, previous);
         match outcome {
             Ok(FrameExit::Yielded(address, resume)) => {
@@ -882,6 +906,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             .ok_or_else(|| invalid("missing suspended entry"))?;
         let previous = mem::replace(&mut self.types, frame.types);
         let outcome = self.run_blocks(
+            frame.function,
             body,
             &frame.args,
             &mut frame.registers,
@@ -1207,7 +1232,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         let marker = self.memory.len();
         let previous_types = mem::replace(&mut self.types, types);
         self.depth += 1;
-        let result = self.run_frame(body, &args, marker);
+        let result = self.run_frame(id, body, &args, marker);
         self.depth -= 1;
         self.types = previous_types;
         self.memory.restore(marker);
@@ -1326,12 +1351,13 @@ impl<'a, 'p> Interpreter<'a, 'p> {
 
     fn run_frame(
         &mut self,
+        id: FunctionId,
         body: &Function,
         args: &[Binding],
         frame_base: usize,
     ) -> Result<(), RuntimeError> {
         let mut registers = FxHashMap::default();
-        let result = self.run_blocks(body, args, &mut registers, frame_base, body.entry());
+        let result = self.run_blocks(id, body, args, &mut registers, frame_base, body.entry());
         // Evidence registers own references independently of stack storage. In particular, CSE
         // may reuse a pure dictionary construction across StackRestore boundaries.
         for binding in registers.values() {
@@ -1345,6 +1371,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
 
     fn run_blocks(
         &mut self,
+        id: FunctionId,
         body: &Function,
         args: &[Binding],
         registers: &mut FxHashMap<ValueId, Binding>,
@@ -1353,14 +1380,27 @@ impl<'a, 'p> Interpreter<'a, 'p> {
     ) -> Result<FrameExit, RuntimeError> {
         let mut pending: Option<RuntimeError> = None;
         let mut secondary: Option<RuntimeError> = None;
+        let key = FunctionKey {
+            module: id.module,
+            identity: id.function,
+        };
         loop {
             let current = body.block(block);
             for operation in current.operations() {
+                if let Some(profile) = &mut self.profile {
+                    profile.record_operation(key, operation);
+                }
                 self.operation(body, args, registers, operation, frame_base)
                     .map_err(|error| match pending.take() {
                         Some(initial) => initial.interrupted_by(error),
                         None => error,
                     })?;
+            }
+            if let Some(profile) = &mut self.profile {
+                profile.record_terminator(key, &current.terminator().kind);
+                if let TerminatorKind::Invoke { operation, .. } = &current.terminator().kind {
+                    profile.record_operation(key, operation);
+                }
             }
             match &current.terminator().kind {
                 TerminatorKind::Goto { target } => block = *target,
@@ -2286,6 +2326,7 @@ mod tests {
         let program = session.prepare_physical_program(module).unwrap();
         assert!(!program.static_evidence().is_empty());
         let mut interpreter = Interpreter {
+            profile: None,
             program: &program,
             memory: Memory::default(),
             limits: ReferenceInterpreterLimits::default(),
@@ -2512,6 +2553,7 @@ mod tests {
         let program = resolve_physical_program([]).unwrap();
         let session = CompilerSession::new();
         let mut interpreter = Interpreter {
+            profile: None,
             program: &program,
             memory: Memory::default(),
             limits: ReferenceInterpreterLimits::default(),

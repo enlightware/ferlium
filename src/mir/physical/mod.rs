@@ -42,6 +42,7 @@ use crate::{
         pass::{
             dataflow::{Root, escaping_roots},
             known_callee::KnownCallees,
+            physical::optimize,
         },
         role::{MirType, ValueRoles},
         terminator::{Terminator, TerminatorKind},
@@ -517,6 +518,31 @@ pub(crate) fn lower_physical_mir(
     env: ModuleEnv<'_>,
     known: &KnownCallees,
 ) -> Result<BackendReadyMirArtifacts, BackendReadinessError> {
+    let entries = expand_physical_mir(module, semantic, env, known)?;
+    let entries = optimize(&entries, semantic, env, known);
+    prepare_physical_mir(entries, semantic, env)
+}
+
+/// The same physical expansion without post-expansion optimization, for differential execution.
+pub(crate) fn lower_unoptimized_physical_mir(
+    module: ModuleId,
+    semantic: &MirArtifacts,
+    env: ModuleEnv<'_>,
+    known: &KnownCallees,
+) -> Result<BackendReadyMirArtifacts, BackendReadinessError> {
+    prepare_physical_mir(
+        expand_physical_mir(module, semantic, env, known)?,
+        semantic,
+        env,
+    )
+}
+
+fn expand_physical_mir(
+    module: ModuleId,
+    semantic: &MirArtifacts,
+    env: ModuleEnv<'_>,
+    known: &KnownCallees,
+) -> Result<Vec<Option<Function>>, BackendReadinessError> {
     assert_eq!(
         env.current.module_id(),
         module,
@@ -607,7 +633,7 @@ pub(crate) fn lower_physical_mir(
         }
     }
     entries.extend(lowerer.helpers.into_iter().map(Some));
-    prepare_physical_mir(entries, semantic, env)
+    Ok(entries)
 }
 
 /// Rebuild process-local bindings and derived catalogs, then verify lowered or restored bodies.
@@ -3570,7 +3596,8 @@ mod tests {
             .expect("optimized MIR was just prepared");
         let first_helper = LocalFunctionId::from_index(semantic.entry_count());
         let known = session.known_callees();
-        let physical = lower_physical_mir(
+        // These tests inspect expansion contracts, before shared passes inline their helpers.
+        let physical = lower_unoptimized_physical_mir(
             module,
             semantic,
             ModuleEnv::new(session.expect_fresh_module(module), session.raw_modules()),

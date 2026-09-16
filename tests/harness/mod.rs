@@ -396,23 +396,33 @@ pub enum RunMode {
     OptimizedMir,
     /// The physical MIR interpreter on ABI-lowered optimized bodies.
     PhysicalMir,
+    /// Expanded physical bodies before post-expansion optimization.
+    UnoptimizedPhysicalMir,
 }
 
 impl RunMode {
-    pub const ALL: [Self; 4] = [Self::Hir, Self::Mir, Self::OptimizedMir, Self::PhysicalMir];
+    pub const ALL: [Self; 5] = [
+        Self::Hir,
+        Self::Mir,
+        Self::OptimizedMir,
+        Self::UnoptimizedPhysicalMir,
+        Self::PhysicalMir,
+    ];
 
     fn target(self) -> ExecutionTarget {
         match self {
             Self::Hir => ExecutionTarget::Hir,
             Self::Mir | Self::OptimizedMir => ExecutionTarget::Mir,
-            Self::PhysicalMir => ExecutionTarget::PhysicalMir,
+            Self::PhysicalMir | Self::UnoptimizedPhysicalMir => ExecutionTarget::PhysicalMir,
         }
     }
 
     fn optimization(self) -> MirOptimization {
         match self {
             Self::Hir | Self::Mir => MirOptimization::Disabled,
-            Self::OptimizedMir | Self::PhysicalMir => MirOptimization::Enabled,
+            Self::OptimizedMir | Self::PhysicalMir | Self::UnoptimizedPhysicalMir => {
+                MirOptimization::Enabled
+            }
         }
     }
 
@@ -422,6 +432,7 @@ impl RunMode {
             Self::Mir => "the MIR backend",
             Self::OptimizedMir => "the optimized MIR backend",
             Self::PhysicalMir => "the physical MIR backend",
+            Self::UnoptimizedPhysicalMir => "the unoptimized physical MIR backend",
         }
     }
 }
@@ -1352,7 +1363,7 @@ impl TestSession {
     /// Create a new test session with std, testing, effects and props modules registered.
     ///
     /// Every snippet run through the session is executed under every [`RunMode`] — the HIR
-    /// interpreter, raw MIR, optimized MIR, and physical MIR — which are
+    /// interpreter, raw MIR, optimized MIR, and physical MIR before/after optimization — which are
     /// asserted to agree (see [`TestSession::try_compile_and_run_value`]).
     pub fn new() -> Self {
         let mut compiler_session = CompilerSession::new();
@@ -1649,6 +1660,7 @@ impl TestSession {
                 // `PropertyFixtures`.
                 let fixtures = PropertyFixtures::capture();
                 let selected = self.session.mir_optimization();
+                let selected_physical = self.session.physical_mir_optimization();
                 let modes = self.modes.clone();
                 let mut expected_effects = None;
                 let results: Vec<_> = modes
@@ -1656,6 +1668,13 @@ impl TestSession {
                     .map(|mode| {
                         fixtures.restore();
                         self.session.set_mir_optimization(mode.optimization());
+                        self.session.set_physical_mir_optimization(
+                            if *mode == RunMode::UnoptimizedPhysicalMir {
+                                MirOptimization::Disabled
+                            } else {
+                                MirOptimization::Enabled
+                            },
+                        );
                         let result = self
                             .session
                             .run_entry(mode.target(), module_id, expr, vec![])
@@ -1675,6 +1694,8 @@ impl TestSession {
                     })
                     .collect();
                 self.session.set_mir_optimization(selected);
+                self.session
+                    .set_physical_mir_optimization(selected_physical);
                 expected_effects.unwrap().restore();
 
                 // The first mode — the HIR interpreter unless a test says otherwise — is the

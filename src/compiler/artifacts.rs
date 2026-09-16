@@ -29,7 +29,10 @@ use crate::{
             prune_specializations, share_specializations,
             will_return::{WillReturn, WillReturnSummaries},
         },
-        physical::{BackendReadinessError, BackendReadyMirArtifacts, lower_physical_mir},
+        physical::{
+            BackendReadinessError, BackendReadyMirArtifacts, lower_physical_mir,
+            lower_unoptimized_physical_mir,
+        },
     },
     module::{
         FunctionId, LocalFunctionId, LocalImplId, Module, ModuleEnv, ModuleId,
@@ -77,6 +80,8 @@ pub(crate) struct ModuleArtifacts {
     /// Host-matched physical artifacts, tied to this same immutable module revision.
     /// Snapshot restoration rebinds native entries from the current runtime.
     physical_mir: OnceCell<BackendReadyMirArtifacts>,
+    /// Built only when explicitly comparing expansion with post-expansion optimization.
+    unoptimized_physical_mir: OnceCell<BackendReadyMirArtifacts>,
 }
 
 impl fmt::Debug for ModuleArtifacts {
@@ -93,8 +98,14 @@ impl fmt::Debug for ModuleArtifacts {
 }
 
 impl ModuleArtifacts {
-    pub(crate) fn physical_mir(&self) -> Option<&BackendReadyMirArtifacts> {
-        self.physical_mir.get()
+    pub(crate) fn physical_mir(
+        &self,
+        optimization: MirOptimization,
+    ) -> Option<&BackendReadyMirArtifacts> {
+        match optimization {
+            MirOptimization::Disabled => self.unoptimized_physical_mir.get(),
+            MirOptimization::Enabled => self.physical_mir.get(),
+        }
     }
 
     #[cfg(feature = "std-snapshot")]
@@ -622,7 +633,10 @@ pub(crate) fn ensure_physical_mir_artifacts(
 ) -> Result<(), BackendReadinessError> {
     let module = session.expect_fresh_module(module_id);
     let artifacts = session.expect_module_entry(module_id).artifacts();
-    if artifacts.physical_mir().is_some() {
+    if artifacts
+        .physical_mir(session.physical_mir_optimization())
+        .is_some()
+    {
         return Ok(());
     }
     ensure_optimized_mir_artifacts(session, module_id);
@@ -630,6 +644,19 @@ pub(crate) fn ensure_physical_mir_artifacts(
         .optimized_mir
         .get()
         .expect("optimized MIR was just prepared");
+    if session.physical_mir_optimization() == MirOptimization::Disabled {
+        let physical = lower_unoptimized_physical_mir(
+            module_id,
+            optimized,
+            ModuleEnv::new(module, session.raw_modules()),
+            session.known_callees(),
+        )?;
+        artifacts
+            .unoptimized_physical_mir
+            .set(physical)
+            .unwrap_or_else(|_| panic!("expanded MIR must only be installed once per revision"));
+        return Ok(());
+    }
     let build = || {
         lower_physical_mir(
             module_id,

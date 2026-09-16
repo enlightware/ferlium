@@ -118,6 +118,9 @@ repl-opt:
 profile-mir:
 	cargo run --release --example mir_profile -- $(WORKLOADS)
 
+profile-physical-mir:
+	cargo run --release --example mir_profile -- --physical $(WORKLOADS)
+
 print-std:
 	cargo run --example ferlium -- --print-std
 

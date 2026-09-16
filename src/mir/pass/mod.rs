@@ -23,12 +23,14 @@
 //! run, inlining is bounded by its growth budget and the non-recursive restriction, and
 //! [`MAX_ROUNDS`](budget::MAX_ROUNDS) bounds the outer loop.
 //!
-//! The driver is per module and reads the raw stage of every body it consults, so a result never
-//! depends on the order functions are optimized in. Inlining may cross module boundaries — that is
+//! Each stage reads immutable pre-pass callee bodies, so a result never depends on the order
+//! functions are optimized in. Semantic inlining may cross module boundaries — that is
 //! where most inlinable script callees live — which is sound because function, dictionary and
 //! subscript identities are global while constant identities are function-local and remapped into
 //! the caller's pool. This is not whole-program optimization: nothing outside the module being
 //! optimized is modified.
+//! Physical scheduling reuses these passes after expansion, without semantic specialization or
+//! boxed script evaluation. Its callee view includes module-local physical bodies and helpers.
 
 pub(crate) mod bounds_check;
 pub(crate) mod branch_forward;
@@ -49,6 +51,7 @@ pub(crate) mod negation;
 pub(crate) mod outcome_branch;
 pub(crate) mod owned_arguments;
 pub(crate) mod peephole;
+pub(crate) mod physical;
 pub(crate) mod provenance;
 pub(crate) mod prune_specializations;
 pub(crate) mod relations;
@@ -57,11 +60,13 @@ pub(crate) mod share_specializations;
 pub(crate) use crate::mir::site;
 pub(crate) mod specialization_table;
 pub(crate) mod stack_region;
+mod stage;
 pub(crate) mod string_accumulate;
 pub(crate) mod tail_merge;
 pub(crate) mod will_return;
 
 pub(crate) use monomorphize::Specializations;
+pub(crate) use stage::OptimizationStage;
 
 use crate::{
     compiler::{CompilerSession, MirOptimization},
@@ -176,8 +181,10 @@ pub(crate) fn optimize_function(
             source,
             original_size,
             env,
-            session,
-            module_id,
+            OptimizationStage::Semantic {
+                session,
+                specializations: Some(specializations),
+            },
             fold::KnownCallSemantics::new(context.known_callees, &|callee| {
                 specializations.original(callee)
             }),
@@ -222,7 +229,14 @@ pub(crate) fn optimize_function(
         // equivalence. Run its cheap structural scan every round before inlining so the body being
         // priced has already lost provably redundant result slots, transfers and allocations.
         let source = current.as_ref().unwrap_or(function);
-        if let Some(forwarded) = copy_forward::forward_redundant_storage(source, env) {
+        if let Some(forwarded) = copy_forward::forward_redundant_storage(
+            source,
+            env,
+            OptimizationStage::Semantic {
+                session,
+                specializations: Some(specializations),
+            },
+        ) {
             current = Some(forwarded);
             changed = true;
         }
@@ -242,9 +256,10 @@ pub(crate) fn optimize_function(
             source,
             original_size,
             env,
-            session,
-            module_id,
-            specializations,
+            OptimizationStage::Semantic {
+                session,
+                specializations: Some(specializations),
+            },
         ) {
             current = Some(inlined);
             changed = true;
@@ -264,7 +279,14 @@ pub(crate) fn optimize_function(
             current = Some(merged);
         }
         let source = current.as_ref().unwrap_or(function);
-        if let Some(forwarded) = copy_forward::forward_redundant_storage(source, env) {
+        if let Some(forwarded) = copy_forward::forward_redundant_storage(
+            source,
+            env,
+            OptimizationStage::Semantic {
+                session,
+                specializations: Some(specializations),
+            },
+        ) {
             current = Some(forwarded);
         }
     }
@@ -302,7 +324,14 @@ pub(crate) fn optimize_function(
             current = Some(merged);
         }
         let source = current.as_ref().unwrap();
-        if let Some(forwarded) = copy_forward::forward_redundant_storage(source, env) {
+        if let Some(forwarded) = copy_forward::forward_redundant_storage(
+            source,
+            env,
+            OptimizationStage::Semantic {
+                session,
+                specializations: Some(specializations),
+            },
+        ) {
             current = Some(forwarded);
         }
     }

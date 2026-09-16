@@ -43,17 +43,16 @@ use std::borrow::Cow;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::{Specializations, budget, monomorphize, site::OperationIndex};
+use super::{OptimizationStage, Specializations, budget, monomorphize, site::OperationIndex};
 use crate::{
     CompilerSession, Location,
-    compiler::MirOptimization,
     containers::DenseBitSet,
     mir::{
         self, BlockId, Function, Instantiation, Operation, OperationKind, ParameterKind, ValueId,
         edit::FunctionEdit,
         terminator::{Terminator, TerminatorKind},
     },
-    module::{FunctionId, ModuleEnv, ModuleId, id::Id},
+    module::{FunctionId, ModuleEnv, id::Id},
     types::{r#type::Type, type_like::TypeLike},
 };
 
@@ -160,19 +159,9 @@ pub(crate) fn inline_function(
     func: &Function,
     original_size: usize,
     env: ModuleEnv<'_>,
-    session: &CompilerSession,
-    module_id: ModuleId,
-    specializations: &Specializations,
+    stage: OptimizationStage<'_>,
 ) -> Option<Function> {
-    let _ = module_id;
-    let sites = plan_inlinings(
-        func,
-        original_size,
-        env,
-        session,
-        Some(specializations),
-        &mut None,
-    );
+    let sites = plan_inlinings(func, original_size, env, stage, &mut None);
     if sites.is_empty() {
         return None;
     }
@@ -208,8 +197,7 @@ fn plan_inlinings<'a>(
     func: &Function,
     original_size: usize,
     env: ModuleEnv<'_>,
-    session: &'a CompilerSession,
-    specializations: Option<&'a Specializations>,
+    stage: OptimizationStage<'a>,
     refusals: &mut Option<&mut Vec<Refusal>>,
 ) -> Vec<Inlining<'a>> {
     let mut sites = Vec::new();
@@ -269,13 +257,16 @@ fn plan_inlinings<'a>(
                 refuse(NotInlinable::CalleeNotDirect);
                 continue;
             };
-            if callee_is_inline_never(session, callee, specializations) {
+            if stage.inline_never(callee, env) {
                 refuse(NotInlinable::InlineNever);
                 continue;
             }
-            // Borrowed from the raw stage, and stays borrowed unless substitution replaces it: a
+            if !stage.permits_inlining(callee) {
+                continue;
+            }
+            // Borrowed from this stage's immutable input, unless substitution replaces it: a
             // refused callee then costs a lookup rather than a copy of its whole body.
-            let Some(body) = callee_body(session, callee, specializations) else {
+            let Some(body) = stage.body(callee) else {
                 refuse(NotInlinable::NoBody);
                 continue;
             };
@@ -294,14 +285,13 @@ fn plan_inlinings<'a>(
                 refuse(reason);
                 continue;
             }
-            let body = match concrete_body(
+            let body = match concrete_body_for_stage(
                 body,
                 callee,
                 metadata
                     .as_deref()
                     .and_then(|metadata| metadata.instantiation.as_ref()),
-                session,
-                specializations,
+                stage,
                 env,
             ) {
                 Ok(body) => body,
@@ -329,26 +319,6 @@ fn plan_inlinings<'a>(
     sites
 }
 
-/// Whether the source function behind `callee` explicitly forbids inlining.
-///
-/// An in-progress specialization is resolved through its construction table. The post-optimization
-/// report instead resolves through the installed optimized artifacts. Ordinary functions take the
-/// identity path in both cases.
-fn callee_is_inline_never(
-    session: &CompilerSession,
-    callee: FunctionId,
-    specializations: Option<&Specializations>,
-) -> bool {
-    let original = match specializations {
-        Some(specializations) => specializations.original(callee).unwrap_or(callee),
-        None => session.hir_identity_of(callee, MirOptimization::Enabled),
-    };
-    session
-        .expect_fresh_module(original.module)
-        .get_function_by_id(original.function)
-        .is_some_and(|function| function.definition.is_inline_never())
-}
-
 /// Classifies every call site of `func` that inlining left alone, for the optimization report.
 pub(crate) fn refusals_of(
     func: &Function,
@@ -362,8 +332,10 @@ pub(crate) fn refusals_of(
         func,
         func.operation_count(),
         env,
-        session,
-        None,
+        OptimizationStage::Semantic {
+            session,
+            specializations: None,
+        },
         &mut Some(&mut refusals),
     );
     refusals
@@ -384,6 +356,34 @@ pub(crate) fn refusals_of(
 /// round.
 /// Owns its result only when substitution actually produced a new body; an already-concrete callee
 /// is borrowed straight from the raw stage and never copied.
+fn concrete_body_for_stage<'a>(
+    body: &'a Function,
+    callee: FunctionId,
+    instantiation: Option<&Instantiation>,
+    stage: OptimizationStage<'_>,
+    env: ModuleEnv<'_>,
+) -> Result<Cow<'a, Function>, NotInlinable> {
+    match stage {
+        OptimizationStage::Semantic {
+            session,
+            specializations,
+        } => concrete_body(body, callee, instantiation, session, specializations, env),
+        // Semantic substitution can create operations requiring physical expansion. Keep generic
+        // physical bodies shared; concrete helpers and specializations need no substitution.
+        OptimizationStage::Physical { .. } => {
+            if body
+                .parameters()
+                .iter()
+                .any(|parameter| !parameter.ty.is_constant())
+            {
+                Err(NotInlinable::Generic)
+            } else {
+                Ok(Cow::Borrowed(body))
+            }
+        }
+    }
+}
+
 fn concrete_body<'a>(
     body: &'a Function,
     callee: FunctionId,
@@ -473,32 +473,6 @@ fn used_parameters(body: &Function) -> DenseBitSet {
         }
     }
     used
-}
-
-/// The callee's body, read from the raw stage.
-///
-/// Deliberately raw rather than optimized: the driver reads raw bodies everywhere so that a result
-/// never depends on the order functions are optimized in. Folding runs over the inlined body
-/// afterwards, which recovers most of what an already-simplified callee would have given.
-///
-/// A specialization the optimizer created has no raw *artifact* — it exists only in the stage being
-/// built — so its equivalent comes from the table, which keeps each body as it was created, before
-/// the worklist optimized it. Same rule, same reason. `specializations` is `None` for the
-/// optimization report, which runs after the table is consumed into the artifacts; a specialization
-/// then reports as having no body, which is a cosmetic gap in the report rather than a decision.
-fn callee_body<'a>(
-    session: &'a CompilerSession,
-    callee: FunctionId,
-    specializations: Option<&'a Specializations>,
-) -> Option<&'a Function> {
-    if let Some(specializations) = specializations
-        && specializations.is_specialization(callee)
-    {
-        return specializations.raw_body(callee.function);
-    }
-    session
-        .mir_artifacts_for(callee.module, MirOptimization::Disabled)?
-        .get(callee.function)
 }
 
 /// The blocks a source failure is already in flight in — everything reachable from an error edge.

@@ -1,12 +1,8 @@
 // Copyright 2026 Enlightware GmbH
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
-//! Fast raw-versus-optimized MIR instruction profiling over the runtime benchmark suite.
+//! Before/after MIR instruction profiling over the runtime benchmark suite.
+//! `--physical` compares expanded physical MIR with its post-expansion optimization.
 //!
 //! This deliberately does not use Gungraun or Valgrind. It executes each workload once with the
 //! optional counters in the MIR reference interpreter, using the same workload definitions and
@@ -21,8 +17,11 @@ use std::{
     io::{self, IsTerminal},
 };
 
-use ferlium::mir::profile::{
-    MirExecutionProfile, MirInstructionCostClass, MirInstructionCounts, MirInstructionKind,
+use ferlium::{
+    ExecutionTarget,
+    mir::profile::{
+        MirExecutionProfile, MirInstructionCostClass, MirInstructionCounts, MirInstructionKind,
+    },
 };
 
 use runtime_workloads::{BenchTarget, RuntimeWorkload};
@@ -79,7 +78,10 @@ fn colors_enabled(stdout_is_terminal: bool, no_color_is_set: bool) -> bool {
 }
 
 fn selected_workloads() -> Vec<RuntimeWorkload> {
-    let names = env::args().skip(1).collect::<Vec<_>>();
+    let names = env::args()
+        .skip(1)
+        .filter(|arg| arg != "--physical")
+        .collect::<Vec<_>>();
     if names.iter().any(|name| name == "--list") {
         for workload in RuntimeWorkload::ALL {
             println!("{}", workload.name());
@@ -100,11 +102,17 @@ fn selected_workloads() -> Vec<RuntimeWorkload> {
         .collect()
 }
 
-fn profile(workload: RuntimeWorkload, target: BenchTarget) -> MirExecutionProfile {
+fn profile(workload: RuntimeWorkload, target: BenchTarget) -> (MirExecutionProfile, Option<usize>) {
     let mut prepared = workload.prepare(target);
+    let static_operations = (prepared.target == ExecutionTarget::PhysicalMir).then(|| {
+        prepared
+            .session
+            .physical_mir_operation_count(prepared.module_id)
+            .unwrap()
+    });
     let (result, profile) = prepared.run_profiled();
     result.discard_storage();
-    profile
+    (profile, static_operations)
 }
 
 fn kinds_in(
@@ -206,15 +214,41 @@ fn print_peak_cells(style: OutputStyle, label: &str, raw: usize, optimized: usiz
 fn main() {
     let style = OutputStyle::for_stdout();
     let workloads = selected_workloads();
+    let physical = env::args().any(|arg| arg == "--physical");
+    let targets = if physical {
+        [
+            BenchTarget::UnoptimizedPhysicalMir,
+            BenchTarget::PhysicalMir,
+        ]
+    } else {
+        [BenchTarget::Mir, BenchTarget::OptimizedMir]
+    };
+    if physical {
+        println!("Physical MIR: expanded vs optimized (same optimized semantic input)");
+        println!(
+            "Peak cells count physical allocations and dynamic evidence environments, not bytes."
+        );
+    } else {
+        println!("Peak cells count boxed environment slots, not bytes.");
+    }
     let mut raw_total = MirInstructionCounts::default();
     let mut optimized_total = MirInstructionCounts::default();
     let (mut raw_peak_sum, mut optimized_peak_sum) = (0, 0);
 
     for workload in &workloads {
         eprintln!("profiling {}...", workload.name());
-        let raw = profile(*workload, BenchTarget::Mir);
-        let optimized = profile(*workload, BenchTarget::OptimizedMir);
+        let (raw, raw_static) = profile(*workload, targets[0]);
+        let (optimized, optimized_static) = profile(*workload, targets[1]);
         print_comparison(style, workload.name(), raw.total(), optimized.total());
+        if let (Some(before), Some(after)) = (raw_static, optimized_static) {
+            print_row(
+                style,
+                "static ops (module closure)",
+                before as u64,
+                after as u64,
+                false,
+            );
+        }
         print_peak_cells(
             style,
             "peak cells",

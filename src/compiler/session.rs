@@ -59,6 +59,7 @@ use crate::{
             program::{ResolvedPhysicalProgram, resolve_physical_program},
         },
         profile::MirExecutionProfile,
+        terminator::TerminatorKind,
     },
     module::{
         self, FunctionId, LocalFunctionId, Module, ModuleEnv, ModuleFunction, ModuleId, Path,
@@ -509,6 +510,8 @@ pub struct CompilerSession {
     pub(crate) capabilities: CompilationCapabilities,
     /// Whether execution through this session runs optimized MIR.
     pub(crate) mir_optimization: MirOptimization,
+    /// Whether execution through this session runs optimized physical MIR.
+    physical_mir_optimization: MirOptimization,
     /// Standard-library callable identities shared by every MIR stage in this session.
     known_callees: OnceCell<KnownCallees>,
     /// Compact, session-local discriminants for symbolic variant tags.
@@ -619,6 +622,7 @@ impl InitialSessionState {
             initial_source_table_size,
             capabilities: CompilationCapabilities::default(),
             mir_optimization: MirOptimization::default(),
+            physical_mir_optimization: MirOptimization::Enabled,
             known_callees: OnceCell::new(),
             variant_tags: RefCell::default(),
         }
@@ -682,6 +686,15 @@ impl CompilerSession {
     /// Whether execution through this session runs optimized MIR.
     pub fn mir_optimization(&self) -> MirOptimization {
         self.mir_optimization
+    }
+
+    /// Select post-expansion passes independently of semantic MIR optimization.
+    pub fn set_physical_mir_optimization(&mut self, optimization: MirOptimization) {
+        self.physical_mir_optimization = optimization;
+    }
+
+    pub fn physical_mir_optimization(&self) -> MirOptimization {
+        self.physical_mir_optimization
     }
 
     /// Selects whether execution through this session runs optimized MIR.
@@ -1303,7 +1316,7 @@ impl CompilerSession {
                 .map_err(|error| RuntimeError::Backend(error.to_string()))?;
             let physical = entry
                 .artifacts()
-                .physical_mir()
+                .physical_mir(self.physical_mir_optimization)
                 .expect("physical MIR was just prepared");
             physical
                 .validate_native_runtime(ModuleEnv::new(
@@ -1468,6 +1481,59 @@ impl CompilerSession {
             .take_profile()
             .expect("a profiled MIR interpreter must carry a profile");
         Ok((value, profile))
+    }
+
+    /// Profile physical execution with the selected post-expansion optimization setting.
+    pub fn run_physical_mir_entry_profiled(
+        &mut self,
+        module_id: ModuleId,
+        entry: LocalFunctionId,
+        mut arguments: Vec<Value>,
+    ) -> Result<(Value, MirExecutionProfile), RuntimeError> {
+        let mut profile = MirExecutionProfile::default();
+        let result = self
+            .prepare_physical_program(module_id)
+            .and_then(|program| {
+                physical_interpreter::run_entry_with_profile(
+                    &program,
+                    FunctionId::new(module_id, entry),
+                    &mut arguments,
+                    ReferenceInterpreterLimits::default(),
+                    self,
+                    Some(&mut profile),
+                )
+            });
+        for argument in arguments {
+            argument.discard_storage();
+        }
+        result.map(|value| (value, profile))
+    }
+
+    /// Static operations, including Invoke operations but not terminators, over the selected
+    /// physical dependency closure. Includes uncalled bodies and helpers.
+    pub fn physical_mir_operation_count(&self, module_id: ModuleId) -> Result<usize, RuntimeError> {
+        let program = self.prepare_physical_program(module_id)?;
+        Ok(program
+            .modules()
+            .iter()
+            .map(|module| {
+                (0..module.entry_count())
+                    .filter_map(|index| module.get(LocalFunctionId::from_index(index)))
+                    .map(|body| {
+                        body.operation_count()
+                            + body
+                                .blocks()
+                                .filter(|&block| {
+                                    matches!(
+                                        body.block(block).terminator().kind,
+                                        TerminatorKind::Invoke { .. }
+                                    )
+                                })
+                                .count()
+                    })
+                    .sum::<usize>()
+            })
+            .sum())
     }
 
     /// Ensure that `module_id` and its dependencies have the semantic artifacts needed by `target`.
@@ -1747,7 +1813,10 @@ mod tests {
         for (id, previous) in previous_revisions {
             assert_eq!(
                 ptr::eq(
-                    previous.artifacts.physical_mir().unwrap(),
+                    previous
+                        .artifacts
+                        .physical_mir(MirOptimization::Enabled)
+                        .unwrap(),
                     third.module(id).unwrap()
                 ),
                 id == STD_MODULE_ID,

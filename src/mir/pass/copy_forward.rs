@@ -26,6 +26,7 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{
+    OptimizationStage,
     dataflow::{call_operands, field_index},
     site::{OperationIndex, OperationSite},
 };
@@ -35,6 +36,7 @@ use crate::{
     mir::{
         self, BlockId, Function, Operation, OperationKind,
         edit::FunctionEdit,
+        role::{MirType, ValueRole, ValueRoles},
         terminator::TerminatorKind,
         value::{ConstantId, ParameterId, ValueId},
     },
@@ -117,7 +119,11 @@ enum OperandStorage {
 }
 
 /// Rewrites provably redundant local storage, returning `None` when there is none.
-pub(crate) fn forward_redundant_storage(func: &Function, env: ModuleEnv<'_>) -> Option<Function> {
+pub(crate) fn forward_redundant_storage(
+    func: &Function,
+    env: ModuleEnv<'_>,
+    stage: OptimizationStage<'_>,
+) -> Option<Function> {
     let hoisted = hoist_transfer_field_addresses(func);
     let func = hoisted.as_ref().unwrap_or(func);
     let mut definitions = FxHashMap::default();
@@ -274,6 +280,30 @@ pub(crate) fn forward_redundant_storage(func: &Function, env: ModuleEnv<'_>) -> 
     let mut blocked = FxHashSet::default();
     let mut forwarded_temporaries = FxHashSet::default();
     let mut storage_cache = FxHashMap::default();
+    if operation_definitions
+        .values()
+        .any(|operation| matches!(operation.kind, OperationKind::Load))
+    {
+        // Loaded place pointers alias existing storage in both stages. Seed only pointer-valued
+        // loads, so ordinary loaded values remain eligible for forwarding.
+        let roles = ValueRoles::derive(func);
+        for (&id, operation) in &operation_definitions {
+            if matches!(operation.kind, OperationKind::Load)
+                && roles
+                    .get(&mir::Value::Register(id), func.constants())
+                    .is_some_and(|role| {
+                        matches!(
+                            &*role,
+                            ValueRole::Place(_)
+                                | ValueRole::Materialized(MirType::Pointer(_))
+                                | ValueRole::OpenProjection { .. }
+                        )
+                    })
+            {
+                storage_cache.insert(id, OperandStorage::Unknown);
+            }
+        }
+    }
     for start in 0..forwarded_initializations.len() {
         if consumed.contains(&start) || blocked.contains(&start) {
             continue;
@@ -291,6 +321,7 @@ pub(crate) fn forward_redundant_storage(func: &Function, env: ModuleEnv<'_>) -> 
                 &operation_definitions,
                 &mut storage_cache,
                 env,
+                stage,
             ) {
                 break;
             }
@@ -477,6 +508,7 @@ fn can_retarget_initialization(
     definitions: &FxHashMap<ValueId, &Operation>,
     storage_cache: &mut FxHashMap<ValueId, OperandStorage>,
     env: ModuleEnv<'_>,
+    stage: OptimizationStage<'_>,
 ) -> bool {
     let Some(destination_index) = initialization_destination_index(producer) else {
         return false;
@@ -490,11 +522,13 @@ fn can_retarget_initialization(
         } else {
             2
         };
-        if initialization_is_trivial_copy(producer, env)
+        if matches!(stage, OptimizationStage::Semantic { .. })
+            && initialization_is_trivial_copy(producer, env)
             && resolved_callee_is_native(&producer.operands[callee_index], env)
         {
             // Native calls first compute an owned HIR result and only then store it through the MIR
             // return place. Retargeting therefore cannot clobber an aliased input while it is read.
+            // Physical dispatch has no such blanket guarantee for aliased inputs and outputs.
             return true;
         }
     }
@@ -591,9 +625,14 @@ fn operand_storage(
                         _ => OperandStorage::Unknown,
                     }
                 }
-                // A projection exposes storage owned by one of its arguments, but its provenance
-                // is not encoded directly in this operation. Reject it rather than guess.
-                Some(OperationKind::Project { .. }) | None => OperandStorage::Unknown,
+                // Projections and loaded pointers can alias existing storage. A new register is
+                // not a new allocation; retain staging unless its provenance is known here.
+                Some(
+                    OperationKind::Project { .. }
+                    | OperationKind::AddressOffset { .. }
+                    | OperationKind::AddressOffsetPlace { .. },
+                )
+                | None => OperandStorage::Unknown,
                 Some(_) => OperandStorage::Place(PlaceIdentity {
                     root: PlaceRoot::Result(*id),
                     fields: SVec2::new(),
@@ -658,7 +697,6 @@ fn note_operation(operation: &Operation, site: Site, uses: &mut FxHashMap<ValueI
         | OperationKind::CompareEqual
         | OperationKind::ExtractTag
         | OperationKind::ExtractPayloadIndirection
-        | OperationKind::IsInitialized
         | OperationKind::RuntimeAlloc { .. } => {
             operation
                 .operands
@@ -718,6 +756,9 @@ fn note_operation(operation: &Operation, site: Site, uses: &mut FxHashMap<ValueI
             write(&operation.operands[0], uses)
         }
         OperationKind::Alloca { .. }
+        // Unlike a value read, an initialization query may legally observe a destination before
+        // its sole write. Substituting the source would expose the source's initialization state.
+        | OperationKind::IsInitialized
         | OperationKind::Project { .. }
         | OperationKind::EndProject
         | OperationKind::Subfield { .. }
@@ -756,9 +797,10 @@ fn note_unsafe(operand: &mir::Value, uses: &mut FxHashMap<ValueId, Uses>) {
 mod tests {
     use ustr::ustr;
 
-    use super::{forward_redundant_storage, hoist_transfer_field_addresses};
+    use super::{OptimizationStage, hoist_transfer_field_addresses};
     use crate::{
         CompilerSession, ExecutionTarget, Location, MirOptimization, Path,
+        compiler::MirArtifacts,
         format::FormatWith,
         hir::{
             function::ArgConvention,
@@ -769,11 +811,13 @@ mod tests {
             builder::FunctionBuilder,
             edit::FunctionEdit,
             operation::OperationKindDiscriminant as Op,
+            pass::dce,
             profile::{MirInstructionCounts, MirInstructionKind as Kind},
             terminator::Terminator,
+            verify::verify_physical_function,
         },
         module::ModuleEnv,
-        std::{math::int_type, string::string_type},
+        std::{logic::bool_type, math::int_type, string::string_type},
         types::r#type::tuple_type,
     };
 
@@ -781,6 +825,21 @@ mod tests {
         let mut session = CompilerSession::new();
         session.set_mir_optimization(MirOptimization::Enabled);
         session.emit_mir("copy_forward", src)
+    }
+
+    fn forward_redundant_storage(
+        func: &Function,
+        env: ModuleEnv<'_>,
+        session: &CompilerSession,
+    ) -> Option<Function> {
+        super::forward_redundant_storage(
+            func,
+            env,
+            OptimizationStage::Semantic {
+                session,
+                specializations: None,
+            },
+        )
     }
 
     fn body_of<'a>(module: &'a str, name: &str) -> &'a str {
@@ -847,6 +906,140 @@ mod tests {
         );
         builder.set_terminator(block, Terminator::ret(span));
         builder.finish(env)
+    }
+
+    #[test]
+    fn forwarding_preserves_aliased_call_and_transfer_inputs() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let semantic = MirArtifacts::build(env.current, env.modules);
+        let stage = OptimizationStage::Physical {
+            module: env.current.module_id(),
+            bodies: &[],
+            semantic: &semantic,
+        };
+        let span = Location::new_synthesized();
+        for native in [false, true] {
+            for address_kind in ["direct", "offset", "loaded"] {
+                let mut builder =
+                    FunctionBuilder::new("aliased_physical_result".into(), Default::default());
+                let base = mir::Value::Parameter(builder.add_parameter(
+                    int_type(),
+                    ParameterKind::Parameter(ArgConvention::MutableRef),
+                ));
+                let result =
+                    mir::Value::Parameter(builder.add_parameter(int_type(), ParameterKind::Return));
+                let block = builder.add_block();
+                let (input, destination) = if address_kind == "offset" {
+                    let zero =
+                        builder.add_constant(int_type(), LiteralValue::new_native(0isize), &env);
+                    let offset = mir::Value::Constant(zero);
+                    let address = || {
+                        Operation::address_offset(
+                            span,
+                            base.clone(),
+                            offset.clone(),
+                            int_type(),
+                            None,
+                        )
+                    };
+                    (
+                        builder.append_operation(block, address()).unwrap(),
+                        builder.append_operation(block, address()).unwrap(),
+                    )
+                } else if address_kind == "loaded" {
+                    let slot = builder
+                        .append_operation(block, Operation::alloca_place(span, int_type()))
+                        .unwrap();
+                    builder.append_operation(
+                        block,
+                        Operation::store(span, base.clone(), slot.clone()),
+                    );
+                    (
+                        builder
+                            .append_operation(block, Operation::load(span, slot.clone()))
+                            .unwrap(),
+                        builder
+                            .append_operation(block, Operation::load(span, slot))
+                            .unwrap(),
+                    )
+                } else {
+                    (base.clone(), base.clone())
+                };
+                let temporary = builder
+                    .append_operation(block, Operation::alloca(span, int_type()))
+                    .unwrap();
+                let producer = if native {
+                    let (callee, ty) = session.known_callees().int_add();
+                    Operation::call(
+                        span,
+                        mir::Value::Function(callee),
+                        [input.clone(), input, temporary.clone()],
+                        ty.clone(),
+                    )
+                } else {
+                    Operation::memcpy(span, input, temporary.clone())
+                };
+                builder.append_operation(block, producer);
+                builder
+                    .append_operation(block, Operation::move_value(span, temporary, destination));
+                builder.append_operation(block, Operation::memcpy(span, base, result));
+                builder.set_terminator(block, Terminator::ret(span));
+                let body = builder.finish_unverified();
+                verify_physical_function(&body, env);
+                assert!(
+                    super::forward_redundant_storage(&body, env, stage).is_none(),
+                    "native={native}, address_kind={address_kind}"
+                );
+                if address_kind != "offset" {
+                    // Semantic MIR also loads place pointers. Transfers must preserve their
+                    // aliasing; boxed scalar native calls retain their read-before-write shortcut.
+                    assert_eq!(
+                        forward_redundant_storage(&body, env, &session).is_some(),
+                        native,
+                        "semantic: native={native}, address_kind={address_kind}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn initialization_observation_prevents_storage_forwarding_and_removal() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let mut builder =
+            FunctionBuilder::new("observed_initialization".into(), Default::default());
+        let result =
+            mir::Value::Parameter(builder.add_parameter(bool_type(), ParameterKind::Return));
+        let block = builder.add_block();
+        let source = builder
+            .append_operation(block, Operation::alloca(span, int_type()))
+            .unwrap();
+        let destination = builder
+            .append_operation(block, Operation::alloca(span, int_type()))
+            .unwrap();
+        let one = builder.add_constant(int_type(), LiteralValue::new_native(1isize), &env);
+        builder.append_operation(
+            block,
+            Operation::store(span, mir::Value::Constant(one), source.clone()),
+        );
+        let present = builder
+            .append_operation(block, Operation::is_initialized(span, destination.clone()))
+            .unwrap();
+        builder.append_operation(block, Operation::store(span, present, result));
+        builder.append_operation(
+            block,
+            Operation::memcpy(span, source.clone(), destination.clone()),
+        );
+        builder.append_operation(block, Operation::load(span, source));
+        builder.append_operation(block, Operation::load(span, destination));
+        builder.set_terminator(block, Terminator::ret(span));
+        let body = builder.finish(env);
+        verify_physical_function(&body, env);
+        assert!(forward_redundant_storage(&body, env, &session).is_none());
+        assert!(dce::remove_dead_storage(&body).is_none());
     }
 
     fn staged_memcpy(env: ModuleEnv<'_>) -> Function {
@@ -968,8 +1161,8 @@ mod tests {
         let session = CompilerSession::new();
         let env = session.module_env();
         let source = forwarded_move_chain(env);
-        let forwarded =
-            forward_redundant_storage(&source, env).expect("the move chain must be forwarded");
+        let forwarded = forward_redundant_storage(&source, env, &session)
+            .expect("the move chain must be forwarded");
         let body = forwarded.format_with(&env).to_string();
 
         assert_eq!(body.matches("alloca int").count(), 0, "{body}");
@@ -982,8 +1175,8 @@ mod tests {
         let session = CompilerSession::new();
         let env = session.module_env();
         let source = staged_memcpy(env);
-        let forwarded =
-            forward_redundant_storage(&source, env).expect("the staging memcpy must be forwarded");
+        let forwarded = forward_redundant_storage(&source, env, &session)
+            .expect("the staging memcpy must be forwarded");
         let body = forwarded.format_with(&env).to_string();
 
         assert_eq!(body.matches("alloca int").count(), 0, "{body}");
@@ -1023,7 +1216,7 @@ mod tests {
         builder.set_terminator(block, Terminator::ret(span));
         let source = builder.finish(env);
 
-        let forwarded = forward_redundant_storage(&source, env)
+        let forwarded = forward_redundant_storage(&source, env, &session)
             .expect("the initialization must target its destination directly");
         let roles = mir::role::check_function_operand_roles(&forwarded);
         mir::verify::verify_function_with_roles(&forwarded, env, roles);
@@ -1084,8 +1277,8 @@ mod tests {
         );
         builder.set_terminator(block, Terminator::ret(span));
         let staged = builder.finish(env);
-        let forwarded =
-            forward_redundant_storage(&staged, env).expect("the staged clone must be forwarded");
+        let forwarded = forward_redundant_storage(&staged, env, &session)
+            .expect("the staged clone must be forwarded");
         let body = forwarded.format_with(&env).to_string();
 
         assert_eq!(body.matches("alloca string").count(), 0, "{body}");
@@ -1173,7 +1366,7 @@ mod tests {
         let hoisted = hoist_transfer_field_addresses(&body)
             .expect("the address must be a speculative hoist candidate");
         FunctionEdit::new(hoisted).finish(env);
-        assert!(forward_redundant_storage(&body, env).is_none());
+        assert!(forward_redundant_storage(&body, env, &session).is_none());
     }
 
     #[test]

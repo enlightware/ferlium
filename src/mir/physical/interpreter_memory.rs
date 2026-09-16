@@ -679,6 +679,8 @@ pub(super) struct Memory {
     generation: Generation,
     /// Maximum live allocation count, not a byte-memory quota.
     pub(super) allocation_limit: usize,
+    /// Optional high-water counter for profiled execution (allocation cells, not bytes).
+    pub(super) peak_allocations: Option<usize>,
     /// Unique live owners of opaque native values; snapshots transfer but never duplicate them.
     native_owners: FxHashMap<NativeOwnerId, NativeOwner>,
     /// Lost ownership remains an error after its containing stack storage has been reclaimed.
@@ -701,6 +703,7 @@ impl Default for Memory {
             Rc::new(StorageLayout::scalar(Type::never(), ScalarKind::Unit)),
         );
         Self {
+            peak_allocations: None,
             evidence: FxHashMap::default(),
             live_evidence: 0,
             allocations: vec![],
@@ -1096,6 +1099,7 @@ impl Memory {
         let generation = allocation.generation;
         self.evidence.insert(environment, allocation);
         self.live_evidence += usize::from(!is_static);
+        self.record_allocation_peak();
         Ok(Evidence::Physical {
             reference: DictionaryReference {
                 descriptor,
@@ -1426,7 +1430,8 @@ impl Memory {
         self.allocations.len() - self.free_allocations.len() + self.live_evidence
     }
     fn check_allocation_limit(&self, span: Option<Location>) -> Result<(), RuntimeError> {
-        if self.live_allocations() >= self.allocation_limit {
+        let live = self.live_allocations();
+        if live >= self.allocation_limit {
             return Err(RuntimeError::new_sandbox_violation(
                 SandboxViolationKind::EnvironmentCellLimitExceeded {
                     limit: self.allocation_limit,
@@ -1435,6 +1440,12 @@ impl Memory {
             ));
         }
         Ok(())
+    }
+
+    fn record_allocation_peak(&mut self) {
+        if let Some(peak) = self.peak_allocations {
+            self.peak_allocations = Some(peak.max(self.live_allocations()));
+        }
     }
     pub(super) fn restore(&mut self, marker: usize) {
         while self.stack.len() > marker {
@@ -1738,6 +1749,7 @@ impl Memory {
         if !heap {
             self.stack.push(id);
         }
+        self.record_allocation_peak();
         Ok(self.address(id, 0))
     }
 
@@ -2083,6 +2095,7 @@ impl Memory {
             self.allocations.len() - 1
         };
         let mut address = self.address(id, 0);
+        self.record_allocation_peak();
         self.allocations[root.allocation]
             .as_mut()
             .unwrap()

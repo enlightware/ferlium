@@ -980,6 +980,8 @@ impl DceCensus {
             if is_construction_use {
                 allocation.has_deferred_construction_use = true;
             } else {
+                // Includes initialization queries and byte-address projections: these observe
+                // storage state or expose aliases even when no stored value is read directly.
                 allocation.storage_only_invalid = true;
             }
         }

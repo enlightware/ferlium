@@ -25,6 +25,8 @@ pub enum BenchTarget {
     Hir,
     Mir,
     OptimizedMir,
+    UnoptimizedPhysicalMir,
+    PhysicalMir,
 }
 
 impl BenchTarget {
@@ -34,19 +36,27 @@ impl BenchTarget {
         match self {
             Self::Hir => ExecutionTarget::Hir,
             Self::Mir | Self::OptimizedMir => ExecutionTarget::Mir,
+            Self::PhysicalMir | Self::UnoptimizedPhysicalMir => ExecutionTarget::PhysicalMir,
         }
     }
 
     pub fn optimization(self) -> MirOptimization {
         match self {
             Self::Hir | Self::Mir => MirOptimization::Disabled,
-            Self::OptimizedMir => MirOptimization::Enabled,
+            Self::OptimizedMir | Self::PhysicalMir | Self::UnoptimizedPhysicalMir => {
+                MirOptimization::Enabled
+            }
         }
     }
 
     pub fn session(self) -> CompilerSession {
         let mut session = CompilerSession::new();
         session.set_mir_optimization(self.optimization());
+        session.set_physical_mir_optimization(if self == Self::UnoptimizedPhysicalMir {
+            MirOptimization::Disabled
+        } else {
+            MirOptimization::Enabled
+        });
         session
     }
 }
@@ -271,6 +281,12 @@ impl PreparedRuntimeWorkload {
 
     pub fn run_profiled(&mut self) -> (Value, MirExecutionProfile) {
         let arguments = self.take_arguments();
+        if self.target == ExecutionTarget::PhysicalMir {
+            return self
+                .session
+                .run_physical_mir_entry_profiled(self.module_id, self.entry, arguments)
+                .unwrap();
+        }
         self.session
             .run_mir_entry_profiled(self.module_id, self.entry, arguments)
             .unwrap()

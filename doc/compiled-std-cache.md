@@ -1,8 +1,8 @@
 # Compiled standard-library cache
 
-Ferlium caches the standard library's semantic HIR, raw MIR, optimized MIR, and physical MIR across compiler
-processes. Each stage is a separate artifact and is loaded only when requested. This is enabled by
-the default `std-cache` Cargo feature. Set
+Ferlium caches the standard library's semantic HIR, raw MIR, optimized MIR, and optimized physical MIR
+across compiler processes. Each stage is a separate artifact and is loaded only when requested.
+This is enabled by the default `std-cache` Cargo feature. Set
 `FERLIUM_STD_CACHE_DISABLE` to any value to force the old compile-on-startup path, or set
 `FERLIUM_STD_CACHE_DIR` to choose a cache directory. By default the cache lives in
 the platform-standard per-user Ferlium cache directory, under `compiled-std` (for example,

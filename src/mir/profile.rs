@@ -1,7 +1,7 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-//! Dynamic, unweighted execution counts for the MIR reference interpreter.
+//! Dynamic, unweighted execution counts for the boxed and physical MIR interpreters.
 //!
 //! A profile records facts — how often each MIR instruction executed — rather than pretending the
 //! boxed interpreter supplies a cost model for a future backend. [`MirInstructionCostClass`] gives
@@ -201,7 +201,7 @@ impl MirExecutionProfile {
         &self.total
     }
 
-    /// The high-water mark of the interpreter's cell environment over the run.
+    /// Peak boxed environment cells or physical allocation cells, depending on the interpreter.
     ///
     /// The one figure here that is not an event count, and it answers a question no event count
     /// can: what a transform trades when it stops reclaiming storage early. `stack_restore` frees

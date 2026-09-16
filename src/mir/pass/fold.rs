@@ -34,6 +34,7 @@ use rustc_hash::FxHashSet;
 use ustr::{Ustr, ustr};
 
 use super::{
+    OptimizationStage,
     budget::INLINE_FUNCTION_GROWTH,
     dataflow::{self, Analysis, Const, Fact, Root, State},
     known_callee::{KnownCallee, KnownCallees},
@@ -203,7 +204,7 @@ impl Plan {
 /// The evaluator, environment, and dataflow analysis decide whether a call folds. Refusal-only
 /// provenance is absent from normal optimization and constructed only for an optimization report.
 struct FoldContext<'a> {
-    evaluator: ConstEvaluator<'a>,
+    evaluator: Option<ConstEvaluator<'a>>,
     env: ModuleEnv<'a>,
     analysis: Analysis,
     known_calls: KnownCallSemantics<'a>,
@@ -310,12 +311,22 @@ pub(crate) fn fold_function(
     func: &Function,
     original_size: usize,
     env: ModuleEnv<'_>,
-    session: &CompilerSession,
-    module_id: ModuleId,
+    stage: OptimizationStage<'_>,
     known_calls: KnownCallSemantics<'_>,
     string_materializer: &StringMaterializer,
 ) -> Option<Folded> {
-    let resources = FoldResources::new(original_size, env, module_id, string_materializer);
+    // Physical folding uses shared algebraic/CFG rules, never the boxed script evaluator or
+    // semantic dictionary-entry adaptation.
+    let session = match stage {
+        OptimizationStage::Semantic { session, .. } => Some(session),
+        OptimizationStage::Physical { .. } => None,
+    };
+    let resources = FoldResources::new(
+        original_size,
+        env,
+        env.current.module_id(),
+        string_materializer,
+    );
     let (plan, devirtualizations) =
         plan_folds_and_devirtualizations(func, resources, session, known_calls);
     if plan.is_empty() && devirtualizations.is_empty() {
@@ -603,7 +614,14 @@ pub(crate) fn plan_folds(
     known_calls: KnownCallSemantics<'_>,
     refusals: &mut Option<&mut Vec<Refusal>>,
 ) -> Plan {
-    plan_folds_with(func, resources, session, known_calls, refusals, &mut None)
+    plan_folds_with(
+        func,
+        resources,
+        Some(session),
+        known_calls,
+        refusals,
+        &mut None,
+    )
 }
 
 /// Plans folds and devirtualizations in one walk.
@@ -618,7 +636,7 @@ pub(crate) fn plan_folds(
 fn plan_folds_and_devirtualizations(
     func: &Function,
     resources: FoldResources<'_, '_>,
-    session: &CompilerSession,
+    session: Option<&CompilerSession>,
     known_calls: KnownCallSemantics<'_>,
 ) -> (Plan, Vec<Devirtualization>) {
     let mut devirtualizations = Vec::new();
@@ -628,7 +646,7 @@ fn plan_folds_and_devirtualizations(
         session,
         known_calls,
         &mut None,
-        &mut Some(&mut devirtualizations),
+        &mut session.map(|_| &mut devirtualizations),
     );
     (plan, devirtualizations)
 }
@@ -730,7 +748,7 @@ fn apply_devirtualizations(edit: &mut FunctionEdit, devirtualizations: Vec<Devir
 fn plan_folds_with(
     func: &Function,
     resources: FoldResources<'_, '_>,
-    session: &CompilerSession,
+    session: Option<&CompilerSession>,
     known_calls: KnownCallSemantics<'_>,
     refusals: &mut Option<&mut Vec<Refusal>>,
     devirtualizations: &mut Option<&mut Vec<Devirtualization>>,
@@ -747,7 +765,7 @@ fn plan_folds_with(
         call_destinations: call_destinations(func),
     });
     let context = FoldContext {
-        evaluator: ConstEvaluator::new(module_id, session),
+        evaluator: session.map(|session| ConstEvaluator::new(module_id, session)),
         env,
         analysis: dataflow::analyze(func, env),
         known_calls,
@@ -766,8 +784,12 @@ fn plan_folds_with(
         for (index, operation) in basic_block.operations().iter().enumerate() {
             if let OperationKind::Call { ty, .. } = &operation.kind
                 && let Some(call) = dataflow::call_operands(&operation.operands, ty)
-                && let Some(result) =
-                    partial_call_outcome(operation, ty, &state, &context).or_else(|| {
+                && let Some(result) = partial_call_outcome(operation, ty, &state, &context)
+                    .filter(|rewrite| {
+                        context.evaluator.is_some()
+                            || !matches!(rewrite, CallRewrite::EqualOrdering)
+                    })
+                    .or_else(|| {
                         fold_outcome(operation, ty, &state, &context, refusals)
                             .map(CallRewrite::Reification)
                     })
@@ -1038,6 +1060,23 @@ fn partial_call_outcome(
         })))
     };
 
+    // Layout expansion exposes constant integer offset arithmetic. These are the same wrapping
+    // operations as the registered natives, and need no interpreter or constructive reification.
+    let integer = |index| literal(index)?.as_primitive_ty::<isize>().copied();
+    let constant = match known {
+        KnownCallee::IntAdd => integer(0).zip(integer(1)).map(|(a, b)| a.wrapping_add(b)),
+        KnownCallee::IntSub => integer(0).zip(integer(1)).map(|(a, b)| a.wrapping_sub(b)),
+        KnownCallee::IntMul => integer(0).zip(integer(1)).map(|(a, b)| a.wrapping_mul(b)),
+        KnownCallee::IntNeg => integer(0).map(isize::wrapping_neg),
+        _ => None,
+    };
+    if let Some(value) = constant {
+        return Some(CallRewrite::Reification(Reification::Constant(Constant {
+            ty: ty.ret(),
+            representation: LiteralValue::new_native(value),
+        })));
+    }
+
     match known {
         KnownCallee::IntAdd if int_is(0, 0) => copy(1),
         KnownCallee::IntAdd if int_is(1, 0) => copy(0),
@@ -1303,6 +1342,7 @@ fn try_fold_call(
     state: &State,
     context: &FoldContext<'_>,
 ) -> Result<Reification, NotFoldable> {
+    let evaluator = context.evaluator.as_ref().ok_or(NotFoldable::NoBody)?;
     let Some(call) = dataflow::call_operands(&operation.operands, ty) else {
         return Err(NotFoldable::UnsupportedConvention);
     };
@@ -1406,7 +1446,7 @@ fn try_fold_call(
         return discard(arguments, NotFoldable::UnitResult);
     }
 
-    let value = context.evaluator.try_call(
+    let value = evaluator.try_call(
         callee,
         ty.effects(),
         ty.result_convention,
