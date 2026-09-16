@@ -147,13 +147,13 @@ pub(crate) fn desugar(
                 [(name, _)] => ctx.locals.contains(name),
                 _ => false,
             };
-            if !is_local {
-                // There is *NOT* a local variable shadowing a function definition.
-                if let [(name, _)] = &path.segments[..]
-                    && let Some(index) = ctx.fn_map.get(name)
-                {
+            if !is_local && let [(name, _)] = &path.segments[..] {
+                if let Some(index) = ctx.fn_map.get(name) {
                     // This is a known function part of this module.
                     ctx.fn_deps.insert(*index);
+                } else if let Some(members) = ctx.subscript_map.get(name) {
+                    // Taking a subscript first-class needs its members' shared signature too.
+                    ctx.fn_deps.extend(members.iter().copied());
                 }
             }
             Identifier(path)

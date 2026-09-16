@@ -4512,6 +4512,42 @@ fn first_class_subscript_value_passes_captured_hidden_evidence() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_first_class_subscript_in_same_module() {
+    let subscript = indoc! { r#"
+        subscript cell<T>(value: &mut T) -> T where T: Value {
+            ref { let local = value; yield local; }
+            mut { let mut local = value; yield local; value = local; }
+        }
+    "# };
+    let caller = indoc! { r#"
+        fn set<T>(value: &mut T, replacement: T) {
+            let accessor = cell;
+            let copied = accessor;
+            value->[copied] = replacement;
+        }
+    "# };
+    for declarations in [
+        format!("{subscript}{caller}"),
+        format!("{caller}{subscript}"),
+    ] {
+        let source = format!(
+            "{declarations}
+             fn compute() {{
+                 let mut number = 1; set(number, 2);
+                 let mut text = \"before\"; set(text, \"after\");
+                 (number, text)
+             }}
+             compute()"
+        );
+        assert_val_eq!(
+            run_experimental_subscript_source(&source),
+            expected_tuple([int(2), string("after")])
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn first_class_subscript_value_hir_captures_hidden_evidence() {
     fn contains_build_subscript_value_with_evidence(arena: &ENodeArena, node: ENodeId) -> bool {
         match &arena[node].kind {
