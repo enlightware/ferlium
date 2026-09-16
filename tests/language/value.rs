@@ -3610,3 +3610,43 @@ fn aggregate_with_unit_field_dropped_once_on_error_after_field_borrow() {
     assert_eq!(session.fail_run(&source), SourceFailureKind::DivisionByZero);
     assert_val_eq!(session.run("testing::tracked_drop_log()"), int(7));
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn partial_construction_drops_completed_fields() {
+    for (expression, log) in [
+        ("(Probe(1), Probe(2), idiv(1, x))", 21),
+        ("{ a: Probe(1), b: Probe(2), c: idiv(1, x) }", 21),
+        ("(Probe(1), (Probe(2), idiv(1, x)))", 21),
+        ("[Probe(1), Probe(idiv(1, x))]", 1),
+    ] {
+        let source = format!(
+            "{} fn build(x: int) {{ let value = {expression}; }}
+             testing::reset_tracked_drops(); build(0)",
+            tracked_probe_value_impl()
+        );
+        // Inspect the log immediately after each backend fails; another run resets the probe.
+        for mode in RunMode::ALL {
+            let mut session = TestSession::new();
+            session.allow_unsafe();
+            session.run_modes([mode]);
+            assert_eq!(session.fail_run(&source), SourceFailureKind::DivisionByZero);
+            assert_val_eq!(session.run("testing::tracked_drop_log()"), int(log));
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn partial_product_construction_drops_fields_on_early_return() {
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    let source = format!(
+        "{} fn build(stop: bool) {{
+            let value = (Probe(1), if stop {{ return (); }} else {{ 0 }});
+        }}
+        testing::reset_tracked_drops(); build(true); testing::tracked_drop_log()",
+        tracked_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(1));
+}

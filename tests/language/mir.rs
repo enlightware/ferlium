@@ -87,7 +87,7 @@ fn execution_targets_accept_by_value_arguments() {
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn mir_execution_targets_preserve_partial_construction_cleanup_failures() {
+fn execution_targets_preserve_partial_construction_cleanup_failures() {
     let mut session = TestSession::new();
     session.allow_unsafe();
     session
@@ -124,7 +124,7 @@ fn mir_execution_targets_preserve_partial_construction_cleanup_failures() {
             .get_local_function_id(ustr::ustr("compute"))
             .unwrap();
         for input in [0, 2] {
-            let outcomes = [ExecutionTarget::Mir, ExecutionTarget::PhysicalMir].map(|target| {
+            let outcomes = ExecutionTarget::ALL.map(|target| {
                 session
                     .session_mut()
                     .run_entry_with_limits(
@@ -141,7 +141,9 @@ fn mir_execution_targets_preserve_partial_construction_cleanup_failures() {
                     })
                     .map_err(|error| (error.kind(), error.source_failure().is_some()))
             });
-            assert_eq!(outcomes[0], outcomes[1], "{body}, input={input}");
+            for outcome in &outcomes[1..] {
+                assert_eq!(&outcomes[0], outcome, "{body}, input={input}");
+            }
             assert_eq!(
                 outcomes[1].is_ok(),
                 input != 0,

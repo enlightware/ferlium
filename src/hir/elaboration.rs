@@ -26,8 +26,9 @@ use crate::{
         LocalDeclId, LocalFunctionId, Module, ModuleEnv,
         PendingGeneratedStructuralProjectionSubscripts, PendingLocalClone, PendingLocalDrop,
         PendingModuleFunction, PendingTakeLocalValueMode, ProjectionIndex, ProjectionKey,
-        ResolvedLocalClone, ResolvedLocalDrop, SubscriptId, SubscriptMemberKind, TraitDictionaryId,
-        TraitId, generated_structural_projection_definition, id::Id,
+        ResolvedLocalClone, ResolvedLocalDrop, ResolvedTakeLocalValueMode, SubscriptId,
+        SubscriptMemberKind, TraitDictionaryId, TraitId,
+        generated_structural_projection_definition, id::Id,
     },
     std::core_traits_names::VALUE_TRAIT_NAME,
     types::{
@@ -96,7 +97,7 @@ use crate::{
         value_layout_associated_const_values, variant_payload_storage_for_type,
     },
     types::{
-        effects::{EffType, Effect, EffectsInstSubst, no_effects},
+        effects::{EffType, Effect, EffectsInstSubst, PrimitiveEffect, no_effects},
         mutability::MutType,
         trait_solver::alpha_canonicalize_types_with_instantiation,
         r#type::{CallImplType, CallResultConvention, FnArgType, FnType, Type, TypeKind, TypeVar},
@@ -1505,7 +1506,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
         Ok(())
     }
 
-    fn push_owned_call_temp(
+    fn push_owned_temp(
         &mut self,
         ty: Type,
         drop: ResolvedLocalDrop,
@@ -1534,7 +1535,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
         name: Ustr,
         drop: ResolvedLocalDrop,
     ) -> (ENodeId, LocalDeclId) {
-        let local = self.push_owned_call_temp(ty, drop, scope_span, name);
+        let local = self.push_owned_temp(ty, drop, scope_span, name);
         let store = self.alloc_elaborated_node(
             NodeKind::StoreLocal(hir::StoreLocal { value, id: local }),
             Type::unit(),
@@ -1585,6 +1586,101 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
         self.in_progress.remove(&old);
         self.remap.insert(old, new);
         Ok(new)
+    }
+
+    /// Keep completed fields owned until every field has evaluated, then transfer them together.
+    fn elaborate_construction(
+        &mut self,
+        src: &UNodeArena,
+        old: UNodeId,
+        nodes: &[UNodeId],
+        constructor: fn(hir::NodeIds<Elaborated>) -> NodeKind<Elaborated>,
+    ) -> Result<NodeKind<Elaborated>, InternalCompilationError> {
+        let ty = src[old].ty;
+        let effects = &src[old].effects;
+        let span = src[old].span;
+        fn can_interrupt(arena: &UNodeArena, node: UNodeId) -> bool {
+            arena[node].effects.iter().any(|effect| {
+                matches!(
+                    effect,
+                    Effect::Variable(_) | Effect::Primitive(PrimitiveEffect::Fallible)
+                )
+            }) || matches!(
+                arena[node].kind,
+                NodeKind::Return(_) | NodeKind::Break(_) | NodeKind::Continue(_)
+            ) || arena[node]
+                .kind
+                .child_node_ids()
+                .iter()
+                .any(|child| can_interrupt(arena, *child))
+        }
+        // Poisoning needs no guest cleanup. Only source failure or a control transfer can
+        // require dropping a completed prefix; straight-line constructors stay unchanged.
+        let prefix_len = nodes
+            .iter()
+            .rposition(|node| can_interrupt(src, *node))
+            .unwrap_or(0);
+        if prefix_len == 0 {
+            let fields = b(SVec2::from_vec(
+                self.elaborate_node_iter(src, nodes.iter().copied())?,
+            ));
+            return Ok(constructor(fields));
+        }
+        let mut drops = Vec::with_capacity(nodes.len());
+        for node in nodes.iter().take(prefix_len) {
+            drops.push(if src[*node].ty == Type::never() {
+                ResolvedLocalDrop::Skip
+            } else {
+                resolve_local_drop(&mut self.generated, self.ctx, src[*node].ty, span)?
+                    .into_elaborated()
+            });
+        }
+        let needs_cleanup = drops.iter().any(|drop| *drop != ResolvedLocalDrop::Skip);
+        let mut fields = Vec::with_capacity(nodes.len());
+        let mut body = Vec::new();
+        let mut cleanup = Vec::new();
+        for (index, node) in nodes.iter().copied().enumerate() {
+            let value = self.elaborate_node(src, node)?;
+            if !needs_cleanup {
+                fields.push(value);
+                continue;
+            }
+            if src[node].ty == Type::never() {
+                body.push(value);
+                return Ok(NodeKind::Block(b(hir::Block {
+                    body: b(SVec2::from_vec(body)),
+                    cleanup,
+                })));
+            }
+            let drop = drops.get(index).copied().unwrap_or(ResolvedLocalDrop::Skip);
+            let local = self.push_owned_temp(src[node].ty, drop, span, ustr("$field"));
+            body.push(self.alloc_elaborated_node(
+                NodeKind::StoreLocal(hir::StoreLocal { value, id: local }),
+                Type::unit(),
+                src[node].effects.clone(),
+                src[node].span,
+            ));
+            cleanup.push(local);
+            fields.push(self.alloc_elaborated_node(
+                NodeKind::TakeLocalValue(hir::TakeLocalValue {
+                    id: local,
+                    mode: ResolvedTakeLocalValueMode::MoveOwned,
+                }),
+                src[node].ty,
+                no_effects(),
+                src[node].span,
+            ));
+        }
+        let fields = b(SVec2::from_vec(fields));
+        let product = constructor(fields);
+        if body.is_empty() {
+            return Ok(product);
+        }
+        body.push(self.alloc_elaborated_node(product, ty, effects.clone(), span));
+        Ok(NodeKind::Block(b(hir::Block {
+            body: b(SVec2::from_vec(body)),
+            cleanup,
+        })))
     }
 
     fn elaborate_synthetic_node(
@@ -2621,9 +2717,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             PendingAssignment(_) => unreachable!("assignment preparation precedes HIR elaboration"),
             Tuple(nodes) => {
                 self.ensure_product_layout_evidence(node_ty, node_span)?;
-                Tuple(b(SVec2::from_vec(
-                    self.elaborate_node_iter(src, nodes.iter().copied())?,
-                )))
+                self.elaborate_construction(src, old, nodes, Tuple)?
             }
             Project(project) => {
                 let value = project.value;
@@ -2641,9 +2735,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             }
             Record(nodes) => {
                 self.ensure_product_layout_evidence(node_ty, node_span)?;
-                Record(b(SVec2::from_vec(
-                    self.elaborate_node_iter(src, nodes.iter().copied())?,
-                )))
+                self.elaborate_construction(src, old, nodes, Record)?
             }
             FieldAccess(field_access) => {
                 use TypeKind::*;
@@ -2757,9 +2849,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     payload_storage: Some(payload_storage),
                 })
             }
-            Array(nodes) => Array(b(SVec2::from_vec(
-                self.elaborate_node_iter(src, nodes.iter().copied())?,
-            ))),
+            Array(nodes) => self.elaborate_construction(src, old, nodes, Array)?,
             Case(case) => {
                 let value = case.value;
                 let default = case.default;

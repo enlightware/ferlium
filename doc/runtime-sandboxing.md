@@ -38,6 +38,9 @@ propagate through enclosing cleanup scopes. Escalation happens only if another s
 already in flight. A sandbox violation always takes the sandbox path, including when it interrupts
 source-failure cleanup; it may retain the interrupted source failure for diagnostics.
 
+If tuple, record, or array construction exits early, its completed elements remain owned and
+receive semantic cleanup. An incompletely constructed value does not run its own destructor.
+
 ## Optimization, progress and poisoning
 
 Compiler correctness is defined independently of a particular host resource budget. Optimization
