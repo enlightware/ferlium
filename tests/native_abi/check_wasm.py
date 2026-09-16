@@ -9,6 +9,7 @@ import tempfile
 
 
 # These are the agreed core-Wasm signatures, not inferred from Rust's emitted signatures.
+# Keep the corresponding NativeSignature mapping in src/wasm/mod.rs consistent with these probes.
 EXPECTED = {
     "probe_scalars": ("i32 i64 f32 f64 i32 i32", "f64"),
     "probe_integer": ("i64", "i64"),

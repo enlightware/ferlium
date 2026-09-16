@@ -51,6 +51,10 @@ test-wasm:
 	CARGO_PROFILE_TEST_DEBUG=0 WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --chrome --firefox --headless --test language --lib
 	cd playground/script-api && CARGO_PROFILE_TEST_DEBUG=0 WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --chrome --firefox --headless --lib
 
+test-wasm-linkage:
+	CARGO_PROFILE_TEST_DEBUG=0 WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --release --chrome --firefox --headless --lib -- wasm_linkage
+	CARGO_PROFILE_TEST_DEBUG=0 wasm-pack test --release --node --lib -- wasm_linkage
+
 test: test-local test-wasm
 
 test-miri:

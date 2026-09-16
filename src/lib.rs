@@ -25,6 +25,8 @@ mod primitive;
 pub mod std;
 mod sync;
 pub mod types;
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;
 
 pub(crate) use compiler::Modules;
 pub(crate) use compiler::add_code_to_module_with_capabilities;

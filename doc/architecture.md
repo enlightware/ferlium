@@ -25,10 +25,14 @@ Rust runtime                            generated Ferlium module
 ------------                            -------------------------
 shared memory  -----------------------> import memory
 allocator      -----------------------> import alloc/realloc/dealloc
-native code    -----------------------> import native wrappers
+native code    -----------------------> import native C entries
 diagnostics    -----------------------> import abort/reporting functions
                                          export module entrypoints
 ```
+
+The loader resolves registered native C entries from the Rust instance's function table and
+supplies them as direct function imports. JavaScript participates in linking, not in forwarding
+each native call. Table indexes are instance-local; compiler function identities remain symbolic.
 
 The compiled boundary is specified in [abi.md](abi.md). Memory accounting and reclamation are
 specified in [runtime-memory-limits.md](runtime-memory-limits.md) and
