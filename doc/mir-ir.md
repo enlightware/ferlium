@@ -303,15 +303,16 @@ The diagnostic layout remains opaque; its ownership and lifetime are specified i
 
 Semantic MIR gives every call a result place, including calls returning `()`. Physical lowering
 assigns a result convention to each lowered function artifact after specialization. A direct
-artifact returning exactly canonical unit may use `NoValue`, omitting both its `@ret` parameter and
-the corresponding call operand. Other zero-sized and named types retain a value result. A shared
-generic artifact retains `Value`; a specialization whose concrete result is `()` may independently
-use `NoValue`.
+artifact returning a statically zero-sized Ferlium product may use `NoValue`, omitting both its
+`@ret` parameter and the corresponding call operand. This includes unit, empty structs, tuples and
+records, and products composed of them. A shared generic artifact retains `Value`; a concrete
+specialization may independently use `NoValue`.
 
 The convention belongs to the artifact rather than an individual call site, and every direct call
 must match it. First-class callables always expose `Value`. When a `NoValue` implementation is used
-first-class, physical lowering supplies an adapter entry that invokes it and produces the logical
-unit result.
+first-class, physical lowering supplies an adapter entry that invokes it and initializes the declared
+result on success. Call metadata retains that result type. Its ownership and destruction obligations
+are unchanged; a failed call leaves the result absent.
 
 Physical artifacts associate stable callable symbols with their direct implementations. A
 `call no_value` selects the direct entry and omits the result operand; other callable uses retain

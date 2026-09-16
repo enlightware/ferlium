@@ -23,6 +23,7 @@ use crate::{
         ParameterId, ParameterKind, ValueId,
         dominance::Dominance,
         operation::SourceFallibility,
+        physical::is_zero_sized_result,
         role::{self, MirType, ValueRole, ValueRoles},
         terminator::TerminatorKind,
     },
@@ -919,6 +920,12 @@ impl<'a> Verifier<'a> {
                 );
             }
             OperationKind::Call { ty, metadata } => {
+                if ty.result_convention == CallResultConvention::NoValue {
+                    assert!(
+                        is_zero_sized_result(ty.fn_ty.ret, &self.env),
+                        "NoValue requires an inhabited, statically zero-sized product result"
+                    );
+                }
                 self.verify_instantiation(
                     node,
                     &operands[0],

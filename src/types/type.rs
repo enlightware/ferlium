@@ -540,7 +540,7 @@ pub enum CallResultConvention {
     /// A normal value return.
     #[default]
     Value,
-    /// Physical-only exact-unit result, with no caller-provided result storage.
+    /// Physical-only statically zero-sized result, with no caller-provided result storage.
     NoValue,
     Subscript(SubscriptResultConvention),
 }

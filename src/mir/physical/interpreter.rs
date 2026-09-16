@@ -10,6 +10,7 @@ use super::{
         Address, CallableReference, Generation, Memory, Scalar, ScalarKind, StoredValue,
     },
     program::{Descriptor, InternedStaticEvidence, ProgramEvidenceId, ResolvedPhysicalProgram},
+    results::{ValueAdapter, decode_adapter},
     same_storage_type,
 };
 use crate::{
@@ -1219,10 +1220,15 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         let output = if id != symbol {
             let output = args
                 .pop()
-                .ok_or_else(|| invalid("unit adapter result missing"))?
+                .ok_or_else(|| invalid("zero-sized adapter result missing"))?
                 .place()?;
-            if output.ty != Type::unit() {
-                return Err(invalid("unit adapter result type mismatch"));
+            let adapter = self
+                .program
+                .function(symbol)
+                .and_then(decode_adapter)
+                .ok_or_else(|| invalid("malformed value adapter"))?;
+            if output.ty != adapter.result.ty {
+                return Err(invalid("zero-sized adapter result type mismatch"));
             }
             Some(output)
         } else {
@@ -1253,49 +1259,48 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         self.types = previous_types;
         self.memory.restore(marker);
         if let Some(output) = output {
-            self.profile_value_adapter(symbol, &result);
-            result.and_then(|()| self.memory.write(output, Scalar::Unit))
+            let adapter = self
+                .program
+                .function(symbol)
+                .and_then(decode_adapter)
+                .ok_or_else(|| invalid("malformed value adapter"))?;
+            self.profile_value_adapter(symbol, &adapter, &result);
+            result.and_then(|()| {
+                // Materializing the adapter's typed result constant transfers
+                // the logical result, including product-field liveness, without a source clone.
+                let constant = adapter.result;
+                let value = self.memory.literal(constant.ty, &constant.representation)?;
+                self.memory.write_value(output, &value)
+            })
         } else {
             result
         }
     }
 
-    fn profile_value_adapter(&mut self, id: FunctionId, outcome: &Result<(), RuntimeError>) {
+    fn profile_value_adapter(
+        &mut self,
+        id: FunctionId,
+        adapter: &ValueAdapter<'_>,
+        outcome: &Result<(), RuntimeError>,
+    ) {
         let Some(profile) = &mut self.profile else {
             return;
         };
-        let body = self.program.function(id).unwrap();
         let key = FunctionKey {
             module: id.module,
             identity: id.function,
         };
-        let entry = body.block(body.entry());
-        if let TerminatorKind::Invoke {
-            operation,
-            normal,
-            error,
-        } = &entry.terminator().kind
+        if let Some(invoke) = adapter.invoke {
+            profile.record_terminator(key, &invoke.kind);
+        }
+        profile.record_operation(key, adapter.call);
+        if outcome.is_ok() {
+            profile.record_operation(key, adapter.store);
+            profile.record_terminator(key, &adapter.returned.kind);
+        } else if matches!(outcome, Err(RuntimeError::SourceFailure(_)))
+            && let Some(failure) = adapter.failure
         {
-            profile.record_terminator(key, &entry.terminator().kind);
-            profile.record_operation(key, operation);
-            let exit = match outcome {
-                Ok(()) => *normal,
-                Err(RuntimeError::SourceFailure(_)) => *error,
-                Err(_) => return,
-            };
-            let exit = body.block(exit);
-            for operation in exit.operations() {
-                profile.record_operation(key, operation);
-            }
-            profile.record_terminator(key, &exit.terminator().kind);
-        } else {
-            profile.record_operation(key, &entry.operations()[0]);
-            if outcome.is_ok() {
-                for operation in &entry.operations()[1..] {
-                    profile.record_operation(key, operation);
-                }
-                profile.record_terminator(key, &entry.terminator().kind);
-            }
+            profile.record_terminator(key, &failure.kind);
         }
     }
 

@@ -3449,6 +3449,41 @@ const EMPTY_VALUE_STRUCT: &str = r#"
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn zero_sized_call_results_keep_drop_obligations() {
+    for call in ["make(n)", "apply(make, n)"] {
+        for fails in [false, true] {
+            let initial = if fails { -1 } else { 0 };
+            let source = format!(
+                "{EMPTY_VALUE_STRUCT}
+                 #[inline(never)] fn make(x: &mut int) -> E {{
+                     let created = E{{}};
+                     x += 1;
+                     let checked = idiv(1, x);
+                     created
+                 }}
+                 #[inline(never)] fn apply<T>(f: (&mut int) -> T, x: &mut int) -> T {{ f(x) }}
+                 fn compute() {{ let mut n = {initial}; let value = {call}; }}
+                 testing::reset_tracked_drops(); compute()"
+            );
+            for mode in RunMode::ALL {
+                let mut session = TestSession::new();
+                session.allow_unsafe();
+                session.run_modes([mode]);
+                if fails {
+                    assert_eq!(session.fail_run(&source), SourceFailureKind::DivisionByZero);
+                } else {
+                    session.run(&source);
+                }
+                // Success transfers the obligation to the caller; failure drops the callee's
+                // local without initializing an additional result in the caller.
+                assert_val_eq!(session.run("testing::tracked_drop_log()"), int(1));
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn owned_empty_struct_is_dropped_once_at_scope_exit() {
     let mut session = TestSession::new();
     session.allow_unsafe();

@@ -126,14 +126,16 @@ There are two language-effect cases:
 
 There are three return value classes:
 
-- **No value**: `()`
+- **No value**: `()` and eligible statically zero-sized Ferlium products
 - **Direct value**: concrete values with a direct scalar ABI representation
 - **Caller-allocated value**: aggregates, address-only values, and polymorphic results
 
 First-class Ferlium callables use a uniform caller-allocated result convention, including for `()`.
-An optimized direct implementation may omit an exact-unit result; an adapter preserves the callable
-interface. Shared generic implementations retain result storage. Physical module interfaces
-distinguish direct and callable entries without changing source function types.
+An optimized direct implementation may omit a statically zero-sized product result; an adapter
+preserves the callable interface and initializes the declared result type on success. Zero size does
+not remove construction effects or destruction obligations. Shared generic implementations retain
+result storage. Physical module interfaces distinguish direct and callable entries without changing
+source function types. Rust native entries retain their declared result contracts.
 
 Direct generated Ferlium calls and Rust native entries use these return forms:
 

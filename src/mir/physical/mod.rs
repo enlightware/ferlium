@@ -84,7 +84,7 @@ use dictionary::PhysicalDictionaryCatalog;
 pub(crate) use dictionary::{PhysicalDictionaryDefinition, PhysicalDictionaryEntry};
 use evidence::{PhysicalEvidenceReferences, try_for_each_static_evidence};
 use native::{NativeRequirementError, NativeRequirements};
-pub(crate) use results::DirectEntries;
+pub(crate) use results::{DirectEntries, is_zero_sized_result};
 use subscript::PhysicalSubscriptCatalog;
 pub(crate) use subscript::{PhysicalSubscriptDefinition, PhysicalSubscriptMember};
 
@@ -534,7 +534,7 @@ pub(crate) fn lower_physical_mir(
     let entries = expand_physical_mir(module, semantic, env, known)?;
     let entries = optimize(&entries, semantic, env, known);
     let (mut entries, direct) = results::select(entries, env);
-    // Result selection exposes dead unit storage. Keep this cleanup out of the unoptimized
+    // Result selection exposes dead zero-sized storage. Keep this cleanup out of the unoptimized
     // differential path so it independently exercises the lifetimes before storage DCE.
     for body in entries.iter_mut().flatten() {
         if let Some(cleaned) = dce::remove_dead_storage(body) {

@@ -305,7 +305,7 @@ impl Operation {
     /// Creates a `call` operation with the given properties.
     ///
     /// A call yields no register. Its last operand is the result out-pointer, except for physical
-    /// `NoValue` calls, which return canonical unit without result storage.
+    /// `NoValue` calls, which return statically zero-sized products without result storage.
     ///
     /// ## Callee contract
     ///
@@ -1527,11 +1527,6 @@ impl OperationKind {
                     "call needs its callee, arguments and convention-specific result place"
                 );
                 if !ty.result_convention.has_result_place() {
-                    assert_eq!(
-                        ty.fn_ty.ret,
-                        Type::unit(),
-                        "NoValue requires canonical unit"
-                    );
                     assert!(
                         matches!(whole.operands[0], mir::Value::Function(_)),
                         "NoValue requires a direct physical call"

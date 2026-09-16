@@ -1,7 +1,7 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-//! Exact-unit direct entries and their uniform callable interfaces.
+//! Zero-sized direct results and their uniform callable interfaces.
 
 use std::mem;
 
@@ -18,8 +18,10 @@ use crate::{
         edit::FunctionEdit,
         operation::CallMetadata,
         terminator::{Terminator, TerminatorKind},
+        value::Constant,
     },
     module::{FunctionId, LocalFunctionId, ModuleEnv, id::Id},
+    std::value::{TypeLayoutEnv, product_member_types},
     types::{
         effects::{PrimitiveEffect, effect, no_effects},
         r#type::{CallImplType, CallResultConvention, FnType, Type},
@@ -29,6 +31,89 @@ use crate::{
 
 /// Callable symbols keep their Value interface; direct calls resolve to these private bodies.
 pub(crate) type DirectEntries = FxHashMap<LocalFunctionId, LocalFunctionId>;
+
+// Synthesis limits select an optimization, not the validity of existing physical MIR.
+const ZERO_SIZED_RESULT_NODES: usize = 4096;
+const ZERO_SIZED_RESULT_DEPTH: usize = 64;
+
+#[derive(Clone, Copy)]
+struct ResultShape {
+    nodes: usize,
+    depth: usize,
+}
+
+/// Inspect the type graph once, without expanding its potentially exponential literal tree.
+fn result_shape(ty: Type, env: &impl TypeLayoutEnv) -> Option<ResultShape> {
+    if !ty.is_constant() {
+        return None;
+    }
+    let leaf = ResultShape { nodes: 1, depth: 0 };
+    if ty == Type::unit() {
+        return Some(leaf);
+    }
+    enum Visit {
+        Type(Type),
+        Product(Type, Vec<Type>),
+    }
+    let mut pending = vec![Visit::Type(ty)];
+    // None marks an active type: revisiting it would require infinite product storage.
+    let mut shapes = FxHashMap::<Type, Option<ResultShape>>::default();
+    while let Some(visit) = pending.pop() {
+        match visit {
+            Visit::Type(ty) => {
+                if let Some(shape) = shapes.get(&ty) {
+                    shape.as_ref()?;
+                    continue;
+                }
+                if ty == Type::unit() {
+                    shapes.insert(ty, Some(leaf));
+                    continue;
+                }
+                let members = product_member_types(ty, env)?;
+                shapes.insert(ty, None);
+                pending.push(Visit::Product(ty, members.clone()));
+                pending.extend(members.into_iter().rev().map(Visit::Type));
+            }
+            Visit::Product(ty, members) => {
+                let mut shape = leaf;
+                for member in members {
+                    let child = shapes[&member]?;
+                    shape.nodes = shape.nodes.saturating_add(child.nodes);
+                    shape.depth = shape.depth.max(child.depth.saturating_add(1));
+                }
+                shapes.insert(ty, Some(shape));
+            }
+        }
+    }
+    shapes[&ty]
+}
+
+/// Whether a result is an inhabited, statically zero-sized Ferlium product.
+pub(crate) fn is_zero_sized_result(ty: Type, env: &impl TypeLayoutEnv) -> bool {
+    result_shape(ty, env).is_some()
+}
+
+fn eligible_result(ty: Type, env: &impl TypeLayoutEnv) -> bool {
+    result_shape(ty, env).is_some_and(|shape| {
+        shape.nodes <= ZERO_SIZED_RESULT_NODES && shape.depth <= ZERO_SIZED_RESULT_DEPTH
+    })
+}
+
+/// Build a result literal only after its expansion has been bounded by eligibility checking.
+fn zero_sized_result(ty: Type, env: &impl TypeLayoutEnv) -> Option<LiteralValue> {
+    fn build(ty: Type, env: &impl TypeLayoutEnv) -> LiteralValue {
+        if ty == Type::unit() {
+            return LiteralValue::new_native(());
+        }
+        let fields = product_member_types(ty, env)
+            .expect("eligible result is a product")
+            .into_iter()
+            .map(|member| build(member, env))
+            .collect::<Vec<_>>();
+        LiteralValue::new_tuple(fields)
+    }
+    eligible_result(ty, env).then(|| build(ty, env))
+}
 
 /// Function references outside a direct call select the uniform callable interface.
 pub(super) fn callable_targets(operation: &Operation) -> impl Iterator<Item = FunctionId> + '_ {
@@ -58,7 +143,7 @@ fn exported_no_value(id: FunctionId, env: ModuleEnv<'_>) -> bool {
     let scheme = &function.definition.ty_scheme;
     function.code.as_script().is_some()
         && function.definition.return_convention() == CallResultConvention::Value
-        && scheme.ty.ret == Type::unit()
+        && eligible_result(scheme.ty.ret, &env)
         && scheme.ty.is_constant()
         && scheme.ty_quantifiers.is_empty()
         && scheme
@@ -84,7 +169,7 @@ pub(super) fn select(
                     .split_last()
                     .is_some_and(|(result, inputs)| {
                         result.kind == ParameterKind::Return
-                            && result.ty == Type::unit()
+                            && eligible_result(result.ty, &env)
                             && inputs
                                 .iter()
                                 .all(|p| p.kind != ParameterKind::Dictionary && p.ty.is_constant())
@@ -115,8 +200,8 @@ pub(super) fn select(
                 let result = rewrite_call(&mut operation, &direct, &mut imported, env);
                 let span = operation.span;
                 rewritten.push(operation);
-                if let Some(result) = result {
-                    rewritten.push(store_unit(&mut edit, result, span, env));
+                if let Some((result, value)) = result {
+                    rewritten.push(store_result(&mut edit, result, value, span, env));
                 }
             }
             edit.block_mut(block).operations = rewritten;
@@ -124,10 +209,10 @@ pub(super) fn select(
             if let TerminatorKind::Invoke {
                 operation, normal, ..
             } = &mut terminator.kind
-                && let Some(result) = rewrite_call(operation, &direct, &mut imported, env)
+                && let Some((result, value)) = rewrite_call(operation, &direct, &mut imported, env)
             {
                 let (span, target) = (operation.span, *normal);
-                let store = store_unit(&mut edit, result, span, env);
+                let store = store_result(&mut edit, result, value, span, env);
                 let success = edit.add_block(Terminator::goto(span, target));
                 edit.block_mut(success).operations.push(store);
                 let TerminatorKind::Invoke { normal, .. } =
@@ -148,7 +233,7 @@ fn rewrite_call(
     direct: &DirectEntries,
     imported: &mut FxHashMap<FunctionId, bool>,
     env: ModuleEnv<'_>,
-) -> Option<Value> {
+) -> Option<(Value, Constant)> {
     let OperationKind::Call { ty, .. } = &mut operation.kind else {
         return None;
     };
@@ -168,32 +253,38 @@ fn rewrite_call(
     if !eligible {
         return None;
     }
-    assert_eq!(ty.fn_ty.ret, Type::unit());
+    let value = Constant {
+        ty: ty.fn_ty.ret,
+        representation: zero_sized_result(ty.fn_ty.ret, &env)
+            .expect("selected call result must be eligible"),
+    };
     ty.result_convention = CallResultConvention::NoValue;
     let mut operands = mem::take(&mut operation.operands).into_vec();
     let result = operands.pop().unwrap();
     operation.operands = operands.into_boxed_slice();
-    Some(result)
+    Some((result, value))
 }
 
-fn store_unit(
+fn store_result(
     edit: &mut FunctionEdit,
     result: Value,
+    value: Constant,
     span: Location,
     env: ModuleEnv<'_>,
 ) -> Operation {
-    let unit = edit.add_constant(Type::unit(), LiteralValue::new_native(()), &env);
-    Operation::store(span, Value::Constant(unit), result)
+    let constant = edit.add_constant(value.ty, value.representation, &env);
+    Operation::store(span, Value::Constant(constant), result)
 }
 
 fn without_result(body: Function) -> Function {
     let mut edit = FunctionEdit::new(body);
     edit.set_name(ustr(&format!("{}$no_value", edit.name())));
+    let result_ty = edit.parameters().last().unwrap().ty;
     let result = Value::Parameter(ParameterId::from_index(edit.parameters().len() - 1));
-    // Any internal use that still needs a unit place (notably a native call) keeps local storage.
+    // Internal uses that still need a result place keep local storage of the original type.
     // The optimized path removes dead return stores and their local allocation after selection.
     let span = Location::new_synthesized();
-    let mut allocation = Operation::alloca(span, Type::unit());
+    let mut allocation = Operation::alloca(span, result_ty);
     let local = edit.assign_new_result(&mut allocation).unwrap();
     edit.visit_operands_mut(|operand| {
         if *operand == result {
@@ -209,11 +300,13 @@ fn without_result(body: Function) -> Function {
 }
 
 fn adapter(body: &Function, implementation: FunctionId, env: ModuleEnv<'_>) -> Function {
+    let result_ty = body.parameters().last().unwrap().ty;
     build_adapter(
         body.name,
         body.parameters(),
         implementation,
         may_fail(body),
+        zero_sized_result(result_ty, &env).expect("selected adapter result must be eligible"),
         env,
     )
 }
@@ -227,6 +320,104 @@ fn may_fail(body: &Function) -> bool {
     })
 }
 
+/// The forwarding operations shared by adapter execution, profiling and verification.
+pub(super) struct ValueAdapter<'a> {
+    pub call: &'a Operation,
+    pub invoke: Option<&'a Terminator>,
+    pub store: &'a Operation,
+    pub result: &'a Constant,
+    pub returned: &'a Terminator,
+    pub failure: Option<&'a Terminator>,
+}
+
+/// Read the result from its store operand, independently of constant-table ordering.
+pub(super) fn decode_adapter(body: &Function) -> Option<ValueAdapter<'_>> {
+    let entry = body.block(body.blocks().next()?);
+    let (call, invoke, store, returned, failure) = match &entry.terminator().kind {
+        TerminatorKind::Invoke {
+            operation,
+            normal,
+            error,
+        } if entry.operations().is_empty() => {
+            let block = |id| {
+                body.blocks()
+                    .find(|candidate| *candidate == id)
+                    .map(|id| body.block(id))
+            };
+            let success = block(*normal)?;
+            let failure = block(*error)?;
+            let [store] = success.operations() else {
+                return None;
+            };
+            if !failure.operations().is_empty()
+                || !matches!(failure.terminator().kind, TerminatorKind::PropagateError)
+            {
+                return None;
+            }
+            (
+                operation,
+                Some(entry.terminator()),
+                store,
+                success.terminator(),
+                Some(failure.terminator()),
+            )
+        }
+        TerminatorKind::Return => {
+            let [call, store] = entry.operations() else {
+                return None;
+            };
+            (call, None, store, entry.terminator(), None)
+        }
+        _ => return None,
+    };
+    if !matches!(returned.kind, TerminatorKind::Return)
+        || !matches!(call.kind, OperationKind::Call { .. })
+        || !matches!(store.kind, OperationKind::Store)
+    {
+        return None;
+    }
+    let [Value::Constant(constant), Value::Parameter(output)] = store.operands.as_ref() else {
+        return None;
+    };
+    let result = body.constants().get(constant.as_index())?;
+    let parameter = body.parameters().get(output.as_index())?;
+    if parameter.kind != ParameterKind::Return || parameter.ty != result.ty {
+        return None;
+    }
+    Some(ValueAdapter {
+        call,
+        invoke,
+        store,
+        result,
+        returned,
+        failure,
+    })
+}
+
+/// Validate the explicit literal without rebuilding it or imposing the synthesis budget.
+fn valid_result_literal(result: &Constant, env: ModuleEnv<'_>) -> bool {
+    let mut pending = vec![(result.ty, &result.representation)];
+    while let Some((ty, value)) = pending.pop() {
+        if ty == Type::unit() {
+            if value.as_primitive_ty::<()>().is_none() {
+                return false;
+            }
+        } else {
+            let LiteralValue::Tuple(fields) = value else {
+                return false;
+            };
+            let Some(members) = product_member_types(ty, &env) else {
+                return false;
+            };
+            if members.len() != fields.len() {
+                return false;
+            }
+            pending.extend(members.into_iter().zip(fields.iter()));
+        }
+    }
+    true
+}
+
 /// Executors may forward these fixed adapters without allocating another interpreter frame.
 pub(super) fn valid_adapter(
     adapter: &Function,
@@ -237,10 +428,15 @@ pub(super) fn valid_adapter(
     let Some((result, inputs)) = adapter.parameters().split_last() else {
         return false;
     };
+    let Some(decoded) = decode_adapter(adapter) else {
+        return false;
+    };
     if adapter.result_convention() != CallResultConvention::Value
         || direct.result_convention() != CallResultConvention::NoValue
         || result.kind != ParameterKind::Return
-        || result.ty != Type::unit()
+        || decoded.result.ty != result.ty
+        || !is_zero_sized_result(result.ty, &env)
+        || !valid_result_literal(decoded.result, env)
         || inputs != direct.parameters()
     {
         return false;
@@ -252,6 +448,7 @@ pub(super) fn valid_adapter(
         adapter.parameters(),
         target,
         may_fail(direct),
+        decoded.result.representation.clone(),
         env,
     );
     adapter.constants() == expected.constants()
@@ -266,10 +463,12 @@ fn build_adapter(
     parameters: &[Parameter],
     implementation: FunctionId,
     fallible: bool,
+    result_value: LiteralValue,
     env: ModuleEnv<'_>,
 ) -> Function {
     let span = Location::new_synthesized();
     let inputs = &parameters[..parameters.len() - 1];
+    let result_ty = parameters.last().unwrap().ty;
     let ty = FnType::new_mut_resolved(
         inputs.iter().map(|p| {
             (
@@ -277,7 +476,7 @@ fn build_adapter(
                 p.kind == ParameterKind::Parameter(ArgConvention::MutableRef),
             )
         }),
-        Type::unit(),
+        result_ty,
         if fallible {
             effect(PrimitiveEffect::Fallible)
         } else {
@@ -323,7 +522,11 @@ fn build_adapter(
         blocks,
     ));
     let result = Value::Parameter(ParameterId::from_index(inputs.len()));
-    let store = store_unit(&mut edit, result, span, env);
+    let value = Constant {
+        ty: result_ty,
+        representation: result_value,
+    };
+    let store = store_result(&mut edit, result, value, span, env);
     edit.block_mut(BlockId::from_index(usize::from(fallible)))
         .operations
         .push(store);
@@ -346,6 +549,7 @@ mod tests {
             profile::MirExecutionProfile,
         },
         module::Path,
+        std::{STD_MODULE_ID, math::int_type},
     };
 
     #[test]
@@ -410,7 +614,9 @@ mod tests {
                 artifacts.get(bump).unwrap().result_convention(),
                 CallResultConvention::Value
             );
-            for name in ["invoke", "generic", "empty"] {
+            let empty = symbol("empty");
+            assert_ne!(artifacts.direct_entry(empty), empty);
+            for name in ["invoke", "generic"] {
                 let id = symbol(name);
                 assert_eq!(artifacts.direct_entry(id), id, "{name} retains Value");
             }
@@ -433,6 +639,154 @@ mod tests {
                 .unwrap();
             assert_eq!(result.into_primitive_ty::<isize>().unwrap(), 42);
         }
+    }
+
+    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    fn zero_sized_products_preserve_typed_results_across_calls() {
+        let mut session = CompilerSession::new();
+        let library = session
+            .compile(
+                "pub struct Empty {}
+             pub struct Bundle { first: Empty, nested: ((), Empty) }
+             #[inline(never)] pub fn make(x: &mut int) -> Bundle {
+                 x += 1; Bundle { first: Empty {}, nested: ((), Empty {}) }
+             }
+             #[inline(never)] pub fn apply<T>(f: (&mut int) -> T, x: &mut int) -> T { f(x) }",
+                "zero_results",
+                Path::single_str("zero_results"),
+            )
+            .unwrap()
+            .module_id;
+        let user = session
+            .compile(
+                "use zero_results::*;
+             pub fn compute(x: int) -> (Bundle, Bundle, int) {
+                 let mut n = x;
+                 let direct = make(n);
+                 let f = make;
+                 let indirect = apply(f, n);
+                 (direct, indirect, n)
+             }
+             pub fn host(x: int) -> Bundle { let mut n = x; make(n) }",
+                "zero_user",
+                Path::single_str("zero_user"),
+            )
+            .unwrap()
+            .module_id;
+        let function = |module, name| {
+            session
+                .expect_fresh_module(module)
+                .get_local_function_id(ustr(name))
+                .unwrap()
+        };
+        let make = function(library, "make");
+        let compute = function(user, "compute");
+        let host = function(user, "host");
+        for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+            session.set_physical_mir_optimization(optimization);
+            let program = session.prepare_physical_program(user).unwrap();
+            let artifacts = program.module(library).unwrap();
+            let adapter = artifacts.get(make).unwrap();
+            let result_ty = adapter.parameters().last().unwrap().ty;
+            assert_ne!(result_ty, Type::unit());
+            assert_ne!(artifacts.direct_entry(make), make);
+            let caller = program.function(FunctionId::new(user, compute)).unwrap();
+            assert!(
+                caller
+                    .blocks()
+                    .flat_map(|b| caller.block(b).operations())
+                    .any(|op| {
+                        matches!(&op.kind, OperationKind::Call { ty, .. }
+                    if ty.result_convention == CallResultConvention::NoValue
+                        && ty.fn_ty.ret == result_ty
+                        && op.operands[0] == Value::Function(FunctionId::new(library, make)))
+                    })
+            );
+            let check_bundle = |value: &HostValue| {
+                let fields = value.as_tuple().unwrap();
+                assert!(fields[0].as_tuple().unwrap().is_empty());
+                let nested = fields[1].as_tuple().unwrap();
+                assert_eq!(nested[0].as_primitive_ty::<()>(), Some(&()));
+                assert!(nested[1].as_tuple().unwrap().is_empty());
+            };
+            for target in ExecutionTarget::ALL {
+                let result = session
+                    .run_entry(target, user, compute, vec![HostValue::native(40isize)])
+                    .unwrap();
+                let fields = result.as_tuple().unwrap();
+                check_bundle(&fields[0]);
+                check_bundle(&fields[1]);
+                assert_eq!(fields[2].as_primitive_ty::<isize>(), Some(&42));
+                result.discard_storage();
+                let result = session
+                    .run_entry(target, user, host, vec![HostValue::native(0isize)])
+                    .unwrap();
+                check_bundle(&result);
+                result.discard_storage();
+            }
+        }
+    }
+
+    #[test]
+    fn zero_sized_result_synthesis_is_bounded() {
+        let session = CompilerSession::new();
+        let env = ModuleEnv::new(
+            session.expect_fresh_module(STD_MODULE_ID),
+            session.raw_modules(),
+        );
+        assert!(zero_sized_result(Type::never(), &env).is_none());
+        assert!(zero_sized_result(int_type(), &env).is_none());
+        let mut ty = Type::unit();
+        for _ in 0..20 {
+            ty = Type::tuple([ty, ty]);
+        }
+        assert!(zero_sized_result(ty, &env).is_none());
+        assert!(is_zero_sized_result(ty, &env));
+        let mut ty = Type::unit();
+        let mut literal = LiteralValue::new_native(());
+        for _ in 0..=ZERO_SIZED_RESULT_DEPTH {
+            ty = Type::tuple([ty]);
+            literal = LiteralValue::new_tuple(vec![literal]);
+        }
+        assert!(zero_sized_result(ty, &env).is_none());
+        assert!(is_zero_sized_result(ty, &env));
+
+        // A previously-built adapter remains valid even beyond today's synthesis limits.
+        let target = FunctionId::new(STD_MODULE_ID, LocalFunctionId::from_index(0));
+        let adapter = build_adapter(
+            ustr("large_result"),
+            &[Parameter {
+                ty,
+                kind: ParameterKind::Return,
+            }],
+            target,
+            false,
+            literal,
+            env,
+        );
+        let direct = Function::new(
+            ustr("direct"),
+            CallResultConvention::NoValue,
+            vec![],
+            vec![],
+            vec![BasicBlock::new(
+                vec![],
+                Terminator::ret(Location::new_synthesized()),
+            )],
+        );
+        assert!(valid_adapter(&adapter, &direct, target, env));
+
+        let mut edit = FunctionEdit::new(adapter);
+        let extra = edit.add_constant(int_type(), LiteralValue::new_native(7isize), &env);
+        edit.constants_mut().swap(0, extra.as_index());
+        edit.visit_operands_mut(|operand| {
+            if matches!(operand, Value::Constant(_)) {
+                *operand = Value::Constant(extra);
+            }
+        });
+        let reordered = edit.finish_unverified();
+        assert_eq!(decode_adapter(&reordered).unwrap().result.ty, ty);
     }
 
     #[test]
