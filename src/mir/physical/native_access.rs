@@ -7,8 +7,8 @@
 use super::*;
 use crate::types::r#type::TypeKind;
 use crate::{
-    hir::native_functions::NativeParameter, mir::pass::dataflow::call_operands,
-    types::type_properties::concrete_type_is_trivial_copy,
+    hir::function::arg_conventions_for_args, hir::native_functions::NativeParameter,
+    mir::pass::dataflow::call_operands, types::type_properties::concrete_type_is_trivial_copy,
 };
 
 const LIVE: u8 = 1;
@@ -225,9 +225,14 @@ pub(super) fn verify(
                 write(&operands[1], true)?;
             }
             OperationKind::Call { ty, metadata } => {
-                let call = call_operands(operands, ty).expect("verified call shape");
-                for (index, (argument, passing)) in call.arguments.iter().enumerate() {
-                    if *passing == ArgConvention::MutableRef && flags(argument) & READ_ONLY != 0 {
+                let end = operands.len() - usize::from(ty.result_convention.has_result_place());
+                let start = end - ty.fn_ty.args.len();
+                for (index, (argument, passing)) in operands[start..end]
+                    .iter()
+                    .zip(arg_conventions_for_args(&ty.fn_ty.args))
+                    .enumerate()
+                {
+                    if passing == ArgConvention::MutableRef && flags(argument) & READ_ONLY != 0 {
                         return Err(error("mutable call through shared member"));
                     }
                     if metadata
@@ -236,7 +241,7 @@ pub(super) fn verify(
                     {
                         consume(argument)?;
                     }
-                    if let Value::Function(target) = call.callee {
+                    if let Value::Function(target) = &operands[0] {
                         let consumes = signatures.get(target).is_some_and(|signature| {
                             matches!(
                                 signature.parameters.get(index),
@@ -248,7 +253,9 @@ pub(super) fn verify(
                         }
                     }
                 }
-                write(call.result, false)?;
+                if ty.result_convention.has_result_place() {
+                    write(&operands[end], false)?;
+                }
             }
             _ => {}
         }

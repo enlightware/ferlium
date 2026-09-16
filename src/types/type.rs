@@ -537,12 +537,19 @@ impl SubscriptResultConvention {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub enum CallResultConvention {
+    /// A normal value return.
     #[default]
     Value,
+    /// Physical-only exact-unit result, with no caller-provided result storage.
+    NoValue,
     Subscript(SubscriptResultConvention),
 }
 
 impl CallResultConvention {
+    pub fn has_result_place(self) -> bool {
+        self != Self::NoValue
+    }
+
     pub const YIELDED_ONCE: Self = Self::Subscript(SubscriptResultConvention::YieldedOnce);
     pub const ADDRESSOR_PLACE: Self = Self::Subscript(SubscriptResultConvention::AddressorPlace);
 
@@ -552,14 +559,14 @@ impl CallResultConvention {
 
     pub fn returns_caller_rooted_place(self) -> bool {
         match self {
-            Self::Value => false,
+            Self::Value | Self::NoValue => false,
             Self::Subscript(convention) => convention.returns_caller_rooted_place(),
         }
     }
 
     pub fn requires_yield_driver(self) -> bool {
         match self {
-            Self::Value => false,
+            Self::Value | Self::NoValue => false,
             Self::Subscript(convention) => convention.requires_yield_driver(),
         }
     }
@@ -570,7 +577,7 @@ impl CallResultConvention {
 
     pub fn can_satisfy(self, expected: Self) -> bool {
         match (self, expected) {
-            (Self::Value, Self::Value) => true,
+            (Self::Value, Self::Value) | (Self::NoValue, Self::NoValue) => true,
             (Self::Subscript(SubscriptResultConvention::AddressorPlace), Self::Value) => true,
             (Self::Subscript(current), Self::Subscript(expected)) => current.can_satisfy(expected),
             _ => false,

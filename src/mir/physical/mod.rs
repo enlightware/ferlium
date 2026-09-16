@@ -11,6 +11,7 @@ mod interpreter_memory;
 mod native;
 mod native_access;
 pub(crate) mod program;
+mod results;
 mod subscript;
 mod subscript_lifecycle;
 
@@ -41,6 +42,7 @@ use crate::{
         edit::FunctionEdit,
         pass::{
             dataflow::{Root, escaping_roots},
+            dce,
             known_callee::KnownCallees,
             physical::optimize,
         },
@@ -82,6 +84,7 @@ use dictionary::PhysicalDictionaryCatalog;
 pub(crate) use dictionary::{PhysicalDictionaryDefinition, PhysicalDictionaryEntry};
 use evidence::{PhysicalEvidenceReferences, try_for_each_static_evidence};
 use native::{NativeRequirementError, NativeRequirements};
+pub(crate) use results::DirectEntries;
 use subscript::PhysicalSubscriptCatalog;
 pub(crate) use subscript::{PhysicalSubscriptDefinition, PhysicalSubscriptMember};
 
@@ -407,6 +410,7 @@ impl Error for BackendReadinessError {}
 pub(crate) struct BackendReadyMirArtifacts {
     module: ModuleId,
     entries: Vec<Option<Function>>,
+    direct_entries: DirectEntries,
     /// Derived after every physical transformation. Any later pass that changes function or
     /// evidence-catalog references must rebuild this map before execution.
     native_requirements: NativeRequirements,
@@ -415,6 +419,15 @@ pub(crate) struct BackendReadyMirArtifacts {
 }
 
 impl BackendReadyMirArtifacts {
+    /// Resolve the optimized implementation behind a stable callable symbol.
+    pub(crate) fn direct_entry(&self, id: LocalFunctionId) -> LocalFunctionId {
+        self.direct_entries.get(&id).copied().unwrap_or(id)
+    }
+
+    pub(crate) fn direct_entries(&self) -> &DirectEntries {
+        &self.direct_entries
+    }
+
     pub(crate) fn native_entry(&self, function: FunctionId) -> Option<&NativeEntry> {
         self.native_requirements.entries.get(&function)
     }
@@ -520,7 +533,15 @@ pub(crate) fn lower_physical_mir(
 ) -> Result<BackendReadyMirArtifacts, BackendReadinessError> {
     let entries = expand_physical_mir(module, semantic, env, known)?;
     let entries = optimize(&entries, semantic, env, known);
-    prepare_physical_mir(entries, semantic, env)
+    let (mut entries, direct) = results::select(entries, env);
+    // Result selection exposes dead unit storage. Keep this cleanup out of the unoptimized
+    // differential path so it independently exercises the lifetimes before storage DCE.
+    for body in entries.iter_mut().flatten() {
+        if let Some(cleaned) = dce::remove_dead_storage(body) {
+            *body = cleaned;
+        }
+    }
+    prepare_physical_mir(entries, direct, semantic, env)
 }
 
 /// The same physical expansion without post-expansion optimization, for differential execution.
@@ -530,11 +551,9 @@ pub(crate) fn lower_unoptimized_physical_mir(
     env: ModuleEnv<'_>,
     known: &KnownCallees,
 ) -> Result<BackendReadyMirArtifacts, BackendReadinessError> {
-    prepare_physical_mir(
-        expand_physical_mir(module, semantic, env, known)?,
-        semantic,
-        env,
-    )
+    let (entries, direct) =
+        results::select(expand_physical_mir(module, semantic, env, known)?, env);
+    prepare_physical_mir(entries, direct, semantic, env)
 }
 
 fn expand_physical_mir(
@@ -639,6 +658,7 @@ fn expand_physical_mir(
 /// Rebuild process-local bindings and derived catalogs, then verify lowered or restored bodies.
 pub(crate) fn prepare_physical_mir(
     entries: Vec<Option<Function>>,
+    direct_entries: DirectEntries,
     semantic: &MirArtifacts,
     env: ModuleEnv<'_>,
 ) -> Result<BackendReadyMirArtifacts, BackendReadinessError> {
@@ -673,6 +693,7 @@ pub(crate) fn prepare_physical_mir(
     let artifacts = BackendReadyMirArtifacts {
         module,
         entries,
+        direct_entries,
         native_requirements,
         dictionaries,
         subscripts,
@@ -2847,9 +2868,17 @@ fn int_unary(
     result
 }
 
-/// The shared call boundary has exactly one trailing result parameter, even for scoped accessors.
+/// Value/place boundaries have one trailing result parameter; NoValue has none.
 /// A Project supplies its result through the yield protocol rather than an explicit out-pointer.
 fn physical_call_arity(body: &Function, projection: bool) -> Option<usize> {
+    if body.result_convention() == CallResultConvention::NoValue {
+        return (!projection
+            && body
+                .parameters()
+                .iter()
+                .all(|p| p.kind != ParameterKind::Return))
+        .then_some(body.parameters().len());
+    }
     let (result, inputs) = body.parameters().split_last()?;
     if result.kind != ParameterKind::Return
         || inputs
@@ -2865,6 +2894,26 @@ fn verify_physical_mir(
     artifacts: &BackendReadyMirArtifacts,
     env: ModuleEnv<'_>,
 ) -> Result<(), BackendReadinessError> {
+    for (&symbol, &implementation) in &artifacts.direct_entries {
+        if symbol == implementation
+            || artifacts
+                .get(symbol)
+                .zip(artifacts.get(implementation))
+                .is_none_or(|(adapter, direct)| {
+                    !results::valid_adapter(
+                        adapter,
+                        direct,
+                        FunctionId::new(artifacts.module, implementation),
+                        env,
+                    )
+                })
+        {
+            return Err(BackendReadinessError::InvalidPhysicalProtocol {
+                function: FunctionId::new(artifacts.module, symbol),
+                reason: "invalid physical direct/callable entry pair",
+            });
+        }
+    }
     verify_dictionary_catalog(artifacts)?;
     verify_subscript_catalog(artifacts)?;
     let module = artifacts.module;
@@ -2928,7 +2977,7 @@ fn verify_physical_mir(
         if physical_call_arity(body, false).is_none() {
             return Err(BackendReadinessError::InvalidPhysicalProtocol {
                 function: function_id,
-                reason: "entry requires exactly one trailing result parameter",
+                reason: "result parameters do not match the physical convention",
             });
         }
         // Compiler-generated malformed MIR is an invariant failure, diagnosed by the shared
@@ -3008,6 +3057,18 @@ fn verify_physical_operation(
             function: owner,
             reason: "scoped accessor requires project, not call",
         });
+    }
+    for target in results::callable_targets(operation) {
+        if target.module == artifacts.module
+            && artifacts
+                .get(target.function)
+                .is_some_and(|body| body.result_convention() == CallResultConvention::NoValue)
+        {
+            return Err(BackendReadinessError::InvalidPhysicalProtocol {
+                function: owner,
+                reason: "a NoValue implementation cannot be used as a first-class callable",
+            });
+        }
     }
     verify_local_function_operands(
         artifacts.module,
@@ -3135,6 +3196,9 @@ fn verify_dictionary_catalog(
             // Native entries legitimately occupy a function-table slot without a MIR body.
             if target.module != artifacts.module
                 || target.function.as_index() >= artifacts.entry_count()
+                || artifacts
+                    .get(target.function)
+                    .is_some_and(|body| body.result_convention() == CallResultConvention::NoValue)
             {
                 return Err(BackendReadinessError::InvalidDictionaryEntry {
                     dictionary: definition.id(),
@@ -3494,13 +3558,18 @@ fn verify_direct_call(
     if target.module != artifacts.module {
         return Ok(());
     }
-    let Some(target_body) = artifacts.get(target.function) else {
+    let entry = if ty.result_convention == CallResultConvention::NoValue {
+        artifacts.direct_entry(target.function)
+    } else {
+        target.function
+    };
+    let Some(target_body) = artifacts.get(entry) else {
         return Ok(());
     };
     let expected = physical_call_arity(target_body, projection).ok_or(
         BackendReadinessError::InvalidPhysicalProtocol {
             function: *target,
-            reason: "entry requires exactly one trailing result parameter",
+            reason: "result parameters do not match the physical convention",
         },
     )?;
     // Semantic can_satisfy allows adaptation; it does not make value storage, pointer-result
@@ -3961,7 +4030,7 @@ mod tests {
         assert!(matches!(
             verify_physical_mir(&artifacts, env),
             Err(BackendReadinessError::InvalidPhysicalProtocol {
-                reason: "entry requires exactly one trailing result parameter",
+                reason: "result parameters do not match the physical convention",
                 ..
             })
         ));
@@ -4736,6 +4805,7 @@ mod tests {
         let physical = BackendReadyMirArtifacts {
             module,
             entries: entries.into(),
+            direct_entries: DirectEntries::default(),
             native_requirements: NativeRequirements::default(),
             dictionaries,
             subscripts,
@@ -5198,14 +5268,17 @@ mod tests {
                 if !is_value_drop_function(original, &env) {
                     return false;
                 }
-                let Some(body) = physical.get(LocalFunctionId::from_index(index)) else {
+                let Some(body) =
+                    physical.get(physical.direct_entry(LocalFunctionId::from_index(index)))
+                else {
                     return false;
                 };
                 body.blocks().any(|block| {
                     body.block(block).operations().iter().any(|operation| {
                         matches!(
                             operation.operands.first(),
-                            Some(Value::Function(function)) if *function == release
+                            Some(Value::Function(function)) if function.module == release.module
+                                && physical.direct_entry(function.function) == release.function
                         )
                     }) && matches!(body.block(block).terminator().kind, TerminatorKind::Return)
                 })
@@ -5258,7 +5331,8 @@ mod tests {
             block.operations().iter().any(|operation| {
                 matches!(
                     operation.operands.first(),
-                    Some(Value::Function(function)) if *function == release
+                Some(Value::Function(function)) if function.module == release.module
+                    && physical.direct_entry(function.function) == release.function
                 )
             })
         }));

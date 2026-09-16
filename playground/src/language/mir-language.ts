@@ -23,6 +23,7 @@ const operationKeywords = new Set([
 const contextualKeywords = new Set([
 	"arg", "owned", "extra", "using", "from", "to", "via", "capturing", "error",
 	"size", "align", "by", "storage", "layout", "with", "default", "member", "count", "index",
+	"no_value",
 ]);
 const primitiveTypes = new Set(["bool", "char", "float", "int", "never", "string", "unit"]);
 
@@ -117,6 +118,11 @@ export const mirLanguage = StreamLanguage.define({
 			return null;
 		}
 		if (state.nextTokenIsFunctionName) {
+			// Only `call` accepts a prefix convention; `no_value(...)` is a callee name.
+			if (/\bcall[ \t]+$/.test(stream.string.slice(0, stream.pos))
+				&& stream.match(/no_value(?=[ \t]+\S)/)) {
+				return "modifier";
+			}
 			state.nextTokenIsFunctionName = false;
 			if (skipCallableName(stream)) {
 				return "variableName";

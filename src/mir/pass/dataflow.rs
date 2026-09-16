@@ -1436,6 +1436,9 @@ pub(crate) fn call_result_operand_index(
     operands: &[mir::Value],
     ty: &CallImplType,
 ) -> Option<usize> {
+    if !ty.result_convention.has_result_place() {
+        return None;
+    }
     let visible = ty.fn_ty.args.len();
     // callee + extras + args + ret
     let extras = operands.len().checked_sub(visible + 2)?;

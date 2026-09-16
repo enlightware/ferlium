@@ -39,7 +39,8 @@ before atomic publication. Later semantic MIR loads trust checksum-matching comp
 and repeat structural restoration, not whole-corpus MIR verification.
 
 Physical snapshots are valid only for the matching compiler/runtime build and target. They store
-physical bodies and native layout/ABI requirements, but no code pointers or Rust type identities.
+physical bodies, direct/callable entry mappings and native layout/ABI requirements, but no code
+pointers or Rust type identities.
 Loading rebinds native entries from the current runtime, reconstructs evidence catalogs, checks
 the native contracts, and repeats physical readiness verification. An incompatibility is a cache
 miss. Whole-program resolution remains session-local and is not persisted.

@@ -207,7 +207,11 @@ impl Function {
                     parameter.ty.format_with(env)
                 )?;
             }
-            write!(text, "):")?;
+            if self.result_convention == CallResultConvention::NoValue {
+                write!(text, ") no_value:")?;
+            } else {
+                write!(text, "):")?;
+            }
 
             for (index, constant) in self.constants.iter().enumerate() {
                 write!(

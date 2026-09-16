@@ -512,6 +512,13 @@ impl<'a> Verifier<'a> {
     }
 
     fn verify(mut self, semantic_storage: bool, roles: Option<ValueRoles>) {
+        if semantic_storage {
+            assert_ne!(
+                self.func.result_convention(),
+                CallResultConvention::NoValue,
+                "NoValue entries belong to physical MIR"
+            );
+        }
         self.verify_shared_contracts(roles);
         if semantic_storage {
             self.collect_storage_roots();
@@ -920,7 +927,9 @@ impl<'a> Verifier<'a> {
                         .as_deref()
                         .and_then(|metadata| metadata.instantiation.as_ref()),
                 );
-                let visible_start = operands.len() - ty.fn_ty.args.len() - 1;
+                let visible_start = operands.len()
+                    - ty.fn_ty.args.len()
+                    - usize::from(ty.result_convention.has_result_place());
                 for (offset, argument) in ty.fn_ty.args.iter().enumerate() {
                     let index = visible_start + offset;
                     self.verify_place_representation(
@@ -950,7 +959,7 @@ impl<'a> Verifier<'a> {
                         );
                     }
                 }
-                if ty.fn_ty.ret != Type::never() {
+                if ty.fn_ty.ret != Type::never() && ty.result_convention.has_result_place() {
                     let expected = if ty.result_convention.returns_place() {
                         MirType::pointer_to(MirType::Lowered(ty.fn_ty.ret))
                     } else {

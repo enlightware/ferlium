@@ -640,7 +640,10 @@ pub(crate) fn check_operand_roles(
                 .len()
                 .checked_sub(
                     ty.fn_ty.args.len()
-                        + usize::from(!matches!(operation.kind, OperationKind::Project { .. })),
+                        + usize::from(
+                            !matches!(operation.kind, OperationKind::Project { .. })
+                                && ty.result_convention.has_result_place(),
+                        ),
                 )
                 .filter(|start| *start >= 1)
                 .unwrap_or_else(|| {
@@ -660,7 +663,9 @@ pub(crate) fn check_operand_roles(
             for offset in 0..ty.fn_ty.args.len() {
                 place(visible_start + offset);
             }
-            if matches!(operation.kind, OperationKind::Call { .. }) {
+            if matches!(operation.kind, OperationKind::Call { .. })
+                && ty.result_convention.has_result_place()
+            {
                 let result = role(operands.len() - 1);
                 assert!(
                     result.is_place_operand(),

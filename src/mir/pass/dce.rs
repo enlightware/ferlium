@@ -679,7 +679,9 @@ pub(super) fn may_leave_frame_storage(
             let Some(visible_start) = operation
                 .operands
                 .len()
-                .checked_sub(ty.fn_ty.args.len() + 1)
+                .checked_sub(
+                    ty.fn_ty.args.len() + usize::from(ty.result_convention.has_result_place()),
+                )
                 .filter(|start| *start >= 1)
             else {
                 return true;
@@ -1192,7 +1194,7 @@ mod tests {
         std::math::int_type,
         types::{
             effects::no_effects,
-            r#type::{CallImplType, FnType, SubscriptType, Type},
+            r#type::{CallImplType, CallResultConvention, FnType, SubscriptType, Type},
         },
     };
 
@@ -1563,6 +1565,19 @@ mod tests {
         let roles = ValueRoles::derive(&function);
         let call = &function.block(block).operations()[1];
 
+        assert!(may_leave_frame_storage(call, &function, &roles));
+
+        let mut edit = FunctionEdit::new(function);
+        let call = &mut edit.block_mut(block).operations[1];
+        let OperationKind::Call { ty, .. } = &mut call.kind else {
+            unreachable!()
+        };
+        ty.result_convention = CallResultConvention::NoValue;
+        ty.fn_ty.ret = Type::unit();
+        call.operands = call.operands[..call.operands.len() - 1].into();
+        let function = edit.finish_unverified();
+        let roles = ValueRoles::derive(&function);
+        let call = &function.block(block).operations()[1];
         assert!(may_leave_frame_storage(call, &function, &roles));
     }
 

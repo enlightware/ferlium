@@ -196,6 +196,16 @@ pub(crate) fn emit_physical_mir_with_source_map(
                 id
             )
             .expect("writing to a string cannot fail");
+            let direct = artifacts.direct_entry(id);
+            if direct != id {
+                writeln!(
+                    text.text,
+                    "// direct entry m{}:f{}",
+                    artifacts.module(),
+                    direct
+                )
+                .expect("writing to a string cannot fail");
+            }
             append_rendered_function(body, &env, &mut text.text, &mut text.source_map);
         }
     }
@@ -381,6 +391,7 @@ impl<'a> Emitter<'a> {
 
         // Lower the body, dispatching on the function's return convention.
         match f.definition.return_convention() {
+            CallResultConvention::NoValue => unreachable!("NoValue is physical-only"),
             // A value-returning function stores its result into the return out-pointer.
             CallResultConvention::Value => {
                 let ret_dest = emitter.context.return_destination.clone();
@@ -2277,6 +2288,7 @@ impl<'a> Emitter<'a> {
     /// for a result through this helper.
     fn allocate_result(&mut self, node: &ENode, f: &CallImplType) -> mir::Value {
         match f.result_convention {
+            CallResultConvention::NoValue => unreachable!("NoValue is physical-only"),
             CallResultConvention::Value => self.alloca_storage(node.span, node.ty),
             CallResultConvention::Subscript(SubscriptResultConvention::AddressorPlace) => self
                 .insert(Operation::alloca_place(node.span, node.ty))

@@ -313,6 +313,11 @@ must match it. First-class callables always expose `Value`. When a `NoValue` imp
 first-class, physical lowering supplies an adapter entry that invokes it and produces the logical
 unit result.
 
+Physical artifacts associate stable callable symbols with their direct implementations. A
+`call no_value` selects the direct entry and omits the result operand; other callable uses retain
+the `Value` entry. These identities remain module-qualified until backend linking. Adapters do not
+introduce source-level call-depth or fuel checks.
+
 ### Runtime allocation
 
 Physical MIR exposes the compiled runtime boundary directly:

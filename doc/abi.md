@@ -130,7 +130,12 @@ There are three return value classes:
 - **Direct value**: concrete values with a direct scalar ABI representation
 - **Caller-allocated value**: aggregates, address-only values, and polymorphic results
 
-Generated Ferlium functions and Rust native entries share this return convention:
+First-class Ferlium callables use a uniform caller-allocated result convention, including for `()`.
+An optimized direct implementation may omit an exact-unit result; an adapter preserves the callable
+interface. Shared generic implementations retain result storage. Physical module interfaces
+distinguish direct and callable entries without changing source function types.
+
+Direct generated Ferlium calls and Rust native entries use these return forms:
 
 | May return language failure? | Return value kind      | ABI return form                                                | Out-pointer needed? |
 |------------------------------|------------------------|----------------------------------------------------------------|---------------------|

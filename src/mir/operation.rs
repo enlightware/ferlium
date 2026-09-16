@@ -304,8 +304,8 @@ impl Operation {
 
     /// Creates a `call` operation with the given properties.
     ///
-    /// A call yields no register: every callee, including one returning `()`, writes its result
-    /// through the return out-pointer passed as the call's last operand.
+    /// A call yields no register. Its last operand is the result out-pointer, except for physical
+    /// `NoValue` calls, which return canonical unit without result storage.
     ///
     /// ## Callee contract
     ///
@@ -1519,10 +1519,25 @@ impl OperationKind {
                 1,
                 "runtime_dealloc takes exactly the allocation address"
             ),
-            Call { .. } => assert!(
-                whole.operands.len() >= 2,
-                "call needs the callee and a trailing result place"
-            ),
+            Call { ty, .. } => {
+                assert!(
+                    whole.operands.len()
+                        >= 1 + ty.fn_ty.args.len()
+                            + usize::from(ty.result_convention.has_result_place()),
+                    "call needs its callee, arguments and convention-specific result place"
+                );
+                if !ty.result_convention.has_result_place() {
+                    assert_eq!(
+                        ty.fn_ty.ret,
+                        Type::unit(),
+                        "NoValue requires canonical unit"
+                    );
+                    assert!(
+                        matches!(whole.operands[0], mir::Value::Function(_)),
+                        "NoValue requires a direct physical call"
+                    );
+                }
+            }
             Project { .. } => assert!(
                 !whole.operands.is_empty(),
                 "project needs at least the callee operand"
@@ -1740,6 +1755,9 @@ impl OperationKind {
             RuntimeDealloc => write!(f, "runtime_dealloc {}", whole.operands[0].format_with(env)),
             Call { ty, metadata } => {
                 write!(f, "call ")?;
+                if !ty.result_convention.has_result_place() {
+                    write!(f, "no_value ")?;
+                }
                 fmt_callee_and_args(
                     f,
                     whole,
@@ -2025,14 +2043,16 @@ fn fmt_callee_and_args(
     owned: Option<(&DenseBitSet, usize)>,
 ) -> fmt::Result {
     write!(f, "{}(", whole.operands[0].format_with(env))?;
-    let visible_start = owned.map(|(_, visible)| whole.operands.len() - visible - 1);
+    let result_count = usize::from(matches!(&whole.kind,
+        OperationKind::Call { ty, .. } if ty.result_convention.has_result_place()));
+    let visible_start = owned.map(|(_, visible)| whole.operands.len() - visible - result_count);
     for (i, operand) in whole.operands[1..].iter().enumerate() {
         if i != 0 {
             write!(f, ", ")?;
         }
         if let (Some((owned, _)), Some(visible_start)) = (owned, visible_start)
             && i + 1 >= visible_start
-            && i + 1 < whole.operands.len() - 1
+            && i + 1 < whole.operands.len() - result_count
             && owned.contains(i + 1 - visible_start)
         {
             write!(f, "move ")?;

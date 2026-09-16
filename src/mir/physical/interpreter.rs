@@ -1212,6 +1212,22 @@ impl<'a, 'p> Interpreter<'a, 'p> {
     }
 
     fn call(&mut self, id: FunctionId, mut args: Vec<Binding>) -> Result<(), RuntimeError> {
+        let symbol = id;
+        let id = self.program.direct_entry(id);
+        // The readiness verifier checks the exact forwarding body. Execute that fixed ABI
+        // boundary here so generic callbacks do not double the Rust stack needed for recursion.
+        let output = if id != symbol {
+            let output = args
+                .pop()
+                .ok_or_else(|| invalid("unit adapter result missing"))?
+                .place()?;
+            if output.ty != Type::unit() {
+                return Err(invalid("unit adapter result type mismatch"));
+            }
+            Some(output)
+        } else {
+            None
+        };
         let Some(body) = self.program.function(id) else {
             return self.call_native(id, &args);
         };
@@ -1236,7 +1252,51 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         self.depth -= 1;
         self.types = previous_types;
         self.memory.restore(marker);
-        result
+        if let Some(output) = output {
+            self.profile_value_adapter(symbol, &result);
+            result.and_then(|()| self.memory.write(output, Scalar::Unit))
+        } else {
+            result
+        }
+    }
+
+    fn profile_value_adapter(&mut self, id: FunctionId, outcome: &Result<(), RuntimeError>) {
+        let Some(profile) = &mut self.profile else {
+            return;
+        };
+        let body = self.program.function(id).unwrap();
+        let key = FunctionKey {
+            module: id.module,
+            identity: id.function,
+        };
+        let entry = body.block(body.entry());
+        if let TerminatorKind::Invoke {
+            operation,
+            normal,
+            error,
+        } = &entry.terminator().kind
+        {
+            profile.record_terminator(key, &entry.terminator().kind);
+            profile.record_operation(key, operation);
+            let exit = match outcome {
+                Ok(()) => *normal,
+                Err(RuntimeError::SourceFailure(_)) => *error,
+                Err(_) => return,
+            };
+            let exit = body.block(exit);
+            for operation in exit.operations() {
+                profile.record_operation(key, operation);
+            }
+            profile.record_terminator(key, &exit.terminator().kind);
+        } else {
+            profile.record_operation(key, &entry.operations()[0]);
+            if outcome.is_ok() {
+                for operation in &entry.operations()[1..] {
+                    profile.record_operation(key, operation);
+                }
+                profile.record_terminator(key, &entry.terminator().kind);
+            }
+        }
     }
 
     fn invoke(&mut self, callable: Callable, args: Vec<Binding>) -> Result<(), RuntimeError> {
@@ -1494,14 +1554,17 @@ impl<'a, 'p> Interpreter<'a, 'p> {
     ) -> Result<(), RuntimeError> {
         use OperationKind::*;
         let result = match &operation.kind {
-            Call { .. } => {
-                let callable = self.resolve_callable(self.operand(
+            Call { ty, .. } => {
+                let mut callable = self.resolve_callable(self.operand(
                     body,
                     args,
                     registers,
                     &operation.operands[0],
                 )?)?;
                 let id = callable.function;
+                if ty.result_convention == CallResultConvention::NoValue {
+                    callable.function = self.program.direct_entry(callable.function);
+                }
                 let values = operation.operands[1..]
                     .iter()
                     .map(|value| self.operand(body, args, registers, value))
@@ -2502,6 +2565,7 @@ mod tests {
         });
         // Source-level Value::drop is pure. Inject a failing body to exercise defensive cleanup
         // without weakening that contract or adding an invalid native ABI fixture.
+        let fail = artifacts[1].direct_entry(fail);
         let failure = artifacts[1].entries[fail.as_index()]
             .as_ref()
             .unwrap()

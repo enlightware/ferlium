@@ -14,6 +14,21 @@ function highlightedTokens(source: string): Array<[string, string]> {
 }
 
 describe("MIR language highlighting", () => {
+	it("highlights the physical result convention without consuming the callee", () => {
+		const tokens = highlightedTokens("call no_value update(%p0)\nfn update(%p0: @arg let int) no_value:");
+		expect(tokens).toContainEqual(["no_value", "tok-keyword"]);
+		expect(tokens).toContainEqual(["update", "tok-variableName"]);
+	});
+	it.each([
+		"call no_value(%p0)",
+		"call no_value no_value(%p0)",
+		"call no_value::update(%p0)",
+		"fn no_value(%p0: @arg let int) no_value:",
+		"drop int %p0 via no_value with (%p1)",
+	])("distinguishes a callee named no_value in %s", (source) => {
+		const name = source.includes("no_value::") ? "no_value::update" : "no_value";
+		expect(highlightedTokens(source)).toContainEqual([name, "tok-variableName"]);
+	});
 	it.each([
 		"runtime_alloc int size 8 align 8",
 		"runtime_dealloc %r0",

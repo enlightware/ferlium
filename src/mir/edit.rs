@@ -181,6 +181,10 @@ impl FunctionEdit {
         self.result_convention
     }
 
+    pub(crate) fn set_result_convention(&mut self, convention: CallResultConvention) {
+        self.result_convention = convention;
+    }
+
     pub(crate) fn blocks(&self) -> impl Iterator<Item = BlockId> + '_ {
         (0..self.blocks.len()).map(BlockId::from_index)
     }

@@ -31,6 +31,7 @@ pub(crate) struct CompiledPhysicalMirSnapshot {
     parent_checksum: CacheChecksum,
     types: SnapshotTypeGraph,
     functions: Vec<Option<SnapshotMirFunction>>,
+    direct_entries: Vec<(LocalFunctionId, LocalFunctionId)>,
     native: NativeBindings,
 }
 
@@ -51,6 +52,12 @@ impl CompiledPhysicalMirSnapshot {
                     .transpose()
             })
             .collect::<Result<_, _>>()?;
+        let mut direct_entries = artifacts
+            .direct_entries()
+            .iter()
+            .map(|(&a, &b)| (a, b))
+            .collect::<Vec<_>>();
+        direct_entries.sort_unstable_by_key(|(symbol, _)| symbol.as_index());
         Ok(Self {
             module: artifacts.module(),
             module_path: module.path().to_string(),
@@ -58,6 +65,7 @@ impl CompiledPhysicalMirSnapshot {
             parent_checksum,
             types: graph.finish()?,
             functions,
+            direct_entries,
             native: NativeBindings::capture(artifacts)?,
         })
     }
@@ -124,6 +132,7 @@ impl CompiledPhysicalMirSnapshot {
         let artifacts = catch_unwind(AssertUnwindSafe(|| {
             prepare_physical_mir(
                 functions,
+                self.direct_entries.iter().copied().collect(),
                 optimized,
                 ModuleEnv::new(module, session.raw_modules()),
             )
@@ -308,6 +317,8 @@ mod tests {
             snapshot.restore(&[7; 32], optimized, module, &session)
         };
         let restored = restore(&decoded).unwrap();
+        assert!(!physical.direct_entries().is_empty());
+        assert_eq!(restored.direct_entries(), physical.direct_entries());
         restored
             .validate_native_runtime(ModuleEnv::new(module, session.raw_modules()))
             .unwrap();
@@ -355,6 +366,12 @@ mod tests {
                 "a snapshot must retain the body of Buffer::{primitive:?}"
             );
         }
+        let mut malformed = decoded.clone();
+        malformed.direct_entries[0].1 = malformed.direct_entries[0].0;
+        assert!(matches!(
+            restore(&malformed),
+            Err(SnapshotError::InvalidMir(_))
+        ));
         let mut malformed = decoded;
         malformed.functions.clear();
         assert!(matches!(

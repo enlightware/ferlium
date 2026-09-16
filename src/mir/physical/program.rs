@@ -22,7 +22,7 @@ use super::{
     BackendReadyMirArtifacts, ConstructedSubscript, PhysicalDictionaryDefinition,
     PhysicalSubscriptDefinition, PhysicalSubscriptMember, constructed_dictionary_definitions,
     constructed_subscript_definitions, evidence::try_for_each_static_evidence, physical_call_arity,
-    static_dictionary_definition, static_subscript,
+    results::callable_targets, static_dictionary_definition, static_subscript,
 };
 
 define_id_type!(
@@ -97,6 +97,14 @@ impl ResolvedPhysicalProgram<'_> {
 
     pub(crate) fn function(&self, id: FunctionId) -> Option<&Function> {
         self.module(id.module)?.get(id.function)
+    }
+
+    pub(crate) fn direct_entry(&self, id: FunctionId) -> FunctionId {
+        FunctionId::new(
+            id.module,
+            self.module(id.module)
+                .map_or(id.function, |m| m.direct_entry(id.function)),
+        )
     }
 
     pub(crate) fn dictionary(
@@ -201,7 +209,7 @@ impl fmt::Display for PhysicalProgramError {
             }
             Self::InvalidResultParameter { function } => write!(
                 f,
-                "resolved physical entry {function:?} requires exactly one trailing result parameter"
+                "resolved physical entry {function:?} has result parameters inconsistent with its convention"
             ),
             Self::InvalidCallConvention {
                 owner,
@@ -388,7 +396,11 @@ fn verify_program(program: &ResolvedPhysicalProgram) -> Result<(), PhysicalProgr
     for module in program.modules() {
         for dictionary in module.dictionaries() {
             for (index, entry) in dictionary.entries().iter().enumerate() {
-                if !has_function(program, entry.function()) {
+                if !has_function(program, entry.function())
+                    || program.function(entry.function()).is_some_and(|body| {
+                        body.result_convention() == CallResultConvention::NoValue
+                    })
+                {
                     return Err(PhysicalProgramError::InvalidDictionaryEntryFunction {
                         dictionary: dictionary.id(),
                         entry: TraitDictionaryEntryIndex::from_index(index),
@@ -459,6 +471,19 @@ fn verify_operation(
     subscripts: &FxHashMap<ValueId, ConstructedSubscript>,
     operation: &Operation,
 ) -> Result<(), PhysicalProgramError> {
+    for target in callable_targets(operation) {
+        if program
+            .function(target)
+            .is_some_and(|body| body.result_convention() == CallResultConvention::NoValue)
+        {
+            return Err(PhysicalProgramError::InvalidCallConvention {
+                owner,
+                target,
+                expected: CallResultConvention::Value,
+                actual: CallResultConvention::NoValue,
+            });
+        }
+    }
     for (index, operand) in operation.operands.iter().enumerate() {
         if index == 0 && matches!(operation.kind, OperationKind::BuildSubscriptEvidence { .. }) {
             verify_subscript_base(program, owner, operand)?;
@@ -471,7 +496,12 @@ fn verify_operation(
     }
     if let OperationKind::Call { ty, .. } | OperationKind::Project { ty, .. } = &operation.kind
         && let Some(Value::Function(target)) = operation.operands.first()
-        && let Some(target_body) = program.function(*target)
+        && let Some(target_body) =
+            program.function(if ty.result_convention == CallResultConvention::NoValue {
+                program.direct_entry(*target)
+            } else {
+                *target
+            })
     {
         let expected = physical_call_arity(
             target_body,
