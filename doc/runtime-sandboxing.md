@@ -16,7 +16,7 @@ Once guest execution starts, there are three outcomes besides successful return:
 
 1. A **source failure** is declared by the `Fallible` effect. It follows semantic cleanup and uses
    the status-bearing function ABI. If cleanup succeeds, the executor remains reusable.
-2. A **sandbox violation** means that fuel, call depth, interpreter environment, or a future
+2. A **sandbox violation** means that fuel, call depth, execution stack, interpreter environment, or a future
    accounted-memory limit was exceeded. It is not a source effect and cannot be caught by Ferlium
    code. It immediately poisons the affected execution domain; no further Ferlium cleanup runs.
 3. A **failure during cleanup** means a second source failure was raised while propagating an

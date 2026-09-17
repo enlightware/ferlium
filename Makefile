@@ -55,6 +55,14 @@ test-wasm-linkage:
 	CARGO_PROFILE_TEST_DEBUG=0 WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --release --chrome --firefox --headless --lib -- wasm_linkage
 	CARGO_PROFILE_TEST_DEBUG=0 wasm-pack test --release --node --lib -- wasm_linkage
 
+test-wasm-codegen:
+	CARGO_PROFILE_TEST_DEBUG=0 WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --release --chrome --firefox --headless --lib -- wasm_codegen
+	CARGO_PROFILE_TEST_DEBUG=0 wasm-pack test --release --node --lib -- wasm_codegen
+
+profile-wasm:
+	wasm-pack build examples/wasm-profile --target nodejs --release --out-dir ../../target/wasm-profile
+	node examples/wasm-profile/run.mjs $(ARGS)
+
 test: test-local test-wasm
 
 test-miri:

@@ -1,0 +1,16 @@
+// Copyright 2026 Enlightware GmbH
+// SPDX-License-Identifier: Apache-2.0
+
+#[inline(never)]
+fn step(total: int, i: int) -> int { total * 3 + i }
+
+fn compute(iterations: int) -> int {
+    let mut i = 0;
+    let mut total = 0;
+    loop {
+        if i >= iterations { break; };
+        total = step(total, i);
+        i += 1;
+    };
+    total
+}

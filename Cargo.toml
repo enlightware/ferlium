@@ -1,5 +1,5 @@
 [workspace]
-members = [ ".", "ferlium_macros", "playground/script-api", "fuzz" ]
+members = [ ".", "ferlium_macros", "playground/script-api", "examples/wasm-profile", "fuzz" ]
 
 [package]
 name = "ferlium"
@@ -37,7 +37,8 @@ env_logger ="0.11.5"
 gungraun = "0.18.2"
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
-wasm-bindgen-test = "0.3.50"
+wasm-bindgen-test = "0.3.78"
+wasmparser = { version = "0.259", default-features = false, features = ["std"] }
 
 [dependencies]
 dyn-clone = "1.0.17"
@@ -80,8 +81,8 @@ ferlium_macros = { path = "ferlium_macros", features = ["ferlium_abi_32"] }
 ferlium_macros = { path = "ferlium_macros", features = ["ferlium_abi_64"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen = "0.2.118"
-js-sys = "0.3.103"
+wasm-bindgen = "0.2.128"
+js-sys = "0.3.105"
 wasm-encoder = { version = "0.259", default-features = false, features = ["std"] }
 
 [lints.rust]

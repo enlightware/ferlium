@@ -4,7 +4,7 @@ Ferlium is designed to be integrated into existing Rust codebases, web apps thro
 
 The compiler parses source into an abstract syntax tree (AST), desugars it, and emits typed
 high-level IR (HIR) while resolving symbols and checking types. Ferlium can execute final HIR with
-its tree-walking interpreter or lower it to MIR for the MIR reference interpreter. Future machine
+its tree-walking interpreter or lower it to MIR for the MIR reference interpreter. Machine
 backends consume the backend-ready physical MIR stage specified in [mir-ir.md](mir-ir.md).
 
 ## Compiled runtime topology
@@ -30,9 +30,10 @@ diagnostics    -----------------------> import abort/reporting functions
                                          export module entrypoints
 ```
 
-The loader resolves registered native C entries from the Rust instance's function table and
-supplies them as direct function imports. JavaScript participates in linking, not in forwarding
-each native call. Table indexes are instance-local; compiler function identities remain symbolic.
+Rust and generated Ferlium code call each other directly through a shared ABI, without JavaScript
+argument conversion or call forwarding. JavaScript handles linking and the outer trap boundary;
+Rust owns execution state and failure handling. Compiled code is reusable across invocations with
+separate execution budgets.
 
 The compiled boundary is specified in [abi.md](abi.md). Memory accounting and reclamation are
 specified in [runtime-memory-limits.md](runtime-memory-limits.md) and

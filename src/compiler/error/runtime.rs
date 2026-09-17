@@ -39,6 +39,7 @@ impl Display for SourceFailureKind {
 pub enum SandboxViolationKind {
     CallDepthLimitExceeded { limit: usize },
     EnvironmentCellLimitExceeded { limit: usize },
+    StackByteLimitExceeded { limit: usize },
     FuelExhausted,
 }
 
@@ -54,6 +55,9 @@ impl Display for SandboxViolationKind {
                     f,
                     "Interpreter environment cell limit exceeded: limit is {limit}"
                 )
+            }
+            StackByteLimitExceeded { limit } => {
+                write!(f, "Execution stack byte limit exceeded: limit is {limit}")
             }
             FuelExhausted => write!(f, "Execution fuel exhausted"),
         }

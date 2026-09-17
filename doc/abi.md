@@ -182,6 +182,14 @@ Failures raised by Ferlium's accounted runtime use this defined path; exhaustion
 
 ## Wasm
 
+Rust and generated Ferlium code call each other through ABI-matched Wasm functions sharing one
+linear memory. Linking and an outer trap boundary may use JavaScript, but language arguments and
+results never require JavaScript conversion or forwarding.
+
+The wasm32 profile uses `i32` for pointers and target-sized Ferlium `int`. A wasm64 profile must
+change both integer transport and addressing; enabling 64-bit memory alone is insufficient.
+Rust hosts binding generated functions into their function table must link with `--growable-table`.
+
 The Wasm backend maps direct values to Wasm value types (`i32`, `i64`, `f32`, `f64`) following the scalar-slot rules.
 The `u32` status maps to Wasm `i32`, whose type does not encode signedness.
 Shared references, mutable references, and caller-allocated result pointers are represented as pointers in linear memory using the selected backend profile.

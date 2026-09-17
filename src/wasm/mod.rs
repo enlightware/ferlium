@@ -3,8 +3,17 @@
 
 //! Wasm32 linkage to the matching Rust runtime instance. Table lookup happens during linking;
 //! generated code imports the C entries themselves, not JavaScript or interpreter adapters.
+//! Hosts must link with `--growable-table` to bind generated entries into Rust's function table.
+//! This backend is wasm32-specific: pointers and Ferlium's target-sized `int` use i32. Wasm64
+//! needs coordinated changes to transport, addressing, memory declarations and invocation state.
 
+mod emit;
+mod execution;
 mod runtime;
+
+pub use execution::{
+    BoundFunction, CompiledProgram, Instance, WasmArguments, WasmLimits, WasmValue,
+};
 
 use js_sys::{Object, Reflect, WebAssembly::Table};
 use wasm_bindgen::{JsCast, JsValue};
@@ -193,3 +202,6 @@ impl Imports {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod codegen_tests;
