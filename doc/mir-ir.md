@@ -206,6 +206,9 @@ source-error payload follows the explicit CFG: normal code may `return`, one pen
 `propagate_error`, and a second failure must reach `failure_during_cleanup`. Normal and error control
 flow may not silently rejoin.
 
+Unsafe operations must not let a source failure escape a plain MIR operation:
+that violates the MIR contract, and no recoverable cleanup path exists there.
+
 Sandbox violations, such as exceeding fuel, call-depth, or memory limits, are not source failures.
 They bypass MIR successors, poison the executor, and enter runtime reclamation without running
 more guest cleanup.

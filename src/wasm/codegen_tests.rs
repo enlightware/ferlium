@@ -1,7 +1,7 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{fmt::Debug, hint::black_box, mem::offset_of, ptr};
+use std::{cell::Cell, fmt::Debug, hint::black_box, mem::offset_of, ptr};
 
 use js_sys::{Function as JsFunction, Reflect, Uint8Array, WebAssembly};
 use wasm_bindgen::{JsCast, JsValue};
@@ -14,13 +14,24 @@ use crate::{
         MirOptimization,
         error::{RuntimeErrorKind, SandboxViolationKind},
     },
-    hir::value::{NativeValueType, Value},
-    module::{FunctionId, Path},
+    execution::ReferenceInterpreterLimits,
+    hir::{
+        native_functions::NativeFnN,
+        value::{NativeValueType, Value},
+    },
+    module::{FunctionId, Module, Path},
     std::math::Float,
+    types::effects::{PrimitiveEffect, effect},
     ustr,
 };
 
 use super::{CompiledProgram, Imports, WasmLimits, WasmValue, emit, execution::InvocationState};
+
+thread_local! { static DROP_LOG: Cell<isize> = const { Cell::new(0) }; }
+
+fn record_drop(value: isize) {
+    DROP_LOG.set(DROP_LOG.get() * 10 + value);
+}
 
 // Observe the address of a real Rust shadow-stack slot without exporting runtime internals.
 #[inline(never)]
@@ -269,11 +280,168 @@ fn wasm_codegen_limits_and_rejection() {
         RuntimeErrorKind::SandboxViolation(SandboxViolationKind::FuelExhausted)
     ));
     assert_eq!(instance.run((3,), WasmLimits::default()).unwrap(), 3);
-    let entry = compile(
-        &mut session,
-        "fn compute(x: int) -> int { if x == 0 { 1 } else { idiv(3, x) } }",
-    );
-    assert!(CompiledProgram::compile(&session, entry).is_err());
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_managed_differential() {
+    // Bridge coverage until generated Wasm joins the shared language-suite harness.
+    let cases = [
+        "#[inline(never)] fn pair(x: int) -> (int, bool) { (x + 2, true) } fn compute(x: int) -> int { let p = pair(x); if p.1 { p.0 } else { 0 } }",
+        "struct Pair { a: int, b: float } #[inline(never)] fn update(p: &mut Pair) { p.a += 2; p.b += 1.0; } fn compute(x: int) -> int { let mut p = Pair { a: x, b: 2.0 }; update(p); p.a }",
+        "fn compute(x: int) -> int { let s = to_string(x); let copy = s; if s == copy { 1 } else { 0 } }",
+        "#[inline(never)] fn pair(x: int) -> (string, int) { (to_string(x), x) } fn compute(x: int) -> int { let p = pair(x); let copy = p; if p.0 == copy.0 { copy.1 } else { 0 } }",
+        "fn compute(x: int) -> int { let mut s = to_string(x); let mut i = 0; loop { if i >= x { break; }; s = string_concat(s, \"!\"); i += 1; }; if s == \"4!!!!\" { 1 } else { 0 } }",
+        "fn compute(x: int) -> int { let mut s = \"hello\"; string_push_str(s, \" world\"); if s == \"hello world\" { x } else { 0 } }",
+        "#[inline(never)] fn divide(x: int) -> int { idiv(20, x) } fn compute(x: int) -> int { let s = to_string(x); let result = divide(x); if s == to_string(x) { result } else { 0 } }",
+    ];
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(optimization);
+        session.set_physical_mir_optimization(optimization);
+        for source in cases {
+            differential::<isize, isize>(&mut session, source, 4);
+        }
+        let entry = compile(&mut session, cases.last().unwrap());
+        let expected = session
+            .run_entry(
+                ExecutionTarget::PhysicalMir,
+                entry.module,
+                entry.function,
+                vec![Value::native(0_isize)],
+            )
+            .unwrap_err();
+        let mut instance = CompiledProgram::compile(&session, entry)
+            .unwrap()
+            .instantiate::<(isize,), isize>()
+            .unwrap();
+        for _ in 0..3 {
+            assert_eq!(
+                instance
+                    .run((0,), WasmLimits::default())
+                    .unwrap_err()
+                    .kind(),
+                expected.kind()
+            );
+            assert_eq!(instance.run((4,), WasmLimits::default()).unwrap(), 5);
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_cleanup_failures() {
+    // Backend invariant: source cleanup runs, but poisoning never executes the outer destructor.
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        let mut session = CompilerSession::new();
+        session.set_allow_unsafe(true);
+        session.set_mir_optimization(optimization);
+        session.set_physical_mir_optimization(optimization);
+        let path = Path::single_str("probe");
+        let mut module = Module::new(session.modules().next_id(), path.clone());
+        module.add_function(
+            ustr("record"),
+            NativeFnN::from_rust(record_drop).description(
+                ["id"],
+                "",
+                effect(PrimitiveEffect::Write),
+            ),
+        );
+        session.register_module(path, module);
+        let entry = compile(
+            &mut session,
+            r#"
+            struct Probe(int)
+            impl Value for Probe {
+                fn eq(a: Probe, b: Probe) -> bool { a.0 == b.0 }
+                fn to_string(p: Probe) -> string { to_string(p.0) }
+                fn hash(p: Probe, h: &mut hasher) { hash(p.0, h) }
+                fn clone(p: Probe) -> Probe { Probe(p.0) }
+                fn drop(p: &mut Probe) {
+                    effects_unsafe {
+                        probe::record(p.0);
+                        if p.0 == 2 { loop {} }
+                    }
+                }
+            }
+            fn compute(x: int) -> int {
+                let outer = Probe(9);
+                let inner = Probe(x);
+                idiv(20, if x <= 3 { 0 } else { x })
+            }
+        "#,
+        );
+        let mut instance = CompiledProgram::compile(&session, entry)
+            .unwrap()
+            .instantiate::<(isize,), isize>()
+            .unwrap();
+        let limits = ReferenceInterpreterLimits::default().with_fuel_limit(Some(100));
+        for (input, log) in [(4, 49), (3, 39), (2, 2), (4, 49)] {
+            DROP_LOG.set(0);
+            let expected = session
+                .run_entry_with_limits(
+                    ExecutionTarget::PhysicalMir,
+                    entry.module,
+                    entry.function,
+                    vec![Value::native(input)],
+                    limits,
+                )
+                .map(|value| {
+                    let result = *value.as_primitive_ty::<isize>().unwrap();
+                    value.discard_storage();
+                    result
+                });
+            assert_eq!(DROP_LOG.get(), log);
+            DROP_LOG.set(0);
+            let actual = instance.run(
+                (input,),
+                WasmLimits {
+                    execution: limits.execution,
+                    ..WasmLimits::default()
+                },
+            );
+            assert_eq!(
+                actual.as_ref().map_err(|e| e.kind()),
+                expected.as_ref().map_err(|e| e.kind())
+            );
+            assert_eq!(DROP_LOG.get(), log);
+            if input == 2 {
+                assert!(
+                    actual
+                        .unwrap_err()
+                        .sandbox_violation()
+                        .unwrap()
+                        .interrupted_source_failure()
+                        .is_some()
+                );
+            }
+        }
+        // Fixed Value adapters must not charge extra source call-depth frames for destruction.
+        for depth in 2..8 {
+            DROP_LOG.set(0);
+            let limits = limits.with_call_depth_limit(depth);
+            let expected = session
+                .run_entry_with_limits(
+                    ExecutionTarget::PhysicalMir,
+                    entry.module,
+                    entry.function,
+                    vec![Value::native(4_isize)],
+                    limits,
+                )
+                .map(|value| value.discard_storage())
+                .map_err(|error| error.kind());
+            DROP_LOG.set(0);
+            let actual = instance
+                .run(
+                    (4,),
+                    WasmLimits {
+                        execution: limits.execution,
+                        ..WasmLimits::default()
+                    },
+                )
+                .map(|_| ())
+                .map_err(|error| error.kind());
+            assert_eq!(actual, expected, "call-depth limit {depth}");
+        }
+    }
 }
 
 #[wasm_bindgen_test]
@@ -338,7 +506,7 @@ fn wasm_codegen_inactive_entry_does_not_write_memory() {
     );
     let program = session.prepare_physical_program(entry.module).unwrap();
     let mut imports = Imports::new().unwrap();
-    let emitted = emit::emit(&program, entry, &mut imports).unwrap();
+    let emitted = emit::emit(&program, entry, &mut imports, &session).unwrap();
     let module = WebAssembly::Module::new(&Uint8Array::from(emitted.bytes.as_slice())).unwrap();
     let instance = WebAssembly::Instance::new(&module, imports.object()).unwrap();
     let entry: JsFunction = Reflect::get(&instance.exports(), &"entry".into())

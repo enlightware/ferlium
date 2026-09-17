@@ -7,8 +7,10 @@
 //! This backend is wasm32-specific: pointers and Ferlium's target-sized `int` use i32. Wasm64
 //! needs coordinated changes to transport, addressing, memory declarations and invocation state.
 
+mod abi;
 mod emit;
 mod execution;
+mod failure;
 mod runtime;
 
 pub use execution::{
@@ -19,12 +21,11 @@ use js_sys::{Object, Reflect, WebAssembly::Table};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_encoder::ValType;
 
+use self::abi::CallAbi;
+
 use crate::{
     FxHashMap,
-    hir::native_functions::{
-        NativeEntry, NativeFailureConvention, NativeParameter, NativeResult, NativeScalar,
-        NativeSignature,
-    },
+    hir::native_functions::{NativeEntry, NativeSignature},
     module::FunctionId,
 };
 
@@ -41,60 +42,13 @@ pub struct FunctionImport {
 impl FunctionImport {
     // Keep this mapping consistent with the rustc ABI probes in tests/native_abi/check_wasm.py.
     fn native(name: String, signature: &NativeSignature) -> Result<Self, JsValue> {
-        let fallible = signature.failure == NativeFailureConvention::StatusWithState;
-        if (fallible
-            && matches!(
-                signature.result,
-                NativeResult::Scalar(..) | NativeResult::Optional { .. }
-            ))
-            || (!fallible && signature.result == NativeResult::Never)
-        {
-            return Err(JsValue::from_str(&format!(
-                "invalid native result transport for Wasm import {name}"
-            )));
-        }
-        let mut parameters = Vec::new();
-        if fallible {
-            parameters.push(ValType::I32);
-        }
-        parameters.extend(
-            signature
-                .parameters
-                .iter()
-                .map(|parameter| match parameter {
-                    NativeParameter::Scalar(_, scalar) => scalar_type(*scalar),
-                    NativeParameter::Shared(_)
-                    | NativeParameter::Mutable(_)
-                    | NativeParameter::Consuming(_) => ValType::I32,
-                }),
-        );
-        let result = match signature.result {
-            NativeResult::Unit | NativeResult::Never => None,
-            NativeResult::Scalar(_, scalar) => Some(scalar_type(scalar)),
-            NativeResult::Addressor { .. } if !fallible => Some(ValType::I32),
-            NativeResult::Output(_) | NativeResult::Addressor { .. } => {
-                parameters.push(ValType::I32);
-                None
-            }
-            NativeResult::Optional { .. } => {
-                parameters.push(ValType::I32);
-                Some(ValType::I32)
-            }
-        };
+        let abi = CallAbi::native(signature)
+            .map_err(|reason| JsValue::from_str(&format!("{reason} for Wasm import {name}")))?;
         Ok(Self {
             name,
-            parameters,
-            results: if fallible { Some(ValType::I32) } else { result }
-                .into_iter()
-                .collect(),
+            parameters: abi.params(),
+            results: abi.results().into_iter().collect(),
         })
-    }
-}
-
-fn scalar_type(scalar: NativeScalar) -> ValType {
-    match scalar {
-        NativeScalar::Bool | NativeScalar::Int => ValType::I32,
-        NativeScalar::Float => ValType::F64,
     }
 }
 
@@ -141,6 +95,18 @@ impl Imports {
                 vec![ValType::I32],
                 vec![],
             ),
+            (
+                "capture_failure",
+                failure::capture as *const (),
+                vec![ValType::I32; 2],
+                vec![ValType::I32],
+            ),
+            (
+                "propagate_failure",
+                failure::propagate as *const (),
+                vec![ValType::I32; 2],
+                vec![ValType::I32],
+            ),
         ] {
             imports.insert(
                 FunctionImport {
@@ -166,6 +132,13 @@ impl Imports {
         )?;
         self.natives.insert(id, index);
         Ok(index)
+    }
+
+    pub(super) fn function_index(&self, name: &str) -> u32 {
+        self.functions
+            .iter()
+            .position(|function| function.name == name)
+            .expect("runtime import") as u32
     }
 
     pub fn functions(&self) -> &[FunctionImport] {

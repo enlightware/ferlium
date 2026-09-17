@@ -1456,9 +1456,15 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     profile.record_operation(key, operation);
                 }
                 self.operation(body, args, registers, operation, frame_base)
-                    .map_err(|error| match pending.take() {
-                        Some(initial) => initial.interrupted_by(error),
-                        None => error,
+                    .map_err(|error| {
+                        assert!(
+                            !matches!(error, RuntimeError::SourceFailure(_)),
+                            "a plain MIR operation raised a source failure"
+                        );
+                        match pending.take() {
+                            Some(initial) => initial.interrupted_by(error),
+                            None => error,
+                        }
                     })?;
             }
             if let Some(profile) = &mut self.profile {
@@ -2513,107 +2519,6 @@ mod tests {
                 }
                 (expected, actual) => panic!("{source}: expected={expected:?}, actual={actual:?}"),
             }
-        }
-    }
-
-    #[test]
-    fn physical_callable_drop_failure_detaches_environment() {
-        use crate::{
-            ExecutionTarget, MirOptimization,
-            compiler::error::{RuntimeErrorKind, SourceFailureKind},
-            mir::physical::lower_physical_mir,
-            module::Path,
-            std::{STD_MODULE_ID, math::int_value},
-        };
-        use ustr::ustr;
-
-        let mut session = CompilerSession::new();
-        session.set_allow_unsafe(true);
-        session.set_mir_optimization(MirOptimization::Disabled);
-        let module = session
-            .compile(
-                r#"
-            struct Bomb(int)
-            impl Value for Bomb {
-                fn eq(a: Bomb, b: Bomb) -> bool { a.0 == b.0 }
-                fn to_string(a: Bomb) -> string { to_string(a.0) }
-                fn hash(a: Bomb, s: &mut hasher) { hash(a.0, s) }
-                fn clone(a: Bomb) -> Bomb { Bomb(a.0 - 1) }
-                fn drop(a: &mut Bomb) { () }
-            }
-            fn fail_drop(a: &mut Bomb) { idiv(1, a.0); }
-            pub fn compute(x: int) -> int {
-                let bomb = Bomb(x); let f = || bomb.0; x
-            }
-            pub fn unwind(x: int) -> int {
-                let bomb = Bomb(x); let f = || bomb.0; idiv(1, 0)
-            }
-            "#,
-                "drop_failure",
-                Path::single_str("drop_failure"),
-            )
-            .unwrap()
-            .module_id;
-        session.prepare_execution_target(ExecutionTarget::Mir, module);
-        let compiled = session.expect_fresh_module(module);
-        let fail = compiled.get_local_function_id(ustr("fail_drop")).unwrap();
-        let mut artifacts = [STD_MODULE_ID, module].map(|id| {
-            lower_physical_mir(
-                id,
-                session
-                    .mir_artifacts_for(id, MirOptimization::Disabled)
-                    .unwrap(),
-                ModuleEnv::new(session.expect_fresh_module(id), session.raw_modules()),
-                session.known_callees(),
-            )
-            .unwrap()
-        });
-        // Source-level Value::drop is pure. Inject a failing body to exercise defensive cleanup
-        // without weakening that contract or adding an invalid native ABI fixture.
-        let fail = artifacts[1].direct_entry(fail);
-        let failure = artifacts[1].entries[fail.as_index()]
-            .as_ref()
-            .unwrap()
-            .clone();
-        let targets = artifacts[1]
-            .entries
-            .iter_mut()
-            .enumerate()
-            .filter(|(index, body)| {
-                *index != fail.as_index()
-                    && body.as_ref().is_some_and(|body| {
-                        body.name.contains("drop")
-                            && body.parameters().len() == failure.parameters().len()
-                            && body
-                                .parameters()
-                                .iter()
-                                .zip(failure.parameters())
-                                .all(|(a, b)| a.ty == b.ty && a.kind == b.kind)
-                    })
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(targets.len(), 1);
-        for (_, body) in targets {
-            *body = Some(failure.clone());
-        }
-        let program = resolve_physical_program(artifacts.iter()).unwrap();
-        for (name, expected) in [
-            (
-                "compute",
-                RuntimeErrorKind::SourceFailure(SourceFailureKind::DivisionByZero),
-            ),
-            ("unwind", RuntimeErrorKind::FailureDuringCleanup),
-        ] {
-            let entry = compiled.get_local_function_id(ustr(name)).unwrap();
-            let error = run_entry(
-                &program,
-                FunctionId::new(module, entry),
-                &mut [int_value(1)],
-                ReferenceInterpreterLimits::default(),
-                &session,
-            )
-            .unwrap_err();
-            assert_eq!(error.kind(), expected, "{name}: {error:?}");
         }
     }
 
