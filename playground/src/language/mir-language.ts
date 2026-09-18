@@ -17,8 +17,8 @@ const operationKeywords = new Set([
 	"borrow_subscript_member", "variant", "build_array", "extract_tag",
 	"extract_payload_indirection", "is_initialized", "store", "clear", "memcpy", "move",
 	"replace", "move_bytes", "stack_save", "stack_restore",
-	"check_call_depth", "check_fuel", "drop", "clone", "build_closure", "clone_closure_env",
-	"drop_closure_env",
+	"check_call_depth", "check_fuel", "drop", "drop_initialized", "clone", "build_closure",
+	"clone_closure_env", "drop_closure_env",
 ]);
 const contextualKeywords = new Set([
 	"arg", "owned", "extra", "using", "from", "to", "via", "capturing", "error",

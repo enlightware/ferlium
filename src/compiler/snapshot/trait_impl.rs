@@ -9,7 +9,7 @@ use crate::{
     Location,
     module::{
         BlanketTraitImplSubKey, ConcreteTraitImplKey, DictionaryEntryEvidence, LocalFunctionId,
-        LocalImplId, ModuleId, TraitId, TraitImpl, TraitImpls, build_dictionary_value,
+        LocalImplId, ModuleId, TraitId, TraitImpl, TraitImpls, build_dictionary_value, id::Id,
     },
     types::{
         effects::{EffType, Effect},
@@ -69,9 +69,9 @@ fn capture_types(
 
 fn live_type(types: &[Type], value: SnapshotTypeId) -> Result<Type, SnapshotError> {
     types
-        .get(value.0 as usize)
+        .get(value.as_index())
         .copied()
-        .ok_or(SnapshotError::InvalidTypeReference(value.0))
+        .ok_or(SnapshotError::InvalidTypeReference(value.as_u32()))
 }
 
 fn live_types(values: &[SnapshotTypeId], types: &[Type]) -> Result<Vec<Type>, SnapshotError> {

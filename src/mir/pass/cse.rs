@@ -858,6 +858,7 @@ fn transfer(
             forget_write(state, origins, &operation.operands[1]);
         }
         OperationKind::Drop { .. }
+        | OperationKind::DropInitialized { .. }
         | OperationKind::DropSubscriptEnv
         | OperationKind::DropClosureEnv
         | OperationKind::CloneClosureEnv { .. } => {

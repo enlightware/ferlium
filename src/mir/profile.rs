@@ -100,6 +100,7 @@ impl MirInstructionKind {
                 | Op::EndProject
                 | Op::Clone
                 | Op::Drop
+                | Op::DropInitialized
                 | Op::CloneSubscriptEnv
                 | Op::DropSubscriptEnv
                 | Op::CloneClosureEnv
@@ -253,6 +254,7 @@ impl MirExecutionProfile {
             | OperationKind::BorrowSubscriptMember { ty, .. }
             | OperationKind::Clone { ty }
             | OperationKind::Drop { ty }
+            | OperationKind::DropInitialized { ty }
             | OperationKind::BuildClosure { ty, .. }
             | OperationKind::CloneClosureEnv { ty } => Some(*ty),
             OperationKind::Variant { metadata, .. } => Some(metadata.ty),

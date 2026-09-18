@@ -381,6 +381,7 @@ fn operation_types(kind: &OperationKind, types: &mut Vec<Type>) {
         | MoveBytes { ty }
         | Clone { ty }
         | Drop { ty }
+        | DropInitialized { ty }
         | BuildClosure { ty, .. }
         | CloneClosureEnv { ty } => types.push(*ty),
         AllocaPlace { pointing_to } | AddressOffsetPlace { pointing_to } => {

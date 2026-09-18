@@ -243,11 +243,20 @@ their externally visible identity. Generated helpers are ordinary entries in the
 Semantic and physical stages use the same MIR structures, and shared operations retain their
 meaning. Partially lowered bodies are not valid input to physical executors.
 
+Before address expansion, physical lowering replaces initialization-aware `drop` with explicit
+guards and `drop_initialized`, whose pointee must be fully initialized. Partial constructions
+destroy their completed fields individually.
+The checked physical interpreter asserts these contracts independently.
+Initialization flags belong to construction and cleanup scopes, not the value ABI. Whole-value
+transfers require complete sources; on source failure, a callee leaves no live result in its output.
+`replace` installs a complete replacement and transfers the displaced value's possibly partial
+state into the replacement's storage for cleanup.
+
 Shared optimization may run again after physical expansion. Rewrites preserve physical place and
 ownership contracts; transformed artifacts are reverified before execution or backend emission.
 
 Physical MIR retains shared ownership, callable, and control-flow operations with physical storage
-semantics; it is not machine instruction-level IR. In particular, `clone`, `drop`, scoped
+semantics; it is not machine instruction-level IR. In particular, `clone`, `drop_initialized`, scoped
 `project`/`yield`, and `invoke` remain valid. Unresolved semantic field projections and semantic
 subscript-member selection must instead be expanded before this boundary.
 

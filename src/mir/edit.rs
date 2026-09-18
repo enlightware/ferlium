@@ -231,6 +231,17 @@ impl FunctionEdit {
         })
     }
 
+    /// Appends an operation, assigning a fresh result identity if it produces a value.
+    pub(crate) fn append_operation(
+        &mut self,
+        block: BlockId,
+        mut operation: Operation,
+    ) -> Option<mir::Value> {
+        let result = self.assign_new_result(&mut operation);
+        self.block_mut(block).operations.push(operation);
+        result
+    }
+
     /// Replace one operation with an already-linked operation sequence.
     pub(crate) fn replace_operation_sequence(
         &mut self,

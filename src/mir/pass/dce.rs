@@ -670,7 +670,8 @@ pub(super) fn may_leave_frame_storage(
         | OperationKind::EndProject
         | OperationKind::DictEntry { .. }
         | OperationKind::SubscriptMember { .. }
-        | OperationKind::Drop { .. } => true,
+        | OperationKind::Drop { .. }
+        | OperationKind::DropInitialized { .. } => true,
         // A call reclaims its own script frame, and closure calls bracket their materialized
         // evidence and environment internally. The one caller-frame temporary is a symbolic
         // subscript passed as script evidence; retaining every such call is conservative because a
@@ -831,7 +832,7 @@ impl DceCensus {
                         && let mir::Value::Register(target) = &operation.operands[1]
                         && let Some(&(clone, ty)) = pending_clones.get(target)
                         && let Some(drop) = basic_block.operations().get(index.as_index() + 1)
-                        && matches!(drop.kind, OperationKind::Drop { ty: dropped } if dropped == ty)
+                        && matches!(drop.kind, OperationKind::Drop { ty: dropped } | OperationKind::DropInitialized { ty: dropped } if dropped == ty)
                         && drop.operands.first() == operation.operands.first()
                     {
                         census.same_block_clone_drop_pairs.push(CloneDropPair {
@@ -907,7 +908,7 @@ impl DceCensus {
                 remove_pending_operands(pending);
                 pending.insert(*destination, (index, *ty));
             }
-            OperationKind::Drop { ty }
+            OperationKind::Drop { ty } | OperationKind::DropInitialized { ty }
                 if let Some(mir::Value::Register(target)) = operation.operands.first()
                     && operation
                         .operands
@@ -975,7 +976,10 @@ impl DceCensus {
             && matches!(operation.operands[0], mir::Value::Function(_));
         let is_clone_constructor =
             matches!(operation.kind, OperationKind::Clone { .. }) && position == 1;
-        let is_drop = matches!(operation.kind, OperationKind::Drop { .. }) && position == 0;
+        let is_drop = matches!(
+            operation.kind,
+            OperationKind::Drop { .. } | OperationKind::DropInitialized { .. }
+        ) && position == 0;
         let is_construction_use =
             is_array_constructor || is_bare_function_constructor || is_clone_constructor || is_drop;
         if !removable_store {
@@ -1161,7 +1165,9 @@ impl DceCensus {
 fn is_exact_clone_lifetime_role(operation: &Operation, position: usize) -> bool {
     match &operation.kind {
         OperationKind::Clone { .. } => position == 1,
-        OperationKind::Drop { .. } | OperationKind::Clear => position == 0,
+        OperationKind::Drop { .. }
+        | OperationKind::DropInitialized { .. }
+        | OperationKind::Clear => position == 0,
         OperationKind::Store
         | OperationKind::Memcpy
         | OperationKind::Move

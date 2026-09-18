@@ -8,6 +8,7 @@ use super::{
 };
 use crate::{
     Location,
+    module::id::Id,
     types::{
         r#trait::{Trait, TraitAssociatedConst, TraitImplPolicy, TraitSpans},
         r#type::{
@@ -129,9 +130,9 @@ impl SnapshotTypeAlias {
             generic_params: live_names(&self.generic_params),
             ty_var_count: self.ty_var_count,
             ty: types
-                .get(self.ty.0 as usize)
+                .get(self.ty.as_index())
                 .copied()
-                .ok_or(SnapshotError::InvalidTypeReference(self.ty.0))?,
+                .ok_or(SnapshotError::InvalidTypeReference(self.ty.as_u32()))?,
             doc: self.doc.clone(),
         })
     }
@@ -379,9 +380,9 @@ impl SnapshotTrait {
                     Ok(TraitAssociatedConst {
                         name: value.name.as_str().into(),
                         ty: types
-                            .get(value.ty.0 as usize)
+                            .get(value.ty.as_index())
                             .copied()
-                            .ok_or(SnapshotError::InvalidTypeReference(value.ty.0))?,
+                            .ok_or(SnapshotError::InvalidTypeReference(value.ty.as_u32()))?,
                         doc: value.doc.clone(),
                     })
                 })

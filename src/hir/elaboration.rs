@@ -1179,7 +1179,7 @@ fn effect_set_is_contained_in(required: &EffType, available: &EffType) -> bool {
 /// order need not match the final generalized scheme. The function surface is nevertheless the
 /// authoritative relationship between both schemes. Repeated pairs are accepted coinductively so
 /// recursive interned type graphs terminate without assigning identity by case tag.
-fn bind_call_type_instantiation(
+pub(crate) fn bind_call_type_instantiation(
     pattern: Type,
     actual: Type,
     subst: &mut FxHashMap<TypeVar, Type>,
@@ -1282,6 +1282,23 @@ pub struct ElaboratedHir {
     pub root: ENodeId,
     pub remap: FxHashMap<UNodeId, ENodeId>,
     pub locals: Vec<ELocalDecl>,
+}
+
+/// Whether evaluation can leave a construction needing guest cleanup (poisoning does not).
+fn can_interrupt(arena: &UNodeArena, node: UNodeId) -> bool {
+    arena[node].effects.iter().any(|effect| {
+        matches!(
+            effect,
+            Effect::Variable(_) | Effect::Primitive(PrimitiveEffect::Fallible)
+        )
+    }) || matches!(
+        arena[node].kind,
+        NodeKind::Return(_) | NodeKind::Break(_) | NodeKind::Continue(_)
+    ) || arena[node]
+        .kind
+        .child_node_ids()
+        .iter()
+        .any(|child| can_interrupt(arena, *child))
 }
 
 fn node_contains_yield(arena: &UNodeArena, root: UNodeId) -> bool {
@@ -1599,21 +1616,6 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
         let ty = src[old].ty;
         let effects = &src[old].effects;
         let span = src[old].span;
-        fn can_interrupt(arena: &UNodeArena, node: UNodeId) -> bool {
-            arena[node].effects.iter().any(|effect| {
-                matches!(
-                    effect,
-                    Effect::Variable(_) | Effect::Primitive(PrimitiveEffect::Fallible)
-                )
-            }) || matches!(
-                arena[node].kind,
-                NodeKind::Return(_) | NodeKind::Break(_) | NodeKind::Continue(_)
-            ) || arena[node]
-                .kind
-                .child_node_ids()
-                .iter()
-                .any(|child| can_interrupt(arena, *child))
-        }
         // Poisoning needs no guest cleanup. Only source failure or a control transfer can
         // require dropping a completed prefix; straight-line constructors stay unchanged.
         let prefix_len = nodes
@@ -1652,7 +1654,16 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     cleanup,
                 })));
             }
-            let drop = drops.get(index).copied().unwrap_or(ResolvedLocalDrop::Skip);
+            // The interrupting field can itself hold a partial in-place construction. Later
+            // fields cannot be interrupted and need no temporary cleanup obligation.
+            let drop = match drops.get(index).copied() {
+                Some(drop) => drop,
+                None if index == prefix_len => {
+                    resolve_local_drop(&mut self.generated, self.ctx, src[node].ty, span)?
+                        .into_elaborated()
+                }
+                None => ResolvedLocalDrop::Skip,
+            };
             let local = self.push_owned_temp(src[node].ty, drop, span, ustr("$field"));
             body.push(self.alloc_elaborated_node(
                 NodeKind::StoreLocal(hir::StoreLocal { value, id: local }),
@@ -2843,11 +2854,56 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                         self.ctx.trait_solver,
                     )?)
                 };
-                Variant(hir::Variant {
+                let mut payload = self.elaborate_node(src, variant.payload)?;
+                // A custom destructor only accepts complete receivers. Stage interruptible
+                // payloads before publishing the shell; the local owns any partial construction.
+                let custom_drop = matches!(&*node_ty.data(), TypeKind::Named(named)
+                    if self.ctx.trait_solver.type_def(named.def).has_custom_value_impl);
+                let staged = if custom_drop
+                    && payload_ty != Type::unit()
+                    && can_interrupt(src, variant.payload)
+                {
+                    let drop =
+                        resolve_local_drop(&mut self.generated, self.ctx, payload_ty, node_span)?
+                            .into_elaborated();
+                    let local = self.push_owned_temp(payload_ty, drop, node_span, ustr("$payload"));
+                    let store = self.alloc_elaborated_node(
+                        StoreLocal(hir::StoreLocal {
+                            value: payload,
+                            id: local,
+                        }),
+                        Type::unit(),
+                        src[variant.payload].effects.clone(),
+                        node_span,
+                    );
+                    payload = self.alloc_elaborated_node(
+                        TakeLocalValue(hir::TakeLocalValue {
+                            id: local,
+                            mode: ResolvedTakeLocalValueMode::MoveOwned,
+                        }),
+                        payload_ty,
+                        no_effects(),
+                        node_span,
+                    );
+                    Some((local, store))
+                } else {
+                    None
+                };
+                let construction = Variant(hir::Variant {
                     tag: variant.tag,
-                    payload: self.elaborate_node(src, variant.payload)?,
+                    payload,
                     payload_storage: Some(payload_storage),
-                })
+                });
+                if let Some((local, store)) = staged {
+                    let value =
+                        self.alloc_elaborated_node(construction, node_ty, no_effects(), node_span);
+                    Block(b(hir::Block {
+                        body: b(SVec2::from_vec(vec![store, value])),
+                        cleanup: vec![local],
+                    }))
+                } else {
+                    construction
+                }
             }
             Array(nodes) => self.elaborate_construction(src, old, nodes, Array)?,
             Case(case) => {

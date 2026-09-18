@@ -630,6 +630,33 @@ fn inline_at(edit: &mut FunctionEdit, body: &Function, site: Site, env: ModuleEn
     edit.block_mut(site.block()).terminator = Terminator::goto(span, entry);
 }
 
+/// Splice compiler-generated cleanup at an ordinary call site. Unlike optional inlining, this
+/// expansion preserves the caller's partial-place identities for drop elaboration.
+pub(crate) fn expand_cleanup(
+    edit: &mut FunctionEdit,
+    body: &Function,
+    block: BlockId,
+    index: usize,
+    env: ModuleEnv<'_>,
+) {
+    assert!(body.blocks().all(|block| !matches!(
+        body.block(block).terminator().kind,
+        TerminatorKind::Invoke { .. }
+            | TerminatorKind::PropagateError
+            | TerminatorKind::FailureDuringCleanup
+            | TerminatorKind::Yield { .. }
+    )));
+    inline_at(
+        edit,
+        body,
+        Site::Operation {
+            block,
+            index: OperationIndex::from_index(index),
+        },
+        env,
+    );
+}
+
 /// The state of one splice: what the callee's identities become in the caller.
 struct Copier<'a> {
     body: &'a Function,

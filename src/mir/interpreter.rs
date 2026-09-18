@@ -862,6 +862,9 @@ impl<'a> Interpreter<'a> {
             OperationKind::Drop { .. } => {
                 self.exec_drop(slots, &operation.operands, span)?;
             }
+            OperationKind::DropInitialized { .. } => {
+                unreachable!("drop_initialized belongs to physical MIR")
+            }
             OperationKind::Clone { .. } => {
                 self.exec_clone(slots, &operation.operands, span)?;
             }

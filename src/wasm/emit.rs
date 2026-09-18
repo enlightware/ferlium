@@ -17,7 +17,7 @@ use crate::{
     hir::{
         function::ArgConvention,
         native_functions::{NativeResult, NativeScalar},
-        value::LiteralValue,
+        value::{LiteralValue, VariantPayloadStorage},
     },
     mir::{
         BasicBlock, BlockId, Function, Operation, OperationKind, ParameterId, ParameterKind, Value,
@@ -32,12 +32,16 @@ use crate::{
     std::{
         math::Float,
         string::StaticStr,
-        value::{product_layout_spec, value_layout_for_type},
+        value::{
+            product_layout_spec, structural_variant, value_layout_for_type, variant_payload_offset,
+            variant_payload_storage_for_type,
+        },
     },
     types::{
         r#type::{CallResultConvention, Type, TypeKind},
         type_like::TypeLike,
     },
+    ustr,
 };
 
 use super::{
@@ -129,9 +133,11 @@ fn script_abi(body: &Function) -> Result<CallAbi, String> {
     // Thus MIR input indices also index abi.parameters; only the failure pointer shifts locals.
     if !matches!(
         body.result_convention(),
-        CallResultConvention::Value | CallResultConvention::NoValue
+        CallResultConvention::Value
+            | CallResultConvention::NoValue
+            | CallResultConvention::ADDRESSOR_PLACE
     ) {
-        return Err("scoped or addressor result convention".into());
+        return Err("scoped result convention".into());
     }
     let mut parameters = Vec::new();
     let mut result = None;
@@ -160,6 +166,9 @@ fn script_abi(body: &Function) -> Result<CallAbi, String> {
         }
     }
     let result_kind = match result {
+        Some(_) if body.result_convention() == CallResultConvention::ADDRESSOR_PLACE => {
+            ResultKind::Direct(ScalarType::pointer().wasm())
+        }
         None => ResultKind::Unit,
         Some(ty) if ty == Type::unit() || ty == Type::never() => ResultKind::Unit,
         Some(ty) => {
@@ -195,6 +204,16 @@ pub(super) fn emit(
     let entry_body = program
         .function(entry)
         .ok_or_else(|| format!("missing script entry {entry:?}"))?;
+    if !matches!(
+        entry_body.result_convention(),
+        CallResultConvention::Value | CallResultConvention::NoValue
+    ) {
+        return Err(diagnostic(
+            entry,
+            entry_body,
+            "Wasm host binding requires a value result",
+        ));
+    }
     if entry_body.parameters().iter().any(|p| {
         !matches!(
             p.kind,
@@ -241,17 +260,14 @@ pub(super) fn emit(
                 block.terminator().kind,
                 TerminatorKind::Goto { .. }
                     | TerminatorKind::CondBr { .. }
+                    | TerminatorKind::SwitchVariant { .. }
                     | TerminatorKind::Invoke { .. }
                     | TerminatorKind::PropagateError
                     | TerminatorKind::FailureDuringCleanup
                     | TerminatorKind::Return
                     | TerminatorKind::InvariantFailure { .. }
             ) {
-                return Err(diagnostic(
-                    id,
-                    body,
-                    "unsupported terminator (variant switch or yield)",
-                ));
+                return Err(diagnostic(id, body, "unsupported terminator (yield)"));
             }
             for operation in operations(block) {
                 if let Some(callee) = callee(operation) {
@@ -267,15 +283,8 @@ pub(super) fn emit(
                             .and_then(|m| m.native_entry(target))
                             .ok_or_else(|| diagnostic(id, body, "missing native entry"))?;
                         let sig = native.signature();
-                        if matches!(
-                            sig.result,
-                            NativeResult::Optional { .. } | NativeResult::Addressor { .. }
-                        ) {
-                            return Err(diagnostic(
-                                id,
-                                body,
-                                "optional or addressor native result",
-                            ));
+                        if matches!(sig.result, NativeResult::Addressor { .. }) {
+                            return Err(diagnostic(id, body, "addressor native result"));
                         }
                         let index = imports
                             .add_native(target, native)
@@ -336,6 +345,7 @@ pub(super) fn emit(
             signature,
             &callees,
             program,
+            session,
             session
                 .modules()
                 .env_for(session.expect_fresh_module(id.module)),
@@ -417,7 +427,9 @@ fn callee(op: &Operation) -> Option<Value> {
     match &op.kind {
         OperationKind::Call { .. } => Some(op.operands[0].clone()),
         OperationKind::Clone { .. } => Some(op.operands[2].clone()),
-        OperationKind::Drop { .. } => Some(op.operands[1].clone()),
+        OperationKind::Drop { .. } | OperationKind::DropInitialized { .. } => {
+            Some(op.operands[1].clone())
+        }
         _ => None,
     }
 }
@@ -548,9 +560,10 @@ struct Body<'a> {
     strings: &'a mut Vec<StaticStr>,
     pending_failure: u32,
     scratch: u32,
-    replacements: FxHashMap<Type, u32>,
+    scratch_slots: FxHashMap<Type, u32>,
     callees: &'a FxHashMap<FunctionId, (u32, CallAbi)>,
     program: &'a ResolvedPhysicalProgram<'a>,
+    session: &'a CompilerSession,
     registers: FxHashMap<ValueId, u32>,
     storage: FxHashMap<Value, Storage>,
     locals: Vec<ValType>,
@@ -561,11 +574,13 @@ struct Body<'a> {
 }
 
 impl<'a> Body<'a> {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         body: &'a Function,
         signature: &'a CallAbi,
         callees: &'a FxHashMap<FunctionId, (u32, CallAbi)>,
         program: &'a ResolvedPhysicalProgram<'a>,
+        session: &'a CompilerSession,
         env: ModuleEnv<'a>,
         imports: &'a Imports,
         strings: &'a mut Vec<StaticStr>,
@@ -578,9 +593,10 @@ impl<'a> Body<'a> {
             strings,
             pending_failure: 0,
             scratch: 0,
-            replacements: FxHashMap::default(),
+            scratch_slots: FxHashMap::default(),
             callees,
             program,
+            session,
             roles: ValueRoles::derive(body),
             registers: FxHashMap::default(),
             storage: FxHashMap::default(),
@@ -618,7 +634,7 @@ impl<'a> Body<'a> {
                     .is_some_and(|p| matches!(p, ParameterTransport::Direct(_)))
             {
                 let value = Value::Parameter(ParameterId::from_index(index));
-                let ty = ScalarType::of(parameter.ty)?;
+                let ty = this.pointee(&value)?;
                 if addressed.contains(&value) {
                     this.slot(value, ty.size())?;
                 } else {
@@ -637,15 +653,12 @@ impl<'a> Body<'a> {
                     let MirType::Lowered(ty) = this.pointee_type(&operation.operands[0])? else {
                         return Err("pointer replacement".into());
                     };
-                    if !this.replacements.contains_key(&ty) {
-                        let offset = this.frame_size;
-                        let size = this.size(&MirType::Lowered(ty))?;
-                        this.frame_size = this
-                            .frame_size
-                            .checked_add(size.max(1).checked_add(7).ok_or("frame overflow")? & !7)
-                            .ok_or("frame overflow")?;
-                        this.replacements.insert(ty, offset);
-                    }
+                    this.reserve_scratch(ty)?;
+                }
+                if let Some(Value::Function(target)) = callee(operation)
+                    && let Some(payload) = this.optional_payload(target)
+                {
+                    this.reserve_scratch(payload)?;
                 }
                 if let Some(id) = operation.result_id() {
                     let storage_ty = match &operation.kind {
@@ -672,7 +685,9 @@ impl<'a> Body<'a> {
                         .get(&Value::Register(id), body.constants())
                         .unwrap();
                     let ty = match &*role {
-                        ValueRole::Place(_) | ValueRole::StackMarker => ValType::I32,
+                        ValueRole::Place(_) | ValueRole::StackMarker | ValueRole::VariantTag => {
+                            ValType::I32
+                        }
                         ValueRole::Materialized(ty) => match scalar(ty) {
                             Ok(ty) => ty.wasm(),
                             Err(_) => {
@@ -715,6 +730,92 @@ impl<'a> Body<'a> {
                 Ok(layout.size)
             }
         }
+    }
+
+    fn optional_payload(&self, target: FunctionId) -> Option<Type> {
+        let native = self.program.module(target.module)?.native_entry(target)?;
+        match native.signature().result {
+            NativeResult::Optional { payload, .. } => Some(payload.ty),
+            _ => None,
+        }
+    }
+
+    fn reserve_scratch(&mut self, ty: Type) -> Result<(), String> {
+        if !self.scratch_slots.contains_key(&ty) {
+            let size = self.size(&MirType::Lowered(ty))?;
+            let offset = self.frame_size;
+            self.frame_size = self
+                .frame_size
+                .checked_add(size.max(1).checked_add(7).ok_or("frame overflow")? & !7)
+                .ok_or("frame overflow")?;
+            self.scratch_slots.insert(ty, offset);
+        }
+        Ok(())
+    }
+
+    fn scratch_address(&mut self, ty: Type) {
+        self.i(I::LocalGet(self.frame.expect("scratch needs a frame")));
+        self.i(I::I32Const(self.scratch_slots[&ty] as i32));
+        self.i(I::I32Add);
+    }
+
+    /// Turn the native presence result and temporary payload into an owned Ferlium Option.
+    fn finish_optional(&mut self, output: &Value, payload: Type) -> Result<(), String> {
+        let MirType::Lowered(ty) = self.pointee_type(output)? else {
+            return Err("optional output must be a value place".into());
+        };
+        let (_, cases) =
+            structural_variant(ty, &self.env).ok_or("optional output is not a variant")?;
+        let some = cases
+            .iter()
+            .find(|(tag, _)| *tag == ustr("Some"))
+            .ok_or("optional output has no Some case")?
+            .1;
+        let span = Location::new_synthesized();
+        let storage = variant_payload_storage_for_type(ty, ustr("Some"), span, &self.env)
+            .map_err(|e| format!("optional payload storage: {e:?}"))?;
+        let layout = value_layout_for_type(some, span, &self.env)
+            .map_err(|e| format!("optional payload layout: {e:?}"))?;
+        let field = product_layout_spec(some, span, &self.env)
+            .and_then(|p| p.static_field_offset(ProjectionIndex::from_index(0)))
+            .ok_or("optional payload must be a concrete tuple")? as u32;
+        self.i(I::If(BlockType::Empty)); // Native presence, not a source-failure status.
+        self.address(output)?;
+        self.i(I::I32Const(
+            storage.encode_tag_id(self.session.variant_tag_id(ustr("Some"))) as i32,
+        ));
+        self.i(I::I32Store(memarg(2)));
+        self.address(output)?;
+        self.i(I::I32Const(
+            variant_payload_offset(if storage.is_indirect() {
+                align_of::<usize>() as u32
+            } else {
+                layout.align
+            }) as i32,
+        ));
+        self.i(I::I32Add);
+        if storage.is_indirect() {
+            self.i(I::I32Const(layout.size as i32));
+            self.i(I::I32Const(layout.align as i32));
+            self.i(I::Call(self.imports.function_index("alloc")));
+            self.i(I::LocalTee(self.scratch));
+            self.i(I::I32Store(memarg(2)));
+            self.i(I::LocalGet(self.scratch));
+        }
+        self.i(I::I32Const(field as i32));
+        self.i(I::I32Add);
+        self.scratch_address(payload);
+        self.i(I::I32Const(self.size(&MirType::Lowered(payload))? as i32));
+        self.i(I::MemoryCopy {
+            src_mem: 0,
+            dst_mem: 0,
+        });
+        self.i(I::Else);
+        self.address(output)?;
+        self.i(I::I32Const(self.session.variant_tag_id(ustr("None")) as i32));
+        self.i(I::I32Store(memarg(2)));
+        self.i(I::End);
+        Ok(())
     }
 
     fn pointee_type(&self, value: &Value) -> Result<MirType, String> {
@@ -763,10 +864,9 @@ impl<'a> Body<'a> {
         if self.signature.fallible {
             self.i(I::I32Const(i32::from(failed)));
         } else if matches!(self.signature.result, ResultKind::Direct(_)) {
-            self.load_place(
-                &Value::Parameter(ParameterId::from_index(self.body.parameters().len() - 1)),
-                ScalarType::of(self.body.parameters().last().unwrap().ty)?,
-            )?;
+            let result =
+                Value::Parameter(ParameterId::from_index(self.body.parameters().len() - 1));
+            self.load_place(&result, self.pointee(&result)?)?;
         }
         self.i(I::Return);
         Ok(())
@@ -853,7 +953,7 @@ impl<'a> Body<'a> {
                 op.operands[3..].iter().chain([&op.operands[0]]).collect(),
                 Some(&op.operands[1]),
             ),
-            OperationKind::Drop { .. } => (
+            OperationKind::Drop { .. } | OperationKind::DropInitialized { .. } => (
                 op.operands[2..].iter().chain([&op.operands[0]]).collect(),
                 None,
             ),
@@ -884,10 +984,16 @@ impl<'a> Body<'a> {
                 ParameterTransport::Indirect => self.address(input)?,
             }
         }
-        if abi.output() {
+        let optional_payload = self.optional_payload(target);
+        if let Some(payload) = optional_payload {
+            self.scratch_address(payload);
+        } else if abi.output() {
             self.address(output.ok_or("missing output storage")?)?;
         }
         self.i(I::Call(index));
+        if let Some(payload) = optional_payload {
+            self.finish_optional(output.ok_or("missing optional output")?, payload)?;
+        }
         if let Some(ty) = direct_result {
             self.finish_store(output.unwrap(), ty);
         }
@@ -1040,7 +1146,9 @@ impl<'a> Body<'a> {
     }
 
     fn literal(&mut self, literal: &LiteralValue) -> Result<(), String> {
-        if let Some(value) = literal.as_primitive_ty::<isize>() {
+        if let LiteralValue::VariantTag(tag) = literal {
+            self.i(I::I32Const(self.session.variant_tag_id(*tag) as i32));
+        } else if let Some(value) = literal.as_primitive_ty::<isize>() {
             self.i(I::I32Const(*value as i32));
         } else if let Some(value) = literal.as_primitive_ty::<bool>() {
             self.i(I::I32Const(i32::from(*value)));
@@ -1069,6 +1177,10 @@ impl<'a> Body<'a> {
             .roles
             .get(value, self.body.constants())
             .ok_or("missing operand role")?;
+        if matches!(&*role, ValueRole::VariantTag) {
+            self.value(value)?;
+            return Ok(ScalarType::pointer());
+        }
         if let Some(pointee) = role.place_pointee_type() {
             let ty = scalar(&pointee)?;
             self.load_place(value, ty)?;
@@ -1232,6 +1344,22 @@ impl<'a> Body<'a> {
                 self.i(I::LocalSet(self.pc.expect("branch needs a dispatcher")));
                 self.i(I::Br(dispatch_depth.expect("branch needs a dispatcher")));
             }
+            TerminatorKind::SwitchVariant {
+                tag,
+                cases,
+                default,
+            } => {
+                self.i(I::I32Const(default.as_u32() as i32));
+                for (case, target) in cases {
+                    self.i(I::I32Const(target.as_u32() as i32));
+                    self.value(tag)?;
+                    self.i(I::I32Const(self.session.variant_tag_id(*case) as i32));
+                    self.i(I::I32Ne);
+                    self.i(I::Select);
+                }
+                self.i(I::LocalSet(self.pc.expect("switch needs a dispatcher")));
+                self.i(I::Br(dispatch_depth.expect("switch needs a dispatcher")));
+            }
             TerminatorKind::Invoke {
                 operation,
                 normal,
@@ -1346,10 +1474,7 @@ impl<'a> Body<'a> {
                 let MirType::Lowered(ty) = self.pointee_type(&args[0])? else {
                     return Err("pointer replacement".into());
                 };
-                let offset = self.replacements[&ty];
-                self.i(I::LocalGet(self.frame.unwrap()));
-                self.i(I::I32Const(offset as i32));
-                self.i(I::I32Add);
+                self.scratch_address(ty);
                 self.i(I::LocalSet(self.scratch));
                 let size = self.size(&MirType::Lowered(ty))?;
                 self.i(I::LocalGet(self.scratch));
@@ -1380,6 +1505,31 @@ impl<'a> Body<'a> {
                 self.i(I::I32Add);
             }
             Clear | StackRestore => (), // Lifetimes are explicit in MIR; backing frame bytes may remain stale after cleanup.
+            Variant {
+                tag,
+                storage: Some(storage),
+                has_layout_witness: false,
+                ..
+            } => {
+                self.address(&Value::Register(op.result_id().unwrap()))?;
+                self.i(I::I32Const(
+                    storage.encode_tag_id(self.session.variant_tag_id(*tag)) as i32,
+                ));
+                self.i(I::I32Store(memarg(2)));
+                // A shell initializes only the tag; physical MIR constructs its payload in place.
+                return Ok(());
+            }
+            ExtractTag | ExtractPayloadIndirection => {
+                self.address(&args[0])?;
+                self.i(I::I32Load(memarg(2)));
+                if matches!(op.kind, ExtractTag) {
+                    self.i(I::I32Const(!VariantPayloadStorage::INDIRECT_TAG_BIT as i32));
+                    self.i(I::I32And);
+                } else {
+                    self.i(I::I32Const(31));
+                    self.i(I::I32ShrU);
+                }
+            }
             StackSave => self.i(I::I32Const(0)),
             CompareEqual => {
                 let ty = self.read(&args[0])?;
@@ -1415,7 +1565,9 @@ impl<'a> Body<'a> {
                 self.i(I::GlobalSet(Global::Fuel as u32));
                 self.i(I::End);
             }
-            Call { .. } | Clone { .. } | Drop { .. } => self.call_operation(op, false)?,
+            Call { .. } | Clone { .. } | Drop { .. } | DropInitialized { .. } => {
+                self.call_operation(op, false)?
+            }
             RuntimeAlloc { .. } => {
                 self.read(&args[0])?;
                 self.read(&args[1])?;

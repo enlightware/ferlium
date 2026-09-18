@@ -966,6 +966,19 @@ impl Operation {
         }
     }
 
+    /// Unconditionally destroys a fully initialized pointee; physical lowering supplies any guard.
+    pub fn drop_initialized(
+        span: Location,
+        target: mir::Value,
+        callee: mir::Value,
+        ty: Type,
+    ) -> Self {
+        Self {
+            kind: OperationKind::DropInitialized { ty },
+            ..Self::drop(span, target, callee, ty)
+        }
+    }
+
     /// Creates a `clone` operation.
     ///
     /// Copies the pointee of `source` (a place) into `destination` (an uninitialized place) by
@@ -1264,8 +1277,10 @@ pub enum OperationKind {
     /// while a `clone` runs the type's own copying logic. Which one lowering emits is decided by
     /// whether the type is trivially copyable.
     Clone { ty: Type },
-    /// Semantically drop an initialized value through its `Value::drop` function.
+    /// Semantically drop a value if any of its storage is present.
     Drop { ty: Type },
+    /// Physically drop a fully initialized value, with no implicit initialization guard.
+    DropInitialized { ty: Type },
     /// Construct a closure from a function and its captured environment.
     BuildClosure {
         function: FunctionId,
@@ -1328,6 +1343,7 @@ impl OperationKind {
             | CheckFuel
             | Clone { .. }
             | Drop { .. }
+            | DropInitialized { .. }
             | CloneClosureEnv { .. }
             | DropClosureEnv => {}
         }
@@ -1380,6 +1396,7 @@ impl OperationKind {
             | CheckFuel
             | Clone { .. }
             | Drop { .. }
+            | DropInitialized { .. }
             | CloneClosureEnv { .. }
             | DropClosureEnv => None,
         }
@@ -1494,6 +1511,7 @@ impl OperationKind {
             | CheckFuel
             | Clone { .. }
             | Drop { .. }
+            | DropInitialized { .. }
             | DropSubscriptEnv
             | DropClosureEnv => OperationResult::Nothing,
         }
@@ -1686,7 +1704,7 @@ impl OperationKind {
             CheckCallDepth | CheckFuel => {
                 assert!(whole.operands.is_empty(), "runtime checks take no operands")
             }
-            Drop { .. } => assert!(
+            Drop { .. } | DropInitialized { .. } => assert!(
                 whole.operands.len() >= 2,
                 "drop takes the target place, the Value::drop callee, and optional hidden evidence"
             ),
@@ -1968,10 +1986,15 @@ impl OperationKind {
             // The type is printed bare, as `alloca` prints its own: it is what decides whether the
             // semantic form is still needed after substitution, and for a dictionary-dispatched
             // callee it is not recoverable from the rest of the line.
-            Drop { ty } => {
+            Drop { ty } | DropInitialized { ty } => {
                 write!(
                     f,
-                    "drop {} {} via {}",
+                    "{} {} {} via {}",
+                    if matches!(self, DropInitialized { .. }) {
+                        "drop_initialized"
+                    } else {
+                        "drop"
+                    },
                     ty.format_with(env),
                     whole.operands[0].format_with(env),
                     whole.operands[1].format_with(env)

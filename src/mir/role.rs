@@ -788,7 +788,7 @@ pub(crate) fn check_operand_roles(
                 "MIR function `{func_name}` {at}: stack_restore needs a stack marker, got {role:?}"
             );
         }
-        OperationKind::Drop { .. } => {
+        OperationKind::Drop { .. } | OperationKind::DropInitialized { .. } => {
             place(0);
             let callee = role(1);
             assert!(

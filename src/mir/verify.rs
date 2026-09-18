@@ -519,6 +519,22 @@ impl<'a> Verifier<'a> {
                 CallResultConvention::NoValue,
                 "NoValue entries belong to physical MIR"
             );
+            assert!(
+                !self.func.blocks().any(|block| {
+                    let block = self.func.block(block);
+                    block
+                        .operations()
+                        .iter()
+                        .chain(match &block.terminator().kind {
+                            TerminatorKind::Invoke { operation, .. } => Some(operation),
+                            _ => None,
+                        })
+                        .any(|operation| {
+                            matches!(operation.kind, OperationKind::DropInitialized { .. })
+                        })
+                }),
+                "drop_initialized belongs to physical MIR"
+            );
         }
         self.verify_shared_contracts(roles);
         if semantic_storage {

@@ -2121,6 +2121,21 @@ impl Memory {
         }
         Ok(true)
     }
+    /// Check the complete inline representation, including a variant's active payload or pointer
+    /// slot. Owning pointers do not recursively inspect their separately allocated pointees.
+    pub(super) fn fully_initialized(&self, address: Address) -> Result<bool, RuntimeError> {
+        let node = self.node(address)?;
+        if node.state != StorageState::Product && !node.state.locally_present() {
+            return Ok(false);
+        }
+        for &child in &node.children {
+            if !self.fully_initialized(self.address(address.allocation, child))? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     pub(super) fn any_initialized(&self, address: Address) -> Result<bool, RuntimeError> {
         let node = self.node(address)?;
         if node.state.locally_present() {
@@ -3369,10 +3384,12 @@ mod tests {
             memory.initialized(root).unwrap(),
             "a shell stays live during payload construction"
         );
+        assert!(!memory.fully_initialized(root).unwrap());
         assert!(memory.read_value(root, false).is_err());
         let offset = variant_payload_offset(align_of::<isize>() as u32) as usize;
         let first = memory.offset(root, offset, int).unwrap();
         memory.write(first, Scalar::Int(42)).unwrap();
+        assert!(memory.fully_initialized(root).unwrap());
         let whole = memory.read_value(root, false).unwrap();
         let copy = memory.allocate(ty, None).unwrap();
         memory.write_value(copy, &whole).unwrap();
@@ -3396,6 +3413,7 @@ mod tests {
             .shell(ty, "Empty".into(), VariantPayloadStorage::Inline)
             .unwrap();
         memory.write_value(root, &empty).unwrap();
+        assert!(memory.fully_initialized(root).unwrap());
         assert!(memory.read_value(root, false).is_ok());
         let value = memory.export(root).unwrap();
         assert_eq!(value.variant_tag(), Some("Empty".into()));

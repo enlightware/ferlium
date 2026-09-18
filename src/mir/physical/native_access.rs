@@ -211,6 +211,7 @@ pub(super) fn verify(
             }
             OperationKind::Clear
             | OperationKind::Drop { .. }
+            | OperationKind::DropInitialized { .. }
             | OperationKind::DropSubscriptEnv
             | OperationKind::RuntimeDealloc => consume(&operands[0])?,
             OperationKind::Move | OperationKind::MoveBytes { .. } => {

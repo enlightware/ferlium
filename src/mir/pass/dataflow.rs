@@ -1103,7 +1103,7 @@ fn transfer(
                 state.set_place(place, Fact::Unknown, register_places);
             }
         }
-        OperationKind::Drop { .. } => {
+        OperationKind::Drop { .. } | OperationKind::DropInitialized { .. } => {
             if let Some(place) = place_of(&operation.operands[0])
                 && tracked(place)
             {
@@ -1370,7 +1370,7 @@ pub(crate) fn escaping_roots(
             // call's result place is, so neither escapes — exactly as when a clone was spelled as a
             // call. The callee is read by reference.
             OperationKind::Clone { .. } => {}
-            OperationKind::Drop { .. } => {
+            OperationKind::Drop { .. } | OperationKind::DropInitialized { .. } => {
                 let target = &operation.operands[0];
                 if !mutations_modelled(operation)
                     && register_places

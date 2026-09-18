@@ -712,7 +712,9 @@ fn elide_trivial_ownership_operations(edit: &mut FunctionEdit, env: ModuleEnv<'_
                     let destination = operation.operands[1].clone();
                     *operation = Operation::memcpy(operation.span, source, destination);
                 }
-                OperationKind::Drop { ty } if concrete_type_is_trivial_copy(*ty, &env) => {
+                OperationKind::Drop { ty } | OperationKind::DropInitialized { ty }
+                    if concrete_type_is_trivial_copy(*ty, &env) =>
+                {
                     dead_drops.push(index);
                 }
                 _ => {}
@@ -780,7 +782,7 @@ fn elide_trivial_ownership_operations(edit: &mut FunctionEdit, env: ModuleEnv<'_
 /// emitter would have chosen the static form. Left in place it is a live use of the dictionary, and
 /// a backend would honour it and emit dynamic layout code for a value whose layout it knows. The
 /// MIR interpreter ignores it, so this changes no behaviour today.
-fn drop_redundant_layout_witnesses(edit: &mut FunctionEdit, env: ModuleEnv<'_>) {
+pub(crate) fn drop_redundant_layout_witnesses(edit: &mut FunctionEdit, env: ModuleEnv<'_>) {
     for block_id in edit.blocks().collect::<Vec<_>>() {
         let block = edit.block_mut(block_id);
         let operations = block
@@ -1021,7 +1023,7 @@ fn open_projection_fallibility(edit: &FunctionEdit) -> FxHashMap<ValueId, bool> 
 /// enumerate a body's per-operation types through this same traversal. They deliberately do *not*
 /// do that for the signature and the constant pool, which they read directly — a check sharing the
 /// traversal it checks cannot see what the traversal skips.
-fn map_types(edit: &mut FunctionEdit, mapper: &mut impl TypeMapper) {
+pub(crate) fn map_types(edit: &mut FunctionEdit, mapper: &mut impl TypeMapper) {
     for parameter in edit.parameters_mut() {
         parameter.ty = parameter.ty.map(mapper);
     }
@@ -1146,7 +1148,9 @@ fn substitute_in_operation(operation: &mut Operation, mapper: &mut impl TypeMapp
         | OperationKind::RuntimeDealloc
         | OperationKind::DropSubscriptEnv
         | OperationKind::DropClosureEnv => {}
-        OperationKind::Clone { ty } | OperationKind::Drop { ty } => *ty = ty.map(mapper),
+        OperationKind::Clone { ty }
+        | OperationKind::Drop { ty }
+        | OperationKind::DropInitialized { ty } => *ty = ty.map(mapper),
     }
 }
 
@@ -1427,7 +1431,7 @@ fn worth_specializing<Ty: TypeLike>(
                 {
                     return true;
                 }
-                OperationKind::Clone { ty } | OperationKind::Drop { ty }
+                OperationKind::Clone { ty } | OperationKind::Drop { ty } | OperationKind::DropInitialized { ty }
                     if ty.is_variable()
                         && concrete_type_is_trivial_copy(ty.map(&mut mapper), &env) =>
                 {

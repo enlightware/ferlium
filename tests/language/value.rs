@@ -3654,9 +3654,23 @@ fn partial_construction_drops_completed_fields() {
         ("{ a: Probe(1), b: Probe(2), c: idiv(1, x) }", 21),
         ("(Probe(1), (Probe(2), idiv(1, x)))", 21),
         ("[Probe(1), Probe(idiv(1, x))]", 1),
+        ("(if x == 0 { Probe(1) } else { Probe(2) }, idiv(1, x))", 1),
+        (
+            "Tree::Branch(Tree::Leaf(Probe(1)), Tree::Leaf(Probe(idiv(1, x))))",
+            1,
+        ),
+        (
+            "(Probe(1), Tree::Branch(Tree::Leaf(Probe(2)), Tree::Leaf(Probe(idiv(1, x)))))",
+            21,
+        ),
+        (
+            "{ for i in 0..3 { let p = (Probe(i + 1), idiv(1, 1 - i)); }; () }",
+            12,
+        ),
     ] {
         let source = format!(
-            "{} fn build(x: int) {{ let value = {expression}; }}
+            "{} enum Tree {{ Leaf(Probe), Branch(Tree, Tree) }}
+             fn build(x: int) {{ let value = {expression}; }}
              testing::reset_tracked_drops(); build(0)",
             tracked_probe_value_impl()
         );
@@ -3684,4 +3698,73 @@ fn partial_product_construction_drops_fields_on_early_return() {
         tracked_probe_value_impl()
     );
     assert_val_eq!(session.run(&source), int(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn partial_variant_cleanup_uses_dependency_destructors() {
+    for mode in RunMode::ALL {
+        let mut session = TestSession::new();
+        session.allow_unsafe();
+        session.run_modes([mode]);
+        session
+            .try_compile_module(
+                "trees",
+                "pub enum Tree<T> { Leaf(T), Branch(Tree<T>, Tree<T>) }",
+            )
+            .unwrap();
+        let source = format!(
+            "{} fn build(x: int) {{
+                let tree = trees::Tree::Branch(
+                    trees::Tree::Leaf(Probe(1)), trees::Tree::Leaf(Probe(idiv(1, x))));
+            }} testing::reset_tracked_drops(); build(0)",
+            tracked_probe_value_impl()
+        );
+        assert_eq!(session.fail_run(&source), SourceFailureKind::DivisionByZero);
+        assert_val_eq!(session.run("testing::tracked_drop_log()"), int(1));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn custom_variant_drop_requires_a_completed_payload() {
+    let source = r#"
+        enum Tree { Leaf(int), Branch(Tree, Tree) }
+        enum Packet { End, Node(int, Packet), Wrap(Tree) }
+        impl Value for Packet {
+            fn eq(a: Packet, b: Packet) -> bool { true }
+            fn to_string(a: Packet) -> string { "packet" }
+            fn hash(a: Packet, s: &mut hasher) { () }
+            fn clone(a: Packet) -> Packet {
+                match a {
+                    End => Packet::End,
+                    Node(n, tail) => Packet::Node(n, tail),
+                    Wrap(tree) => Packet::Wrap(tree),
+                }
+            }
+            fn drop(a: &mut Packet) {
+                testing::record_tracked_drop(9);
+                loop {}
+            }
+        }
+    "#;
+    for construction in [
+        "Packet::Node(idiv(1, x), Packet::End)",
+        "Packet::Wrap(Tree::Branch(Tree::Leaf(1), Tree::Leaf(idiv(1, x))))",
+    ] {
+        // The physical executor also checks that no indirect payload allocation lost its owner
+        // on this source-failure exit, including shells nested in the staged payload local.
+        let source = format!(
+            "{source}
+            fn build(x: int) -> Packet {{ {construction} }}
+            testing::reset_tracked_drops(); build(0)"
+        );
+        for mode in RunMode::ALL {
+            let mut session = TestSession::new();
+            session.allow_unsafe();
+            session.run_modes([mode]);
+            assert_eq!(session.fail_run(&source), SourceFailureKind::DivisionByZero);
+            assert_val_eq!(session.run("testing::tracked_drop_log()"), int(0));
+        }
+    }
 }

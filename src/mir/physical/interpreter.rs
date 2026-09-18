@@ -502,6 +502,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     | OperationKind::AddressOffset { ty, .. }
                     | OperationKind::Clone { ty }
                     | OperationKind::Drop { ty }
+                    | OperationKind::DropInitialized { ty }
                     | OperationKind::MoveBytes { ty }
                     | OperationKind::BuildClosure { ty, .. }
                     | OperationKind::BuildSubscript { ty }
@@ -654,6 +655,10 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 self.memory.write(values, Scalar::Unit)?;
             }
             for (index, &capture) in captures.iter().enumerate() {
+                assert!(
+                    self.memory.fully_initialized(capture)?,
+                    "physical lowering error at {span:?}: closure capture must be complete"
+                );
                 self.memory.check_consume(capture)?;
                 let value = self.memory.read_value(capture, false)?;
                 self.memory
@@ -1166,6 +1171,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             | EndProject
             | Clone { .. }
             | Drop { .. }
+            | DropInitialized { .. }
             | Call { .. }
             | DictEntry { .. }
             | BuildDictionary { .. }
@@ -1249,6 +1255,12 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             if self.memory.is_pointer_slot(argument.place()?)? != pointer_result {
                 return Err(invalid("call argument storage role mismatch"));
             }
+            if parameter.kind == ParameterKind::Owned {
+                assert!(
+                    self.memory.fully_initialized(argument.place()?)?,
+                    "physical lowering error in {id:?}: owned argument must be complete"
+                );
+            }
         }
         // Explicit CheckCallDepth operations preserve the boxed executor's source-level policy.
         let marker = self.memory.len();
@@ -1257,6 +1269,26 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         let result = self.run_frame(id, body, &args, marker);
         self.depth -= 1;
         self.types = previous_types;
+        // A callee owns partial result construction, including cleanup before a source failure.
+        // Poisoning abandons that contract along with guest cleanup.
+        if let Some((argument, _)) = args
+            .iter()
+            .zip(body.parameters())
+            .find(|(_, parameter)| parameter.kind == ParameterKind::Return)
+        {
+            let address = argument.place()?;
+            match &result {
+                Ok(()) => assert!(
+                    self.memory.fully_initialized(address)?,
+                    "physical lowering error in {id:?}: returned an incomplete result"
+                ),
+                Err(RuntimeError::SourceFailure(_)) => assert!(
+                    !self.memory.any_initialized(address)?,
+                    "physical lowering error in {id:?}: source failure left a live result"
+                ),
+                _ => (),
+            }
+        }
         self.memory.restore(marker);
         if let Some(output) = output {
             let adapter = self
@@ -1584,15 +1616,23 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     .map_err(|error| error.with_frame(id, operation.span))?;
                 None
             }
+            DropInitialized { ty } => {
+                self.drop_operation(body, args, registers, operation, *ty)?;
+                None
+            }
             Clone { .. }
-            | Drop { .. }
             | Project { .. }
             | EndProject
             | CloneClosureEnv { .. }
             | CloneSubscriptEnv { .. }
             | DropClosureEnv
             | DropSubscriptEnv => self.lifecycle_operation(body, args, registers, operation)?,
-            _ => self.storage_operation(body, args, registers, operation, frame_base)?,
+            _ => {
+                // Layout getters execute guest code. Resolve them before entering the larger
+                // storage-operation frame, which must not remain live across those calls.
+                let layout = self.storage_witness_layout(body, args, registers, operation)?;
+                self.storage_operation(body, args, registers, operation, frame_base, layout)?
+            }
         };
         if let Some(value) = result {
             // Construction transfers its initial owner; other results retain borrowed evidence.
@@ -1624,7 +1664,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         let operand =
             |index: usize| self.operand(body, args, registers, &operation.operands[index]);
         let place = |index| operand(index)?.place();
-        if let Clone { ty } | Drop { ty } = &operation.kind {
+        if let Clone { ty } = &operation.kind {
             if !same_storage_type(place(0)?.ty, self.types.resolve(*ty)) {
                 return Err(invalid("operation type differs from storage type"));
             }
@@ -1671,32 +1711,89 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     .map_err(|error| error.with_frame(id, operation.span))?;
                 None
             }
-            Drop { .. } => {
-                let address = place(0)?;
-                // Drop must not skip an aggregate with remaining live fields. Partial-construction
-                // cleanup is emitted per field (or through a structural drop body); a custom
-                // destructor must only be called once its receiver is fully constructed.
-                // IsInitialized, by contrast, asks whether the entire selected value is present.
-                if self.memory.any_initialized(address)? {
-                    let callable = self.resolve_callable(operand(1)?)?;
-                    let id = callable.function;
-                    let mut values = (2..operation.operands.len())
-                        .map(operand)
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let marker = self.memory.len();
-                    let result = self
-                        .memory
-                        .allocate(ScalarKind::Unit.ty(), Some(operation.span))?;
-                    values.extend([Binding::Place(address), Binding::Place(result)]);
-                    let outcome = self.invoke(callable, values);
-                    self.memory.restore(marker);
-                    outcome.map_err(|error| error.with_frame(id, operation.span))?;
-                    self.memory.clear(address)?;
-                }
-                None
-            }
             _ => unreachable!("lifecycle operation dispatch"),
         })
+    }
+
+    // Recursive destruction must not retain the other lifecycle arms' temporaries on the stack.
+    fn drop_operation(
+        &mut self,
+        body: &Function,
+        args: &[Binding],
+        registers: &FxHashMap<ValueId, Binding>,
+        operation: &Operation,
+        ty: Type,
+    ) -> Result<(), RuntimeError> {
+        let operand =
+            |index: usize| self.operand(body, args, registers, &operation.operands[index]);
+        let address = operand(0)?.place()?;
+        if !same_storage_type(address.ty, self.types.resolve(ty)) {
+            return Err(invalid("operation type differs from storage type"));
+        }
+        assert!(
+            self.memory.fully_initialized(address)?,
+            "physical lowering error: drop_initialized requires fully initialized storage"
+        );
+        let callable = self.resolve_callable(operand(1)?)?;
+        let id = callable.function;
+        let mut values = (2..operation.operands.len())
+            .map(operand)
+            .collect::<Result<Vec<_>, _>>()?;
+        let marker = self.memory.len();
+        let result = self
+            .memory
+            .allocate(ScalarKind::Unit.ty(), Some(operation.span))?;
+        values.extend([Binding::Place(address), Binding::Place(result)]);
+        let outcome = self.invoke(callable, values);
+        self.memory.restore(marker);
+        outcome.map_err(|error| error.with_frame(id, operation.span))?;
+        self.memory.clear(address)
+    }
+
+    fn storage_witness_layout(
+        &mut self,
+        body: &Function,
+        args: &[Binding],
+        registers: &FxHashMap<ValueId, Binding>,
+        operation: &Operation,
+    ) -> Result<Option<[usize; 2]>, RuntimeError> {
+        use OperationKind::*;
+        let operand =
+            |index: usize| self.operand(body, args, registers, &operation.operands[index]);
+        let place = |index| operand(index)?.place();
+        let witness = match &operation.kind {
+            Alloca { ty } if !operation.operands.is_empty() => Some((0, self.types.resolve(*ty))),
+            Move if operation.operands.len() == 3 => Some((
+                2,
+                match operand(0)? {
+                    Binding::Callable(_) => place(1)?.ty,
+                    source => source.place()?.ty,
+                },
+            )),
+            Replace if operation.operands.len() == 3 => Some((2, place(0)?.ty)),
+            Variant {
+                metadata,
+                has_layout_witness: true,
+                ..
+            } => Some((
+                operation.operands.len() - 1,
+                self.types.resolve(metadata.payload_ty),
+            )),
+            _ => None,
+        };
+        if let Some((index, ty)) = witness {
+            let evidence = operand(index)?.evidence(&self.memory)?;
+            if !same_storage_type(evidence.layout_type()?, ty) {
+                return Err(invalid("layout evidence differs from storage type"));
+            }
+            let layout = self.witness_layout(evidence, operation.span)?;
+            if matches!(operation.kind, Variant { .. }) {
+                self.memory.check_type_layout(ty, layout[0], layout[1])?;
+            }
+            Ok(Some(layout))
+        } else {
+            Ok(None)
+        }
     }
 
     fn storage_operation(
@@ -1706,6 +1803,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         registers: &mut FxHashMap<ValueId, Binding>,
         operation: &Operation,
         frame_base: usize,
+        witnessed_layout: Option<[usize; 2]>,
     ) -> Result<Option<Binding>, RuntimeError> {
         use OperationKind::*;
         let operand =
@@ -1720,36 +1818,6 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             }),
             _ => None,
         };
-        let witness = match &operation.kind {
-            Alloca { ty } if !operation.operands.is_empty() => Some((0, self.types.resolve(*ty))),
-            Move if operation.operands.len() == 3 => Some((2, transfer_storage.unwrap().ty)),
-            Replace if operation.operands.len() == 3 => Some((2, place(0)?.ty)),
-            Variant {
-                metadata,
-                has_layout_witness: true,
-                ..
-            } => Some((
-                operation.operands.len() - 1,
-                self.types.resolve(metadata.payload_ty),
-            )),
-            _ => None,
-        };
-        let witnessed_layout = if let Some((index, ty)) = witness {
-            let evidence = operand(index)?.evidence(&self.memory)?;
-            if !same_storage_type(evidence.layout_type()?, ty) {
-                return Err(invalid("layout evidence differs from storage type"));
-            }
-            let layout = self.witness_layout(evidence, operation.span)?;
-            if matches!(operation.kind, Variant { .. }) {
-                self.memory.check_type_layout(ty, layout[0], layout[1])?;
-            }
-            Some(layout)
-        } else {
-            None
-        };
-        let operand =
-            |index: usize| self.operand(body, args, registers, &operation.operands[index]);
-        let place = |index| operand(index)?.place();
         if let MoveBytes { ty } = &operation.kind {
             if !same_storage_type(transfer_storage.unwrap().ty, self.types.resolve(*ty)) {
                 return Err(invalid("operation type differs from storage type"));
@@ -2007,9 +2075,9 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 self.memory.clear(place(0)?)?;
                 None
             }
-            IsInitialized => Some(Binding::Scalar(Scalar::Bool(
-                self.memory.initialized(place(0)?)?,
-            ))),
+            IsInitialized | Drop { .. } => {
+                panic!("physical lowering error: implicit destruction state")
+            }
             Memcpy | Move | MoveBytes { .. } => {
                 let storage = transfer_storage.unwrap();
                 if let Some([size, align]) = witnessed_layout {
@@ -2032,6 +2100,11 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 }
                 let source = place(0)?;
                 let destination = place(1)?;
+                assert!(
+                    self.memory.fully_initialized(source)?,
+                    "physical lowering error at {:?}: transfer of an incomplete value",
+                    operation.span
+                );
                 if matches!(operation.kind, Move | MoveBytes { .. }) && source != destination {
                     self.memory.check_consume(source)?;
                 }
@@ -2048,6 +2121,11 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             Replace => {
                 let source = place(0)?;
                 let destination = place(1)?;
+                assert!(
+                    self.memory.fully_initialized(source)?,
+                    "physical lowering error at {:?}: replacement must be complete",
+                    operation.span
+                );
                 if let Some([size, align]) = witnessed_layout {
                     self.memory.check_layout(source, size, align)?;
                 }
@@ -2292,6 +2370,8 @@ impl<'a, 'p> Interpreter<'a, 'p> {
 
 #[cfg(test)]
 mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
     use super::*;
     use crate::{Location, mir::physical::program::resolve_physical_program};
     #[cfg(target_arch = "wasm32")]
@@ -2523,6 +2603,102 @@ mod tests {
     }
 
     #[test]
+    fn physical_drop_initialized_requires_complete_storage() {
+        use crate::module::Path;
+
+        let mut session = CompilerSession::new();
+        let module = session
+            .compile(
+                "pub fn dispose(p: &mut (int, int)) { p.0 = 99; }",
+                "initialized_drop",
+                Path::single_str("initialized_drop"),
+            )
+            .unwrap()
+            .module_id;
+        let callee = FunctionId::new(
+            module,
+            session
+                .expect_fresh_module(module)
+                .get_local_function_id("dispose".into())
+                .unwrap(),
+        );
+        let program = session.prepare_physical_program(module).unwrap();
+        let mut interpreter = Interpreter {
+            profile: None,
+            program: &program,
+            memory: Memory::default(),
+            limits: ReferenceInterpreterLimits::default(),
+            fuel: None,
+            depth: 0,
+            session: &session,
+            types: RuntimeTypes::default(),
+            static_evidence: FxHashMap::default(),
+            environments: FxHashMap::default(),
+            prepared: FxHashSet::default(),
+            prepared_monomorphic: FxHashSet::default(),
+            projections: Vec::new(),
+        };
+        interpreter.prepare_native_storage().unwrap();
+        let ty = Type::tuple([ScalarKind::Int.ty(); 2]);
+        let env = ModuleEnv::new(session.expect_fresh_module(module), session.raw_modules());
+        interpreter.memory.prepare_type(ty, &env).unwrap();
+        let target = interpreter.memory.allocate(ty, None).unwrap();
+        let first = interpreter
+            .memory
+            .project(target, 0, ScalarKind::Int.ty(), None)
+            .unwrap();
+        let second = interpreter
+            .memory
+            .project(target, size_of::<isize>(), ScalarKind::Int.ty(), None)
+            .unwrap();
+        let id = ValueId::from_index(0);
+        let registers = FxHashMap::from_iter([(id, Binding::Place(target))]);
+        let operation = Operation::drop_initialized(
+            Location::new_synthesized(),
+            mir::Value::Register(id),
+            mir::Value::Function(callee),
+            ty,
+        );
+        let body = program.function(callee).unwrap();
+        for initialized in 0..=2 {
+            if initialized == 1 {
+                interpreter.memory.write(first, Scalar::Int(1)).unwrap();
+                let destination = interpreter.memory.allocate(ty, None).unwrap();
+                let destination_id = ValueId::from_index(1);
+                let mut transfers = registers.clone();
+                transfers.insert(destination_id, Binding::Place(destination));
+                let source = mir::Value::Register(id);
+                let destination = mir::Value::Register(destination_id);
+                for transfer in [
+                    Operation::move_value(operation.span, source.clone(), destination.clone()),
+                    Operation::replace(operation.span, source, destination, None),
+                ] {
+                    assert!(
+                        catch_unwind(AssertUnwindSafe(|| {
+                            interpreter.operation(body, &[], &mut transfers, &transfer, 0)
+                        }))
+                        .is_err()
+                    );
+                }
+            } else if initialized == 2 {
+                interpreter.memory.write(second, Scalar::Int(2)).unwrap();
+            }
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                interpreter.drop_operation(body, &[], &registers, &operation, ty)
+            }));
+            if initialized < 2 {
+                assert!(result.is_err());
+                if initialized == 1 {
+                    assert_eq!(interpreter.memory.read(first).unwrap(), Scalar::Int(1));
+                }
+            } else {
+                result.unwrap().unwrap();
+                assert!(!interpreter.memory.any_initialized(target).unwrap());
+            }
+        }
+    }
+
+    #[test]
     fn physical_scalar_transfers_preserve_absence_and_self_moves() {
         let program = resolve_physical_program([]).unwrap();
         let session = CompilerSession::new();
@@ -2565,9 +2741,10 @@ mod tests {
         let span = Location::new_synthesized();
         let self_move = Operation::move_value(span, source_operand.clone(), source_operand.clone());
         assert!(
-            interpreter
-                .operation(&body, &[], &mut registers, &self_move, 0)
-                .is_err()
+            catch_unwind(AssertUnwindSafe(|| {
+                interpreter.operation(&body, &[], &mut registers, &self_move, 0)
+            }))
+            .is_err()
         );
         interpreter.memory.write(source, Scalar::Int(42)).unwrap();
         interpreter
@@ -2576,6 +2753,13 @@ mod tests {
         assert_eq!(interpreter.memory.read(source).unwrap(), Scalar::Int(42));
 
         let replace = Operation::replace(span, source_operand, destination_operand, None);
+        interpreter.memory.clear(source).unwrap();
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                interpreter.operation(&body, &[], &mut registers, &replace, 0)
+            }))
+            .is_err()
+        );
         for old in [None, Some(Scalar::Int(7))] {
             interpreter.memory.clear(destination).unwrap();
             if let Some(old) = old {

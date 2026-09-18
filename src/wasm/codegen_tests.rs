@@ -16,12 +16,15 @@ use crate::{
     },
     execution::ReferenceInterpreterLimits,
     hir::{
-        native_functions::NativeFnN,
+        native_functions::{NativeFnN, NativeOptionalFnN},
         value::{NativeValueType, Value},
     },
     module::{FunctionId, Module, Path},
-    std::math::Float,
-    types::effects::{PrimitiveEffect, effect},
+    std::{math::Float, option::option_type, string::String},
+    types::{
+        effects::{PrimitiveEffect, effect},
+        r#type::Type,
+    },
     ustr,
 };
 
@@ -323,6 +326,83 @@ fn wasm_codegen_managed_differential() {
                 expected.kind()
             );
             assert_eq!(instance.run((4,), WasmLimits::default()).unwrap(), 5);
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_variant_differential() {
+    // Bridge coverage until generated Wasm joins the shared language-suite harness.
+    let cases = [
+        "enum Choice { Empty, Number(int), Real(float) } #[inline(never)] fn choose(x: int) -> Choice { if x == 0 { Choice::Empty } else if x == 1 { Choice::Real(2.5) } else { Choice::Number(x) } } fn compute(x: int) -> int { match choose(x) { Choice::Empty => 7, Choice::Number(n) => n + 1, Choice::Real(f) => if f == 2.5 { 8 } else { 9 } } }",
+        "fn compute(x: int) -> int { let v = if x == 0 { Empty } else { Text(to_string(x)) }; let copy = v; match copy { Empty => 7, Text(s) => if s == to_string(x) { x } else { 0 } } }",
+        "enum Text { Empty, Full(string) } #[inline(never)] fn change(v: &mut Text, x: int) { v = Text::Full(to_string(x)); } fn compute(x: int) -> int { let mut v = Text::Empty; change(v, x); match v { Text::Empty => 0, Text::Full(s) => if s == to_string(x) { x } else { 0 } } }",
+        "enum List { Nil, Cons(string, List) } #[inline(never)] fn build(x: int) -> List { if x == 0 { List::Nil } else { List::Cons(to_string(x), build(x - 1)) } } #[inline(never)] fn count(l: List) -> int { match l { List::Nil => 0, List::Cons(s, tail) => count(tail) + 1 } } fn compute(x: int) -> int { let l = build(x); let copy = l; count(copy) + count(l) }",
+    ];
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(optimization);
+        session.set_physical_mir_optimization(optimization);
+        for source in cases {
+            for input in [0, 1, 4] {
+                differential::<isize, isize>(&mut session, source, input);
+            }
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_optional_native_results() {
+    // Bridge coverage for the native presence/payload ABI, including an absent reused result.
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(optimization);
+        session.set_physical_mir_optimization(optimization);
+        let path = Path::single_str("probe");
+        let mut module = Module::new(session.modules().next_id(), path.clone());
+        module.add_function(
+            ustr("integer"),
+            NativeOptionalFnN::from_rust(
+                |x: isize| (x > 0).then_some(x + 1),
+                option_type(Type::primitive::<isize>()),
+            )
+            .description(["x"], "", Default::default()),
+        );
+        module.add_function(
+            ustr("real"),
+            NativeOptionalFnN::from_rust(
+                |x: isize| (x > 0).then(|| Float::new(2.5).unwrap()),
+                option_type(Type::primitive::<Float>()),
+            )
+            .description(["x"], "", Default::default()),
+        );
+        module.add_function(
+            ustr("text"),
+            NativeOptionalFnN::from_rust(
+                |x: isize| (x > 0).then(|| String::from(x.to_string())),
+                option_type(Type::primitive::<String>()),
+            )
+            .description(["x"], "", Default::default()),
+        );
+        module.add_function(
+            ustr("unit"),
+            NativeOptionalFnN::from_rust(
+                |x: isize| (x > 0).then_some(()),
+                option_type(Type::unit()),
+            )
+            .description(["x"], "", Default::default()),
+        );
+        session.register_module(path, module);
+        for source in [
+            "fn compute(x: int) -> int { match probe::integer(x) { None => 7, Some(n) => n } }",
+            "fn compute(x: int) -> int { match probe::real(x) { None => 7, Some(f) => if f == 2.5 { x } else { 0 } } }",
+            "fn compute(x: int) -> int { let v = probe::text(x); let copy = v; match copy { None => 7, Some(s) => if s == to_string(x) { x } else { 0 } } }",
+            "fn compute(x: int) -> int { match probe::unit(x) { None => 7, Some(u) => x } }",
+            "fn compute(x: int) -> int { let mut v = probe::text(x); let mut n = x; loop { if n <= 0 { break; }; n -= 1; v = probe::text(n); }; match v { None => 7, Some(s) => 0 } }",
+        ] {
+            for input in [0, 4] {
+                differential::<isize, isize>(&mut session, source, input);
+            }
         }
     }
 }

@@ -492,6 +492,7 @@ fn record_writes(
         }
         OperationKind::Clear
         | OperationKind::Drop { .. }
+        | OperationKind::DropInitialized { .. }
         | OperationKind::DropSubscriptEnv
         | OperationKind::DropClosureEnv => write(&operation.operands[0]),
         OperationKind::RuntimeDealloc => write(&operation.operands[0]),

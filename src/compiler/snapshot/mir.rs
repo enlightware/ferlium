@@ -26,6 +26,7 @@ use crate::{
     },
     module::{
         FunctionId, Module, ModuleEnv, ModuleId, ProjectionIndex, SubscriptId, TraitDictionaryId,
+        id::Id,
     },
     types::{
         effects::{EffType, Effect},
@@ -356,6 +357,9 @@ enum SnapshotOperationKind {
         ty: SnapshotTypeId,
     },
     Drop {
+        ty: SnapshotTypeId,
+    },
+    DropInitialized {
         ty: SnapshotTypeId,
     },
     BuildClosure {
@@ -928,6 +932,9 @@ impl SnapshotOperationKind {
             Source::Drop { ty } => Stored::Drop {
                 ty: graph.capture(*ty)?,
             },
+            Source::DropInitialized { ty } => Stored::DropInitialized {
+                ty: graph.capture(*ty)?,
+            },
             Source::BuildClosure {
                 function,
                 num_hidden_dicts,
@@ -1068,6 +1075,9 @@ impl SnapshotOperationKind {
                 ty: resolve_type(types, *ty)?,
             },
             Stored::Drop { ty } => Runtime::Drop {
+                ty: resolve_type(types, *ty)?,
+            },
+            Stored::DropInitialized { ty } => Runtime::DropInitialized {
                 ty: resolve_type(types, *ty)?,
             },
             Stored::BuildClosure {
@@ -1292,9 +1302,9 @@ fn materialize_fn_type(function: &SnapshotFnType, types: &[Type]) -> Result<FnTy
 
 fn resolve_type(types: &[Type], id: SnapshotTypeId) -> Result<Type, SnapshotError> {
     types
-        .get(id.0 as usize)
+        .get(id.as_index())
         .copied()
-        .ok_or(SnapshotError::InvalidTypeReference(id.0))
+        .ok_or(SnapshotError::InvalidTypeReference(id.as_u32()))
 }
 
 #[cfg(test)]

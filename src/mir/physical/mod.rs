@@ -5,7 +5,9 @@
 
 mod buffer;
 mod dictionary;
+mod drop_elaboration;
 mod evidence;
+mod initialization;
 pub(crate) mod interpreter;
 mod interpreter_memory;
 mod native;
@@ -641,6 +643,9 @@ fn expand_physical_mir(
                 .map_or(FunctionId::new(module, local), |specialization| {
                     specialization.original
                 });
+            let body = drop_elaboration::elaborate(body, semantic, env, |variant, payload| {
+                lowerer.intern_variant_payload_release(variant, payload)
+            });
             *entry = Some(lowerer.lower_body(FunctionId::new(module, local), original, body)?);
         } else if let Some(&kind) =
             buffer_entries.get(&FunctionId::new(module, LocalFunctionId::from_index(index)))
@@ -1647,11 +1652,12 @@ impl<'a> PhysicalLowerer<'a> {
             // order, so no containing allocation is freed before an address stored inside it.
             for cleanup in cleanups.iter().rev() {
                 let release = edit.add_block(Terminator::goto(cleanup.span, next));
-                let base = append_edit_result(
-                    edit,
-                    release,
-                    Operation::load(cleanup.span, cleanup.base_slot.clone()),
-                );
+                let base = edit
+                    .append_operation(
+                        release,
+                        Operation::load(cleanup.span, cleanup.base_slot.clone()),
+                    )
+                    .expect("load produces a result");
                 let helper =
                     self.intern_variant_payload_release(cleanup.variant_ty, cleanup.payload_ty);
                 let mut operations = variant_payload_release_call(
@@ -1669,11 +1675,9 @@ impl<'a> PhysicalLowerer<'a> {
                 edit.block_mut(release).operations.extend(operations);
 
                 let check = edit.add_block(Terminator::goto(cleanup.span, next));
-                let active = append_edit_result(
-                    edit,
-                    check,
-                    Operation::load(cleanup.span, cleanup.active.clone()),
-                );
+                let active = edit
+                    .append_operation(check, Operation::load(cleanup.span, cleanup.active.clone()))
+                    .expect("load produces a result");
                 edit.block_mut(check).terminator =
                     Terminator::cond_br(cleanup.span, active, release, next);
                 next = check;
@@ -2028,14 +2032,6 @@ fn bool_constant(edit: &mut FunctionEdit, value: bool, env: ModuleEnv<'_>) -> Co
     edit.add_constant(bool_type(), LiteralValue::new_native(value), &env)
 }
 
-fn append_edit_result(edit: &mut FunctionEdit, block: BlockId, mut operation: Operation) -> Value {
-    let result = edit
-        .assign_new_result(&mut operation)
-        .expect("operation produces a result");
-    edit.block_mut(block).operations.push(operation);
-    result
-}
-
 fn variant_payload_addressor_call_type(variant_ty: Type, payload_ty: Type) -> CallImplType {
     CallImplType::new(
         FnType::new_mut_resolved([(variant_ty, true)], payload_ty, no_effects()),
@@ -2275,26 +2271,16 @@ fn build_variant_payload_release(
     let destination = Value::Parameter(builder.add_parameter(Type::unit(), ParameterKind::Return));
     let entry = builder.add_block();
     let done = builder.add_block();
-    let storage_check = builder.add_block();
-    let base_initialized = append_result(
-        &mut builder,
-        entry,
-        Operation::is_initialized(span, base.clone()),
-    );
-    builder.set_terminator(
-        entry,
-        Terminator::cond_br(span, base_initialized, storage_check, done),
-    );
     // A whole variant can mix inline and indirect cases. Release therefore reads the active tag's
     // representation bit rather than specializing on the one pointee type used to type its slot.
     let indirect_check = builder.add_block();
     let indirection = append_result(
         &mut builder,
-        storage_check,
+        entry,
         Operation::extract_payload_indirection(span, base.clone()),
     );
     builder.set_terminator(
-        storage_check,
+        entry,
         Terminator::cond_br(span, indirection, indirect_check, done),
     );
 
@@ -2306,16 +2292,9 @@ fn build_variant_payload_release(
         indirect_check,
         Operation::address_offset_place(span, base, offset, payload_ty),
     );
-    let release = builder.add_block();
-    let slot_initialized = append_result(
-        &mut builder,
-        indirect_check,
-        Operation::is_initialized(span, slot.clone()),
-    );
-    builder.set_terminator(
-        indirect_check,
-        Terminator::cond_br(span, slot_initialized, release, done),
-    );
+    // Callers guard the shell's ownership; allocation accompanies its construction. Neither
+    // shell nor pointer-slot liveness is an implicit runtime query at this boundary.
+    let release = indirect_check;
     let address = append_result(&mut builder, release, Operation::load(span, slot.clone()));
     builder.append_operation(release, Operation::runtime_dealloc(span, address));
     builder.append_operation(release, Operation::clear(span, slot));
@@ -3006,6 +2985,8 @@ fn verify_physical_operation(
             ..
         } => Some("subfield"),
         OperationKind::SubscriptMember { .. } => Some("subscript_member"),
+        OperationKind::Drop { .. } => Some("drop"),
+        OperationKind::IsInitialized => Some("is_initialized"),
         OperationKind::Alloca { .. }
         | OperationKind::AllocaPlace { .. }
         | OperationKind::RuntimeAlloc { .. }
@@ -3028,7 +3009,6 @@ fn verify_physical_operation(
         | OperationKind::BuildArray { .. }
         | OperationKind::ExtractTag
         | OperationKind::ExtractPayloadIndirection
-        | OperationKind::IsInitialized
         | OperationKind::Store
         | OperationKind::Clear
         | OperationKind::Memcpy
@@ -3040,7 +3020,7 @@ fn verify_physical_operation(
         | OperationKind::CheckCallDepth
         | OperationKind::CheckFuel
         | OperationKind::Clone { .. }
-        | OperationKind::Drop { .. }
+        | OperationKind::DropInitialized { .. }
         | OperationKind::BuildClosure { .. }
         | OperationKind::CloneClosureEnv { .. }
         | OperationKind::DropClosureEnv => None,
@@ -5342,16 +5322,6 @@ mod tests {
                 TerminatorKind::PropagateError
             )
         }));
-        let release_body = physical.get(release.function).unwrap();
-        assert!(
-            release_body
-                .blocks()
-                .flat_map(|block| release_body.block(block).operations())
-                .filter(|operation| matches!(operation.kind, OperationKind::IsInitialized))
-                .count()
-                >= 2,
-            "release checks both the variant shell and its owning pointer slot"
-        );
     }
 
     #[test]

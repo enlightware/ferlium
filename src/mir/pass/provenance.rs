@@ -482,7 +482,7 @@ fn derive_repeatable(
                         return false;
                     }
                 }
-                OperationKind::Drop { .. } => {
+                OperationKind::Drop { .. } | OperationKind::DropInitialized { .. } => {
                     if root_of(&operation.operands[0], &roots).is_some() {
                         return false;
                     }

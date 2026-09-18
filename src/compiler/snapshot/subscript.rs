@@ -9,7 +9,7 @@ use crate::{
     Location,
     module::{
         ProjectionEntry, ProjectionKey, ProjectionReceiverKey, SubscriptDefinition,
-        SubscriptMember, SubscriptSignature, SubscriptSignatureState, TypeDefId,
+        SubscriptMember, SubscriptSignature, SubscriptSignatureState, TypeDefId, id::Id,
     },
     types::r#type::{FnArgType, Type},
 };
@@ -59,9 +59,9 @@ fn capture_args(
 
 fn live_type(types: &[Type], id: SnapshotTypeId) -> Result<Type, SnapshotError> {
     types
-        .get(id.0 as usize)
+        .get(id.as_index())
         .copied()
-        .ok_or(SnapshotError::InvalidTypeReference(id.0))
+        .ok_or(SnapshotError::InvalidTypeReference(id.as_u32()))
 }
 
 fn live_args(args: &[SnapshotFnArgType], types: &[Type]) -> Result<Vec<FnArgType>, SnapshotError> {

@@ -17,7 +17,7 @@ use crate::{
     },
     module::{
         EvidenceBindingId, FunctionId, LocalDeclId, ProjectionIndex, ResolvedLocalClone,
-        ResolvedLocalDrop, ResolvedTakeLocalValueMode, SubscriptId, TraitId, TraitImplId,
+        ResolvedLocalDrop, ResolvedTakeLocalValueMode, SubscriptId, TraitId, TraitImplId, id::Id,
     },
     types::{
         effects::{EffType, Effect},
@@ -273,9 +273,9 @@ fn live_effects(value: &[Effect]) -> EffType {
 
 fn live_ty(types: &[Type], id: SnapshotTypeId) -> Result<Type, SnapshotError> {
     types
-        .get(id.0 as usize)
+        .get(id.as_index())
         .copied()
-        .ok_or(SnapshotError::InvalidTypeReference(id.0))
+        .ok_or(SnapshotError::InvalidTypeReference(id.as_u32()))
 }
 
 fn capture_types(

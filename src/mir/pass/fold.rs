@@ -1113,7 +1113,7 @@ fn partial_call_outcome(
 fn callee_operand_index(operation: &Operation) -> Option<usize> {
     match operation.kind {
         OperationKind::Call { .. } => Some(0),
-        OperationKind::Drop { .. } => Some(1),
+        OperationKind::Drop { .. } | OperationKind::DropInitialized { .. } => Some(1),
         OperationKind::Clone { .. } => Some(2),
         _ => None,
     }

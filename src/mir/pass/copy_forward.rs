@@ -744,7 +744,7 @@ fn note_operation(operation: &Operation, site: Site, uses: &mut FxHashMap<ValueI
                 .skip(2)
                 .for_each(|operand| unsafe_use(operand, uses));
         }
-        OperationKind::Drop { .. } => {
+        OperationKind::Drop { .. } | OperationKind::DropInitialized { .. } => {
             write(&operation.operands[0], uses);
             operation
                 .operands

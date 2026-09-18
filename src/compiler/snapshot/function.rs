@@ -14,7 +14,7 @@ use crate::{
     module::{
         DebugLocationRange, ELocalDecl, FunctionDebugInfo, LocalAssignmentMode, LocalDebugInfo,
         LocalDebugOrigin, LocalFrameSlot, LocalStorage, ModuleFunction, ModuleFunctionSpans,
-        ResolvedLocalClone, ResolvedLocalDrop,
+        ResolvedLocalClone, ResolvedLocalDrop, id::Id,
     },
     types::{mutability::MutType, r#type::Type},
 };
@@ -88,9 +88,9 @@ pub(crate) struct SnapshotModuleFunction {
 
 fn live_ty(types: &[Type], id: SnapshotTypeId) -> Result<Type, SnapshotError> {
     types
-        .get(id.0 as usize)
+        .get(id.as_index())
         .copied()
-        .ok_or(SnapshotError::InvalidTypeReference(id.0))
+        .ok_or(SnapshotError::InvalidTypeReference(id.as_u32()))
 }
 
 impl SnapshotFunctionSpans {

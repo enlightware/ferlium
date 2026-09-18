@@ -9,7 +9,7 @@ use crate::{
     Location,
     ast::{Attribute, MetaItem},
     hir::{function::CallableDefinition, native_functions::NativeResultKnowledge},
-    module::TraitId,
+    module::{TraitId, id::Id},
     parser::location::InstantiableLocation,
     types::{
         effects::{EffType, Effect, EffectVar},
@@ -116,9 +116,9 @@ fn materialize_effects(effects: &[Effect]) -> EffType {
 
 fn ty(types: &[Type], id: SnapshotTypeId) -> Result<Type, SnapshotError> {
     types
-        .get(id.0 as usize)
+        .get(id.as_index())
         .copied()
-        .ok_or(SnapshotError::InvalidTypeReference(id.0))
+        .ok_or(SnapshotError::InvalidTypeReference(id.as_u32()))
 }
 
 pub(super) fn capture_attribute(attribute: &Attribute) -> SnapshotAttribute {

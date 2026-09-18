@@ -151,7 +151,9 @@ fn operation_returns(operation: &Operation, callee_returns: &impl Fn(FunctionId)
     match &operation.kind {
         OperationKind::Call { .. } => direct(operation.operands.first()),
         OperationKind::Clone { .. } => direct(operation.operands.get(2)),
-        OperationKind::Drop { .. } => direct(operation.operands.get(1)),
+        OperationKind::Drop { .. } | OperationKind::DropInitialized { .. } => {
+            direct(operation.operands.get(1))
+        }
         // `Project` runs an accessor until its yield; `EndProject` resumes the suspended body.
         // First-class callable clone/drop recursively invoke functions stored in runtime values.
         OperationKind::Project { .. }

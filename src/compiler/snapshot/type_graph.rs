@@ -4,7 +4,8 @@
 use crate::{
     FxHashMap,
     containers::b,
-    module::TypeDefId,
+    define_id_type,
+    module::{TypeDefId, id::Id},
     types::{
         effects::{EffType, Effect},
         mutability::MutType,
@@ -17,10 +18,11 @@ use crate::{
 
 use super::SnapshotError;
 
-/// Snapshot-local reference into [`SnapshotTypeGraph::nodes`].
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct SnapshotTypeId(pub(crate) u32);
+define_id_type!(
+    /// Snapshot-local reference into [`SnapshotTypeGraph::nodes`].
+    #[derive(PartialOrd, Ord)]
+    SnapshotTypeId
+);
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,11 +107,11 @@ impl<'a> SnapshotTypeGraphBuilder<'a> {
         }
 
         // Reserve before descending so recursive worlds close back over this ID.
-        let id = SnapshotTypeId(self.nodes.len() as u32);
+        let id = SnapshotTypeId::from_index(self.nodes.len());
         self.ids.insert(ty, id);
         self.nodes.push(None);
         let kind = self.capture_kind(&ty.data())?;
-        self.nodes[id.0 as usize] = Some(kind);
+        self.nodes[id.as_index()] = Some(kind);
         Ok(id)
     }
 
@@ -234,10 +236,10 @@ impl SnapshotTypeGraph {
         native_type: &dyn Fn(&str) -> Option<BareNativeTypeB>,
     ) -> Result<Vec<Type>, SnapshotError> {
         let local = |id: SnapshotTypeId| -> Result<Type, SnapshotError> {
-            if (id.0 as usize) < self.nodes.len() {
-                Ok(Type::new_local(id.0))
+            if id.as_index() < self.nodes.len() {
+                Ok(Type::new_local(id.as_u32()))
             } else {
-                Err(SnapshotError::InvalidTypeReference(id.0))
+                Err(SnapshotError::InvalidTypeReference(id.as_u32()))
             }
         };
         let effects = |effects: &[Effect]| -> EffType { effects.iter().copied().collect() };
@@ -351,7 +353,7 @@ mod tests {
             "int" => Some(bare_native_type::<isize>()),
             _ => None,
         };
-        let restored = graph.materialize(&resolve).unwrap()[root.0 as usize];
+        let restored = graph.materialize(&resolve).unwrap()[root.as_index()];
 
         assert_eq!(restored, original);
         assert!(restored.is_global_recursive());

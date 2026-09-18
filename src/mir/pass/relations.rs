@@ -1003,7 +1003,10 @@ pub(crate) fn analyze(
     // what the transfer function does. Folding cannot say either, which is why it escapes both —
     // and why an array read only for its length would otherwise be untracked from its own drop.
     let (escaped, register_places) = escaping_roots(func, &|operation| {
-        matches!(operation.kind, OperationKind::Drop { .. }) || semantics.of(operation).is_some()
+        matches!(
+            operation.kind,
+            OperationKind::Drop { .. } | OperationKind::DropInitialized { .. }
+        ) || semantics.of(operation).is_some()
     });
 
     let types = RootTypes::new(func);
@@ -1462,7 +1465,9 @@ fn writes_into(operation: &Operation, root: Root, register_places: &PlaceBinding
         OperationKind::Memcpy | OperationKind::Move | OperationKind::MoveBytes { .. } => {
             rooted(&operation.operands[1]) || operation.operands.iter().skip(2).any(rooted)
         }
-        OperationKind::Clear | OperationKind::Drop { .. } => rooted(&operation.operands[0]),
+        OperationKind::Clear
+        | OperationKind::Drop { .. }
+        | OperationKind::DropInitialized { .. } => rooted(&operation.operands[0]),
         OperationKind::Clone { .. } => rooted(&operation.operands[1]),
         OperationKind::Call { ty, .. } => match call_operands(&operation.operands, ty) {
             Some(call) => {
@@ -1844,7 +1849,9 @@ fn transfer(
                 state.define(place, def, interner, None);
             }
         }
-        OperationKind::Clear | OperationKind::Drop { .. } => {
+        OperationKind::Clear
+        | OperationKind::Drop { .. }
+        | OperationKind::DropInitialized { .. } => {
             if let Some(place) = tracked_place(state, &operation.operands[0], escaped, interner) {
                 state.define(place, def, interner, None);
             }
