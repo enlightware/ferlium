@@ -2905,7 +2905,13 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     construction
                 }
             }
-            Array(nodes) => self.elaborate_construction(src, old, nodes, Array)?,
+            Array(nodes) => {
+                // Buffer allocation needs the whole element layout, not just its generic leaves.
+                if let Some(element) = nodes.first() {
+                    self.ensure_value_layout_evidence(src[*element].ty, node_span)?;
+                }
+                self.elaborate_construction(src, old, nodes, Array)?
+            }
             Case(case) => {
                 let value = case.value;
                 let default = case.default;

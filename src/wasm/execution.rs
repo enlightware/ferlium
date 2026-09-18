@@ -22,6 +22,7 @@ use crate::{
     eval::RuntimeError,
     execution::ExecutionLimits,
     hir::native_functions::NativeFailureState,
+    mir::physical::program::ResolvedPhysicalProgram,
     module::FunctionId,
     std::{math::Float, string::StaticStr},
     types::r#type::Type,
@@ -131,6 +132,7 @@ pub(super) struct InvocationState {
     pub diagnostics: *mut Failures,
     pub strings: *const StaticStr,
     pub native_failure: *mut NativeFailureState,
+    pub evidence: *const u32,
 }
 
 /// Out-of-band diagnostics written by generated code before trapping; zero means no failure.
@@ -153,9 +155,17 @@ pub struct CompiledProgram {
 impl CompiledProgram {
     pub fn compile(session: &CompilerSession, entry: FunctionId) -> Result<Self, RuntimeError> {
         let program = session.prepare_physical_program(entry.module)?;
+        Self::from_physical(session, &program, entry)
+    }
+
+    pub(super) fn from_physical(
+        session: &CompilerSession,
+        program: &ResolvedPhysicalProgram<'_>,
+        entry: FunctionId,
+    ) -> Result<Self, RuntimeError> {
         let mut imports = Imports::new().map_err(js_error)?;
         let emitted =
-            emit::emit(&program, entry, &mut imports, session).map_err(RuntimeError::Backend)?;
+            emit::emit(program, entry, &mut imports, session).map_err(RuntimeError::Backend)?;
         Ok(Self { emitted, imports })
     }
 
@@ -197,6 +207,7 @@ impl CompiledProgram {
             setup: TableSlot::new(&setup)?,
             stack: Vec::new(),
             strings: self.emitted.strings.clone(),
+            evidence: self.emitted.evidence.instantiate(),
             marker: PhantomData,
         })
     }
@@ -243,6 +254,7 @@ pub struct Instance<A, R> {
     // Frame bytes are lent exclusively to each invocation. MIR lifetimes, not zeroing, govern reads.
     stack: Vec<u64>,
     strings: Box<[StaticStr]>,
+    evidence: Box<[u32]>,
     marker: PhantomData<fn(A) -> R>,
 }
 
@@ -304,6 +316,7 @@ impl<A: WasmArguments, R: WasmValue> Instance<A, R> {
             fuel_enabled: u32::from(limits.execution.fuel_limit.is_some()),
             failure: 0,
             strings: self.strings.as_ptr(),
+            evidence: self.evidence.as_ptr(),
             // SAFETY: diagnostics_ptr points to the live invocation-owned diagnostics above.
             native_failure: unsafe { &raw mut (*diagnostics_ptr).native },
             diagnostics: diagnostics_ptr,

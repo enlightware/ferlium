@@ -14,7 +14,9 @@ use crate::{
         Function, Operation, OperationKind, Value, ValueId, terminator::TerminatorKind,
         value::StaticEvidence,
     },
-    module::{FunctionId, LocalFunctionId, ModuleId, SubscriptId, TraitDictionaryId, id::Id},
+    module::{
+        FunctionId, LocalFunctionId, ModuleId, SubscriptId, TraitDictionaryId, TraitId, id::Id,
+    },
     types::{r#trait::TraitDictionaryEntryIndex, r#type::CallResultConvention},
 };
 
@@ -174,6 +176,12 @@ pub(crate) enum PhysicalProgramError {
         dictionary: TraitDictionaryId,
         entry: TraitDictionaryEntryIndex,
     },
+    InvalidDictionaryTrait {
+        owner: FunctionId,
+        dictionary: TraitDictionaryId,
+        expected: TraitId,
+        actual: TraitId,
+    },
     InvalidDictionaryEntryFunction {
         dictionary: TraitDictionaryId,
         entry: TraitDictionaryEntryIndex,
@@ -265,6 +273,15 @@ impl fmt::Display for PhysicalProgramError {
                 entry.as_index(),
                 dictionary.module_id,
                 dictionary.impl_id
+            ),
+            Self::InvalidDictionaryTrait {
+                owner,
+                dictionary,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "physical entry {owner:?} selects trait {actual:?} from dictionary {dictionary:?}, expected {expected:?}"
             ),
             Self::InvalidDictionaryEntryFunction {
                 dictionary,
@@ -538,13 +555,25 @@ fn verify_operation(
             });
         }
     }
-    if let OperationKind::DictEntry { entry_index, .. } = operation.kind
+    if let OperationKind::DictEntry {
+        trait_id,
+        entry_index,
+        ..
+    } = operation.kind
         && let Some(definition) = operation
             .operands
             .first()
             .and_then(|value| static_dictionary_definition(value, dictionaries))
     {
         let metadata = expect_dictionary(program, owner, definition)?;
+        if trait_id != metadata.trait_id() {
+            return Err(PhysicalProgramError::InvalidDictionaryTrait {
+                owner,
+                dictionary: definition,
+                expected: metadata.trait_id(),
+                actual: trait_id,
+            });
+        }
         if metadata.entries().get(entry_index.as_index()).is_none() {
             return Err(PhysicalProgramError::InvalidDictionaryEntryIndex {
                 owner,
@@ -881,11 +910,65 @@ fn intern_function_evidence(function: &Function, interner: &mut EvidenceInterner
 #[cfg(test)]
 mod tests {
     use crate::{
-        mir::{Value, value::StaticEvidence},
-        module::{LocalImplId, ModuleId, TraitDictionaryId, id::Id},
+        CompilerSession, Location, MirOptimization,
+        mir::{Operation, Value, value::StaticEvidence},
+        module::{FunctionId, LocalImplId, ModuleId, Path, TraitDictionaryId, id::Id},
+        types::{r#trait::TraitDictionaryEntryIndex, r#type::Type},
+        ustr,
     };
 
-    use super::{EvidenceInterner, ResolvedPhysicalProgram};
+    use super::{
+        EvidenceInterner, PhysicalProgramError, ResolvedPhysicalProgram, verify_operation,
+    };
+
+    #[test]
+    fn dictionary_entries_check_trait_identity() {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Disabled);
+        let module = session.compile(
+            "pub trait Probe<Self> { fn probe(x: Self, n: int) -> int; } pub trait Other<Self> { fn other(x: Self) -> int; } impl Probe for int { fn probe(x: int, n: int) -> int { x + n } } fn forward<T>(x: T) -> int where T: Probe { probe(x, 1) } pub fn compute(x: int) -> int { forward(x) }",
+            "interfaces", Path::single_str("interfaces"),
+        ).unwrap().module_id;
+        let source = session.expect_fresh_module(module);
+        let probe = source.get_trait_id(ustr("Probe")).unwrap();
+        let other = source.get_trait_id(ustr("Other")).unwrap();
+        let owner = FunctionId::new(
+            module,
+            source.get_local_function_id(ustr("compute")).unwrap(),
+        );
+        let program = session.prepare_physical_program(module).unwrap();
+        let artifacts = program.module(module).unwrap();
+        let index = TraitDictionaryEntryIndex::from_index(0);
+        let dictionary = artifacts
+            .dictionaries()
+            .iter()
+            .find(|d| d.trait_id() == probe)
+            .unwrap();
+        for (trait_id, valid) in [(probe, true), (other, false)] {
+            let operation = Operation::dict_entry(
+                Location::new_synthesized(),
+                Value::Dictionary(dictionary.id()),
+                trait_id,
+                index,
+                Type::unit(),
+            );
+            let result = verify_operation(
+                &program,
+                owner,
+                &Default::default(),
+                &Default::default(),
+                &operation,
+            );
+            if valid {
+                result.unwrap();
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(PhysicalProgramError::InvalidDictionaryTrait { .. })
+                ));
+            }
+        }
+    }
 
     #[test]
     fn equivalent_static_evidence_trees_share_one_program_identity() {

@@ -23,7 +23,8 @@ use crate::{
     module::{
         self, EvidenceBindingId, ExtraParameterId, FunctionId, LocalDeclId, LocalFunctionId,
         Module, ModuleEnv, ModuleId, ResolvedLocalClone, ResolvedLocalDrop,
-        ResolvedTakeLocalValueMode, TraitDictionaryEntry, TraitDictionaryId, TraitImplId, id::Id,
+        ResolvedTakeLocalValueMode, TraitDictionaryEntry, TraitDictionaryId, TraitId, TraitImplId,
+        id::Id,
     },
     std::{
         STD_MODULE_ID,
@@ -369,6 +370,7 @@ impl<'a> Emitter<'a> {
                 locals,
                 extra_parameters,
                 evidence_bindings: FxHashMap::default(),
+                evidence_traits: FxHashMap::default(),
                 static_evidence: FxHashMap::default(),
                 value_witnesses,
                 static_layouts: FxHashMap::default(),
@@ -532,6 +534,9 @@ impl<'a> Emitter<'a> {
     fn lower_function_evidence_bindings(&mut self, bindings: &[EvidenceBinding]) {
         for (index, binding) in bindings.iter().enumerate() {
             let id = EvidenceBindingId::from_index(index);
+            if let DictionaryReq::TraitImpl { trait_id, .. } = binding.requirement {
+                self.context.evidence_traits.insert(id, trait_id);
+            }
             let mut known_static = None;
             let value = match &binding.source {
                 EvidenceBindingSource::Parameter(parameter) => {
@@ -646,6 +651,7 @@ impl<'a> Emitter<'a> {
                 self.insert(Operation::dict_entry(
                     span,
                     dictionary,
+                    self.env.expect_std_trait_id(VALUE_TRAIT_NAME),
                     entry_index,
                     method_ty,
                 ))
@@ -793,6 +799,7 @@ impl<'a> Emitter<'a> {
                         self.insert(Operation::dict_entry(
                             span,
                             dictionary,
+                            self.env.expect_std_trait_id(VALUE_TRAIT_NAME),
                             entry_index,
                             method_ty,
                         ))
@@ -1536,7 +1543,7 @@ impl<'a> Emitter<'a> {
 
     /// Materializes the physical `Value` layout arguments used by Buffer operations.
     ///
-    /// Concrete layouts become ordinary integer constants. A bare generic element type obtains the
+    /// Concrete layouts become ordinary integer constants. A generic element type obtains the
     /// same values by calling the `SIZE` and `ALIGN` getters in its forwarded `Value` dictionary.
     fn value_layout_argument_places(
         &mut self,
@@ -1586,6 +1593,7 @@ impl<'a> Emitter<'a> {
             .insert(Operation::dict_entry(
                 span,
                 dictionary,
+                self.env.expect_std_trait_id(VALUE_TRAIT_NAME),
                 entry_index,
                 Type::function_type(getter_fn_ty.clone()),
             ))
@@ -1711,6 +1719,7 @@ impl<'a> Emitter<'a> {
                     self.insert(Operation::dict_entry(
                         node.span,
                         dict,
+                        self.dictionary_trait(base_node),
                         TraitDictionaryEntryIndex::from_index(n.index.as_index()),
                         node.ty,
                     ))
@@ -1795,6 +1804,7 @@ impl<'a> Emitter<'a> {
                 self.insert(Operation::dict_entry(
                     node.span,
                     dictionary,
+                    self.dictionary_trait(&self.hir_arena[n.dictionary]),
                     n.entry_index,
                     node.ty,
                 ))
@@ -2077,6 +2087,21 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    fn dictionary_trait(&self, node: &ENode) -> TraitId {
+        match &node.kind {
+            hir::NodeKind::GetDictionary(d) => {
+                self.env
+                    .module_by_id(d.dictionary.module)
+                    .unwrap()
+                    .get_impl_data(d.dictionary.impl_id)
+                    .unwrap()
+                    .trait_id
+            }
+            hir::NodeKind::LoadDictionary(d) => self.context.evidence_traits[&d.extra_parameter],
+            _ => unreachable!("expected dictionary evidence"),
+        }
+    }
+
     /// Lowers a HIR subscript-evidence node to a symbolic MIR subscript operand.
     ///
     /// A static `GetSubscript` becomes a `Subscript(id)` constant; a forwarded
@@ -2265,6 +2290,7 @@ impl<'a> Emitter<'a> {
             .insert(Operation::dict_entry(
                 node.span,
                 dictionary,
+                self.dictionary_trait(&self.hir_arena[n.dictionary]),
                 n.entry_index,
                 function_ty,
             ))
@@ -3270,6 +3296,9 @@ struct InsertionContext {
 
     /// Values produced by the function's immutable evidence-binding graph.
     evidence_bindings: FxHashMap<EvidenceBindingId, mir::Value>,
+
+    /// Declaration identities survive substitution so dictionary dispatch keeps a fixed ABI.
+    evidence_traits: FxHashMap<EvidenceBindingId, TraitId>,
 
     /// Recursively static form of evidence bindings, when available.
     static_evidence: FxHashMap<EvidenceBindingId, mir::value::StaticEvidence>,

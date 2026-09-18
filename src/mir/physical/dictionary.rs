@@ -7,7 +7,7 @@ use crate::{
     hir::dictionary::DictionaryReq,
     module::{
         DictionaryEntryEvidence, FunctionId, LocalImplId, Module, ModuleEnv, ModuleId,
-        TraitDictionaryEntry, TraitDictionaryId, id::Id,
+        TraitDictionaryEntry, TraitDictionaryId, TraitId, id::Id,
     },
     std::{
         core_traits_names::VALUE_TRAIT_NAME,
@@ -88,10 +88,11 @@ impl PhysicalDictionaryEntry {
 /// A relocatable dictionary definition owned by one physical MIR module.
 ///
 /// Function and dictionary identities remain module-qualified. Later whole-program assembly may
-/// deduplicate definitions and assign descriptor indexes without consulting semantic HIR.
+/// deduplicate definitions and assign descriptor indexes.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PhysicalDictionaryDefinition {
     id: TraitDictionaryId,
+    trait_id: TraitId,
     ty: Type,
     capture_schema: Box<[DictionaryReq]>,
     capture_types: Box<[Type]>,
@@ -101,6 +102,10 @@ pub(crate) struct PhysicalDictionaryDefinition {
 }
 
 impl PhysicalDictionaryDefinition {
+    pub(crate) fn trait_id(&self) -> TraitId {
+        self.trait_id
+    }
+
     pub(crate) fn ty(&self) -> Type {
         self.ty
     }
@@ -170,6 +175,7 @@ impl PhysicalDictionaryCatalog {
                     .into_boxed_slice();
                 PhysicalDictionaryDefinition {
                     id,
+                    trait_id: implementation.trait_id,
                     ty: implementation.dictionary_ty,
                     capture_schema: dictionary.capture_schema().to_vec().into_boxed_slice(),
                     capture_types: dictionary

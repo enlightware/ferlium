@@ -40,7 +40,7 @@ use crate::{
     hir::value::VariantPayloadStorage,
     mir,
     mir::ValueId,
-    module::{FunctionId, ModuleEnv, ProjectionIndex, TraitDictionaryId},
+    module::{FunctionId, ModuleEnv, ProjectionIndex, TraitDictionaryId, TraitId},
     types::{
         effects::{EffType, Effect, PrimitiveEffect},
         r#trait::TraitDictionaryEntryIndex,
@@ -562,6 +562,7 @@ impl Operation {
     pub fn dict_entry(
         span: Location,
         dict: mir::Value,
+        trait_id: TraitId,
         entry_index: TraitDictionaryEntryIndex,
         ty: Type,
     ) -> Self {
@@ -569,7 +570,11 @@ impl Operation {
             result_id: None,
             span,
             operands: Box::new([dict]),
-            kind: OperationKind::DictEntry { entry_index, ty },
+            kind: OperationKind::DictEntry {
+                trait_id,
+                entry_index,
+                ty,
+            },
         }
     }
 
@@ -1214,6 +1219,8 @@ pub enum OperationKind {
     AddressOffsetPlace { pointing_to: Type },
     /// Project a function entry place from a symbolic dictionary.
     DictEntry {
+        /// Declaration identity fixes the entry ABI before any type substitution.
+        trait_id: TraitId,
         entry_index: TraitDictionaryEntryIndex,
         ty: Type,
     },

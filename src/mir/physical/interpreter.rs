@@ -5,7 +5,7 @@
 //! Function storage is prepared on dispatch; every executed access is checked.
 
 use super::{
-    dictionary::{DictionaryReference, EvidenceEnvironmentLayout},
+    DictionaryReference, EvidenceEnvironmentLayout,
     interpreter_memory::{
         Address, CallableReference, Generation, Memory, Scalar, ScalarKind, StoredValue,
     },

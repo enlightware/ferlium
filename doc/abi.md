@@ -508,6 +508,10 @@ static data similarly resolve to target addresses.
 The descriptor determines the environment's layout and entry calling contracts, including how
 each entry receives its required evidence.
 
+Dictionary entries use the trait declaration's argument transport, before implementation-type
+substitution, and the caller-allocated result convention. Adapters bridge to implementation ABIs
+when necessary.
+
 Dynamic evidence environments are immutable and reference-counted. Calls borrow evidence for
 their duration. Capturing or cloning evidence retains its environment; moving transfers ownership;
 releasing the last owner releases the captured evidence and reclaims the environment. Static

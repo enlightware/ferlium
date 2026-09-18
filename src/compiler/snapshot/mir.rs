@@ -26,7 +26,7 @@ use crate::{
     },
     module::{
         FunctionId, Module, ModuleEnv, ModuleId, ProjectionIndex, SubscriptId, TraitDictionaryId,
-        id::Id,
+        TraitId, id::Id,
     },
     types::{
         effects::{EffType, Effect},
@@ -303,6 +303,7 @@ enum SnapshotOperationKind {
         pointing_to: SnapshotTypeId,
     },
     DictEntry {
+        trait_id: TraitId,
         entry_index: TraitDictionaryEntryIndex,
         ty: SnapshotTypeId,
     },
@@ -870,7 +871,12 @@ impl SnapshotOperationKind {
             Source::AddressOffsetPlace { pointing_to } => Stored::AddressOffsetPlace {
                 pointing_to: graph.capture(*pointing_to)?,
             },
-            Source::DictEntry { entry_index, ty } => Stored::DictEntry {
+            Source::DictEntry {
+                trait_id,
+                entry_index,
+                ty,
+            } => Stored::DictEntry {
+                trait_id: *trait_id,
                 entry_index: *entry_index,
                 ty: graph.capture(*ty)?,
             },
@@ -1012,7 +1018,12 @@ impl SnapshotOperationKind {
             Stored::AddressOffsetPlace { pointing_to } => Runtime::AddressOffsetPlace {
                 pointing_to: resolve_type(types, *pointing_to)?,
             },
-            Stored::DictEntry { entry_index, ty } => Runtime::DictEntry {
+            Stored::DictEntry {
+                trait_id,
+                entry_index,
+                ty,
+            } => Runtime::DictEntry {
+                trait_id: *trait_id,
                 entry_index: *entry_index,
                 ty: resolve_type(types, *ty)?,
             },

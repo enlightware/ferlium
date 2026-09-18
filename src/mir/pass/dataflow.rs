@@ -1860,6 +1860,11 @@ mod tests {
                 Operation::dict_entry(
                     span,
                     mir::Value::Dictionary(dictionary),
+                    session
+                        .expect_fresh_module(dictionary.module_id)
+                        .get_impl_data(dictionary.impl_id)
+                        .unwrap()
+                        .trait_id,
                     TraitDictionaryEntryIndex::new(0),
                     int_type(),
                 ),

@@ -16,19 +16,30 @@ use crate::{
     },
     execution::ReferenceInterpreterLimits,
     hir::{
-        native_functions::{NativeFnN, NativeOptionalFnN},
+        function::Function,
+        native_functions::{
+            NativeAddressorMut, NativeAddressorRef, NativeFnN, NativeFnNN, NativeOptionalFnN,
+        },
         value::{NativeValueType, Value},
+    },
+    mir::physical::{
+        lower_physical_mir, lower_unoptimized_physical_mir,
+        program::{ResolvedPhysicalProgram, resolve_physical_program},
     },
     module::{FunctionId, Module, Path},
     std::{math::Float, option::option_type, string::String},
     types::{
-        effects::{PrimitiveEffect, effect},
+        effects::{PrimitiveEffect, effect, no_effects},
         r#type::Type,
     },
     ustr,
 };
 
-use super::{CompiledProgram, Imports, WasmLimits, WasmValue, emit, execution::InvocationState};
+use super::{
+    CompiledProgram, Imports, WasmLimits, WasmValue, emit,
+    evidence::{BUILT_ENVIRONMENTS, LIVE_ENVIRONMENTS},
+    execution::InvocationState,
+};
 
 thread_local! { static DROP_LOG: Cell<isize> = const { Cell::new(0) }; }
 
@@ -46,12 +57,50 @@ fn shadow_stack_probe() -> usize {
 fn compile(session: &mut CompilerSession, source: &str) -> FunctionId {
     let output = session
         .compile(source, "wasm_test", Path::single(ustr("wasm_test")))
-        .unwrap();
+        .unwrap_or_else(|error| panic!("{source}: {error:?}"));
     let module = session.expect_fresh_module(output.module_id);
     FunctionId::new(
         output.module_id,
         module.get_local_function_id(ustr("compute")).unwrap(),
     )
+}
+
+/// Bypass session specialization so backend tests exercise the retained generic bodies themselves.
+fn compile_raw(session: &CompilerSession, entry: FunctionId) -> CompiledProgram {
+    with_raw_program(session, entry, |program| {
+        CompiledProgram::from_physical(session, program, entry).unwrap()
+    })
+}
+
+pub(super) fn with_raw_program<T>(
+    session: &CompilerSession,
+    entry: FunctionId,
+    run: impl FnOnce(&ResolvedPhysicalProgram<'_>) -> T,
+) -> T {
+    let prepared = session.prepare_physical_program(entry.module).unwrap();
+    let artifacts = prepared
+        .modules()
+        .iter()
+        .map(|module| {
+            let id = module.module();
+            let raw = session
+                .mir_artifacts_for(id, MirOptimization::Disabled)
+                .unwrap();
+            let lower = match session.physical_mir_optimization() {
+                MirOptimization::Disabled => lower_unoptimized_physical_mir,
+                MirOptimization::Enabled => lower_physical_mir,
+            };
+            lower(
+                id,
+                raw,
+                session.modules().env_for(session.expect_fresh_module(id)),
+                session.known_callees(),
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let program = resolve_physical_program(artifacts.iter()).unwrap();
+    run(&program)
 }
 
 fn differential<A: WasmValue + NativeValueType, R: WasmValue + PartialEq + Debug>(
@@ -68,17 +117,20 @@ fn differential<A: WasmValue + NativeValueType, R: WasmValue + PartialEq + Debug
             vec![Value::native(input)],
         )
         .unwrap();
-    let code =
-        CompiledProgram::compile(session, entry).unwrap_or_else(|e| panic!("{source}: {e:?}"));
-    let mut instance = code
-        .instantiate::<(A,), R>()
-        .unwrap_or_else(|e| panic!("{source}: {e:?}"));
-    for _ in 0..2 {
-        assert_eq!(
-            &instance.run((input,), WasmLimits::default()).unwrap(),
-            reference.as_primitive_ty::<R>().unwrap(),
-            "{source}"
-        );
+    for code in [
+        compile_raw(session, entry),
+        CompiledProgram::compile(session, entry).unwrap_or_else(|e| panic!("{source}: {e:?}")),
+    ] {
+        let mut instance = code
+            .instantiate::<(A,), R>()
+            .unwrap_or_else(|e| panic!("{source}: {e:?}"));
+        for _ in 0..2 {
+            assert_eq!(
+                &instance.run((input,), WasmLimits::default()).unwrap(),
+                reference.as_primitive_ty::<R>().unwrap(),
+                "{source}"
+            );
+        }
     }
     reference.discard_storage();
 }
@@ -156,6 +208,198 @@ fn wasm_codegen_scalar_differential() {
         );
         differential::<isize, ()>(&mut session, "fn compute(x: int) { let y = x + 1; () }", 1);
         differential::<(), isize>(&mut session, "fn compute(x: ()) -> int { 42 }", ());
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_generic_evidence_and_buffers() {
+    let sources = [
+        "#[inline(never)] fn identity<T>(x: T) -> T { x } fn compute(x: int) -> int { identity(x) }",
+        "#[inline(never)] fn identity<T>(x: T) -> T { x } fn compute(x: int) -> int { let p = identity((x, x + 2)); p.0 + p.1 }",
+        "trait Tag<Self> { fn tag(value: Self) -> int; } impl Tag for int { fn tag(value: int) -> int { value + 1 } } #[inline(never)] fn tagged<T>(x: T) -> int where T: Tag { tag(x) } fn compute(x: int) -> int { tagged(x) }",
+        "fn compute(x: int) -> int { let mut a = [x, x + 1]; array_append(a, x + 2); a[0] + a[2] }",
+        "#[inline(never)] fn duplicate<T>(x: T) -> (T, T) { (x, x) } fn compute(x: int) -> int { let p = duplicate((x, true)); if p.1.1 { p.0.0 } else { 0 } }",
+        "#[inline(never)] fn repeat<T>(x: T) -> T { let mut n = 0; loop { let pair = (x, x); if n == 3 { return pair.0; }; n += 1; } } fn compute(x: int) -> int { repeat(x) }",
+        "#[inline(never)] fn replace<T>(x: &mut T, y: T) { x = y; } fn compute(x: int) -> int { let mut p = (1, false); replace(p, (x, true)); p.0 }",
+        "#[inline(never)] fn make_array<T>(x: T) -> [T] { let mut a = [x]; array_append(a, x); a } fn compute(x: int) -> int { let a = make_array(x); a[1] }",
+        "fn compute(x: int) -> int { let mut a = []; let mut n = 0; loop { if n >= 100 { break; }; array_append(a, to_string(n)); n += 1; }; let b = a; let expected = to_string(x); if b[7] == expected { len(b) } else { 0 } }",
+        "fn compute(x: int) -> int { let mut a = [()]; let mut n = 0; loop { if n >= x { break; }; array_append(a, ()); n += 1; }; len(a) }",
+        "trait Mix<Self> { fn mix(x: Self, n: int, flag: bool, factor: float) -> int; } impl Mix for int { fn mix(x: int, n: int, flag: bool, factor: float) -> int { if flag and factor == 2.0 { x + n } else { 0 } } } #[inline(never)] fn forward<T>(x: T) -> int where T: Mix { mix(x, 3, true, 2.0) } fn compute(x: int) -> int { forward(x) }",
+        "enum Maybe<T> { Empty, Full(T) } #[inline(never)] fn make<T>(x: T) -> Maybe<T> { Maybe::Full(x) } #[inline(never)] fn duplicate<T>(x: T) -> (T, T) { (x, x) } fn compute(x: int) -> int { match duplicate(make((x, true))).0 { Maybe::Empty => 0, Maybe::Full(p) => p.0 } }",
+    ];
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        for source in sources {
+            let mut session = CompilerSession::new();
+            session.set_mir_optimization(optimization);
+            session.set_physical_mir_optimization(optimization);
+            let before = LIVE_ENVIRONMENTS.get();
+            differential::<isize, isize>(&mut session, source, 7);
+            assert_eq!(LIVE_ENVIRONMENTS.get(), before);
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_generic_evidence_cleanup() {
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(optimization);
+        session.set_physical_mir_optimization(optimization);
+        let entry = compile(
+            &mut session,
+            r#"
+            #[inline(never)] fn fail<T>(value: T, divisor: int) -> int {
+                let values = [(value, value)];
+                idiv(len(values), divisor)
+            }
+            fn compute(x: int) -> int { fail(to_string(x), x) }
+        "#,
+        );
+        let code = compile_raw(&session, entry);
+        let mut first = code.instantiate::<(isize,), isize>().unwrap();
+        let mut second = code.instantiate::<(isize,), isize>().unwrap();
+        // Each instance owns its relocated immutable data, independently of the compiled artifact.
+        drop(code);
+        for input in [0_isize, 1, 0, 2] {
+            let expected = session
+                .run_entry(
+                    ExecutionTarget::PhysicalMir,
+                    entry.module,
+                    entry.function,
+                    vec![Value::native(input)],
+                )
+                .map(|value| {
+                    let result = *value.as_primitive_ty::<isize>().unwrap();
+                    value.discard_storage();
+                    result
+                });
+            for instance in [&mut first, &mut second] {
+                let before = LIVE_ENVIRONMENTS.get();
+                let built = BUILT_ENVIRONMENTS.get();
+                let actual = instance.run((input,), WasmLimits::default());
+                assert_eq!(
+                    actual.as_ref().map_err(|e| e.kind()),
+                    expected.as_ref().map_err(|e| e.kind())
+                );
+                assert_eq!(LIVE_ENVIRONMENTS.get(), before);
+                assert!(BUILT_ENVIRONMENTS.get() > built);
+            }
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_captured_trait_evidence() {
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(optimization);
+        session.set_physical_mir_optimization(optimization);
+        session
+            .compile(
+                r#"
+            pub trait Tag<Self> { fn tag(value: Self) -> int; }
+            impl Tag for int { fn tag(value: int) -> int { value } }
+            pub struct Wrapper<T>(T)
+            impl<T> Tag for Wrapper<T> where T: Tag, T: Value {
+                fn tag(value: Wrapper<T>) -> int { tag(value.0) + 1 }
+            }
+            pub fn forward<T>(value: T) -> int where T: Tag, T: Value { tag(value) }
+        "#,
+                "captured",
+                Path::single_str("captured"),
+            )
+            .unwrap();
+        differential::<isize, isize>(
+            &mut session,
+            "use captured::*; fn compute(x: int) -> int { forward(Wrapper(Wrapper(x))) }",
+            7,
+        );
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_native_dictionary_adapters() {
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(optimization);
+        session.set_physical_mir_optimization(optimization);
+        let traits = session.compile(
+            "pub trait Probe<Self> { fn maybe(x: Self) -> Option<string>; fn add_offset(x: Self, y: int) -> int; }",
+            "traits", Path::single_str("traits"),
+        ).unwrap().module_id;
+        let source = session.expect_fresh_module(traits);
+        let trait_id = source.get_trait_id(ustr("Probe")).unwrap();
+        let definition = source.get_trait(ustr("Probe")).unwrap();
+        let path = Path::single_str("native_probe");
+        let mut module = Module::new(session.modules().next_id(), path.clone());
+        module.add_concrete_impl_for_trait_def_no_locals(
+            trait_id,
+            definition,
+            [Type::primitive::<isize>()],
+            [],
+            [],
+            [
+                Box::new(NativeOptionalFnN::from_rust(
+                    |x: isize| (x > 0).then(|| String::from(x.to_string())),
+                    option_type(Type::primitive::<String>()),
+                )) as Function,
+                Box::new(NativeFnNN::from_rust(|x: isize, y: isize| x + y)) as Function,
+            ],
+        );
+        session.register_module(path, module);
+        for input in [0, 4] {
+            differential::<isize, isize>(
+                &mut session,
+                r#"
+                use traits::*; use native_probe::*;
+                #[inline(never)] fn forward<T>(x: T) -> int where T: Probe {
+                            let n = add_offset(x, 3);
+                    match maybe(x) { None => n, Some(text) => n + len(text) }
+                }
+                fn compute(x: int) -> int { forward(x) }
+            "#,
+                input,
+            );
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_native_addressors() {
+    unsafe extern "C" fn shared(value: *const String) -> *const String {
+        value
+    }
+    unsafe extern "C" fn mutable(value: *mut String) -> *mut String {
+        value
+    }
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(optimization);
+        session.set_physical_mir_optimization(optimization);
+        let path = Path::single_str("native_members");
+        let mut module = Module::new(session.modules().next_id(), path.clone());
+        // SAFETY: identity projections remain rooted and allow ordinary string replacement.
+        unsafe {
+            module.add_native_member(
+                ustr("native_self"),
+                Some(NativeAddressorRef::new(shared).description(["self"], "", no_effects())),
+                Some(NativeAddressorMut::new(mutable).description(["self"], "", no_effects())),
+            );
+        }
+        session.register_module(path, module);
+        differential::<isize, isize>(
+            &mut session,
+            r#"
+                use native_members::*;
+                fn compute(x: int) -> int {
+                    let mut text = "before";
+                    let before = len(text.native_self);
+                    text.native_self = to_string(x);
+                    before + len(text.native_self)
+                }
+            "#,
+            123,
+        );
     }
 }
 

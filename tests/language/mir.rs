@@ -26,6 +26,23 @@ fn prepare_mir(session: &mut TestSession, module_id: ferlium::module::ModuleId) 
         .prepare_execution_target(ExecutionTarget::Mir, module_id);
 }
 
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_array_literals_retain_composite_element_layouts() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+        #[inline(never)] fn pairs<T>(value: T) -> [(T, T)] { [(value, value)] }
+        let a = pairs("owned");
+        let b = pairs((7, true));
+        (a[0].0 == a[0].1, b[0].1.0)
+    "#
+        ),
+        expected_tuple([bool(true), int(7)])
+    );
+}
+
 /// Keeps a place-lowering snapshot focused on the functions the test wrote.
 ///
 /// Indexing an array of a composite element type needs a concrete `Value` dictionary for that

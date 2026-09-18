@@ -9,6 +9,7 @@
 
 mod abi;
 mod emit;
+mod evidence;
 mod execution;
 mod failure;
 mod runtime;
@@ -106,6 +107,24 @@ impl Imports {
                 failure::propagate as *const (),
                 vec![ValType::I32; 2],
                 vec![ValType::I32],
+            ),
+            (
+                "retain_evidence",
+                evidence::retain as *const (),
+                vec![ValType::I32],
+                vec![],
+            ),
+            (
+                "release_evidence",
+                evidence::release as *const (),
+                vec![ValType::I32; 2],
+                vec![],
+            ),
+            (
+                "build_evidence",
+                evidence::build as *const (),
+                vec![ValType::I32; 4],
+                vec![],
             ),
         ] {
             imports.insert(

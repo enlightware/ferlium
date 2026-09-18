@@ -87,7 +87,7 @@ use crate::{
         terminator::{Terminator, TerminatorKind},
         value::{ConstantId, ValueId},
     },
-    module::{FunctionId, ModuleEnv, ProjectionIndex, id::Id},
+    module::{FunctionId, ModuleEnv, ProjectionIndex, TraitId, id::Id},
     types::{
         r#trait::TraitDictionaryEntryIndex,
         r#type::{CallImplType, CallResultConvention, Type},
@@ -1016,6 +1016,7 @@ enum Computation {
     AddressOffsetPlace { pointing_to: Type },
     /// A function place *materialized* from evidence into a freshly allocated cell.
     DictEntry {
+        trait_id: TraitId,
         entry_index: TraitDictionaryEntryIndex,
         ty: Type,
     },
@@ -1042,7 +1043,12 @@ impl Computation {
             OperationKind::AddressOffsetPlace { pointing_to } => Some(Self::AddressOffsetPlace {
                 pointing_to: *pointing_to,
             }),
-            OperationKind::DictEntry { entry_index, ty } => Some(Self::DictEntry {
+            OperationKind::DictEntry {
+                trait_id,
+                entry_index,
+                ty,
+            } => Some(Self::DictEntry {
+                trait_id: *trait_id,
                 entry_index: *entry_index,
                 ty: *ty,
             }),

@@ -4,6 +4,7 @@
 //! ABI-layout storage with checked provenance, logical subobjects and initialization.
 
 use super::{
+    DictionaryReference, EvidenceEnvironmentLayout,
     interpreter::{Evidence, invalid, unsupported},
     same_storage_type,
 };
@@ -15,7 +16,6 @@ use crate::{
         native_functions::NativeLayout,
         value::{LiteralNativeValue, LiteralValue, Value, VariantPayloadStorage},
     },
-    mir::physical::dictionary::{DictionaryReference, EvidenceEnvironmentLayout},
     module::{ProjectionIndex, id::Id},
     std::{
         buffer::buffer_element_type,

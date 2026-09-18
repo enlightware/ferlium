@@ -3,13 +3,14 @@
 
 //! Concrete physical MIR to core Wasm. A dispatcher preserves arbitrary MIR control flow.
 
-use std::mem::offset_of;
+use std::{iter, mem::offset_of};
 
 use strum::{EnumIter, IntoEnumIterator};
 use wasm_encoder::{
-    BlockType, CodeSection, ConstExpr, EntityType, ExportKind, ExportSection,
-    Function as WasmFunction, FunctionSection, GlobalSection, GlobalType, ImportSection,
-    Instruction as I, MemArg, MemoryType, Module, TypeSection, ValType,
+    BlockType, CodeSection, ConstExpr, ElementSection, Elements, EntityType, ExportKind,
+    ExportSection, Function as WasmFunction, FunctionSection, GlobalSection, GlobalType,
+    ImportSection, Instruction as I, MemArg, MemoryType, Module, RefType, TableSection, TableType,
+    TypeSection, ValType,
 };
 
 use crate::{
@@ -23,23 +24,30 @@ use crate::{
         BasicBlock, BlockId, Function, Operation, OperationKind, ParameterId, ParameterKind, Value,
         ValueId,
         operation::OperationKindDiscriminant,
-        physical::program::ResolvedPhysicalProgram,
+        physical::{DictionaryReference, program::ResolvedPhysicalProgram},
         role::{MirType, ValueRole, ValueRoles},
         terminator::TerminatorKind,
         value::ConstantId,
     },
-    module::{FunctionId, ModuleEnv, ProjectionIndex, id::Id},
+    module::{
+        DictionaryEntryEvidence, FunctionId, ModuleEnv, ProjectionIndex, TraitDictionaryId,
+        TraitId, id::Id,
+    },
     std::{
+        core_traits_names::VALUE_TRAIT_NAME,
         math::Float,
         string::StaticStr,
         value::{
-            product_layout_spec, structural_variant, value_layout_for_type, variant_payload_offset,
+            VALUE_ALIGN_ASSOC_CONST_INDEX, VALUE_SIZE_ASSOC_CONST_INDEX, product_layout_spec,
+            structural_variant, value_layout_for_type, variant_payload_offset,
             variant_payload_storage_for_type,
         },
     },
     types::{
-        r#type::{CallResultConvention, Type, TypeKind},
-        type_like::TypeLike,
+        effects::{EffType, Effect, PrimitiveEffect},
+        mutability::MutType,
+        r#trait::TraitDictionaryEntryIndex,
+        r#type::{CallResultConvention, FnType, Type, TypeKind},
     },
     ustr,
 };
@@ -47,6 +55,7 @@ use crate::{
 use super::{
     IMPORT_MODULE, Imports, MEMORY_IMPORT,
     abi::{CallAbi, Parameter as ParameterTransport, ResultKind, scalar_type},
+    evidence::{self, DictionaryDescriptor, ENVIRONMENT_OFFSET, ReachableEvidence},
     execution::{FailureCode, InvocationState},
 };
 
@@ -142,9 +151,6 @@ fn script_abi(body: &Function) -> Result<CallAbi, String> {
     let mut parameters = Vec::new();
     let mut result = None;
     for parameter in body.parameters() {
-        if !parameter.ty.is_constant() {
-            return Err("generic storage or evidence".into());
-        }
         match parameter.kind {
             ParameterKind::Return => result = Some(parameter.ty),
             ParameterKind::Parameter(mode) => {
@@ -162,7 +168,7 @@ fn script_abi(body: &Function) -> Result<CallAbi, String> {
             ParameterKind::Owned => {
                 parameters.push(ParameterTransport::Indirect);
             }
-            ParameterKind::Dictionary => return Err("generic evidence".into()),
+            ParameterKind::Dictionary => parameters.push(ParameterTransport::Indirect),
         }
     }
     let result_kind = match result {
@@ -193,6 +199,48 @@ pub(super) struct Emitted {
     pub strings: Box<[StaticStr]>,
     pub parameters: Vec<ScalarType>,
     pub result: ScalarType,
+    pub evidence: evidence::Image,
+}
+
+fn dictionary_abi(
+    env: ModuleEnv<'_>,
+    trait_id: TraitId,
+    entry: TraitDictionaryEntryIndex,
+) -> Result<CallAbi, String> {
+    let definition = env.trait_def(trait_id);
+    let getter;
+    let ty = if let Some((_, method)) = definition.methods.get(entry.as_index()) {
+        &method.ty_scheme.ty
+    } else {
+        let constant = definition
+            .associated_consts
+            .get(entry.as_index() - definition.methods.len())
+            .ok_or("missing dictionary entry declaration")?;
+        getter = FnType::new_by_val([], constant.ty, EffType::empty());
+        &getter
+    };
+    Ok(CallAbi {
+        // The leading pointer borrows the complete dictionary reference, including self evidence.
+        parameters: iter::once(ParameterTransport::Indirect)
+            .chain(ty.args.iter().map(|arg| {
+                if arg.mut_ty != MutType::constant() {
+                    ParameterTransport::Indirect
+                } else {
+                    ScalarType::of(arg.ty)
+                        .ok()
+                        .filter(|ty| !ty.is::<()>())
+                        .map_or(ParameterTransport::Indirect, |ty| {
+                            ParameterTransport::Direct(ty.wasm())
+                        })
+                }
+            }))
+            .collect(),
+        result: ResultKind::Output,
+        fallible: ty.effects.has_variables()
+            || ty
+                .effects
+                .contains(Effect::Primitive(PrimitiveEffect::Fallible)),
+    })
 }
 
 pub(super) fn emit(
@@ -242,17 +290,57 @@ pub(super) fn emit(
         .map(|p| ScalarType::of(p.ty))
         .collect::<Result<Vec<_>, _>>()?;
     let entry = program.direct_entry(entry);
+    let env = session
+        .modules()
+        .env_for(session.expect_fresh_module(entry.module));
+    let value_trait = env.expect_std_trait_id(VALUE_TRAIT_NAME);
+    let definition = env.trait_def(value_trait);
+    let layout_entries =
+        [VALUE_SIZE_ASSOC_CONST_INDEX, VALUE_ALIGN_ASSOC_CONST_INDEX].map(|index| {
+            (
+                value_trait,
+                definition.dictionary_associated_const_index(index),
+            )
+        });
     let mut pending = vec![entry];
     let mut seen = FxHashSet::default();
     let mut bodies = Vec::new();
     let mut natives = FxHashMap::default();
-    while let Some(id) = pending.pop() {
+    let mut reachable = ReachableEvidence::default();
+    loop {
+        if pending.is_empty() {
+            for &id in &reachable.dictionaries {
+                let definition = program.dictionary(id).unwrap();
+                for &(trait_id, entry) in &reachable.entries {
+                    if definition.trait_id() == trait_id {
+                        let target =
+                            program.direct_entry(definition.entries()[entry.as_index()].function());
+                        if !seen.contains(&target) {
+                            pending.push(target);
+                        }
+                    }
+                }
+            }
+        }
+        let Some(id) = pending.pop() else {
+            break;
+        };
         if !seen.insert(id) {
             continue;
         }
-        let body = program
-            .function(id)
-            .ok_or_else(|| format!("missing script entry {id:?}"))?;
+        let Some(body) = program.function(id) else {
+            let native = program
+                .module(id.module)
+                .and_then(|m| m.native_entry(id))
+                .ok_or_else(|| format!("missing native entry {id:?}"))?;
+            let index = imports
+                .add_native(id, native)
+                .map_err(|e| format!("native linkage {id:?}: {e:?}"))?;
+            let abi = CallAbi::native(native.signature())
+                .map_err(|reason| format!("native {id:?}: {reason}"))?;
+            natives.insert(id, (index, abi));
+            continue;
+        };
         let signature = script_abi(body).map_err(|reason| diagnostic(id, body, &reason))?;
         for block in body.blocks() {
             let block = body.block(block);
@@ -270,29 +358,32 @@ pub(super) fn emit(
                 return Err(diagnostic(id, body, "unsupported terminator (yield)"));
             }
             for operation in operations(block) {
-                if let Some(callee) = callee(operation) {
-                    let Value::Function(mut target) = callee else {
-                        return Err(diagnostic(id, body, "indirect call"));
-                    };
-                    target = program.direct_entry(target);
-                    if program.function(target).is_some() {
-                        pending.push(target);
-                    } else {
-                        let native = program
-                            .module(target.module)
-                            .and_then(|m| m.native_entry(target))
-                            .ok_or_else(|| diagnostic(id, body, "missing native entry"))?;
-                        let sig = native.signature();
-                        if matches!(sig.result, NativeResult::Addressor { .. }) {
-                            return Err(diagnostic(id, body, "addressor native result"));
-                        }
-                        let index = imports
-                            .add_native(target, native)
-                            .map_err(|error| format!("native linkage {target:?}: {error:?}"))?;
-                        let abi = CallAbi::native(sig)
-                            .map_err(|reason| format!("native {target:?}: {reason}"))?;
-                        natives.insert(target, (index, abi));
+                for value in &operation.operands {
+                    reachable.value(program, value)?;
+                }
+                match operation.kind {
+                    OperationKind::BuildDictionary { definition, .. } => {
+                        reachable.dictionary(definition)
                     }
+                    OperationKind::DictEntry {
+                        trait_id,
+                        entry_index,
+                        ..
+                    } => reachable.entry(trait_id, entry_index),
+                    OperationKind::Alloca { .. }
+                    | OperationKind::Move
+                    | OperationKind::Replace
+                    | OperationKind::Variant { .. }
+                        if layout_witness(operation).is_some() =>
+                    {
+                        for (trait_id, entry) in layout_entries {
+                            reachable.entry(trait_id, entry);
+                        }
+                    }
+                    _ => (),
+                }
+                if let Some(Value::Function(target)) = callee(operation) {
+                    pending.push(program.direct_entry(target));
                 }
             }
         }
@@ -336,6 +427,25 @@ pub(super) fn emit(
         .collect();
     let mut functions = FunctionSection::new();
     let mut code = CodeSection::new();
+    let mut table = FxHashMap::default();
+    let mut adapters = Vec::new();
+    let mut entry_abis = FxHashMap::default();
+    for &(trait_id, entry) in &reachable.entries {
+        let abi = dictionary_abi(env, trait_id, entry)?;
+        let index = types.len();
+        types.ty().function(abi.params(), abi.results());
+        entry_abis.insert((trait_id, entry), (index, abi));
+    }
+    for &id in &reachable.dictionaries {
+        let definition = program.dictionary(id).unwrap();
+        for &(trait_id, entry) in &reachable.entries {
+            if trait_id == definition.trait_id() {
+                table.insert((id, entry.as_index()), adapters.len() as u32 + 1);
+                adapters.push((id, entry));
+            }
+        }
+    }
+    let evidence = evidence::Image::build(program, &reachable, &table);
     let mut strings = Vec::new();
     for (id, body, signature) in &bodies {
         functions.function(types.len());
@@ -351,11 +461,41 @@ pub(super) fn emit(
                 .env_for(session.expect_fresh_module(id.module)),
             imports,
             &mut strings,
+            &evidence,
+            &entry_abis,
+            layout_entries,
         )
         .and_then(Body::emit)
         .map_err(|reason| diagnostic(*id, body, &reason))?;
         code.function(&emitted);
     }
+    let adapter_base = imports.functions().len() as u32 + bodies.len() as u32;
+    for &(id, entry) in &adapters {
+        let definition = program.dictionary(id).unwrap();
+        let (ty, abi) = &entry_abis[&(definition.trait_id(), entry)];
+        functions.function(*ty);
+        code.function(&dictionary_adapter(
+            program, id, entry, abi, &callees, session, imports,
+        )?);
+    }
+    let mut tables = TableSection::new();
+    tables.table(TableType {
+        element_type: RefType::FUNCREF,
+        table64: false,
+        minimum: adapters.len() as u64 + 1,
+        maximum: None,
+        shared: false,
+    });
+    let mut elements = ElementSection::new();
+    elements.active(
+        None,
+        &ConstExpr::i32_const(1),
+        Elements::Functions(
+            (adapter_base..adapter_base + adapters.len() as u32)
+                .collect::<Vec<_>>()
+                .into(),
+        ),
+    );
     let mut globals = GlobalSection::new();
     let mut exports = ExportSection::new();
     for _ in Global::iter() {
@@ -369,7 +509,7 @@ pub(super) fn emit(
         );
     }
     let entry_signature = &indices[&entry].1;
-    let mut setup_index = imports.functions().len() as u32 + bodies.len() as u32;
+    let mut setup_index = adapter_base + adapters.len() as u32;
     // Only fallible entries need a host adapter: internal status returns become a Rust error
     // through the outer invocation boundary, without changing the scalar host C signature.
     if entry_signature.fallible {
@@ -402,14 +542,17 @@ pub(super) fn emit(
         .section(&types)
         .section(&import_section)
         .section(&functions)
+        .section(&tables)
         .section(&globals)
         .section(&exports)
+        .section(&elements)
         .section(&code);
     Ok(Emitted {
         bytes: module.finish(),
         parameters: host_parameters,
         strings: strings.into_boxed_slice(),
         result,
+        evidence,
     })
 }
 
@@ -423,9 +566,344 @@ fn operations(block: &BasicBlock) -> impl Iterator<Item = &Operation> {
         })
 }
 
+fn layout_witness(op: &Operation) -> Option<&Value> {
+    match op.kind {
+        OperationKind::Alloca { .. } if !op.operands.is_empty() => op.operands.first(),
+        OperationKind::Move | OperationKind::Replace if op.operands.len() == 3 => {
+            op.operands.last()
+        }
+        OperationKind::Variant {
+            has_layout_witness: true,
+            ..
+        } => op.operands.last(),
+        _ => None,
+    }
+}
+
+/// Bridge the declaration-fixed dictionary ABI to the implementation's direct ABI.
+#[allow(clippy::too_many_arguments)]
+fn dictionary_adapter(
+    program: &ResolvedPhysicalProgram<'_>,
+    dictionary: TraitDictionaryId,
+    entry: TraitDictionaryEntryIndex,
+    abi: &CallAbi,
+    callees: &FxHashMap<FunctionId, (u32, CallAbi)>,
+    session: &CompilerSession,
+    imports: &Imports,
+) -> Result<WasmFunction, String> {
+    let definition = program.dictionary(dictionary).unwrap();
+    let entry = &definition.entries()[entry.as_index()];
+    let target = program.direct_entry(entry.function());
+    let (index, direct) = &callees[&target];
+    let (input_types, result_ty) = if let Some(body) = program.function(target) {
+        (
+            body.parameters()
+                .iter()
+                .filter(|p| p.kind != ParameterKind::Return)
+                .map(|p| p.ty)
+                .collect::<Vec<_>>(),
+            body.parameters()
+                .iter()
+                .find(|p| p.kind == ParameterKind::Return)
+                .map_or(Type::unit(), |p| p.ty),
+        )
+    } else {
+        let native = program
+            .module(target.module)
+            .unwrap()
+            .native_entry(target)
+            .unwrap()
+            .signature();
+        (
+            native.parameters.iter().map(|p| p.layout().ty).collect(),
+            native.result.ty(),
+        )
+    };
+    let captures = entry.capture_mapping();
+    if direct.parameters.len() != captures.len() + abi.parameters.len() - 1 {
+        return Err(format!("dictionary adapter argument count for {target:?}"));
+    }
+    let env = session
+        .modules()
+        .env_for(session.expect_fresh_module(target.module));
+    let optional = if matches!(direct.result, ResultKind::Optional) {
+        let NativeResult::Optional { payload, .. } = program
+            .module(target.module)
+            .unwrap()
+            .native_entry(target)
+            .unwrap()
+            .signature()
+            .result
+        else {
+            unreachable!()
+        };
+        Some(NativeOptionalResultAdapter::new(
+            result_ty, payload.ty, env, session,
+        )?)
+    } else {
+        None
+    };
+    let mut frame_size = optional
+        .as_ref()
+        .map_or(0, |adapter| (adapter.payload_size.max(1) + 7) & !7);
+    let mut spills = FxHashMap::default();
+    for (i, canonical) in abi.parameters[1..].iter().enumerate() {
+        if matches!(canonical, ParameterTransport::Direct(_))
+            && direct.parameters[captures.len() + i] == ParameterTransport::Indirect
+        {
+            spills.insert(i, frame_size);
+            frame_size = frame_size
+                .checked_add(8)
+                .ok_or("dictionary adapter frame overflow")?;
+        }
+    }
+    let frame = abi.parameter_count() as u32;
+    let scratch = frame + 1;
+    let mut code = WasmFunction::new([(if frame_size == 0 { 0 } else { 2 }, ValType::I32)]);
+    if frame_size != 0 {
+        code.instruction(&I::GlobalGet(Global::Stack as u32));
+        code.instruction(&I::LocalSet(frame));
+        code.instruction(&I::GlobalGet(Global::End as u32));
+        code.instruction(&I::LocalGet(frame));
+        code.instruction(&I::I32Sub);
+        code.instruction(&I::I32Const(frame_size as i32));
+        code.instruction(&I::I32LtU);
+        code.instruction(&I::If(BlockType::Empty));
+        emit_failure(&mut code, FailureCode::StackCapacity);
+        code.instruction(&I::End);
+        code.instruction(&I::LocalGet(frame));
+        code.instruction(&I::I32Const(frame_size as i32));
+        code.instruction(&I::I32Add);
+        code.instruction(&I::GlobalSet(Global::Stack as u32));
+        for (i, _) in abi.parameters[1..].iter().enumerate() {
+            if let Some(offset) = spills.get(&i) {
+                code.instruction(&I::LocalGet(frame));
+                code.instruction(&I::I32Const(*offset as i32));
+                code.instruction(&I::I32Add);
+                code.instruction(&I::LocalGet(abi.input_local(i as u32 + 1)));
+                code.instruction(&scalar_store(ScalarType::of(
+                    input_types[captures.len() + i],
+                )?));
+            }
+        }
+    }
+    if !direct.fallible && matches!(direct.result, ResultKind::Direct(_)) {
+        code.instruction(&I::LocalGet(abi.output_local()));
+    }
+    if direct.fallible {
+        if abi.fallible {
+            code.instruction(&I::LocalGet(0));
+        } else {
+            code.instruction(&I::GlobalGet(Global::Context as u32));
+            code.instruction(&I::I32Load(MemArg {
+                offset: offset_of!(InvocationState, native_failure) as u64,
+                ..memarg(2)
+            }));
+        }
+    }
+    for mapping in captures {
+        code.instruction(&I::LocalGet(abi.input_local(0)));
+        if let DictionaryEntryEvidence::Capture(index) = mapping {
+            code.instruction(&I::I32Load(MemArg {
+                offset: ENVIRONMENT_OFFSET,
+                ..memarg(2)
+            }));
+            code.instruction(&I::I32Const(
+                definition.environment().fields[*index].offset as i32,
+            ));
+            code.instruction(&I::I32Add);
+        }
+    }
+    for (i, canonical) in abi.parameters[1..].iter().enumerate() {
+        let actual = direct.parameters[captures.len() + i];
+        if let Some(offset) = spills.get(&i) {
+            code.instruction(&I::LocalGet(frame));
+            code.instruction(&I::I32Const(*offset as i32));
+            code.instruction(&I::I32Add);
+            continue;
+        }
+        code.instruction(&I::LocalGet(abi.input_local(i as u32 + 1)));
+        if let (ParameterTransport::Indirect, ParameterTransport::Direct(_)) = (*canonical, actual)
+        {
+            code.instruction(&scalar_load(ScalarType::of(
+                input_types[captures.len() + i],
+            )?));
+        }
+    }
+    if direct.output() {
+        code.instruction(&I::LocalGet(if optional.is_some() {
+            frame
+        } else {
+            abi.output_local()
+        }));
+    }
+    code.instruction(&I::Call(*index));
+    if let Some(adapter) = optional {
+        adapter.emit(
+            &mut code,
+            abi.output_local(),
+            frame,
+            scratch,
+            imports.function_index("alloc"),
+        );
+    }
+    if direct.fallible {
+        if !abi.fallible {
+            // A status ABI does not imply a source-level permission to fail. The declaration's
+            // infallible contract guarantees success here, including after unsafe effect erasure.
+            code.instruction(&I::Drop);
+        }
+    } else {
+        if matches!(direct.result, ResultKind::Direct(_)) {
+            code.instruction(&scalar_store(ScalarType::of(result_ty)?));
+        }
+        if abi.fallible {
+            code.instruction(&I::I32Const(0));
+        }
+    }
+    if frame_size != 0 {
+        code.instruction(&I::LocalGet(frame));
+        code.instruction(&I::GlobalSet(Global::Stack as u32));
+    }
+    code.instruction(&I::End);
+    Ok(code)
+}
+
+/// Concrete native presence/payload transport to the language's Option representation.
+struct NativeOptionalResultAdapter {
+    some_tag: u32,
+    none_tag: u32,
+    storage: VariantPayloadStorage,
+    size: u32,
+    align: u32,
+    field: u32,
+    payload_size: u32,
+}
+
+impl NativeOptionalResultAdapter {
+    fn new(
+        ty: Type,
+        payload: Type,
+        env: ModuleEnv<'_>,
+        session: &CompilerSession,
+    ) -> Result<Self, String> {
+        let (_, cases) = structural_variant(ty, &env).ok_or("optional output is not a variant")?;
+        let some = cases
+            .iter()
+            .find(|(tag, _)| *tag == ustr("Some"))
+            .ok_or("optional output has no Some case")?
+            .1;
+        let span = Location::new_synthesized();
+        let storage = variant_payload_storage_for_type(ty, ustr("Some"), span, &env)
+            .map_err(|e| format!("optional payload storage: {e:?}"))?;
+        let layout = value_layout_for_type(some, span, &env)
+            .map_err(|e| format!("optional payload layout: {e:?}"))?;
+        let payload_layout = value_layout_for_type(payload, span, &env)
+            .map_err(|e| format!("optional native layout: {e:?}"))?;
+        if payload_layout.align > 8 {
+            return Err("optional native alignment exceeds frame alignment".into());
+        }
+        let field = product_layout_spec(some, span, &env)
+            .and_then(|p| p.static_field_offset(ProjectionIndex::from_index(0)))
+            .ok_or("optional payload must be a concrete tuple")? as u32;
+        Ok(Self {
+            some_tag: storage.encode_tag_id(session.variant_tag_id(ustr("Some"))),
+            none_tag: session.variant_tag_id(ustr("None")),
+            storage,
+            size: layout.size,
+            align: layout.align,
+            field,
+            payload_size: payload_layout.size,
+        })
+    }
+
+    fn emit(
+        &self,
+        code: &mut WasmFunction,
+        output: u32,
+        payload: u32,
+        scratch: u32,
+        allocate: u32,
+    ) {
+        code.instruction(&I::If(BlockType::Empty)); // Native presence, not a failure status.
+        code.instruction(&I::LocalGet(output));
+        code.instruction(&I::I32Const(self.some_tag as i32));
+        code.instruction(&I::I32Store(memarg(2)));
+        code.instruction(&I::LocalGet(output));
+        code.instruction(&I::I32Const(
+            variant_payload_offset(if self.storage.is_indirect() {
+                align_of::<usize>() as u32
+            } else {
+                self.align
+            }) as i32,
+        ));
+        code.instruction(&I::I32Add);
+        if self.storage.is_indirect() {
+            code.instruction(&I::I32Const(self.size as i32));
+            code.instruction(&I::I32Const(self.align as i32));
+            code.instruction(&I::Call(allocate));
+            code.instruction(&I::LocalTee(scratch));
+            code.instruction(&I::I32Store(memarg(2)));
+            code.instruction(&I::LocalGet(scratch));
+        }
+        code.instruction(&I::I32Const(self.field as i32));
+        code.instruction(&I::I32Add);
+        code.instruction(&I::LocalGet(payload));
+        code.instruction(&I::I32Const(self.payload_size as i32));
+        code.instruction(&I::MemoryCopy {
+            src_mem: 0,
+            dst_mem: 0,
+        });
+        code.instruction(&I::Else);
+        code.instruction(&I::LocalGet(output));
+        code.instruction(&I::I32Const(self.none_tag as i32));
+        code.instruction(&I::I32Store(memarg(2)));
+        code.instruction(&I::End);
+    }
+}
+
+fn emit_failure(code: &mut WasmFunction, failure: FailureCode) {
+    code.instruction(&I::GlobalGet(Global::Context as u32));
+    code.instruction(&I::I32Eqz);
+    code.instruction(&I::If(BlockType::Empty));
+    code.instruction(&I::Unreachable);
+    code.instruction(&I::End);
+    code.instruction(&I::GlobalGet(Global::Context as u32));
+    code.instruction(&I::I32Const(failure as i32));
+    code.instruction(&I::I32Store(MemArg {
+        offset: offset_of!(InvocationState, failure) as u64,
+        ..memarg(2)
+    }));
+    code.instruction(&I::Unreachable);
+}
+
+fn scalar_load(ty: ScalarType) -> I<'static> {
+    if ty.is::<bool>() {
+        I::I32Load8U(memarg(0))
+    } else if ty.is::<Float>() {
+        I::F64Load(memarg(3))
+    } else if ty.is::<isize>() {
+        I::I32Load(memarg(2))
+    } else {
+        unreachable!("non-scalar transport")
+    }
+}
+
+fn scalar_store(ty: ScalarType) -> I<'static> {
+    if ty.is::<bool>() {
+        I::I32Store8(memarg(0))
+    } else if ty.is::<Float>() {
+        I::F64Store(memarg(3))
+    } else if ty.is::<isize>() {
+        I::I32Store(memarg(2))
+    } else {
+        unreachable!("non-scalar transport")
+    }
+}
+
 fn callee(op: &Operation) -> Option<Value> {
     match &op.kind {
-        OperationKind::Call { .. } => Some(op.operands[0].clone()),
+        OperationKind::Call { .. } | OperationKind::Project { .. } => Some(op.operands[0].clone()),
         OperationKind::Clone { .. } => Some(op.operands[2].clone()),
         OperationKind::Drop { .. } | OperationKind::DropInitialized { .. } => {
             Some(op.operands[1].clone())
@@ -558,6 +1036,18 @@ struct Body<'a> {
     env: ModuleEnv<'a>,
     imports: &'a Imports,
     strings: &'a mut Vec<StaticStr>,
+    evidence: &'a evidence::Image,
+    entry_abis: &'a FxHashMap<(TraitId, TraitDictionaryEntryIndex), (u32, CallAbi)>,
+    layout_entries: [(TraitId, TraitDictionaryEntryIndex); 2],
+    selections: FxHashMap<ValueId, (TraitId, TraitDictionaryEntryIndex)>,
+    owned_evidence: Vec<Value>,
+    capture_slots: FxHashMap<ValueId, u32>,
+    variant_shells: FxHashSet<ValueId>,
+    layout_slot: u32,
+    dynamic_size: u32,
+    dynamic_align: u32,
+    dynamic_base: u32,
+    allocation_end: u32,
     pending_failure: u32,
     scratch: u32,
     scratch_slots: FxHashMap<Type, u32>,
@@ -584,6 +1074,9 @@ impl<'a> Body<'a> {
         env: ModuleEnv<'a>,
         imports: &'a Imports,
         strings: &'a mut Vec<StaticStr>,
+        evidence: &'a evidence::Image,
+        entry_abis: &'a FxHashMap<(TraitId, TraitDictionaryEntryIndex), (u32, CallAbi)>,
+        layout_entries: [(TraitId, TraitDictionaryEntryIndex); 2],
     ) -> Result<Self, String> {
         let mut this = Self {
             body,
@@ -591,6 +1084,18 @@ impl<'a> Body<'a> {
             env,
             imports,
             strings,
+            evidence,
+            entry_abis,
+            layout_entries,
+            selections: FxHashMap::default(),
+            owned_evidence: Vec::new(),
+            capture_slots: FxHashMap::default(),
+            variant_shells: FxHashSet::default(),
+            layout_slot: 0,
+            dynamic_size: 0,
+            dynamic_align: 0,
+            dynamic_base: 0,
+            allocation_end: 0,
             pending_failure: 0,
             scratch: 0,
             scratch_slots: FxHashMap::default(),
@@ -608,6 +1113,16 @@ impl<'a> Body<'a> {
         };
         this.pending_failure = this.local(ValType::I32);
         this.scratch = this.local(ValType::I32);
+        this.dynamic_size = this.local(ValType::I32);
+        this.dynamic_align = this.local(ValType::I32);
+        this.dynamic_base = this.local(ValType::I32);
+        this.allocation_end = this.local(ValType::I64);
+        let witnessed = body
+            .blocks()
+            .any(|block| operations(body.block(block)).any(|op| layout_witness(op).is_some()));
+        if witnessed {
+            this.layout_slot = this.reserve_bytes(8)?;
+        }
         if body.blocks().count() != 1
             || !matches!(
                 body.block(body.entry()).terminator().kind,
@@ -649,7 +1164,9 @@ impl<'a> Body<'a> {
         }
         for block in body.blocks() {
             for operation in operations(body.block(block)) {
-                if matches!(operation.kind, OperationKind::Replace) {
+                if matches!(operation.kind, OperationKind::Replace)
+                    && layout_witness(operation).is_none()
+                {
                     let MirType::Lowered(ty) = this.pointee_type(&operation.operands[0])? else {
                         return Err("pointer replacement".into());
                     };
@@ -661,6 +1178,43 @@ impl<'a> Body<'a> {
                     this.reserve_scratch(payload)?;
                 }
                 if let Some(id) = operation.result_id() {
+                    match operation.kind {
+                        OperationKind::BuildDictionary { definition, .. } => {
+                            this.slot(
+                                Value::Register(id),
+                                size_of::<DictionaryReference>() as u32,
+                            )?;
+                            this.owned_evidence.push(Value::Register(id));
+                            let bytes = program
+                                .dictionary(definition)
+                                .unwrap()
+                                .environment()
+                                .allocation
+                                .size();
+                            let offset = this.reserve_bytes(bytes as u32)?;
+                            this.capture_slots.insert(id, offset);
+                            continue;
+                        }
+                        OperationKind::DictEntry {
+                            trait_id,
+                            entry_index,
+                            ..
+                        } => {
+                            this.slot(
+                                Value::Register(id),
+                                size_of::<DictionaryReference>() as u32,
+                            )?;
+                            this.owned_evidence.push(Value::Register(id));
+                            this.selections.insert(id, (trait_id, entry_index));
+                            continue;
+                        }
+                        OperationKind::Variant { .. } => {
+                            this.slot(Value::Register(id), 4)?;
+                            this.variant_shells.insert(id);
+                            continue;
+                        }
+                        _ => (),
+                    }
                     let storage_ty = match &operation.kind {
                         OperationKind::Alloca { ty } if operation.operands.is_empty() => {
                             Some(MirType::Lowered(*ty))
@@ -683,8 +1237,15 @@ impl<'a> Body<'a> {
                     let role = this
                         .roles
                         .get(&Value::Register(id), body.constants())
-                        .unwrap();
-                    let ty = match &*role {
+                        .unwrap()
+                        .into_owned();
+                    if let ValueRole::Materialized(MirType::Lowered(ty)) = &role
+                        && let Ok(ty) = ScalarType::of(*ty)
+                        && addressed.contains(&Value::Register(id))
+                    {
+                        this.slot(Value::Register(id), ty.size())?;
+                    }
+                    let ty = match &role {
                         ValueRole::Place(_) | ValueRole::StackMarker | ValueRole::VariantTag => {
                             ValType::I32
                         }
@@ -708,6 +1269,9 @@ impl<'a> Body<'a> {
             }
         }
         this.frame_size = (this.frame_size + 7) & !7;
+        if !this.selections.is_empty() {
+            this.reserve_scratch(Type::unit())?;
+        }
         if this.frame_size != 0 {
             this.frame = Some(this.local(ValType::I32));
         }
@@ -719,9 +1283,6 @@ impl<'a> Body<'a> {
         match ty {
             MirType::Pointer(_) => Ok(ScalarType::pointer().size()),
             MirType::Lowered(ty) => {
-                if !ty.is_constant() {
-                    return Err("open storage layout".into());
-                }
                 let layout = value_layout_for_type(*ty, Location::new_synthesized(), &self.env)
                     .map_err(|e| format!("Wasm storage layout: {e:?}"))?;
                 if layout.align > 8 {
@@ -764,57 +1325,19 @@ impl<'a> Body<'a> {
         let MirType::Lowered(ty) = self.pointee_type(output)? else {
             return Err("optional output must be a value place".into());
         };
-        let (_, cases) =
-            structural_variant(ty, &self.env).ok_or("optional output is not a variant")?;
-        let some = cases
-            .iter()
-            .find(|(tag, _)| *tag == ustr("Some"))
-            .ok_or("optional output has no Some case")?
-            .1;
-        let span = Location::new_synthesized();
-        let storage = variant_payload_storage_for_type(ty, ustr("Some"), span, &self.env)
-            .map_err(|e| format!("optional payload storage: {e:?}"))?;
-        let layout = value_layout_for_type(some, span, &self.env)
-            .map_err(|e| format!("optional payload layout: {e:?}"))?;
-        let field = product_layout_spec(some, span, &self.env)
-            .and_then(|p| p.static_field_offset(ProjectionIndex::from_index(0)))
-            .ok_or("optional payload must be a concrete tuple")? as u32;
-        self.i(I::If(BlockType::Empty)); // Native presence, not a source-failure status.
+        let adapter = NativeOptionalResultAdapter::new(ty, payload, self.env, self.session)?;
+        // Preserve the presence result on the operand stack while preparing the two addresses.
         self.address(output)?;
-        self.i(I::I32Const(
-            storage.encode_tag_id(self.session.variant_tag_id(ustr("Some"))) as i32,
-        ));
-        self.i(I::I32Store(memarg(2)));
-        self.address(output)?;
-        self.i(I::I32Const(
-            variant_payload_offset(if storage.is_indirect() {
-                align_of::<usize>() as u32
-            } else {
-                layout.align
-            }) as i32,
-        ));
-        self.i(I::I32Add);
-        if storage.is_indirect() {
-            self.i(I::I32Const(layout.size as i32));
-            self.i(I::I32Const(layout.align as i32));
-            self.i(I::Call(self.imports.function_index("alloc")));
-            self.i(I::LocalTee(self.scratch));
-            self.i(I::I32Store(memarg(2)));
-            self.i(I::LocalGet(self.scratch));
-        }
-        self.i(I::I32Const(field as i32));
-        self.i(I::I32Add);
+        self.i(I::LocalSet(self.dynamic_base));
         self.scratch_address(payload);
-        self.i(I::I32Const(self.size(&MirType::Lowered(payload))? as i32));
-        self.i(I::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
-        self.i(I::Else);
-        self.address(output)?;
-        self.i(I::I32Const(self.session.variant_tag_id(ustr("None")) as i32));
-        self.i(I::I32Store(memarg(2)));
-        self.i(I::End);
+        self.i(I::LocalSet(self.dynamic_size));
+        adapter.emit(
+            &mut self.code,
+            self.dynamic_base,
+            self.dynamic_size,
+            self.scratch,
+            self.imports.function_index("alloc"),
+        );
         Ok(())
     }
 
@@ -831,6 +1354,166 @@ impl<'a> Body<'a> {
             offset: offset as u64,
             ..memarg(2)
         }));
+    }
+
+    fn frame_address(&mut self, offset: u32) {
+        self.i(I::LocalGet(self.frame.expect("reserved frame storage")));
+        self.i(I::I32Const(offset as i32));
+        self.i(I::I32Add);
+    }
+
+    fn release_evidence(&mut self, reference: &Value) -> Result<(), String> {
+        self.context_pointer(offset_of!(InvocationState, evidence));
+        self.address(reference)?;
+        self.i(I::Call(self.imports.function_index("release_evidence")));
+        Ok(())
+    }
+
+    fn dictionary_index(&mut self, dictionary: &Value, entry: usize) -> Result<(), String> {
+        // Descriptor and entry-table addresses are image-relative; environments are relocated.
+        self.context_pointer(offset_of!(InvocationState, evidence));
+        self.context_pointer(offset_of!(InvocationState, evidence));
+        self.context_pointer(offset_of!(InvocationState, evidence));
+        self.value(dictionary)?;
+        self.i(I::I32Load(memarg(2)));
+        self.i(I::I32Const(2));
+        self.i(I::I32Shl);
+        self.i(I::I32Add);
+        self.i(I::I32Load(memarg(2)));
+        self.i(I::I32Add);
+        self.i(I::I32Load(MemArg {
+            offset: offset_of!(DictionaryDescriptor, entries) as u64,
+            ..memarg(2)
+        }));
+        self.i(I::I32Add);
+        self.i(I::I32Load(MemArg {
+            offset: entry as u64 * 4,
+            ..memarg(2)
+        }));
+        Ok(())
+    }
+
+    fn dynamic_layout(&mut self, dictionary: &Value) -> Result<(), String> {
+        for (index, entry) in self.layout_entries.into_iter().enumerate() {
+            let (ty, _) = self.entry_abis[&entry];
+            self.value(dictionary)?;
+            self.frame_address(self.layout_slot + index as u32 * 4);
+            self.dictionary_index(dictionary, entry.1.as_index())?;
+            self.i(I::CallIndirect {
+                type_index: ty,
+                table_index: 0,
+            });
+            self.frame_address(self.layout_slot + index as u32 * 4);
+            self.i(I::I32Load(memarg(2)));
+            self.i(I::LocalSet(if index == 0 {
+                self.dynamic_size
+            } else {
+                self.dynamic_align
+            }));
+        }
+        Ok(())
+    }
+
+    /// Reserve witnessed frame bytes, doing the alignment and extent arithmetic without wrapping.
+    fn dynamic_alloca(&mut self) {
+        // alignment = max(requested_alignment, 8), preserving alignment for callees' fixed frames.
+        self.i(I::LocalGet(self.dynamic_align));
+        self.i(I::I32Const(8));
+        self.i(I::LocalGet(self.dynamic_align));
+        self.i(I::I32Const(8));
+        self.i(I::I32GtU);
+        self.i(I::Select);
+        self.i(I::LocalSet(self.dynamic_align));
+        // base = align_up(stack_pointer, alignment).
+        self.i(I::GlobalGet(Global::Stack as u32));
+        self.i(I::I64ExtendI32U);
+        self.i(I::LocalGet(self.dynamic_align));
+        self.i(I::I64ExtendI32U);
+        self.i(I::I64Const(1));
+        self.i(I::I64Sub);
+        self.i(I::I64Add);
+        self.i(I::I64Const(0));
+        self.i(I::LocalGet(self.dynamic_align));
+        self.i(I::I64ExtendI32U);
+        self.i(I::I64Sub);
+        self.i(I::I64And);
+        self.i(I::LocalTee(self.allocation_end));
+        self.i(I::I32WrapI64);
+        self.i(I::LocalSet(self.dynamic_base));
+        // end = align_up(base + max(size, 1), 8), reserving a distinct address even for zero size.
+        self.i(I::LocalGet(self.allocation_end));
+        self.i(I::LocalGet(self.dynamic_size));
+        self.i(I::I32Const(1));
+        self.i(I::LocalGet(self.dynamic_size));
+        self.i(I::Select);
+        self.i(I::I64ExtendI32U);
+        self.i(I::I64Add);
+        self.i(I::I64Const(7));
+        self.i(I::I64Add);
+        self.i(I::I64Const(-8));
+        self.i(I::I64And);
+        self.i(I::LocalTee(self.allocation_end));
+        // if end > stack_limit: fail(StackCapacity).
+        self.i(I::GlobalGet(Global::End as u32));
+        self.i(I::I64ExtendI32U);
+        self.i(I::I64GtU);
+        self.i(I::If(BlockType::Empty));
+        self.fail(FailureCode::StackCapacity);
+        self.i(I::End);
+        // stack_pointer = end.
+        self.i(I::LocalGet(self.allocation_end));
+        self.i(I::I32WrapI64);
+        self.i(I::GlobalSet(Global::Stack as u32));
+        // Leave base on the operand stack as the allocation result.
+        self.i(I::LocalGet(self.dynamic_base));
+    }
+
+    fn call_dictionary(
+        &mut self,
+        selected: &Value,
+        inputs: &[&Value],
+        output: Option<&Value>,
+        invoked: bool,
+    ) -> Result<(), String> {
+        let Value::Register(id) = selected else {
+            return Err("stored callable dispatch".into());
+        };
+        let key = *self
+            .selections
+            .get(id)
+            .ok_or("non-dictionary indirect call")?;
+        let (ty, abi) = self.entry_abis[&key].clone();
+        if inputs.len() + 1 != abi.parameters.len() {
+            return Err("dictionary call argument count".into());
+        }
+        if abi.fallible {
+            self.context_pointer(offset_of!(InvocationState, native_failure));
+        }
+        self.address(selected)?;
+        for (input, transport) in inputs.iter().zip(&abi.parameters[1..]) {
+            match transport {
+                ParameterTransport::Direct(_) => {
+                    self.read(input)?;
+                }
+                ParameterTransport::Indirect => self.address(input)?,
+            }
+        }
+        if let Some(output) = output {
+            self.address(output)?;
+        } else {
+            self.scratch_address(Type::unit());
+        }
+        self.dictionary_index(selected, key.1.as_index())?;
+        self.i(I::CallIndirect {
+            type_index: ty,
+            table_index: 0,
+        });
+        if invoked && !abi.fallible {
+            self.i(I::I32Const(0));
+        } else if !invoked && abi.fallible {
+            self.i(I::Drop);
+        }
+        Ok(())
     }
 
     fn capture_failure(&mut self) {
@@ -852,6 +1535,9 @@ impl<'a> Body<'a> {
     fn return_frame(&mut self, failed: bool) -> Result<(), String> {
         if failed && !self.signature.fallible {
             return Err("failure in an infallible entry".into());
+        }
+        for value in self.owned_evidence.clone() {
+            self.release_evidence(&value)?;
         }
         if let Some(frame) = self.frame {
             self.i(I::LocalGet(frame));
@@ -925,17 +1611,6 @@ impl<'a> Body<'a> {
 
     fn call_operation(&mut self, op: &Operation, invoked: bool) -> Result<(), String> {
         let callee = callee(op).ok_or("unsupported fallible operation")?;
-        let Value::Function(mut target) = callee else {
-            return Err("indirect lifecycle call".into());
-        };
-        // Static calls can bypass fixed Value adapters: an elided result has no bytes to write.
-        // This also avoids charging an adapter as an additional source call-depth frame.
-        target = self.program.direct_entry(target);
-        let (index, abi) = self
-            .callees
-            .get(&target)
-            .cloned()
-            .ok_or("unresolved callee")?;
         let (inputs, output): (Vec<_>, _) = match &op.kind {
             OperationKind::Call { ty, .. } => {
                 let output = ty
@@ -957,8 +1632,18 @@ impl<'a> Body<'a> {
                 op.operands[2..].iter().chain([&op.operands[0]]).collect(),
                 None,
             ),
-            _ => unreachable!(),
+            _ => return Err("unsupported call operation".into()),
         };
+        let Value::Function(target) = callee else {
+            return self.call_dictionary(&callee, &inputs, output, invoked);
+        };
+        // Static calls bypass fixed Value adapters without adding a source call-depth frame.
+        let target = self.program.direct_entry(target);
+        let (index, abi) = self
+            .callees
+            .get(&target)
+            .cloned()
+            .ok_or("unresolved callee")?;
         if inputs.len() != abi.parameters.len() {
             return Err("hidden call evidence".into());
         }
@@ -1077,12 +1762,18 @@ impl<'a> Body<'a> {
 
     fn slot(&mut self, value: Value, size: u32) -> Result<(), String> {
         // All slots are 8-aligned, including distinct zero-sized places.
-        self.storage.insert(value, Storage::Stack(self.frame_size));
+        let offset = self.reserve_bytes(size)?;
+        self.storage.insert(value, Storage::Stack(offset));
+        Ok(())
+    }
+
+    fn reserve_bytes(&mut self, size: u32) -> Result<u32, String> {
+        let offset = self.frame_size;
         self.frame_size = self
             .frame_size
             .checked_add(size.max(1).checked_add(7).ok_or("frame size overflow")? & !7)
             .ok_or("frame size overflow")?;
-        Ok(())
+        Ok(offset)
     }
 
     fn i(&mut self, instruction: I<'_>) {
@@ -1092,18 +1783,7 @@ impl<'a> Body<'a> {
     fn fail(&mut self, code: FailureCode) {
         // A host can reach the exported entry without installing an invocation. Trap without
         // touching low linear memory when there is no diagnostic destination.
-        self.i(I::GlobalGet(Global::Context as u32));
-        self.i(I::I32Eqz);
-        self.i(I::If(BlockType::Empty));
-        self.i(I::Unreachable);
-        self.i(I::End);
-        self.i(I::GlobalGet(Global::Context as u32));
-        self.i(I::I32Const(code as i32));
-        self.i(I::I32Store(MemArg {
-            offset: offset_of!(InvocationState, failure) as u64,
-            ..memarg(2)
-        }));
-        self.i(I::Unreachable);
+        emit_failure(&mut self.code, code);
     }
 
     fn address(&mut self, value: &Value) -> Result<(), String> {
@@ -1121,11 +1801,17 @@ impl<'a> Body<'a> {
     }
 
     fn value(&mut self, value: &Value) -> Result<(), String> {
+        if let Some(id) = self.program.evidence_id(value) {
+            self.context_pointer(offset_of!(InvocationState, evidence));
+            self.i(I::I32Const(self.evidence.references[&id] as i32));
+            self.i(I::I32Add);
+            return Ok(());
+        }
         if self.storage.contains_key(value)
-            && (!matches!(value, Value::Constant(_))
-                || self.roles.get(value, self.body.constants()).is_some_and(
-                    |r| matches!(&*r, ValueRole::Materialized(ty) if scalar(ty).is_err()),
-                ))
+            && !self
+                .roles
+                .get(value, self.body.constants())
+                .is_some_and(|r| matches!(&*r, ValueRole::Materialized(ty) if scalar(ty).is_ok()))
         {
             return self.address(value);
         }
@@ -1177,6 +1863,19 @@ impl<'a> Body<'a> {
             .roles
             .get(value, self.body.constants())
             .ok_or("missing operand role")?;
+        if matches!(&*role, ValueRole::VariantPayloadStorage) {
+            self.value(value)?;
+            self.load(ScalarType::native(NativeScalar::Bool));
+            return Ok(ScalarType::native(NativeScalar::Bool));
+        }
+        if let Value::Parameter(id) = value
+            && self.body.parameters()[id.as_index()].kind == ParameterKind::Dictionary
+            && self.body.parameters()[id.as_index()].ty == Type::primitive::<bool>()
+        {
+            self.value(value)?;
+            self.load(ScalarType::native(NativeScalar::Bool));
+            return Ok(ScalarType::native(NativeScalar::Bool));
+        }
         if matches!(&*role, ValueRole::VariantTag) {
             self.value(value)?;
             return Ok(ScalarType::pointer());
@@ -1273,6 +1972,11 @@ impl<'a> Body<'a> {
         self.i(I::I32Const(1));
         self.i(I::I32Add);
         self.i(I::GlobalSet(Global::Depth as u32));
+        for value in self.owned_evidence.clone() {
+            self.address(&value)?;
+            self.i(I::I64Const(0));
+            self.i(I::I64Store(memarg(2)));
+        }
         for (index, constant) in self.body.constants().iter().enumerate() {
             let value = Value::Constant(ConstantId::from_index(index));
             if self.storage.contains_key(&value) {
@@ -1399,6 +2103,112 @@ impl<'a> Body<'a> {
         use OperationKind::*;
         let args = &op.operands;
         match &op.kind {
+            BuildArray { element_ty } => {
+                let (destination, elements) = args.split_last().unwrap();
+                let MirType::Lowered(array_ty) = self.pointee_type(destination)? else {
+                    return Err("array output must be a value place".into());
+                };
+                let layout = product_layout_spec(array_ty, op.span, &self.env)
+                    .ok_or("array representation")?;
+                let element = value_layout_for_type(*element_ty, op.span, &self.env)
+                    .map_err(|e| format!("array element layout: {e:?}"))?;
+                let bytes = element
+                    .size
+                    .checked_mul(elements.len() as u32)
+                    .ok_or("array allocation overflow")?;
+                self.i(I::I32Const(bytes as i32));
+                self.i(I::I32Const(element.align as i32));
+                self.i(I::Call(self.imports.function_index("alloc")));
+                self.i(I::LocalSet(self.scratch));
+                for (index, value) in elements.iter().enumerate() {
+                    self.i(I::LocalGet(self.scratch));
+                    self.i(I::I32Const((index as u32 * element.size) as i32));
+                    self.i(I::I32Add);
+                    if let Ok(ty) = ScalarType::of(*element_ty) {
+                        self.read(value)?;
+                        self.store(ty);
+                    } else {
+                        self.address(value)?;
+                        self.i(I::I32Const(element.size as i32));
+                        self.i(I::MemoryCopy {
+                            src_mem: 0,
+                            dst_mem: 0,
+                        });
+                    }
+                }
+                // The compiler-known array fields are normalized as capacity, data, len, start.
+                for index in 0..4 {
+                    self.address(destination)?;
+                    if index == 1 {
+                        self.i(I::LocalGet(self.scratch));
+                    } else {
+                        self.i(I::I32Const(if index == 3 {
+                            0
+                        } else {
+                            elements.len() as i32
+                        }));
+                    }
+                    self.i(I::I32Store(MemArg {
+                        offset: layout
+                            .static_field_offset(ProjectionIndex::from_index(index))
+                            .ok_or("open array field offset")?
+                            as u64,
+                        ..memarg(2)
+                    }));
+                }
+            }
+            BuildDictionary { definition, .. } => {
+                let result = Value::Register(op.result_id().unwrap());
+                self.release_evidence(&result)?;
+                let fields = self
+                    .program
+                    .dictionary(*definition)
+                    .unwrap()
+                    .environment()
+                    .fields
+                    .clone();
+                let capture_offset = self.capture_slots[&op.result_id().unwrap()];
+                for (field, argument) in fields.iter().zip(args) {
+                    self.frame_address(capture_offset + field.offset as u32);
+                    if field.is_storage_flag {
+                        self.read(argument)?;
+                        self.i(I::I32Store8(memarg(0)));
+                    } else {
+                        self.value(argument)?;
+                        self.i(I::I32Const(size_of::<DictionaryReference>() as i32));
+                        self.i(I::MemoryCopy {
+                            src_mem: 0,
+                            dst_mem: 0,
+                        });
+                    }
+                }
+                self.context_pointer(offset_of!(InvocationState, evidence));
+                self.i(I::I32Const(
+                    self.program.descriptor_index(*definition).unwrap() as i32,
+                ));
+                self.frame_address(capture_offset);
+                self.address(&result)?;
+                self.i(I::Call(self.imports.function_index("build_evidence")));
+                return Ok(());
+            }
+            DictEntry { .. } => {
+                let result = Value::Register(op.result_id().unwrap());
+                self.release_evidence(&result)?;
+                self.address(&result)?;
+                self.value(&args[0])?;
+                self.i(I::I32Const(size_of::<DictionaryReference>() as i32));
+                self.i(I::MemoryCopy {
+                    src_mem: 0,
+                    dst_mem: 0,
+                });
+                self.address(&result)?;
+                self.i(I::Call(self.imports.function_index("retain_evidence")));
+                return Ok(());
+            }
+            Alloca { .. } if !args.is_empty() => {
+                self.dynamic_layout(&args[0])?;
+                self.dynamic_alloca();
+            }
             Alloca { .. } | AllocaPlace { .. } => {
                 let value = Value::Register(op.result_id().unwrap());
                 if !self.storage.contains_key(&value) {
@@ -1425,6 +2235,13 @@ impl<'a> Body<'a> {
             Store => {
                 // Store takes a materialized value, including a pointer; it must not dereference
                 // a place operand as read() would. The MIR verifier checks this operand contract.
+                if matches!(&args[0], Value::Register(id) if self.variant_shells.contains(id)) {
+                    self.address(&args[1])?;
+                    self.address(&args[0])?;
+                    self.i(I::I32Load(memarg(2)));
+                    self.i(I::I32Store(memarg(2)));
+                    return Ok(());
+                }
                 let ty = self.pointee_type(&args[1])?;
                 if let Ok(ty) = scalar(&ty) {
                     self.prepare_store(&args[1])?;
@@ -1441,17 +2258,9 @@ impl<'a> Body<'a> {
                 }
             }
             Memcpy | Move | MoveBytes { .. } => {
-                if args.len() > 2 && !matches!(op.kind, MoveBytes { .. }) {
-                    return Err("layout evidence".into());
-                }
                 let ty = self.pointee_type(&args[1])?;
-                if matches!(op.kind, MoveBytes { .. }) {
-                    self.read(&args[2])?;
-                    self.i(I::I32Const(self.size(&ty)? as i32));
-                    self.i(I::I32Ne);
-                    self.i(I::If(BlockType::Empty));
-                    self.fail(FailureCode::Invariant);
-                    self.i(I::End);
+                if let Some(witness) = layout_witness(op) {
+                    self.dynamic_layout(witness)?;
                 }
                 if let Ok(ty) = scalar(&ty) {
                     self.prepare_store(&args[1])?;
@@ -1460,7 +2269,13 @@ impl<'a> Body<'a> {
                 } else {
                     self.address(&args[1])?;
                     self.address(&args[0])?;
-                    self.i(I::I32Const(self.size(&ty)? as i32));
+                    if matches!(op.kind, MoveBytes { .. }) {
+                        self.read(&args[2])?;
+                    } else if layout_witness(op).is_some() {
+                        self.i(I::LocalGet(self.dynamic_size));
+                    } else {
+                        self.i(I::I32Const(self.size(&ty)? as i32));
+                    }
                     self.i(I::MemoryCopy {
                         src_mem: 0,
                         dst_mem: 0,
@@ -1468,53 +2283,70 @@ impl<'a> Body<'a> {
                 }
             }
             Replace => {
-                if args.len() != 2 {
-                    return Err("replacement layout evidence".into());
-                }
                 let MirType::Lowered(ty) = self.pointee_type(&args[0])? else {
                     return Err("pointer replacement".into());
                 };
-                self.scratch_address(ty);
-                self.i(I::LocalSet(self.scratch));
-                let size = self.size(&MirType::Lowered(ty))?;
-                self.i(I::LocalGet(self.scratch));
+                if let Some(witness) = layout_witness(op) {
+                    self.dynamic_layout(witness)?;
+                    self.i(I::GlobalGet(Global::Stack as u32));
+                    self.i(I::LocalSet(self.scratch));
+                    self.dynamic_alloca();
+                    self.i(I::Drop);
+                } else {
+                    self.scratch_address(ty);
+                    self.i(I::LocalSet(self.dynamic_base));
+                    self.i(I::I32Const(self.size(&MirType::Lowered(ty))? as i32));
+                    self.i(I::LocalSet(self.dynamic_size));
+                }
+                self.i(I::LocalGet(self.dynamic_base));
                 self.address(&args[0])?;
-                self.i(I::I32Const(size as i32));
+                self.i(I::LocalGet(self.dynamic_size));
                 self.i(I::MemoryCopy {
                     src_mem: 0,
                     dst_mem: 0,
                 });
                 self.address(&args[0])?;
                 self.address(&args[1])?;
-                self.i(I::I32Const(size as i32));
+                self.i(I::LocalGet(self.dynamic_size));
                 self.i(I::MemoryCopy {
                     src_mem: 0,
                     dst_mem: 0,
                 });
                 self.address(&args[1])?;
-                self.i(I::LocalGet(self.scratch));
-                self.i(I::I32Const(size as i32));
+                self.i(I::LocalGet(self.dynamic_base));
+                self.i(I::LocalGet(self.dynamic_size));
                 self.i(I::MemoryCopy {
                     src_mem: 0,
                     dst_mem: 0,
                 });
+                if layout_witness(op).is_some() {
+                    self.i(I::LocalGet(self.scratch));
+                    self.i(I::GlobalSet(Global::Stack as u32));
+                }
             }
             AddressOffset { .. } | AddressOffsetPlace { .. } => {
                 self.address(&args[0])?;
                 self.read(&args[1])?;
                 self.i(I::I32Add);
             }
-            Clear | StackRestore => (), // Lifetimes are explicit in MIR; backing frame bytes may remain stale after cleanup.
-            Variant {
-                tag,
-                storage: Some(storage),
-                has_layout_witness: false,
-                ..
-            } => {
+            Clear => (), // Lifetimes are explicit in MIR; backing bytes may remain stale after cleanup.
+            StackRestore => {
+                self.value(&args[0])?;
+                self.i(I::GlobalSet(Global::Stack as u32));
+            }
+            Variant { tag, storage, .. } => {
                 self.address(&Value::Register(op.result_id().unwrap()))?;
-                self.i(I::I32Const(
-                    storage.encode_tag_id(self.session.variant_tag_id(*tag)) as i32,
-                ));
+                if let Some(storage) = storage {
+                    self.i(I::I32Const(
+                        storage.encode_tag_id(self.session.variant_tag_id(*tag)) as i32,
+                    ));
+                } else {
+                    self.read(&args[0])?;
+                    self.i(I::I32Const(31));
+                    self.i(I::I32Shl);
+                    self.i(I::I32Const(self.session.variant_tag_id(*tag) as i32));
+                    self.i(I::I32Or);
+                }
                 self.i(I::I32Store(memarg(2)));
                 // A shell initializes only the tag; physical MIR constructs its payload in place.
                 return Ok(());
@@ -1530,7 +2362,7 @@ impl<'a> Body<'a> {
                     self.i(I::I32ShrU);
                 }
             }
-            StackSave => self.i(I::I32Const(0)),
+            StackSave => self.i(I::GlobalGet(Global::Stack as u32)),
             CompareEqual => {
                 let ty = self.read(&args[0])?;
                 // The second operand is a compile-time Pattern, enforced by physical verification.
@@ -1581,6 +2413,16 @@ impl<'a> Body<'a> {
         }
         if let Some(id) = op.result_id() {
             self.i(I::LocalSet(self.registers[&id]));
+            let value = Value::Register(id);
+            if self.storage.contains_key(&value) {
+                let role = self.roles.get(&value, self.body.constants()).unwrap();
+                if let ValueRole::Materialized(ty) = &*role {
+                    let ty = scalar(ty)?;
+                    self.address(&value)?;
+                    self.i(I::LocalGet(self.registers[&id]));
+                    self.store(ty);
+                }
+            }
         }
         Ok(())
     }

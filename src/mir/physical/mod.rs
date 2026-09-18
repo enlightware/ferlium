@@ -83,7 +83,10 @@ use crate::{
 };
 
 use dictionary::PhysicalDictionaryCatalog;
-pub(crate) use dictionary::{PhysicalDictionaryDefinition, PhysicalDictionaryEntry};
+pub(crate) use dictionary::{
+    DictionaryReference, EvidenceEnvironmentLayout, PhysicalDictionaryDefinition,
+    PhysicalDictionaryEntry,
+};
 use evidence::{PhysicalEvidenceReferences, try_for_each_static_evidence};
 use native::{NativeRequirementError, NativeRequirements};
 pub(crate) use results::{DirectEntries, is_zero_sized_result};
@@ -2686,6 +2689,7 @@ fn value_layout_place(
         Operation::dict_entry(
             span,
             dictionary,
+            env.expect_std_trait_id(VALUE_TRAIT_NAME),
             entry,
             Type::function_type(getter_ty.clone()),
         ),
@@ -4771,6 +4775,11 @@ mod tests {
                     captures: vec![StaticEvidence::bare_dictionary(nested_foreign)]
                         .into_boxed_slice(),
                 })),
+                session
+                    .expect_fresh_module(STD_MODULE_ID)
+                    .get_impl_data(foreign.impl_id)
+                    .unwrap()
+                    .trait_id,
                 TraitDictionaryEntryIndex::from_index(0),
                 Type::unit(),
             ),
@@ -4808,6 +4817,7 @@ mod tests {
             .find(|definition| !definition.capture_schema().is_empty())
             .unwrap();
         let definition_id = definition.id();
+        let trait_id = definition.trait_id();
         let capture_count = definition.capture_schema().len();
         let invalid_entry = TraitDictionaryEntryIndex::from_index(definition.entries().len());
         let dictionary_ty = session
@@ -4833,7 +4843,7 @@ mod tests {
             .unwrap();
         builder.append_operation(
             block,
-            Operation::dict_entry(span, dictionary, invalid_entry, Type::unit()),
+            Operation::dict_entry(span, dictionary, trait_id, invalid_entry, Type::unit()),
         );
         builder.set_terminator(block, Terminator::ret(span));
         physical.entries.push(Some(builder.finish_unverified()));

@@ -270,10 +270,10 @@ builds; embedders must not assume such invariant failures are recoverable compil
 
 Each physical module owns relocatable dictionary and subscript catalogs. A dictionary definition
 records its stable identity, physical capture layout, entry functions, and entry-to-capture mappings.
+Dictionary entry selections identify the trait declaration that determines their ABI.
 A subscript definition records its identity, capture schema, optional `ref` and `mut` functions, and
 their provenance. Foreign references form explicit import lists. Local metadata and resolved
-imports must agree on capture counts, entry contracts, and available members, independently of
-semantic HIR storage.
+imports must agree on capture counts, entry contracts, and available members.
 
 A target-independent assembly step creates a `ResolvedPhysicalProgram` over the independently
 lowered artifacts. It resolves function and evidence imports without rewriting or merging their
