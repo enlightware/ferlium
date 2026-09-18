@@ -5,9 +5,38 @@
 
 use wasm_encoder::ValType;
 
-use crate::hir::native_functions::{
-    NativeFailureConvention, NativeParameter, NativeResult, NativeScalar, NativeSignature,
+use crate::{
+    define_id_type,
+    hir::native_functions::{
+        NativeFailureConvention, NativeParameter, NativeResult, NativeScalar, NativeSignature,
+    },
+    module::id::Id,
 };
+
+define_id_type!(
+    /// A parameter or local index in a generated Wasm function.
+    WasmLocalId
+);
+
+define_id_type!(
+    /// A function index in an emitted Wasm module, including imports.
+    WasmFunctionId
+);
+
+define_id_type!(
+    /// A signature index in an emitted Wasm module's type section.
+    WasmTypeId
+);
+
+define_id_type!(
+    /// A slot in the Rust runtime instance's indirect function table.
+    HostTableSlotId
+);
+
+define_id_type!(
+    /// A slot in a generated module's dictionary-dispatch table.
+    EvidenceTableSlotId
+);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Parameter {
@@ -23,7 +52,6 @@ pub(super) enum ResultKind {
     Optional,
 }
 
-#[derive(Clone)]
 pub(super) struct CallAbi {
     pub parameters: Vec<Parameter>,
     pub result: ResultKind,
@@ -100,12 +128,17 @@ impl CallAbi {
         }
     }
 
-    pub fn input_local(&self, index: u32) -> u32 {
-        u32::from(self.fallible) + index
+    pub fn failure_local(&self) -> WasmLocalId {
+        assert!(self.fallible, "infallible ABI has no failure pointer");
+        WasmLocalId::from_index(0)
     }
 
-    pub fn output_local(&self) -> u32 {
-        self.input_local(self.parameters.len() as u32)
+    pub fn input_local(&self, index: usize) -> WasmLocalId {
+        WasmLocalId::from_index(usize::from(self.fallible) + index)
+    }
+
+    pub fn output_local(&self) -> WasmLocalId {
+        self.input_local(self.parameters.len())
     }
 }
 

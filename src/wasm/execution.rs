@@ -23,13 +23,14 @@ use crate::{
     execution::ExecutionLimits,
     hir::native_functions::NativeFailureState,
     mir::physical::program::ResolvedPhysicalProgram,
-    module::FunctionId,
+    module::{FunctionId, id::Id},
     std::{math::Float, string::StaticStr},
     types::r#type::Type,
 };
 
 use super::{
     Imports,
+    abi::HostTableSlotId,
     emit::{self, ScalarType},
     failure::Failures,
 };
@@ -46,7 +47,7 @@ mod sealed {
     pub trait Arguments: Copy {
         fn types() -> Vec<Type>;
         /// The table entry must match this argument tuple and R's C ABI.
-        unsafe fn invoke<R: WasmValue>(self, address: usize) -> R;
+        unsafe fn invoke<R: WasmValue>(self, slot: HostTableSlotId) -> R;
     }
 }
 
@@ -84,10 +85,10 @@ macro_rules! arguments {
         impl<$($ty: WasmValue),*> sealed::Arguments for ($($ty,)*) {
             fn types() -> Vec<Type> { vec![$($ty::ty()),*] }
             #[inline]
-            unsafe fn invoke<R: WasmValue>(self, address: usize) -> R {
+            unsafe fn invoke<R: WasmValue>(self, slot: HostTableSlotId) -> R {
                 // SAFETY: binding checks the exact signature; the live table slot contains the
                 // generated entry itself. wasm32 C function pointers are table indexes.
-                let function: unsafe extern "C" fn($($ty::Argument),*) -> R = unsafe { mem::transmute(address) };
+                let function: unsafe extern "C" fn($($ty::Argument),*) -> R = unsafe { mem::transmute(slot.as_index()) };
                 unsafe { function($(self.$index.argument()),*) }
             }
         }
@@ -214,13 +215,13 @@ impl CompiledProgram {
 }
 
 thread_local! {
-    static FREE_TABLE_SLOTS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+    static FREE_TABLE_SLOTS: RefCell<Vec<HostTableSlotId>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Owns an instance-local slot in Rust's indirect function table.
 struct TableSlot {
     table: Table,
-    index: u32,
+    index: HostTableSlotId,
 }
 
 impl TableSlot {
@@ -231,17 +232,21 @@ impl TableSlot {
         let index = FREE_TABLE_SLOTS
             .with(|slots| slots.borrow_mut().pop())
             .map(Ok)
-            .unwrap_or_else(|| table.grow(1))
+            .unwrap_or_else(|| table.grow(1).map(HostTableSlotId::new))
             .map_err(js_error)?;
         let slot = Self { table, index };
-        slot.table.set(index, function).map_err(js_error)?;
+        slot.table.set(index.as_u32(), function).map_err(js_error)?;
         Ok(slot)
     }
 }
 
 impl Drop for TableSlot {
     fn drop(&mut self) {
-        if self.table.set_raw(self.index, &JsValue::NULL).is_ok() {
+        if self
+            .table
+            .set_raw(self.index.as_u32(), &JsValue::NULL)
+            .is_ok()
+        {
             FREE_TABLE_SLOTS.with(|slots| slots.borrow_mut().push(self.index));
         }
     }
@@ -261,7 +266,7 @@ pub struct Instance<A, R> {
 /// A direct Rust-callable entry borrowed for one active invocation. No JavaScript, allocation,
 /// argument marshalling or signature checking occurs on this call path.
 pub struct BoundFunction<A, R> {
-    address: usize,
+    slot: HostTableSlotId,
     marker: PhantomData<Rc<(A, R)>>,
 }
 
@@ -270,7 +275,7 @@ impl<A: WasmArguments, R: WasmValue> BoundFunction<A, R> {
     pub fn call(&self, arguments: A) -> R {
         // SAFETY: only a bound instance in an active scope lends this handle. Its signature was
         // checked at binding, its table slot is live, and its execution state is installed.
-        unsafe { arguments.invoke(self.address) }
+        unsafe { arguments.invoke(self.slot) }
     }
 }
 
@@ -324,10 +329,10 @@ impl<A: WasmArguments, R: WasmValue> Instance<A, R> {
         // SAFETY: setup is generated with this exact C signature. It borrows state until reset;
         // the stack block is alive, aligned and disjoint from the Rust call stack.
         let setup: unsafe extern "C" fn(*mut InvocationState) =
-            unsafe { mem::transmute(self.setup.index as usize) };
+            unsafe { mem::transmute(self.setup.index.as_index()) };
         unsafe { setup(&mut state) };
         let function = BoundFunction {
-            address: self.entry.index as usize,
+            slot: self.entry.index,
             marker: PhantomData,
         };
         let outcome = catch_trap(|| callback(&function));
@@ -383,7 +388,8 @@ fn catch_trap<F: FnOnce() -> T, T>(callback: F) -> Result<T, JsValue> {
         result: MaybeUninit::uninit(),
     };
     let table: Table = wasm_bindgen::function_table().dyn_into()?;
-    let thunk = table.get(invoke::<F, T> as *const () as u32)?;
+    let thunk_slot = HostTableSlotId::from_index(invoke::<F, T> as *const () as usize);
+    let thunk = table.get(thunk_slot.as_u32())?;
     thunk.call1(
         &JsValue::UNDEFINED,
         &JsValue::from_f64(ptr::from_mut(&mut context) as usize as f64),

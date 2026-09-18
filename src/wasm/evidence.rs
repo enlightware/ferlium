@@ -21,7 +21,7 @@ use crate::{
     types::r#trait::TraitDictionaryEntryIndex,
 };
 
-use super::runtime;
+use super::{abi::EvidenceTableSlotId, runtime};
 
 /// Descriptor offsets are relative to the instance's immutable data base; table entries are local.
 #[repr(C)]
@@ -41,9 +41,46 @@ pub(super) struct ReachableEvidence {
     dictionary_set: FxHashSet<TraitDictionaryId>,
     entry_set: FxHashSet<(TraitId, TraitDictionaryEntryIndex)>,
     static_set: FxHashSet<ProgramEvidenceId>,
+    dispatched_dictionaries: usize,
+    dispatched_entries: usize,
+    dictionaries_by_trait: FxHashMap<TraitId, Vec<TraitDictionaryId>>,
+    entries_by_trait: FxHashMap<TraitId, Vec<TraitDictionaryEntryIndex>>,
 }
 
 impl ReachableEvidence {
+    /// Visit each reachable dictionary/entry pair once, including pairs discovered by callees.
+    pub fn discover_dispatches(
+        &mut self,
+        program: &ResolvedPhysicalProgram<'_>,
+        mut visit: impl FnMut(TraitDictionaryId, TraitDictionaryEntryIndex),
+    ) {
+        for &id in &self.dictionaries[self.dispatched_dictionaries..] {
+            let trait_id = program.dictionary(id).unwrap().trait_id();
+            if let Some(entries) = self.entries_by_trait.get(&trait_id) {
+                for &entry in entries {
+                    visit(id, entry);
+                }
+            }
+            self.dictionaries_by_trait
+                .entry(trait_id)
+                .or_default()
+                .push(id);
+        }
+        for &(trait_id, entry) in &self.entries[self.dispatched_entries..] {
+            if let Some(dictionaries) = self.dictionaries_by_trait.get(&trait_id) {
+                for &id in dictionaries {
+                    visit(id, entry);
+                }
+            }
+            self.entries_by_trait
+                .entry(trait_id)
+                .or_default()
+                .push(entry);
+        }
+        self.dispatched_dictionaries = self.dictionaries.len();
+        self.dispatched_entries = self.entries.len();
+    }
+
     pub fn dictionary(&mut self, id: TraitDictionaryId) {
         if self.dictionary_set.insert(id) {
             self.dictionaries.push(id);
@@ -107,7 +144,7 @@ impl Image {
     pub fn build(
         program: &ResolvedPhysicalProgram<'_>,
         reachable: &ReachableEvidence,
-        table: &FxHashMap<(TraitDictionaryId, usize), u32>,
+        table: &FxHashMap<(TraitDictionaryId, usize), EvidenceTableSlotId>,
     ) -> Self {
         let count = reachable
             .dictionaries
@@ -136,7 +173,7 @@ impl Image {
             }));
             this.words.extend(
                 (0..definition.entries().len())
-                    .map(|index| table.get(&(id, index)).copied().unwrap_or(0)),
+                    .map(|index| table.get(&(id, index)).map_or(0, |slot| slot.as_u32())),
             );
         }
         for &id in &reachable.statics {
@@ -326,10 +363,13 @@ mod tests {
 
     use super::super::{Imports, codegen_tests::with_raw_program, emit};
     use crate::{
-        CompilerSession, MirOptimization,
-        module::{FunctionId, Path},
+        CompilerSession, FxHashSet, MirOptimization,
+        module::{FunctionId, Path, id::Id},
+        types::r#trait::TraitDictionaryEntryIndex,
         ustr,
     };
+
+    use super::ReachableEvidence;
 
     #[wasm_bindgen_test]
     fn wasm_codegen_static_evidence_image() {
@@ -373,6 +413,42 @@ mod tests {
                 assert_eq!(reachable.statics.len(), count);
             }
             assert_eq!(reachable.statics.len(), image.references.len());
+
+            // Grow the two sides in opposite orders. Every compatible pair must be discovered
+            // exactly once, even when another dispatch introduces dictionaries or entry uses.
+            let dictionaries: Vec<_> = program
+                .modules()
+                .iter()
+                .flat_map(|module| module.dictionaries())
+                .filter(|definition| definition.entries().len() > 1)
+                .map(|definition| definition.id())
+                .collect();
+            assert!(
+                dictionaries.len() > 1,
+                "fixture needs several multi-entry dictionaries"
+            );
+            let first_entry = TraitDictionaryEntryIndex::from_index(0);
+            let second_entry = TraitDictionaryEntryIndex::from_index(1);
+            let mut incremental = ReachableEvidence::default();
+            let mut dispatched = Vec::new();
+            for (index, &id) in dictionaries.iter().enumerate() {
+                let definition = program.dictionary(id).unwrap();
+                if index % 2 == 0 {
+                    incremental.entry(definition.trait_id(), first_entry);
+                }
+                incremental.dictionary(id);
+                incremental.discover_dispatches(program, |id, entry| dispatched.push((id, entry)));
+                incremental.entry(definition.trait_id(), first_entry);
+                incremental.entry(definition.trait_id(), second_entry);
+                incremental.discover_dispatches(program, |id, entry| dispatched.push((id, entry)));
+                incremental.discover_dispatches(program, |_, _| panic!("dispatch visited twice"));
+            }
+            let expected: FxHashSet<_> = dictionaries
+                .iter()
+                .flat_map(|&id| [(id, first_entry), (id, second_entry)])
+                .collect();
+            assert_eq!(dispatched.len(), expected.len());
+            assert_eq!(dispatched.into_iter().collect::<FxHashSet<_>>(), expected);
         });
     }
 

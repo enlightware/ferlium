@@ -34,7 +34,9 @@ use crate::{
     ustr,
 };
 
-use super::{FunctionImport, IMPORT_MODULE, Imports, MEMORY_IMPORT};
+use super::{
+    FunctionImport, IMPORT_MODULE, Imports, MEMORY_IMPORT, WasmFunctionId, abi::WasmTypeId,
+};
 
 struct ProbeFunction {
     name: String,
@@ -56,7 +58,7 @@ impl Probe {
         }
     }
 
-    fn native(&mut self, module: &Module, name: &str) -> u32 {
+    fn native(&mut self, module: &Module, name: &str) -> WasmFunctionId {
         let local = module.get_local_function_id(ustr(name)).unwrap();
         let entry = module
             .get_function_by_id(local)
@@ -72,13 +74,13 @@ impl Probe {
         index
     }
 
-    fn forward(&mut self, name: &str, index: u32) {
-        let import = &self.imports.functions()[index as usize];
+    fn forward(&mut self, name: &str, index: WasmFunctionId) {
+        let import = &self.imports.functions()[index.as_index()];
         let mut body = Function::new([]);
         for parameter in 0..import.parameters.len() as u32 {
             body.instruction(&Instruction::LocalGet(parameter));
         }
-        body.instruction(&Instruction::Call(index));
+        body.instruction(&Instruction::Call(index.as_u32()));
         body.instruction(&Instruction::End);
         self.functions.push(ProbeFunction {
             name: name.into(),
@@ -103,7 +105,7 @@ impl Probe {
             },
         );
         for function in self.imports.functions() {
-            let type_index = types.len();
+            let type_index = WasmTypeId::new(types.len());
             types.ty().function(
                 function.parameters.iter().copied(),
                 function.results.iter().copied(),
@@ -111,19 +113,19 @@ impl Probe {
             imports.import(
                 IMPORT_MODULE,
                 &function.name,
-                EntityType::Function(type_index),
+                EntityType::Function(type_index.as_u32()),
             );
         }
         let mut functions = FunctionSection::new();
         let mut exports = ExportSection::new();
         let mut code = CodeSection::new();
         exports.export("memory", ExportKind::Memory, 0);
-        let imported_functions = self.imports.functions().len() as u32;
+        let imported_functions = self.imports.functions().len();
         for (index, function) in self.functions.into_iter().enumerate() {
-            let type_index = types.len();
-            let function_index = imported_functions + index as u32;
-            functions.function(type_index);
-            exports.export(&function.name, ExportKind::Func, function_index);
+            let type_index = WasmTypeId::new(types.len());
+            let function_index = WasmFunctionId::from_index(imported_functions + index);
+            functions.function(type_index.as_u32());
+            exports.export(&function.name, ExportKind::Func, function_index.as_u32());
             types.ty().function(function.parameters, function.results);
             code.function(&function.body);
         }
@@ -350,7 +352,7 @@ fn wasm_linkage_rejects_mismatched_native_import() {
     for name in ["add", "fallible"] {
         let mut probe = Probe::new();
         let index = probe.native(&module, name);
-        let signature = &mut probe.imports.functions[index as usize];
+        let signature = &mut probe.imports.functions[index.as_index()];
         if name == "add" {
             signature.results = vec![ValType::F64];
         } else {
@@ -422,18 +424,22 @@ fn wasm_linkage_native_execution() {
     let mut body = Function::new([(2, ValType::I32)]);
     body.instruction(&Instruction::I32Const(size_of::<Owned>() as i32))
         .instruction(&Instruction::I32Const(align_of::<Owned>() as i32))
-        .instruction(&Instruction::Call(0)) // runtime alloc
+        .instruction(&Instruction::Call(
+            probe.imports.function_index("alloc").as_u32(),
+        ))
         .instruction(&Instruction::LocalSet(1))
         .instruction(&Instruction::LocalGet(0))
         .instruction(&Instruction::LocalGet(1))
-        .instruction(&Instruction::Call(entries["clone"]))
+        .instruction(&Instruction::Call(entries["clone"].as_u32()))
         .instruction(&Instruction::LocalGet(1))
-        .instruction(&Instruction::Call(entries["length"]))
+        .instruction(&Instruction::Call(entries["length"].as_u32()))
         .instruction(&Instruction::LocalSet(2))
         .instruction(&Instruction::LocalGet(1))
-        .instruction(&Instruction::Call(entries["drop"]))
+        .instruction(&Instruction::Call(entries["drop"].as_u32()))
         .instruction(&Instruction::LocalGet(1))
-        .instruction(&Instruction::Call(2)) // runtime dealloc
+        .instruction(&Instruction::Call(
+            probe.imports.function_index("dealloc").as_u32(),
+        ))
         .instruction(&Instruction::LocalGet(2))
         .instruction(&Instruction::End);
     probe.functions.push(ProbeFunction {
@@ -586,9 +592,9 @@ fn wasm_linkage_native_execution() {
 #[wasm_bindgen_test]
 fn wasm_linkage_allocation_and_memory_growth() {
     let mut probe = Probe::new();
-    probe.forward("alloc", 0);
-    probe.forward("realloc", 1);
-    probe.forward("dealloc", 2);
+    for name in ["alloc", "realloc", "dealloc"] {
+        probe.forward(name, probe.imports.function_index(name));
+    }
     let memarg = MemArg {
         offset: 0,
         align: 2,

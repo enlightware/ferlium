@@ -14,6 +14,7 @@ mod execution;
 mod failure;
 mod runtime;
 
+pub use abi::WasmFunctionId;
 pub use execution::{
     BoundFunction, CompiledProgram, Instance, WasmArguments, WasmLimits, WasmValue,
 };
@@ -22,12 +23,12 @@ use js_sys::{Object, Reflect, WebAssembly::Table};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_encoder::ValType;
 
-use self::abi::CallAbi;
+use self::abi::{CallAbi, HostTableSlotId};
 
 use crate::{
     FxHashMap,
     hir::native_functions::{NativeEntry, NativeSignature},
-    module::FunctionId,
+    module::{FunctionId, id::Id},
 };
 
 pub const IMPORT_MODULE: &str = "ferlium";
@@ -60,7 +61,7 @@ pub struct Imports {
     namespace: Object,
     object: Object,
     functions: Vec<FunctionImport>,
-    natives: FxHashMap<FunctionId, u32>,
+    natives: FxHashMap<FunctionId, WasmFunctionId>,
 }
 
 impl Imports {
@@ -140,7 +141,11 @@ impl Imports {
     }
 
     /// Bind a registered C entry, reusing its imported function index on subsequent references.
-    pub fn add_native(&mut self, id: FunctionId, entry: &NativeEntry) -> Result<u32, JsValue> {
+    pub fn add_native(
+        &mut self,
+        id: FunctionId,
+        entry: &NativeEntry,
+    ) -> Result<WasmFunctionId, JsValue> {
         if let Some(&index) = self.natives.get(&id) {
             return Ok(index);
         }
@@ -153,11 +158,13 @@ impl Imports {
         Ok(index)
     }
 
-    pub(super) fn function_index(&self, name: &str) -> u32 {
-        self.functions
-            .iter()
-            .position(|function| function.name == name)
-            .expect("runtime import") as u32
+    pub(super) fn function_index(&self, name: &str) -> WasmFunctionId {
+        WasmFunctionId::from_index(
+            self.functions
+                .iter()
+                .position(|function| function.name == name)
+                .expect("runtime import"),
+        )
     }
 
     pub fn functions(&self) -> &[FunctionImport] {
@@ -168,7 +175,11 @@ impl Imports {
         &self.object
     }
 
-    fn insert(&mut self, import: FunctionImport, address: *const ()) -> Result<u32, JsValue> {
+    fn insert(
+        &mut self,
+        import: FunctionImport,
+        address: *const (),
+    ) -> Result<WasmFunctionId, JsValue> {
         let name = JsValue::from_str(&import.name);
         if Reflect::has(&self.namespace, &name)? {
             return Err(JsValue::from_str(&format!(
@@ -178,7 +189,8 @@ impl Imports {
         }
         // Rust wasm32 function pointers are indexes in this instance's indirect function table.
         // The value returned by get is the Wasm function itself; do not wrap it in a JS closure.
-        let function = self.table.get(address as u32)?;
+        let slot = HostTableSlotId::from_index(address as usize);
+        let function = self.table.get(slot.as_u32())?;
         if !function.is_function() {
             return Err(JsValue::from_str(&format!(
                 "missing Wasm C entry {}",
@@ -186,7 +198,7 @@ impl Imports {
             )));
         }
         Reflect::set(&self.namespace, &name, &function)?;
-        let index = self.functions.len() as u32;
+        let index = WasmFunctionId::from_index(self.functions.len());
         self.functions.push(import);
         Ok(index)
     }

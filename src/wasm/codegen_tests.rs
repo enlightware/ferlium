@@ -37,7 +37,7 @@ use crate::{
 
 use super::{
     CompiledProgram, Imports, WasmLimits, WasmValue, emit,
-    evidence::{BUILT_ENVIRONMENTS, LIVE_ENVIRONMENTS},
+    evidence::{BUILT_ENVIRONMENTS, DictionaryDescriptor, LIVE_ENVIRONMENTS},
     execution::InvocationState,
 };
 
@@ -237,6 +237,57 @@ fn wasm_codegen_generic_evidence_and_buffers() {
             assert_eq!(LIVE_ENVIRONMENTS.get(), before);
         }
     }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_witnessed_layout_shares_descriptor_lookup() {
+    let mut session = CompilerSession::new();
+    session.set_mir_optimization(MirOptimization::Disabled);
+    session.set_physical_mir_optimization(MirOptimization::Disabled);
+    let entry = compile(
+        &mut session,
+        "#[inline(never)] fn replace<T>(x: &mut T, y: T) { x = y; } fn compute(x: int) -> int { let mut p = (1, false); replace(p, (x, true)); p.0 }",
+    );
+    let code = compile_raw(&session, entry);
+    let mut lookups = 0;
+    let mut calls = 0;
+    for payload in Parser::new(0).parse_all(code.bytes()) {
+        if let Payload::CodeSectionEntry(body) = payload.unwrap() {
+            let ops = body
+                .get_operators_reader()
+                .unwrap()
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            calls += ops
+                .iter()
+                .filter(|op| matches!(op, Operator::CallIndirect { .. }))
+                .count();
+            // Descriptor-relative loads follow the addition of the evidence-image base. Loads
+            // of individual table entries instead use the cached table address directly.
+            lookups += ops
+                .windows(2)
+                .filter(|ops| {
+                    matches!(ops,
+                        [Operator::I32Add, Operator::I32Load { memarg }]
+                            if memarg.offset == offset_of!(DictionaryDescriptor, entries) as u64
+                    )
+                })
+                .count();
+        }
+    }
+    assert!(lookups > 0);
+    assert!(
+        lookups < calls,
+        "size and alignment must share their descriptor lookup: {lookups} lookups, {calls} calls"
+    );
+    assert_eq!(
+        code.instantiate::<(isize,), isize>()
+            .unwrap()
+            .run((7,), WasmLimits::default())
+            .unwrap(),
+        7
+    );
 }
 
 #[wasm_bindgen_test]

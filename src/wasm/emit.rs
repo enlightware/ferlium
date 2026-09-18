@@ -35,7 +35,8 @@ use crate::{
     },
     std::{
         core_traits_names::VALUE_TRAIT_NAME,
-        math::Float,
+        logic::bool_type,
+        math::{Float, float_type, int_type},
         string::StaticStr,
         value::{
             VALUE_ALIGN_ASSOC_CONST_INDEX, VALUE_SIZE_ASSOC_CONST_INDEX, product_layout_spec,
@@ -54,7 +55,10 @@ use crate::{
 
 use super::{
     IMPORT_MODULE, Imports, MEMORY_IMPORT,
-    abi::{CallAbi, Parameter as ParameterTransport, ResultKind, scalar_type},
+    abi::{
+        CallAbi, EvidenceTableSlotId, Parameter as ParameterTransport, ResultKind, WasmFunctionId,
+        WasmLocalId, WasmTypeId, scalar_type,
+    },
     evidence::{self, DictionaryDescriptor, ENVIRONMENT_OFFSET, ReachableEvidence},
     execution::{FailureCode, InvocationState},
 };
@@ -65,18 +69,10 @@ pub(super) struct ScalarType(Type);
 
 impl ScalarType {
     pub(super) fn of(ty: Type) -> Result<Self, String> {
-        if [
-            Type::unit(),
-            Type::primitive::<bool>(),
-            Type::primitive::<isize>(),
-            Type::primitive::<Float>(),
-        ]
-        .contains(&ty)
-        {
-            Ok(Self(ty))
-        } else {
-            Err(format!("unsupported Wasm storage type {ty:?}"))
-        }
+        [Type::unit(), bool_type(), int_type(), float_type()]
+            .contains(&ty)
+            .then_some(Self(ty))
+            .ok_or_else(|| format!("unsupported Wasm storage type {ty:?}"))
     }
 
     fn unit() -> Self {
@@ -85,27 +81,66 @@ impl ScalarType {
 
     fn native(scalar: NativeScalar) -> Self {
         Self(match scalar {
-            NativeScalar::Bool => Type::primitive::<bool>(),
-            NativeScalar::Int => Type::primitive::<isize>(),
-            NativeScalar::Float => Type::primitive::<Float>(),
+            NativeScalar::Bool => bool_type(),
+            NativeScalar::Int => int_type(),
+            NativeScalar::Float => float_type(),
         })
     }
 
-    fn is<T: 'static>(self) -> bool {
-        self.0 == Type::primitive::<T>()
+    fn is_unit(self) -> bool {
+        self.0 == Type::unit()
+    }
+
+    /// Unit has no native scalar transport.
+    fn as_non_unit_native(self) -> Option<NativeScalar> {
+        if self.is_unit() {
+            None
+        } else if self.0 == bool_type() {
+            Some(NativeScalar::Bool)
+        } else if self.0 == int_type() {
+            Some(NativeScalar::Int)
+        } else if self.0 == float_type() {
+            Some(NativeScalar::Float)
+        } else {
+            unreachable!("checked scalar type")
+        }
     }
 
     fn wasm(self) -> ValType {
-        if self.is::<Float>() {
-            scalar_type(NativeScalar::Float)
-        } else if self.is::<bool>() {
-            scalar_type(NativeScalar::Bool)
-        } else if self.is::<isize>() {
-            scalar_type(NativeScalar::Int)
-        } else if self.is::<()>() {
-            ValType::I32 // Internal unit placeholder, never a direct ABI argument or result.
-        } else {
-            unreachable!("missing scalar transport mapping")
+        // Internal unit placeholder, never a direct ABI argument or result.
+        self.as_non_unit_native().map_or(ValType::I32, scalar_type)
+    }
+
+    fn load(self, code: &mut WasmFunction) {
+        let instruction = match self.as_non_unit_native() {
+            None => {
+                code.instruction(&I::Drop);
+                I::I32Const(0)
+            }
+            Some(NativeScalar::Bool) => I::I32Load8U(memarg(0)),
+            Some(NativeScalar::Int) => I::I32Load(memarg(2)),
+            Some(NativeScalar::Float) => I::F64Load(memarg(3)),
+        };
+        code.instruction(&instruction);
+    }
+
+    fn store(self, code: &mut WasmFunction) {
+        let instruction = match self.as_non_unit_native() {
+            None => {
+                code.instruction(&I::Drop);
+                I::Drop
+            }
+            Some(NativeScalar::Bool) => I::I32Store8(memarg(0)),
+            Some(NativeScalar::Int) => I::I32Store(memarg(2)),
+            Some(NativeScalar::Float) => I::F64Store(memarg(3)),
+        };
+        code.instruction(&instruction);
+    }
+
+    fn equal(self) -> I<'static> {
+        match self.as_non_unit_native() {
+            None | Some(NativeScalar::Bool | NativeScalar::Int) => I::I32Eq,
+            Some(NativeScalar::Float) => I::F64Eq,
         }
     }
 
@@ -137,6 +172,15 @@ enum Global {
     FuelEnabled,
 }
 
+fn value_transport(ty: Type) -> ParameterTransport {
+    ScalarType::of(ty)
+        .ok()
+        .and_then(ScalarType::as_non_unit_native)
+        .map_or(ParameterTransport::Indirect, |scalar| {
+            ParameterTransport::Direct(scalar_type(scalar))
+        })
+}
+
 fn script_abi(body: &Function) -> Result<CallAbi, String> {
     // Physical verification requires a unique trailing Return for Value, none for NoValue.
     // Thus MIR input indices also index abi.parameters; only the failure pointer shifts locals.
@@ -155,12 +199,7 @@ fn script_abi(body: &Function) -> Result<CallAbi, String> {
             ParameterKind::Return => result = Some(parameter.ty),
             ParameterKind::Parameter(mode) => {
                 parameters.push(if mode == ArgConvention::Let {
-                    ScalarType::of(parameter.ty)
-                        .ok()
-                        .filter(|ty| !ty.is::<()>())
-                        .map_or(ParameterTransport::Indirect, |ty| {
-                            ParameterTransport::Direct(ty.wasm())
-                        })
+                    value_transport(parameter.ty)
                 } else {
                     ParameterTransport::Indirect
                 });
@@ -226,12 +265,7 @@ fn dictionary_abi(
                 if arg.mut_ty != MutType::constant() {
                     ParameterTransport::Indirect
                 } else {
-                    ScalarType::of(arg.ty)
-                        .ok()
-                        .filter(|ty| !ty.is::<()>())
-                        .map_or(ParameterTransport::Indirect, |ty| {
-                            ParameterTransport::Direct(ty.wasm())
-                        })
+                    value_transport(arg.ty)
                 }
             }))
             .collect(),
@@ -307,20 +341,18 @@ pub(super) fn emit(
     let mut bodies = Vec::new();
     let mut natives = FxHashMap::default();
     let mut reachable = ReachableEvidence::default();
+    let mut adapters = Vec::new();
     loop {
         if pending.is_empty() {
-            for &id in &reachable.dictionaries {
+            reachable.discover_dispatches(program, |id, entry| {
                 let definition = program.dictionary(id).unwrap();
-                for &(trait_id, entry) in &reachable.entries {
-                    if definition.trait_id() == trait_id {
-                        let target =
-                            program.direct_entry(definition.entries()[entry.as_index()].function());
-                        if !seen.contains(&target) {
-                            pending.push(target);
-                        }
-                    }
+                let target =
+                    program.direct_entry(definition.entries()[entry.as_index()].function());
+                if !seen.contains(&target) {
+                    pending.push(target);
                 }
-            }
+                adapters.push((id, entry));
+            });
         }
         let Some(id) = pending.pop() else {
             break;
@@ -383,7 +415,7 @@ pub(super) fn emit(
                     _ => (),
                 }
                 if let Some(Value::Function(target)) = callee(operation) {
-                    pending.push(program.direct_entry(target));
+                    pending.push(program.direct_entry(*target));
                 }
             }
         }
@@ -403,52 +435,58 @@ pub(super) fn emit(
         },
     );
     for import in imports.functions() {
-        let index = types.len();
+        let index = WasmTypeId::new(types.len());
         types.ty().function(
             import.parameters.iter().copied(),
             import.results.iter().copied(),
         );
-        import_section.import(IMPORT_MODULE, &import.name, EntityType::Function(index));
+        import_section.import(
+            IMPORT_MODULE,
+            &import.name,
+            EntityType::Function(index.as_u32()),
+        );
     }
-    let indices: FxHashMap<_, _> = bodies
+    let callees: FxHashMap<_, _> = bodies
         .iter()
         .enumerate()
         .map(|(i, (id, _, sig))| {
             (
                 *id,
-                (imports.functions().len() as u32 + i as u32, sig.clone()),
+                (
+                    WasmFunctionId::from_index(imports.functions().len() + i),
+                    sig,
+                ),
             )
         })
-        .collect();
-    let callees: FxHashMap<_, _> = indices
-        .iter()
-        .map(|(id, (index, signature))| (*id, (*index, signature.clone())))
-        .chain(natives)
+        .chain(
+            natives
+                .iter()
+                .map(|(&id, (index, abi))| (id, (*index, abi))),
+        )
         .collect();
     let mut functions = FunctionSection::new();
     let mut code = CodeSection::new();
-    let mut table = FxHashMap::default();
-    let mut adapters = Vec::new();
     let mut entry_abis = FxHashMap::default();
     for &(trait_id, entry) in &reachable.entries {
         let abi = dictionary_abi(env, trait_id, entry)?;
-        let index = types.len();
+        let index = WasmTypeId::new(types.len());
         types.ty().function(abi.params(), abi.results());
         entry_abis.insert((trait_id, entry), (index, abi));
     }
-    for &id in &reachable.dictionaries {
-        let definition = program.dictionary(id).unwrap();
-        for &(trait_id, entry) in &reachable.entries {
-            if trait_id == definition.trait_id() {
-                table.insert((id, entry.as_index()), adapters.len() as u32 + 1);
-                adapters.push((id, entry));
-            }
-        }
-    }
+    let table = adapters
+        .iter()
+        .enumerate()
+        .map(|(index, &(id, entry))| {
+            (
+                (id, entry.as_index()),
+                EvidenceTableSlotId::from_index(index + 1),
+            )
+        })
+        .collect();
     let evidence = evidence::Image::build(program, &reachable, &table);
-    let mut strings = Vec::new();
+    let mut strings = StringLiterals::default();
     for (id, body, signature) in &bodies {
-        functions.function(types.len());
+        functions.function(WasmTypeId::new(types.len()).as_u32());
         types.ty().function(signature.params(), signature.results());
         let emitted = Body::new(
             body,
@@ -469,11 +507,11 @@ pub(super) fn emit(
         .map_err(|reason| diagnostic(*id, body, &reason))?;
         code.function(&emitted);
     }
-    let adapter_base = imports.functions().len() as u32 + bodies.len() as u32;
+    let adapter_base = WasmFunctionId::from_index(imports.functions().len() + bodies.len());
     for &(id, entry) in &adapters {
         let definition = program.dictionary(id).unwrap();
         let (ty, abi) = &entry_abis[&(definition.trait_id(), entry)];
-        functions.function(*ty);
+        functions.function(ty.as_u32());
         code.function(&dictionary_adapter(
             program, id, entry, abi, &callees, session, imports,
         )?);
@@ -491,7 +529,8 @@ pub(super) fn emit(
         None,
         &ConstExpr::i32_const(1),
         Elements::Functions(
-            (adapter_base..adapter_base + adapters.len() as u32)
+            (0..adapters.len())
+                .map(|index| WasmFunctionId::from_index(adapter_base.as_index() + index).as_u32())
                 .collect::<Vec<_>>()
                 .into(),
         ),
@@ -508,35 +547,29 @@ pub(super) fn emit(
             &ConstExpr::i32_const(0),
         );
     }
-    let entry_signature = &indices[&entry].1;
-    let mut setup_index = adapter_base + adapters.len() as u32;
+    let (entry_index, entry_signature) = &callees[&entry];
+    let mut setup_index = WasmFunctionId::from_index(adapter_base.as_index() + adapters.len());
     // Only fallible entries need a host adapter: internal status returns become a Rust error
     // through the outer invocation boundary, without changing the scalar host C signature.
     if entry_signature.fallible {
         debug_assert_eq!(host_parameters.len(), entry_signature.parameters.len());
-        functions.function(types.len());
+        functions.function(WasmTypeId::new(types.len()).as_u32());
         types.ty().function(
-            host_parameters.iter().map(|ty| {
-                if ty.is::<()>() {
-                    ValType::I32
-                } else {
-                    ty.wasm()
-                }
-            }),
+            host_parameters.iter().copied().map(ScalarType::wasm),
             result_as_wasm(result),
         );
-        code.function(&entry_wrapper(indices[&entry].0, entry_signature, result));
-        exports.export("entry", ExportKind::Func, setup_index);
-        setup_index += 1;
+        code.function(&entry_wrapper(*entry_index, entry_signature, result));
+        exports.export("entry", ExportKind::Func, setup_index.as_u32());
+        setup_index = WasmFunctionId::from_index(setup_index.as_index() + 1);
     } else {
-        exports.export("entry", ExportKind::Func, indices[&entry].0);
+        exports.export("entry", ExportKind::Func, entry_index.as_u32());
     }
     // Rust calls this setter directly at invocation boundaries. All state and diagnostics stay
     // in shared memory; no language values or per-call state are passed through JavaScript.
-    functions.function(types.len());
+    functions.function(WasmTypeId::new(types.len()).as_u32());
     types.ty().function([ValType::I32], []);
     code.function(&setup());
-    exports.export("setup", ExportKind::Func, setup_index);
+    exports.export("setup", ExportKind::Func, setup_index.as_u32());
     let mut module = Module::new();
     module
         .section(&types)
@@ -550,7 +583,7 @@ pub(super) fn emit(
     Ok(Emitted {
         bytes: module.finish(),
         parameters: host_parameters,
-        strings: strings.into_boxed_slice(),
+        strings: strings.values.into_boxed_slice(),
         result,
         evidence,
     })
@@ -581,13 +614,12 @@ fn layout_witness(op: &Operation) -> Option<&Value> {
 }
 
 /// Bridge the declaration-fixed dictionary ABI to the implementation's direct ABI.
-#[allow(clippy::too_many_arguments)]
 fn dictionary_adapter(
     program: &ResolvedPhysicalProgram<'_>,
     dictionary: TraitDictionaryId,
     entry: TraitDictionaryEntryIndex,
     abi: &CallAbi,
-    callees: &FxHashMap<FunctionId, (u32, CallAbi)>,
+    callees: &FxHashMap<FunctionId, (WasmFunctionId, &CallAbi)>,
     session: &CompilerSession,
     imports: &Imports,
 ) -> Result<WasmFunction, String> {
@@ -595,6 +627,9 @@ fn dictionary_adapter(
     let entry = &definition.entries()[entry.as_index()];
     let target = program.direct_entry(entry.function());
     let (index, direct) = &callees[&target];
+    let native = program
+        .module(target.module)
+        .and_then(|module| module.native_entry(target));
     let (input_types, result_ty) = if let Some(body) = program.function(target) {
         (
             body.parameters()
@@ -608,12 +643,7 @@ fn dictionary_adapter(
                 .map_or(Type::unit(), |p| p.ty),
         )
     } else {
-        let native = program
-            .module(target.module)
-            .unwrap()
-            .native_entry(target)
-            .unwrap()
-            .signature();
+        let native = native.unwrap().signature();
         (
             native.parameters.iter().map(|p| p.layout().ty).collect(),
             native.result.ty(),
@@ -627,14 +657,7 @@ fn dictionary_adapter(
         .modules()
         .env_for(session.expect_fresh_module(target.module));
     let optional = if matches!(direct.result, ResultKind::Optional) {
-        let NativeResult::Optional { payload, .. } = program
-            .module(target.module)
-            .unwrap()
-            .native_entry(target)
-            .unwrap()
-            .signature()
-            .result
-        else {
+        let NativeResult::Optional { payload, .. } = native.unwrap().signature().result else {
             unreachable!()
         };
         Some(NativeOptionalResultAdapter::new(
@@ -645,64 +668,45 @@ fn dictionary_adapter(
     };
     let mut frame_size = optional
         .as_ref()
-        .map_or(0, |adapter| (adapter.payload_size.max(1) + 7) & !7);
-    let mut spills = FxHashMap::default();
+        .map(|adapter| frame_bytes(adapter.payload_size))
+        .transpose()?
+        .unwrap_or(0);
+    let mut spills = vec![None; abi.parameters.len() - 1];
     for (i, canonical) in abi.parameters[1..].iter().enumerate() {
         if matches!(canonical, ParameterTransport::Direct(_))
             && direct.parameters[captures.len() + i] == ParameterTransport::Indirect
         {
-            spills.insert(i, frame_size);
+            spills[i] = Some(frame_size);
             frame_size = frame_size
                 .checked_add(8)
                 .ok_or("dictionary adapter frame overflow")?;
         }
     }
-    let frame = abi.parameter_count() as u32;
-    let scratch = frame + 1;
+    let frame = WasmLocalId::from_index(abi.parameter_count());
+    let scratch = WasmLocalId::from_index(abi.parameter_count() + 1);
     let mut code = WasmFunction::new([(if frame_size == 0 { 0 } else { 2 }, ValType::I32)]);
     if frame_size != 0 {
-        code.instruction(&I::GlobalGet(Global::Stack as u32));
-        code.instruction(&I::LocalSet(frame));
-        code.instruction(&I::GlobalGet(Global::End as u32));
-        code.instruction(&I::LocalGet(frame));
-        code.instruction(&I::I32Sub);
-        code.instruction(&I::I32Const(frame_size as i32));
-        code.instruction(&I::I32LtU);
-        code.instruction(&I::If(BlockType::Empty));
-        emit_failure(&mut code, FailureCode::StackCapacity);
-        code.instruction(&I::End);
-        code.instruction(&I::LocalGet(frame));
-        code.instruction(&I::I32Const(frame_size as i32));
-        code.instruction(&I::I32Add);
-        code.instruction(&I::GlobalSet(Global::Stack as u32));
-        for (i, _) in abi.parameters[1..].iter().enumerate() {
-            if let Some(offset) = spills.get(&i) {
-                code.instruction(&I::LocalGet(frame));
-                code.instruction(&I::I32Const(*offset as i32));
-                code.instruction(&I::I32Add);
-                code.instruction(&I::LocalGet(abi.input_local(i as u32 + 1)));
-                code.instruction(&scalar_store(ScalarType::of(
-                    input_types[captures.len() + i],
-                )?));
+        enter_frame(&mut code, frame, frame_size);
+        for (i, offset) in spills.iter().enumerate() {
+            if let Some(offset) = offset {
+                frame_address(&mut code, frame, *offset);
+                code.instruction(&I::LocalGet(abi.input_local(i + 1).as_u32()));
+                ScalarType::of(input_types[captures.len() + i])?.store(&mut code);
             }
         }
     }
     if !direct.fallible && matches!(direct.result, ResultKind::Direct(_)) {
-        code.instruction(&I::LocalGet(abi.output_local()));
+        code.instruction(&I::LocalGet(abi.output_local().as_u32()));
     }
     if direct.fallible {
         if abi.fallible {
-            code.instruction(&I::LocalGet(0));
+            code.instruction(&I::LocalGet(abi.failure_local().as_u32()));
         } else {
-            code.instruction(&I::GlobalGet(Global::Context as u32));
-            code.instruction(&I::I32Load(MemArg {
-                offset: offset_of!(InvocationState, native_failure) as u64,
-                ..memarg(2)
-            }));
+            context_pointer(&mut code, offset_of!(InvocationState, native_failure));
         }
     }
     for mapping in captures {
-        code.instruction(&I::LocalGet(abi.input_local(0)));
+        code.instruction(&I::LocalGet(abi.input_local(0).as_u32()));
         if let DictionaryEntryEvidence::Capture(index) = mapping {
             code.instruction(&I::I32Load(MemArg {
                 offset: ENVIRONMENT_OFFSET,
@@ -716,28 +720,27 @@ fn dictionary_adapter(
     }
     for (i, canonical) in abi.parameters[1..].iter().enumerate() {
         let actual = direct.parameters[captures.len() + i];
-        if let Some(offset) = spills.get(&i) {
-            code.instruction(&I::LocalGet(frame));
-            code.instruction(&I::I32Const(*offset as i32));
-            code.instruction(&I::I32Add);
+        if let Some(offset) = spills[i] {
+            frame_address(&mut code, frame, offset);
             continue;
         }
-        code.instruction(&I::LocalGet(abi.input_local(i as u32 + 1)));
+        code.instruction(&I::LocalGet(abi.input_local(i + 1).as_u32()));
         if let (ParameterTransport::Indirect, ParameterTransport::Direct(_)) = (*canonical, actual)
         {
-            code.instruction(&scalar_load(ScalarType::of(
-                input_types[captures.len() + i],
-            )?));
+            ScalarType::of(input_types[captures.len() + i])?.load(&mut code);
         }
     }
     if direct.output() {
-        code.instruction(&I::LocalGet(if optional.is_some() {
-            frame
-        } else {
-            abi.output_local()
-        }));
+        code.instruction(&I::LocalGet(
+            (if optional.is_some() {
+                frame
+            } else {
+                abi.output_local()
+            })
+            .as_u32(),
+        ));
     }
-    code.instruction(&I::Call(*index));
+    code.instruction(&I::Call(index.as_u32()));
     if let Some(adapter) = optional {
         adapter.emit(
             &mut code,
@@ -755,15 +758,14 @@ fn dictionary_adapter(
         }
     } else {
         if matches!(direct.result, ResultKind::Direct(_)) {
-            code.instruction(&scalar_store(ScalarType::of(result_ty)?));
+            ScalarType::of(result_ty)?.store(&mut code);
         }
         if abi.fallible {
             code.instruction(&I::I32Const(0));
         }
     }
     if frame_size != 0 {
-        code.instruction(&I::LocalGet(frame));
-        code.instruction(&I::GlobalSet(Global::Stack as u32));
+        leave_frame(&mut code, frame);
     }
     code.instruction(&I::End);
     Ok(code)
@@ -820,16 +822,16 @@ impl NativeOptionalResultAdapter {
     fn emit(
         &self,
         code: &mut WasmFunction,
-        output: u32,
-        payload: u32,
-        scratch: u32,
-        allocate: u32,
+        output: WasmLocalId,
+        payload: WasmLocalId,
+        scratch: WasmLocalId,
+        allocate: WasmFunctionId,
     ) {
         code.instruction(&I::If(BlockType::Empty)); // Native presence, not a failure status.
-        code.instruction(&I::LocalGet(output));
+        code.instruction(&I::LocalGet(output.as_u32()));
         code.instruction(&I::I32Const(self.some_tag as i32));
         code.instruction(&I::I32Store(memarg(2)));
-        code.instruction(&I::LocalGet(output));
+        code.instruction(&I::LocalGet(output.as_u32()));
         code.instruction(&I::I32Const(
             variant_payload_offset(if self.storage.is_indirect() {
                 align_of::<usize>() as u32
@@ -841,21 +843,21 @@ impl NativeOptionalResultAdapter {
         if self.storage.is_indirect() {
             code.instruction(&I::I32Const(self.size as i32));
             code.instruction(&I::I32Const(self.align as i32));
-            code.instruction(&I::Call(allocate));
-            code.instruction(&I::LocalTee(scratch));
+            code.instruction(&I::Call(allocate.as_u32()));
+            code.instruction(&I::LocalTee(scratch.as_u32()));
             code.instruction(&I::I32Store(memarg(2)));
-            code.instruction(&I::LocalGet(scratch));
+            code.instruction(&I::LocalGet(scratch.as_u32()));
         }
         code.instruction(&I::I32Const(self.field as i32));
         code.instruction(&I::I32Add);
-        code.instruction(&I::LocalGet(payload));
+        code.instruction(&I::LocalGet(payload.as_u32()));
         code.instruction(&I::I32Const(self.payload_size as i32));
         code.instruction(&I::MemoryCopy {
             src_mem: 0,
             dst_mem: 0,
         });
         code.instruction(&I::Else);
-        code.instruction(&I::LocalGet(output));
+        code.instruction(&I::LocalGet(output.as_u32()));
         code.instruction(&I::I32Const(self.none_tag as i32));
         code.instruction(&I::I32Store(memarg(2)));
         code.instruction(&I::End);
@@ -863,11 +865,20 @@ impl NativeOptionalResultAdapter {
 }
 
 fn emit_failure(code: &mut WasmFunction, failure: FailureCode) {
+    check_context(code);
+    store_failure_and_trap(code, failure);
+}
+
+fn check_context(code: &mut WasmFunction) {
+    // An exported entry can be reached without an invocation; never write through a null context.
     code.instruction(&I::GlobalGet(Global::Context as u32));
     code.instruction(&I::I32Eqz);
     code.instruction(&I::If(BlockType::Empty));
     code.instruction(&I::Unreachable);
     code.instruction(&I::End);
+}
+
+fn store_failure_and_trap(code: &mut WasmFunction, failure: FailureCode) {
     code.instruction(&I::GlobalGet(Global::Context as u32));
     code.instruction(&I::I32Const(failure as i32));
     code.instruction(&I::I32Store(MemArg {
@@ -877,107 +888,80 @@ fn emit_failure(code: &mut WasmFunction, failure: FailureCode) {
     code.instruction(&I::Unreachable);
 }
 
-fn scalar_load(ty: ScalarType) -> I<'static> {
-    if ty.is::<bool>() {
-        I::I32Load8U(memarg(0))
-    } else if ty.is::<Float>() {
-        I::F64Load(memarg(3))
-    } else if ty.is::<isize>() {
-        I::I32Load(memarg(2))
-    } else {
-        unreachable!("non-scalar transport")
-    }
+fn context_pointer(code: &mut WasmFunction, offset: usize) {
+    code.instruction(&I::GlobalGet(Global::Context as u32));
+    code.instruction(&I::I32Load(MemArg {
+        offset: offset as u64,
+        ..memarg(2)
+    }));
 }
 
-fn scalar_store(ty: ScalarType) -> I<'static> {
-    if ty.is::<bool>() {
-        I::I32Store8(memarg(0))
-    } else if ty.is::<Float>() {
-        I::F64Store(memarg(3))
-    } else if ty.is::<isize>() {
-        I::I32Store(memarg(2))
-    } else {
-        unreachable!("non-scalar transport")
-    }
+fn frame_address(code: &mut WasmFunction, frame: WasmLocalId, offset: u32) {
+    code.instruction(&I::LocalGet(frame.as_u32()));
+    code.instruction(&I::I32Const(offset as i32));
+    code.instruction(&I::I32Add);
 }
 
-fn callee(op: &Operation) -> Option<Value> {
+fn frame_bytes(size: u32) -> Result<u32, String> {
+    Ok(size.max(1).checked_add(7).ok_or("frame size overflow")? & !7)
+}
+
+fn enter_frame(code: &mut WasmFunction, frame: WasmLocalId, size: u32) {
+    // Check before addition, so a large frame cannot wrap the linear-memory stack pointer.
+    code.instruction(&I::GlobalGet(Global::Stack as u32));
+    code.instruction(&I::LocalSet(frame.as_u32()));
+    code.instruction(&I::GlobalGet(Global::End as u32));
+    code.instruction(&I::LocalGet(frame.as_u32()));
+    code.instruction(&I::I32Sub);
+    code.instruction(&I::I32Const(size as i32));
+    code.instruction(&I::I32LtU);
+    code.instruction(&I::If(BlockType::Empty));
+    emit_failure(code, FailureCode::StackCapacity);
+    code.instruction(&I::End);
+    frame_address(code, frame, size);
+    code.instruction(&I::GlobalSet(Global::Stack as u32));
+}
+
+fn leave_frame(code: &mut WasmFunction, frame: WasmLocalId) {
+    code.instruction(&I::LocalGet(frame.as_u32()));
+    code.instruction(&I::GlobalSet(Global::Stack as u32));
+}
+
+fn callee(op: &Operation) -> Option<&Value> {
     match &op.kind {
-        OperationKind::Call { .. } | OperationKind::Project { .. } => Some(op.operands[0].clone()),
-        OperationKind::Clone { .. } => Some(op.operands[2].clone()),
-        OperationKind::Drop { .. } | OperationKind::DropInitialized { .. } => {
-            Some(op.operands[1].clone())
-        }
+        OperationKind::Call { .. } | OperationKind::Project { .. } => Some(&op.operands[0]),
+        OperationKind::Clone { .. } => Some(&op.operands[2]),
+        OperationKind::Drop { .. } | OperationKind::DropInitialized { .. } => Some(&op.operands[1]),
         _ => None,
     }
 }
 
 fn result_as_wasm(result: ScalarType) -> Option<ValType> {
-    (!result.is::<()>()).then(|| result.wasm())
+    (!result.is_unit()).then(|| result.wasm())
 }
 
-fn entry_wrapper(index: u32, signature: &CallAbi, result: ScalarType) -> WasmFunction {
+fn entry_wrapper(index: WasmFunctionId, signature: &CallAbi, result: ScalarType) -> WasmFunction {
     debug_assert!(signature.fallible);
-    let frame = signature.parameters.len() as u32;
+    let frame = WasmLocalId::from_index(signature.parameters.len());
     let mut code = WasmFunction::new([(1, ValType::I32)]);
-    code.instruction(&I::GlobalGet(Global::Context as u32));
-    code.instruction(&I::I32Eqz);
-    code.instruction(&I::If(BlockType::Empty));
-    code.instruction(&I::Unreachable);
-    code.instruction(&I::End);
+    check_context(&mut code);
     // The scalar host result needs at most eight aligned bytes, reserved before the callee.
-    code.instruction(&I::GlobalGet(Global::Stack as u32));
-    code.instruction(&I::LocalSet(frame));
-    code.instruction(&I::GlobalGet(Global::End as u32));
-    code.instruction(&I::LocalGet(frame));
-    code.instruction(&I::I32Sub);
-    code.instruction(&I::I32Const(8));
-    code.instruction(&I::I32LtU);
-    code.instruction(&I::If(BlockType::Empty));
-    code.instruction(&I::GlobalGet(Global::Context as u32));
-    code.instruction(&I::I32Const(FailureCode::StackCapacity as i32));
-    code.instruction(&I::I32Store(MemArg {
-        offset: offset_of!(InvocationState, failure) as u64,
-        ..memarg(2)
-    }));
-    code.instruction(&I::Unreachable);
-    code.instruction(&I::End);
-    code.instruction(&I::LocalGet(frame));
-    code.instruction(&I::I32Const(8));
-    code.instruction(&I::I32Add);
-    code.instruction(&I::GlobalSet(Global::Stack as u32));
-    code.instruction(&I::GlobalGet(Global::Context as u32));
-    code.instruction(&I::I32Load(MemArg {
-        offset: offset_of!(InvocationState, native_failure) as u64,
-        ..memarg(2)
-    }));
-    for i in 0..signature.parameters.len() as u32 {
-        code.instruction(&I::LocalGet(i));
+    enter_frame(&mut code, frame, 8);
+    context_pointer(&mut code, offset_of!(InvocationState, native_failure));
+    for i in 0..signature.parameters.len() {
+        code.instruction(&I::LocalGet(WasmLocalId::from_index(i).as_u32()));
     }
     if signature.output() {
-        code.instruction(&I::LocalGet(frame));
+        code.instruction(&I::LocalGet(frame.as_u32()));
     }
-    code.instruction(&I::Call(index));
-    code.instruction(&I::LocalGet(frame));
-    code.instruction(&I::GlobalSet(Global::Stack as u32));
+    code.instruction(&I::Call(index.as_u32()));
+    leave_frame(&mut code, frame);
     code.instruction(&I::If(BlockType::Empty));
-    code.instruction(&I::GlobalGet(Global::Context as u32));
-    code.instruction(&I::I32Const(FailureCode::Source as i32));
-    code.instruction(&I::I32Store(MemArg {
-        offset: offset_of!(InvocationState, failure) as u64,
-        ..memarg(2)
-    }));
-    code.instruction(&I::Unreachable);
+    store_failure_and_trap(&mut code, FailureCode::Source);
     code.instruction(&I::End);
-    if !result.is::<()>() {
-        code.instruction(&I::LocalGet(frame));
-        code.instruction(&if result.is::<Float>() {
-            I::F64Load(memarg(3))
-        } else if result.is::<bool>() {
-            I::I32Load8U(memarg(0))
-        } else {
-            I::I32Load(memarg(2))
-        });
+    if !result.is_unit() {
+        code.instruction(&I::LocalGet(frame.as_u32()));
+        result.load(&mut code);
     }
     code.instruction(&I::End);
     code
@@ -1025,8 +1009,32 @@ fn diagnostic(id: FunctionId, body: &Function, reason: &str) -> String {
 
 #[derive(Clone, Copy)]
 enum Storage {
-    Local(u32),
+    Local(WasmLocalId),
+    /// Byte offset from the function's frame base in linear memory.
     Stack(u32),
+}
+
+#[derive(Default)]
+struct StringLiterals {
+    values: Vec<StaticStr>,
+    indices: FxHashMap<StaticStr, usize>,
+}
+
+impl StringLiterals {
+    fn intern(&mut self, text: StaticStr) -> usize {
+        *self.indices.entry(text).or_insert_with(|| {
+            let index = self.values.len();
+            self.values.push(text);
+            index
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct LayoutLocals {
+    dictionary: WasmLocalId,
+    table: WasmLocalId,
+    output: WasmLocalId,
 }
 
 struct Body<'a> {
@@ -1035,30 +1043,32 @@ struct Body<'a> {
     roles: ValueRoles,
     env: ModuleEnv<'a>,
     imports: &'a Imports,
-    strings: &'a mut Vec<StaticStr>,
+    strings: &'a mut StringLiterals,
     evidence: &'a evidence::Image,
-    entry_abis: &'a FxHashMap<(TraitId, TraitDictionaryEntryIndex), (u32, CallAbi)>,
+    entry_abis: &'a FxHashMap<(TraitId, TraitDictionaryEntryIndex), (WasmTypeId, CallAbi)>,
     layout_entries: [(TraitId, TraitDictionaryEntryIndex); 2],
     selections: FxHashMap<ValueId, (TraitId, TraitDictionaryEntryIndex)>,
-    owned_evidence: Vec<Value>,
+    owned_evidence: Vec<ValueId>,
     capture_slots: FxHashMap<ValueId, u32>,
     variant_shells: FxHashSet<ValueId>,
-    layout_slot: u32,
-    dynamic_size: u32,
-    dynamic_align: u32,
-    dynamic_base: u32,
-    allocation_end: u32,
-    pending_failure: u32,
-    scratch: u32,
+    layout_slot: Option<u32>,
+    dynamic_size: WasmLocalId,
+    dynamic_align: WasmLocalId,
+    dynamic_base: WasmLocalId,
+    allocation_end: WasmLocalId,
+    evidence_base: Option<WasmLocalId>,
+    layout_locals: Option<LayoutLocals>,
+    pending_failure: WasmLocalId,
+    scratch: WasmLocalId,
     scratch_slots: FxHashMap<Type, u32>,
-    callees: &'a FxHashMap<FunctionId, (u32, CallAbi)>,
+    callees: &'a FxHashMap<FunctionId, (WasmFunctionId, &'a CallAbi)>,
     program: &'a ResolvedPhysicalProgram<'a>,
     session: &'a CompilerSession,
-    registers: FxHashMap<ValueId, u32>,
+    registers: FxHashMap<ValueId, WasmLocalId>,
     storage: FxHashMap<Value, Storage>,
     locals: Vec<ValType>,
-    frame: Option<u32>,
-    pc: Option<u32>,
+    frame: Option<WasmLocalId>,
+    pc: Option<WasmLocalId>,
     frame_size: u32,
     code: WasmFunction,
 }
@@ -1068,14 +1078,14 @@ impl<'a> Body<'a> {
     fn new(
         body: &'a Function,
         signature: &'a CallAbi,
-        callees: &'a FxHashMap<FunctionId, (u32, CallAbi)>,
+        callees: &'a FxHashMap<FunctionId, (WasmFunctionId, &'a CallAbi)>,
         program: &'a ResolvedPhysicalProgram<'a>,
         session: &'a CompilerSession,
         env: ModuleEnv<'a>,
         imports: &'a Imports,
-        strings: &'a mut Vec<StaticStr>,
+        strings: &'a mut StringLiterals,
         evidence: &'a evidence::Image,
-        entry_abis: &'a FxHashMap<(TraitId, TraitDictionaryEntryIndex), (u32, CallAbi)>,
+        entry_abis: &'a FxHashMap<(TraitId, TraitDictionaryEntryIndex), (WasmTypeId, CallAbi)>,
         layout_entries: [(TraitId, TraitDictionaryEntryIndex); 2],
     ) -> Result<Self, String> {
         let mut this = Self {
@@ -1091,13 +1101,15 @@ impl<'a> Body<'a> {
             owned_evidence: Vec::new(),
             capture_slots: FxHashMap::default(),
             variant_shells: FxHashSet::default(),
-            layout_slot: 0,
-            dynamic_size: 0,
-            dynamic_align: 0,
-            dynamic_base: 0,
-            allocation_end: 0,
-            pending_failure: 0,
-            scratch: 0,
+            layout_slot: None,
+            dynamic_size: WasmLocalId::default(),
+            dynamic_align: WasmLocalId::default(),
+            dynamic_base: WasmLocalId::default(),
+            allocation_end: WasmLocalId::default(),
+            evidence_base: None,
+            layout_locals: None,
+            pending_failure: WasmLocalId::default(),
+            scratch: WasmLocalId::default(),
             scratch_slots: FxHashMap::default(),
             callees,
             program,
@@ -1117,12 +1129,6 @@ impl<'a> Body<'a> {
         this.dynamic_align = this.local(ValType::I32);
         this.dynamic_base = this.local(ValType::I32);
         this.allocation_end = this.local(ValType::I64);
-        let witnessed = body
-            .blocks()
-            .any(|block| operations(body.block(block)).any(|op| layout_witness(op).is_some()));
-        if witnessed {
-            this.layout_slot = this.reserve_bytes(8)?;
-        }
         if body.blocks().count() != 1
             || !matches!(
                 body.block(body.entry()).terminator().kind,
@@ -1156,7 +1162,7 @@ impl<'a> Body<'a> {
                     let local = if parameter.kind == ParameterKind::Return {
                         this.local(ty.wasm())
                     } else {
-                        signature.input_local(index as u32)
+                        signature.input_local(index)
                     };
                     this.storage.insert(value, Storage::Local(local));
                 }
@@ -1164,6 +1170,9 @@ impl<'a> Body<'a> {
         }
         for block in body.blocks() {
             for operation in operations(body.block(block)) {
+                if this.layout_slot.is_none() && layout_witness(operation).is_some() {
+                    this.layout_slot = Some(this.reserve_bytes(8)?);
+                }
                 if matches!(operation.kind, OperationKind::Replace)
                     && layout_witness(operation).is_none()
                 {
@@ -1173,7 +1182,7 @@ impl<'a> Body<'a> {
                     this.reserve_scratch(ty)?;
                 }
                 if let Some(Value::Function(target)) = callee(operation)
-                    && let Some(payload) = this.optional_payload(target)
+                    && let Some(payload) = this.optional_payload(*target)
                 {
                     this.reserve_scratch(payload)?;
                 }
@@ -1184,7 +1193,7 @@ impl<'a> Body<'a> {
                                 Value::Register(id),
                                 size_of::<DictionaryReference>() as u32,
                             )?;
-                            this.owned_evidence.push(Value::Register(id));
+                            this.owned_evidence.push(id);
                             let bytes = program
                                 .dictionary(definition)
                                 .unwrap()
@@ -1204,7 +1213,7 @@ impl<'a> Body<'a> {
                                 Value::Register(id),
                                 size_of::<DictionaryReference>() as u32,
                             )?;
-                            this.owned_evidence.push(Value::Register(id));
+                            this.owned_evidence.push(id);
                             this.selections.insert(id, (trait_id, entry_index));
                             continue;
                         }
@@ -1226,11 +1235,13 @@ impl<'a> Body<'a> {
                     };
                     if let Some(ty) = storage_ty {
                         let value = Value::Register(id);
-                        if addressed.contains(&value) || scalar(&ty).is_err() {
-                            this.slot(value, this.size(&ty)?)?;
-                        } else {
-                            let local = this.local(scalar(&ty)?.wasm());
+                        if !addressed.contains(&value)
+                            && let Ok(ty) = scalar(&ty)
+                        {
+                            let local = this.local(ty.wasm());
                             this.storage.insert(value, Storage::Local(local));
+                        } else {
+                            this.slot(value, this.size(&ty)?)?;
                         }
                         continue;
                     }
@@ -1268,9 +1279,18 @@ impl<'a> Body<'a> {
                 }
             }
         }
-        this.frame_size = (this.frame_size + 7) & !7;
         if !this.selections.is_empty() {
             this.reserve_scratch(Type::unit())?;
+        }
+        if !this.selections.is_empty() || this.layout_slot.is_some() {
+            this.evidence_base = Some(this.local(ValType::I32));
+        }
+        if this.layout_slot.is_some() {
+            this.layout_locals = Some(LayoutLocals {
+                dictionary: this.local(ValType::I32),
+                table: this.local(ValType::I32),
+                output: this.local(ValType::I32),
+            });
         }
         if this.frame_size != 0 {
             this.frame = Some(this.local(ValType::I32));
@@ -1304,20 +1324,14 @@ impl<'a> Body<'a> {
     fn reserve_scratch(&mut self, ty: Type) -> Result<(), String> {
         if !self.scratch_slots.contains_key(&ty) {
             let size = self.size(&MirType::Lowered(ty))?;
-            let offset = self.frame_size;
-            self.frame_size = self
-                .frame_size
-                .checked_add(size.max(1).checked_add(7).ok_or("frame overflow")? & !7)
-                .ok_or("frame overflow")?;
+            let offset = self.reserve_bytes(size)?;
             self.scratch_slots.insert(ty, offset);
         }
         Ok(())
     }
 
     fn scratch_address(&mut self, ty: Type) {
-        self.i(I::LocalGet(self.frame.expect("scratch needs a frame")));
-        self.i(I::I32Const(self.scratch_slots[&ty] as i32));
-        self.i(I::I32Add);
+        self.frame_address(self.scratch_slots[&ty]);
     }
 
     /// Turn the native presence result and temporary payload into an owned Ferlium Option.
@@ -1328,9 +1342,9 @@ impl<'a> Body<'a> {
         let adapter = NativeOptionalResultAdapter::new(ty, payload, self.env, self.session)?;
         // Preserve the presence result on the operand stack while preparing the two addresses.
         self.address(output)?;
-        self.i(I::LocalSet(self.dynamic_base));
+        self.i(I::LocalSet(self.dynamic_base.as_u32()));
         self.scratch_address(payload);
-        self.i(I::LocalSet(self.dynamic_size));
+        self.i(I::LocalSet(self.dynamic_size.as_u32()));
         adapter.emit(
             &mut self.code,
             self.dynamic_base,
@@ -1349,43 +1363,29 @@ impl<'a> Body<'a> {
     }
 
     fn context_pointer(&mut self, offset: usize) {
-        self.i(I::GlobalGet(Global::Context as u32));
-        self.i(I::I32Load(MemArg {
-            offset: offset as u64,
-            ..memarg(2)
-        }));
+        context_pointer(&mut self.code, offset);
     }
 
     fn frame_address(&mut self, offset: u32) {
-        self.i(I::LocalGet(self.frame.expect("reserved frame storage")));
-        self.i(I::I32Const(offset as i32));
-        self.i(I::I32Add);
+        frame_address(
+            &mut self.code,
+            self.frame.expect("reserved frame storage"),
+            offset,
+        );
     }
 
     fn release_evidence(&mut self, reference: &Value) -> Result<(), String> {
         self.context_pointer(offset_of!(InvocationState, evidence));
         self.address(reference)?;
-        self.i(I::Call(self.imports.function_index("release_evidence")));
+        self.i(I::Call(
+            self.imports.function_index("release_evidence").as_u32(),
+        ));
         Ok(())
     }
 
     fn dictionary_index(&mut self, dictionary: &Value, entry: usize) -> Result<(), String> {
-        // Descriptor and entry-table addresses are image-relative; environments are relocated.
-        self.context_pointer(offset_of!(InvocationState, evidence));
-        self.context_pointer(offset_of!(InvocationState, evidence));
-        self.context_pointer(offset_of!(InvocationState, evidence));
         self.value(dictionary)?;
-        self.i(I::I32Load(memarg(2)));
-        self.i(I::I32Const(2));
-        self.i(I::I32Shl);
-        self.i(I::I32Add);
-        self.i(I::I32Load(memarg(2)));
-        self.i(I::I32Add);
-        self.i(I::I32Load(MemArg {
-            offset: offset_of!(DictionaryDescriptor, entries) as u64,
-            ..memarg(2)
-        }));
-        self.i(I::I32Add);
+        self.dictionary_table();
         self.i(I::I32Load(MemArg {
             offset: entry as u64 * 4,
             ..memarg(2)
@@ -1393,23 +1393,68 @@ impl<'a> Body<'a> {
         Ok(())
     }
 
+    /// Replace a dictionary reference on the operand stack with its immutable entry-table address.
+    fn dictionary_table(&mut self) {
+        let evidence_base = self
+            .evidence_base
+            .expect("dictionary lookup needs a base local");
+        // Descriptor and entry-table addresses are image-relative; environments are relocated.
+        self.i(I::I32Load(memarg(2)));
+        self.i(I::I32Const(2));
+        self.i(I::I32Shl);
+        self.context_pointer(offset_of!(InvocationState, evidence));
+        self.i(I::LocalTee(evidence_base.as_u32()));
+        self.i(I::I32Add);
+        self.i(I::I32Load(memarg(2)));
+        self.i(I::LocalGet(evidence_base.as_u32()));
+        self.i(I::I32Add);
+        self.i(I::I32Load(MemArg {
+            offset: offset_of!(DictionaryDescriptor, entries) as u64,
+            ..memarg(2)
+        }));
+        self.i(I::LocalGet(evidence_base.as_u32()));
+        self.i(I::I32Add);
+    }
+
     fn dynamic_layout(&mut self, dictionary: &Value) -> Result<(), String> {
+        let slot = self
+            .layout_slot
+            .expect("layout witness needs output storage");
+        let LayoutLocals {
+            dictionary: dictionary_local,
+            table,
+            output,
+        } = self.layout_locals.expect("layout witness needs locals");
+        self.value(dictionary)?;
+        self.i(I::LocalTee(dictionary_local.as_u32()));
+        self.dictionary_table();
+        self.i(I::LocalSet(table.as_u32()));
+        self.frame_address(slot);
+        self.i(I::LocalSet(output.as_u32()));
         for (index, entry) in self.layout_entries.into_iter().enumerate() {
             let (ty, _) = self.entry_abis[&entry];
-            self.value(dictionary)?;
-            self.frame_address(self.layout_slot + index as u32 * 4);
-            self.dictionary_index(dictionary, entry.1.as_index())?;
+            self.i(I::LocalGet(dictionary_local.as_u32()));
+            self.i(I::LocalGet(output.as_u32()));
+            self.i(I::LocalGet(table.as_u32()));
+            self.i(I::I32Load(MemArg {
+                offset: entry.1.as_index() as u64 * 4,
+                ..memarg(2)
+            }));
             self.i(I::CallIndirect {
-                type_index: ty,
+                type_index: ty.as_u32(),
                 table_index: 0,
             });
-            self.frame_address(self.layout_slot + index as u32 * 4);
+            // Each result is read before the next call, so both entries share one output slot.
+            self.i(I::LocalGet(output.as_u32()));
             self.i(I::I32Load(memarg(2)));
-            self.i(I::LocalSet(if index == 0 {
-                self.dynamic_size
-            } else {
-                self.dynamic_align
-            }));
+            self.i(I::LocalSet(
+                (if index == 0 {
+                    self.dynamic_size
+                } else {
+                    self.dynamic_align
+                })
+                .as_u32(),
+            ));
         }
         Ok(())
     }
@@ -1417,34 +1462,34 @@ impl<'a> Body<'a> {
     /// Reserve witnessed frame bytes, doing the alignment and extent arithmetic without wrapping.
     fn dynamic_alloca(&mut self) {
         // alignment = max(requested_alignment, 8), preserving alignment for callees' fixed frames.
-        self.i(I::LocalGet(self.dynamic_align));
+        self.i(I::LocalGet(self.dynamic_align.as_u32()));
         self.i(I::I32Const(8));
-        self.i(I::LocalGet(self.dynamic_align));
+        self.i(I::LocalGet(self.dynamic_align.as_u32()));
         self.i(I::I32Const(8));
         self.i(I::I32GtU);
         self.i(I::Select);
-        self.i(I::LocalSet(self.dynamic_align));
+        self.i(I::LocalSet(self.dynamic_align.as_u32()));
         // base = align_up(stack_pointer, alignment).
         self.i(I::GlobalGet(Global::Stack as u32));
         self.i(I::I64ExtendI32U);
-        self.i(I::LocalGet(self.dynamic_align));
+        self.i(I::LocalGet(self.dynamic_align.as_u32()));
         self.i(I::I64ExtendI32U);
         self.i(I::I64Const(1));
         self.i(I::I64Sub);
         self.i(I::I64Add);
         self.i(I::I64Const(0));
-        self.i(I::LocalGet(self.dynamic_align));
+        self.i(I::LocalGet(self.dynamic_align.as_u32()));
         self.i(I::I64ExtendI32U);
         self.i(I::I64Sub);
         self.i(I::I64And);
-        self.i(I::LocalTee(self.allocation_end));
+        self.i(I::LocalTee(self.allocation_end.as_u32()));
         self.i(I::I32WrapI64);
-        self.i(I::LocalSet(self.dynamic_base));
+        self.i(I::LocalSet(self.dynamic_base.as_u32()));
         // end = align_up(base + max(size, 1), 8), reserving a distinct address even for zero size.
-        self.i(I::LocalGet(self.allocation_end));
-        self.i(I::LocalGet(self.dynamic_size));
+        self.i(I::LocalGet(self.allocation_end.as_u32()));
+        self.i(I::LocalGet(self.dynamic_size.as_u32()));
         self.i(I::I32Const(1));
-        self.i(I::LocalGet(self.dynamic_size));
+        self.i(I::LocalGet(self.dynamic_size.as_u32()));
         self.i(I::Select);
         self.i(I::I64ExtendI32U);
         self.i(I::I64Add);
@@ -1452,7 +1497,7 @@ impl<'a> Body<'a> {
         self.i(I::I64Add);
         self.i(I::I64Const(-8));
         self.i(I::I64And);
-        self.i(I::LocalTee(self.allocation_end));
+        self.i(I::LocalTee(self.allocation_end.as_u32()));
         // if end > stack_limit: fail(StackCapacity).
         self.i(I::GlobalGet(Global::End as u32));
         self.i(I::I64ExtendI32U);
@@ -1461,11 +1506,11 @@ impl<'a> Body<'a> {
         self.fail(FailureCode::StackCapacity);
         self.i(I::End);
         // stack_pointer = end.
-        self.i(I::LocalGet(self.allocation_end));
+        self.i(I::LocalGet(self.allocation_end.as_u32()));
         self.i(I::I32WrapI64);
         self.i(I::GlobalSet(Global::Stack as u32));
         // Leave base on the operand stack as the allocation result.
-        self.i(I::LocalGet(self.dynamic_base));
+        self.i(I::LocalGet(self.dynamic_base.as_u32()));
     }
 
     fn call_dictionary(
@@ -1482,7 +1527,8 @@ impl<'a> Body<'a> {
             .selections
             .get(id)
             .ok_or("non-dictionary indirect call")?;
-        let (ty, abi) = self.entry_abis[&key].clone();
+        let entry_abis = self.entry_abis;
+        let (ty, abi) = &entry_abis[&key];
         if inputs.len() + 1 != abi.parameters.len() {
             return Err("dictionary call argument count".into());
         }
@@ -1490,14 +1536,7 @@ impl<'a> Body<'a> {
             self.context_pointer(offset_of!(InvocationState, native_failure));
         }
         self.address(selected)?;
-        for (input, transport) in inputs.iter().zip(&abi.parameters[1..]) {
-            match transport {
-                ParameterTransport::Direct(_) => {
-                    self.read(input)?;
-                }
-                ParameterTransport::Indirect => self.address(input)?,
-            }
-        }
+        self.call_inputs(inputs, &abi.parameters[1..])?;
         if let Some(output) = output {
             self.address(output)?;
         } else {
@@ -1505,28 +1544,53 @@ impl<'a> Body<'a> {
         }
         self.dictionary_index(selected, key.1.as_index())?;
         self.i(I::CallIndirect {
-            type_index: ty,
+            type_index: ty.as_u32(),
             table_index: 0,
         });
-        if invoked && !abi.fallible {
-            self.i(I::I32Const(0));
-        } else if !invoked && abi.fallible {
-            self.i(I::Drop);
+        self.call_status(invoked, abi.fallible);
+        Ok(())
+    }
+
+    fn call_inputs(
+        &mut self,
+        inputs: &[&Value],
+        transports: &[ParameterTransport],
+    ) -> Result<(), String> {
+        for (input, transport) in inputs.iter().zip(transports) {
+            match transport {
+                ParameterTransport::Direct(_) => {
+                    self.read(input)?;
+                }
+                ParameterTransport::Indirect => self.address(input)?,
+            }
         }
         Ok(())
     }
 
+    fn call_status(&mut self, invoked: bool, fallible: bool) {
+        if invoked && !fallible {
+            self.i(I::I32Const(0));
+        } else if !invoked && fallible {
+            // A plain call promises success, even when its callee uses a status-return ABI.
+            self.i(I::Drop);
+        }
+    }
+
     fn capture_failure(&mut self) {
         self.context_pointer(offset_of!(InvocationState, diagnostics));
-        self.i(I::LocalGet(self.pending_failure));
-        self.i(I::Call(self.imports.function_index("capture_failure")));
-        self.i(I::LocalSet(self.pending_failure));
+        self.i(I::LocalGet(self.pending_failure.as_u32()));
+        self.i(I::Call(
+            self.imports.function_index("capture_failure").as_u32(),
+        ));
+        self.i(I::LocalSet(self.pending_failure.as_u32()));
     }
 
     fn propagate_failure(&mut self) {
         self.context_pointer(offset_of!(InvocationState, diagnostics));
-        self.i(I::LocalGet(self.pending_failure));
-        self.i(I::Call(self.imports.function_index("propagate_failure")));
+        self.i(I::LocalGet(self.pending_failure.as_u32()));
+        self.i(I::Call(
+            self.imports.function_index("propagate_failure").as_u32(),
+        ));
         self.i(I::If(BlockType::Empty));
         self.fail(FailureCode::Source);
         self.i(I::End);
@@ -1536,12 +1600,11 @@ impl<'a> Body<'a> {
         if failed && !self.signature.fallible {
             return Err("failure in an infallible entry".into());
         }
-        for value in self.owned_evidence.clone() {
-            self.release_evidence(&value)?;
+        for index in 0..self.owned_evidence.len() {
+            self.release_evidence(&Value::Register(self.owned_evidence[index]))?;
         }
         if let Some(frame) = self.frame {
-            self.i(I::LocalGet(frame));
-            self.i(I::GlobalSet(Global::Stack as u32));
+            leave_frame(&mut self.code, frame);
         }
         self.i(I::GlobalGet(Global::Depth as u32));
         self.i(I::I32Const(1));
@@ -1566,14 +1629,7 @@ impl<'a> Body<'a> {
         offset: u32,
     ) -> Result<(), String> {
         if let Some(text) = literal.as_primitive_ty::<StaticStr>() {
-            let index = self
-                .strings
-                .iter()
-                .position(|candidate| candidate == text)
-                .unwrap_or_else(|| {
-                    self.strings.push(*text);
-                    self.strings.len() - 1
-                });
+            let index = self.strings.intern(*text);
             self.address(destination)?;
             self.i(I::I32Const(offset as i32));
             self.i(I::I32Add);
@@ -1635,15 +1691,12 @@ impl<'a> Body<'a> {
             _ => return Err("unsupported call operation".into()),
         };
         let Value::Function(target) = callee else {
-            return self.call_dictionary(&callee, &inputs, output, invoked);
+            return self.call_dictionary(callee, &inputs, output, invoked);
         };
         // Static calls bypass fixed Value adapters without adding a source call-depth frame.
-        let target = self.program.direct_entry(target);
-        let (index, abi) = self
-            .callees
-            .get(&target)
-            .cloned()
-            .ok_or("unresolved callee")?;
+        let target = self.program.direct_entry(*target);
+        let callees = self.callees;
+        let (index, abi) = callees.get(&target).ok_or("unresolved callee")?;
         if inputs.len() != abi.parameters.len() {
             return Err("hidden call evidence".into());
         }
@@ -1661,38 +1714,26 @@ impl<'a> Body<'a> {
         if abi.fallible {
             self.context_pointer(offset_of!(InvocationState, native_failure));
         }
-        for (parameter, input) in abi.parameters.iter().zip(inputs) {
-            match parameter {
-                ParameterTransport::Direct(_) => {
-                    self.read(input)?;
-                }
-                ParameterTransport::Indirect => self.address(input)?,
-            }
-        }
+        self.call_inputs(&inputs, &abi.parameters)?;
         let optional_payload = self.optional_payload(target);
         if let Some(payload) = optional_payload {
             self.scratch_address(payload);
         } else if abi.output() {
             self.address(output.ok_or("missing output storage")?)?;
         }
-        self.i(I::Call(index));
+        self.i(I::Call(index.as_u32()));
         if let Some(payload) = optional_payload {
             self.finish_optional(output.ok_or("missing optional output")?, payload)?;
         }
         if let Some(ty) = direct_result {
             self.finish_store(output.unwrap(), ty);
         }
-        if invoked && !abi.fallible {
-            self.i(I::I32Const(0));
-        } else if abi.fallible && !invoked {
-            // A plain call promises success, even when its callee uses a status-return ABI.
-            self.i(I::Drop);
-        }
+        self.call_status(invoked, abi.fallible);
         Ok(())
     }
 
-    fn local(&mut self, ty: ValType) -> u32 {
-        let id = self.signature.parameter_count() as u32 + self.locals.len() as u32;
+    fn local(&mut self, ty: ValType) -> WasmLocalId {
+        let id = WasmLocalId::from_index(self.signature.parameter_count() + self.locals.len());
         self.locals.push(ty);
         id
     }
@@ -1705,6 +1746,15 @@ impl<'a> Body<'a> {
         for block in self.body.blocks() {
             let block = self.body.block(block);
             for op in operations(block) {
+                let call_abi = if matches!(op.kind, OperationKind::Call { .. })
+                    && let Value::Function(target) = &op.operands[0]
+                {
+                    self.callees
+                        .get(&self.program.direct_entry(*target))
+                        .map(|(_, abi)| *abi)
+                } else {
+                    None
+                };
                 for (index, operand) in op.operands.iter().enumerate() {
                     let observes = match &op.kind {
                         OperationKind::Load
@@ -1725,21 +1775,14 @@ impl<'a> Body<'a> {
                             false
                         }
                         OperationKind::Call { ty, .. } => {
-                            let abi = match &op.operands[0] {
-                                Value::Function(target) => {
-                                    let target = self.program.direct_entry(*target);
-                                    self.callees.get(&target).map(|(_, abi)| abi)
-                                }
-                                _ => None,
-                            };
                             if index + 1 == op.operands.len()
                                 && ty.result_convention.has_result_place()
                             {
-                                abi.is_none_or(CallAbi::output)
+                                call_abi.is_none_or(CallAbi::output)
                             } else {
                                 !index
                                     .checked_sub(1)
-                                    .and_then(|i| abi?.parameters.get(i))
+                                    .and_then(|i| call_abi?.parameters.get(i))
                                     .is_some_and(|p| matches!(p, ParameterTransport::Direct(_)))
                             }
                         }
@@ -1771,7 +1814,7 @@ impl<'a> Body<'a> {
         let offset = self.frame_size;
         self.frame_size = self
             .frame_size
-            .checked_add(size.max(1).checked_add(7).ok_or("frame size overflow")? & !7)
+            .checked_add(frame_bytes(size)?)
             .ok_or("frame size overflow")?;
         Ok(offset)
     }
@@ -1790,9 +1833,7 @@ impl<'a> Body<'a> {
         match self.storage.get(value) {
             Some(Storage::Stack(offset)) => {
                 let offset = *offset;
-                self.i(I::LocalGet(self.frame.expect("stack slot needs a frame")));
-                self.i(I::I32Const(offset as i32));
-                self.i(I::I32Add);
+                self.frame_address(offset);
             }
             Some(Storage::Local(_)) => return Err("address requested for promoted storage".into()),
             None => self.value(value)?,
@@ -1816,13 +1857,14 @@ impl<'a> Body<'a> {
             return self.address(value);
         }
         match value {
-            Value::Register(id) => self.i(I::LocalGet(self.registers[id])),
+            Value::Register(id) => self.i(I::LocalGet(self.registers[id].as_u32())),
             Value::Parameter(id) => self.i(I::LocalGet(
-                if self.body.parameters()[id.as_index()].kind == ParameterKind::Return {
+                (if self.body.parameters()[id.as_index()].kind == ParameterKind::Return {
                     self.signature.output_local()
                 } else {
-                    self.signature.input_local(id.as_u32())
-                },
+                    self.signature.input_local(id.as_index())
+                })
+                .as_u32(),
             )),
             Value::Constant(id) => self.literal(&self.body.constant(*id).representation)?,
             Value::Pattern(literal) => self.literal(literal)?,
@@ -1863,18 +1905,14 @@ impl<'a> Body<'a> {
             .roles
             .get(value, self.body.constants())
             .ok_or("missing operand role")?;
-        if matches!(&*role, ValueRole::VariantPayloadStorage) {
+        let storage_parameter = matches!(value, Value::Parameter(id)
+            if self.body.parameters()[id.as_index()].kind == ParameterKind::Dictionary
+                && self.body.parameters()[id.as_index()].ty == bool_type());
+        if matches!(&*role, ValueRole::VariantPayloadStorage) || storage_parameter {
+            let ty = ScalarType::native(NativeScalar::Bool);
             self.value(value)?;
-            self.load(ScalarType::native(NativeScalar::Bool));
-            return Ok(ScalarType::native(NativeScalar::Bool));
-        }
-        if let Value::Parameter(id) = value
-            && self.body.parameters()[id.as_index()].kind == ParameterKind::Dictionary
-            && self.body.parameters()[id.as_index()].ty == Type::primitive::<bool>()
-        {
-            self.value(value)?;
-            self.load(ScalarType::native(NativeScalar::Bool));
-            return Ok(ScalarType::native(NativeScalar::Bool));
+            self.load(ty);
+            return Ok(ty);
         }
         if matches!(&*role, ValueRole::VariantTag) {
             self.value(value)?;
@@ -1896,7 +1934,7 @@ impl<'a> Body<'a> {
 
     fn load_place(&mut self, value: &Value, ty: ScalarType) -> Result<(), String> {
         if let Some(&Storage::Local(local)) = self.storage.get(value) {
-            self.i(I::LocalGet(local));
+            self.i(I::LocalGet(local.as_u32()));
         } else {
             self.address(value)?;
             self.load(ty);
@@ -1914,66 +1952,30 @@ impl<'a> Body<'a> {
 
     fn finish_store(&mut self, destination: &Value, ty: ScalarType) {
         if let Some(&Storage::Local(local)) = self.storage.get(destination) {
-            self.i(I::LocalSet(local));
+            self.i(I::LocalSet(local.as_u32()));
         } else {
             self.store(ty);
         }
     }
 
     fn load(&mut self, ty: ScalarType) {
-        if ty.is::<()>() {
-            self.i(I::Drop);
-            self.i(I::I32Const(0));
-        } else if ty.is::<bool>() {
-            self.i(I::I32Load8U(memarg(0)));
-        } else if ty.is::<Float>() {
-            self.i(I::F64Load(memarg(3)));
-        } else if ty.is::<isize>() {
-            self.i(I::I32Load(memarg(2)));
-        } else {
-            unreachable!("missing scalar load mapping")
-        }
+        ty.load(&mut self.code);
     }
 
     fn store(&mut self, ty: ScalarType) {
-        if ty.is::<()>() {
-            self.i(I::Drop);
-            self.i(I::Drop);
-        } else if ty.is::<bool>() {
-            self.i(I::I32Store8(memarg(0)));
-        } else if ty.is::<Float>() {
-            self.i(I::F64Store(memarg(3)));
-        } else if ty.is::<isize>() {
-            self.i(I::I32Store(memarg(2)));
-        } else {
-            unreachable!("missing scalar store mapping")
-        }
+        ty.store(&mut self.code);
     }
 
     fn emit(mut self) -> Result<WasmFunction, String> {
-        // Check before addition, so a large frame cannot wrap the linear-memory stack pointer.
         if let Some(frame) = self.frame {
-            self.i(I::GlobalGet(Global::Stack as u32));
-            self.i(I::LocalSet(frame));
-            self.i(I::I32Const(self.frame_size as i32));
-            self.i(I::GlobalGet(Global::End as u32));
-            self.i(I::GlobalGet(Global::Stack as u32));
-            self.i(I::I32Sub);
-            self.i(I::I32GtU);
-            self.i(I::If(BlockType::Empty));
-            self.fail(FailureCode::StackCapacity);
-            self.i(I::End);
-            self.i(I::GlobalGet(Global::Stack as u32));
-            self.i(I::I32Const(self.frame_size as i32));
-            self.i(I::I32Add);
-            self.i(I::GlobalSet(Global::Stack as u32));
+            enter_frame(&mut self.code, frame, self.frame_size);
         }
         self.i(I::GlobalGet(Global::Depth as u32));
         self.i(I::I32Const(1));
         self.i(I::I32Add);
         self.i(I::GlobalSet(Global::Depth as u32));
-        for value in self.owned_evidence.clone() {
-            self.address(&value)?;
+        for index in 0..self.owned_evidence.len() {
+            self.address(&Value::Register(self.owned_evidence[index]))?;
             self.i(I::I64Const(0));
             self.i(I::I64Store(memarg(2)));
         }
@@ -1989,7 +1991,7 @@ impl<'a> Body<'a> {
                 && matches!(self.storage.get(&value), Some(Storage::Stack(_)))
             {
                 self.address(&value)?;
-                self.i(I::LocalGet(self.signature.input_local(index as u32)));
+                self.i(I::LocalGet(self.signature.input_local(index).as_u32()));
                 self.store(ScalarType::of(self.body.parameters()[index].ty)?);
             }
         }
@@ -2002,7 +2004,7 @@ impl<'a> Body<'a> {
             for _ in 0..count {
                 self.i(I::Block(BlockType::Empty));
             }
-            self.i(I::LocalGet(pc));
+            self.i(I::LocalGet(pc.as_u32()));
             self.i(I::BrTable((0..count).collect::<Vec<_>>().into(), count));
             for block_id in self.body.blocks() {
                 self.i(I::End);
@@ -2033,8 +2035,7 @@ impl<'a> Body<'a> {
         match &block.terminator().kind {
             TerminatorKind::Goto { target } => {
                 self.i(I::I32Const(target.as_u32() as i32));
-                self.i(I::LocalSet(self.pc.expect("branch needs a dispatcher")));
-                self.i(I::Br(dispatch_depth.expect("branch needs a dispatcher")));
+                self.jump(dispatch_depth);
             }
             TerminatorKind::CondBr {
                 condition,
@@ -2045,8 +2046,7 @@ impl<'a> Body<'a> {
                 self.i(I::I32Const(else_target.as_u32() as i32));
                 self.read(condition)?;
                 self.i(I::Select);
-                self.i(I::LocalSet(self.pc.expect("branch needs a dispatcher")));
-                self.i(I::Br(dispatch_depth.expect("branch needs a dispatcher")));
+                self.jump(dispatch_depth);
             }
             TerminatorKind::SwitchVariant {
                 tag,
@@ -2061,8 +2061,7 @@ impl<'a> Body<'a> {
                     self.i(I::I32Ne);
                     self.i(I::Select);
                 }
-                self.i(I::LocalSet(self.pc.expect("switch needs a dispatcher")));
-                self.i(I::Br(dispatch_depth.expect("switch needs a dispatcher")));
+                self.jump(dispatch_depth);
             }
             TerminatorKind::Invoke {
                 operation,
@@ -2070,15 +2069,13 @@ impl<'a> Body<'a> {
                 error,
             } => {
                 self.call_operation(operation, true)?;
-                self.i(I::If(BlockType::Empty));
+                self.i(I::If(BlockType::Result(ValType::I32)));
                 self.capture_failure();
                 self.i(I::I32Const(error.as_u32() as i32));
-                self.i(I::LocalSet(self.pc.unwrap()));
                 self.i(I::Else);
                 self.i(I::I32Const(normal.as_u32() as i32));
-                self.i(I::LocalSet(self.pc.unwrap()));
                 self.i(I::End);
-                self.i(I::Br(dispatch_depth.unwrap()));
+                self.jump(dispatch_depth);
             }
             TerminatorKind::PropagateError | TerminatorKind::FailureDuringCleanup => {
                 self.propagate_failure();
@@ -2097,6 +2094,13 @@ impl<'a> Body<'a> {
             _ => return Err("unsupported terminator".into()),
         }
         Ok(())
+    }
+
+    fn jump(&mut self, dispatch_depth: Option<u32>) {
+        self.i(I::LocalSet(
+            self.pc.expect("branch needs a dispatcher").as_u32(),
+        ));
+        self.i(I::Br(dispatch_depth.expect("branch needs a dispatcher")));
     }
 
     fn operation(&mut self, op: &Operation) -> Result<(), String> {
@@ -2118,10 +2122,10 @@ impl<'a> Body<'a> {
                     .ok_or("array allocation overflow")?;
                 self.i(I::I32Const(bytes as i32));
                 self.i(I::I32Const(element.align as i32));
-                self.i(I::Call(self.imports.function_index("alloc")));
-                self.i(I::LocalSet(self.scratch));
+                self.i(I::Call(self.imports.function_index("alloc").as_u32()));
+                self.i(I::LocalSet(self.scratch.as_u32()));
                 for (index, value) in elements.iter().enumerate() {
-                    self.i(I::LocalGet(self.scratch));
+                    self.i(I::LocalGet(self.scratch.as_u32()));
                     self.i(I::I32Const((index as u32 * element.size) as i32));
                     self.i(I::I32Add);
                     if let Ok(ty) = ScalarType::of(*element_ty) {
@@ -2140,7 +2144,7 @@ impl<'a> Body<'a> {
                 for index in 0..4 {
                     self.address(destination)?;
                     if index == 1 {
-                        self.i(I::LocalGet(self.scratch));
+                        self.i(I::LocalGet(self.scratch.as_u32()));
                     } else {
                         self.i(I::I32Const(if index == 3 {
                             0
@@ -2160,13 +2164,12 @@ impl<'a> Body<'a> {
             BuildDictionary { definition, .. } => {
                 let result = Value::Register(op.result_id().unwrap());
                 self.release_evidence(&result)?;
-                let fields = self
-                    .program
+                let program = self.program;
+                let fields = &program
                     .dictionary(*definition)
                     .unwrap()
                     .environment()
-                    .fields
-                    .clone();
+                    .fields;
                 let capture_offset = self.capture_slots[&op.result_id().unwrap()];
                 for (field, argument) in fields.iter().zip(args) {
                     self.frame_address(capture_offset + field.offset as u32);
@@ -2188,7 +2191,9 @@ impl<'a> Body<'a> {
                 ));
                 self.frame_address(capture_offset);
                 self.address(&result)?;
-                self.i(I::Call(self.imports.function_index("build_evidence")));
+                self.i(I::Call(
+                    self.imports.function_index("build_evidence").as_u32(),
+                ));
                 return Ok(());
             }
             DictEntry { .. } => {
@@ -2202,7 +2207,9 @@ impl<'a> Body<'a> {
                     dst_mem: 0,
                 });
                 self.address(&result)?;
-                self.i(I::Call(self.imports.function_index("retain_evidence")));
+                self.i(I::Call(
+                    self.imports.function_index("retain_evidence").as_u32(),
+                ));
                 return Ok(());
             }
             Alloca { .. } if !args.is_empty() => {
@@ -2272,7 +2279,7 @@ impl<'a> Body<'a> {
                     if matches!(op.kind, MoveBytes { .. }) {
                         self.read(&args[2])?;
                     } else if layout_witness(op).is_some() {
-                        self.i(I::LocalGet(self.dynamic_size));
+                        self.i(I::LocalGet(self.dynamic_size.as_u32()));
                     } else {
                         self.i(I::I32Const(self.size(&ty)? as i32));
                     }
@@ -2289,38 +2296,38 @@ impl<'a> Body<'a> {
                 if let Some(witness) = layout_witness(op) {
                     self.dynamic_layout(witness)?;
                     self.i(I::GlobalGet(Global::Stack as u32));
-                    self.i(I::LocalSet(self.scratch));
+                    self.i(I::LocalSet(self.scratch.as_u32()));
                     self.dynamic_alloca();
                     self.i(I::Drop);
                 } else {
                     self.scratch_address(ty);
-                    self.i(I::LocalSet(self.dynamic_base));
+                    self.i(I::LocalSet(self.dynamic_base.as_u32()));
                     self.i(I::I32Const(self.size(&MirType::Lowered(ty))? as i32));
-                    self.i(I::LocalSet(self.dynamic_size));
+                    self.i(I::LocalSet(self.dynamic_size.as_u32()));
                 }
-                self.i(I::LocalGet(self.dynamic_base));
+                self.i(I::LocalGet(self.dynamic_base.as_u32()));
                 self.address(&args[0])?;
-                self.i(I::LocalGet(self.dynamic_size));
+                self.i(I::LocalGet(self.dynamic_size.as_u32()));
                 self.i(I::MemoryCopy {
                     src_mem: 0,
                     dst_mem: 0,
                 });
                 self.address(&args[0])?;
                 self.address(&args[1])?;
-                self.i(I::LocalGet(self.dynamic_size));
+                self.i(I::LocalGet(self.dynamic_size.as_u32()));
                 self.i(I::MemoryCopy {
                     src_mem: 0,
                     dst_mem: 0,
                 });
                 self.address(&args[1])?;
-                self.i(I::LocalGet(self.dynamic_base));
-                self.i(I::LocalGet(self.dynamic_size));
+                self.i(I::LocalGet(self.dynamic_base.as_u32()));
+                self.i(I::LocalGet(self.dynamic_size.as_u32()));
                 self.i(I::MemoryCopy {
                     src_mem: 0,
                     dst_mem: 0,
                 });
                 if layout_witness(op).is_some() {
-                    self.i(I::LocalGet(self.scratch));
+                    self.i(I::LocalGet(self.scratch.as_u32()));
                     self.i(I::GlobalSet(Global::Stack as u32));
                 }
             }
@@ -2367,13 +2374,7 @@ impl<'a> Body<'a> {
                 let ty = self.read(&args[0])?;
                 // The second operand is a compile-time Pattern, enforced by physical verification.
                 self.value(&args[1])?;
-                self.i(if ty.is::<Float>() {
-                    I::F64Eq
-                } else if ty.is::<isize>() || ty.is::<bool>() || ty.is::<()>() {
-                    I::I32Eq
-                } else {
-                    unreachable!("missing scalar comparison mapping")
-                });
+                self.i(ty.equal());
             }
             CheckCallDepth => {
                 self.i(I::GlobalGet(Global::Depth as u32));
@@ -2403,23 +2404,23 @@ impl<'a> Body<'a> {
             RuntimeAlloc { .. } => {
                 self.read(&args[0])?;
                 self.read(&args[1])?;
-                self.i(I::Call(self.imports.function_index("alloc")));
+                self.i(I::Call(self.imports.function_index("alloc").as_u32()));
             }
             RuntimeDealloc => {
                 self.address(&args[0])?;
-                self.i(I::Call(self.imports.function_index("dealloc")));
+                self.i(I::Call(self.imports.function_index("dealloc").as_u32()));
             }
             _ => return Err("unsupported physical operation".into()),
         }
         if let Some(id) = op.result_id() {
-            self.i(I::LocalSet(self.registers[&id]));
+            self.i(I::LocalSet(self.registers[&id].as_u32()));
             let value = Value::Register(id);
             if self.storage.contains_key(&value) {
                 let role = self.roles.get(&value, self.body.constants()).unwrap();
                 if let ValueRole::Materialized(ty) = &*role {
                     let ty = scalar(ty)?;
                     self.address(&value)?;
-                    self.i(I::LocalGet(self.registers[&id]));
+                    self.i(I::LocalGet(self.registers[&id].as_u32()));
                     self.store(ty);
                 }
             }
