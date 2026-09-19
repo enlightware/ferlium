@@ -32,6 +32,17 @@ define_id_type!(
     ProgramEvidenceId
 );
 
+define_id_type!(
+    /// Dense identity of a [`Descriptor`] in one resolved physical program, assigned by assembly.
+    ///
+    /// The ABI stores it as a plain `u32` word —
+    /// [`DictionaryReference::descriptor`](super::DictionaryReference::descriptor) — whose bit
+    /// pattern is not this type's, so convert with [`Self::as_u32`] and
+    /// [`DictionaryReference::descriptor_id`](super::DictionaryReference::descriptor_id) rather
+    /// than transmuting.
+    ProgramDescriptorId
+);
+
 /// Module-qualified descriptor identity before assembly assigns a target index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Descriptor {
@@ -63,23 +74,26 @@ pub(crate) struct ResolvedPhysicalProgram<'a> {
     static_evidence: Box<[InternedStaticEvidence]>,
     evidence_ids: FxHashMap<InternedStaticEvidence, ProgramEvidenceId>,
     descriptors: Box<[Descriptor]>,
-    descriptor_ids: FxHashMap<Descriptor, u32>,
+    descriptor_ids: FxHashMap<Descriptor, ProgramDescriptorId>,
 }
 
 impl ResolvedPhysicalProgram<'_> {
-    pub(crate) fn descriptor_index(&self, id: TraitDictionaryId) -> Option<u32> {
+    pub(crate) fn descriptor_index(&self, id: TraitDictionaryId) -> Option<ProgramDescriptorId> {
         self.reference_index(Descriptor::Dictionary(id))
     }
 
-    pub(crate) fn reference_index(&self, id: Descriptor) -> Option<u32> {
+    pub(crate) fn reference_index(&self, id: Descriptor) -> Option<ProgramDescriptorId> {
         self.descriptor_ids.get(&id).copied()
     }
 
-    pub(crate) fn reference_descriptor(&self, index: u32) -> Option<Descriptor> {
-        self.descriptors.get(index as usize).copied()
+    pub(crate) fn reference_descriptor(&self, index: ProgramDescriptorId) -> Option<Descriptor> {
+        self.descriptors.get(index.as_index()).copied()
     }
 
-    pub(crate) fn descriptor(&self, index: u32) -> Option<&PhysicalDictionaryDefinition> {
+    pub(crate) fn descriptor(
+        &self,
+        index: ProgramDescriptorId,
+    ) -> Option<&PhysicalDictionaryDefinition> {
         let Descriptor::Dictionary(id) = self.reference_descriptor(index)? else {
             return None;
         };
@@ -391,7 +405,8 @@ pub(crate) fn resolve_physical_program<'a>(
         .map(|(index, id)| {
             Ok((
                 *id,
-                u32::try_from(index).map_err(|_| PhysicalProgramError::DescriptorIndexOverflow)?,
+                ProgramDescriptorId::try_from(index)
+                    .map_err(|_| PhysicalProgramError::DescriptorIndexOverflow)?,
             ))
         })
         .collect::<Result<_, PhysicalProgramError>>()?;

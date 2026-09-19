@@ -22,6 +22,7 @@ use rustc_hash::FxHashMap;
 
 use super::{call_graph::CallGraph, dataflow::call_operands};
 use crate::{
+    define_id_type,
     hir::function::ArgConvention,
     mir::{
         self, Function, OperationKind, ParameterId, ParameterKind, ValueId,
@@ -31,19 +32,24 @@ use crate::{
     types::r#type::CallResultConvention,
 };
 
+define_id_type!(
+    /// A position among a function's **visible arguments**, as a caller writes them.
+    ///
+    /// Not a [`ParameterId`]: MIR parameters count hidden evidence first and the `@ret` slot last,
+    /// while a native declares its result root in argument terms. Keeping one vocabulary is what
+    /// lets a derived answer and a declared one be compared, stored and read across a module
+    /// boundary without a translation nobody remembers to apply.
+    ArgumentId
+);
+
 /// Which of a function's parameters its returned place points into.
 ///
 /// Only meaningful for a function returning through `AddressorPlace`; anything else has no place to
 /// be rooted anywhere.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ResultProvenance {
-    /// The result points into the pointee of this **visible argument**.
-    ///
-    /// An argument index rather than a MIR parameter index, because MIR counts hidden evidence
-    /// first and a native declares this in argument terms. Keeping one vocabulary is what lets a
-    /// derived answer and a declared one be compared, stored and read across a module boundary
-    /// without a translation nobody remembers to apply.
-    Argument(u32),
+    /// The result points into the pointee of this visible argument.
+    Argument(ArgumentId),
     /// Not derivable. Always sound to assume, and what every consumer must fall back to.
     Unknown,
 }
@@ -153,9 +159,27 @@ fn declared(id: LocalFunctionId, env: ModuleEnv<'_>) -> AddressorSummary {
         provenance: function
             .definition
             .result_rooted_in
-            .map_or(ResultProvenance::Unknown, ResultProvenance::Argument),
+            .map_or(ResultProvenance::Unknown, |argument| {
+                ResultProvenance::Argument(ArgumentId::new(argument))
+            }),
         repeatable: function.definition.repeatable_addressor,
     }
+}
+
+/// The visible argument MIR parameter `id` carries, if it carries one.
+///
+/// Hidden evidence comes first and is not an argument, and neither is `@ret`, so a root landing on
+/// either has no argument to name and stays unknown.
+fn argument_of(parameters: &[mir::Parameter], id: ParameterId) -> Option<ArgumentId> {
+    let index = id.as_index();
+    matches!(parameters.get(index)?.kind, ParameterKind::Parameter(_)).then(|| {
+        ArgumentId::from_index(
+            parameters[..index]
+                .iter()
+                .filter(|parameter| matches!(parameter.kind, ParameterKind::Parameter(_)))
+                .count(),
+        )
+    })
 }
 
 /// Where `body` roots the place it stores into its `@ret` parameter.
@@ -177,21 +201,9 @@ fn derive_provenance(
     }
     let ret = ParameterId::from_index(parameters.len() - 1);
 
-    // MIR parameter index -> visible argument index. Hidden evidence comes first and is not an
-    // argument, so a root landing on one has no argument to name and stays unknown.
-    let argument_of = |id: ParameterId| -> Option<u32> {
-        let index = id.as_index();
-        matches!(parameters.get(index)?.kind, ParameterKind::Parameter(_)).then(|| {
-            parameters[..index]
-                .iter()
-                .filter(|parameter| matches!(parameter.kind, ParameterKind::Parameter(_)))
-                .count() as u32
-        })
-    };
-
     // Which parameter each register's place points into, filled in as the body is walked. A
     // register absent from the map is one the trace could not follow, which is `Unknown`.
-    let mut roots: FxHashMap<ValueId, u32> = FxHashMap::default();
+    let mut roots: FxHashMap<ValueId, ArgumentId> = FxHashMap::default();
     let mut result: Option<ResultProvenance> = None;
 
     for block_id in body.blocks() {
@@ -204,11 +216,12 @@ fn derive_provenance(
                 _ => None,
             });
         for operation in operations {
-            let root_of = |operand: &mir::Value, roots: &FxHashMap<ValueId, u32>| match operand {
-                mir::Value::Parameter(id) => argument_of(*id),
-                mir::Value::Register(id) => roots.get(id).copied(),
-                _ => None,
-            };
+            let root_of =
+                |operand: &mir::Value, roots: &FxHashMap<ValueId, ArgumentId>| match operand {
+                    mir::Value::Parameter(id) => argument_of(parameters, *id),
+                    mir::Value::Register(id) => roots.get(id).copied(),
+                    _ => None,
+                };
             match &operation.kind {
                 // A field's address is rooted wherever its base is.
                 OperationKind::Subfield { .. }
@@ -256,7 +269,8 @@ fn derive_provenance(
                     let Some(hidden) = operation.operands.len().checked_sub(visible + 2) else {
                         continue;
                     };
-                    let Some(argument) = operation.operands.get(1 + hidden + index as usize) else {
+                    let Some(argument) = operation.operands.get(1 + hidden + index.as_index())
+                    else {
                         continue;
                     };
                     let Some(root) = root_of(argument, &roots) else {
@@ -301,7 +315,7 @@ fn derive_provenance(
 /// addressor; this is the `array_index -> buffer_slot` chain.
 #[derive(Clone, PartialEq, Eq)]
 enum StablePlace {
-    Argument(u32),
+    Argument(ArgumentId),
     Subfield(Box<StablePlace>, mir::Value),
     AddressorCall(FunctionId, Box<[mir::Value]>),
 }
@@ -316,22 +330,13 @@ fn derive_repeatable(
         return false;
     }
     let parameters = body.parameters();
-    let argument_of = |id: ParameterId| -> Option<u32> {
-        let index = id.as_index();
-        matches!(parameters.get(index)?.kind, ParameterKind::Parameter(_)).then(|| {
-            parameters[..index]
-                .iter()
-                .filter(|parameter| matches!(parameter.kind, ParameterKind::Parameter(_)))
-                .count() as u32
-        })
-    };
-    let mut roots: FxHashMap<ValueId, u32> = FxHashMap::default();
+    let mut roots: FxHashMap<ValueId, ArgumentId> = FxHashMap::default();
     let mut places: FxHashMap<ValueId, StablePlace> = FxHashMap::default();
     let mut returned_places: FxHashMap<ValueId, StablePlace> = FxHashMap::default();
     let mut result_place: Option<StablePlace> = None;
 
     let place_of = |operand: &mir::Value, places: &FxHashMap<ValueId, StablePlace>| match operand {
-        mir::Value::Parameter(id) => argument_of(*id).map(StablePlace::Argument),
+        mir::Value::Parameter(id) => argument_of(parameters, *id).map(StablePlace::Argument),
         mir::Value::Register(id) => places.get(id).cloned(),
         _ => None,
     };
@@ -346,11 +351,12 @@ fn derive_repeatable(
                 _ => None,
             });
         for operation in operations {
-            let root_of = |operand: &mir::Value, roots: &FxHashMap<ValueId, u32>| match operand {
-                mir::Value::Parameter(id) => argument_of(*id),
-                mir::Value::Register(id) => roots.get(id).copied(),
-                _ => None,
-            };
+            let root_of =
+                |operand: &mir::Value, roots: &FxHashMap<ValueId, ArgumentId>| match operand {
+                    mir::Value::Parameter(id) => argument_of(parameters, *id),
+                    mir::Value::Register(id) => roots.get(id).copied(),
+                    _ => None,
+                };
             match &operation.kind {
                 OperationKind::Subfield { .. }
                 | OperationKind::AddressOffset { .. }
@@ -416,7 +422,7 @@ fn derive_repeatable(
                     }
                     if ty.result_convention == CallResultConvention::ADDRESSOR_PLACE
                         && let ResultProvenance::Argument(index) = callee_summary.provenance
-                        && let Some((argument, _)) = call.arguments.get(index as usize)
+                        && let Some((argument, _)) = call.arguments.get(index.as_index())
                         && let Some(root) = root_of(argument, &roots)
                         && let mir::Value::Register(out) = call.result
                     {
@@ -425,7 +431,7 @@ fn derive_repeatable(
                     if ty.result_convention == CallResultConvention::ADDRESSOR_PLACE
                         && callee_summary.repeatable
                         && let ResultProvenance::Argument(index) = callee_summary.provenance
-                        && let Some((argument, _)) = call.arguments.get(index as usize)
+                        && let Some((argument, _)) = call.arguments.get(index.as_index())
                         && place_of(argument, &places).is_some()
                         && let mir::Value::Function(callee) = call.callee
                         && let mir::Value::Register(out) = call.result
@@ -582,7 +588,7 @@ mod tests {
         );
         assert_eq!(
             provenances.summary(id("first::ref_mut")).provenance,
-            ResultProvenance::Argument(0),
+            ResultProvenance::Argument(ArgumentId::new(0)),
             "the place is a field of parameter 0"
         );
     }
@@ -626,7 +632,7 @@ mod tests {
             provenances
                 .summary(named("buffer_slot::ref_mut"))
                 .provenance,
-            ResultProvenance::Argument(0),
+            ResultProvenance::Argument(ArgumentId::new(0)),
             "the native declares its root"
         );
         assert!(
@@ -639,7 +645,7 @@ mod tests {
             provenances
                 .summary(named("array_index::ref_mut"))
                 .provenance,
-            ResultProvenance::Argument(0),
+            ResultProvenance::Argument(ArgumentId::new(0)),
             "and the accessor above it derives the same root through it"
         );
         assert!(
@@ -680,7 +686,7 @@ mod tests {
             .expect("raw MIR must be prepared");
         assert_eq!(
             artifacts.addressor_summary(module_id, id).provenance,
-            ResultProvenance::Argument(0),
+            ResultProvenance::Argument(ArgumentId::new(0)),
             "the root must come through std's `array_index`, whose summary is stored"
         );
     }
@@ -707,7 +713,10 @@ mod tests {
              }",
         );
         let summary = provenances.summary(id("chosen::ref_mut"));
-        assert_eq!(summary.provenance, ResultProvenance::Argument(0));
+        assert_eq!(
+            summary.provenance,
+            ResultProvenance::Argument(ArgumentId::new(0))
+        );
         assert!(
             !summary.repeatable,
             "AddressorPlace permits mutation; repeatability must be proved separately"
@@ -822,7 +831,10 @@ mod tests {
              }",
         );
         let summary = summaries.summary(id("chosen::ref_mut"));
-        assert_eq!(summary.provenance, ResultProvenance::Argument(0));
+        assert_eq!(
+            summary.provenance,
+            ResultProvenance::Argument(ArgumentId::new(0))
+        );
         assert!(
             !summary.repeatable,
             "writing the selected leaf can change which leaf the next call selects"

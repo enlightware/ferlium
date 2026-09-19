@@ -1246,7 +1246,7 @@ impl<'a, 's> Body<'a, 's> {
                 }
                 self.context_pointer(offset_of!(InvocationState, evidence));
                 self.i(I::I32Const(
-                    self.program.descriptor_index(*definition).unwrap() as i32,
+                    self.program.descriptor_index(*definition).unwrap().as_u32() as i32,
                 ));
                 self.frame_address(capture_offset);
                 self.address(&result)?;

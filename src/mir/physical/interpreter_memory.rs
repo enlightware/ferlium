@@ -6,6 +6,7 @@
 use super::{
     DictionaryReference, EvidenceEnvironmentLayout,
     interpreter::{Evidence, invalid, unsupported},
+    program::ProgramDescriptorId,
     same_storage_type,
 };
 use crate::{
@@ -218,7 +219,7 @@ enum StoredData {
 /// ABI callable identity with checked provenance for its uniquely owned environment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct CallableReference {
-    pub(super) descriptor: u32,
+    pub(super) descriptor: ProgramDescriptorId,
     pub(super) environment: Option<Address>,
 }
 
@@ -592,7 +593,7 @@ struct EvidenceAllocation {
     /// Field extents and representations selected by shared physical lowering.
     layout: EvidenceEnvironmentLayout,
     /// Resolved descriptor expected by references to this environment.
-    descriptor: u32,
+    descriptor: ProgramDescriptorId,
     /// Identity stamp rejecting pointers to a previous allocation at the same address.
     generation: Generation,
     /// Type and pointer-provenance checks for each stored capture, not executable evidence.
@@ -982,7 +983,9 @@ impl Memory {
         let allocation = self
             .evidence
             .get(&reference.environment)
-            .filter(|a| a.generation == *generation && a.descriptor == reference.descriptor)
+            .filter(|a| {
+                a.generation == *generation && a.descriptor.as_u32() == reference.descriptor
+            })
             .ok_or_else(|| invalid("stale evidence environment"))?;
         Ok(Some(allocation))
     }
@@ -1003,13 +1006,13 @@ impl Memory {
     ) -> Result<&mut EvidenceAllocation, RuntimeError> {
         self.evidence
             .get_mut(&reference.environment)
-            .filter(|a| a.generation == generation && a.descriptor == reference.descriptor)
+            .filter(|a| a.generation == generation && a.descriptor.as_u32() == reference.descriptor)
             .ok_or_else(|| invalid("stale evidence environment"))
     }
 
     pub(super) fn allocate_evidence(
         &mut self,
-        descriptor: u32,
+        descriptor: ProgramDescriptorId,
         ty: Type,
         layout: &EvidenceEnvironmentLayout,
         captures: &[Evidence],
@@ -1035,10 +1038,7 @@ impl Memory {
         }
         if captures.is_empty() {
             return Ok(Evidence::Physical {
-                reference: DictionaryReference {
-                    descriptor,
-                    environment: 0,
-                },
+                reference: DictionaryReference::new(descriptor, 0),
                 generation: Generation::default(),
                 ty,
             });
@@ -1101,10 +1101,7 @@ impl Memory {
         self.live_evidence += usize::from(!is_static);
         self.record_allocation_peak();
         Ok(Evidence::Physical {
-            reference: DictionaryReference {
-                descriptor,
-                environment,
-            },
+            reference: DictionaryReference::new(descriptor, environment),
             generation,
             ty,
         })
@@ -2498,7 +2495,7 @@ impl Memory {
                 let pointer = self.pointer(address)?;
                 // SAFETY: callable layout and both field extents are fixed by repr(C).
                 unsafe {
-                    pointer.cast::<u32>().write(reference.descriptor);
+                    pointer.cast::<u32>().write(reference.descriptor.as_u32());
                     pointer
                         .add(offset_of!(DictionaryReference, environment))
                         .cast::<usize>()
@@ -3203,7 +3200,7 @@ mod tests {
         let pair_layout = EvidenceEnvironmentLayout::new([false, false]).unwrap();
         let leaf = memory
             .allocate_evidence(
-                7,
+                ProgramDescriptorId::new(7),
                 Type::unit(),
                 &leaf_layout,
                 &[Evidence::Storage(true)],
@@ -3213,7 +3210,7 @@ mod tests {
             .unwrap();
         let parent = memory
             .allocate_evidence(
-                11,
+                ProgramDescriptorId::new(11),
                 Type::unit(),
                 &pair_layout,
                 &[leaf.clone(), leaf.clone()],
@@ -3269,7 +3266,7 @@ mod tests {
         let parent_layout = EvidenceEnvironmentLayout::new([false, false]).unwrap();
         let static_value = memory
             .allocate_evidence(
-                1,
+                ProgramDescriptorId::new(1),
                 Type::unit(),
                 &layout,
                 &[Evidence::Storage(false)],
@@ -3286,7 +3283,7 @@ mod tests {
 
         let leaf = memory
             .allocate_evidence(
-                2,
+                ProgramDescriptorId::new(2),
                 Type::unit(),
                 &layout,
                 &[Evidence::Storage(true)],
@@ -3297,7 +3294,7 @@ mod tests {
         assert!(
             memory
                 .allocate_evidence(
-                    3,
+                    ProgramDescriptorId::new(3),
                     Type::unit(),
                     &parent_layout,
                     &[static_value.clone(), leaf.clone()],
@@ -3320,7 +3317,7 @@ mod tests {
         assert!(
             memory
                 .allocate_evidence(
-                    3,
+                    ProgramDescriptorId::new(3),
                     Type::unit(),
                     &parent_layout,
                     &[leaf.clone(), leaf.clone()],
@@ -3343,7 +3340,7 @@ mod tests {
         memory.allocation_limit = 1;
         let error = memory
             .allocate_evidence(
-                3,
+                ProgramDescriptorId::new(3),
                 Type::unit(),
                 &parent_layout,
                 &[static_value, leaf.clone()],
@@ -3488,7 +3485,7 @@ mod tests {
         let captureless = Memory::callable_value(
             ty,
             CallableReference {
-                descriptor: 1,
+                descriptor: ProgramDescriptorId::new(1),
                 environment: None,
             },
         );
@@ -3512,7 +3509,7 @@ mod tests {
         let value = Memory::callable_value(
             ty,
             CallableReference {
-                descriptor: 1,
+                descriptor: ProgramDescriptorId::new(1),
                 environment: Some(environment),
             },
         );

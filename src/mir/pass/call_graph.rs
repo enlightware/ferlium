@@ -23,30 +23,26 @@ use crate::{
     module::{LocalFunctionId, ModuleId, id::Id},
 };
 
-/// One function's outgoing edges, as indices into [`CallGraph::nodes`].
-///
-/// `u32` like every other index in the compiler — `LocalFunctionId` and friends are `NonMaxU32`, and
-/// `graph::Node` only asks its index to be `TryInto<usize>`. The solver widens on the way into a
-/// slice; the edge list has no reason to be stored double-width.
+/// One function's outgoing edges, as positions in [`CallGraph::nodes`], which is the module's
+/// function table.
 struct CallNode {
-    callees: Vec<u32>,
+    callees: Vec<LocalFunctionId>,
 }
 
 impl Node for CallNode {
-    type Index = u32;
+    type Index = LocalFunctionId;
 
-    fn neighbors(&self) -> impl Iterator<Item = u32> {
+    fn neighbors(&self) -> impl Iterator<Item = LocalFunctionId> {
         self.callees.iter().copied()
     }
 }
 
 /// Which functions of a module call which, over one artifact stage.
 ///
-/// Indices are positions in the slice the graph was built from, which is a module's function table:
-/// index *i* is [`LocalFunctionId::from_index(i)`], in [`CallGraph::module`]. The public API speaks
-/// `LocalFunctionId`; the bare index inside does not leave this file. A function the stage has no body for — a native,
-/// or a slot the table left empty — is a node with no outgoing edges rather than an absent one, so
-/// the indices keep lining up.
+/// Nodes are positions in the slice the graph was built from, which is a module's function table:
+/// node *i* is [`LocalFunctionId::from_index(i)`], in [`CallGraph::module`]. A function the stage
+/// has no body for — a native, or a slot the table left empty — is a node with no outgoing edges
+/// rather than an absent one, so the positions keep lining up.
 pub(crate) struct CallGraph {
     module: ModuleId,
     nodes: Vec<CallNode>,
@@ -81,11 +77,11 @@ impl CallGraph {
         Self { module, nodes }
     }
 
-    /// The module these indices address.
+    /// The module these function ids address.
     ///
-    /// Carried once here rather than on every edge, which is why an edge is a bare index: the
+    /// Carried once here rather than on every edge, which is why an edge is a local id: the
     /// module is invariant across the whole graph, and repeating it per edge would be both larger
-    /// and no safer. What it is *not* is optional — a local index means nothing without it, and a
+    /// and no safer. What it is *not* is optional — a local id means nothing without it, and a
     /// consumer building a [`FunctionId`] must take it from here.
     pub(crate) fn module(&self) -> ModuleId {
         self.module
@@ -100,10 +96,7 @@ impl CallGraph {
         &self,
         id: LocalFunctionId,
     ) -> impl Iterator<Item = LocalFunctionId> + '_ {
-        self.nodes[id.as_index()]
-            .callees
-            .iter()
-            .map(|&index| LocalFunctionId::from_index(index as usize))
+        self.nodes[id.as_index()].callees.iter().copied()
     }
 
     /// The module's functions grouped into strongly connected components, **callees first**.
@@ -120,27 +113,18 @@ impl CallGraph {
         // from callers. A summary flows the other way.
         sorted.reverse();
         sorted
-            .into_iter()
-            .map(|component| {
-                component
-                    .into_iter()
-                    .map(|index| LocalFunctionId::from_index(index as usize))
-                    .collect()
-            })
-            .collect()
     }
 }
 
-/// Every function of `module` that `function` names, as graph indices.
-fn callees_within(function: &Function, module: ModuleId) -> Vec<u32> {
+/// Every function of `module` that `function` names.
+fn callees_within(function: &Function, module: ModuleId) -> Vec<LocalFunctionId> {
     let mut callees = Vec::new();
     let mut record = |operand: &mir::Value| {
         if let mir::Value::Function(callee) = operand
             && callee.module == module
         {
-            let index = callee.function.as_index() as u32;
-            if !callees.contains(&index) {
-                callees.push(index);
+            if !callees.contains(&callee.function) {
+                callees.push(callee.function);
             }
         }
     };

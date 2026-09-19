@@ -156,7 +156,7 @@ impl Image {
         let count = reachable
             .dictionaries
             .iter()
-            .map(|id| program.descriptor_index(*id).unwrap() as usize + 1)
+            .map(|id| program.descriptor_index(*id).unwrap().as_index() + 1)
             .max()
             .unwrap_or(0);
         let mut this = Self {
@@ -167,7 +167,7 @@ impl Image {
             let definition = program.dictionary(id).unwrap();
             let layout = definition.environment();
             let descriptor = this.words.len() * 4;
-            this.words[program.descriptor_index(id).unwrap() as usize] = descriptor as u32;
+            this.words[program.descriptor_index(id).unwrap().as_index()] = descriptor as u32;
             let entries = descriptor + size_of::<DictionaryDescriptor>() + layout.fields.len() * 4;
             this.words.extend([
                 layout.allocation.size() as u32,
@@ -200,7 +200,7 @@ impl Image {
                         .map(|id| this.references[id])
                         .collect::<Vec<_>>();
                     this.dictionary(
-                        program.descriptor_index(*definition).unwrap(),
+                        program.descriptor_index(*definition).unwrap().as_u32(),
                         layout,
                         &captures,
                     )

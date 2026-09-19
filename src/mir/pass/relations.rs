@@ -58,7 +58,7 @@ use super::{
     site::{OperationIndex, OperationSite},
 };
 use crate::{
-    graph,
+    define_id_type, graph,
     hir::function::ArgConvention,
     mir::{
         self, BlockId, Function, Operation, OperationKind, dominance::Dominance,
@@ -109,13 +109,15 @@ impl DefSite {
     }
 }
 
-/// A storage slot's dense identity.
-///
-/// The analysis names slots far more often than it does anything else — every operand read is one
-/// — so a slot has to be a word, not a root plus a heap-allocated path. [`Places`] holds the tree
-/// this indexes into.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub(crate) struct PlaceId(u32);
+define_id_type!(
+    /// A storage slot's dense identity.
+    ///
+    /// The analysis names slots far more often than it does anything else — every operand read is
+    /// one — so a slot has to be a word, not a root plus a heap-allocated path. [`Places`] holds the
+    /// tree this indexes into.
+    #[derive(PartialOrd, Ord)]
+    PlaceId
+);
 
 struct PlaceNode {
     root: Root,
@@ -151,8 +153,8 @@ impl Places {
         if let Some(id) = self.fields.get(&(base, index)) {
             return *id;
         }
-        let id = self.push(self.nodes[base.0 as usize].root, Some(base), Some(index));
-        self.nodes[base.0 as usize].children.push(id);
+        let id = self.push(self.nodes[base.as_index()].root, Some(base), Some(index));
+        self.nodes[base.as_index()].children.push(id);
         self.fields.insert((base, index), id);
         id
     }
@@ -163,7 +165,7 @@ impl Places {
         parent: Option<PlaceId>,
         field: Option<ProjectionIndex>,
     ) -> PlaceId {
-        let id = PlaceId(u32::try_from(self.nodes.len()).expect("a body has fewer than 4G slots"));
+        let id = PlaceId::from_index(self.nodes.len());
         self.nodes.push(PlaceNode {
             root,
             parent,
@@ -174,15 +176,15 @@ impl Places {
     }
 
     pub(crate) fn root_of(&self, place: PlaceId) -> Root {
-        self.nodes[place.0 as usize].root
+        self.nodes[place.as_index()].root
     }
 
     fn parent(&self, place: PlaceId) -> Option<PlaceId> {
-        self.nodes[place.0 as usize].parent
+        self.nodes[place.as_index()].parent
     }
 
     fn is_root(&self, place: PlaceId) -> bool {
-        self.nodes[place.0 as usize].parent.is_none()
+        self.nodes[place.as_index()].parent.is_none()
     }
 
     /// The field positions leading from `base` down to `inner`.
@@ -190,7 +192,7 @@ impl Places {
         let mut path = Vec::new();
         let mut current = inner;
         while current != base {
-            let node = &self.nodes[current.0 as usize];
+            let node = &self.nodes[current.as_index()];
             let (Some(parent), Some(field)) = (node.parent, node.field) else {
                 break;
             };
@@ -203,7 +205,7 @@ impl Places {
 
     /// Visits every slot strictly inside `place`.
     fn inside(&self, place: PlaceId, visit: &mut impl FnMut(PlaceId)) {
-        for child in &self.nodes[place.0 as usize].children {
+        for child in &self.nodes[place.as_index()].children {
             visit(*child);
             self.inside(*child, visit);
         }
@@ -220,9 +222,11 @@ pub(crate) enum Symbol {
     Register(ValueId),
 }
 
-/// A symbol's dense identity, so that a fact is a few machine words rather than a cloned path.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub(crate) struct SymbolId(u32);
+define_id_type!(
+    /// A symbol's dense identity, so that a fact is a few machine words rather than a cloned path.
+    #[derive(PartialOrd, Ord)]
+    SymbolId
+);
 
 /// The symbols one analysis run has named.
 ///
@@ -239,15 +243,14 @@ impl Symbols {
         if let Some(id) = self.ids.get(&symbol) {
             return *id;
         }
-        let id =
-            SymbolId(u32::try_from(self.names.len()).expect("a function has fewer than 4G values"));
+        let id = SymbolId::from_index(self.names.len());
         self.names.push(symbol);
         self.ids.insert(symbol, id);
         id
     }
 
     pub(crate) fn name(&self, id: SymbolId) -> &Symbol {
-        &self.names[id.0 as usize]
+        &self.names[id.as_index()]
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -2625,7 +2628,7 @@ mod tests {
     fn negating_a_predicate_flips_the_difference_rather_than_the_relation() {
         let difference = Affine {
             constant: 3,
-            terms: vec![(SymbolId(0), 1)],
+            terms: vec![(SymbolId::new(0), 1)],
         };
         let less = Predicate {
             difference: difference.clone(),
@@ -2654,12 +2657,12 @@ mod tests {
         assert!(!state.implies(&below(0)), "`0 < 0` does not");
 
         let goal = Predicate {
-            difference: Affine::symbol(SymbolId(0)),
+            difference: Affine::symbol(SymbolId::new(0)),
             comparison: Comparison::Less,
         };
         assert!(!state.implies(&goal), "nothing is known about the symbol");
         state.assume(Predicate {
-            difference: Affine::symbol(SymbolId(1)),
+            difference: Affine::symbol(SymbolId::new(1)),
             comparison: Comparison::Less,
         });
         assert!(
@@ -2805,7 +2808,7 @@ mod tests {
     /// first where a range from one asks for the second.
     #[test]
     fn a_strict_bound_entails_the_step_above_it() {
-        let len = Affine::symbol(SymbolId(0));
+        let len = Affine::symbol(SymbolId::new(0));
         let zero = Affine::constant(0);
         let strict = Predicate::between(&zero, Comparison::Less, &len).unwrap();
         let stepped =
@@ -2829,16 +2832,16 @@ mod tests {
         let wide = Affine {
             constant: 0,
             terms: (0..MAX_TERMS as u32)
-                .map(|index| (SymbolId(index), 1))
+                .map(|index| (SymbolId::new(index), 1))
                 .collect(),
         };
         assert_eq!(
-            wide.add(&Affine::symbol(SymbolId(MAX_TERMS as u32))),
+            wide.add(&Affine::symbol(SymbolId::from_index(MAX_TERMS))),
             None,
             "a sum past the bound must be refused, never silently dropped"
         );
         assert!(
-            wide.add(&Affine::symbol(SymbolId(0))).is_some(),
+            wide.add(&Affine::symbol(SymbolId::new(0))).is_some(),
             "a sum that merges into an existing term stays within the bound"
         );
     }

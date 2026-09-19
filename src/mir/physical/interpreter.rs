@@ -1040,7 +1040,9 @@ impl<'a, 'p> Interpreter<'a, 'p> {
 
     fn layout_entries(&self, evidence: &Evidence) -> Result<[usize; 2], RuntimeError> {
         let definition = match evidence {
-            Evidence::Physical { reference, .. } => self.program.descriptor(reference.descriptor),
+            Evidence::Physical { reference, .. } => reference
+                .descriptor_id()
+                .and_then(|descriptor| self.program.descriptor(descriptor)),
             _ => None,
         };
         definition
@@ -1092,7 +1094,11 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         let captures = self.memory.evidence_captures(&evidence)?;
         let entry = self
             .program
-            .descriptor(reference.descriptor)
+            .descriptor(
+                reference
+                    .descriptor_id()
+                    .ok_or_else(|| invalid("unresolved dictionary"))?,
+            )
             .ok_or_else(|| invalid("unresolved dictionary"))?
             .entries()
             .get(index)
@@ -1857,8 +1863,9 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 let Evidence::Physical { reference, .. } = evidence else {
                     return Err(invalid("expected subscript evidence"));
                 };
-                let Some(Descriptor::Subscript(definition)) =
-                    self.program.reference_descriptor(reference.descriptor)
+                let Some(Descriptor::Subscript(definition)) = reference
+                    .descriptor_id()
+                    .and_then(|descriptor| self.program.reference_descriptor(descriptor))
                 else {
                     return Err(invalid("expected subscript descriptor"));
                 };
@@ -1881,9 +1888,9 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 let Evidence::Physical { reference, .. } = evidence else {
                     return Err(invalid("expected subscript evidence"));
                 };
-                let descriptor = self
-                    .program
-                    .reference_descriptor(reference.descriptor)
+                let descriptor = reference
+                    .descriptor_id()
+                    .and_then(|descriptor| self.program.reference_descriptor(descriptor))
                     .ok_or_else(|| invalid("missing subscript descriptor"))?;
                 let hidden = self.memory.evidence_captures(&evidence)?;
                 let value = self.own_callable(
@@ -1899,7 +1906,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             BorrowSubscriptMember { mut_member, .. } => {
                 let (descriptor, captures, environment) = match operand(0)? {
                     Binding::Evidence(evidence @ Evidence::Physical { reference, .. }) => (
-                        reference.descriptor,
+                        reference.descriptor_id(),
                         self.memory.evidence_captures(&evidence)?,
                         None,
                     ),
@@ -1915,12 +1922,12 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                             })
                             .transpose()?
                             .unwrap_or_default();
-                        (reference.descriptor, captures, reference.environment)
+                        (Some(reference.descriptor), captures, reference.environment)
                     }
                     _ => return Err(invalid("expected subscript")),
                 };
                 let Some(Descriptor::Subscript(definition)) =
-                    self.program.reference_descriptor(descriptor)
+                    descriptor.and_then(|descriptor| self.program.reference_descriptor(descriptor))
                 else {
                     return Err(invalid("expected subscript descriptor"));
                 };

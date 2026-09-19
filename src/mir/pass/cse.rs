@@ -498,7 +498,7 @@ impl PlaceOrigins {
         let ResultProvenance::Argument(index) = summary_of(*callee).provenance else {
             return false;
         };
-        let Some((argument, _)) = call.arguments.get(index as usize) else {
+        let Some((argument, _)) = call.arguments.get(index.as_index()) else {
             return false;
         };
         let Some(origin) = self.origin_of(argument) else {
@@ -909,7 +909,7 @@ fn call_expression(
             let ResultProvenance::Argument(index) = summary.provenance else {
                 return None;
             };
-            let (base, _) = call.arguments.get(index as usize)?;
+            let (base, _) = call.arguments.get(index.as_index())?;
             AvailableCall::Addressor {
                 output: call.result.clone(),
                 root: origins.origin_of(base)?.root,

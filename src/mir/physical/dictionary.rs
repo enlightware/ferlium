@@ -16,7 +16,7 @@ use crate::{
     types::{r#trait::TraitDictionaryEntryIndex, r#type::Type},
 };
 
-use super::evidence::PhysicalEvidenceReferences;
+use super::{evidence::PhysicalEvidenceReferences, program::ProgramDescriptorId};
 use std::{
     alloc::{Layout, LayoutError},
     rc::Rc,
@@ -28,6 +28,20 @@ use std::{
 pub(crate) struct DictionaryReference {
     pub(crate) descriptor: u32,
     pub(crate) environment: usize,
+}
+
+impl DictionaryReference {
+    pub(crate) fn new(descriptor: ProgramDescriptorId, environment: usize) -> Self {
+        Self {
+            descriptor: descriptor.as_u32(),
+            environment,
+        }
+    }
+
+    /// The descriptor this reference names, or `None` for a word no descriptor index can hold.
+    pub(crate) fn descriptor_id(self) -> Option<ProgramDescriptorId> {
+        ProgramDescriptorId::try_from(self.descriptor as usize).ok()
+    }
 }
 
 /// Ordered physical capture fields, following a pointer-sized reference count (zero for static data).
