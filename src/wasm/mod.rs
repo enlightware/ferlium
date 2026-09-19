@@ -8,6 +8,7 @@
 //! needs coordinated changes to transport, addressing, memory declarations and invocation state.
 
 mod abi;
+mod callable_environment;
 mod emit;
 mod evidence;
 mod execution;
@@ -125,6 +126,24 @@ impl Imports {
                 "build_evidence",
                 evidence::build as *const (),
                 vec![ValType::I32; 4],
+                vec![],
+            ),
+            (
+                "allocate_callable_environment",
+                callable_environment::allocate as *const (),
+                vec![ValType::I32; 4],
+                vec![ValType::I32],
+            ),
+            (
+                "copy_callable_environment",
+                callable_environment::copy_shell as *const (),
+                vec![ValType::I32],
+                vec![ValType::I32],
+            ),
+            (
+                "release_callable_environment",
+                callable_environment::release as *const (),
+                vec![ValType::I32; 2],
                 vec![],
             ),
         ] {

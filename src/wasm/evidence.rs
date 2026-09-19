@@ -21,7 +21,7 @@ use crate::{
     types::r#trait::TraitDictionaryEntryIndex,
 };
 
-use super::{abi::EvidenceTableSlotId, runtime};
+use super::{abi::DispatchTableSlotId, runtime};
 
 /// Descriptor offsets are relative to the instance's immutable data base; table entries are local.
 #[repr(C)]
@@ -141,10 +141,17 @@ pub(super) struct Image {
 }
 
 impl Image {
+    /// Append one immutable captureless callable; discovery interns these by function identity.
+    pub fn callable_reference(&mut self, slot: DispatchTableSlotId) -> u32 {
+        let offset = self.words.len() as u32 * 4;
+        self.words.extend([slot.as_u32(), 0]);
+        offset
+    }
+
     pub fn build(
         program: &ResolvedPhysicalProgram<'_>,
         reachable: &ReachableEvidence,
-        table: &FxHashMap<(TraitDictionaryId, usize), EvidenceTableSlotId>,
+        table: &FxHashMap<(TraitDictionaryId, usize), DispatchTableSlotId>,
     ) -> Self {
         let count = reachable
             .dictionaries

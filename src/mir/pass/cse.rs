@@ -1381,8 +1381,7 @@ mod tests {
         builder.set_terminator(entry, Terminator::goto(span, next));
         builder.append_operation(next, address(0)); // No cross-block lifetime proof yet.
         builder.set_terminator(next, Terminator::ret(span));
-        let body = builder.finish_unverified();
-        verify_physical_function(&body, env);
+        let body = builder.finish_physical(env);
         let optimized = eliminate_common_subexpressions(&body).expect("one repeated address");
         verify_physical_function(&optimized, env);
         let addresses = |block| {

@@ -36,7 +36,9 @@ use crate::{
 };
 
 use super::{
-    CompiledProgram, Imports, WasmLimits, WasmValue, emit,
+    CompiledProgram, Imports, WasmLimits, WasmValue,
+    callable_environment::LIVE_ENVIRONMENTS as LIVE_CALLABLE_ENVIRONMENTS,
+    emit,
     evidence::{BUILT_ENVIRONMENTS, DictionaryDescriptor, LIVE_ENVIRONMENTS},
     execution::InvocationState,
 };
@@ -133,6 +135,127 @@ fn differential<A: WasmValue + NativeValueType, R: WasmValue + PartialEq + Debug
         }
     }
     reference.discard_storage();
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_stored_functions_and_closures() {
+    let cases = [
+        "fn increment(x: int) -> int { x + 1 } #[inline(never)] fn apply<T>(f: (T) -> T, x: T) -> T { f(x) } fn compute(x: int) -> int { apply(increment, x) }",
+        "fn compute(x: int) -> int { let f = |y| y + x; f(2) + f(3) }",
+        "fn maker(x: int) { |y| y + x } fn compute(x: int) -> int { let f = maker(x); let g = f; f(2) + g(3) }",
+        "fn id<T>(x: T) -> T { x } fn compute(x: int) -> int { let f = id; f(x) }",
+        "fn maker<T>(x: T) { || x } fn compute(x: int) -> int { let f = maker((x, true)); f().0 }",
+        "fn compute(x: int) -> int { let text = \"hello\"; let f = || len(text) + x; let g = f; f() + g() }",
+        "#[inline(never)] fn apply(f: (&mut int) -> (), x: &mut int) { f(x) } fn bump(x: &mut int) { x += 1; } fn compute(x: int) -> int { let mut y = x; apply(bump, y); y }",
+        "fn compute(x: int) -> int { let f = idiv; f(x, 2) }",
+        "#[inline(never)] fn show<T>(x: T) -> int { let f = to_string; len(f(x)) } fn compute(x: int) -> int { show(x) }",
+        "fn make<T, U>(a: T, b: U) { || (a, b) } fn compute(x: int) -> int { let f = make(true, (x, \"text\")); let p = f(); p.1.0 + len(p.1.1) }",
+        "fn compute(x: int) -> int { let f = || x; let g = || f() + 1; let h = g; g() + h() }",
+        "fn compute(x: int) -> int { let mut f = || x; for i in 0..4 { f = || i; }; f() }",
+        "fn compute(x: int) -> int { let a = (); let f = || a; f(); x }",
+        "fn negate(x: bool) -> bool { not x } #[inline(never)] fn apply<T>(f: (T) -> T, x: T) -> T { f(x) } fn compute(x: int) -> int { if apply(negate, x > 0) { 1 } else { 2 } }",
+        "fn half(x: float) -> float { x * 0.5 } #[inline(never)] fn apply<T>(f: (T) -> T, x: T) -> T { f(x) } fn compute(x: int) -> int { if apply(half, 6.0) == 3.0 { x } else { 0 } }",
+        "fn compute(x: int) -> int { let mut y = x; let f = || { y += 1; y }; f() + f() + y }",
+        "fn maker<T, U>(a: T, b: U) { || (a, b) } fn compute(x: int) -> int { let f = maker(true, (x, 1.5)); let p = f(); if p.0 { p.1.0 } else { 0 } }",
+        "fn compute(x: int) -> int { let function: Option<(int) -> int> = None; let pair = (function, function); x }",
+    ];
+    for mode in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        let mut session = CompilerSession::new();
+        session.set_physical_mir_optimization(mode);
+        for source in cases {
+            let before = LIVE_CALLABLE_ENVIRONMENTS.get();
+            differential::<isize, isize>(&mut session, source, 7);
+            assert_eq!(LIVE_CALLABLE_ENVIRONMENTS.get(), before, "{source}");
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_closure_cleanup() {
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        let mut session = CompilerSession::new();
+        session.set_allow_unsafe(true);
+        session.set_physical_mir_optimization(optimization);
+        let path = Path::single_str("probe");
+        let mut module = Module::new(session.modules().next_id(), path.clone());
+        module.add_function(
+            ustr("record"),
+            NativeFnN::from_rust(record_drop).description(
+                ["id"],
+                "",
+                effect(PrimitiveEffect::Write),
+            ),
+        );
+        session.register_module(path, module);
+        let entry = compile(
+            &mut session,
+            r#"
+            struct Probe(int)
+            impl Value for Probe {
+                fn eq(a: Probe, b: Probe) -> bool { a.0 == b.0 }
+                fn to_string(p: Probe) -> string { to_string(p.0) }
+                fn hash(p: Probe, h: &mut hasher) { hash(p.0, h) }
+                fn clone(p: Probe) -> Probe { Probe(p.0) }
+                fn drop(p: &mut Probe) {
+                    effects_unsafe {
+                        probe::record(p.0 + 1);
+                        if p.0 == 2 { loop {} }
+                    }
+                }
+            }
+            fn maker(p: Probe) { || idiv(20, if p.0 == 2 { 0 } else { p.0 }) }
+            fn compute(x: int) -> int {
+                let p = Probe(x);
+                let f = maker(p);
+                let g = f;
+                g()
+            }
+        "#,
+        );
+        let limits = ReferenceInterpreterLimits::default().with_fuel_limit(Some(300));
+        for code in [
+            compile_raw(&session, entry),
+            CompiledProgram::compile(&session, entry).unwrap(),
+        ] {
+            let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+            for input in [4, 0, 2, 4] {
+                DROP_LOG.set(0);
+                let expected = session
+                    .run_entry_with_limits(
+                        ExecutionTarget::PhysicalMir,
+                        entry.module,
+                        entry.function,
+                        vec![Value::native(input)],
+                        limits,
+                    )
+                    .map(|value| {
+                        let result = *value.as_primitive_ty::<isize>().unwrap();
+                        value.discard_storage();
+                        result
+                    })
+                    .map_err(|error| error.kind());
+                let log = DROP_LOG.get();
+                DROP_LOG.set(0);
+                let live = LIVE_CALLABLE_ENVIRONMENTS.get();
+                let evidence = LIVE_ENVIRONMENTS.get();
+                let actual = instance
+                    .run(
+                        (input,),
+                        WasmLimits {
+                            execution: limits.execution,
+                            ..WasmLimits::default()
+                        },
+                    )
+                    .map_err(|error| error.kind());
+                assert_eq!(actual, expected, "input {input}");
+                assert_eq!(DROP_LOG.get(), log, "input {input}");
+                if input != 2 {
+                    assert_eq!(LIVE_CALLABLE_ENVIRONMENTS.get(), live);
+                    assert_eq!(LIVE_ENVIRONMENTS.get(), evidence);
+                }
+            }
+        }
+    }
 }
 
 #[wasm_bindgen_test]

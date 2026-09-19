@@ -34,8 +34,8 @@ define_id_type!(
 );
 
 define_id_type!(
-    /// A slot in a generated module's dictionary-dispatch table.
-    EvidenceTableSlotId
+    /// A slot in a generated module's dictionary/callable dispatch table.
+    DispatchTableSlotId
 );
 
 #[derive(Clone, Copy, PartialEq, Eq)]

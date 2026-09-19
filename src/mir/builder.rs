@@ -5,6 +5,9 @@
 
 use ustr::Ustr;
 
+#[cfg(test)]
+use crate::mir::verify::verify_physical_function;
+
 #[cfg(any(debug_assertions, test))]
 use crate::mir::{
     role::{self, ValueRoles},
@@ -199,6 +202,14 @@ impl FunctionBuilder {
         verify_function(&function, env);
         #[cfg(not(any(debug_assertions, test)))]
         let _ = env;
+        function
+    }
+
+    /// Finalizes a hand-built physical function with the physical verifier.
+    #[cfg(test)]
+    pub(crate) fn finish_physical(self, env: ModuleEnv<'_>) -> Function {
+        let function = self.finish_unverified();
+        verify_physical_function(&function, env);
         function
     }
 

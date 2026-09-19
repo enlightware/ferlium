@@ -107,6 +107,9 @@ result is omitted from the machine return.
 Generic `Let` parameters are physically indirect, even if they have a `T: TrivialCopy` constraint.
 This gives every generic function one stable ABI independent of later concrete instantiations.
 
+These transport choices apply to direct entries. First-class function entries use the uniform
+pointer-based interface described under [Functions and closures](#functions-and-closures).
+
 An indirect `Let` points to the original shared place or, when a snapshot is required, to the
 snapshot's storage. In either case, the observed value remains live throughout the call.
 
@@ -564,10 +567,11 @@ Invoking a closure borrows the closure value. It clones the owned capture tuple 
 temporary, passes the temporary captures and stored hidden evidence to the function body, and
 drops the temporary after both normal return and language failure.
 
-Every closure-compatible entry accepts `env_ptr` as its first closure-specific parameter, followed
-by the parameters required by the standard function ABI. A function that can be materialized as a
-first-class value needs such an entry; an ordinary direct-only function does not. A captureless
-entry ignores its zero environment pointer.
+A closure-compatible entry uses the uniform parameter order `failure_state`, `env_ptr`, visible
+arguments, then result storage. Visible arguments and results are passed by pointer, including for
+`()`, and the entry returns a status; infallible targets always return success. An adapter preserves
+source access modes while translating this interface to the target's direct ABI. A captureless
+entry ignores its zero `env_ptr`.
 
 ## First-class subscripts
 
