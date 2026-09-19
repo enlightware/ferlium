@@ -3,7 +3,7 @@
 
 //! Per-function storage assignment and instruction emission.
 
-use std::mem::offset_of;
+use std::{mem::offset_of, ops::Range};
 
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction as I, MemArg, ValType};
 
@@ -45,6 +45,9 @@ use super::{
     callable, callee, context_pointer, dictionary_table, emit_failure, enter_frame, frame_address,
     frame_bytes, layout_witness, leave_frame, memarg, operations, scalar,
 };
+
+/// Code ranges generated for MIR operations and terminators, with their source spans.
+pub(super) type BodySourceMap = Vec<(Range<usize>, Location)>;
 
 #[derive(Clone, Copy)]
 enum Storage {
@@ -98,6 +101,7 @@ pub(super) struct Body<'a, 's> {
     pc: Option<WasmLocalId>,
     frame_size: u32,
     pub(super) code: WasmFunction,
+    source_map: BodySourceMap,
 }
 
 impl<'a, 's> Body<'a, 's> {
@@ -155,6 +159,7 @@ impl<'a, 's> Body<'a, 's> {
             pc: None,
             frame_size: 0,
             code: WasmFunction::new([]),
+            source_map: Vec::new(),
         };
         this.pending_failure = this.local(ValType::I32);
         this.scratch = this.local(ValType::I32);
@@ -976,7 +981,7 @@ impl<'a, 's> Body<'a, 's> {
         ty.store(&mut self.code);
     }
 
-    pub(super) fn emit(mut self) -> Result<WasmFunction, String> {
+    pub(super) fn emit(mut self) -> Result<(WasmFunction, BodySourceMap), String> {
         if let Some(frame) = self.frame {
             enter_frame(&mut self.code, frame, self.frame_size);
         }
@@ -1028,12 +1033,13 @@ impl<'a, 's> Body<'a, 's> {
         }
         self.i(I::Unreachable);
         self.i(I::End);
-        Ok(self.code)
+        Ok((self.code, self.source_map))
     }
 
     fn emit_block(&mut self, block_id: BlockId, dispatch_depth: Option<u32>) -> Result<(), String> {
         let block = self.body.block(block_id);
         for operation in block.operations() {
+            let start = self.code.byte_len();
             self.operation(operation).map_err(|e| {
                 format!(
                     "{} in block {}: {e}",
@@ -1041,7 +1047,13 @@ impl<'a, 's> Body<'a, 's> {
                     block_id.as_u32()
                 )
             })?;
+            self.record_source(start, operation.span);
         }
+        let start = self.code.byte_len();
+        let span = match &block.terminator().kind {
+            TerminatorKind::Invoke { operation, .. } => operation.span,
+            _ => block.terminator().span,
+        };
         match &block.terminator().kind {
             TerminatorKind::Goto { target } => {
                 self.i(I::I32Const(target.as_u32() as i32));
@@ -1103,7 +1115,15 @@ impl<'a, 's> Body<'a, 's> {
             TerminatorKind::InvariantFailure { .. } => self.fail(FailureCode::Invariant),
             _ => return Err("unsupported terminator".into()),
         }
+        self.record_source(start, span);
         Ok(())
+    }
+
+    fn record_source(&mut self, start: usize, span: Location) {
+        let end = self.code.byte_len();
+        if start < end && !span.is_synthesized() {
+            self.source_map.push((start..end, span));
+        }
     }
 
     fn jump(&mut self, dispatch_depth: Option<u32>) {

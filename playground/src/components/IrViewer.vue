@@ -1,16 +1,19 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Decoration, EditorView, type DecorationSet, type ViewUpdate } from "@codemirror/view";
-import { StateEffect, StateField } from "@codemirror/state";
+import { Compartment, StateEffect, StateField } from "@codemirror/state";
 import { basicSetup } from "codemirror";
 import { rangesOverlap, type IrText, type SourceMapEntry, type SourceRange } from "../types";
 import { mirLanguageExtension } from "../language/mir-language";
+import { wasmLanguageExtension } from "../language/wasm-language";
 
 const props = defineProps<{
 	/** The rendered IR, or `undefined` when the current source has none to show. */
 	ir?: IrText,
 	title: string,
 	sourceSelection?: SourceRange,
+	/** The syntax of the rendered IR. */
+	language?: "mir" | "wasm",
 }>();
 
 const emit = defineEmits<{
@@ -19,6 +22,11 @@ const emit = defineEmits<{
 
 const viewer = ref<HTMLElement>();
 const view = ref<EditorView>();
+const languageCompartment = new Compartment();
+
+function languageExtension() {
+	return props.language === "wasm" ? wasmLanguageExtension() : mirLanguageExtension();
+}
 
 const setHighlights = StateEffect.define<DecorationSet>();
 const highlights = StateField.define<DecorationSet>({
@@ -86,6 +94,9 @@ function processUpdate(update: ViewUpdate) {
 }
 
 watch(() => props.ir, replaceText);
+watch(() => props.language, () => {
+	view.value?.dispatch({ effects: languageCompartment.reconfigure(languageExtension()) });
+});
 watch(() => props.sourceSelection, refreshHighlights, { deep: true });
 
 onMounted(() => {
@@ -93,7 +104,7 @@ onMounted(() => {
 		doc: irText(),
 		extensions: [
 			basicSetup,
-			mirLanguageExtension(),
+			languageCompartment.of(languageExtension()),
 			EditorView.editable.of(false),
 			highlights,
 			EditorView.updateListener.of(processUpdate),

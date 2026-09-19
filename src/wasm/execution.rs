@@ -147,6 +147,9 @@ pub(super) enum FailureCode {
     Source,
 }
 
+/// Export name of the function a compiled program runs.
+pub(super) const ENTRY_EXPORT: &str = "entry";
+
 /// Generated code and instance-local native bindings. Compilation does not execute guest code.
 pub struct CompiledProgram {
     emitted: emit::Emitted,
@@ -165,8 +168,14 @@ impl CompiledProgram {
         entry: FunctionId,
     ) -> Result<Self, RuntimeError> {
         let mut imports = Imports::new().map_err(js_error)?;
-        let emitted =
-            emit::emit(program, entry, &mut imports, session).map_err(RuntimeError::Backend)?;
+        let emitted = emit::emit(
+            program,
+            &[entry],
+            &[(entry, ENTRY_EXPORT.into())],
+            &mut imports,
+            session,
+        )
+        .map_err(RuntimeError::Backend)?;
         Ok(Self { emitted, imports })
     }
 
@@ -183,8 +192,11 @@ impl CompiledProgram {
             .map(ScalarType::of)
             .collect::<Result<Vec<_>, _>>()
             .map_err(RuntimeError::Backend)?;
-        if types != self.emitted.parameters
-            || ScalarType::of(R::ty()).map_err(RuntimeError::Backend)? != self.emitted.result
+        let [export] = self.emitted.exports.as_slice() else {
+            unreachable!("a compiled program exports only its entry");
+        };
+        if types != export.parameters
+            || ScalarType::of(R::ty()).map_err(RuntimeError::Backend)? != export.result
         {
             return Err(RuntimeError::Backend(
                 "Rust signature does not match the Wasm entry".into(),
@@ -195,11 +207,11 @@ impl CompiledProgram {
         let instance =
             WebAssembly::Instance::new(&module, self.imports.object()).map_err(js_error)?;
         let exports = instance.exports();
-        let entry = Reflect::get(&exports, &"entry".into())
+        let entry = Reflect::get(&exports, &export.name.as_str().into())
             .map_err(js_error)?
             .dyn_into()
             .map_err(js_error)?;
-        let setup = Reflect::get(&exports, &"setup".into())
+        let setup = Reflect::get(&exports, &emit::SETUP_EXPORT.into())
             .map_err(js_error)?
             .dyn_into()
             .map_err(js_error)?;
@@ -540,7 +552,14 @@ mod tests {
         }))
         .unwrap();
         let mut imports = Imports::new().unwrap();
-        let emitted = emit::emit(&program, entry, &mut imports, &session).unwrap();
+        let emitted = emit::emit(
+            &program,
+            &[entry],
+            &[(entry, ENTRY_EXPORT.into())],
+            &mut imports,
+            &session,
+        )
+        .unwrap();
         let mut instance = CompiledProgram { emitted, imports }
             .instantiate::<(), isize>()
             .unwrap();

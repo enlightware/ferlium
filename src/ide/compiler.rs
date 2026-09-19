@@ -3,9 +3,13 @@
 
 use std::sync::LazyLock;
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm-text"))]
+use crate::wasm::text::module_text;
 use crate::{
     CompilationError, CompilationOutput, CompilerSession, DiagnosticSeverity, FxHashMap, FxHashSet,
     MirOptimization, ModuleEnv, Path, SourceId, call_fn,
+    emit_mir::MirText,
+    eval::RuntimeError,
     execution::{DEFAULT_INTERACTIVE_FUEL_LIMIT, ExecutionTarget, ReferenceInterpreterLimits},
     format::FormatWith,
     hir::value::{NativeValue, Value},
@@ -210,21 +214,24 @@ impl Compiler {
             .expect("semantic MIR preparation is infallible")
     }
 
+    /// Returns the Wasm text of the current successfully compiled module, with source-link
+    /// metadata. Every function is compiled; named functions with a scalar signature are exported.
+    #[cfg(all(target_arch = "wasm32", feature = "wasm-text"))]
+    pub fn wasm_text(&mut self) -> Result<IrText, String> {
+        let Some(source_id) = self.compiled_source_id() else {
+            return Ok(empty_ir_text());
+        };
+        self.session.set_mir_optimization(MirOptimization::Enabled);
+        let text = module_text(&self.session, self.user_module.module_id)
+            .map_err(|error| self.format_runtime_error(error))?;
+        Ok(self.ir_text(text, source_id))
+    }
+
     fn mir_text_at(&mut self, optimized: bool, physical: bool) -> Result<IrText, String> {
+        let Some(source_id) = self.compiled_source_id() else {
+            return Ok(empty_ir_text());
+        };
         let module_id = self.user_module.module_id;
-        let Some(module_info) = self.session.modules().info(module_id) else {
-            return Ok(empty_ir_text());
-        };
-        if module_info.is_stale() || !module_info.has_compiled_module() {
-            return Ok(empty_ir_text());
-        }
-        let Some((source_id, _)) = self
-            .session
-            .source_table()
-            .get_latest_source_by_name(SRC_NAME)
-        else {
-            return Ok(empty_ir_text());
-        };
         self.session.set_mir_optimization(if optimized {
             MirOptimization::Enabled
         } else {
@@ -233,27 +240,45 @@ impl Compiler {
         let text = if physical {
             self.session
                 .emit_physical_mir_module_with_source_map(module_id)
-                .map_err(|error| {
-                    error
-                        .format_with(&(self.session.source_table(), self.session.raw_modules()))
-                        .to_string()
-                })?
+                .map_err(|error| self.format_runtime_error(error))?
         } else {
             self.session.emit_mir_module_with_source_map(module_id)
         };
-        let mir_lookup = PositionIndexLookup::new(&text.text, self.position_encoding);
+        Ok(self.ir_text(text, source_id))
+    }
+
+    /// The source of the user module, if it is compiled and up to date.
+    fn compiled_source_id(&self) -> Option<SourceId> {
+        let module_info = self.session.modules().info(self.user_module.module_id)?;
+        if module_info.is_stale() || !module_info.has_compiled_module() {
+            return None;
+        }
+        self.session
+            .source_table()
+            .get_latest_source_by_name(SRC_NAME)
+            .map(|(source_id, _)| source_id)
+    }
+
+    fn format_runtime_error(&self, error: RuntimeError) -> String {
+        error
+            .format_with(&(self.session.source_table(), self.session.raw_modules()))
+            .to_string()
+    }
+
+    /// Convert rendered-text byte offsets to editor positions, keeping links to the user source.
+    fn ir_text(&mut self, text: MirText, source_id: SourceId) -> IrText {
+        let ir_lookup = PositionIndexLookup::new(&text.text, self.position_encoding);
         let source_lookup = self.position_index_lookup(source_id);
-        Ok(IrText {
-            text: text.text,
+        IrText {
             source_map: text
                 .source_map
                 .into_iter()
                 .filter(|entry| entry.span.source_id() == source_id)
                 .map(|entry| TextSourceMapEntry {
-                    from: u32::try_from(mir_lookup.byte_to_position(entry.from))
-                        .expect("playground MIR text cannot exceed 4 GiB"),
-                    to: u32::try_from(mir_lookup.byte_to_position(entry.to))
-                        .expect("playground MIR text cannot exceed 4 GiB"),
+                    from: u32::try_from(ir_lookup.byte_to_position(entry.from))
+                        .expect("playground IR text cannot exceed 4 GiB"),
+                    to: u32::try_from(ir_lookup.byte_to_position(entry.to))
+                        .expect("playground IR text cannot exceed 4 GiB"),
                     source_from: u32::try_from(
                         source_lookup.byte_to_position(entry.span.start_usize()),
                     )
@@ -264,7 +289,8 @@ impl Compiler {
                     .expect("playground source cannot exceed 4 GiB"),
                 })
                 .collect(),
-        })
+            text: text.text,
+        }
     }
 
     fn run_expr_with_target(

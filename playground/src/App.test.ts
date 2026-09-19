@@ -14,6 +14,7 @@ const compiler = vi.hoisted(() => {
 		}),
 		mirText: vi.fn(() => ({ text: `MIR of ${source}`, source_map: [] })),
 		physicalMirText: vi.fn(() => ({ text: `Physical MIR of ${source}`, source_map: [] })),
+		wasmText: vi.fn(() => ({ text: `Wasm of ${source}`, source_map: [] })),
 		runHir: vi.fn(),
 		runMir: vi.fn(),
 		runPhysicalMir: vi.fn(() => ({
@@ -37,6 +38,7 @@ vi.mock("./compiler-api", () => ({
 		run_expr_physical_mir() { return compiler.runPhysicalMir(); }
 		mir_text() { return compiler.mirText(); }
 		physical_mir_text() { return compiler.physicalMirText(); }
+		wasm_text() { return compiler.wasmText(); }
 	},
 }));
 
@@ -117,7 +119,7 @@ describe("App", () => {
 	it("inspects and executes physical MIR without falling back", async () => {
 		const app = mountApp();
 		expect(selects(app).executionMode.findAll("option:not([disabled])").map(option => option.text()))
-			.toEqual(["HIR", "raw MIR", "opt. MIR", "phy. MIR"]);
+			.toEqual(["HIR", "raw MIR", "opt. MIR", "phy. MIR", "Wasm"]);
 		await selects(app).executionMode.setValue("phy. MIR");
 		await selects(app).sample.setValue("Factorial");
 		await vi.waitFor(() => expect(irText()).toContain("Physical MIR of fn factorial"));
@@ -130,6 +132,29 @@ describe("App", () => {
 		await vi.waitFor(() => expect(irText()).not.toContain("Physical MIR"));
 		await app.get(".execution-controls button").trigger("click");
 		expect(compiler.runMir).toHaveBeenCalledWith(true);
+	});
+
+	it("inspects Wasm without executing any interpreter", async () => {
+		for (const run of [compiler.runHir, compiler.runMir, compiler.runPhysicalMir]) {
+			run.mockClear();
+		}
+		const app = mountApp();
+		await selects(app).executionMode.setValue("Wasm");
+		await selects(app).sample.setValue("Factorial");
+		await vi.waitFor(() => expect(irText()).toContain("Wasm of fn factorial"));
+		await app.get(".execution-controls button").trigger("click");
+		expect(compiler.runHir).not.toHaveBeenCalled();
+		expect(compiler.runMir).not.toHaveBeenCalled();
+		expect(compiler.runPhysicalMir).not.toHaveBeenCalled();
+		expect(app.text()).toContain("Wasm execution is not available in the playground yet");
+	});
+
+	it("shows Wasm generation errors in the IR pane", async () => {
+		const app = mountApp();
+		compiler.wasmText.mockImplementationOnce(() => { throw "unsupported Wasm storage type"; });
+		await selects(app).executionMode.setValue("Wasm");
+		await selects(app).sample.setValue("Factorial");
+		await vi.waitFor(() => expect(irText()).toContain("Unable to generate Wasm: unsupported Wasm storage type"));
 	});
 
 	it("shows physical preparation errors in the IR pane", async () => {

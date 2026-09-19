@@ -48,7 +48,7 @@ test-native-abi:
 	python3 tests/native_abi/check_wasm.py
 
 test-wasm:
-	CARGO_PROFILE_TEST_DEBUG=0 WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --chrome --firefox --headless --test language --lib
+	CARGO_PROFILE_TEST_DEBUG=0 WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --chrome --firefox --headless --test language --lib --features wasm-text
 	cd playground/script-api && CARGO_PROFILE_TEST_DEBUG=0 WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --chrome --firefox --headless --lib
 
 test-wasm-linkage:

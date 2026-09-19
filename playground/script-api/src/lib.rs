@@ -68,6 +68,11 @@ impl PlaygroundCompiler {
         self.inner.physical_mir_text()
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub fn wasm_text(&mut self) -> Result<IrText, String> {
+        self.inner.wasm_text()
+    }
+
     pub fn get_annotations(&mut self) -> Vec<AnnotationData> {
         self.inner.get_annotations()
     }
@@ -177,5 +182,31 @@ mod tests {
             compiler.run_expr_physical_mir().unwrap().html_message(),
             "42: int"
         );
+    }
+
+    #[wasm_bindgen_test]
+    fn wasm_inspection_in_browser() {
+        set_panic_hook();
+        let mut compiler = PlaygroundCompiler::new();
+        let source = "// 😀\nfn triple(x: int) -> int { x * 3 }\ntriple(14)";
+        assert!(compiler.compile(source).succeeded);
+        let wasm = compiler.wasm_text().unwrap();
+        assert!(
+            wasm.text.contains("(export \"ide::triple\""),
+            "{}",
+            wasm.text
+        );
+        assert!(
+            !wasm.text.contains("(export \"ide::<expr>\""),
+            "{}",
+            wasm.text
+        );
+        assert!(!wasm.source_map.is_empty());
+        assert!(wasm.source_map.iter().all(|entry| {
+            entry.from < entry.to
+                && entry.to as usize <= wasm.text.encode_utf16().count()
+                && entry.source_from <= entry.source_to
+                && entry.source_to as usize <= source.encode_utf16().count()
+        }));
     }
 }

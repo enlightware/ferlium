@@ -34,6 +34,7 @@ export const executionModes = [
 	{ value: "mir", label: "raw MIR" },
 	{ value: "optimized-mir", label: "opt. MIR" },
 	{ value: "physical-mir", label: "phy. MIR" },
+	{ value: "wasm", label: "Wasm" },
 ] as const;
 
 export type ExecutionMode = typeof executionModes[number]["value"];

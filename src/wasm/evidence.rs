@@ -395,9 +395,22 @@ mod tests {
                 .unwrap(),
         );
         with_raw_program(&session, entry, |program| {
-            let emitted =
-                emit::emit(program, entry, &mut Imports::new().unwrap(), &session).unwrap();
-            let again = emit::emit(program, entry, &mut Imports::new().unwrap(), &session).unwrap();
+            let emitted = emit::emit(
+                program,
+                &[entry],
+                &[],
+                &mut Imports::new().unwrap(),
+                &session,
+            )
+            .unwrap();
+            let again = emit::emit(
+                program,
+                &[entry],
+                &[],
+                &mut Imports::new().unwrap(),
+                &session,
+            )
+            .unwrap();
             assert_eq!(emitted.bytes, again.bytes);
             assert_eq!(emitted.evidence.words, again.evidence.words);
             let image = emitted.evidence;

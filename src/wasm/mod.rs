@@ -14,6 +14,8 @@ mod evidence;
 mod execution;
 mod failure;
 mod runtime;
+#[cfg(feature = "wasm-text")]
+pub(crate) mod text;
 
 pub use abi::WasmFunctionId;
 pub use execution::{

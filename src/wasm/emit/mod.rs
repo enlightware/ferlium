@@ -12,24 +12,24 @@ use self::{
     body::Body,
 };
 
-use std::{iter, mem::offset_of};
+use std::{iter, mem::offset_of, ops::Range};
 
 use strum::{EnumIter, IntoEnumIterator};
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, ElementSection, Elements, EntityType, ExportKind,
     ExportSection, Function as WasmFunction, FunctionSection, GlobalSection, GlobalType,
-    ImportSection, Instruction as I, MemArg, MemoryType, Module, RefType, TableSection, TableType,
-    TypeSection, ValType,
+    ImportSection, Instruction as I, MemArg, MemoryType, Module, NameMap, NameSection, RefType,
+    TableSection, TableType, TypeSection, ValType,
 };
 
 use crate::{
-    CompilerSession, FxHashMap, FxHashSet,
+    CompilerSession, FxHashMap, FxHashSet, Location,
     hir::{function::ArgConvention, native_functions::NativeScalar},
     mir::{
         BasicBlock, Function, Operation, OperationKind, ParameterKind, Value,
         physical::program::ResolvedPhysicalProgram, role::MirType, terminator::TerminatorKind,
     },
-    module::{FunctionId, ModuleEnv, TraitId, id::Id},
+    module::{FunctionId, ModuleEnv, ModuleId, TraitId, id::Id},
     std::{
         core_traits_names::VALUE_TRAIT_NAME,
         logic::bool_type,
@@ -310,9 +310,30 @@ fn script_abi(body: &Function) -> Result<CallAbi, String> {
 pub(super) struct Emitted {
     pub bytes: Vec<u8>,
     pub strings: Box<[StaticStr]>,
+    pub exports: Vec<HostExport>,
+    pub evidence: evidence::Image,
+    /// Source regions of the code generated for MIR operations and terminators.
+    #[cfg_attr(not(feature = "wasm-text"), allow(dead_code))]
+    pub source_map: Vec<CodeSourceMapEntry>,
+}
+
+/// A function exported to the Rust host binding.
+pub(super) struct HostExport {
+    pub function: FunctionId,
+    pub name: String,
     pub parameters: Vec<ScalarType>,
     pub result: ScalarType,
-    pub evidence: evidence::Image,
+}
+
+/// The code generated for one MIR operation or terminator.
+#[cfg_attr(not(feature = "wasm-text"), allow(dead_code))]
+#[derive(Clone, Debug)]
+pub(super) struct CodeSourceMapEntry {
+    /// Index of the function body in the code section.
+    pub body: usize,
+    /// Byte range within that body, which starts with its local declarations.
+    pub bytes: Range<usize>,
+    pub span: Location,
 }
 
 fn dictionary_abi(
@@ -351,56 +372,79 @@ fn dictionary_abi(
     })
 }
 
-pub(super) fn emit(
+/// The scalar host signature of a script function, or why the host binding cannot call it.
+pub(super) fn host_signature(
     program: &ResolvedPhysicalProgram<'_>,
-    entry: FunctionId,
-    imports: &mut Imports,
-    session: &CompilerSession,
-) -> Result<Emitted, String> {
-    let entry_body = program
-        .function(entry)
-        .ok_or_else(|| format!("missing script entry {entry:?}"))?;
+    function: FunctionId,
+) -> Result<(Vec<ScalarType>, ScalarType), String> {
+    let body = program
+        .function(function)
+        .ok_or_else(|| format!("missing script entry {function:?}"))?;
     if !matches!(
-        entry_body.result_convention(),
+        body.result_convention(),
         CallResultConvention::Value | CallResultConvention::NoValue
     ) {
         return Err(diagnostic(
-            entry,
-            entry_body,
+            function,
+            body,
             "Wasm host binding requires a value result",
         ));
     }
-    if entry_body.parameters().iter().any(|p| {
+    if body.parameters().iter().any(|p| {
         !matches!(
             p.kind,
             ParameterKind::Return | ParameterKind::Parameter(ArgConvention::Let)
         )
     }) {
         return Err(diagnostic(
-            entry,
-            entry_body,
+            function,
+            body,
             "Wasm host binding requires by-value arguments",
         ));
     }
     // Preserve the public result type before selecting a NoValue implementation: an elided
     // zero-sized named product is not the unit type supported by the Rust binding.
-    let result = entry_body
+    let result = body
         .parameters()
         .iter()
         .find(|parameter| parameter.kind == ParameterKind::Return)
         .map(|parameter| ScalarType::of(parameter.ty))
         .transpose()?
         .unwrap_or_else(ScalarType::unit);
-    let host_parameters = entry_body
+    let parameters = body
         .parameters()
         .iter()
         .filter(|p| p.kind != ParameterKind::Return)
         .map(|p| ScalarType::of(p.ty))
         .collect::<Result<Vec<_>, _>>()?;
-    let entry = program.direct_entry(entry);
+    Ok((parameters, result))
+}
+
+/// Compile the roots and everything they reach into one module. Each export names a root to
+/// expose to the Rust host binding, which requires a scalar host signature.
+pub(super) fn emit(
+    program: &ResolvedPhysicalProgram<'_>,
+    roots: &[FunctionId],
+    exports: &[(FunctionId, String)],
+    imports: &mut Imports,
+    session: &CompilerSession,
+) -> Result<Emitted, String> {
+    let host_exports = exports
+        .iter()
+        .map(|(function, name)| {
+            debug_assert!(roots.contains(function), "export {name} is not a root");
+            let (parameters, result) = host_signature(program, *function)?;
+            Ok(HostExport {
+                function: *function,
+                name: name.clone(),
+                parameters,
+                result,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     let env = session
         .modules()
-        .env_for(session.expect_fresh_module(entry.module));
+        .env_for(session.expect_fresh_module(roots.first().ok_or("no Wasm roots")?.module));
     let value_trait = env.expect_std_trait_id(VALUE_TRAIT_NAME);
     let definition = env.trait_def(value_trait);
     let layout_entries =
@@ -410,7 +454,10 @@ pub(super) fn emit(
                 definition.dictionary_associated_const_index(index),
             )
         });
-    let mut pending = vec![entry];
+    let mut pending = roots
+        .iter()
+        .map(|&root| program.direct_entry(root))
+        .collect::<Vec<_>>();
     let mut seen = FxHashSet::default();
     let mut bodies = Vec::new();
     let mut natives = FxHashMap::default();
@@ -712,7 +759,14 @@ pub(super) fn emit(
         });
     }
     let mut strings = StringLiterals::default();
-    for (id, body, signature, selections) in &bodies {
+    let mut names = FunctionNames::new(session, imports);
+    let mut source_map = Vec::new();
+    for (index, (id, body, signature, selections)) in bodies.iter().enumerate() {
+        names.push(format!(
+            "{}::{}",
+            module_path(session, id.module),
+            body.name
+        ));
         functions.function(WasmTypeId::new(types.len()).as_u32());
         types.ty().function(signature.params(), signature.results());
         let emitted = Body::new(
@@ -734,12 +788,26 @@ pub(super) fn emit(
         )
         .and_then(Body::emit)
         .map_err(|reason| diagnostic(*id, body, &reason))?;
-        code.function(&emitted);
+        code.function(&emitted.0);
+        source_map.extend(
+            emitted
+                .1
+                .into_iter()
+                .map(|(bytes, span)| CodeSourceMapEntry {
+                    body: index,
+                    bytes,
+                    span,
+                }),
+        );
     }
     let adapter_base = WasmFunctionId::from_index(imports.functions().len() + bodies.len());
     for &(id, entry) in &adapters {
         let definition = program.dictionary(id).unwrap();
         let (ty, abi) = &entry_abis[&(definition.trait_id(), entry)];
+        names.push(format!(
+            "<dictionary adapter {}>",
+            dictionary_entry_name(env, definition.trait_id(), entry)
+        ));
         functions.function(ty.as_u32());
         code.function(&dictionary_adapter(
             program, id, entry, abi, &callees, session, imports,
@@ -747,6 +815,12 @@ pub(super) fn emit(
     }
     for &(target, captures) in &callables.entries {
         let arity = callable::visible_arity(callees[&program.direct_entry(target)].1, captures)?;
+        names.push(format!(
+            "<callable adapter {}>",
+            program
+                .function(program.direct_entry(target))
+                .map_or_else(|| format!("{target:?}"), |body| body.name.to_string())
+        ));
         functions.function(callable_entries.signatures[&arity].as_u32());
         code.function(&callable::adapter(
             program,
@@ -765,10 +839,16 @@ pub(super) fn emit(
             .len()
             .checked_sub(1)
             .ok_or("selected callable dictionary arity")?;
+        names.push(format!(
+            "<callable adapter {}>",
+            dictionary_entry_name(env, entry.0, entry.1)
+        ));
         functions.function(callable_entries.signatures[&arity].as_u32());
         code.function(&callable::selected_adapter(env, entry, *ty, abi)?);
     }
     if let Some(methods) = callable_entries.value_methods {
+        names.push("<callable clone>".into());
+        names.push("<callable drop>".into());
         functions.function(types.len());
         types.ty().function([ValType::I32], [ValType::I32]);
         code.function(&callable::clone_entry(imports, methods.clone));
@@ -807,31 +887,35 @@ pub(super) fn emit(
             &ConstExpr::i32_const(0),
         );
     }
-    let (entry_index, entry_signature) = &callees[&entry];
-    let mut setup_index = WasmFunctionId::from_index(
+    let mut next_index = WasmFunctionId::from_index(
         callable_base.as_index() + callable_count + if emit_callable_glue { 2 } else { 0 },
     );
-    // Only fallible entries need a host adapter: internal status returns become a Rust error
-    // through the outer invocation boundary, without changing the scalar host C signature.
-    if entry_signature.fallible {
-        debug_assert_eq!(host_parameters.len(), entry_signature.parameters.len());
-        functions.function(WasmTypeId::new(types.len()).as_u32());
-        types.ty().function(
-            host_parameters.iter().copied().map(ScalarType::wasm),
-            result_as_wasm(result),
-        );
-        code.function(&entry_wrapper(*entry_index, entry_signature, result));
-        exports.export("entry", ExportKind::Func, setup_index.as_u32());
-        setup_index = WasmFunctionId::from_index(setup_index.as_index() + 1);
-    } else {
-        exports.export("entry", ExportKind::Func, entry_index.as_u32());
+    for export in &host_exports {
+        let (index, signature) = &callees[&program.direct_entry(export.function)];
+        // Only fallible entries need a host adapter: internal status returns become a Rust error
+        // through the outer invocation boundary, without changing the scalar host C signature.
+        if signature.fallible {
+            debug_assert_eq!(export.parameters.len(), signature.parameters.len());
+            names.push(format!("<host entry {}>", export.name));
+            functions.function(WasmTypeId::new(types.len()).as_u32());
+            types.ty().function(
+                export.parameters.iter().copied().map(ScalarType::wasm),
+                result_as_wasm(export.result),
+            );
+            code.function(&entry_wrapper(*index, signature, export.result));
+            exports.export(&export.name, ExportKind::Func, next_index.as_u32());
+            next_index = WasmFunctionId::from_index(next_index.as_index() + 1);
+        } else {
+            exports.export(&export.name, ExportKind::Func, index.as_u32());
+        }
     }
     // Rust calls this setter directly at invocation boundaries. All state and diagnostics stay
     // in shared memory; no language values or per-call state are passed through JavaScript.
     functions.function(WasmTypeId::new(types.len()).as_u32());
     types.ty().function([ValType::I32], []);
     code.function(&setup());
-    exports.export("setup", ExportKind::Func, setup_index.as_u32());
+    names.push("<setup>".into());
+    exports.export(SETUP_EXPORT, ExportKind::Func, next_index.as_u32());
     let mut module = Module::new();
     module
         .section(&types)
@@ -841,13 +925,14 @@ pub(super) fn emit(
         .section(&globals)
         .section(&exports)
         .section(&elements)
-        .section(&code);
+        .section(&code)
+        .section(&names.finish());
     Ok(Emitted {
         bytes: module.finish(),
-        parameters: host_parameters,
         strings: strings.values.into_boxed_slice(),
-        result,
+        exports: host_exports,
         evidence,
+        source_map,
     })
 }
 
@@ -985,6 +1070,75 @@ fn setup() -> WasmFunction {
     }
     code.instruction(&I::End);
     code
+}
+
+/// The export of the invocation-state setter, alongside the host-callable functions.
+pub(super) const SETUP_EXPORT: &str = "setup";
+
+fn module_path(session: &CompilerSession, module: ModuleId) -> String {
+    session
+        .modules()
+        .path(module)
+        .map_or_else(|| format!("m{}", module.as_u32()), ToString::to_string)
+}
+
+fn dictionary_entry_name(
+    env: ModuleEnv<'_>,
+    trait_id: TraitId,
+    entry: TraitDictionaryEntryIndex,
+) -> String {
+    let definition = env.trait_def(trait_id);
+    let index = entry.as_index();
+    let entry = definition
+        .methods
+        .get(index)
+        .map(|(name, _)| *name)
+        .or_else(|| {
+            definition
+                .associated_consts
+                .get(index - definition.methods.len())
+                .map(|constant| constant.name)
+        })
+        .map_or_else(|| format!("#{index}"), |name| name.to_string());
+    format!("{}::{entry}", definition.name)
+}
+
+/// Debug names of the functions, in function index order: imports first, then definitions.
+struct FunctionNames {
+    names: Vec<String>,
+}
+
+impl FunctionNames {
+    fn new(session: &CompilerSession, imports: &Imports) -> Self {
+        let mut names = imports
+            .functions()
+            .iter()
+            .map(|import| import.name.clone())
+            .collect::<Vec<_>>();
+        for (&id, index) in &imports.natives {
+            if let Some(name) = session
+                .expect_fresh_module(id.module)
+                .get_function_name_by_id(id.function)
+            {
+                names[index.as_index()] = format!("{}::{name}", module_path(session, id.module));
+            }
+        }
+        Self { names }
+    }
+
+    fn push(&mut self, name: String) {
+        self.names.push(name);
+    }
+
+    fn finish(self) -> NameSection {
+        let mut map = NameMap::new();
+        for (index, name) in self.names.iter().enumerate() {
+            map.append(index as u32, name);
+        }
+        let mut section = NameSection::new();
+        section.functions(&map);
+        section
+    }
 }
 
 fn diagnostic(id: FunctionId, body: &Function, reason: &str) -> String {

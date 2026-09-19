@@ -40,7 +40,7 @@ use super::{
     callable_environment::LIVE_ENVIRONMENTS as LIVE_CALLABLE_ENVIRONMENTS,
     emit,
     evidence::{BUILT_ENVIRONMENTS, DictionaryDescriptor, LIVE_ENVIRONMENTS},
-    execution::InvocationState,
+    execution::{ENTRY_EXPORT, InvocationState},
 };
 
 thread_local! { static DROP_LOG: Cell<isize> = const { Cell::new(0) }; }
@@ -616,6 +616,28 @@ fn wasm_codegen_typed_binding_and_direct_calls() {
             .unwrap(),
         7
     );
+    // Entries need no source name: the top-level expression is compiler-generated.
+    let module = session
+        .compile(
+            "fn compute() -> int { 7 }\ncompute() + 1",
+            "wasm_test",
+            Path::single(ustr("wasm_test")),
+        )
+        .unwrap()
+        .module_id;
+    let expression = session
+        .expect_fresh_module(module)
+        .get_local_function_id(ustr("<expr>"))
+        .unwrap();
+    assert_eq!(
+        CompiledProgram::compile(&session, FunctionId::new(module, expression))
+            .unwrap()
+            .instantiate::<(), isize>()
+            .unwrap()
+            .run((), WasmLimits::default())
+            .unwrap(),
+        8
+    );
     let entry = compile(
         &mut session,
         "struct Empty {} fn compute() -> Empty { Empty {} }",
@@ -1004,10 +1026,17 @@ fn wasm_codegen_inactive_entry_does_not_write_memory() {
     );
     let program = session.prepare_physical_program(entry.module).unwrap();
     let mut imports = Imports::new().unwrap();
-    let emitted = emit::emit(&program, entry, &mut imports, &session).unwrap();
+    let emitted = emit::emit(
+        &program,
+        &[entry],
+        &[(entry, ENTRY_EXPORT.into())],
+        &mut imports,
+        &session,
+    )
+    .unwrap();
     let module = WebAssembly::Module::new(&Uint8Array::from(emitted.bytes.as_slice())).unwrap();
     let instance = WebAssembly::Instance::new(&module, imports.object()).unwrap();
-    let entry: JsFunction = Reflect::get(&instance.exports(), &"entry".into())
+    let entry: JsFunction = Reflect::get(&instance.exports(), &ENTRY_EXPORT.into())
         .unwrap()
         .dyn_into()
         .unwrap();

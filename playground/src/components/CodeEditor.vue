@@ -143,14 +143,18 @@ function refreshIr() {
 		return;
 	}
 	try {
-		const ir = (props.executionMode === "physical-mir"
-			? compiler.physical_mir_text()
-			: compiler.mir_text(props.executionMode === "optimized-mir")) as IrText;
+		const ir = (props.executionMode === "wasm"
+			? compiler.wasm_text()
+			: props.executionMode === "physical-mir"
+				? compiler.physical_mir_text()
+				: compiler.mir_text(props.executionMode === "optimized-mir")) as IrText;
 		emit("irChanged", ir.text === "" ? undefined : ir);
 	} catch (error) {
-		emit("irChanged", props.executionMode === "physical-mir"
-			? { text: `Unable to prepare MIR: ${String(error)}`, source_map: [] }
-			: undefined);
+		emit("irChanged", props.executionMode === "wasm"
+			? { text: `Unable to generate Wasm: ${String(error)}`, source_map: [] }
+			: props.executionMode === "physical-mir"
+				? { text: `Unable to prepare MIR: ${String(error)}`, source_map: [] }
+				: undefined);
 	}
 }
 
@@ -165,6 +169,9 @@ const setText = (newText: string) => {
 };
 
 const runCode = (executionMode: ExecutionMode = props.executionMode) => {
+	if (executionMode === "wasm") {
+		return "Wasm execution is not available in the playground yet; this mode only shows the generated code.";
+	}
 	try {
 		const result = executionMode === "hir"
 			? compiler.run_expr()

@@ -192,6 +192,7 @@ onMounted(() => {
 			v-if="isIrVisible"
 			:ir="ir"
 			:title="irTitle"
+			:language="executionMode === 'wasm' ? 'wasm' : 'mir'"
 			:source-selection="sourceSelection"
 			@source-selected="selectSource"
 		/>
