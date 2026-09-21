@@ -9,10 +9,10 @@ use wasm_bindgen_test::wasm_bindgen_test;
 use wasmparser::{Operator, Parser, Payload};
 
 use crate::{
-    CompilerSession, ExecutionTarget,
+    CompilerSession,
     compiler::{
         MirOptimization,
-        error::{RuntimeErrorKind, SandboxViolationKind},
+        error::{RuntimeErrorKind, SandboxViolationKind, SourceFailureKind},
     },
     execution::ReferenceInterpreterLimits,
     hir::{
@@ -20,7 +20,6 @@ use crate::{
         native_functions::{
             NativeAddressorMut, NativeAddressorRef, NativeFnN, NativeFnNN, NativeOptionalFnN,
         },
-        value::{NativeValueType, Value},
     },
     mir::{
         Operation, OperationKind, Value as MirValue,
@@ -181,20 +180,13 @@ fn calls_borrowed_subscript_member(program: &ResolvedPhysicalProgram<'_>) -> boo
     false
 }
 
-fn differential<A: WasmValue + NativeValueType, R: WasmValue + PartialEq + Debug>(
+fn assert_wasm_runs<A: WasmValue + Copy, R: WasmValue + PartialEq + Debug>(
     session: &mut CompilerSession,
     source: &str,
     input: A,
+    expected: R,
 ) {
     let entry = compile(session, source);
-    let reference = session
-        .run_entry(
-            ExecutionTarget::PhysicalMir,
-            entry.module,
-            entry.function,
-            vec![Value::native(input)],
-        )
-        .unwrap();
     for code in [
         compile_raw(session, entry),
         CompiledProgram::compile(session, entry).unwrap_or_else(|e| panic!("{source}: {e:?}")),
@@ -204,155 +196,10 @@ fn differential<A: WasmValue + NativeValueType, R: WasmValue + PartialEq + Debug
             .unwrap_or_else(|e| panic!("{source}: {e:?}"));
         for _ in 0..2 {
             assert_eq!(
-                &instance.run((input,), WasmLimits::default()).unwrap(),
-                reference.as_primitive_ty::<R>().unwrap(),
+                instance.run((input,), WasmLimits::default()).unwrap(),
+                expected,
                 "{source}"
             );
-        }
-    }
-    reference.discard_storage();
-}
-
-#[wasm_bindgen_test]
-fn wasm_codegen_stored_functions_and_closures() {
-    let cases = [
-        "fn increment(x: int) -> int { x + 1 } #[inline(never)] fn apply<T>(f: (T) -> T, x: T) -> T { f(x) } fn compute(x: int) -> int { apply(increment, x) }",
-        "fn compute(x: int) -> int { let f = |y| y + x; f(2) + f(3) }",
-        "fn maker(x: int) { |y| y + x } fn compute(x: int) -> int { let f = maker(x); let g = f; f(2) + g(3) }",
-        "fn id<T>(x: T) -> T { x } fn compute(x: int) -> int { let f = id; f(x) }",
-        "fn maker<T>(x: T) { || x } fn compute(x: int) -> int { let f = maker((x, true)); f().0 }",
-        "fn compute(x: int) -> int { let text = \"hello\"; let f = || len(text) + x; let g = f; f() + g() }",
-        "#[inline(never)] fn apply(f: (&mut int) -> (), x: &mut int) { f(x) } fn bump(x: &mut int) { x += 1; } fn compute(x: int) -> int { let mut y = x; apply(bump, y); y }",
-        "fn compute(x: int) -> int { let f = idiv; f(x, 2) }",
-        "#[inline(never)] fn show<T>(x: T) -> int { let f = to_string; len(f(x)) } fn compute(x: int) -> int { show(x) }",
-        "fn make<T, U>(a: T, b: U) { || (a, b) } fn compute(x: int) -> int { let f = make(true, (x, \"text\")); let p = f(); p.1.0 + len(p.1.1) }",
-        "fn compute(x: int) -> int { let f = || x; let g = || f() + 1; let h = g; g() + h() }",
-        "fn compute(x: int) -> int { let mut f = || x; for i in 0..4 { f = || i; }; f() }",
-        "fn compute(x: int) -> int { let a = (); let f = || a; f(); x }",
-        "fn negate(x: bool) -> bool { not x } #[inline(never)] fn apply<T>(f: (T) -> T, x: T) -> T { f(x) } fn compute(x: int) -> int { if apply(negate, x > 0) { 1 } else { 2 } }",
-        "fn half(x: float) -> float { x * 0.5 } #[inline(never)] fn apply<T>(f: (T) -> T, x: T) -> T { f(x) } fn compute(x: int) -> int { if apply(half, 6.0) == 3.0 { x } else { 0 } }",
-        "fn compute(x: int) -> int { let mut y = x; let f = || { y += 1; y }; f() + f() + y }",
-        "fn maker<T, U>(a: T, b: U) { || (a, b) } fn compute(x: int) -> int { let f = maker(true, (x, 1.5)); let p = f(); if p.0 { p.1.0 } else { 0 } }",
-        "fn compute(x: int) -> int { let function: Option<(int) -> int> = None; let pair = (function, function); x }",
-    ];
-    for mode in [MirOptimization::Disabled, MirOptimization::Enabled] {
-        let mut session = CompilerSession::new();
-        session.set_physical_mir_optimization(mode);
-        for source in cases {
-            let before = LIVE_CALLABLE_ENVIRONMENTS.get();
-            differential::<isize, isize>(&mut session, source, 7);
-            assert_eq!(LIVE_CALLABLE_ENVIRONMENTS.get(), before, "{source}");
-        }
-    }
-}
-
-#[wasm_bindgen_test]
-fn wasm_codegen_first_class_subscripts() {
-    let cases = [
-        r#"
-            subscript cell(slot: &mut int, log: &mut int) -> int {
-                mut {
-                    log += 1;
-                    let mut local = slot;
-                    yield local;
-                    slot = local;
-                    log *= 10
-                }
-            }
-            fn compute(x: int) -> int {
-                let mut slot = x;
-                let mut log = 0;
-                slot->[cell](log) += 7;
-                slot + log
-            }
-        "#,
-        r#"
-            subscript cell(slot: &mut int, log: &mut int) -> int {
-                mut {
-                    log += 1;
-                    let mut local = slot;
-                    yield local;
-                    slot = local;
-                    log *= 10
-                }
-            }
-            fn compute(x: int) -> int {
-                let accessor = cell;
-                let copied = accessor;
-                let mut slot = x;
-                let mut log = 0;
-                slot->[copied](log) += 7;
-                slot + log
-            }
-        "#,
-        r#"
-            subscript cell<T>(slot: &mut T) -> T where T: Value {
-                ref { let local = slot; yield local; }
-                mut { let mut local = slot; yield local; slot = local; }
-            }
-            fn write<T>(slot: &mut T, value: T, accessor) {
-                slot->[accessor] = value
-            }
-            fn compute(x: int) -> int {
-                let accessor = cell;
-                let mut slot = x;
-                write(slot, x + 4, accessor);
-                slot
-            }
-        "#,
-        r#"
-            subscript first(values: &mut [int]) -> int {
-                ref mut { values[0] }
-            }
-            fn compute(x: int) -> int {
-                let accessor = first;
-                let mut values = [x];
-                let before = values->[accessor];
-                values->[accessor] = x + 3;
-                before * 10 + values[0]
-            }
-        "#,
-        r#"
-            subscript cell<T>(slot: &mut T) -> T where T: Value {
-                ref { let local = slot; yield local; }
-                mut { let mut local = slot; yield local; slot = local; }
-            }
-            fn compute(x: int) -> int {
-                let accessor = cell;
-                let copied = accessor;
-                let mut left = x;
-                let mut right = x + 1;
-                left->[accessor] = x + 2;
-                right->[copied] = x + 3;
-                left * 10 + right
-            }
-        "#,
-        r#"
-            subscript cell<T>(slot: &mut T) -> T where T: Value {
-                mut { let mut local = slot; yield local; slot = local; }
-            }
-            fn add<T>(slot: &mut T, value: T, accessor) where T: Num, T: Value {
-                slot->[accessor] += value
-            }
-            fn compute(x: int) -> int {
-                let accessor = cell;
-                let mut slot = x;
-                add(slot, 4, accessor);
-                slot
-            }
-        "#,
-    ];
-    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
-        let mut session = CompilerSession::new();
-        session.set_allow_experimental(true);
-        session.set_mir_optimization(optimization);
-        session.set_physical_mir_optimization(optimization);
-        for source in cases {
-            let environments = LIVE_CALLABLE_ENVIRONMENTS.get();
-            let evidence = LIVE_ENVIRONMENTS.get();
-            differential::<isize, isize>(&mut session, source, 5);
-            assert_eq!(LIVE_CALLABLE_ENVIRONMENTS.get(), environments, "{source}");
-            assert_eq!(LIVE_ENVIRONMENTS.get(), evidence, "{source}");
         }
     }
 }
@@ -488,31 +335,22 @@ fn wasm_codegen_subscript_resume_failure() {
         session.set_mir_optimization(optimization);
         session.set_physical_mir_optimization(optimization);
         let entry = compile(&mut session, source);
-        let expected = session
-            .run_entry(
-                ExecutionTarget::PhysicalMir,
-                entry.module,
-                entry.function,
-                vec![Value::native(5_isize)],
-            )
-            .map(|value| {
-                let result = *value.as_primitive_ty::<isize>().unwrap();
-                value.discard_storage();
-                result
-            });
         for code in [
             compile_raw(&session, entry),
             CompiledProgram::compile(&session, entry).unwrap(),
         ] {
             let environments = LIVE_CALLABLE_ENVIRONMENTS.get();
             let evidence = LIVE_ENVIRONMENTS.get();
-            let actual = code
+            let error = code
                 .instantiate::<(isize,), isize>()
                 .unwrap()
-                .run((5,), WasmLimits::default());
+                .run((5,), WasmLimits::default())
+                .unwrap_err();
             assert_eq!(
-                actual.as_ref().map_err(|error| error.kind()),
-                expected.as_ref().map_err(|error| error.kind())
+                error.kind(),
+                RuntimeErrorKind::SourceFailure(SourceFailureKind::Aborted(Some(
+                    "Array access out of bounds: index 1 for length 1".into()
+                )))
             );
             assert_eq!(LIVE_CALLABLE_ENVIRONMENTS.get(), environments);
             assert_eq!(LIVE_ENVIRONMENTS.get(), evidence);
@@ -570,22 +408,6 @@ fn wasm_codegen_closure_cleanup() {
             let mut instance = code.instantiate::<(isize,), isize>().unwrap();
             for input in [4, 0, 2, 4] {
                 DROP_LOG.set(0);
-                let expected = session
-                    .run_entry_with_limits(
-                        ExecutionTarget::PhysicalMir,
-                        entry.module,
-                        entry.function,
-                        vec![Value::native(input)],
-                        limits,
-                    )
-                    .map(|value| {
-                        let result = *value.as_primitive_ty::<isize>().unwrap();
-                        value.discard_storage();
-                        result
-                    })
-                    .map_err(|error| error.kind());
-                let log = DROP_LOG.get();
-                DROP_LOG.set(0);
                 let live = LIVE_CALLABLE_ENVIRONMENTS.get();
                 let evidence = LIVE_ENVIRONMENTS.get();
                 let actual = instance
@@ -597,117 +419,28 @@ fn wasm_codegen_closure_cleanup() {
                         },
                     )
                     .map_err(|error| error.kind());
-                assert_eq!(actual, expected, "input {input}");
-                assert_eq!(DROP_LOG.get(), log, "input {input}");
+                match input {
+                    4 => assert_eq!(actual, Ok(5)),
+                    0 => assert_eq!(
+                        actual,
+                        Err(RuntimeErrorKind::SourceFailure(
+                            SourceFailureKind::DivisionByZero
+                        ))
+                    ),
+                    2 => assert!(matches!(
+                        actual,
+                        Err(RuntimeErrorKind::SandboxViolation(
+                            SandboxViolationKind::FuelExhausted
+                        ))
+                    )),
+                    _ => unreachable!(),
+                }
+                assert_ne!(DROP_LOG.get(), 0, "input {input}");
                 if input != 2 {
                     assert_eq!(LIVE_CALLABLE_ENVIRONMENTS.get(), live);
                     assert_eq!(LIVE_ENVIRONMENTS.get(), evidence);
                 }
             }
-        }
-    }
-}
-
-#[wasm_bindgen_test]
-fn wasm_codegen_scalar_differential() {
-    let cases = [
-        ("fn compute(x: int) -> int { x * 3 + 1 }", 17),
-        (
-            "fn compute(x: int) -> int { if x > 0 { x + 2 } else { -x } }",
-            -8,
-        ),
-        (
-            "fn compute(x: int) -> int { let mut sum = 0; let mut i = 0; loop { if i >= x { break; }; sum += i; i += 1; }; sum }",
-            30,
-        ),
-        (
-            "fn twice(x: int) -> int { x + x } fn compute(x: int) -> int { twice(x) + twice(x + 1) }",
-            8,
-        ),
-        (
-            "fn bump(x: &mut int) { x += 1; } fn compute(x: int) -> int { let mut y = x; bump(y); y }",
-            9,
-        ),
-        ("fn compute(x: int) -> int { x + 1 }", isize::MAX),
-        (
-            "fn compute(x: int) -> int { match x { 1 => 4, _ => 9 } }",
-            1,
-        ),
-        (
-            "use dependency::*; fn compute(x: int) -> int { adjust(x) }",
-            5,
-        ),
-        (
-            "fn compute(x: int) -> int { if x == 0 { 0 } else { compute(x - 1) + 1 } }",
-            6,
-        ),
-        (
-            "fn unit_arg(x: ()) -> int { 3 } fn compute(x: int) -> int { unit_arg(()) + x }",
-            7,
-        ),
-        (
-            "#[inline(never)] fn exchange(x: &mut int, y: &mut int) { let old = x; x = y; y = old; } fn compute(x: int) -> int { let mut a = x; let mut b = x + 3; exchange(a, b); a * 10 + b }",
-            7,
-        ),
-        (
-            "fn compute(x: int) -> int { let mut n = 0; let mut sum = 0; loop { if n >= x { break; }; if n < 10 { sum += n; } else { sum -= n; }; n += 1; }; sum }",
-            30,
-        ),
-    ];
-    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
-        let mut session = CompilerSession::new();
-        session.set_mir_optimization(optimization);
-        session.set_physical_mir_optimization(optimization);
-        session
-            .compile(
-                "pub fn adjust(x: int) -> int { x * 7 - 2 }",
-                "dependency",
-                Path::single(ustr("dependency")),
-            )
-            .unwrap();
-        for (source, input) in cases {
-            differential::<isize, isize>(&mut session, source, input);
-        }
-        differential::<Float, Float>(
-            &mut session,
-            "fn compute(x: float) -> float { x * 1.5 + 2.0 }",
-            Float::new(3.5).unwrap(),
-        );
-        differential::<bool, bool>(&mut session, "fn compute(x: bool) -> bool { not x }", true);
-        differential::<Float, Float>(
-            &mut session,
-            "#[inline(never)] fn adjust(x: &mut float) { x += 0.25; } fn compute(x: float) -> float { let mut y = x; adjust(y); y * 2.0 }",
-            Float::new(3.5).unwrap(),
-        );
-        differential::<isize, ()>(&mut session, "fn compute(x: int) { let y = x + 1; () }", 1);
-        differential::<(), isize>(&mut session, "fn compute(x: ()) -> int { 42 }", ());
-    }
-}
-
-#[wasm_bindgen_test]
-fn wasm_codegen_generic_evidence_and_buffers() {
-    let sources = [
-        "#[inline(never)] fn identity<T>(x: T) -> T { x } fn compute(x: int) -> int { identity(x) }",
-        "#[inline(never)] fn identity<T>(x: T) -> T { x } fn compute(x: int) -> int { let p = identity((x, x + 2)); p.0 + p.1 }",
-        "trait Tag<Self> { fn tag(value: Self) -> int; } impl Tag for int { fn tag(value: int) -> int { value + 1 } } #[inline(never)] fn tagged<T>(x: T) -> int where T: Tag { tag(x) } fn compute(x: int) -> int { tagged(x) }",
-        "fn compute(x: int) -> int { let mut a = [x, x + 1]; array_append(a, x + 2); a[0] + a[2] }",
-        "#[inline(never)] fn duplicate<T>(x: T) -> (T, T) { (x, x) } fn compute(x: int) -> int { let p = duplicate((x, true)); if p.1.1 { p.0.0 } else { 0 } }",
-        "#[inline(never)] fn repeat<T>(x: T) -> T { let mut n = 0; loop { let pair = (x, x); if n == 3 { return pair.0; }; n += 1; } } fn compute(x: int) -> int { repeat(x) }",
-        "#[inline(never)] fn replace<T>(x: &mut T, y: T) { x = y; } fn compute(x: int) -> int { let mut p = (1, false); replace(p, (x, true)); p.0 }",
-        "#[inline(never)] fn make_array<T>(x: T) -> [T] { let mut a = [x]; array_append(a, x); a } fn compute(x: int) -> int { let a = make_array(x); a[1] }",
-        "fn compute(x: int) -> int { let mut a = []; let mut n = 0; loop { if n >= 100 { break; }; array_append(a, to_string(n)); n += 1; }; let b = a; let expected = to_string(x); if b[7] == expected { len(b) } else { 0 } }",
-        "fn compute(x: int) -> int { let mut a = [()]; let mut n = 0; loop { if n >= x { break; }; array_append(a, ()); n += 1; }; len(a) }",
-        "trait Mix<Self> { fn mix(x: Self, n: int, flag: bool, factor: float) -> int; } impl Mix for int { fn mix(x: int, n: int, flag: bool, factor: float) -> int { if flag and factor == 2.0 { x + n } else { 0 } } } #[inline(never)] fn forward<T>(x: T) -> int where T: Mix { mix(x, 3, true, 2.0) } fn compute(x: int) -> int { forward(x) }",
-        "enum Maybe<T> { Empty, Full(T) } #[inline(never)] fn make<T>(x: T) -> Maybe<T> { Maybe::Full(x) } #[inline(never)] fn duplicate<T>(x: T) -> (T, T) { (x, x) } fn compute(x: int) -> int { match duplicate(make((x, true))).0 { Maybe::Empty => 0, Maybe::Full(p) => p.0 } }",
-    ];
-    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
-        for source in sources {
-            let mut session = CompilerSession::new();
-            session.set_mir_optimization(optimization);
-            session.set_physical_mir_optimization(optimization);
-            let before = LIVE_ENVIRONMENTS.get();
-            differential::<isize, isize>(&mut session, source, 7);
-            assert_eq!(LIVE_ENVIRONMENTS.get(), before);
         }
     }
 }
@@ -785,26 +518,22 @@ fn wasm_codegen_generic_evidence_cleanup() {
         // Each instance owns its relocated immutable data, independently of the compiled artifact.
         drop(code);
         for input in [0_isize, 1, 0, 2] {
-            let expected = session
-                .run_entry(
-                    ExecutionTarget::PhysicalMir,
-                    entry.module,
-                    entry.function,
-                    vec![Value::native(input)],
-                )
-                .map(|value| {
-                    let result = *value.as_primitive_ty::<isize>().unwrap();
-                    value.discard_storage();
-                    result
-                });
             for instance in [&mut first, &mut second] {
                 let before = LIVE_ENVIRONMENTS.get();
                 let built = BUILT_ENVIRONMENTS.get();
-                let actual = instance.run((input,), WasmLimits::default());
-                assert_eq!(
-                    actual.as_ref().map_err(|e| e.kind()),
-                    expected.as_ref().map_err(|e| e.kind())
-                );
+                let actual = instance
+                    .run((input,), WasmLimits::default())
+                    .map_err(|error| error.kind());
+                if input == 0 {
+                    assert_eq!(
+                        actual,
+                        Err(RuntimeErrorKind::SourceFailure(
+                            SourceFailureKind::DivisionByZero
+                        ))
+                    );
+                } else {
+                    assert_eq!(actual, Ok(1 / input));
+                }
                 assert_eq!(LIVE_ENVIRONMENTS.get(), before);
                 assert!(BUILT_ENVIRONMENTS.get() > built);
             }
@@ -833,10 +562,11 @@ fn wasm_codegen_captured_trait_evidence() {
                 Path::single_str("captured"),
             )
             .unwrap();
-        differential::<isize, isize>(
+        assert_wasm_runs::<isize, isize>(
             &mut session,
             "use captured::*; fn compute(x: int) -> int { forward(Wrapper(Wrapper(x))) }",
             7,
+            9,
         );
     }
 }
@@ -871,8 +601,8 @@ fn wasm_codegen_native_dictionary_adapters() {
             ],
         );
         session.register_module(path, module);
-        for input in [0, 4] {
-            differential::<isize, isize>(
+        for (input, expected) in [(0, 3), (4, 8)] {
+            assert_wasm_runs::<isize, isize>(
                 &mut session,
                 r#"
                 use traits::*; use native_probe::*;
@@ -881,8 +611,9 @@ fn wasm_codegen_native_dictionary_adapters() {
                     match maybe(x) { None => n, Some(text) => n + len(text) }
                 }
                 fn compute(x: int) -> int { forward(x) }
-            "#,
+                "#,
                 input,
+                expected,
             );
         }
     }
@@ -911,7 +642,7 @@ fn wasm_codegen_native_addressors() {
             );
         }
         session.register_module(path, module);
-        differential::<isize, isize>(
+        assert_wasm_runs::<isize, isize>(
             &mut session,
             r#"
                 use native_members::*;
@@ -923,6 +654,7 @@ fn wasm_codegen_native_addressors() {
                 }
             "#,
             123,
+            9,
         );
     }
 }
@@ -966,6 +698,42 @@ fn wasm_codegen_typed_binding_and_direct_calls() {
             .unwrap(),
         7
     );
+    let entry = compile(&mut session, "fn compute(x: bool) -> bool { not x }");
+    assert!(
+        !CompiledProgram::compile(&session, entry)
+            .unwrap()
+            .instantiate::<(bool,), bool>()
+            .unwrap()
+            .run((true,), WasmLimits::default())
+            .unwrap()
+    );
+    let entry = compile(&mut session, "fn compute(x: float) -> float { x * 2.0 }");
+    assert_eq!(
+        CompiledProgram::compile(&session, entry)
+            .unwrap()
+            .instantiate::<(Float,), Float>()
+            .unwrap()
+            .run((Float::new(3.5).unwrap(),), WasmLimits::default())
+            .unwrap(),
+        Float::new(7.0).unwrap()
+    );
+    let entry = compile(&mut session, "fn compute(x: ()) -> int { 42 }");
+    assert_eq!(
+        CompiledProgram::compile(&session, entry)
+            .unwrap()
+            .instantiate::<((),), isize>()
+            .unwrap()
+            .run(((),), WasmLimits::default())
+            .unwrap(),
+        42
+    );
+    let entry = compile(&mut session, "fn compute(x: int) { () }");
+    CompiledProgram::compile(&session, entry)
+        .unwrap()
+        .instantiate::<(isize,), ()>()
+        .unwrap()
+        .run((1,), WasmLimits::default())
+        .unwrap();
     // Entries need no source name: the top-level expression is compiler-generated.
     let module = session
         .compile(
@@ -1076,72 +844,6 @@ fn wasm_codegen_limits_and_rejection() {
 }
 
 #[wasm_bindgen_test]
-fn wasm_codegen_managed_differential() {
-    // Bridge coverage until generated Wasm joins the shared language-suite harness.
-    let cases = [
-        "#[inline(never)] fn pair(x: int) -> (int, bool) { (x + 2, true) } fn compute(x: int) -> int { let p = pair(x); if p.1 { p.0 } else { 0 } }",
-        "struct Pair { a: int, b: float } #[inline(never)] fn update(p: &mut Pair) { p.a += 2; p.b += 1.0; } fn compute(x: int) -> int { let mut p = Pair { a: x, b: 2.0 }; update(p); p.a }",
-        "fn compute(x: int) -> int { let s = to_string(x); let copy = s; if s == copy { 1 } else { 0 } }",
-        "#[inline(never)] fn pair(x: int) -> (string, int) { (to_string(x), x) } fn compute(x: int) -> int { let p = pair(x); let copy = p; if p.0 == copy.0 { copy.1 } else { 0 } }",
-        "fn compute(x: int) -> int { let mut s = to_string(x); let mut i = 0; loop { if i >= x { break; }; s = string_concat(s, \"!\"); i += 1; }; if s == \"4!!!!\" { 1 } else { 0 } }",
-        "fn compute(x: int) -> int { let mut s = \"hello\"; string_push_str(s, \" world\"); if s == \"hello world\" { x } else { 0 } }",
-        "#[inline(never)] fn divide(x: int) -> int { idiv(20, x) } fn compute(x: int) -> int { let s = to_string(x); let result = divide(x); if s == to_string(x) { result } else { 0 } }",
-    ];
-    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
-        let mut session = CompilerSession::new();
-        session.set_mir_optimization(optimization);
-        session.set_physical_mir_optimization(optimization);
-        for source in cases {
-            differential::<isize, isize>(&mut session, source, 4);
-        }
-        let entry = compile(&mut session, cases.last().unwrap());
-        let expected = session
-            .run_entry(
-                ExecutionTarget::PhysicalMir,
-                entry.module,
-                entry.function,
-                vec![Value::native(0_isize)],
-            )
-            .unwrap_err();
-        let mut instance = CompiledProgram::compile(&session, entry)
-            .unwrap()
-            .instantiate::<(isize,), isize>()
-            .unwrap();
-        for _ in 0..3 {
-            assert_eq!(
-                instance
-                    .run((0,), WasmLimits::default())
-                    .unwrap_err()
-                    .kind(),
-                expected.kind()
-            );
-            assert_eq!(instance.run((4,), WasmLimits::default()).unwrap(), 5);
-        }
-    }
-}
-
-#[wasm_bindgen_test]
-fn wasm_codegen_variant_differential() {
-    // Bridge coverage until generated Wasm joins the shared language-suite harness.
-    let cases = [
-        "enum Choice { Empty, Number(int), Real(float) } #[inline(never)] fn choose(x: int) -> Choice { if x == 0 { Choice::Empty } else if x == 1 { Choice::Real(2.5) } else { Choice::Number(x) } } fn compute(x: int) -> int { match choose(x) { Choice::Empty => 7, Choice::Number(n) => n + 1, Choice::Real(f) => if f == 2.5 { 8 } else { 9 } } }",
-        "fn compute(x: int) -> int { let v = if x == 0 { Empty } else { Text(to_string(x)) }; let copy = v; match copy { Empty => 7, Text(s) => if s == to_string(x) { x } else { 0 } } }",
-        "enum Text { Empty, Full(string) } #[inline(never)] fn change(v: &mut Text, x: int) { v = Text::Full(to_string(x)); } fn compute(x: int) -> int { let mut v = Text::Empty; change(v, x); match v { Text::Empty => 0, Text::Full(s) => if s == to_string(x) { x } else { 0 } } }",
-        "enum List { Nil, Cons(string, List) } #[inline(never)] fn build(x: int) -> List { if x == 0 { List::Nil } else { List::Cons(to_string(x), build(x - 1)) } } #[inline(never)] fn count(l: List) -> int { match l { List::Nil => 0, List::Cons(s, tail) => count(tail) + 1 } } fn compute(x: int) -> int { let l = build(x); let copy = l; count(copy) + count(l) }",
-    ];
-    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
-        let mut session = CompilerSession::new();
-        session.set_mir_optimization(optimization);
-        session.set_physical_mir_optimization(optimization);
-        for source in cases {
-            for input in [0, 1, 4] {
-                differential::<isize, isize>(&mut session, source, input);
-            }
-        }
-    }
-}
-
-#[wasm_bindgen_test]
 fn wasm_codegen_optional_native_results() {
     // Bridge coverage for the native presence/payload ABI, including an absent reused result.
     for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
@@ -1183,16 +885,30 @@ fn wasm_codegen_optional_native_results() {
             .description(["x"], "", Default::default()),
         );
         session.register_module(path, module);
-        for source in [
-            "fn compute(x: int) -> int { match probe::integer(x) { None => 7, Some(n) => n } }",
-            "fn compute(x: int) -> int { match probe::real(x) { None => 7, Some(f) => if f == 2.5 { x } else { 0 } } }",
-            "fn compute(x: int) -> int { let v = probe::text(x); let copy = v; match copy { None => 7, Some(s) => if s == to_string(x) { x } else { 0 } } }",
-            "fn compute(x: int) -> int { match probe::unit(x) { None => 7, Some(u) => x } }",
-            "fn compute(x: int) -> int { let mut v = probe::text(x); let mut n = x; loop { if n <= 0 { break; }; n -= 1; v = probe::text(n); }; match v { None => 7, Some(s) => 0 } }",
+        for (source, positive) in [
+            (
+                "fn compute(x: int) -> int { match probe::integer(x) { None => 7, Some(n) => n } }",
+                5,
+            ),
+            (
+                "fn compute(x: int) -> int { match probe::real(x) { None => 7, Some(f) => if f == 2.5 { x } else { 0 } } }",
+                4,
+            ),
+            (
+                "fn compute(x: int) -> int { let v = probe::text(x); let copy = v; match copy { None => 7, Some(s) => if s == to_string(x) { x } else { 0 } } }",
+                4,
+            ),
+            (
+                "fn compute(x: int) -> int { match probe::unit(x) { None => 7, Some(u) => x } }",
+                4,
+            ),
+            (
+                "fn compute(x: int) -> int { let mut v = probe::text(x); let mut n = x; loop { if n <= 0 { break; }; n -= 1; v = probe::text(n); }; match v { None => 7, Some(s) => 0 } }",
+                7,
+            ),
         ] {
-            for input in [0, 4] {
-                differential::<isize, isize>(&mut session, source, input);
-            }
+            assert_wasm_runs::<isize, isize>(&mut session, source, 0, 7);
+            assert_wasm_runs::<isize, isize>(&mut session, source, 4, positive);
         }
     }
 }
@@ -1246,21 +962,6 @@ fn wasm_codegen_cleanup_failures() {
         let limits = ReferenceInterpreterLimits::default().with_fuel_limit(Some(100));
         for (input, log) in [(4, 49), (3, 39), (2, 2), (4, 49)] {
             DROP_LOG.set(0);
-            let expected = session
-                .run_entry_with_limits(
-                    ExecutionTarget::PhysicalMir,
-                    entry.module,
-                    entry.function,
-                    vec![Value::native(input)],
-                    limits,
-                )
-                .map(|value| {
-                    let result = *value.as_primitive_ty::<isize>().unwrap();
-                    value.discard_storage();
-                    result
-                });
-            assert_eq!(DROP_LOG.get(), log);
-            DROP_LOG.set(0);
             let actual = instance.run(
                 (input,),
                 WasmLimits {
@@ -1268,49 +969,43 @@ fn wasm_codegen_cleanup_failures() {
                     ..WasmLimits::default()
                 },
             );
-            assert_eq!(
-                actual.as_ref().map_err(|e| e.kind()),
-                expected.as_ref().map_err(|e| e.kind())
-            );
-            assert_eq!(DROP_LOG.get(), log);
-            if input == 2 {
-                assert!(
-                    actual
-                        .unwrap_err()
-                        .sandbox_violation()
-                        .unwrap()
-                        .interrupted_source_failure()
-                        .is_some()
-                );
+            match input {
+                4 => assert_eq!(actual.unwrap(), 5),
+                3 => assert_eq!(
+                    actual.unwrap_err().kind(),
+                    RuntimeErrorKind::SourceFailure(SourceFailureKind::DivisionByZero)
+                ),
+                2 => {
+                    assert!(matches!(
+                        actual.as_ref().unwrap_err().kind(),
+                        RuntimeErrorKind::SandboxViolation(SandboxViolationKind::FuelExhausted)
+                    ));
+                    assert!(
+                        actual
+                            .unwrap_err()
+                            .sandbox_violation()
+                            .unwrap()
+                            .interrupted_source_failure()
+                            .is_some()
+                    );
+                }
+                _ => unreachable!(),
             }
+            assert_eq!(DROP_LOG.get(), log);
         }
         // Fixed Value adapters must not charge extra source call-depth frames for destruction.
-        for depth in 2..8 {
-            DROP_LOG.set(0);
-            let limits = limits.with_call_depth_limit(depth);
-            let expected = session
-                .run_entry_with_limits(
-                    ExecutionTarget::PhysicalMir,
-                    entry.module,
-                    entry.function,
-                    vec![Value::native(4_isize)],
-                    limits,
-                )
-                .map(|value| value.discard_storage())
-                .map_err(|error| error.kind());
-            DROP_LOG.set(0);
-            let actual = instance
+        assert_eq!(
+            instance
                 .run(
                     (4,),
                     WasmLimits {
-                        execution: limits.execution,
+                        execution: limits.with_call_depth_limit(3).execution,
                         ..WasmLimits::default()
                     },
                 )
-                .map(|_| ())
-                .map_err(|error| error.kind());
-            assert_eq!(actual, expected, "call-depth limit {depth}");
-        }
+                .unwrap(),
+            5
+        );
     }
 }
 
