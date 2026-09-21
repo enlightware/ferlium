@@ -3100,12 +3100,14 @@ fn record_constructed_dictionary(
 }
 
 #[derive(Clone, Copy)]
-struct ConstructedSubscript {
-    definition: SubscriptId,
-    capture_count: usize,
+pub(crate) struct ConstructedSubscript {
+    pub(crate) definition: SubscriptId,
+    pub(crate) capture_count: usize,
 }
 
-fn constructed_subscript_definitions(body: &Function) -> FxHashMap<ValueId, ConstructedSubscript> {
+pub(crate) fn constructed_subscript_definitions(
+    body: &Function,
+) -> FxHashMap<ValueId, ConstructedSubscript> {
     let operations = body
         .blocks()
         .flat_map(|block| {
@@ -3477,7 +3479,7 @@ fn static_dictionary_definition(
     }
 }
 
-fn static_subscript(
+pub(crate) fn static_subscript(
     value: &Value,
     constructed: &FxHashMap<ValueId, ConstructedSubscript>,
 ) -> Option<ConstructedSubscript> {

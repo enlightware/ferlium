@@ -7,6 +7,9 @@
 use std::cell::Cell;
 use std::{alloc::Layout, ptr};
 
+#[cfg(test)]
+use wasm_bindgen_test::wasm_bindgen_test;
+
 use super::{evidence, runtime};
 use crate::mir::physical::DictionaryReference;
 
@@ -97,6 +100,48 @@ pub(super) unsafe extern "C" fn copy_shell(source: *const Environment) -> *mut E
     }
 }
 
+/// Copy a closed subscript's evidence captures into its owned callable environment.
+///
+/// # Safety
+/// `data` is the live immutable image and `source` is a valid subscript evidence reference.
+pub(super) unsafe extern "C" fn materialize_subscript(
+    data: *const u8,
+    source: *const DictionaryReference,
+) -> *mut Environment {
+    // SAFETY: the descriptor fixes every source capture offset and representation.
+    unsafe {
+        let source = source.read();
+        let descriptor = evidence::descriptor(data, source.descriptor);
+        if descriptor.captures == 0 {
+            return ptr::null_mut();
+        }
+        let result = allocate(0, 1, descriptor.captures, 0);
+        let fields = ptr::from_ref(descriptor)
+            .byte_add(size_of::<evidence::DictionaryDescriptor>())
+            .cast::<u32>();
+        for index in 0..descriptor.captures as usize {
+            let field = fields.add(index).read();
+            let target = result
+                .byte_add(Environment::hidden_offset(index) as usize)
+                .cast::<u8>();
+            if field & (1 << 31) != 0 {
+                target.write(
+                    (source.environment as *const u8)
+                        .add((field & !(1 << 31)) as usize)
+                        .read(),
+                );
+            } else {
+                let source = (source.environment as *const u8)
+                    .add(field as usize)
+                    .cast::<DictionaryReference>();
+                target.cast::<DictionaryReference>().write(source.read());
+                evidence::retain(target.cast());
+            }
+        }
+        result
+    }
+}
+
 /// Release evidence and storage after the capture tuple has been destroyed.
 ///
 /// # Safety
@@ -122,4 +167,38 @@ pub(super) unsafe extern "C" fn release(data: *const u8, environment: *mut Envir
 #[cfg(test)]
 thread_local! {
     pub(super) static LIVE_ENVIRONMENTS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+#[wasm_bindgen_test]
+fn wasm_codegen_materialized_subscript_copies_storage_flag_captures() {
+    let before = LIVE_ENVIRONMENTS.get();
+    let data = [
+        4_u32, // Descriptor zero starts after this prefix entry.
+        8,     // Environment size.
+        8,     // Environment alignment.
+        1,     // Capture count.
+        0,     // Entry table (unused by materialization).
+        1 << 31,
+    ];
+    let flag = 1_u8;
+    let source = DictionaryReference {
+        descriptor: 0,
+        environment: ptr::from_ref(&flag) as usize,
+    };
+    // SAFETY: the local image describes one flag byte at offset zero and remains live throughout.
+    let environment = unsafe { materialize_subscript(data.as_ptr().cast(), &source) };
+    // SAFETY: materialization allocated the descriptor's one zero-padded hidden slot.
+    assert_eq!(
+        unsafe {
+            environment
+                .byte_add(Environment::hidden_offset(0) as usize)
+                .cast::<u8>()
+                .read()
+        },
+        1
+    );
+    // SAFETY: no source values exist and this transfers the environment's sole owner.
+    unsafe { release(data.as_ptr().cast(), environment) };
+    assert_eq!(LIVE_ENVIRONMENTS.get(), before);
 }

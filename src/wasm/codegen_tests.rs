@@ -22,11 +22,15 @@ use crate::{
         },
         value::{NativeValueType, Value},
     },
-    mir::physical::{
-        lower_physical_mir, lower_unoptimized_physical_mir,
-        program::{ResolvedPhysicalProgram, resolve_physical_program},
+    mir::{
+        Operation, OperationKind, Value as MirValue,
+        physical::{
+            lower_physical_mir, lower_unoptimized_physical_mir,
+            program::{ResolvedPhysicalProgram, resolve_physical_program},
+        },
+        terminator::TerminatorKind,
     },
-    module::{FunctionId, Module, Path},
+    module::{FunctionId, LocalFunctionId, Module, Path, id::Id},
     std::{math::Float, option::option_type, string::String},
     types::{
         effects::{PrimitiveEffect, effect, no_effects},
@@ -105,6 +109,78 @@ pub(super) fn with_raw_program<T>(
     run(&program)
 }
 
+fn physical_operations(
+    program: &ResolvedPhysicalProgram<'_>,
+    mut visit: impl FnMut(&Operation) -> bool,
+) -> bool {
+    for module in program.modules() {
+        for index in 0..module.entry_count() {
+            let Some(body) = module.get(LocalFunctionId::from_index(index)) else {
+                continue;
+            };
+            for block in body.blocks() {
+                let block = body.block(block);
+                if block.operations().iter().any(&mut visit) {
+                    return true;
+                }
+                if let TerminatorKind::Invoke { operation, .. } = &block.terminator().kind
+                    && visit(operation)
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn calls_borrowed_subscript_member(program: &ResolvedPhysicalProgram<'_>) -> bool {
+    for module in program.modules() {
+        for index in 0..module.entry_count() {
+            let Some(body) = module.get(LocalFunctionId::from_index(index)) else {
+                continue;
+            };
+            let borrowed = body
+                .blocks()
+                .flat_map(|block| {
+                    let block = body.block(block);
+                    block.operations().iter().chain(
+                        if let TerminatorKind::Invoke { operation, .. } = &block.terminator().kind {
+                            Some(operation)
+                        } else {
+                            None
+                        },
+                    )
+                })
+                .filter(|operation| {
+                    matches!(operation.kind, OperationKind::BorrowSubscriptMember { .. })
+                })
+                .map(|operation| operation.result_id().unwrap())
+                .collect::<Vec<_>>();
+            if body.blocks().any(|block| {
+                let block = body.block(block);
+                block
+                    .operations()
+                    .iter()
+                    .chain(
+                        if let TerminatorKind::Invoke { operation, .. } = &block.terminator().kind {
+                            Some(operation)
+                        } else {
+                            None
+                        },
+                    )
+                    .any(|operation| {
+                        matches!(operation.kind, OperationKind::Call { .. })
+                            && matches!(operation.operands.first(), Some(MirValue::Register(id)) if borrowed.contains(id))
+                    })
+            }) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn differential<A: WasmValue + NativeValueType, R: WasmValue + PartialEq + Debug>(
     session: &mut CompilerSession,
     source: &str,
@@ -166,6 +242,280 @@ fn wasm_codegen_stored_functions_and_closures() {
             let before = LIVE_CALLABLE_ENVIRONMENTS.get();
             differential::<isize, isize>(&mut session, source, 7);
             assert_eq!(LIVE_CALLABLE_ENVIRONMENTS.get(), before, "{source}");
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_first_class_subscripts() {
+    let cases = [
+        r#"
+            subscript cell(slot: &mut int, log: &mut int) -> int {
+                mut {
+                    log += 1;
+                    let mut local = slot;
+                    yield local;
+                    slot = local;
+                    log *= 10
+                }
+            }
+            fn compute(x: int) -> int {
+                let mut slot = x;
+                let mut log = 0;
+                slot->[cell](log) += 7;
+                slot + log
+            }
+        "#,
+        r#"
+            subscript cell(slot: &mut int, log: &mut int) -> int {
+                mut {
+                    log += 1;
+                    let mut local = slot;
+                    yield local;
+                    slot = local;
+                    log *= 10
+                }
+            }
+            fn compute(x: int) -> int {
+                let accessor = cell;
+                let copied = accessor;
+                let mut slot = x;
+                let mut log = 0;
+                slot->[copied](log) += 7;
+                slot + log
+            }
+        "#,
+        r#"
+            subscript cell<T>(slot: &mut T) -> T where T: Value {
+                ref { let local = slot; yield local; }
+                mut { let mut local = slot; yield local; slot = local; }
+            }
+            fn write<T>(slot: &mut T, value: T, accessor) {
+                slot->[accessor] = value
+            }
+            fn compute(x: int) -> int {
+                let accessor = cell;
+                let mut slot = x;
+                write(slot, x + 4, accessor);
+                slot
+            }
+        "#,
+        r#"
+            subscript first(values: &mut [int]) -> int {
+                ref mut { values[0] }
+            }
+            fn compute(x: int) -> int {
+                let accessor = first;
+                let mut values = [x];
+                let before = values->[accessor];
+                values->[accessor] = x + 3;
+                before * 10 + values[0]
+            }
+        "#,
+        r#"
+            subscript cell<T>(slot: &mut T) -> T where T: Value {
+                ref { let local = slot; yield local; }
+                mut { let mut local = slot; yield local; slot = local; }
+            }
+            fn compute(x: int) -> int {
+                let accessor = cell;
+                let copied = accessor;
+                let mut left = x;
+                let mut right = x + 1;
+                left->[accessor] = x + 2;
+                right->[copied] = x + 3;
+                left * 10 + right
+            }
+        "#,
+        r#"
+            subscript cell<T>(slot: &mut T) -> T where T: Value {
+                mut { let mut local = slot; yield local; slot = local; }
+            }
+            fn add<T>(slot: &mut T, value: T, accessor) where T: Num, T: Value {
+                slot->[accessor] += value
+            }
+            fn compute(x: int) -> int {
+                let accessor = cell;
+                let mut slot = x;
+                add(slot, 4, accessor);
+                slot
+            }
+        "#,
+    ];
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        let mut session = CompilerSession::new();
+        session.set_allow_experimental(true);
+        session.set_mir_optimization(optimization);
+        session.set_physical_mir_optimization(optimization);
+        for source in cases {
+            let environments = LIVE_CALLABLE_ENVIRONMENTS.get();
+            let evidence = LIVE_ENVIRONMENTS.get();
+            differential::<isize, isize>(&mut session, source, 5);
+            assert_eq!(LIVE_CALLABLE_ENVIRONMENTS.get(), environments, "{source}");
+            assert_eq!(LIVE_ENVIRONMENTS.get(), evidence, "{source}");
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_subscript_call_clone_and_stack_reclamation() {
+    let first = r#"
+        subscript first<T>(values: &mut [T]) -> T where T: Value {
+            ref mut { values[0] }
+        }
+        fn compute(x: int) -> int {
+            let accessor = first;
+            let copied = accessor;
+            let mut values = [x];
+            let before = values->[accessor];
+            values->[copied] = x + 3;
+            before * 10 + values[0]
+        }
+    "#;
+    let mut session = CompilerSession::new();
+    session.set_allow_experimental(true);
+    session.set_physical_mir_optimization(MirOptimization::Disabled);
+    let entry = compile(&mut session, first);
+    with_raw_program(&session, entry, |program| {
+        assert!(physical_operations(program, |operation| matches!(
+            operation.kind,
+            OperationKind::CloneSubscriptEnv { .. }
+        )));
+        assert!(calls_borrowed_subscript_member(program));
+    });
+    let mut instance = compile_raw(&session, entry)
+        .instantiate::<(isize,), isize>()
+        .unwrap();
+    assert_eq!(instance.run((5,), WasmLimits::default()).unwrap(), 58);
+
+    let projections = "slot->[accessor] += 1;".repeat(64);
+    let reclaim = r#"
+        #[inline(never)]
+        fn identity<T>(value: T) -> T { value }
+        subscript cell<T>(slot: &mut T) -> T where T: Value {
+            mut {
+                let mut local = slot;
+                yield local;
+                let restored = identity(local);
+                slot = restored
+            }
+        }
+        fn compute(x: int) -> int {
+            let accessor = cell;
+            let mut slot = x;
+            $PROJECTIONS
+            slot
+        }
+    "#
+    .replace("$PROJECTIONS", &projections);
+    let mut session = CompilerSession::new();
+    session.set_allow_experimental(true);
+    session.set_mir_optimization(MirOptimization::Disabled);
+    session.set_physical_mir_optimization(MirOptimization::Disabled);
+    let entry = compile(&mut session, &reclaim);
+    with_raw_program(&session, entry, |program| {
+        let mut dynamic_after_yield = false;
+        for module in program.modules() {
+            for index in 0..module.entry_count() {
+                let Some(body) = module.get(LocalFunctionId::from_index(index)) else {
+                    continue;
+                };
+                for block in body.blocks() {
+                    let TerminatorKind::Yield { resume, .. } = body.block(block).terminator().kind
+                    else {
+                        continue;
+                    };
+                    dynamic_after_yield |=
+                        body.block(resume).operations().iter().any(|operation| {
+                            matches!(operation.kind, OperationKind::Alloca { .. })
+                                && !operation.operands.is_empty()
+                        });
+                }
+            }
+        }
+        assert!(
+            dynamic_after_yield,
+            "regression requires a run-time-sized allocation after the yield"
+        );
+        assert!(
+            !program
+                .function(entry)
+                .unwrap()
+                .blocks()
+                .flat_map(|block| program.function(entry).unwrap().block(block).operations())
+                .any(|operation| matches!(operation.kind, OperationKind::StackRestore)),
+            "the caller must not mask retained-frame leaks with its own stack restore"
+        );
+    });
+    let mut instance = compile_raw(&session, entry)
+        .instantiate::<(isize,), isize>()
+        .unwrap();
+    assert_eq!(
+        instance
+            .run(
+                (5,),
+                WasmLimits {
+                    stack_bytes: 512,
+                    ..WasmLimits::default()
+                },
+            )
+            .unwrap(),
+        69
+    );
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_subscript_resume_failure() {
+    let source = r#"
+        subscript cell(slot: &mut int) -> int {
+            mut {
+                let mut local = slot;
+                yield local;
+                slot = local;
+                let failure = [0][1];
+            }
+        }
+        fn compute(x: int) -> int {
+            let accessor = cell;
+            let mut slot = x;
+            slot->[accessor] = x + 1;
+            slot
+        }
+    "#;
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        let mut session = CompilerSession::new();
+        session.set_allow_experimental(true);
+        session.set_mir_optimization(optimization);
+        session.set_physical_mir_optimization(optimization);
+        let entry = compile(&mut session, source);
+        let expected = session
+            .run_entry(
+                ExecutionTarget::PhysicalMir,
+                entry.module,
+                entry.function,
+                vec![Value::native(5_isize)],
+            )
+            .map(|value| {
+                let result = *value.as_primitive_ty::<isize>().unwrap();
+                value.discard_storage();
+                result
+            });
+        for code in [
+            compile_raw(&session, entry),
+            CompiledProgram::compile(&session, entry).unwrap(),
+        ] {
+            let environments = LIVE_CALLABLE_ENVIRONMENTS.get();
+            let evidence = LIVE_ENVIRONMENTS.get();
+            let actual = code
+                .instantiate::<(isize,), isize>()
+                .unwrap()
+                .run((5,), WasmLimits::default());
+            assert_eq!(
+                actual.as_ref().map_err(|error| error.kind()),
+                expected.as_ref().map_err(|error| error.kind())
+            );
+            assert_eq!(LIVE_CALLABLE_ENVIRONMENTS.get(), environments);
+            assert_eq!(LIVE_ENVIRONMENTS.get(), evidence);
         }
     }
 }

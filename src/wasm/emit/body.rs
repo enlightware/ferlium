@@ -16,7 +16,10 @@ use crate::{
     mir::{
         BlockId, Function, Operation, OperationKind, ParameterId, ParameterKind, Value, ValueId,
         operation::OperationKindDiscriminant,
-        physical::{DictionaryReference, program::ResolvedPhysicalProgram},
+        physical::{
+            ConstructedSubscript, DictionaryReference, constructed_subscript_definitions,
+            program::{Descriptor, ResolvedPhysicalProgram},
+        },
         role::{MirType, ValueRole, ValueRoles},
         terminator::TerminatorKind,
         value::ConstantId,
@@ -28,12 +31,15 @@ use crate::{
         string::StaticStr,
         value::{product_layout_spec, value_layout_for_type},
     },
-    types::{r#trait::TraitDictionaryEntryIndex, r#type::Type},
+    types::{
+        r#trait::TraitDictionaryEntryIndex,
+        r#type::{CallResultConvention, Type},
+    },
     wasm::{
         Imports,
         abi::{
-            CallAbi, Parameter as ParameterTransport, ResultKind, WasmFunctionId, WasmLocalId,
-            WasmTypeId,
+            CallAbi, DispatchTableSlotId, Parameter as ParameterTransport, ResultKind,
+            WasmFunctionId, WasmLocalId, WasmTypeId,
         },
         evidence::{self, ENVIRONMENT_OFFSET},
         execution::{FailureCode, InvocationState},
@@ -43,7 +49,7 @@ use crate::{
 use super::{
     Global, ScalarType, StringLiterals, adapters::NativeOptionalResultAdapter, allocate_frame,
     callable, callee, context_pointer, dictionary_table, emit_failure, enter_frame, frame_address,
-    frame_bytes, layout_witness, leave_frame, memarg, operations, scalar,
+    frame_bytes, layout_witness, leave_frame, memarg, operations, scalar, subscript,
 };
 
 /// Code ranges generated for MIR operations and terminators, with their source spans.
@@ -56,11 +62,85 @@ enum Storage {
     Stack(u32),
 }
 
+fn wasm_value_size(ty: ValType) -> u32 {
+    match ty {
+        ValType::I32 | ValType::F32 => 4,
+        ValType::I64 | ValType::F64 => 8,
+        _ => unreachable!("the Wasm32 backend emits only numeric locals"),
+    }
+}
+
+pub(super) fn local_load(ty: ValType, offset: u32) -> I<'static> {
+    match ty {
+        ValType::I32 => I::I32Load(MemArg {
+            offset: offset.into(),
+            ..memarg(2)
+        }),
+        ValType::I64 => I::I64Load(MemArg {
+            offset: offset.into(),
+            ..memarg(3)
+        }),
+        ValType::F32 => I::F32Load(MemArg {
+            offset: offset.into(),
+            ..memarg(2)
+        }),
+        ValType::F64 => I::F64Load(MemArg {
+            offset: offset.into(),
+            ..memarg(3)
+        }),
+        _ => unreachable!("the Wasm32 backend emits only numeric locals"),
+    }
+}
+
+fn local_store(ty: ValType) -> I<'static> {
+    match ty {
+        ValType::I32 => I::I32Store(memarg(2)),
+        ValType::I64 => I::I64Store(memarg(3)),
+        ValType::F32 => I::F32Store(memarg(2)),
+        ValType::F64 => I::F64Store(memarg(3)),
+        _ => unreachable!("the Wasm32 backend emits only numeric locals"),
+    }
+}
+
 #[derive(Clone, Copy)]
 struct LayoutLocals {
     dictionary: WasmLocalId,
     table: WasmLocalId,
     output: WasmLocalId,
+}
+
+const RESUME_SLOT_OFFSET: u32 = 0;
+const RESUME_BLOCK_OFFSET: u32 = 4;
+const SUSPENDED_STACK_END_OFFSET: u32 = 8;
+const CONTINUATION_HEADER_SIZE: u32 = 16;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BodyMode {
+    Normal,
+    ProjectionStart { resume: DispatchTableSlotId },
+    ProjectionResume,
+}
+
+impl BodyMode {
+    fn extra_parameters(self) -> usize {
+        usize::from(matches!(self, Self::ProjectionResume))
+    }
+
+    fn projection(self) -> bool {
+        !matches!(self, Self::Normal)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SuspensionLayout {
+    pub inputs: Vec<(u32, ValType)>,
+    locals: Vec<(u32, ValType)>,
+}
+
+pub(super) struct EmittedBody {
+    pub function: WasmFunction,
+    pub source_map: BodySourceMap,
+    pub suspension: Option<SuspensionLayout>,
 }
 
 pub(super) struct Body<'a, 's> {
@@ -74,8 +154,13 @@ pub(super) struct Body<'a, 's> {
     entry_abis: &'a FxHashMap<(TraitId, TraitDictionaryEntryIndex), (WasmTypeId, CallAbi)>,
     layout_entries: [(TraitId, TraitDictionaryEntryIndex); 2],
     pub(super) callable_entries: &'a callable::Entries,
+    subscript_entries: &'a subscript::Entries,
     pub(super) callable_locals: Option<(WasmLocalId, WasmLocalId)>,
     callable_values: FxHashSet<ValueId>,
+    subscript_values: FxHashSet<ValueId>,
+    borrowed_subscripts: FxHashMap<ValueId, subscript::Borrowed>,
+    projection_frames: FxHashMap<ValueId, WasmLocalId>,
+    constructed_subscripts: FxHashMap<ValueId, ConstructedSubscript>,
     pub(super) dictionary_definitions: FxHashMap<ValueId, &'a Operation>,
     selections: &'s FxHashMap<ValueId, (TraitId, TraitDictionaryEntryIndex)>,
     owned_evidence: Vec<ValueId>,
@@ -97,6 +182,10 @@ pub(super) struct Body<'a, 's> {
     registers: FxHashMap<ValueId, WasmLocalId>,
     storage: FxHashMap<Value, Storage>,
     locals: Vec<ValType>,
+    mode: BodyMode,
+    suspension: Option<SuspensionLayout>,
+    /// Stack frontier on entry to a resumed accessor, below which its restores may not reach.
+    resume_stack_floor: Option<WasmLocalId>,
     frame: Option<WasmLocalId>,
     pc: Option<WasmLocalId>,
     frame_size: u32,
@@ -119,8 +208,11 @@ impl<'a, 's> Body<'a, 's> {
         entry_abis: &'a FxHashMap<(TraitId, TraitDictionaryEntryIndex), (WasmTypeId, CallAbi)>,
         layout_entries: [(TraitId, TraitDictionaryEntryIndex); 2],
         callable_entries: &'a callable::Entries,
+        subscript_entries: &'a subscript::Entries,
         selections: &'s FxHashMap<ValueId, (TraitId, TraitDictionaryEntryIndex)>,
+        mode: BodyMode,
     ) -> Result<Self, String> {
+        let constructed_subscripts = constructed_subscript_definitions(body);
         let mut this = Self {
             body,
             signature,
@@ -131,8 +223,13 @@ impl<'a, 's> Body<'a, 's> {
             entry_abis,
             layout_entries,
             callable_entries,
+            subscript_entries,
             callable_locals: None,
             callable_values: FxHashSet::default(),
+            subscript_values: FxHashSet::default(),
+            borrowed_subscripts: FxHashMap::default(),
+            projection_frames: FxHashMap::default(),
+            constructed_subscripts,
             dictionary_definitions: FxHashMap::default(),
             selections,
             owned_evidence: Vec::new(),
@@ -155,9 +252,16 @@ impl<'a, 's> Body<'a, 's> {
             registers: FxHashMap::default(),
             storage: FxHashMap::default(),
             locals: Vec::new(),
+            mode,
+            suspension: None,
+            resume_stack_floor: None,
             frame: None,
             pc: None,
-            frame_size: 0,
+            frame_size: if mode.projection() {
+                CONTINUATION_HEADER_SIZE
+            } else {
+                0
+            },
             code: WasmFunction::new([]),
             source_map: Vec::new(),
         };
@@ -167,7 +271,8 @@ impl<'a, 's> Body<'a, 's> {
         this.dynamic_align = this.local(ValType::I32);
         this.dynamic_base = this.local(ValType::I32);
         this.allocation_end = this.local(ValType::I64);
-        if body.blocks().count() != 1
+        if mode.projection()
+            || body.blocks().count() != 1
             || !matches!(
                 body.block(body.entry()).terminator().kind,
                 TerminatorKind::Return | TerminatorKind::InvariantFailure { .. }
@@ -234,6 +339,34 @@ impl<'a, 's> Body<'a, 's> {
                     this.reserve_scratch(payload)?;
                 }
                 if let Some(id) = operation.result_id() {
+                    if let OperationKind::BorrowSubscriptMember { mut_member, .. } = operation.kind
+                    {
+                        let source = operation.operands[0].clone();
+                        // Physical MIR represents symbolic subscript evidence as an evidence
+                        // value and an owned first-class subscript as a place. This is the same
+                        // distinction used by the physical interpreter; role verification rejects
+                        // every other operand form before emission.
+                        let materialized = this
+                            .roles
+                            .get(&source, body.constants())
+                            .is_some_and(|role| role.is_place_operand());
+                        this.borrowed_subscripts.insert(
+                            id,
+                            subscript::Borrowed {
+                                source,
+                                mut_member,
+                                materialized,
+                            },
+                        );
+                        continue;
+                    }
+                    if matches!(operation.kind, OperationKind::Project { .. }) {
+                        let local = this.local(ValType::I32);
+                        this.registers.insert(id, local);
+                        let frame = this.local(ValType::I32);
+                        this.projection_frames.insert(id, frame);
+                        continue;
+                    }
                     if matches!(operation.kind, OperationKind::Load)
                         && this.selections.contains_key(&id)
                     {
@@ -251,6 +384,33 @@ impl<'a, 's> Body<'a, 's> {
                                 size_of::<DictionaryReference>() as u32,
                             )?;
                             this.callable_values.insert(id);
+                            continue;
+                        }
+                        OperationKind::BuildSubscript { .. }
+                        | OperationKind::CloneSubscriptEnv { .. } => {
+                            this.slot(
+                                Value::Register(id),
+                                size_of::<DictionaryReference>() as u32,
+                            )?;
+                            this.subscript_values.insert(id);
+                            continue;
+                        }
+                        OperationKind::BuildSubscriptEvidence { .. } => {
+                            let constructed = *this
+                                .constructed_subscripts
+                                .get(&id)
+                                .ok_or("dynamic subscript evidence base")?;
+                            let definition = program
+                                .subscript(constructed.definition)
+                                .ok_or("missing subscript definition")?;
+                            this.slot(
+                                Value::Register(id),
+                                size_of::<DictionaryReference>() as u32,
+                            )?;
+                            this.owned_evidence.push(id);
+                            let offset = this
+                                .reserve_bytes(definition.environment().allocation.size() as u32)?;
+                            this.capture_slots.insert(id, offset);
                             continue;
                         }
                         OperationKind::BuildDictionary { definition, .. } => {
@@ -343,7 +503,13 @@ impl<'a, 's> Body<'a, 's> {
         if !this.selections.is_empty() {
             this.reserve_scratch(Type::unit())?;
         }
-        if !this.selections.is_empty() || this.layout_slot.is_some() {
+        if !this.projection_frames.is_empty() {
+            this.reserve_scratch(Type::unit())?;
+        }
+        if !this.selections.is_empty()
+            || !this.borrowed_subscripts.is_empty()
+            || this.layout_slot.is_some()
+        {
             this.evidence_base = Some(this.local(ValType::I32));
         }
         if this.layout_slot.is_some() {
@@ -353,7 +519,37 @@ impl<'a, 's> Body<'a, 's> {
                 output: this.local(ValType::I32),
             });
         }
-        if this.frame_size != 0 {
+        if mode.projection() {
+            let inputs = signature
+                .parameters
+                .iter()
+                .map(|parameter| {
+                    let ty = match parameter {
+                        ParameterTransport::Direct(ty) => *ty,
+                        ParameterTransport::Indirect => ValType::I32,
+                    };
+                    let offset = this.reserve_bytes(wasm_value_size(ty))?;
+                    Ok((offset, ty))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let local_count = this.locals.len();
+            let locals = (0..local_count)
+                .map(|index| {
+                    let ty = this.locals[index];
+                    let offset = this.reserve_bytes(wasm_value_size(ty))?;
+                    Ok((offset, ty))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            this.suspension = Some(SuspensionLayout { inputs, locals });
+            this.frame = Some(match mode {
+                BodyMode::ProjectionStart { .. } => this.local(ValType::I32),
+                BodyMode::ProjectionResume => WasmLocalId::from_index(signature.parameter_count()),
+                BodyMode::Normal => unreachable!(),
+            });
+            if matches!(mode, BodyMode::ProjectionResume) {
+                this.resume_stack_floor = Some(this.local(ValType::I32));
+            }
+        } else if this.frame_size != 0 {
             this.frame = Some(this.local(ValType::I32));
         }
         this.code = WasmFunction::new(this.locals.iter().map(|ty| (1, *ty)));
@@ -433,6 +629,306 @@ impl<'a, 's> Body<'a, 's> {
             self.frame.expect("reserved frame storage"),
             offset,
         );
+    }
+
+    fn store_local_in_frame(&mut self, local: WasmLocalId, offset: u32, ty: ValType) {
+        self.frame_address(offset);
+        self.i(I::LocalGet(local.as_u32()));
+        self.i(local_store(ty));
+    }
+
+    fn load_local_from_frame(&mut self, local: WasmLocalId, offset: u32, ty: ValType) {
+        self.frame_address(offset);
+        self.i(local_load(ty, 0));
+        self.i(I::LocalSet(local.as_u32()));
+    }
+
+    fn initialize_suspension(&mut self) {
+        let input_count = self
+            .suspension
+            .as_ref()
+            .expect("projected body has a suspension layout")
+            .inputs
+            .len();
+        for index in 0..input_count {
+            let (offset, ty) = self
+                .suspension
+                .as_ref()
+                .expect("projected body has a suspension layout")
+                .inputs[index];
+            self.store_local_in_frame(self.signature.input_local(index), offset, ty);
+        }
+    }
+
+    fn finish_project(&mut self, result: ValueId, invoked: bool) {
+        let yielded = self.registers[&result];
+        let frame = self.projection_frames[&result];
+        self.i(I::LocalSet(yielded.as_u32()));
+        self.i(I::LocalSet(frame.as_u32()));
+        self.call_status(invoked, true);
+    }
+
+    fn project(&mut self, op: &Operation, invoked: bool) -> Result<(), String> {
+        let result = op.result_id().expect("project produces a place");
+        let callee = &op.operands[0];
+        let inputs = &op.operands[1..];
+        if let Value::Register(id) = callee
+            && let Some(selected) = self.borrowed_subscripts.get(id).cloned()
+        {
+            let ty = self.subscript_entries.signatures_by_arity[&inputs.len()];
+            if selected.materialized {
+                self.address(&selected.source)?;
+            } else {
+                self.value(&selected.source)?;
+            }
+            self.i(I::LocalTee(self.dynamic_base.as_u32()));
+            self.dictionary_table();
+            self.i(I::I32Load(MemArg {
+                offset: u64::from(selected.mut_member) * 4,
+                ..memarg(2)
+            }));
+            self.i(I::LocalSet(self.dynamic_size.as_u32()));
+            self.context_pointer(offset_of!(InvocationState, native_failure));
+            self.i(I::LocalGet(self.dynamic_base.as_u32()));
+            self.i(I::I32Const(i32::from(selected.materialized)));
+            for input in inputs {
+                self.address(input)?;
+            }
+            self.i(I::LocalGet(self.dynamic_size.as_u32()));
+            self.i(I::CallIndirect {
+                type_index: ty.as_u32(),
+                table_index: 0,
+            });
+            self.finish_project(result, invoked);
+            return Ok(());
+        }
+        let Value::Function(target) = callee else {
+            return Err("project requires a subscript member".into());
+        };
+        let target = self.program.direct_entry(*target);
+        let (index, abi) = self.callees[&target];
+        if inputs.len() != abi.parameters.len() {
+            return Err("project argument count".into());
+        }
+        if abi.fallible {
+            self.context_pointer(offset_of!(InvocationState, native_failure));
+        }
+        self.call_inputs(inputs.iter(), &abi.parameters)?;
+        let convention = self
+            .program
+            .function(target)
+            .map(Function::result_convention);
+        if convention == Some(CallResultConvention::YIELDED_ONCE) {
+            self.i(I::I32Const(0));
+            self.i(I::Call(index.as_u32()));
+            self.finish_project(result, invoked);
+            return Ok(());
+        }
+        if !subscript::is_addressor_native(self.program, target)
+            && convention != Some(CallResultConvention::ADDRESSOR_PLACE)
+        {
+            return Err("project target is not a place accessor".into());
+        }
+        if abi.output() {
+            self.scratch_address(Type::unit());
+        }
+        self.i(I::Call(index.as_u32()));
+        let yielded = self.registers[&result];
+        if abi.fallible {
+            self.i(I::LocalSet(self.dynamic_size.as_u32()));
+            self.scratch_address(Type::unit());
+            self.i(I::I32Load(memarg(2)));
+            self.i(I::LocalSet(yielded.as_u32()));
+            self.i(I::LocalGet(self.dynamic_size.as_u32()));
+        } else {
+            self.i(I::LocalSet(yielded.as_u32()));
+            self.i(I::I32Const(0));
+        }
+        self.i(I::I32Const(0));
+        self.i(I::LocalGet(yielded.as_u32()));
+        self.finish_project(result, invoked);
+        Ok(())
+    }
+
+    fn call_subscript_member(
+        &mut self,
+        selected: subscript::Borrowed,
+        inputs: &[&Value],
+        output: Option<&Value>,
+        invoked: bool,
+    ) -> Result<(), String> {
+        let output = output.ok_or("addressor call requires output storage")?;
+        let ty = self.subscript_entries.signatures_by_arity[&inputs.len()];
+        if selected.materialized {
+            self.address(&selected.source)?;
+        } else {
+            self.value(&selected.source)?;
+        }
+        self.i(I::LocalTee(self.dynamic_base.as_u32()));
+        self.dictionary_table();
+        self.i(I::I32Load(MemArg {
+            offset: u64::from(selected.mut_member) * 4,
+            ..memarg(2)
+        }));
+        self.i(I::LocalSet(self.scratch.as_u32()));
+        self.context_pointer(offset_of!(InvocationState, native_failure));
+        self.i(I::LocalGet(self.dynamic_base.as_u32()));
+        self.i(I::I32Const(i32::from(selected.materialized)));
+        for input in inputs {
+            self.address(input)?;
+        }
+        self.i(I::LocalGet(self.scratch.as_u32()));
+        self.i(I::CallIndirect {
+            type_index: ty.as_u32(),
+            table_index: 0,
+        });
+        self.i(I::LocalSet(self.dynamic_base.as_u32())); // yielded address
+        self.i(I::LocalSet(self.dynamic_align.as_u32())); // retained frame
+        self.i(I::LocalSet(self.dynamic_size.as_u32())); // status
+        self.i(I::LocalGet(self.dynamic_align.as_u32()));
+        self.i(I::If(BlockType::Empty));
+        self.fail(FailureCode::Invariant);
+        self.i(I::End);
+        self.address(output)?;
+        self.i(I::LocalGet(self.dynamic_base.as_u32()));
+        self.i(I::I32Store(memarg(2)));
+        self.i(I::LocalGet(self.dynamic_size.as_u32()));
+        self.call_status(invoked, true);
+        Ok(())
+    }
+
+    fn end_project(&mut self, projected: &Value, invoked: bool) -> Result<(), String> {
+        let Value::Register(id) = projected else {
+            return Err("end_project requires its project result".into());
+        };
+        let frame = self.projection_frames[id];
+        self.i(I::LocalGet(frame.as_u32()));
+        self.i(I::If(BlockType::Result(ValType::I32)));
+        self.context_pointer(offset_of!(InvocationState, native_failure));
+        self.i(I::LocalGet(frame.as_u32()));
+        self.i(I::LocalGet(frame.as_u32()));
+        self.i(I::I32Load(MemArg {
+            offset: RESUME_SLOT_OFFSET as u64,
+            ..memarg(2)
+        }));
+        self.i(I::CallIndirect {
+            type_index: self.subscript_entries.resume_signature.as_u32(),
+            table_index: 0,
+        });
+        self.i(I::Else);
+        self.i(I::I32Const(0));
+        self.i(I::End);
+        // The retained frame is dead on both success and source failure. Keeping zero in the
+        // local also lets later stack restores ignore this completed projection.
+        self.i(I::I32Const(0));
+        self.i(I::LocalSet(frame.as_u32()));
+        self.call_status(invoked, true);
+        Ok(())
+    }
+
+    fn suspend(&mut self, yielded: &Value, resume: BlockId) -> Result<(), String> {
+        let entry = match self.mode {
+            BodyMode::ProjectionStart { resume } => resume,
+            BodyMode::ProjectionResume => {
+                self.fail(FailureCode::Invariant);
+                return Ok(());
+            }
+            BodyMode::Normal => return Err("ordinary call yielded a place".into()),
+        };
+        let local_count = self
+            .suspension
+            .as_ref()
+            .expect("projected body has a suspension layout")
+            .locals
+            .len();
+        for index in 0..local_count {
+            let (offset, ty) = self
+                .suspension
+                .as_ref()
+                .expect("projected body has a suspension layout")
+                .locals[index];
+            let local = WasmLocalId::from_index(self.signature.parameter_count() + index);
+            self.store_local_in_frame(local, offset, ty);
+        }
+        self.frame_address(RESUME_SLOT_OFFSET);
+        self.i(I::I32Const(entry.as_u32() as i32));
+        self.i(I::I32Store(memarg(2)));
+        self.frame_address(RESUME_BLOCK_OFFSET);
+        self.i(I::I32Const(resume.as_u32() as i32));
+        self.i(I::I32Store(memarg(2)));
+        // The caller may allocate above this retained frame before resuming it. Remember the
+        // frontier so its stack restores cannot reclaim the continuation and completion can tell
+        // caller-owned storage from allocations made by the resumed half itself.
+        self.frame_address(SUSPENDED_STACK_END_OFFSET);
+        self.i(I::GlobalGet(Global::Stack as u32));
+        self.i(I::I32Store(memarg(2)));
+        self.i(I::I32Const(0));
+        self.i(I::LocalGet(self.frame.unwrap().as_u32()));
+        self.address(yielded)?;
+        self.i(I::Return);
+        Ok(())
+    }
+
+    fn restore_suspension(&mut self) {
+        let local_count = self
+            .suspension
+            .as_ref()
+            .expect("projected body has a suspension layout")
+            .locals
+            .len();
+        for index in 0..local_count {
+            let (offset, ty) = self
+                .suspension
+                .as_ref()
+                .expect("projected body has a suspension layout")
+                .locals[index];
+            let local = WasmLocalId::from_index(self.signature.parameter_count() + 1 + index);
+            self.load_local_from_frame(local, offset, ty);
+        }
+        let pc = self.pc.expect("projected body uses a dispatcher");
+        self.frame_address(RESUME_BLOCK_OFFSET);
+        self.i(I::I32Load(memarg(2)));
+        self.i(I::LocalSet(pc.as_u32()));
+    }
+
+    /// Restore a MIR stack marker without crossing a suspended continuation frame.
+    fn restore_stack(&mut self, marker: &Value) -> Result<(), String> {
+        self.value(marker)?;
+        self.i(I::LocalSet(self.scratch.as_u32()));
+        if let Some(floor) = self.resume_stack_floor {
+            self.raise_stack_floor(floor);
+        }
+        let mut frames = self
+            .projection_frames
+            .iter()
+            .map(|(id, frame)| (*id, *frame))
+            .collect::<Vec<_>>();
+        frames.sort_by_key(|(id, _)| id.as_index());
+        for (_, frame) in frames {
+            self.i(I::LocalGet(frame.as_u32()));
+            self.i(I::If(BlockType::Empty));
+            self.i(I::LocalGet(frame.as_u32()));
+            self.i(I::I32Load(MemArg {
+                offset: SUSPENDED_STACK_END_OFFSET.into(),
+                ..memarg(2)
+            }));
+            self.i(I::LocalSet(self.dynamic_base.as_u32()));
+            self.raise_stack_floor(self.dynamic_base);
+            self.i(I::End);
+        }
+        self.i(I::LocalGet(self.scratch.as_u32()));
+        Ok(())
+    }
+
+    /// Raise the pending stack frontier in `scratch` to `floor` when necessary.
+    fn raise_stack_floor(&mut self, floor: WasmLocalId) {
+        self.i(I::LocalGet(self.scratch.as_u32()));
+        self.i(I::LocalGet(floor.as_u32()));
+        self.i(I::LocalGet(self.scratch.as_u32()));
+        self.i(I::LocalGet(floor.as_u32()));
+        self.i(I::I32GtU);
+        self.i(I::Select);
+        self.i(I::LocalSet(self.scratch.as_u32()));
     }
 
     fn release_evidence(&mut self, reference: &Value) -> Result<(), String> {
@@ -537,7 +1033,7 @@ impl<'a, 's> Body<'a, 's> {
             self.context_pointer(offset_of!(InvocationState, native_failure));
         }
         self.address(selected)?;
-        self.call_inputs(inputs, &abi.parameters[1..])?;
+        self.call_inputs(inputs.iter().copied(), &abi.parameters[1..])?;
         if let Some(output) = output {
             self.address(output)?;
         } else {
@@ -552,12 +1048,12 @@ impl<'a, 's> Body<'a, 's> {
         Ok(())
     }
 
-    fn call_inputs(
+    fn call_inputs<'v>(
         &mut self,
-        inputs: &[&Value],
+        inputs: impl IntoIterator<Item = &'v Value>,
         transports: &[ParameterTransport],
     ) -> Result<(), String> {
-        for (input, transport) in inputs.iter().zip(transports) {
+        for (input, transport) in inputs.into_iter().zip(transports) {
             match transport {
                 ParameterTransport::Direct(_) => {
                     self.read(input)?;
@@ -598,6 +1094,12 @@ impl<'a, 's> Body<'a, 's> {
     }
 
     fn return_frame(&mut self, failed: bool) -> Result<(), String> {
+        if matches!(self.mode, BodyMode::ProjectionStart { .. }) && !failed {
+            // Resume-only blocks share the same MIR body. They are encoded in the start entry but
+            // cannot be reached before its Yield; trap if malformed control flow reaches one.
+            self.fail(FailureCode::Invariant);
+            return Ok(());
+        }
         if failed && !self.signature.fallible {
             return Err("failure in an infallible entry".into());
         }
@@ -605,13 +1107,41 @@ impl<'a, 's> Body<'a, 's> {
             self.release_evidence(&Value::Register(self.owned_evidence[index]))?;
         }
         if let Some(frame) = self.frame {
-            leave_frame(&mut self.code, frame);
+            if matches!(self.mode, BodyMode::ProjectionResume) {
+                let floor = self
+                    .resume_stack_floor
+                    .expect("projection resume records its entry stack frontier");
+                // Reclaim both the retained continuation and allocations made after resumption
+                // when no caller-owned storage was already above the frame. The current stack
+                // frontier cannot answer that question because the resumed half may have pushed
+                // its own dynamic allocations. Otherwise retain the frame and caller storage but
+                // still restore the resume-entry frontier to discard those later allocations.
+                self.i(I::LocalGet(floor.as_u32()));
+                self.i(I::LocalGet(frame.as_u32()));
+                self.i(I::I32Load(MemArg {
+                    offset: SUSPENDED_STACK_END_OFFSET.into(),
+                    ..memarg(2)
+                }));
+                self.i(I::I32Eq);
+                self.i(I::If(BlockType::Empty));
+                leave_frame(&mut self.code, frame);
+                self.i(I::Else);
+                self.i(I::LocalGet(floor.as_u32()));
+                self.i(I::GlobalSet(Global::Stack as u32));
+                self.i(I::End);
+            } else {
+                leave_frame(&mut self.code, frame);
+            }
         }
         self.i(I::GlobalGet(Global::Depth as u32));
         self.i(I::I32Const(1));
         self.i(I::I32Sub);
         self.i(I::GlobalSet(Global::Depth as u32));
-        if self.signature.fallible {
+        if matches!(self.mode, BodyMode::ProjectionStart { .. }) {
+            self.i(I::I32Const(1));
+            self.i(I::I32Const(0));
+            self.i(I::I32Const(0));
+        } else if matches!(self.mode, BodyMode::ProjectionResume) || self.signature.fallible {
             self.i(I::I32Const(i32::from(failed)));
         } else if matches!(self.signature.result, ResultKind::Direct(_)) {
             let result =
@@ -667,6 +1197,12 @@ impl<'a, 's> Body<'a, 's> {
     }
 
     fn call_operation(&mut self, op: &Operation, invoked: bool) -> Result<(), String> {
+        if matches!(op.kind, OperationKind::Project { .. }) {
+            return self.project(op, invoked);
+        }
+        if matches!(op.kind, OperationKind::EndProject) {
+            return self.end_project(&op.operands[0], invoked);
+        }
         let callee = callee(op).ok_or("unsupported fallible operation")?;
         let (inputs, output): (Vec<_>, _) = match &op.kind {
             OperationKind::Call { ty, .. } => {
@@ -692,6 +1228,11 @@ impl<'a, 's> Body<'a, 's> {
             _ => return Err("unsupported call operation".into()),
         };
         let Value::Function(target) = callee else {
+            if let Value::Register(id) = callee
+                && let Some(selected) = self.borrowed_subscripts.get(id).cloned()
+            {
+                return self.call_subscript_member(selected, &inputs, output, invoked);
+            }
             if !matches!(callee, Value::Register(id) if self.selections.contains_key(id)) {
                 return self.call_stored(callee, &inputs, output, invoked);
             }
@@ -718,7 +1259,7 @@ impl<'a, 's> Body<'a, 's> {
         if abi.fallible {
             self.context_pointer(offset_of!(InvocationState, native_failure));
         }
-        self.call_inputs(&inputs, &abi.parameters)?;
+        self.call_inputs(inputs.iter().copied(), &abi.parameters)?;
         let optional_payload = self.optional_payload(target);
         if let Some(payload) = optional_payload {
             self.scratch_address(payload);
@@ -737,7 +1278,9 @@ impl<'a, 's> Body<'a, 's> {
     }
 
     fn local(&mut self, ty: ValType) -> WasmLocalId {
-        let id = WasmLocalId::from_index(self.signature.parameter_count() + self.locals.len());
+        let id = WasmLocalId::from_index(
+            self.signature.parameter_count() + self.mode.extra_parameters() + self.locals.len(),
+        );
         self.locals.push(ty);
         id
     }
@@ -872,7 +1415,14 @@ impl<'a, 's> Body<'a, 's> {
             return self.address(value);
         }
         match value {
-            Value::Register(id) => self.i(I::LocalGet(self.registers[id].as_u32())),
+            Value::Register(id) => {
+                let local = self
+                    .registers
+                    .get(id)
+                    .copied()
+                    .ok_or_else(|| format!("register {id:?} has no Wasm value"))?;
+                self.i(I::LocalGet(local.as_u32()));
+            }
             Value::Parameter(id) => self.i(I::LocalGet(
                 (if self.body.parameters()[id.as_index()].kind == ParameterKind::Return {
                     self.signature.output_local()
@@ -981,34 +1531,49 @@ impl<'a, 's> Body<'a, 's> {
         ty.store(&mut self.code);
     }
 
-    pub(super) fn emit(mut self) -> Result<(WasmFunction, BodySourceMap), String> {
-        if let Some(frame) = self.frame {
+    pub(super) fn emit(mut self) -> Result<EmittedBody, String> {
+        if let Some(frame) = self.frame
+            && !matches!(self.mode, BodyMode::ProjectionResume)
+        {
             enter_frame(&mut self.code, frame, self.frame_size);
         }
-        self.i(I::GlobalGet(Global::Depth as u32));
-        self.i(I::I32Const(1));
-        self.i(I::I32Add);
-        self.i(I::GlobalSet(Global::Depth as u32));
-        for index in 0..self.owned_evidence.len() {
-            self.address(&Value::Register(self.owned_evidence[index]))?;
-            self.i(I::I64Const(0));
-            self.i(I::I64Store(memarg(2)));
-        }
-        for (index, constant) in self.body.constants().iter().enumerate() {
-            let value = Value::Constant(ConstantId::from_index(index));
-            if self.storage.contains_key(&value) {
-                self.initialize_literal(&value, constant.ty, &constant.representation, 0)?;
+        if !matches!(self.mode, BodyMode::ProjectionResume) {
+            self.i(I::GlobalGet(Global::Depth as u32));
+            self.i(I::I32Const(1));
+            self.i(I::I32Add);
+            self.i(I::GlobalSet(Global::Depth as u32));
+            for index in 0..self.owned_evidence.len() {
+                self.address(&Value::Register(self.owned_evidence[index]))?;
+                self.i(I::I64Const(0));
+                self.i(I::I64Store(memarg(2)));
             }
-        }
-        for (index, transport) in self.signature.parameters.iter().enumerate() {
-            let value = Value::Parameter(ParameterId::from_index(index));
-            if matches!(transport, ParameterTransport::Direct(_))
-                && matches!(self.storage.get(&value), Some(Storage::Stack(_)))
-            {
-                self.address(&value)?;
-                self.i(I::LocalGet(self.signature.input_local(index).as_u32()));
-                self.store(ScalarType::of(self.body.parameters()[index].ty)?);
+            for (index, constant) in self.body.constants().iter().enumerate() {
+                let value = Value::Constant(ConstantId::from_index(index));
+                if self.storage.contains_key(&value) {
+                    self.initialize_literal(&value, constant.ty, &constant.representation, 0)?;
+                }
             }
+            for (index, transport) in self.signature.parameters.iter().enumerate() {
+                let value = Value::Parameter(ParameterId::from_index(index));
+                if matches!(transport, ParameterTransport::Direct(_))
+                    && matches!(self.storage.get(&value), Some(Storage::Stack(_)))
+                {
+                    self.address(&value)?;
+                    self.i(I::LocalGet(self.signature.input_local(index).as_u32()));
+                    self.store(ScalarType::of(self.body.parameters()[index].ty)?);
+                }
+            }
+            if matches!(self.mode, BodyMode::ProjectionStart { .. }) {
+                self.initialize_suspension();
+            }
+        } else {
+            self.i(I::GlobalGet(Global::Stack as u32));
+            self.i(I::LocalSet(
+                self.resume_stack_floor
+                    .expect("resumed projection has a stack floor")
+                    .as_u32(),
+            ));
+            self.restore_suspension();
         }
         if let Some(pc) = self.pc {
             let count = self.body.blocks().count() as u32;
@@ -1033,7 +1598,11 @@ impl<'a, 's> Body<'a, 's> {
         }
         self.i(I::Unreachable);
         self.i(I::End);
-        Ok((self.code, self.source_map))
+        Ok(EmittedBody {
+            function: self.code,
+            source_map: self.source_map,
+            suspension: self.suspension,
+        })
     }
 
     fn emit_block(&mut self, block_id: BlockId, dispatch_depth: Option<u32>) -> Result<(), String> {
@@ -1112,8 +1681,8 @@ impl<'a, 's> Body<'a, 's> {
                 }
             }
             TerminatorKind::Return => self.return_frame(false)?,
+            TerminatorKind::Yield { place, resume } => self.suspend(place, *resume)?,
             TerminatorKind::InvariantFailure { .. } => self.fail(FailureCode::Invariant),
-            _ => return Err("unsupported terminator".into()),
         }
         self.record_source(start, span);
         Ok(())
@@ -1170,7 +1739,30 @@ impl<'a, 's> Body<'a, 's> {
                 }));
                 return Ok(());
             }
-            DropClosureEnv => {
+            CloneSubscriptEnv { .. } => {
+                let clone = self
+                    .callable_entries
+                    .clone
+                    .ok_or("missing callable environment clone entry")?;
+                let result = Value::Register(op.result_id().unwrap());
+                self.address(&result)?;
+                self.address(&args[0])?;
+                self.i(I::I32Load(memarg(2)));
+                self.i(I::I32Store(memarg(2)));
+                self.address(&result)?;
+                self.address(&args[0])?;
+                self.i(I::I32Load(MemArg {
+                    offset: ENVIRONMENT_OFFSET,
+                    ..memarg(2)
+                }));
+                self.i(I::Call(clone.as_u32()));
+                self.i(I::I32Store(MemArg {
+                    offset: ENVIRONMENT_OFFSET,
+                    ..memarg(2)
+                }));
+                return Ok(());
+            }
+            DropClosureEnv | DropSubscriptEnv => {
                 let drop = self
                     .callable_entries
                     .drop
@@ -1186,6 +1778,99 @@ impl<'a, 's> Body<'a, 's> {
                 self.i(I::I64Store(memarg(2)));
                 self.i(I::Call(drop.as_u32()));
             }
+            BuildSubscriptEvidence { .. } => {
+                let id = op.result_id().unwrap();
+                let result = Value::Register(id);
+                let constructed = *self
+                    .constructed_subscripts
+                    .get(&id)
+                    .ok_or("dynamic subscript evidence base")?;
+                let definition = self
+                    .program
+                    .subscript(constructed.definition)
+                    .ok_or("missing subscript definition")?;
+                let fields = &definition.environment().fields;
+                let appended = args.len() - 1;
+                let inherited = constructed
+                    .capture_count
+                    .checked_sub(appended)
+                    .ok_or("subscript capture count")?;
+                if inherited > fields.len() {
+                    return Err("subscript base capture count".into());
+                }
+                self.release_evidence(&result)?;
+                let capture_offset = self.capture_slots[&id];
+                for field in &fields[..inherited] {
+                    self.frame_address(capture_offset + field.offset as u32);
+                    self.value(&args[0])?;
+                    self.i(I::I32Load(MemArg {
+                        offset: ENVIRONMENT_OFFSET,
+                        ..memarg(2)
+                    }));
+                    self.i(I::I32Const(field.offset as i32));
+                    self.i(I::I32Add);
+                    if field.is_storage_flag {
+                        self.i(I::I32Load8U(memarg(0)));
+                        self.i(I::I32Store8(memarg(0)));
+                    } else {
+                        self.i(I::I32Const(size_of::<DictionaryReference>() as i32));
+                        self.i(I::MemoryCopy {
+                            src_mem: 0,
+                            dst_mem: 0,
+                        });
+                    }
+                }
+                for (field, argument) in fields[inherited..].iter().zip(&args[1..]) {
+                    self.frame_address(capture_offset + field.offset as u32);
+                    if field.is_storage_flag {
+                        self.read(argument)?;
+                        self.i(I::I32Store8(memarg(0)));
+                    } else {
+                        self.value(argument)?;
+                        self.i(I::I32Const(size_of::<DictionaryReference>() as i32));
+                        self.i(I::MemoryCopy {
+                            src_mem: 0,
+                            dst_mem: 0,
+                        });
+                    }
+                }
+                self.context_pointer(offset_of!(InvocationState, evidence));
+                self.i(I::I32Const(
+                    self.program
+                        .reference_index(Descriptor::Subscript(constructed.definition))
+                        .unwrap()
+                        .as_u32() as i32,
+                ));
+                self.frame_address(capture_offset);
+                self.address(&result)?;
+                self.i(I::Call(
+                    self.imports.function_index("build_evidence").as_u32(),
+                ));
+                return Ok(());
+            }
+            BuildSubscript { .. } => {
+                let result = Value::Register(op.result_id().unwrap());
+                self.address(&result)?;
+                self.value(&args[0])?;
+                self.i(I::I32Load(memarg(2)));
+                self.i(I::I32Store(memarg(2)));
+                self.address(&result)?;
+                self.context_pointer(offset_of!(InvocationState, evidence));
+                self.value(&args[0])?;
+                self.i(I::Call(
+                    self.imports
+                        .function_index("materialize_subscript_environment")
+                        .as_u32(),
+                ));
+                self.i(I::I32Store(MemArg {
+                    offset: ENVIRONMENT_OFFSET,
+                    ..memarg(2)
+                }));
+                return Ok(());
+            }
+            BorrowSubscriptMember { .. } => return Ok(()),
+            Project { .. } => return self.project(op, false),
+            EndProject => return self.end_project(&args[0], false),
             BuildArray { element_ty } => {
                 let (destination, elements) = args.split_last().unwrap();
                 let MirType::Lowered(array_ty) = self.pointee_type(destination)? else {
@@ -1326,7 +2011,8 @@ impl<'a, 's> Body<'a, 's> {
             Store => {
                 // Store takes a materialized value, including a pointer; it must not dereference
                 // a place operand as read() would. The MIR verifier checks this operand contract.
-                if matches!(&args[0], Value::Register(id) if self.callable_values.contains(id)) {
+                if matches!(&args[0], Value::Register(id) if self.callable_values.contains(id) || self.subscript_values.contains(id))
+                {
                     self.address(&args[1])?;
                     self.address(&args[0])?;
                     self.i(I::I64Load(memarg(2)));
@@ -1429,7 +2115,7 @@ impl<'a, 's> Body<'a, 's> {
             }
             Clear => (), // Lifetimes are explicit in MIR; backing bytes may remain stale after cleanup.
             StackRestore => {
-                self.value(&args[0])?;
+                self.restore_stack(&args[0])?;
                 self.i(I::GlobalSet(Global::Stack as u32));
             }
             Variant { tag, storage, .. } => {

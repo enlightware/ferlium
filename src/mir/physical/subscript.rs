@@ -11,6 +11,7 @@ use crate::{
     },
 };
 
+use super::EvidenceEnvironmentLayout;
 use super::evidence::PhysicalEvidenceReferences;
 
 /// One callable member of a physical subscript definition.
@@ -35,6 +36,7 @@ impl PhysicalSubscriptMember {
 pub(crate) struct PhysicalSubscriptDefinition {
     id: SubscriptId,
     capture_schema: Box<[DictionaryReq]>,
+    environment: EvidenceEnvironmentLayout,
     ref_member: Option<PhysicalSubscriptMember>,
     mut_member: Option<PhysicalSubscriptMember>,
 }
@@ -46,6 +48,10 @@ impl PhysicalSubscriptDefinition {
 
     pub(crate) fn capture_schema(&self) -> &[DictionaryReq] {
         &self.capture_schema
+    }
+
+    pub(crate) fn environment(&self) -> &EvidenceEnvironmentLayout {
+        &self.environment
     }
 
     pub(crate) fn member(&self, mut_member: bool) -> Option<PhysicalSubscriptMember> {
@@ -85,9 +91,15 @@ impl PhysicalSubscriptCatalog {
                     .extra_parameters(env)
                     .requirements
                     .into_boxed_slice();
+                let environment =
+                    EvidenceEnvironmentLayout::new(capture_schema.iter().map(|requirement| {
+                        matches!(requirement, DictionaryReq::VariantPayloadIndirection { .. })
+                    }))
+                    .expect("subscript environment layout fits the target");
                 PhysicalSubscriptDefinition {
                     id: SubscriptId::new(module, local),
                     capture_schema,
+                    environment,
                     ref_member: definition
                         .ref_member
                         .as_ref()

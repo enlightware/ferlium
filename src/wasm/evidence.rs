@@ -14,10 +14,12 @@ use crate::{
         Value,
         physical::{
             DictionaryReference, EvidenceEnvironmentLayout,
-            program::{InternedStaticEvidence, ProgramEvidenceId, ResolvedPhysicalProgram},
+            program::{
+                Descriptor, InternedStaticEvidence, ProgramEvidenceId, ResolvedPhysicalProgram,
+            },
         },
     },
-    module::{TraitDictionaryId, TraitId, id::Id},
+    module::{SubscriptId, TraitDictionaryId, TraitId, id::Id},
     types::r#trait::TraitDictionaryEntryIndex,
 };
 
@@ -36,9 +38,11 @@ pub(super) struct DictionaryDescriptor {
 #[derive(Default)]
 pub(super) struct ReachableEvidence {
     pub dictionaries: Vec<TraitDictionaryId>,
+    pub subscripts: Vec<SubscriptId>,
     pub entries: Vec<(TraitId, TraitDictionaryEntryIndex)>,
     pub statics: Vec<ProgramEvidenceId>,
     dictionary_set: FxHashSet<TraitDictionaryId>,
+    subscript_set: FxHashSet<SubscriptId>,
     entry_set: FxHashSet<(TraitId, TraitDictionaryEntryIndex)>,
     static_set: FxHashSet<ProgramEvidenceId>,
     dispatched_dictionaries: usize,
@@ -87,6 +91,12 @@ impl ReachableEvidence {
         }
     }
 
+    pub fn subscript(&mut self, id: SubscriptId) {
+        if self.subscript_set.insert(id) {
+            self.subscripts.push(id);
+        }
+    }
+
     pub fn entry(&mut self, id: TraitId, entry: TraitDictionaryEntryIndex) {
         if self.entry_set.insert((id, entry)) {
             self.entries.push((id, entry));
@@ -123,8 +133,14 @@ impl ReachableEvidence {
                 }
             }
             InternedStaticEvidence::VariantPayloadStorage(_) => (),
-            InternedStaticEvidence::Subscript { .. } => {
-                return Err("static subscript evidence".into());
+            InternedStaticEvidence::Subscript {
+                definition,
+                captures,
+            } => {
+                self.subscript(*definition);
+                for &capture in captures {
+                    self.static_value(program, capture)?;
+                }
             }
         }
         self.statics.push(id); // Children precede their immutable parents.
@@ -152,11 +168,25 @@ impl Image {
         program: &ResolvedPhysicalProgram<'_>,
         reachable: &ReachableEvidence,
         table: &FxHashMap<(TraitDictionaryId, usize), DispatchTableSlotId>,
+        subscript_table: &FxHashMap<(SubscriptId, bool), DispatchTableSlotId>,
     ) -> Self {
         let count = reachable
             .dictionaries
             .iter()
-            .map(|id| program.descriptor_index(*id).unwrap().as_index() + 1)
+            .map(|id| {
+                program
+                    .reference_index(Descriptor::Dictionary(*id))
+                    .unwrap()
+                    .as_index()
+                    + 1
+            })
+            .chain(reachable.subscripts.iter().map(|id| {
+                program
+                    .reference_index(Descriptor::Subscript(*id))
+                    .unwrap()
+                    .as_index()
+                    + 1
+            }))
             .max()
             .unwrap_or(0);
         let mut this = Self {
@@ -167,7 +197,8 @@ impl Image {
             let definition = program.dictionary(id).unwrap();
             let layout = definition.environment();
             let descriptor = this.words.len() * 4;
-            this.words[program.descriptor_index(id).unwrap().as_index()] = descriptor as u32;
+            let index = program.reference_index(Descriptor::Dictionary(id)).unwrap();
+            this.words[index.as_index()] = descriptor as u32;
             let entries = descriptor + size_of::<DictionaryDescriptor>() + layout.fields.len() * 4;
             this.words.extend([
                 layout.allocation.size() as u32,
@@ -182,6 +213,28 @@ impl Image {
                 (0..definition.entries().len())
                     .map(|index| table.get(&(id, index)).map_or(0, |slot| slot.as_u32())),
             );
+        }
+        for &id in &reachable.subscripts {
+            let definition = program.subscript(id).unwrap();
+            let layout = definition.environment();
+            let descriptor = this.words.len() * 4;
+            let index = program.reference_index(Descriptor::Subscript(id)).unwrap();
+            this.words[index.as_index()] = descriptor as u32;
+            let entries = descriptor + size_of::<DictionaryDescriptor>() + layout.fields.len() * 4;
+            this.words.extend([
+                layout.allocation.size() as u32,
+                layout.allocation.align() as u32,
+                layout.fields.len() as u32,
+                entries as u32,
+            ]);
+            this.words.extend(layout.fields.iter().map(|field| {
+                field.offset as u32 | if field.is_storage_flag { 1 << 31 } else { 0 }
+            }));
+            this.words.extend([false, true].map(|mutable| {
+                subscript_table
+                    .get(&(id, mutable))
+                    .map_or(0, |slot| slot.as_u32())
+            }));
         }
         for &id in &reachable.statics {
             let offset = match &program.static_evidence()[id.as_index()] {
@@ -200,12 +253,32 @@ impl Image {
                         .map(|id| this.references[id])
                         .collect::<Vec<_>>();
                     this.dictionary(
-                        program.descriptor_index(*definition).unwrap().as_u32(),
+                        program
+                            .reference_index(Descriptor::Dictionary(*definition))
+                            .unwrap()
+                            .as_u32(),
                         layout,
                         &captures,
                     )
                 }
-                InternedStaticEvidence::Subscript { .. } => unreachable!(),
+                InternedStaticEvidence::Subscript {
+                    definition,
+                    captures,
+                } => {
+                    let layout = program.subscript(*definition).unwrap().environment();
+                    let captures = captures
+                        .iter()
+                        .map(|id| this.references[id])
+                        .collect::<Vec<_>>();
+                    this.dictionary(
+                        program
+                            .reference_index(Descriptor::Subscript(*definition))
+                            .unwrap()
+                            .as_u32(),
+                        layout,
+                        &captures,
+                    )
+                }
             };
             this.references.insert(id, offset as u32);
         }
@@ -258,7 +331,7 @@ impl Image {
     }
 }
 
-unsafe fn descriptor<'a>(data: *const u8, index: u32) -> &'a DictionaryDescriptor {
+pub(super) unsafe fn descriptor<'a>(data: *const u8, index: u32) -> &'a DictionaryDescriptor {
     // SAFETY: generated references use a descriptor in this instance's live immutable image.
     unsafe {
         &*data

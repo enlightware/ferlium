@@ -6,10 +6,11 @@
 mod adapters;
 mod body;
 mod callable;
+mod subscript;
 
 use self::{
     adapters::{dictionary_adapter, entry_wrapper},
-    body::Body,
+    body::{Body, BodyMode},
 };
 
 use std::{iter, mem::offset_of, ops::Range};
@@ -27,7 +28,9 @@ use crate::{
     hir::{function::ArgConvention, native_functions::NativeScalar},
     mir::{
         BasicBlock, Function, Operation, OperationKind, ParameterKind, Value,
-        physical::program::ResolvedPhysicalProgram, role::MirType, terminator::TerminatorKind,
+        physical::{constructed_subscript_definitions, program::ResolvedPhysicalProgram},
+        role::MirType,
+        terminator::TerminatorKind,
     },
     module::{FunctionId, ModuleEnv, ModuleId, TraitId, id::Id},
     std::{
@@ -258,11 +261,13 @@ fn dictionary_table(code: &mut WasmFunction, evidence_base: WasmLocalId) {
 fn script_abi(body: &Function) -> Result<CallAbi, String> {
     // Physical verification requires a unique trailing Return for Value, none for NoValue.
     // Thus MIR input indices also index abi.parameters; only the failure pointer shifts locals.
+    let yielded = body.result_convention() == CallResultConvention::YIELDED_ONCE;
     if !matches!(
         body.result_convention(),
         CallResultConvention::Value
             | CallResultConvention::NoValue
             | CallResultConvention::ADDRESSOR_PLACE
+            | CallResultConvention::YIELDED_ONCE
     ) {
         return Err("scoped result convention".into());
     }
@@ -285,6 +290,7 @@ fn script_abi(body: &Function) -> Result<CallAbi, String> {
         }
     }
     let result_kind = match result {
+        _ if yielded => ResultKind::Output,
         Some(_) if body.result_convention() == CallResultConvention::ADDRESSOR_PLACE => {
             ResultKind::Direct(ScalarType::pointer().wasm())
         }
@@ -294,12 +300,13 @@ fn script_abi(body: &Function) -> Result<CallAbi, String> {
             ScalarType::of(ty).map_or(ResultKind::Output, |ty| ResultKind::Direct(ty.wasm()))
         }
     };
-    let fallible = body.blocks().any(|id| {
-        matches!(
-            body.block(id).terminator().kind,
-            TerminatorKind::Invoke { .. }
-        )
-    });
+    let fallible = yielded
+        || body.blocks().any(|id| {
+            matches!(
+                body.block(id).terminator().kind,
+                TerminatorKind::Invoke { .. }
+            )
+        });
     Ok(CallAbi {
         parameters,
         result: result_kind,
@@ -465,6 +472,9 @@ pub(super) fn emit(
     let mut callables = callable::Reachable::default();
     let mut needs_callable_glue = false;
     let mut adapters = Vec::new();
+    let mut subscript_modes = Vec::new();
+    let mut subscript_adapters = Vec::new();
+    let mut subscript_adapter_set = FxHashSet::default();
     loop {
         if pending.is_empty() {
             reachable.discover_dispatches(program, |id, entry| {
@@ -476,6 +486,16 @@ pub(super) fn emit(
                 }
                 adapters.push((id, entry));
             });
+            for &id in &reachable.subscripts {
+                for &mut_member in &subscript_modes {
+                    if subscript_adapter_set.insert((id, mut_member))
+                        && let Some(member) = program.subscript_member(id, mut_member)
+                    {
+                        pending.push(program.direct_entry(member.function()));
+                        subscript_adapters.push((id, mut_member));
+                    }
+                }
+            }
         }
         let Some(id) = pending.pop() else {
             break;
@@ -498,21 +518,9 @@ pub(super) fn emit(
         };
         let signature = script_abi(body).map_err(|reason| diagnostic(id, body, &reason))?;
         let selections = callable::selections(body);
+        let constructed_subscripts = constructed_subscript_definitions(body);
         for block in body.blocks() {
             let block = body.block(block);
-            if !matches!(
-                block.terminator().kind,
-                TerminatorKind::Goto { .. }
-                    | TerminatorKind::CondBr { .. }
-                    | TerminatorKind::SwitchVariant { .. }
-                    | TerminatorKind::Invoke { .. }
-                    | TerminatorKind::PropagateError
-                    | TerminatorKind::FailureDuringCleanup
-                    | TerminatorKind::Return
-                    | TerminatorKind::InvariantFailure { .. }
-            ) {
-                return Err(diagnostic(id, body, "unsupported terminator (yield)"));
-            }
             for operation in operations(block) {
                 if matches!(
                     operation.kind,
@@ -580,14 +588,27 @@ pub(super) fn emit(
                     OperationKind::BuildDictionary { definition, .. } => {
                         reachable.dictionary(definition)
                     }
+                    OperationKind::BuildSubscriptEvidence { .. } => {
+                        if let Some(result) = operation.result_id()
+                            && let Some(constructed) = constructed_subscripts.get(&result)
+                        {
+                            reachable.subscript(constructed.definition);
+                        }
+                    }
+                    OperationKind::BorrowSubscriptMember { mut_member, .. } => {
+                        if !subscript_modes.contains(&mut_member) {
+                            subscript_modes.push(mut_member);
+                        }
+                    }
                     OperationKind::DictEntry {
                         trait_id,
                         entry_index,
                         ..
                     } => reachable.entry(trait_id, entry_index),
-                    OperationKind::CloneClosureEnv { .. } | OperationKind::DropClosureEnv => {
-                        needs_callable_glue = true
-                    }
+                    OperationKind::CloneClosureEnv { .. }
+                    | OperationKind::DropClosureEnv
+                    | OperationKind::CloneSubscriptEnv { .. }
+                    | OperationKind::DropSubscriptEnv => needs_callable_glue = true,
                     OperationKind::Alloca { .. }
                     | OperationKind::Move
                     | OperationKind::Replace
@@ -642,17 +663,18 @@ pub(super) fn emit(
             EntityType::Function(index.as_u32()),
         );
     }
+    let mut direct_index = imports.functions().len();
+    let mut resume_indices = FxHashMap::default();
     let callees: FxHashMap<_, _> = bodies
         .iter()
-        .enumerate()
-        .map(|(i, (id, _, sig, _))| {
-            (
-                *id,
-                (
-                    WasmFunctionId::from_index(imports.functions().len() + i),
-                    sig,
-                ),
-            )
+        .map(|(id, body, sig, _)| {
+            let start = WasmFunctionId::from_index(direct_index);
+            direct_index += 1;
+            if body.result_convention() == CallResultConvention::YIELDED_ONCE {
+                resume_indices.insert(*id, WasmFunctionId::from_index(direct_index));
+                direct_index += 1;
+            }
+            (*id, (start, sig))
         })
         .chain(
             natives
@@ -669,7 +691,7 @@ pub(super) fn emit(
         types.ty().function(abi.params(), abi.results());
         entry_abis.insert((trait_id, entry), (index, abi));
     }
-    let table = adapters
+    let dictionary_table = adapters
         .iter()
         .enumerate()
         .map(|(index, &(id, entry))| {
@@ -679,9 +701,8 @@ pub(super) fn emit(
             )
         })
         .collect();
-    let mut evidence = evidence::Image::build(program, &reachable, &table);
-    let callable_base =
-        WasmFunctionId::from_index(imports.functions().len() + bodies.len() + adapters.len());
+    let direct_count = direct_index - imports.functions().len();
+    let adapter_base = WasmFunctionId::from_index(imports.functions().len() + direct_count);
     for &(target, captures) in &callables.entries {
         let abi = callees[&program.direct_entry(target)].1;
         callables
@@ -699,6 +720,34 @@ pub(super) fn emit(
         );
     }
     let callable_count = callables.entries.len() + callables.selected.len();
+    let subscript_base = adapters.len() + callable_count;
+    let subscript_table = subscript_adapters
+        .iter()
+        .enumerate()
+        .map(|(index, &entry)| {
+            (
+                entry,
+                DispatchTableSlotId::from_index(subscript_base + index + 1),
+            )
+        })
+        .collect::<FxHashMap<_, _>>();
+    let resume_base = subscript_base + subscript_adapters.len();
+    let resume_slots = bodies
+        .iter()
+        .filter(|(_, body, _, _)| body.result_convention() == CallResultConvention::YIELDED_ONCE)
+        .enumerate()
+        .map(|(index, (id, _, _, _))| {
+            (
+                *id,
+                DispatchTableSlotId::from_index(resume_base + index + 1),
+            )
+        })
+        .collect::<FxHashMap<_, _>>();
+    let table_count =
+        adapters.len() + callable_count + subscript_adapters.len() + resume_slots.len();
+    let glue_base = WasmFunctionId::from_index(adapter_base.as_index() + table_count);
+    let mut evidence =
+        evidence::Image::build(program, &reachable, &dictionary_table, &subscript_table);
     let emit_callable_glue = callable_count != 0 || needs_callable_glue;
     let clone_method = definition.dictionary_method_index(VALUE_CLONE_METHOD_INDEX);
     let drop_method = definition.dictionary_method_index(VALUE_DROP_METHOD_INDEX);
@@ -729,10 +778,8 @@ pub(super) fn emit(
                 )
             })
             .collect(),
-        clone: emit_callable_glue
-            .then(|| WasmFunctionId::from_index(callable_base.as_index() + callable_count)),
-        drop: emit_callable_glue
-            .then(|| WasmFunctionId::from_index(callable_base.as_index() + callable_count + 1)),
+        clone: emit_callable_glue.then_some(glue_base),
+        drop: emit_callable_glue.then(|| WasmFunctionId::from_index(glue_base.as_index() + 1)),
         value_methods: emit_callable_glue.then(|| callable::ValueMethods {
             clone: callable::ValueMethod::new(
                 entry_abis[&(value_trait, clone_method)].0,
@@ -743,6 +790,14 @@ pub(super) fn emit(
                 drop_method,
             ),
         }),
+    };
+    let resume_signature = WasmTypeId::new(types.len());
+    types
+        .ty()
+        .function([ValType::I32, ValType::I32], [ValType::I32]);
+    let mut subscript_entries = subscript::Entries {
+        signatures_by_arity: FxHashMap::default(),
+        resume_signature,
     };
     for &(target, _) in &callables.entries {
         if callables.references.contains(&target) {
@@ -758,17 +813,48 @@ pub(super) fn emit(
             index
         });
     }
+    for &(id, mut_member) in &subscript_adapters {
+        let definition = program.subscript(id).unwrap();
+        let target = program.direct_entry(definition.member(mut_member).unwrap().function());
+        let arity =
+            subscript::visible_arity(callees[&target].1, definition.capture_schema().len())?;
+        subscript_entries
+            .signatures_by_arity
+            .entry(arity)
+            .or_insert_with(|| {
+                let index = WasmTypeId::new(types.len());
+                types
+                    .ty()
+                    .function(subscript::parameters(arity), subscript::results());
+                index
+            });
+    }
     let mut strings = StringLiterals::default();
     let mut names = FunctionNames::new(session, imports);
     let mut source_map = Vec::new();
-    for (index, (id, body, signature, selections)) in bodies.iter().enumerate() {
+    let mut suspension_layouts = FxHashMap::default();
+    let mut body_index = 0;
+    for (id, body, signature, selections) in &bodies {
         names.push(format!(
             "{}::{}",
             module_path(session, id.module),
             body.name
         ));
         functions.function(WasmTypeId::new(types.len()).as_u32());
-        types.ty().function(signature.params(), signature.results());
+        if body.result_convention() == CallResultConvention::YIELDED_ONCE {
+            types
+                .ty()
+                .function(signature.params(), subscript::results());
+        } else {
+            types.ty().function(signature.params(), signature.results());
+        }
+        let mode = if body.result_convention() == CallResultConvention::YIELDED_ONCE {
+            BodyMode::ProjectionStart {
+                resume: resume_slots[id],
+            }
+        } else {
+            BodyMode::Normal
+        };
         let emitted = Body::new(
             body,
             signature,
@@ -784,23 +870,66 @@ pub(super) fn emit(
             &entry_abis,
             layout_entries,
             &callable_entries,
+            &subscript_entries,
             selections,
+            mode,
         )
         .and_then(Body::emit)
         .map_err(|reason| diagnostic(*id, body, &reason))?;
-        code.function(&emitted.0);
+        if let Some(layout) = emitted.suspension {
+            suspension_layouts.insert(*id, layout);
+        }
+        code.function(&emitted.function);
         source_map.extend(
             emitted
-                .1
+                .source_map
                 .into_iter()
                 .map(|(bytes, span)| CodeSourceMapEntry {
-                    body: index,
+                    body: body_index,
                     bytes,
                     span,
                 }),
         );
+        body_index += 1;
+        if body.result_convention() == CallResultConvention::YIELDED_ONCE {
+            names.push(format!("<resume {}>", body.name));
+            functions.function(WasmTypeId::new(types.len()).as_u32());
+            let mut parameters = signature.params();
+            parameters.push(ValType::I32);
+            types.ty().function(parameters, [ValType::I32]);
+            let emitted = Body::new(
+                body,
+                signature,
+                &callees,
+                program,
+                session,
+                session
+                    .modules()
+                    .env_for(session.expect_fresh_module(id.module)),
+                imports,
+                &mut strings,
+                &evidence,
+                &entry_abis,
+                layout_entries,
+                &callable_entries,
+                &subscript_entries,
+                selections,
+                BodyMode::ProjectionResume,
+            )
+            .and_then(Body::emit)
+            .map_err(|reason| diagnostic(*id, body, &reason))?;
+            debug_assert!(emitted.suspension.is_some());
+            code.function(&emitted.function);
+            source_map.extend(emitted.source_map.into_iter().map(|(bytes, span)| {
+                CodeSourceMapEntry {
+                    body: body_index,
+                    bytes,
+                    span,
+                }
+            }));
+            body_index += 1;
+        }
     }
-    let adapter_base = WasmFunctionId::from_index(imports.functions().len() + bodies.len());
     for &(id, entry) in &adapters {
         let definition = program.dictionary(id).unwrap();
         let (ty, abi) = &entry_abis[&(definition.trait_id(), entry)];
@@ -846,6 +975,38 @@ pub(super) fn emit(
         functions.function(callable_entries.signatures[&arity].as_u32());
         code.function(&callable::selected_adapter(env, entry, *ty, abi)?);
     }
+    for &(id, mut_member) in &subscript_adapters {
+        let definition = program.subscript(id).unwrap();
+        let member = definition.member(mut_member).unwrap();
+        let target = program.direct_entry(member.function());
+        let (index, abi) = callees[&target];
+        let arity = subscript::visible_arity(abi, definition.capture_schema().len())?;
+        names.push(format!(
+            "<subscript {} member>",
+            if mut_member { "mut" } else { "ref" }
+        ));
+        functions.function(subscript_entries.signatures_by_arity[&arity].as_u32());
+        code.function(&subscript::member_adapter(
+            program, definition, mut_member, abi, index,
+        )?);
+    }
+    for &target in bodies
+        .iter()
+        .filter(|(_, body, _, _)| body.result_convention() == CallResultConvention::YIELDED_ONCE)
+        .map(|(id, _, _, _)| id)
+    {
+        let (_, abi) = callees[&target];
+        names.push(format!(
+            "<subscript resume {}>",
+            program.function(target).unwrap().name
+        ));
+        functions.function(subscript_entries.resume_signature.as_u32());
+        code.function(&subscript::resume_adapter(
+            abi,
+            &suspension_layouts[&target],
+            resume_indices[&target],
+        ));
+    }
     if let Some(methods) = callable_entries.value_methods {
         names.push("<callable clone>".into());
         names.push("<callable drop>".into());
@@ -860,7 +1021,7 @@ pub(super) fn emit(
     tables.table(TableType {
         element_type: RefType::FUNCREF,
         table64: false,
-        minimum: (adapters.len() + callable_count) as u64 + 1,
+        minimum: table_count as u64 + 1,
         maximum: None,
         shared: false,
     });
@@ -869,7 +1030,7 @@ pub(super) fn emit(
         None,
         &ConstExpr::i32_const(1),
         Elements::Functions(
-            (0..adapters.len() + callable_count)
+            (0..table_count)
                 .map(|index| WasmFunctionId::from_index(adapter_base.as_index() + index).as_u32())
                 .collect::<Vec<_>>()
                 .into(),
@@ -887,9 +1048,8 @@ pub(super) fn emit(
             &ConstExpr::i32_const(0),
         );
     }
-    let mut next_index = WasmFunctionId::from_index(
-        callable_base.as_index() + callable_count + if emit_callable_glue { 2 } else { 0 },
-    );
+    let mut next_index =
+        WasmFunctionId::from_index(glue_base.as_index() + if emit_callable_glue { 2 } else { 0 });
     for export in &host_exports {
         let (index, signature) = &callees[&program.direct_entry(export.function)];
         // Only fallible entries need a host adapter: internal status returns become a Rust error

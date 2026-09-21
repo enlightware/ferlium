@@ -143,6 +143,12 @@ impl Imports {
                 vec![ValType::I32],
             ),
             (
+                "materialize_subscript_environment",
+                callable_environment::materialize_subscript as *const (),
+                vec![ValType::I32; 2],
+                vec![ValType::I32],
+            ),
+            (
                 "release_callable_environment",
                 callable_environment::release as *const (),
                 vec![ValType::I32; 2],
