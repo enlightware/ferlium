@@ -22,7 +22,7 @@ for (const name of selected) {
 console.log('workload                 compile    instantiate        cold      warmed       bytes  result');
 for (const name of selected) {
     let start = performance.now();
-    const workload = new Workload(name);
+    const workload = new Workload(name, true);
     const compilation = performance.now() - start;
     try {
         start = performance.now();

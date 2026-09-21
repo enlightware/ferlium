@@ -244,8 +244,8 @@ impl RuntimeWorkload {
     /// Aggregate and string results are reduced to a deterministic scalar after the workload has
     /// produced them.
     #[cfg(target_arch = "wasm32")]
-    pub fn prepare_wasm(self) -> PreparedWasmRuntimeWorkload {
-        let prepared = self.prepare(BenchTarget::PhysicalMir);
+    pub fn prepare_wasm(self, target: BenchTarget) -> PreparedWasmRuntimeWorkload {
+        let prepared = self.prepare(target);
         let program = CompiledProgram::compile(
             &prepared.session,
             FunctionId::new(prepared.module_id, prepared.entry),
@@ -254,6 +254,7 @@ impl RuntimeWorkload {
         PreparedWasmRuntimeWorkload {
             program,
             result: prepared.result.wasm_transport(),
+            prepared,
             expected: self.expected,
         }
     }
@@ -295,6 +296,7 @@ pub enum WasmRuntimeResult {
 #[cfg(target_arch = "wasm32")]
 pub struct PreparedWasmRuntimeWorkload {
     pub program: CompiledProgram,
+    pub prepared: PreparedRuntimeWorkload,
     pub result: WasmRuntimeResult,
     pub expected: f64,
 }

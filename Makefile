@@ -34,6 +34,8 @@ BENCH_JOBS ?= $(shell c=$$(lscpu -p=Core,Socket 2>/dev/null | grep -v '^\#' | so
 # Valgrind 3.18's Rust v0 demangler is broken, so Gungraun's Rust-symbol entry points silently
 # collect zero events. An uninstalled Valgrind build can be selected with VALGRIND=/path/vg-in-place.
 VALGRIND ?= valgrind
+# Directory holding valgrind.h and callgrind.h; derived from VALGRIND when left empty.
+VALGRIND_INCLUDE ?=
 VALGRIND_MIN_VERSION := 3.19.0
 
 install-deps:
@@ -62,10 +64,6 @@ test-wasm-codegen:
 test-wasm-release:
 	CARGO_PROFILE_TEST_DEBUG=0 wasm-pack test --release --node --test language
 
-profile-wasm:
-	wasm-pack build examples/wasm-profile --target nodejs --release --out-dir ../../target/wasm-profile
-	node examples/wasm-profile/run.mjs $(ARGS)
-
 test: test-local test-wasm
 
 test-miri:
@@ -88,6 +86,14 @@ check-valgrind:
 
 bench: check-valgrind
 	GUNGRAUN_VALGRIND_BIN="$(VALGRIND)" GUNGRAUN_PARALLEL=$(BENCH_JOBS) cargo bench
+
+bench-wasm:
+	wasm-pack build examples/wasm-profile --target nodejs --release --out-dir ../../target/wasm-profile
+	node examples/wasm-profile/run.mjs $(ARGS)
+
+bench-wasm-callgrind: check-valgrind
+	wasm-pack build examples/wasm-profile --target nodejs --release --out-dir ../../target/wasm-profile
+	VALGRIND="$(VALGRIND)" VALGRIND_INCLUDE="$(VALGRIND_INCLUDE)" BENCH_JOBS=$(BENCH_JOBS) node examples/wasm-profile/callgrind.mjs $(ARGS)
 
 fuzz-ide:
 	mkdir -p fuzz/corpus-generated/ide_compile_any $(FUZZ_LOG_DIR)/ide_compile_any

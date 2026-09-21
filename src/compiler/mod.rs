@@ -33,6 +33,11 @@ pub use session::{
 };
 
 #[doc(hidden)]
+pub mod bench_support {
+    pub use crate::compiler::session::reset_initial_session_state_cache;
+}
+
+#[doc(hidden)]
 pub mod test_support {
     use crate::{
         compiler::{

@@ -134,6 +134,11 @@ For fast optimizer iteration, `make profile-mir` runs the same runtime workloads
 the MIR interpreter and compares unweighted instruction counts for raw and optimized MIR. Select a
 subset with `make profile-mir WORKLOADS="fibonacci sieve"`; this does not require Valgrind.
 
+`make bench-wasm` times the same workloads through the WebAssembly backend under Node, and
+`make bench-wasm-callgrind` measures them under Callgrind, in Gungraun's metrics: per phase, per
+optimization setting, and for generated Wasm against physical MIR interpretation. See
+[doc/wasm-benchmarks.md](doc/wasm-benchmarks.md).
+
 ### Fuzzing
 
 Crash-oriented fuzz targets live in `fuzz/` and are run explicitly with `cargo-fuzz`; see [doc/fuzzing.md](doc/fuzzing.md).

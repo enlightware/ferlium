@@ -8,11 +8,21 @@
 mod runtime_workloads;
 
 use ferlium::{
+    compiler::bench_support::reset_initial_session_state_cache,
     std::math::Float,
     wasm::{CompiledProgram, Instance, WasmLimits},
 };
-use runtime_workloads::{RuntimeWorkload, WasmRuntimeResult};
+use runtime_workloads::{BenchTarget, PreparedRuntimeWorkload, RuntimeWorkload, WasmRuntimeResult};
 use wasm_bindgen::prelude::*;
+
+/// Post-expansion optimization is the axis the Callgrind benchmark varies.
+fn bench_target(optimized: bool) -> BenchTarget {
+    if optimized {
+        BenchTarget::PhysicalMir
+    } else {
+        BenchTarget::UnoptimizedPhysicalMir
+    }
+}
 
 enum WorkloadInstance {
     Int(Instance<(), isize>),
@@ -22,6 +32,7 @@ enum WorkloadInstance {
 #[wasm_bindgen]
 pub struct Workload {
     program: CompiledProgram,
+    prepared: PreparedRuntimeWorkload,
     result: WasmRuntimeResult,
     expected: f64,
     instance: Option<WorkloadInstance>,
@@ -29,14 +40,15 @@ pub struct Workload {
 
 #[wasm_bindgen]
 impl Workload {
-    /// Compile one shared runtime workload using optimized physical MIR.
+    /// Compile one shared runtime workload using physical MIR.
     #[wasm_bindgen(constructor)]
-    pub fn new(name: &str) -> Result<Workload, JsValue> {
+    pub fn new(name: &str, optimized: bool) -> Result<Workload, JsValue> {
         let workload = RuntimeWorkload::from_name(name)
             .ok_or_else(|| JsValue::from_str(&format!("unknown runtime workload `{name}`")))?;
-        let prepared = workload.prepare_wasm();
+        let prepared = workload.prepare_wasm(bench_target(optimized));
         Ok(Self {
             program: prepared.program,
+            prepared: prepared.prepared,
             result: prepared.result,
             expected: prepared.expected,
             instance: None,
@@ -76,6 +88,14 @@ impl Workload {
         .map_err(|error| JsValue::from_str(&format!("{error:?}")))
     }
 
+    /// Run the same workload through the physical MIR interpreter instead of generated Wasm.
+    pub fn run_mir(&mut self) -> f64 {
+        match self.result {
+            WasmRuntimeResult::Int => self.prepared.run_int() as f64,
+            WasmRuntimeResult::Float => self.prepared.run_float().into_inner(),
+        }
+    }
+
     pub fn code_bytes(&self) -> usize {
         self.program.bytes().len()
     }
@@ -83,6 +103,21 @@ impl Workload {
     pub fn expected(&self) -> f64 {
         self.expected
     }
+}
+
+/// Lower std alone, so that workload compilations measured afterwards reuse its artifacts.
+#[wasm_bindgen]
+pub fn prepare_std(optimized: bool) -> Result<(), JsValue> {
+    bench_target(optimized)
+        .session()
+        .prepare_std_artifacts()
+        .map_err(|error| JsValue::from_str(&format!("{error:?}")))
+}
+
+/// Discard the cached pristine session state left by an unmeasured warmup.
+#[wasm_bindgen]
+pub fn reset_std_cache() {
+    reset_initial_session_state_cache();
 }
 
 /// Newline-separated workload names, kept in the shared corpus definition.

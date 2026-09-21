@@ -629,6 +629,23 @@ impl InitialSessionState {
     }
 }
 
+/// Drop the cached pristine session state so the next [`CompilerSession::new`] rebuilds it.
+///
+/// Panics when a live session still shares the cached standard library, as it would keep alive the
+/// artifacts the caller wants rebuilt.
+pub fn reset_initial_session_state_cache() {
+    INITIAL_SESSION_STATE_CACHE.with(|cache| {
+        let state = cache.borrow_mut().take();
+        if let Some(state) = state {
+            assert_eq!(
+                Rc::strong_count(&state.std_revision),
+                1,
+                "a live compiler session still shares the cached standard library"
+            );
+        }
+    });
+}
+
 impl CompilerSession {
     /// Native adapter tests need an EvalCtx but no standard-library compilation or execution.
     #[cfg(test)]
@@ -805,6 +822,12 @@ impl CompilerSession {
     /// Get the standard library module.
     pub fn std_module(&self) -> &Module {
         self.expect_fresh_module(STD_MODULE_ID)
+    }
+
+    /// Lower the standard library to physical MIR without compiling any user module.
+    pub fn prepare_std_artifacts(&self) -> Result<(), RuntimeError> {
+        ensure_physical_mir_artifacts(self, STD_MODULE_ID)
+            .map_err(|error| RuntimeError::Backend(error.to_string()))
     }
 
     fn pristine_scratch_entry(&self) -> ModuleEntry {
