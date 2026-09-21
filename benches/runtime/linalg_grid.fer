@@ -1,0 +1,3 @@
+fn benchmark_entry() {
+    grid_simulation(black_box(8), black_box(2))
+}

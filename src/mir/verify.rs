@@ -1072,6 +1072,9 @@ impl<'a> Verifier<'a> {
                 self.verify_place_representation(node, 0, &operands[0], MirType::Lowered(*ty));
                 self.verify_place_representation(node, 1, &operands[1], MirType::Lowered(*ty));
             }
+            OperationKind::BlackBox { ty } => {
+                self.verify_place_representation(node, 0, &operands[0], MirType::Lowered(*ty));
+            }
             _ => {}
         }
     }

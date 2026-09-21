@@ -15,3 +15,9 @@ fn add_one(x: int) -> int { x + 1 }
 
 This does not change the function's source-level behavior or type; it only prevents MIR inlining.
 Currently, `never` is the only accepted argument to `inline`.
+
+## Hiding values from optimization
+
+The safe `std::black_box(value)` function returns `value` unchanged while preventing the compiler
+from reasoning about its contents across that call. It is mainly useful for benchmarks; it is not a
+security boundary and does not prevent optimization of unrelated code.

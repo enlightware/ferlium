@@ -22,8 +22,7 @@ use crate::{
             native_value_drop_function,
         },
     },
-    types::r#trait::Trait,
-    types::r#type::Type,
+    types::{r#trait::Trait, r#type::Type},
 };
 
 fn repr_trait() -> Trait {

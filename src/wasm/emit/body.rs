@@ -2163,6 +2163,18 @@ impl<'a, 's> Body<'a, 's> {
                     });
                 }
             }
+            BlackBox { ty } => {
+                if let Some(witness) = layout_witness(op) {
+                    self.dynamic_layout(witness)?;
+                }
+                self.address(&args[0])?;
+                if layout_witness(op).is_some() {
+                    self.i(I::LocalGet(self.dynamic_size.as_u32()));
+                } else {
+                    self.i(I::I32Const(self.size(&MirType::Lowered(*ty))? as i32));
+                }
+                self.i(I::Call(self.imports.function_index("black_box").as_u32()));
+            }
             Replace => {
                 let MirType::Lowered(ty) = self.pointee_type(&args[0])? else {
                     return Err("pointer replacement".into());

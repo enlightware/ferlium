@@ -541,6 +541,7 @@ pub(crate) fn eliminate_common_calls(
     func: &Function,
     env: ModuleEnv<'_>,
     summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
+    is_optimization_barrier: &dyn Fn(FunctionId) -> bool,
 ) -> Option<Function> {
     let scan = scan_call_cse_inputs(func, env);
     if !scan.has_duplicate_calls {
@@ -548,7 +549,14 @@ pub(crate) fn eliminate_common_calls(
     }
     let constant_cells = &scan.constant_cells;
     let origins = PlaceOrigins::of(func, summary_of);
-    let entry_states = available_call_states(func, env, &origins, constant_cells, summary_of);
+    let entry_states = available_call_states(
+        func,
+        env,
+        &origins,
+        constant_cells,
+        summary_of,
+        is_optimization_barrier,
+    );
     let mut replacements = Vec::new();
 
     for block_id in func.blocks() {
@@ -563,6 +571,7 @@ pub(crate) fn eliminate_common_calls(
                 &origins,
                 constant_cells,
                 summary_of,
+                is_optimization_barrier,
                 &mut state,
             ) {
                 replacements.push(CallReplacement {
@@ -585,6 +594,7 @@ pub(crate) fn eliminate_common_calls(
                 &origins,
                 constant_cells,
                 summary_of,
+                is_optimization_barrier,
                 &mut state,
             )
         {
@@ -720,6 +730,7 @@ fn available_call_states(
     origins: &PlaceOrigins,
     constant_cells: &ImmutableConstantCells,
     summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
+    is_optimization_barrier: &dyn Fn(FunctionId) -> bool,
 ) -> FxHashMap<BlockId, AvailableCalls> {
     let mut entries = FxHashMap::default();
     entries.insert(func.entry(), AvailableCalls::default());
@@ -738,6 +749,7 @@ fn available_call_states(
                     origins,
                     constant_cells,
                     summary_of,
+                    is_optimization_barrier,
                     &mut state,
                 );
             }
@@ -753,6 +765,7 @@ fn available_call_states(
                         origins,
                         constant_cells,
                         summary_of,
+                        is_optimization_barrier,
                         &mut state,
                     );
                     changed |= join_available(&mut entries, *normal, &state);
@@ -796,11 +809,17 @@ fn transfer(
     origins: &PlaceOrigins,
     constant_cells: &ImmutableConstantCells,
     summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
+    is_optimization_barrier: &dyn Fn(FunctionId) -> bool,
     state: &mut AvailableCalls,
 ) -> Option<(mir::Value, mir::Value)> {
-    if let Some((expression, available)) =
-        call_expression(operation, origins, constant_cells, summary_of, env)
-    {
+    if let Some((expression, available)) = call_expression(
+        operation,
+        origins,
+        constant_cells,
+        summary_of,
+        is_optimization_barrier,
+        env,
+    ) {
         // Every call writes its out-slot. This can invalidate another value expression whose input
         // or cached result occupies the same root, and overwrites an addressor pointer cached in
         // exactly that slot.
@@ -882,6 +901,7 @@ fn call_expression(
     origins: &PlaceOrigins,
     constant_cells: &ImmutableConstantCells,
     summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
+    is_optimization_barrier: &dyn Fn(FunctionId) -> bool,
     env: ModuleEnv<'_>,
 ) -> Option<(CallExpression, AvailableCall)> {
     let OperationKind::Call { ty, metadata } = &operation.kind else {
@@ -900,6 +920,9 @@ fn call_expression(
     let mir::Value::Function(callee) = call.callee else {
         return None;
     };
+    if is_optimization_barrier(*callee) {
+        return None;
+    }
     let available = match ty.result_convention {
         CallResultConvention::ADDRESSOR_PLACE => {
             let summary = summary_of(*callee);

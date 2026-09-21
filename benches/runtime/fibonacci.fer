@@ -1,0 +1,3 @@
+fn benchmark_entry() {
+    fibonacci_rec(black_box(20))
+}

@@ -45,7 +45,7 @@ use crate::{
         pass::{
             dataflow::{Root, escaping_roots},
             dce,
-            known_callee::KnownCallees,
+            known_callee::{KnownCallee, KnownCallees},
             physical::optimize,
         },
         role::{MirType, ValueRoles},
@@ -70,8 +70,8 @@ use crate::{
         value::{
             ProductLayoutOrder, ProductLayoutSpec, ProductMemberLayout,
             VALUE_ALIGN_ASSOC_CONST_INDEX, VALUE_SIZE_ASSOC_CONST_INDEX, is_value_drop_function,
-            product_layout_spec, value_layout_for_type, value_layout_getter_entry,
-            variant_indirect_payload_type, variant_payload_offset,
+            product_layout_spec, type_has_static_layout, value_layout_for_type,
+            value_layout_getter_entry, variant_indirect_payload_type, variant_payload_offset,
             variant_payload_storage_for_payload_type, variant_tag_layout,
         },
     },
@@ -641,15 +641,21 @@ fn expand_physical_mir(
     for (index, entry) in entries.iter_mut().enumerate() {
         if let Some(body) = entry.take() {
             let local = LocalFunctionId::from_index(index);
+            let function = FunctionId::new(module, local);
             let original = semantic
                 .specialization(local)
-                .map_or(FunctionId::new(module, local), |specialization| {
-                    specialization.original
-                });
+                .map_or(function, |specialization| specialization.original);
             let body = drop_elaboration::elaborate(body, semantic, env, |variant, payload| {
                 lowerer.intern_variant_payload_release(variant, payload)
             });
-            *entry = Some(lowerer.lower_body(FunctionId::new(module, local), original, body)?);
+            let body = lowerer.lower_body(function, original, body)?;
+            *entry = Some(
+                if lowerer.known.resolve(original, |_| None) == Some(KnownCallee::BlackBox) {
+                    lowerer.add_black_box_barrier(function, body)?
+                } else {
+                    body
+                },
+            );
         } else if let Some(&kind) =
             buffer_entries.get(&FunctionId::new(module, LocalFunctionId::from_index(index)))
         {
@@ -969,6 +975,65 @@ impl<'a> PhysicalLowerer<'a> {
         self.lower_incomplete_variant_allocation_cleanup(&mut edit, &allocation_cleanups);
         if !variant_candidates.is_empty() || !allocation_cleanups.is_empty() {
             edit.reorder_blocks_in_reverse_postorder();
+        }
+        Ok(edit.finish_unverified())
+    }
+
+    /// Add the backend observation after the ordinary source body has cloned or moved its result.
+    /// Ownership therefore remains entirely governed by normal `Let` call semantics.
+    fn add_black_box_barrier(
+        &self,
+        function: FunctionId,
+        body: Function,
+    ) -> Result<Function, BackendReadinessError> {
+        let mut edit = FunctionEdit::new(body);
+        let Some((result_index, result)) = edit
+            .parameters()
+            .iter()
+            .enumerate()
+            .find(|(_, parameter)| parameter.kind == ParameterKind::Return)
+        else {
+            return Err(BackendReadinessError::InvalidPhysicalProtocol {
+                function,
+                reason: "black_box has no result place",
+            });
+        };
+        let result_ty = result.ty;
+        let result = Value::Parameter(ParameterId::from_index(result_index));
+        let witness = if type_has_static_layout(result_ty, Location::new_synthesized(), &self.env) {
+            None
+        } else {
+            let mut dictionaries = edit
+                .parameters()
+                .iter()
+                .enumerate()
+                .filter(|(_, parameter)| parameter.kind == ParameterKind::Dictionary)
+                .map(|(index, _)| Value::Parameter(ParameterId::from_index(index)));
+            let witness =
+                dictionaries
+                    .next()
+                    .ok_or(BackendReadinessError::InvalidPhysicalProtocol {
+                        function,
+                        reason: "dynamic black_box has no layout witness",
+                    })?;
+            if dictionaries.next().is_some() {
+                return Err(BackendReadinessError::InvalidPhysicalProtocol {
+                    function,
+                    reason: "black_box has unexpected hidden evidence",
+                });
+            }
+            Some(witness)
+        };
+        let returns = edit
+            .blocks()
+            .filter(|block| matches!(edit.block(*block).terminator.kind, TerminatorKind::Return))
+            .collect::<Vec<_>>();
+        for block in returns {
+            let span = edit.block(block).terminator.span;
+            edit.append_operation(
+                block,
+                Operation::black_box(span, result_ty, result.clone(), witness.clone()),
+            );
         }
         Ok(edit.finish_unverified())
     }
@@ -2995,6 +3060,7 @@ fn verify_physical_operation(
         | OperationKind::AllocaPlace { .. }
         | OperationKind::RuntimeAlloc { .. }
         | OperationKind::RuntimeDealloc
+        | OperationKind::BlackBox { .. }
         | OperationKind::Call { .. }
         | OperationKind::Project { .. }
         | OperationKind::EndProject

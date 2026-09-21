@@ -912,6 +912,24 @@ impl Operation {
         }
     }
 
+    /// Observe `value` without changing it while preventing optimization from deriving its
+    /// contents. A trailing witness supplies a run-time layout for generic storage.
+    pub fn black_box(
+        span: Location,
+        ty: Type,
+        value: mir::Value,
+        witness: Option<mir::Value>,
+    ) -> Self {
+        let mut operands = vec![value];
+        operands.extend(witness);
+        Operation {
+            result_id: None,
+            span,
+            operands: operands.into_boxed_slice(),
+            kind: OperationKind::BlackBox { ty },
+        }
+    }
+
     /// Install an owned replacement without exposing an intermediate absent destination.
     /// The replacement's storage receives the displaced old value (possibly absent) for cleanup.
     /// This is an ownership transition, not a prescribed byte-swap algorithm; it runs no callbacks
@@ -1199,6 +1217,8 @@ pub enum OperationKind {
     CompareEqual,
     /// Read a representation-copyable value from a place without consuming it.
     Load,
+    /// Observe a complete value through a backend optimization barrier.
+    BlackBox { ty: Type },
     /// Project a field place from an aggregate place.
     Subfield {
         ty: Type,
@@ -1317,6 +1337,7 @@ impl OperationKind {
             | AllocaPlace { .. }
             | RuntimeAlloc { .. }
             | RuntimeDealloc
+            | BlackBox { .. }
             | Call { .. }
             | Project { .. }
             | EndProject
@@ -1370,6 +1391,7 @@ impl OperationKind {
             | AllocaPlace { .. }
             | RuntimeAlloc { .. }
             | RuntimeDealloc
+            | BlackBox { .. }
             | Call { .. }
             | Project { .. }
             | EndProject
@@ -1504,6 +1526,7 @@ impl OperationKind {
             IsInitialized => OperationResult::Lowered(cached_primitive_ty!(bool)),
             StackSave => OperationResult::StackMarker,
             Call { .. }
+            | BlackBox { .. }
             | BuildArray { .. }
             | EndProject
             | Store
@@ -1543,6 +1566,10 @@ impl OperationKind {
                 whole.operands.len(),
                 1,
                 "runtime_dealloc takes exactly the allocation address"
+            ),
+            BlackBox { .. } => assert!(
+                matches!(whole.operands.len(), 1 | 2),
+                "black_box takes the value place and optional layout evidence"
             ),
             Call { ty, .. } => {
                 assert!(
@@ -1773,6 +1800,13 @@ impl OperationKind {
                 Ok(())
             }
             RuntimeDealloc => write!(f, "runtime_dealloc {}", whole.operands[0].format_with(env)),
+            BlackBox { .. } => {
+                write!(f, "black_box {}", whole.operands[0].format_with(env))?;
+                if let Some(witness) = whole.operands.get(1) {
+                    write!(f, " using {}", witness.format_with(env))?;
+                }
+                Ok(())
+            }
             Call { ty, metadata } => {
                 write!(f, "call ")?;
                 if !ty.result_convention.has_result_place() {

@@ -756,6 +756,7 @@ fn note_operation(operation: &Operation, site: Site, uses: &mut FxHashMap<ValueI
             write(&operation.operands[0], uses)
         }
         OperationKind::Alloca { .. }
+        | OperationKind::BlackBox { .. }
         // Unlike a value read, an initialization query may legally observe a destination before
         // its sole write. Substituting the source would expose the source's initialization state.
         | OperationKind::IsInitialized

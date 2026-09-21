@@ -868,11 +868,13 @@ enumeration.
 
 `make profile-mir` compares raw and optimized MIR over the canonical runtime workloads without
 Valgrind; `WORKLOADS="fibonacci sieve"` selects a subset. The native profiler and Gungraun share
-workload compilation, inputs and typed result extraction through `benches/runtime_workloads.rs`.
-Gungraun therefore continues to measure the same execution boundary. Each row includes its signed
-delta and percentage change; a count introduced from a zero baseline is marked `new`. Peak cells is
-a high-water mark within one run, while the corpus summary sums the workloads' paired peaks to make
-their improvements additive; that sum is a comparison score, not simultaneous memory use.
+workload compilation and scalar benchmark entries through `benches/runtime_workloads.rs`. Each
+entry passes its source-defined canonical inputs through `std::black_box` so they remain opaque to
+evaluation, and returns a fixed scalar checksum. The same entries are used by generated-Wasm
+profiling. Each row includes its signed delta and percentage change; a count introduced from a zero
+baseline is marked `new`. Peak cells is a high-water mark within one run, while the corpus summary
+sums the workloads' paired peaks to make their improvements additive; that sum is a comparison
+score, not simultaneous memory use.
 When standard output is a terminal, decreases are green, increases red and unchanged values dimmed;
 headings and totals are emphasized. Redirected output is always plain, and `NO_COLOR` disables color
 explicitly.

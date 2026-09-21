@@ -120,6 +120,7 @@ impl MirInstructionKind {
                 Cost::Storage
             }
             Self::Operation(Op::RuntimeAlloc | Op::RuntimeDealloc) => Cost::Semantic,
+            Self::Operation(Op::BlackBox) => Cost::Semantic,
             Self::Operation(
                 Op::Subfield
                 | Op::AddressOffset

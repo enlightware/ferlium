@@ -772,6 +772,12 @@ pub(crate) fn check_operand_roles(
                 evidence(2);
             }
         }
+        OperationKind::BlackBox { .. } => {
+            place(0);
+            if operands.len() == 2 {
+                evidence(1);
+            }
+        }
         OperationKind::MoveBytes { .. } => {
             place(0);
             place(1);

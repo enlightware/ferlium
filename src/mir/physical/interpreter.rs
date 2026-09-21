@@ -503,6 +503,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     | OperationKind::Clone { ty }
                     | OperationKind::Drop { ty }
                     | OperationKind::DropInitialized { ty }
+                    | OperationKind::BlackBox { ty }
                     | OperationKind::MoveBytes { ty }
                     | OperationKind::BuildClosure { ty, .. }
                     | OperationKind::BuildSubscript { ty }
@@ -1189,6 +1190,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             | ExtractTag
             | ExtractPayloadIndirection
             | MoveBytes { .. }
+            | BlackBox { .. }
             | Load
             | Store
             | Clear
@@ -1776,6 +1778,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     source => source.place()?.ty,
                 },
             )),
+            BlackBox { ty } if operation.operands.len() == 2 => Some((1, self.types.resolve(*ty))),
             Replace if operation.operands.len() == 3 => Some((2, place(0)?.ty)),
             Variant {
                 metadata,
@@ -2080,6 +2083,21 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             }
             Clear => {
                 self.memory.clear(place(0)?)?;
+                None
+            }
+            BlackBox { ty } => {
+                let value = place(0)?;
+                if !same_storage_type(value.ty, self.types.resolve(*ty)) {
+                    return Err(invalid("black_box type differs from storage type"));
+                }
+                if let Some([size, align]) = witnessed_layout {
+                    self.memory.check_layout(value, size, align)?;
+                }
+                assert!(
+                    self.memory.fully_initialized(value)?,
+                    "physical lowering error: black_box requires a complete value"
+                );
+                std::hint::black_box(value);
                 None
             }
             IsInitialized | Drop { .. } => {

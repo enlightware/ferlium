@@ -288,6 +288,9 @@ enum SnapshotOperationKind {
     EndProject,
     CompareEqual,
     Load,
+    BlackBox {
+        ty: SnapshotTypeId,
+    },
     Subfield {
         ty: SnapshotTypeId,
         variant_payload: bool,
@@ -843,6 +846,9 @@ impl SnapshotOperationKind {
             Source::EndProject => Stored::EndProject,
             Source::CompareEqual => Stored::CompareEqual,
             Source::Load => Stored::Load,
+            Source::BlackBox { ty } => Stored::BlackBox {
+                ty: graph.capture(*ty)?,
+            },
             Source::Subfield {
                 ty,
                 variant_payload,
@@ -988,6 +994,9 @@ impl SnapshotOperationKind {
             Stored::EndProject => Runtime::EndProject,
             Stored::CompareEqual => Runtime::CompareEqual,
             Stored::Load => Runtime::Load,
+            Stored::BlackBox { ty } => Runtime::BlackBox {
+                ty: resolve_type(types, *ty)?,
+            },
             Stored::Subfield {
                 ty,
                 variant_payload,

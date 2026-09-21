@@ -193,6 +193,13 @@ pub struct Interpreter<'a> {
     /// Present only for explicitly profiled runs; ordinary interpretation pays one predictable
     /// branch per executed MIR instruction and allocates no counter state.
     profile: Option<MirExecutionProfile>,
+    /// Optional semantic callee whose execution a client wants to observe.
+    ///
+    /// Compile-time evaluation uses this to notice a `black_box` reached through any number of
+    /// ordinary calls without changing the function's effects or turning the observation into a
+    /// runtime error. Ordinary interpretation leaves it unset.
+    const_eval_barrier: Option<FunctionId>,
+    reached_const_eval_barrier: bool,
     /// Memoized semantic classification used only by debug call-boundary assertions.
     #[cfg(debug_assertions)]
     value_drop_functions: FxHashMap<FunctionId, bool>,
@@ -234,6 +241,8 @@ impl<'a> Interpreter<'a> {
             session,
             stage,
             profile: None,
+            const_eval_barrier: None,
+            reached_const_eval_barrier: false,
             #[cfg(debug_assertions)]
             value_drop_functions: FxHashMap::default(),
         }
@@ -253,6 +262,18 @@ impl<'a> Interpreter<'a> {
     /// Takes the profile from a profiled interpreter, leaving profiling disabled.
     pub fn take_profile(&mut self) -> Option<MirExecutionProfile> {
         self.profile.take()
+    }
+
+    /// Records whether execution enters `callee`, after resolving generated specializations back
+    /// to their semantic identity.
+    pub(crate) fn observe_const_eval_barrier(&mut self, callee: FunctionId) {
+        self.const_eval_barrier = Some(callee);
+        self.reached_const_eval_barrier = false;
+    }
+
+    /// Whether the callee configured by [`Self::observe_const_eval_barrier`] was entered.
+    pub(crate) fn reached_const_eval_barrier(&self) -> bool {
+        self.reached_const_eval_barrier
     }
 
     /// Whether this interpreter's execution domain is poisoned and may no longer be entered.
@@ -523,6 +544,13 @@ impl<'a> Interpreter<'a> {
     /// `CheckCallDepth` in recursive functions; lowering preserves that check explicitly, so frame
     /// entry only maintains the counter and does not impose an additional backend-specific limit.
     fn run_function(&mut self, key: FunctionKey, args: Vec<Binding>) -> Result<(), RuntimeError> {
+        let entered = FunctionId::new(key.module, key.identity);
+        if self
+            .const_eval_barrier
+            .is_some_and(|observed| self.session.hir_identity_of(entered, self.stage) == observed)
+        {
+            self.reached_const_eval_barrier = true;
+        }
         let function = self.function(key);
         assert_eq!(
             args.len(),
@@ -734,6 +762,7 @@ impl<'a> Interpreter<'a> {
             }
             OperationKind::RuntimeAlloc { .. }
             | OperationKind::RuntimeDealloc
+            | OperationKind::BlackBox { .. }
             | OperationKind::ExtractPayloadIndirection
             | OperationKind::IsInitialized => {
                 panic!("physical storage operations require the physical MIR interpreter")

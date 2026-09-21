@@ -1085,6 +1085,7 @@ fn bind_dictionaries(edit: &mut FunctionEdit, dictionaries: &[StaticEvidence]) {
 fn substitute_in_operation(operation: &mut Operation, mapper: &mut impl TypeMapper) {
     match &mut operation.kind {
         OperationKind::Alloca { ty }
+        | OperationKind::BlackBox { ty }
         | OperationKind::DictEntry { ty, .. }
         | OperationKind::BuildDictionary { ty, .. }
         | OperationKind::SubscriptMember { ty, .. }

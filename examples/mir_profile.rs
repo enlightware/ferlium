@@ -111,6 +111,7 @@ fn profile(workload: RuntimeWorkload, target: BenchTarget) -> (MirExecutionProfi
             .unwrap()
     });
     let (result, profile) = prepared.run_profiled();
+    workload.assert_value(&result);
     result.discard_storage();
     (profile, static_operations)
 }

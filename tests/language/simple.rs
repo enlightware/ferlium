@@ -60,6 +60,65 @@ fn literals() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn black_box_preserves_its_argument() {
+    let mut session = TestSession::new();
+    session.allow_experimental();
+    assert_val_eq!(session.run("black_box(1 + 1)"), int(2));
+    assert_val_eq!(session.run("black_box(\"opaque\")"), string("opaque"));
+    assert_val_eq!(
+        session.run("black_box((42, \"opaque\"))"),
+        tuple!(int(42), string("opaque"))
+    );
+    assert_val_eq!(
+        session.run("black_box([1, 2, 3])"),
+        array![int(1), int(2), int(3)]
+    );
+    assert_val_eq!(
+        session.run("let value = \"x\"; let copy = black_box(value); (value, copy)"),
+        tuple!(string("x"), string("x"))
+    );
+    assert_val_eq!(
+        session.run(
+            "fn copy(value: string) -> string { black_box(value) }
+             let value = \"x\"; (copy(value), value)",
+        ),
+        tuple!(string("x"), string("x"))
+    );
+    assert_val_eq!(
+        session.run(
+            "let opaque = black_box;
+             let value = \"x\"; let copy = opaque(value); (value, copy)",
+        ),
+        tuple!(string("x"), string("x"))
+    );
+    assert_val_eq!(
+        session.run("let offset = 40; let f = black_box(|x| x + offset); f(2)"),
+        int(42)
+    );
+    assert_val_eq!(
+        session.run(
+            r#"
+            subscript cell<T>(slot: &mut T) -> T
+            where T: Value
+            {
+                ref {
+                    let local = slot;
+                    yield local
+                }
+            }
+            fn read_with(accessor) -> int {
+                let mut number = 42;
+                number->[accessor]
+            }
+            read_with(black_box(cell))
+        "#,
+        ),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn raw_identifiers() {
     let mut session = TestSession::new();
     assert_val_eq!(

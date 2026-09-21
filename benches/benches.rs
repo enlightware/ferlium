@@ -8,13 +8,25 @@ use gungraun::{
 };
 use std::hint::black_box;
 
-use ferlium::{
-    CompilerSession, ExecutionTarget, MirOptimization, Path,
-    hir::value::Value,
-    std::{math::Float, string::String as Str},
-};
+use ferlium::{CompilerSession, ExecutionTarget, MirOptimization, Path, std::math::Float};
 
 use runtime_workloads::{BenchTarget, PreparedRuntimeWorkload, RuntimeWorkload};
+
+trait RuntimeChecksum {
+    fn checksum(self) -> f64;
+}
+
+impl RuntimeChecksum for isize {
+    fn checksum(self) -> f64 {
+        self as f64
+    }
+}
+
+impl RuntimeChecksum for Float {
+    fn checksum(self) -> f64 {
+        self.into_inner()
+    }
+}
 
 // --- User-code corpus ---
 
@@ -186,59 +198,25 @@ fn bench_user_code_compile_without_std_startup(
 // --- Runtime benchmarks ---
 //
 // Workload compilation, entry selection and input construction live in `runtime_workloads.rs`,
-// shared with `examples/mir_profile.rs`. These one-line setup functions remain because Gungraun's
-// macro requires a concrete function path for each named benchmark.
-
-fn setup_quicksort(target: BenchTarget) -> PreparedRuntimeWorkload {
-    RuntimeWorkload::Quicksort.prepare(target)
-}
-
-fn setup_fibonacci(target: BenchTarget) -> PreparedRuntimeWorkload {
-    RuntimeWorkload::Fibonacci.prepare(target)
-}
-
-fn setup_sieve(target: BenchTarget) -> PreparedRuntimeWorkload {
-    RuntimeWorkload::Sieve.prepare(target)
-}
-
-fn setup_rle_encode(target: BenchTarget) -> PreparedRuntimeWorkload {
-    RuntimeWorkload::RleEncode.prepare(target)
-}
-
-fn setup_csv(target: BenchTarget) -> PreparedRuntimeWorkload {
-    RuntimeWorkload::Csv.prepare(target)
-}
-
-fn setup_bank_account(target: BenchTarget) -> PreparedRuntimeWorkload {
-    RuntimeWorkload::BankAccount.prepare(target)
-}
-
-fn setup_sudoku(target: BenchTarget) -> PreparedRuntimeWorkload {
-    RuntimeWorkload::Sudoku.prepare(target)
-}
-
-fn setup_calculator(target: BenchTarget) -> PreparedRuntimeWorkload {
-    RuntimeWorkload::Calculator.prepare(target)
-}
-
-fn setup_linalg_transform(target: BenchTarget) -> PreparedRuntimeWorkload {
-    RuntimeWorkload::LinalgTransform.prepare(target)
-}
-
-fn setup_linalg_grid(target: BenchTarget) -> PreparedRuntimeWorkload {
-    RuntimeWorkload::LinalgGrid.prepare(target)
-}
-
-fn setup_data_text_roundtrip(target: BenchTarget) -> PreparedRuntimeWorkload {
-    RuntimeWorkload::DataTextRoundtrip.prepare(target)
-}
+// shared with the MIR and Wasm profile runners. The macro emits the named setup functions that
+// Gungraun requires.
 
 macro_rules! runtime_benchmark {
-    ($benchmark:ident, $setup:ident, $output:ty, $run:ident) => {
+    ($benchmark:ident, $setup:ident, $workload:expr, $output:ty, $run:ident) => {
+        fn $setup(target: BenchTarget) -> PreparedRuntimeWorkload {
+            $workload.prepare(target)
+        }
+
         #[library_benchmark(teardown = teardown_benchmark)]
         #[benches::target(iter = BenchTarget::ALL, setup = $setup)]
         fn $benchmark(mut bench: PreparedRuntimeWorkload) -> BenchOutput<$output> {
             let result = measure(|| bench.$run());
+            assert_eq!(
+                result.checksum(),
+                $workload.expected(),
+                "benchmark `{}` produced the wrong checksum",
+                $workload.name()
+            );
             BenchOutput {
                 session: bench.session,
                 result,
@@ -247,26 +225,83 @@ macro_rules! runtime_benchmark {
     };
 }
 
-runtime_benchmark!(bench_quicksort_run, setup_quicksort, Value, run_value);
-runtime_benchmark!(bench_fibonacci, setup_fibonacci, isize, run_int);
-runtime_benchmark!(bench_sieve, setup_sieve, isize, run_int);
-runtime_benchmark!(bench_rle_encode, setup_rle_encode, Str, run_string);
-runtime_benchmark!(bench_csv, setup_csv, Str, run_string);
-runtime_benchmark!(bench_bank_account_run, setup_bank_account, Str, run_string);
-runtime_benchmark!(bench_sudoku_run, setup_sudoku, isize, run_int);
-runtime_benchmark!(bench_calculator_run, setup_calculator, isize, run_int);
 runtime_benchmark!(
-    bench_linalg_transform,
-    setup_linalg_transform,
+    bench_quicksort_run,
+    setup_quicksort,
+    RuntimeWorkload::QUICKSORT,
     isize,
     run_int
 );
-runtime_benchmark!(bench_linalg_grid, setup_linalg_grid, Float, run_float);
+runtime_benchmark!(
+    bench_fibonacci,
+    setup_fibonacci,
+    RuntimeWorkload::FIBONACCI,
+    isize,
+    run_int
+);
+runtime_benchmark!(
+    bench_sieve,
+    setup_sieve,
+    RuntimeWorkload::SIEVE,
+    isize,
+    run_int
+);
+runtime_benchmark!(
+    bench_rle_encode,
+    setup_rle_encode,
+    RuntimeWorkload::RLE_ENCODE,
+    isize,
+    run_int
+);
+runtime_benchmark!(bench_csv, setup_csv, RuntimeWorkload::CSV, isize, run_int);
+runtime_benchmark!(
+    bench_bank_account_run,
+    setup_bank_account,
+    RuntimeWorkload::BANK_ACCOUNT,
+    isize,
+    run_int
+);
+runtime_benchmark!(
+    bench_sudoku_run,
+    setup_sudoku,
+    RuntimeWorkload::SUDOKU,
+    isize,
+    run_int
+);
+runtime_benchmark!(
+    bench_calculator_run,
+    setup_calculator,
+    RuntimeWorkload::CALCULATOR,
+    isize,
+    run_int
+);
+runtime_benchmark!(
+    bench_linalg_transform,
+    setup_linalg_transform,
+    RuntimeWorkload::LINALG_TRANSFORM,
+    isize,
+    run_int
+);
+runtime_benchmark!(
+    bench_linalg_grid,
+    setup_linalg_grid,
+    RuntimeWorkload::LINALG_GRID,
+    Float,
+    run_float
+);
+runtime_benchmark!(
+    bench_iter_pipeline,
+    setup_iter_pipeline,
+    RuntimeWorkload::ITER_PIPELINE,
+    isize,
+    run_int
+);
 runtime_benchmark!(
     bench_data_text_roundtrip,
     setup_data_text_roundtrip,
-    Str,
-    run_string
+    RuntimeWorkload::DATA_TEXT_ROUNDTRIP,
+    isize,
+    run_int
 );
 
 // --- Gungraun setup ---
@@ -296,6 +331,7 @@ library_benchmark_group!(
         bench_calculator_run,
         bench_linalg_transform,
         bench_linalg_grid,
+        bench_iter_pipeline,
         bench_data_text_roundtrip
     ]
 );

@@ -370,6 +370,7 @@ fn operation_types(kind: &OperationKind, types: &mut Vec<Type>) {
     use OperationKind::*;
     match kind {
         Alloca { ty }
+        | BlackBox { ty }
         | AddressOffset { ty, .. }
         | DictEntry { ty, .. }
         | BuildDictionary { ty, .. }

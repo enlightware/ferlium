@@ -1,0 +1,3 @@
+fn benchmark_entry() {
+    transform_pipeline_mixed(black_box(6))
+}

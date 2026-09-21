@@ -1,0 +1,3 @@
+fn benchmark_entry() {
+    solved_cell(black_box(0), black_box(2))
+}

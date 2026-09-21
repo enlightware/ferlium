@@ -1,0 +1,3 @@
+fn benchmark_entry() {
+    pipeline_total(black_box(16))
+}

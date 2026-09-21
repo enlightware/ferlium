@@ -229,9 +229,11 @@ pub(crate) fn remove_dead_proven_calls(
             let mir::Value::Function(callee) = *call.callee else {
                 continue;
             };
-            let known_total = known
-                .resolve(callee, original_of)
-                .is_some_and(|callee| callee.is_total_and_speculatable());
+            let known_callee = known.resolve(callee, original_of);
+            if known_callee.is_some_and(|callee| callee.is_optimization_barrier()) {
+                continue;
+            }
+            let known_total = known_callee.is_some_and(|callee| callee.is_total_and_speculatable());
             if !known_total {
                 let Some(function) = env
                     .module_by_id(callee.module)
@@ -697,6 +699,7 @@ pub(super) fn may_leave_frame_storage(
             })
         }
         OperationKind::CompareEqual
+        | OperationKind::BlackBox { .. }
         | OperationKind::Load
         | OperationKind::RuntimeAlloc { .. }
         | OperationKind::RuntimeDealloc

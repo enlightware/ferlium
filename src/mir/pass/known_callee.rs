@@ -73,6 +73,8 @@ fn named_def(ty: Type) -> Option<TypeDefId> {
 /// for it rather than assume mathematical integers.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum KnownCallee {
+    /// `black_box(value)` — the same value behind an optimization barrier.
+    BlackBox,
     /// `Num<int>::add(left, right)` — `left + right`.
     IntAdd,
     /// `Num<int>::sub(left, right)` — `left - right`.
@@ -153,6 +155,11 @@ pub(crate) enum KnownCallee {
 }
 
 impl KnownCallee {
+    /// Whether this callable explicitly prevents optimization across its invocation.
+    pub(crate) fn is_optimization_barrier(self) -> bool {
+        matches!(self, Self::BlackBox)
+    }
+
     /// Whether this exact std callable is total, deterministic and safe to execute speculatively.
     ///
     /// This is deliberately stronger than an empty effect row. A pure script function may diverge,
@@ -264,6 +271,7 @@ impl KnownCallees {
         let array_offset_unchecked = resolver.subscript_mut_member("array_offset_unchecked");
         resolver.assert_retargetable(array_index, array_offset_unchecked);
         let entries = [
+            (resolver.function("black_box"), KnownCallee::BlackBox),
             (int_add, KnownCallee::IntAdd),
             (int_sub, KnownCallee::IntSub),
             (int_mul, KnownCallee::IntMul),
@@ -370,6 +378,14 @@ impl KnownCallees {
 
     pub(crate) fn layouts(&self) -> &Layouts {
         &self.layouts
+    }
+
+    /// The canonical std optimization barrier.
+    pub(crate) fn optimization_barrier(&self) -> FunctionId {
+        self.by_id
+            .iter()
+            .find_map(|(id, callee)| callee.is_optimization_barrier().then_some(*id))
+            .expect("std must define an optimization barrier")
     }
 
     /// The concrete integer addition used to materialize an affine offset proved by the range
@@ -637,7 +653,7 @@ mod tests {
         let session = CompilerSession::new();
         assert_eq!(
             known_callees(&session).by_id.len(),
-            29,
+            30,
             "two known callees resolved to the same function id"
         );
     }

@@ -71,7 +71,14 @@ pub(crate) fn optimize(
                         current = folded.body;
                         changed |= folded.warrants_another_round;
                     }
-                    apply!(cse::eliminate_common_calls(&current, env, &summary));
+                    apply!(cse::eliminate_common_calls(
+                        &current,
+                        env,
+                        &summary,
+                        &|callee| known
+                            .resolve(callee, |callee| Some(stage.original(callee)))
+                            .is_some_and(super::known_callee::KnownCallee::is_optimization_barrier),
+                    ));
                     apply!(cse::eliminate_common_subexpressions(&current));
                     apply!(copy_forward::forward_redundant_storage(
                         &current, env, stage
@@ -98,7 +105,15 @@ pub(crate) fn optimize(
 
 #[cfg(test)]
 mod tests {
-    use crate::{CompilerSession, MirOptimization, hir::value::Value, module::Path};
+    use crate::{
+        CompilerSession, MirOptimization,
+        hir::value::Value,
+        mir::{
+            OperationKind, operation::OperationKindDiscriminant, pass::known_callee::KnownCallee,
+            profile::MirInstructionKind, terminator::TerminatorKind,
+        },
+        module::{FunctionId, Path},
+    };
     use ustr::ustr;
 
     #[test]
@@ -141,5 +156,108 @@ mod tests {
             .unwrap();
         value.discard_storage();
         assert_eq!(profile.total().total(), counts[0]);
+    }
+
+    #[test]
+    fn physical_optimization_respects_inline_never() {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        session.set_physical_mir_optimization(MirOptimization::Enabled);
+        let module = session
+            .compile(
+                "#[inline(never)]
+                 fn add_one(x: int) -> int { x + 1 }
+                 pub fn compute(x: int) -> int { add_one(x) }",
+                "physical_inline_never",
+                Path::single_str("physical_inline_never"),
+            )
+            .unwrap()
+            .module_id;
+        let physical = session.emit_physical_mir_module(module).unwrap();
+        assert!(
+            physical.contains("call physical_inline_never::add_one"),
+            "#[inline(never)] call disappeared from optimized physical MIR:\n{physical}"
+        );
+    }
+
+    #[test]
+    fn physical_optimization_preserves_black_box() {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        session.set_physical_mir_optimization(MirOptimization::Enabled);
+        let module = session
+            .compile(
+                "pub fn compute(x: int) -> int {
+                     black_box(x);
+                     let left = black_box(x);
+                     let right = black_box(x);
+                     let mut total = 0;
+                     for i in 0..2 { total += black_box(x) };
+                     left + right + total
+                 }",
+                "physical_black_box",
+                Path::single_str("physical_black_box"),
+            )
+            .unwrap()
+            .module_id;
+        let entry = session
+            .expect_fresh_module(module)
+            .get_local_function_id(ustr("compute"))
+            .unwrap();
+        let physical = session.emit_physical_mir_module(module).unwrap();
+        let targets = {
+            let program = session.prepare_physical_program(module).unwrap();
+            let body = program
+                .function(FunctionId::new(module, entry))
+                .expect("compute has a physical body");
+            body.blocks()
+                .flat_map(|block| {
+                    let block = body.block(block);
+                    block
+                        .operations()
+                        .iter()
+                        .chain(match &block.terminator().kind {
+                            TerminatorKind::Invoke { operation, .. } => Some(operation),
+                            _ => None,
+                        })
+                })
+                .filter_map(|operation| {
+                    matches!(operation.kind, OperationKind::Call { .. })
+                        .then(|| operation.operands.first())
+                        .flatten()
+                        .and_then(|callee| match callee {
+                            crate::mir::Value::Function(callee) => Some(*callee),
+                            _ => None,
+                        })
+                })
+                .collect::<Vec<_>>()
+        };
+        let black_box_calls = targets
+            .into_iter()
+            .filter(|&callee| {
+                session.known_callees().resolve(callee, |callee| {
+                    Some(session.hir_identity_of(callee, MirOptimization::Enabled))
+                }) == Some(KnownCallee::BlackBox)
+            })
+            .count();
+        assert_eq!(
+            black_box_calls, 4,
+            "black_box calls were folded, merged, or removed:\n{physical}"
+        );
+        let (value, profile) = session
+            .run_physical_mir_entry_profiled(module, entry, vec![Value::native(1isize)])
+            .unwrap();
+        assert_eq!(value.into_primitive_ty::<isize>().unwrap(), 4);
+        assert_eq!(
+            profile.total().get(MirInstructionKind::Operation(
+                OperationKindDiscriminant::BlackBox,
+            )),
+            5,
+            "the loop's black_box call must execute once per iteration"
+        );
+        assert!(
+            physical.contains("black_box"),
+            "black_box disappeared from optimized physical MIR:\n{physical}"
+        );
     }
 }

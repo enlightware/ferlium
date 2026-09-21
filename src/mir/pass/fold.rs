@@ -1359,6 +1359,13 @@ fn try_fold_call(
             _ => return Err(NotFoldable::CalleeNotDirect),
         },
     };
+    if context
+        .known_calls
+        .resolve(callee)
+        .is_some_and(KnownCallee::is_optimization_barrier)
+    {
+        return Err(NotFoldable::OptimizationBarrier);
+    }
 
     // Constructive string reification ends in this call. Evaluating it would produce the same
     // `StaticStr` plus `string_from_static` sequence again, so it is the fixed point rather than a

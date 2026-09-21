@@ -102,6 +102,12 @@ impl Imports {
                 vec![],
             ),
             (
+                "black_box",
+                runtime::black_box as *const (),
+                vec![ValType::I32; 2],
+                vec![],
+            ),
+            (
                 "string_matches",
                 runtime::string_matches as *const (),
                 vec![ValType::I32; 2],

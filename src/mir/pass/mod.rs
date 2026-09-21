@@ -220,7 +220,12 @@ pub(crate) fn optimize_function(
                     artifacts.addressor_summary(original.module, original.function)
                 })
         };
-        if let Some(merged) = cse::eliminate_common_calls(source, env, &summary_of) {
+        if let Some(merged) = cse::eliminate_common_calls(source, env, &summary_of, &|callee| {
+            context
+                .known_callees
+                .resolve(callee, |callee| specializations.original(callee))
+                .is_some_and(known_callee::KnownCallee::is_optimization_barrier)
+        }) {
             current = Some(merged);
             changed = true;
         }
@@ -399,7 +404,12 @@ pub(crate) fn optimize_function(
     // and mutation; the raw-MIR summary separately proves that speculation preserves termination.
     // The pass adds no operation while moving the call and any loop-local allocation.
     let source = current.as_ref().unwrap_or(function);
-    if let Some(hoisted) = licm::hoist_loop_invariant_calls(source, env, &will_return) {
+    if let Some(hoisted) = licm::hoist_loop_invariant_calls(source, env, &will_return, &|callee| {
+        context
+            .known_callees
+            .resolve(callee, |callee| specializations.original(callee))
+            .is_some_and(known_callee::KnownCallee::is_optimization_barrier)
+    }) {
         current = Some(hoisted);
     }
     // Inlining substitutes the caller's throwaway result allocation for the callee's `@ret`. For

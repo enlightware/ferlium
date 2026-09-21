@@ -251,6 +251,8 @@ Initialization flags belong to construction and cleanup scopes, not the value AB
 transfers require complete sources; on source failure, a callee leaves no live result in its output.
 `replace` installs a complete replacement and transfers the displaced value's possibly partial
 state into the replacement's storage for cleanup.
+`black_box` observes a complete place through its physical byte representation and is an opaque
+optimization barrier; optional `Value` evidence supplies the layout of generic storage.
 
 Shared optimization may run again after physical expansion. Rewrites preserve physical place and
 ownership contracts; transformed artifacts are reverified before execution or backend emission.

@@ -1201,6 +1201,7 @@ fn layout_witness(op: &Operation) -> Option<&Value> {
         OperationKind::Move | OperationKind::Replace if op.operands.len() == 3 => {
             op.operands.last()
         }
+        OperationKind::BlackBox { .. } if op.operands.len() == 2 => op.operands.last(),
         OperationKind::Variant {
             has_layout_witness: true,
             ..

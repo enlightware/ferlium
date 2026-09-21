@@ -56,6 +56,8 @@ fn const_eval_limits() -> ReferenceInterpreterLimits {
 /// Every one of these is a normal outcome: the call stays in the program and runs at run time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NotFoldable {
+    /// Evaluation would directly or transitively cross an optimization barrier.
+    OptimizationBarrier,
     /// The call's declared effects do not permit compile-time execution.
     Effectful,
     /// The callee has no body the compiler can run.
@@ -144,6 +146,7 @@ impl NotFoldable {
     /// the wording stable — people grep for these.
     pub(crate) fn description(self) -> &'static str {
         match self {
+            Self::OptimizationBarrier => "evaluation reaches an optimization barrier",
             Self::Effectful => "callee is effectful",
             Self::NoBody => "callee has no body the compiler can run",
             Self::UnsupportedConvention => "result convention is not supported",
@@ -203,6 +206,7 @@ pub(crate) struct ConstEvaluator<'a> {
     session: &'a CompilerSession,
     /// Module context for the evaluation contexts this evaluator creates.
     module_id: ModuleId,
+    optimization_barrier: FunctionId,
 }
 
 /// An argument to a compile-time call, in the callee's parameter order.
@@ -227,7 +231,11 @@ impl ConstArgument {
 
 impl<'a> ConstEvaluator<'a> {
     pub(crate) fn new(module_id: ModuleId, session: &'a CompilerSession) -> Self {
-        Self { session, module_id }
+        Self {
+            session,
+            module_id,
+            optimization_barrier: session.known_callees().optimization_barrier(),
+        }
     }
 
     /// Evaluates `callee` applied to `arguments`, or explains why it cannot be.
@@ -269,6 +277,7 @@ impl<'a> ConstEvaluator<'a> {
             const_eval_limits(),
             MirOptimization::Disabled,
         );
+        interpreter.observe_const_eval_barrier(self.optimization_barrier);
         let arguments = arguments
             .into_iter()
             .map(|argument| match argument {
@@ -276,9 +285,14 @@ impl<'a> ConstEvaluator<'a> {
                 ConstArgument::Dictionary(dictionary) => CallArgument::Dictionary(dictionary),
             })
             .collect();
-        interpreter
-            .call_with_known_arguments(callee, arguments, result_ty, span)
-            .map_err(classify)
+        let result = interpreter.call_with_known_arguments(callee, arguments, result_ty, span);
+        if interpreter.reached_const_eval_barrier() {
+            if let Ok(value) = result {
+                value.discard_storage();
+            }
+            return Err(NotFoldable::OptimizationBarrier);
+        }
+        result.map_err(classify)
     }
 
     /// Whether the compiler can run this callee at all: a script function needs a lowered body, a
@@ -488,6 +502,28 @@ mod tests {
             try_call(&session, module, call, vec![int(21)]).expect("a pure script call must fold");
         assert_eq!(result.as_primitive_ty::<isize>(), Some(&42));
         result.discard_storage();
+    }
+
+    /// Reaching the barrier while evaluating a wrapper refuses the outer call as well. Looking
+    /// only at the call site would miss this and let a parameterless benchmark collapse to its
+    /// checksum during compilation.
+    #[test]
+    fn optimization_barrier_is_observed_through_wrappers() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            "fn wrapped() -> int { black_box(42) }\nfn f() -> int { wrapped() }",
+        );
+        let sites = call_sites(body(&session, module, "f"));
+        let call = sites
+            .iter()
+            .find(|site| site.callee == function_id(&session, module, "wrapped"))
+            .expect("`wrapped` must be called directly");
+
+        assert_eq!(
+            refusal(try_call(&session, module, call, vec![])),
+            Some(NotFoldable::OptimizationBarrier)
+        );
     }
 
     /// A call that raises must not be folded: the program is entitled to observe that failure.

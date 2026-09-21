@@ -133,6 +133,7 @@ pub(crate) fn hoist_loop_invariant_calls(
     func: &Function,
     env: ModuleEnv<'_>,
     will_return: &impl Fn(FunctionId) -> bool,
+    is_optimization_barrier: &impl Fn(FunctionId) -> bool,
 ) -> Option<Function> {
     // Every directed cycle has an edge that does not increase an arbitrary total ordering of its
     // vertices. Block ids provide that order, making this an allocation-free rejection of acyclic
@@ -147,10 +148,9 @@ pub(crate) fn hoist_loop_invariant_calls(
         return None;
     }
     let has_eligible_call = func.blocks().any(|block| {
-        func.block(block)
-            .operations()
-            .iter()
-            .any(|operation| eligible_call(operation, env, will_return).is_some())
+        func.block(block).operations().iter().any(|operation| {
+            eligible_call(operation, env, will_return, is_optimization_barrier).is_some()
+        })
     });
     if !has_eligible_call {
         return None;
@@ -159,7 +159,7 @@ pub(crate) fn hoist_loop_invariant_calls(
     let mut current: Option<Function> = None;
     loop {
         let source = current.as_ref().unwrap_or(func);
-        let Some(hoist) = find_hoist(source, env, will_return) else {
+        let Some(hoist) = find_hoist(source, env, will_return, is_optimization_barrier) else {
             break;
         };
         current = Some(apply_hoist(source, hoist));
@@ -171,6 +171,7 @@ fn eligible_call<'a>(
     operation: &'a Operation,
     env: ModuleEnv<'_>,
     will_return: &impl Fn(FunctionId) -> bool,
+    is_optimization_barrier: &impl Fn(FunctionId) -> bool,
 ) -> Option<dataflow::CallOperands<'a>> {
     let OperationKind::Call { ty, metadata } = &operation.kind else {
         return None;
@@ -197,6 +198,9 @@ fn eligible_call<'a>(
     let mir::Value::Function(callee) = call.callee else {
         return None;
     };
+    if is_optimization_barrier(*callee) {
+        return None;
+    }
     if !will_return(*callee) {
         return None;
     }
@@ -207,6 +211,7 @@ fn find_hoist(
     func: &Function,
     env: ModuleEnv<'_>,
     will_return: &impl Fn(FunctionId) -> bool,
+    is_optimization_barrier: &impl Fn(FunctionId) -> bool,
 ) -> Option<Hoist> {
     let (successors, predecessors) = cfg(func);
     let dominance = Dominance::of(&successors, func.entry().as_index());
@@ -238,7 +243,9 @@ fn find_hoist(
                     block,
                     index: OperationIndex::from_index(index),
                 };
-                let Some(call) = eligible_call(operation, env, will_return) else {
+                let Some(call) =
+                    eligible_call(operation, env, will_return, is_optimization_barrier)
+                else {
                     continue;
                 };
                 let mir::Value::Register(result) = call.result else {
@@ -512,6 +519,7 @@ fn record_writes(
         OperationKind::Alloca { .. }
         | OperationKind::AllocaPlace { .. }
         | OperationKind::RuntimeAlloc { .. }
+        | OperationKind::BlackBox { .. }
         | OperationKind::CompareEqual
         | OperationKind::Load
         | OperationKind::Subfield { .. }

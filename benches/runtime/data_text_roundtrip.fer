@@ -1,0 +1,5 @@
+fn benchmark_entry() {
+    len(data_text_roundtrip(black_box(
+        "\n/* A representative configuration document. */\n{\n    title: \"Ferlium Ω\",\n    version: 3,\n    enabled: true,\n    optional: Some(\"Candli\"),\n    missing: None,\n    numbers: [0, -17, 42, 3.14159, 1.25e3,],\n    tags: set { \"compiler\", \"wasm\", \"unicode\", },\n    aliases: map {\n        \"main\" => \"candli\",\n        \"legacy\" => \"ferlium-interpreter\",\n    },\n    items: [\n        { id: 1, name: \"alpha\", active: true },\n        { id: 2, name: \"béta\", active: false },\n        { id: 3, name: \"γ\", active: true },\n        { id: 4, name: \"한글\", active: true },\n    ],\n    nested: {\n        owner: { name: \"Enlightware\", location: \"Zürich\" },\n        coordinates: (47.3769, 8.5417),\n        élève٢: \"Unicode identifier\",\n    },\n    message: \"line one\\nline two: \\u{2126} \\u{1f680}\",\n}\n"
+    )))
+}

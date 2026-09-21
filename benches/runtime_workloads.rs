@@ -9,15 +9,16 @@
 
 #![allow(dead_code)] // each of the two importing binaries uses a different half of this module
 
-use std::hint::black_box;
-
 use ferlium::{
     CompilerSession, ExecutionTarget, MirOptimization, Path,
     hir::value::Value,
     mir::profile::MirExecutionProfile,
     module::{LocalFunctionId, ModuleId},
-    std::{array::array_value_from_vec, math::Float, string::String as Str},
+    std::math::Float,
 };
+
+#[cfg(target_arch = "wasm32")]
+use ferlium::{module::FunctionId, wasm::CompiledProgram};
 
 /// Runtime artifact stage selected by the benchmark or profiler.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -61,54 +62,144 @@ impl BenchTarget {
     }
 }
 
-/// The runtime suite's canonical workloads and inputs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RuntimeWorkload {
-    Quicksort,
-    Fibonacci,
-    Sieve,
-    RleEncode,
-    Csv,
-    BankAccount,
-    Sudoku,
-    Calculator,
-    LinalgTransform,
-    LinalgGrid,
-    IterPipeline,
-    DataTextRoundtrip,
+#[derive(Clone, Copy)]
+struct ModuleSource {
+    name: &'static str,
+    source: &'static str,
+}
+
+const BANK_ACCOUNT_DEPENDENCIES: &[ModuleSource] = &[
+    ModuleSource {
+        name: "quicksort",
+        source: include_str!("../tests/modules/quicksort.fer"),
+    },
+    ModuleSource {
+        name: "account",
+        source: include_str!("../tests/modules/bank_account.fer"),
+    },
+];
+
+/// One canonical runtime workload and everything needed to compile its scalar benchmark entry.
+#[derive(Clone, Copy)]
+pub struct RuntimeWorkload {
+    name: &'static str,
+    module_name: &'static str,
+    workload_source: &'static str,
+    benchmark_source: &'static str,
+    dependencies: &'static [ModuleSource],
+    result: RuntimeResult,
+    expected: f64,
+    experimental: bool,
 }
 
 impl RuntimeWorkload {
+    pub const QUICKSORT: Self = Self::single(
+        "quicksort",
+        include_str!("../tests/modules/quicksort.fer"),
+        include_str!("runtime/quicksort.fer"),
+        RuntimeResult::Int,
+        8_259_661.0,
+    );
+    pub const FIBONACCI: Self = Self::single(
+        "fibonacci",
+        include_str!("../tests/modules/fibonacci.fer"),
+        include_str!("runtime/fibonacci.fer"),
+        RuntimeResult::Int,
+        6_765.0,
+    );
+    pub const SIEVE: Self = Self::single(
+        "sieve",
+        include_str!("../tests/modules/sieve.fer"),
+        include_str!("runtime/sieve.fer"),
+        RuntimeResult::Int,
+        95.0,
+    );
+    pub const RLE_ENCODE: Self = Self::single(
+        "rle_encode",
+        include_str!("../tests/modules/rle_encode.fer"),
+        include_str!("runtime/rle_encode.fer"),
+        RuntimeResult::Int,
+        300.0,
+    );
+    pub const CSV: Self = Self::single(
+        "csv",
+        include_str!("../tests/modules/csv.fer"),
+        include_str!("runtime/csv.fer"),
+        RuntimeResult::Int,
+        9_340.0,
+    );
+    pub const BANK_ACCOUNT: Self = Self {
+        name: "bank_account",
+        module_name: "bank_account_benchmark",
+        workload_source: "",
+        benchmark_source: include_str!("runtime/bank_account.fer"),
+        dependencies: BANK_ACCOUNT_DEPENDENCIES,
+        result: RuntimeResult::Int,
+        expected: 3.0,
+        experimental: false,
+    };
+    pub const SUDOKU: Self = Self::single(
+        "sudoku",
+        include_str!("../tests/modules/sudoku.fer"),
+        include_str!("runtime/sudoku.fer"),
+        RuntimeResult::Int,
+        4.0,
+    );
+    pub const CALCULATOR: Self = Self::single(
+        "calculator",
+        include_str!("../tests/modules/calculator.fer"),
+        include_str!("runtime/calculator.fer"),
+        RuntimeResult::Int,
+        148.0,
+    );
+    pub const LINALG_TRANSFORM: Self = Self::single(
+        "linalg_transform",
+        include_str!("../tests/modules/linalg.fer"),
+        include_str!("runtime/linalg_transform.fer"),
+        RuntimeResult::Int,
+        416.0,
+    )
+    .experimental();
+    pub const LINALG_GRID: Self = Self::single(
+        "linalg_grid",
+        include_str!("../tests/modules/linalg.fer"),
+        include_str!("runtime/linalg_grid.fer"),
+        RuntimeResult::Float,
+        114_176.720_214_843_75,
+    )
+    .experimental();
+    pub const ITER_PIPELINE: Self = Self::single(
+        "iter_pipeline",
+        include_str!("../tests/modules/iter_pipeline.fer"),
+        include_str!("runtime/iter_pipeline.fer"),
+        RuntimeResult::Int,
+        4_195.0,
+    );
+    pub const DATA_TEXT_ROUNDTRIP: Self = Self::single(
+        "data_text_roundtrip",
+        include_str!("../tests/modules/data_text.fer"),
+        include_str!("runtime/data_text_roundtrip.fer"),
+        RuntimeResult::Int,
+        569.0,
+    );
+
     pub const ALL: [Self; 12] = [
-        Self::Quicksort,
-        Self::Fibonacci,
-        Self::Sieve,
-        Self::RleEncode,
-        Self::Csv,
-        Self::BankAccount,
-        Self::Sudoku,
-        Self::Calculator,
-        Self::LinalgTransform,
-        Self::LinalgGrid,
-        Self::IterPipeline,
-        Self::DataTextRoundtrip,
+        Self::QUICKSORT,
+        Self::FIBONACCI,
+        Self::SIEVE,
+        Self::RLE_ENCODE,
+        Self::CSV,
+        Self::BANK_ACCOUNT,
+        Self::SUDOKU,
+        Self::CALCULATOR,
+        Self::LINALG_TRANSFORM,
+        Self::LINALG_GRID,
+        Self::ITER_PIPELINE,
+        Self::DATA_TEXT_ROUNDTRIP,
     ];
 
     pub const fn name(self) -> &'static str {
-        match self {
-            Self::Quicksort => "quicksort",
-            Self::Fibonacci => "fibonacci",
-            Self::Sieve => "sieve",
-            Self::RleEncode => "rle_encode",
-            Self::Csv => "csv",
-            Self::BankAccount => "bank_account",
-            Self::Sudoku => "sudoku",
-            Self::Calculator => "calculator",
-            Self::LinalgTransform => "linalg_transform",
-            Self::LinalgGrid => "linalg_grid",
-            Self::IterPipeline => "iter_pipeline",
-            Self::DataTextRoundtrip => "data_text_roundtrip",
-        }
+        self.name
     }
 
     pub fn from_name(name: &str) -> Option<Self> {
@@ -117,154 +208,163 @@ impl RuntimeWorkload {
             .find(|workload| workload.name() == name)
     }
 
+    /// Canonical scalar checksum produced by the benchmark entry.
+    pub const fn expected(self) -> f64 {
+        self.expected
+    }
+
+    /// Checks a boxed interpreter result outside the measured workload.
+    pub fn assert_value(self, value: &Value) {
+        let actual = match self.result {
+            RuntimeResult::Int => *value
+                .as_primitive_ty::<isize>()
+                .expect("integer benchmark entry returned another type")
+                as f64,
+            RuntimeResult::Float => value
+                .as_primitive_ty::<Float>()
+                .expect("float benchmark entry returned another type")
+                .into_inner(),
+        };
+        assert_eq!(
+            actual, self.expected,
+            "benchmark `{}` produced the wrong checksum",
+            self.name
+        );
+    }
+
     pub fn prepare(self, target: BenchTarget) -> PreparedRuntimeWorkload {
+        let (session, module_id) = compile_workload(target, self);
+        prepare_entry(target.target(), session, module_id, self.result)
+    }
+
+    /// Compile the canonical workload behind a parameterless, scalar-result Wasm entry.
+    ///
+    /// Inputs are constructed inside generated code and passed through `std::black_box`, keeping
+    /// their representation opaque without exposing workload-specific types to the host bridge.
+    /// Aggregate and string results are reduced to a deterministic scalar after the workload has
+    /// produced them.
+    #[cfg(target_arch = "wasm32")]
+    pub fn prepare_wasm(self) -> PreparedWasmRuntimeWorkload {
+        let prepared = self.prepare(BenchTarget::PhysicalMir);
+        let program = CompiledProgram::compile(
+            &prepared.session,
+            FunctionId::new(prepared.module_id, prepared.entry),
+        )
+        .unwrap_or_else(|error| panic!("failed to emit {}: {error:?}", self.name()));
+        PreparedWasmRuntimeWorkload {
+            program,
+            result: prepared.result.wasm_transport(),
+            expected: self.expected,
+        }
+    }
+
+    const fn single(
+        name: &'static str,
+        workload_source: &'static str,
+        benchmark_source: &'static str,
+        result: RuntimeResult,
+        expected: f64,
+    ) -> Self {
+        Self {
+            name,
+            module_name: name,
+            workload_source,
+            benchmark_source,
+            dependencies: &[],
+            result,
+            expected,
+            experimental: false,
+        }
+    }
+
+    const fn experimental(mut self) -> Self {
+        self.experimental = true;
+        self
+    }
+}
+
+/// Scalar transport used by a generated Wasm benchmark entry.
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WasmRuntimeResult {
+    Int,
+    Float,
+}
+
+/// One emitted workload, before engine compilation and instantiation.
+#[cfg(target_arch = "wasm32")]
+pub struct PreparedWasmRuntimeWorkload {
+    pub program: CompiledProgram,
+    pub result: WasmRuntimeResult,
+    pub expected: f64,
+}
+
+const BENCHMARK_ENTRY: &str = "benchmark_entry";
+
+#[derive(Clone, Copy)]
+enum RuntimeResult {
+    Int,
+    Float,
+}
+
+impl RuntimeResult {
+    #[cfg(target_arch = "wasm32")]
+    fn wasm_transport(self) -> WasmRuntimeResult {
         match self {
-            Self::Quicksort => prepare_quicksort(target),
-            Self::Fibonacci => prepare_single_module(
-                target,
-                "fibonacci",
-                include_str!("../tests/modules/fibonacci.fer"),
-                "fibonacci_rec",
-                RuntimeArguments::Int(20),
-            ),
-            Self::Sieve => prepare_single_module(
-                target,
-                "sieve",
-                include_str!("../tests/modules/sieve.fer"),
-                "prime_count",
-                RuntimeArguments::Int(500),
-            ),
-            Self::RleEncode => prepare_single_module(
-                target,
-                "rle_encode",
-                include_str!("../tests/modules/rle_encode.fer"),
-                "rle_encode_string",
-                RuntimeArguments::String(Str::new(&"aabccccccc".repeat(50))),
-            ),
-            Self::Csv => prepare_single_module(
-                target,
-                "csv",
-                include_str!("../tests/modules/csv.fer"),
-                "csv_table",
-                RuntimeArguments::Int(500),
-            ),
-            Self::BankAccount => prepare_bank_account(target),
-            Self::Sudoku => prepare_single_module(
-                target,
-                "sudoku",
-                include_str!("../tests/modules/sudoku.fer"),
-                "solved_cell",
-                RuntimeArguments::IntPair(0, 2),
-            ),
-            Self::Calculator => prepare_single_module(
-                target,
-                "calculator",
-                include_str!("../tests/modules/calculator.fer"),
-                "calculate",
-                RuntimeArguments::String(Str::new("((1 + 2) * (3 + 4) - 5) * 6 / 2 + 100")),
-            ),
-            Self::LinalgTransform => {
-                prepare_linalg(target, "transform_pipeline_mixed", RuntimeArguments::Int(6))
-            }
-            Self::IterPipeline => prepare_single_module(
-                target,
-                "iter_pipeline",
-                include_str!("../tests/modules/iter_pipeline.fer"),
-                "pipeline_total",
-                RuntimeArguments::Int(16),
-            ),
-            Self::LinalgGrid => {
-                prepare_linalg(target, "grid_simulation", RuntimeArguments::IntPair(8, 2))
-            }
-            Self::DataTextRoundtrip => prepare_single_module(
-                target,
-                "data_text",
-                include_str!("../tests/modules/data_text.fer"),
-                "data_text_roundtrip",
-                RuntimeArguments::String(Str::new(DATA_TEXT_INPUT)),
-            ),
+            Self::Float => WasmRuntimeResult::Float,
+            Self::Int => WasmRuntimeResult::Int,
         }
     }
 }
 
-const DATA_TEXT_INPUT: &str = r#"
-/* A representative configuration document. */
-{
-    title: "Ferlium Ω",
-    version: 3,
-    enabled: true,
-    optional: Some("Candli"),
-    missing: None,
-    numbers: [0, -17, 42, 3.14159, 1.25e3,],
-    tags: set { "compiler", "wasm", "unicode", },
-    aliases: map {
-        "main" => "candli",
-        "legacy" => "ferlium-interpreter",
-    },
-    items: [
-        { id: 1, name: "alpha", active: true },
-        { id: 2, name: "béta", active: false },
-        { id: 3, name: "γ", active: true },
-        { id: 4, name: "한글", active: true },
-    ],
-    nested: {
-        owner: { name: "Enlightware", location: "Zürich" },
-        coordinates: (47.3769, 8.5417),
-        élève٢: "Unicode identifier",
-    },
-    message: "line one\nline two: \u{2126} \u{1f680}",
+fn compile_workload(target: BenchTarget, workload: RuntimeWorkload) -> (CompilerSession, ModuleId) {
+    let mut session = target.session();
+    session.set_allow_experimental(workload.experimental);
+    for dependency in workload.dependencies {
+        session
+            .compile_for(
+                target.target(),
+                dependency.source,
+                &format!("{}.fer", dependency.name),
+                Path::single_str(dependency.name),
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "failed to compile {} dependency {}: {error:?}",
+                    workload.name, dependency.name
+                )
+            });
+    }
+    let source = format!(
+        "{}\n{}",
+        workload.workload_source, workload.benchmark_source
+    );
+    let module_id = session
+        .compile_for(
+            target.target(),
+            &source,
+            &format!("{}.fer", workload.name),
+            Path::single_str(workload.module_name),
+        )
+        .unwrap_or_else(|error| panic!("failed to compile {}: {error:?}", workload.name))
+        .module_id;
+    (session, module_id)
 }
-"#;
 
-/// One fully compiled workload. Arguments are owned because MIR entry execution consumes them.
+/// One fully compiled parameterless workload.
 pub struct PreparedRuntimeWorkload {
     pub target: ExecutionTarget,
     pub session: CompilerSession,
     pub module_id: ModuleId,
     pub entry: LocalFunctionId,
-    arguments: Option<RuntimeArguments>,
-}
-
-enum RuntimeArguments {
-    None,
-    Int(isize),
-    IntPair(isize, isize),
-    String(Str),
-    IntArray(Vec<isize>),
-}
-
-impl RuntimeArguments {
-    fn into_values(self) -> Vec<Value> {
-        match self {
-            Self::None => vec![],
-            Self::Int(value) => vec![Value::native(black_box(value))],
-            Self::IntPair(first, second) => vec![
-                Value::native(black_box(first)),
-                Value::native(black_box(second)),
-            ],
-            Self::String(value) => vec![Value::native(value)],
-            Self::IntArray(values) => vec![int_a(values)],
-        }
-    }
+    result: RuntimeResult,
 }
 
 impl PreparedRuntimeWorkload {
-    fn take_arguments(&mut self) -> Vec<Value> {
-        self.arguments
-            .take()
-            .expect("a prepared runtime workload can only be run once")
-            .into_values()
-    }
-
     fn run_entry(&mut self) -> Value {
-        let arguments = self.take_arguments();
         self.session
-            .run_entry(self.target, self.module_id, self.entry, arguments)
+            .run_entry(self.target, self.module_id, self.entry, vec![])
             .unwrap()
-    }
-
-    pub fn run_value(&mut self) -> Value {
-        self.run_entry()
     }
 
     pub fn run_int(&mut self) -> isize {
@@ -275,163 +375,35 @@ impl PreparedRuntimeWorkload {
         self.run_entry().into_primitive_ty::<Float>().unwrap()
     }
 
-    pub fn run_string(&mut self) -> Str {
-        self.run_entry().into_primitive_ty::<Str>().unwrap()
-    }
-
     pub fn run_profiled(&mut self) -> (Value, MirExecutionProfile) {
-        let arguments = self.take_arguments();
         if self.target == ExecutionTarget::PhysicalMir {
             return self
                 .session
-                .run_physical_mir_entry_profiled(self.module_id, self.entry, arguments)
+                .run_physical_mir_entry_profiled(self.module_id, self.entry, vec![])
                 .unwrap();
         }
         self.session
-            .run_mir_entry_profiled(self.module_id, self.entry, arguments)
+            .run_mir_entry_profiled(self.module_id, self.entry, vec![])
             .unwrap()
     }
-}
-
-fn prepare_single_module(
-    target: BenchTarget,
-    name: &str,
-    source: &str,
-    function_name: &str,
-    arguments: RuntimeArguments,
-) -> PreparedRuntimeWorkload {
-    let mut session = target.session();
-    let module_id = session
-        .compile_for(
-            target.target(),
-            source,
-            &format!("{name}.fer"),
-            Path::single_str(name),
-        )
-        .unwrap()
-        .module_id;
-    prepare_entry(
-        target.target(),
-        session,
-        module_id,
-        function_name,
-        arguments,
-    )
 }
 
 fn prepare_entry(
     target: ExecutionTarget,
     mut session: CompilerSession,
     module_id: ModuleId,
-    function_name: &str,
-    arguments: RuntimeArguments,
+    result: RuntimeResult,
 ) -> PreparedRuntimeWorkload {
     let entry = session
         .expect_fresh_module(module_id)
-        .get_local_function_id(ferlium::ustr(function_name))
-        .unwrap_or_else(|| panic!("function {function_name} not found"));
+        .get_local_function_id(ferlium::ustr(BENCHMARK_ENTRY))
+        .expect("benchmark wrapper must define its entry");
     session.prepare_execution_target(target, module_id);
     PreparedRuntimeWorkload {
         target,
         session,
         module_id,
         entry,
-        arguments: Some(arguments),
+        result,
     }
-}
-
-fn prepare_quicksort(target: BenchTarget) -> PreparedRuntimeWorkload {
-    let data = lcg_seq(300, 42);
-    prepare_single_module(
-        target,
-        "quicksort",
-        include_str!("../tests/modules/quicksort.fer"),
-        "quicksort_int_a",
-        RuntimeArguments::IntArray(data),
-    )
-}
-
-fn prepare_bank_account(target: BenchTarget) -> PreparedRuntimeWorkload {
-    use indoc::indoc;
-
-    let mut session = target.session();
-    session
-        .compile_for(
-            target.target(),
-            include_str!("../tests/modules/quicksort.fer"),
-            "quicksort.fer",
-            Path::single_str("quicksort"),
-        )
-        .unwrap();
-    session
-        .compile_for(
-            target.target(),
-            include_str!("../tests/modules/bank_account.fer"),
-            "bank_account.fer",
-            Path::single_str("account"),
-        )
-        .unwrap();
-    let module_id = session
-        .compile_for(
-            target.target(),
-            indoc! { r#"
-                fn test() {
-                    let data = account::test_data();
-                    let json = json_encode(data);
-                    let decoded: [account::Account] = json_decode(json);
-                    let sorted = quicksort::quicksort_array(decoded);
-                    sorted[len(sorted) - 1].name
-                }
-            "# },
-            "test.fer",
-            Path::single_str("test"),
-        )
-        .unwrap()
-        .module_id;
-    prepare_entry(
-        target.target(),
-        session,
-        module_id,
-        "test",
-        RuntimeArguments::None,
-    )
-}
-
-fn prepare_linalg(
-    target: BenchTarget,
-    function_name: &str,
-    arguments: RuntimeArguments,
-) -> PreparedRuntimeWorkload {
-    let mut session = target.session();
-    session.set_allow_experimental(true);
-    let module_id = session
-        .compile_for(
-            target.target(),
-            include_str!("../tests/modules/linalg.fer"),
-            "linalg.fer",
-            Path::single_str("linalg"),
-        )
-        .unwrap()
-        .module_id;
-    prepare_entry(
-        target.target(),
-        session,
-        module_id,
-        function_name,
-        arguments,
-    )
-}
-
-fn int_a(values: impl Into<Vec<isize>>) -> Value {
-    array_value_from_vec(values.into().into_iter().map(Value::native).collect())
-}
-
-fn lcg_seq(n: usize, seed: usize) -> Vec<isize> {
-    let mut state = seed;
-    (0..n)
-        .map(|_| {
-            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
-            state as isize
-        })
-        .collect()
 }

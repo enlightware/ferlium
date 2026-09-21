@@ -82,6 +82,13 @@ pub(super) unsafe extern "C" fn release(data: *mut u8) {
     }
 }
 
+/// Hide guest storage from optimization without changing its bytes.
+pub(super) extern "C" fn black_box(data: *const u8, size: usize) {
+    // Observing the pair is sufficient: it keeps the place address and its dynamic extent opaque
+    // without constructing a Rust reference (in particular, for a zero-sized value at address 0).
+    std::hint::black_box((data, size));
+}
+
 /// Compare an owned run-time string with immutable compiler pattern data.
 ///
 /// # Safety

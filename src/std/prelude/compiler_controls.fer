@@ -1,0 +1,8 @@
+/// Returns `value` while conservatively hiding it from optimization.
+#[inline(never)]
+pub fn black_box<A>(value: A) -> A
+where
+	A: Value
+{
+	value
+}

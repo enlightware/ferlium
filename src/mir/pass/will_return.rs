@@ -166,6 +166,7 @@ fn operation_returns(operation: &Operation, callee_returns: &impl Fn(FunctionId)
         | OperationKind::AllocaPlace { .. }
         | OperationKind::RuntimeAlloc { .. }
         | OperationKind::RuntimeDealloc
+        | OperationKind::BlackBox { .. }
         | OperationKind::CompareEqual
         | OperationKind::Load
         | OperationKind::Subfield { .. }

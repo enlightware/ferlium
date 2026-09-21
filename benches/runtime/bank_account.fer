@@ -1,0 +1,11 @@
+fn test() {
+    let data = black_box(account::test_data());
+    let json = json_encode(data);
+    let decoded: [account::Account] = json_decode(json);
+    let sorted = quicksort::quicksort_array(decoded);
+    sorted[len(sorted) - 1].name
+}
+
+fn benchmark_entry() {
+    len(test())
+}
