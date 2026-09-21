@@ -39,6 +39,12 @@ use std::{
 };
 use ustr::ustr;
 
+#[cfg(target_arch = "wasm32")]
+use ferlium::{
+    module::FunctionId,
+    wasm::{WasmLimits, run_boxed_entry},
+};
+
 #[derive(Debug)]
 pub enum Error {
     Compilation(CompilationError),
@@ -381,12 +387,12 @@ pub(crate) fn compare_values(actual: &Value, expected: &Value, path: &str) -> Re
 
 /// How a snippet is executed by the test harness.
 ///
-/// By default every snippet runs under all of these, and each is checked against the first — the
-/// HIR interpreter. That is what gives the MIR backend and the optimization passes their coverage:
-/// a divergence surfaces in whichever test happens to exercise the construct, rather than only in a
-/// hand-picked corpus. A test that must not run under some mode selects its own set; see
+/// Native tests run every interpreter and compare them with HIR. Wasm tests run only generated
+/// Wasm by default; the same language assertions provide their oracle without repeating the native
+/// differential suite inside Wasm. A test that needs particular modes selects its own set; see
 /// [`TestSession::without_optimized_mode`] and [`TestSession::only_optimized_mode`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub enum RunMode {
     /// The HIR interpreter: the reference.
     Hir,
@@ -398,9 +404,19 @@ pub enum RunMode {
     PhysicalMir,
     /// Expanded physical bodies before post-expansion optimization.
     UnoptimizedPhysicalMir,
+    /// Generated Wasm over optimized physical MIR.
+    #[cfg(target_arch = "wasm32")]
+    Wasm,
 }
 
 impl RunMode {
+    /// The interpreter modes that preserve unoptimized execution semantics.
+    ///
+    /// Generated Wasm intentionally is not included: Wasm emission consumes optimized physical
+    /// MIR. Tests selecting these modes cover interpreter behavior rather than the Wasm backend.
+    pub const UNOPTIMIZED_INTERPRETERS: [Self; 2] = [Self::Hir, Self::Mir];
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub const ALL: [Self; 5] = [
         Self::Hir,
         Self::Mir,
@@ -409,11 +425,16 @@ impl RunMode {
         Self::PhysicalMir,
     ];
 
-    fn target(self) -> ExecutionTarget {
+    #[cfg(target_arch = "wasm32")]
+    pub const ALL: [Self; 1] = [Self::Wasm];
+
+    fn target(self) -> Option<ExecutionTarget> {
         match self {
-            Self::Hir => ExecutionTarget::Hir,
-            Self::Mir | Self::OptimizedMir => ExecutionTarget::Mir,
-            Self::PhysicalMir | Self::UnoptimizedPhysicalMir => ExecutionTarget::PhysicalMir,
+            Self::Hir => Some(ExecutionTarget::Hir),
+            Self::Mir | Self::OptimizedMir => Some(ExecutionTarget::Mir),
+            Self::PhysicalMir | Self::UnoptimizedPhysicalMir => Some(ExecutionTarget::PhysicalMir),
+            #[cfg(target_arch = "wasm32")]
+            Self::Wasm => None,
         }
     }
 
@@ -423,6 +444,8 @@ impl RunMode {
             Self::OptimizedMir | Self::PhysicalMir | Self::UnoptimizedPhysicalMir => {
                 MirOptimization::Enabled
             }
+            #[cfg(target_arch = "wasm32")]
+            Self::Wasm => MirOptimization::Enabled,
         }
     }
 
@@ -433,6 +456,8 @@ impl RunMode {
             Self::OptimizedMir => "the optimized MIR backend",
             Self::PhysicalMir => "the physical MIR backend",
             Self::UnoptimizedPhysicalMir => "the unoptimized physical MIR backend",
+            #[cfg(target_arch = "wasm32")]
+            Self::Wasm => "the generated Wasm backend",
         }
     }
 }
@@ -1471,7 +1496,7 @@ impl TestSession {
     /// on the optimized run. That is the compile-time execution contract working as documented (see
     /// `doc/runtime-sandboxing.md`), not a divergence.
     pub fn without_optimized_mode(&mut self) -> &mut Self {
-        self.run_modes([RunMode::Hir, RunMode::Mir])
+        self.run_modes(RunMode::UNOPTIMIZED_INTERPRETERS)
     }
 
     /// Runs snippets *only* under optimized MIR, for a test aimed at the effect of optimization
@@ -1637,12 +1662,9 @@ impl TestSession {
         let CompilationOutput { module_id, expr } =
             self.try_compile(src).map_err(Error::Compilation)?;
 
-        // Run the expression through every execution mode, asserting they all agree with the HIR
-        // interpreter: equal values, matching structural runtime-error kinds, or matching
-        // cleanup-failure causes and retained cause kinds. Return the HIR result. Running every
-        // mode on every snippet is what gives the MIR backend, and the optimization passes, full
-        // coverage — including the error path, since a failing snippet exercises all of them rather
-        // than short-circuiting on the HIR error.
+        // Run the expression through the target's default execution modes. Native tests compare
+        // every interpreter with HIR; Wasm tests run generated Wasm alone and use the language
+        // assertion as their oracle. Tests may select another explicit mode set.
         if let Some(expr) = expr {
             let ty = self
                 .session
@@ -1675,10 +1697,18 @@ impl TestSession {
                                 MirOptimization::Enabled
                             },
                         );
-                        let result = self
-                            .session
-                            .run_entry(mode.target(), module_id, expr, vec![])
-                            .map_err(Error::Runtime);
+                        let result = match mode.target() {
+                            Some(target) => self.session.run_entry(target, module_id, expr, vec![]),
+                            #[cfg(target_arch = "wasm32")]
+                            None => run_boxed_entry(
+                                &self.session,
+                                FunctionId::new(module_id, expr),
+                                WasmLimits::default(),
+                            ),
+                            #[cfg(not(target_arch = "wasm32"))]
+                            None => unreachable!("native builds have no generated Wasm mode"),
+                        }
+                        .map_err(Error::Runtime);
                         let effects = PropertyFixtures::capture();
                         if let Some(expected) = &expected_effects {
                             assert_eq!(
@@ -1698,8 +1728,7 @@ impl TestSession {
                     .set_physical_mir_optimization(selected_physical);
                 expected_effects.unwrap().restore();
 
-                // The first mode — the HIR interpreter unless a test says otherwise — is the
-                // reference every other one is checked against.
+                // The first selected mode is the reference for any additional modes.
                 for (mode, result) in modes.iter().zip(&results).skip(1) {
                     assert_outcomes_agree(&results[0], result, mode.label());
                 }

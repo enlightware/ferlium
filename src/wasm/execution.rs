@@ -21,7 +21,7 @@ use crate::{
     compiler::error::SandboxViolationKind,
     eval::RuntimeError,
     execution::ExecutionLimits,
-    hir::native_functions::NativeFailureState,
+    hir::{native_functions::NativeFailureState, value::Value},
     mir::physical::program::ResolvedPhysicalProgram,
     module::{FunctionId, id::Id},
     std::{math::Float, string::StaticStr},
@@ -31,7 +31,8 @@ use crate::{
 use super::{
     Imports,
     abi::HostTableSlotId,
-    emit::{self, ScalarType},
+    boxed::{self, NativeOutputs},
+    emit::{self, HostExportKind, ScalarType},
     failure::Failures,
 };
 
@@ -179,6 +180,23 @@ impl CompiledProgram {
         Ok(Self { emitted, imports })
     }
 
+    fn compile_boxed(
+        session: &CompilerSession,
+        entry: FunctionId,
+    ) -> Result<(Self, NativeOutputs), RuntimeError> {
+        let program = session.prepare_physical_program(entry.module)?;
+        let mut imports = Imports::new().map_err(js_error)?;
+        let emitted = emit::emit_boxed(
+            &program,
+            &[entry],
+            &[(entry, ENTRY_EXPORT.into())],
+            &mut imports,
+            session,
+        )
+        .map_err(RuntimeError::Backend)?;
+        Ok((Self { emitted, imports }, boxed::native_outputs(&program)))
+    }
+
     pub fn bytes(&self) -> &[u8] {
         &self.emitted.bytes
     }
@@ -195,13 +213,48 @@ impl CompiledProgram {
         let [export] = self.emitted.exports.as_slice() else {
             unreachable!("a compiled program exports only its entry");
         };
-        if types != export.parameters
-            || ScalarType::of(R::ty()).map_err(RuntimeError::Backend)? != export.result
+        let HostExportKind::Scalar { parameters, result } = &export.kind else {
+            return Err(RuntimeError::Backend(
+                "boxed Wasm export cannot use a typed binding".into(),
+            ));
+        };
+        if types != *parameters
+            || ScalarType::of(R::ty()).map_err(RuntimeError::Backend)? != *result
         {
             return Err(RuntimeError::Backend(
                 "Rust signature does not match the Wasm entry".into(),
             ));
         }
+        Ok(Instance {
+            runtime: self.instantiate_runtime(export)?,
+            marker: PhantomData,
+        })
+    }
+
+    fn instantiate_boxed(
+        &self,
+        native_outputs: NativeOutputs,
+    ) -> Result<BoxedInstance, RuntimeError> {
+        let [export] = self.emitted.exports.as_slice() else {
+            unreachable!("a compiled program exports only its entry");
+        };
+        let HostExportKind::Boxed { result } = export.kind else {
+            return Err(RuntimeError::Backend(
+                "typed Wasm export cannot use a boxed binding".into(),
+            ));
+        };
+        Ok(BoxedInstance {
+            runtime: self.instantiate_runtime(export)?,
+            owner: export.function,
+            result,
+            native_outputs,
+        })
+    }
+
+    fn instantiate_runtime(
+        &self,
+        export: &emit::HostExport,
+    ) -> Result<RuntimeInstance, RuntimeError> {
         let bytes = Uint8Array::from(self.bytes());
         let module = WebAssembly::Module::new(&bytes).map_err(js_error)?;
         let instance =
@@ -215,15 +268,30 @@ impl CompiledProgram {
             .map_err(js_error)?
             .dyn_into()
             .map_err(js_error)?;
-        Ok(Instance {
+        Ok(RuntimeInstance {
             entry: TableSlot::new(&entry)?,
             setup: TableSlot::new(&setup)?,
             stack: Vec::new(),
             strings: self.emitted.strings.clone(),
             evidence: self.emitted.evidence.instantiate(),
-            marker: PhantomData,
         })
     }
+}
+
+/// Execute one no-argument expression through generated Wasm and box its result for the shared
+/// differential harness.
+///
+/// This is temporary compatibility scaffolding, not the production host-value ABI.
+#[doc(hidden)]
+pub fn run_boxed_entry(
+    session: &CompilerSession,
+    entry: FunctionId,
+    limits: WasmLimits,
+) -> Result<Value, RuntimeError> {
+    let (program, native_outputs) = CompiledProgram::compile_boxed(session, entry)?;
+    program
+        .instantiate_boxed(native_outputs)?
+        .run(session, limits)
 }
 
 thread_local! {
@@ -266,13 +334,24 @@ impl Drop for TableSlot {
 
 /// An ABI-checked binding whose code and function-table slots remain live until it is dropped.
 pub struct Instance<A, R> {
+    runtime: RuntimeInstance,
+    marker: PhantomData<fn(A) -> R>,
+}
+
+struct RuntimeInstance {
     entry: TableSlot,
     setup: TableSlot,
     // Frame bytes are lent exclusively to each invocation. MIR lifetimes, not zeroing, govern reads.
     stack: Vec<u64>,
     strings: Box<[StaticStr]>,
     evidence: Box<[u32]>,
-    marker: PhantomData<fn(A) -> R>,
+}
+
+struct BoxedInstance {
+    runtime: RuntimeInstance,
+    owner: FunctionId,
+    result: Type,
+    native_outputs: NativeOutputs,
 }
 
 /// A direct Rust-callable entry borrowed for one active invocation. No JavaScript, allocation,
@@ -311,6 +390,62 @@ impl<A: WasmArguments, R: WasmValue> Instance<A, R> {
         limits: WasmLimits,
         callback: impl FnOnce(&BoundFunction<A, R>) -> T,
     ) -> Result<T, RuntimeError> {
+        // SAFETY: this method's caller upholds the same non-unwinding callback contract.
+        unsafe {
+            self.runtime.with_invocation(limits, |slot| {
+                let function = BoundFunction {
+                    slot,
+                    marker: PhantomData,
+                };
+                callback(&function)
+            })
+        }
+    }
+}
+
+impl BoxedInstance {
+    fn run(
+        &mut self,
+        session: &CompilerSession,
+        limits: WasmLimits,
+    ) -> Result<Value, RuntimeError> {
+        boxed::validate_result(session, self.owner, &self.native_outputs, self.result)
+            .map_err(RuntimeError::Backend)?;
+        let layout = boxed::result_layout(session, self.owner, self.result)
+            .map_err(RuntimeError::Backend)?;
+        if layout.align() > align_of::<u64>() {
+            return Err(RuntimeError::Backend(
+                "boxed Wasm result alignment exceeds eight bytes".into(),
+            ));
+        }
+        let mut storage = vec![0_u64; layout.size().max(1).div_ceil(size_of::<u64>())];
+        let output = storage.as_mut_ptr().cast::<u8>();
+        // SAFETY: the generated boxed entry has the fixed pointer-only signature, and the callback
+        // has no Rust cleanup obligation below the trap boundary.
+        unsafe {
+            self.runtime.with_invocation(limits, |slot| {
+                let function: unsafe extern "C" fn(*mut u8) = mem::transmute(slot.as_index());
+                function(output);
+            })?;
+        }
+        boxed::export(
+            session,
+            self.owner,
+            &self.native_outputs,
+            self.result,
+            output,
+        )
+        .map_err(RuntimeError::Backend)
+    }
+}
+
+impl RuntimeInstance {
+    /// Run a callback under the sole JavaScript trap boundary for this instance.
+    unsafe fn with_invocation<T>(
+        &mut self,
+        limits: WasmLimits,
+        callback: impl FnOnce(HostTableSlotId) -> T,
+    ) -> Result<T, RuntimeError> {
         if limits.stack_bytes > i32::MAX as usize || limits.stack_bytes < 8 {
             return Err(RuntimeError::Backend("invalid Wasm stack capacity".into()));
         }
@@ -343,11 +478,7 @@ impl<A: WasmArguments, R: WasmValue> Instance<A, R> {
         let setup: unsafe extern "C" fn(*mut InvocationState) =
             unsafe { mem::transmute(self.setup.index.as_index()) };
         unsafe { setup(&mut state) };
-        let function = BoundFunction {
-            slot: self.entry.index,
-            marker: PhantomData,
-        };
-        let outcome = catch_trap(|| callback(&function));
+        let outcome = catch_trap(|| callback(self.entry.index));
         unsafe { setup(ptr::null_mut()) };
         outcome.map_err(|error| {
             let error = match FailureCode::from_repr(state.failure) {

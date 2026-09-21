@@ -8,6 +8,7 @@
 //! needs coordinated changes to transport, addressing, memory declarations and invocation state.
 
 mod abi;
+mod boxed;
 mod callable_environment;
 mod emit;
 mod evidence;
@@ -19,7 +20,7 @@ pub(crate) mod text;
 
 pub use abi::WasmFunctionId;
 pub use execution::{
-    BoundFunction, CompiledProgram, Instance, WasmArguments, WasmLimits, WasmValue,
+    BoundFunction, CompiledProgram, Instance, WasmArguments, WasmLimits, WasmValue, run_boxed_entry,
 };
 
 use js_sys::{Object, Reflect, WebAssembly::Table};
@@ -99,6 +100,12 @@ impl Imports {
                 runtime::release as *const (),
                 vec![ValType::I32],
                 vec![],
+            ),
+            (
+                "string_matches",
+                runtime::string_matches as *const (),
+                vec![ValType::I32; 2],
+                vec![ValType::I32],
             ),
             (
                 "capture_failure",

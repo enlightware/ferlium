@@ -1189,6 +1189,8 @@ fn array_casts() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn reducing_fns() {
     let mut session = TestSession::new();
+    // The inferred predicate result keeps this generic until MIR instantiation, covering generic
+    // boolean match lowering.
     assert_val_eq!(session.run("0..2 |> any(|x| x > 1)"), bool(false));
     assert_val_eq!(session.run("0..2 |> iter() |> any(|x| x > 1)"), bool(false));
     assert_val_eq!(session.run("0..2 |> any(|x| x >= 1)"), bool(true));

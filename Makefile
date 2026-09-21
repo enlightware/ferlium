@@ -48,8 +48,8 @@ test-native-abi:
 	python3 tests/native_abi/check_wasm.py
 
 test-wasm:
-	CARGO_PROFILE_TEST_DEBUG=0 WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --chrome --firefox --headless --test language --lib --features wasm-text
-	cd playground/script-api && CARGO_PROFILE_TEST_DEBUG=0 WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --chrome --firefox --headless --lib
+	CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_TEST_OPT_LEVEL=1 WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --chrome --firefox --headless --test language --lib --features wasm-text
+	cd playground/script-api && CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_TEST_OPT_LEVEL=1 WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --chrome --firefox --headless --lib
 
 test-wasm-linkage:
 	CARGO_PROFILE_TEST_DEBUG=0 WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --release --chrome --firefox --headless --lib -- wasm_linkage
@@ -58,6 +58,9 @@ test-wasm-linkage:
 test-wasm-codegen:
 	CARGO_PROFILE_TEST_DEBUG=0 WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --release --chrome --firefox --headless --lib -- wasm_codegen
 	CARGO_PROFILE_TEST_DEBUG=0 wasm-pack test --release --node --lib -- wasm_codegen
+
+test-wasm-release:
+	CARGO_PROFILE_TEST_DEBUG=0 wasm-pack test --release --node --test language
 
 profile-wasm:
 	wasm-pack build examples/wasm-profile --target nodejs --release --out-dir ../../target/wasm-profile

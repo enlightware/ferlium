@@ -8,6 +8,8 @@ use std::{
     ptr,
 };
 
+use crate::std::string::{StaticStr, String as NativeString};
+
 #[derive(Clone, Copy)]
 struct Header {
     size: usize,
@@ -23,6 +25,16 @@ impl Header {
             .expect("allocation layout overflow");
         (layout.pad_to_align(), offset)
     }
+}
+
+/// Recover the payload layout recorded by the temporary pointer-only allocation contract.
+///
+/// # Safety
+/// `data` must be a live allocation returned by [`allocate`].
+pub(super) unsafe fn payload_layout(data: *const u8) -> Layout {
+    // SAFETY: the allocation contract places a live Header immediately before every payload.
+    let header = unsafe { data.sub(size_of::<Header>()).cast::<Header>().read() };
+    Layout::from_size_align(header.size.max(1), header.align).expect("invalid allocation layout")
 }
 
 /// Allocate aligned, uninitialized storage, including a distinct reclaimable zero-sized block.
@@ -68,4 +80,17 @@ pub(super) unsafe extern "C" fn release(data: *mut u8) {
         let (layout, offset) = header.allocation();
         dealloc(data.sub(offset), layout);
     }
+}
+
+/// Compare an owned run-time string with immutable compiler pattern data.
+///
+/// # Safety
+/// Both pointers must address initialized values of their respective Rust types for the duration
+/// of this call. Generated code satisfies that contract.
+pub(super) unsafe extern "C" fn string_matches(
+    actual: *const NativeString,
+    expected: *const StaticStr,
+) -> u32 {
+    // SAFETY: upheld by the generated-code contract above.
+    u32::from(unsafe { &*actual }.as_ref() == unsafe { &*expected }.as_str())
 }

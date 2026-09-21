@@ -33,7 +33,7 @@ use crate::{
     },
     types::{
         r#trait::TraitDictionaryEntryIndex,
-        r#type::{CallResultConvention, Type},
+        r#type::{CallResultConvention, Type, TypeKind},
     },
     wasm::{
         Imports,
@@ -462,7 +462,13 @@ impl<'a, 's> Body<'a, 's> {
                             let local = this.local(ty.wasm());
                             this.storage.insert(value, Storage::Local(local));
                         } else {
-                            this.slot(value, this.size(&ty)?)?;
+                            let size = this.size(&ty).map_err(|error| {
+                                format!(
+                                    "{error} for result {id:?} of {}",
+                                    OperationKindDiscriminant::from(&operation.kind)
+                                )
+                            })?;
+                            this.slot(value, size)?;
                         }
                         continue;
                     }
@@ -484,7 +490,13 @@ impl<'a, 's> Body<'a, 's> {
                         ValueRole::Materialized(ty) => match scalar(ty) {
                             Ok(ty) => ty.wasm(),
                             Err(_) => {
-                                this.slot(Value::Register(id), this.size(ty)?)?;
+                                let size = this.size(ty).map_err(|error| {
+                                    format!(
+                                        "{error} for result {id:?} of {}",
+                                        OperationKindDiscriminant::from(&operation.kind)
+                                    )
+                                })?;
+                                this.slot(Value::Register(id), size)?;
                                 continue;
                             }
                         },
@@ -1159,6 +1171,13 @@ impl<'a, 's> Body<'a, 's> {
         literal: &LiteralValue,
         offset: u32,
     ) -> Result<(), String> {
+        if value_layout_for_type(ty, Location::new_synthesized(), &self.env)
+            .map_err(|error| format!("constant layout: {error:?}"))?
+            .size
+            == 0
+        {
+            return Ok(());
+        }
         if let Some(text) = literal.as_primitive_ty::<StaticStr>() {
             let index = self.strings.intern(*text);
             self.address(destination)?;
@@ -1192,6 +1211,84 @@ impl<'a, 's> Body<'a, 's> {
             self.i(I::I32Add);
             self.literal(literal)?;
             self.store(ScalarType::of(ty)?);
+        }
+        Ok(())
+    }
+
+    fn pattern_address(&mut self, value: &Value, offset: u32) -> Result<(), String> {
+        self.address(value)?;
+        if offset != 0 {
+            self.i(I::I32Const(offset as i32));
+            self.i(I::I32Add);
+        }
+        Ok(())
+    }
+
+    fn pattern_equal_at(
+        &mut self,
+        value: &Value,
+        offset: u32,
+        ty: Type,
+        literal: &LiteralValue,
+    ) -> Result<(), String> {
+        let data = ty.data().clone();
+        if let TypeKind::Named(named) = data {
+            let represented = self
+                .env
+                .type_def(named.def)
+                .instantiated_shape_with_effects(&named.params, &named.effect_params);
+            return self.pattern_equal_at(value, offset, represented, literal);
+        }
+        if let Some(expected) = literal.as_primitive_ty::<StaticStr>() {
+            let index = self.strings.intern(*expected);
+            self.pattern_address(value, offset)?;
+            self.context_pointer(offset_of!(InvocationState, strings));
+            self.i(I::I32Const((index * size_of::<StaticStr>()) as i32));
+            self.i(I::I32Add);
+            self.i(I::Call(
+                self.imports.function_index("string_matches").as_u32(),
+            ));
+            return Ok(());
+        }
+        if let LiteralValue::Tuple(fields) = literal {
+            let layout = product_layout_spec(ty, Location::new_synthesized(), &self.env)
+                .ok_or("expected product pattern")?;
+            if fields.len() != layout.members.len() {
+                return Err("product pattern arity mismatch".into());
+            }
+            self.i(I::I32Const(1));
+            for (index, field) in fields.iter().enumerate() {
+                let field_offset = layout
+                    .static_field_offset(ProjectionIndex::from_index(index))
+                    .ok_or("open product pattern layout")?
+                    as u32;
+                self.pattern_equal_at(
+                    value,
+                    offset + field_offset,
+                    layout.members[index].ty,
+                    field,
+                )?;
+                self.i(I::I32And);
+            }
+            return Ok(());
+        }
+        // Variant tags are only whole-pattern discriminants. HIR lowers nested variant matching
+        // structurally rather than embedding symbolic tags in product literals.
+
+        // A pattern fixes the concrete scalar representation even when the scrutinee's static
+        // type is an unresolved parameter constrained to that literal type.
+        let scalar = literal
+            .native_type()
+            .map(ScalarType::of)
+            .transpose()?
+            .ok_or("expected scalar pattern")?;
+        if scalar.is_unit() {
+            self.i(I::I32Const(1));
+        } else {
+            self.pattern_address(value, offset)?;
+            self.load(scalar);
+            self.literal(literal)?;
+            self.i(scalar.equal());
         }
         Ok(())
     }
@@ -2148,10 +2245,30 @@ impl<'a, 's> Body<'a, 's> {
             }
             StackSave => self.i(I::GlobalGet(Global::Stack as u32)),
             CompareEqual => {
-                let ty = self.read(&args[0])?;
-                // The second operand is a compile-time Pattern, enforced by physical verification.
-                self.value(&args[1])?;
-                self.i(ty.equal());
+                let Value::Pattern(pattern) = &args[1] else {
+                    return Err("compare_equal requires a pattern".into());
+                };
+                if matches!(&**pattern, LiteralValue::VariantTag(_)) {
+                    let ty = self.read(&args[0])?;
+                    self.value(&args[1])?;
+                    self.i(ty.equal());
+                } else if let Some(MirType::Lowered(ty)) = self
+                    .roles
+                    .get(&args[0], self.body.constants())
+                    .and_then(|role| role.place_pointee_type())
+                {
+                    if ScalarType::of(ty).is_ok() {
+                        let ty = self.read(&args[0])?;
+                        self.value(&args[1])?;
+                        self.i(ty.equal());
+                    } else {
+                        self.pattern_equal_at(&args[0], 0, ty, pattern)?;
+                    }
+                } else {
+                    let ty = self.read(&args[0])?;
+                    self.value(&args[1])?;
+                    self.i(ty.equal());
+                }
             }
             CheckCallDepth => {
                 self.i(I::GlobalGet(Global::Depth as u32));

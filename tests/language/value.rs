@@ -65,7 +65,7 @@ fn native_member_owned_replacement_drops_detached_value_once() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn native_member_failure_preserves_owner_and_cleans_up() {
-    for mode in [RunMode::Hir, RunMode::Mir] {
+    for mode in RunMode::UNOPTIMIZED_INTERPRETERS {
         let mut session = TestSession::new();
         session.run_modes([mode]);
         assert!(
@@ -161,7 +161,7 @@ fn native_drop_destroys_replaced_values_before_scope_exit() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn native_drop_destroys_values_once_on_source_failure() {
-    for mode in [RunMode::Hir, RunMode::Mir] {
+    for mode in RunMode::UNOPTIMIZED_INTERPRETERS {
         let mut session = TestSession::new();
         session.run_modes([mode]);
         assert!(
@@ -183,7 +183,7 @@ fn native_drop_destroys_values_once_on_source_failure() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn ordinary_assignment_drops_prepared_rhs_when_destination_fails() {
-    for mode in [RunMode::Hir, RunMode::Mir] {
+    for mode in RunMode::UNOPTIMIZED_INTERPRETERS {
         let mut session = TestSession::new();
         session.run_modes([mode]);
         assert!(

@@ -5,6 +5,8 @@ use test_log::test;
 
 use indoc::indoc;
 
+#[cfg(target_arch = "wasm32")]
+use crate::harness::RunMode;
 use crate::harness::{
     TestSession, bool, float, get_array_property_value, get_property_value, int,
     set_array_property_value, set_property_value, string, unit, variant_0, variant_t1, variant_tn,
@@ -2672,6 +2674,10 @@ fn environment_cell_limit_exceeded() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn runtime_backtrace_recovers_user_locals_from_debug_info() {
     let mut session = TestSession::new();
+    // Generated calls do not contribute source backtraces yet; this test targets interpreter
+    // debug-info recovery rather than language execution.
+    #[cfg(target_arch = "wasm32")]
+    session.run_modes([RunMode::Hir]);
     let error = session
         .try_run(
             "fn g(n: int) { let x = n + 1; let xs = [1]; xs[1] }
@@ -2702,6 +2708,10 @@ fn runtime_backtrace_recovers_user_locals_from_debug_info() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn runtime_backtrace_debug_info_respects_local_scope() {
     let mut session = TestSession::new();
+    // Generated calls do not contribute source backtraces yet; this test targets interpreter
+    // debug-info recovery rather than language execution.
+    #[cfg(target_arch = "wasm32")]
+    session.run_modes([RunMode::Hir]);
     let error = session
         .try_run(
             "fn f() {

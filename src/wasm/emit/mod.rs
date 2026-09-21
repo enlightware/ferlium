@@ -9,7 +9,7 @@ mod callable;
 mod subscript;
 
 use self::{
-    adapters::{dictionary_adapter, entry_wrapper},
+    adapters::{boxed_entry_wrapper, dictionary_adapter, entry_wrapper},
     body::{Body, BodyMode},
 };
 
@@ -328,8 +328,17 @@ pub(super) struct Emitted {
 pub(super) struct HostExport {
     pub function: FunctionId,
     pub name: String,
-    pub parameters: Vec<ScalarType>,
-    pub result: ScalarType,
+    pub kind: HostExportKind,
+}
+
+pub(super) enum HostExportKind {
+    Scalar {
+        parameters: Vec<ScalarType>,
+        result: ScalarType,
+    },
+    Boxed {
+        result: Type,
+    },
 }
 
 /// The code generated for one MIR operation or terminator.
@@ -436,16 +445,85 @@ pub(super) fn emit(
     imports: &mut Imports,
     session: &CompilerSession,
 ) -> Result<Emitted, String> {
+    emit_with_export_kind(
+        program,
+        roots,
+        exports,
+        imports,
+        session,
+        |program, function| {
+            let (parameters, result) = host_signature(program, function)?;
+            Ok(HostExportKind::Scalar { parameters, result })
+        },
+    )
+}
+
+/// Emit no-argument roots through the temporary boxed differential-testing boundary.
+pub(super) fn emit_boxed(
+    program: &ResolvedPhysicalProgram<'_>,
+    roots: &[FunctionId],
+    exports: &[(FunctionId, String)],
+    imports: &mut Imports,
+    session: &CompilerSession,
+) -> Result<Emitted, String> {
+    emit_with_export_kind(
+        program,
+        roots,
+        exports,
+        imports,
+        session,
+        |program, function| {
+            let body = program
+                .function(function)
+                .ok_or_else(|| format!("missing script entry {function:?}"))?;
+            if !matches!(
+                body.result_convention(),
+                CallResultConvention::Value | CallResultConvention::NoValue
+            ) {
+                return Err(diagnostic(
+                    function,
+                    body,
+                    "boxed Wasm expression binding requires a value result",
+                ));
+            }
+            if body
+                .parameters()
+                .iter()
+                .any(|parameter| parameter.kind != ParameterKind::Return)
+            {
+                return Err(diagnostic(
+                    function,
+                    body,
+                    "boxed Wasm expression binding requires no arguments",
+                ));
+            }
+            Ok(HostExportKind::Boxed {
+                result: body
+                    .parameters()
+                    .iter()
+                    .find(|parameter| parameter.kind == ParameterKind::Return)
+                    .map_or(Type::unit(), |parameter| parameter.ty),
+            })
+        },
+    )
+}
+
+fn emit_with_export_kind(
+    program: &ResolvedPhysicalProgram<'_>,
+    roots: &[FunctionId],
+    exports: &[(FunctionId, String)],
+    imports: &mut Imports,
+    session: &CompilerSession,
+    export_kind: impl Fn(&ResolvedPhysicalProgram<'_>, FunctionId) -> Result<HostExportKind, String>,
+) -> Result<Emitted, String> {
     let host_exports = exports
         .iter()
         .map(|(function, name)| {
             debug_assert!(roots.contains(function), "export {name} is not a root");
-            let (parameters, result) = host_signature(program, *function)?;
             Ok(HostExport {
                 function: *function,
                 name: name.clone(),
-                parameters,
-                result,
+                kind: export_kind(program, *function)?,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -1052,21 +1130,32 @@ pub(super) fn emit(
         WasmFunctionId::from_index(glue_base.as_index() + if emit_callable_glue { 2 } else { 0 });
     for export in &host_exports {
         let (index, signature) = &callees[&program.direct_entry(export.function)];
-        // Only fallible entries need a host adapter: internal status returns become a Rust error
-        // through the outer invocation boundary, without changing the scalar host C signature.
-        if signature.fallible {
-            debug_assert_eq!(export.parameters.len(), signature.parameters.len());
-            names.push(format!("<host entry {}>", export.name));
-            functions.function(WasmTypeId::new(types.len()).as_u32());
-            types.ty().function(
-                export.parameters.iter().copied().map(ScalarType::wasm),
-                result_as_wasm(export.result),
-            );
-            code.function(&entry_wrapper(*index, signature, export.result));
-            exports.export(&export.name, ExportKind::Func, next_index.as_u32());
-            next_index = WasmFunctionId::from_index(next_index.as_index() + 1);
-        } else {
-            exports.export(&export.name, ExportKind::Func, index.as_u32());
+        match &export.kind {
+            HostExportKind::Scalar { parameters, result } if signature.fallible => {
+                // Internal status returns become a Rust error through the outer invocation
+                // boundary, without changing the scalar host C signature.
+                debug_assert_eq!(parameters.len(), signature.parameters.len());
+                names.push(format!("<host entry {}>", export.name));
+                functions.function(WasmTypeId::new(types.len()).as_u32());
+                types.ty().function(
+                    parameters.iter().copied().map(ScalarType::wasm),
+                    result_as_wasm(*result),
+                );
+                code.function(&entry_wrapper(*index, signature, *result));
+                exports.export(&export.name, ExportKind::Func, next_index.as_u32());
+                next_index = WasmFunctionId::from_index(next_index.as_index() + 1);
+            }
+            HostExportKind::Scalar { .. } => {
+                exports.export(&export.name, ExportKind::Func, index.as_u32());
+            }
+            HostExportKind::Boxed { .. } => {
+                names.push(format!("<boxed host entry {}>", export.name));
+                functions.function(WasmTypeId::new(types.len()).as_u32());
+                types.ty().function([ValType::I32], []);
+                code.function(&boxed_entry_wrapper(*index, signature)?);
+                exports.export(&export.name, ExportKind::Func, next_index.as_u32());
+                next_index = WasmFunctionId::from_index(next_index.as_index() + 1);
+            }
         }
     }
     // Rust calls this setter directly at invocation boundaries. All state and diagnostics stay

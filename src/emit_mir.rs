@@ -29,6 +29,7 @@ use crate::{
     std::{
         STD_MODULE_ID,
         core_traits_names::VALUE_TRAIT_NAME,
+        logic::bool_type,
         math::int_type,
         value::{
             VALUE_ALIGN_ASSOC_CONST_INDEX, VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX,
@@ -2436,7 +2437,10 @@ impl<'a> Emitter<'a> {
                         // comparison does not.
                         let (condition, then_target, else_target) =
                             match c.as_primitive_ty::<bool>() {
-                                Some(&expects_true) if scrutinee_is_place => {
+                                Some(&expects_true)
+                                    if scrutinee_is_place
+                                        && self.hir_arena[n.value].ty == bool_type() =>
+                                {
                                     let loaded = self
                                         .insert(Operation::load(node.span, scrutinee.clone()))
                                         .unwrap();

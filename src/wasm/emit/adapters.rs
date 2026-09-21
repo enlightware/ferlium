@@ -314,3 +314,43 @@ pub(super) fn entry_wrapper(
     code.instruction(&I::End);
     code
 }
+
+/// Normalize a no-argument expression entry to one caller-provided result pointer.
+pub(super) fn boxed_entry_wrapper(
+    index: WasmFunctionId,
+    signature: &CallAbi,
+) -> Result<WasmFunction, String> {
+    if !signature.parameters.is_empty() {
+        return Err("boxed Wasm expression entry has parameters".into());
+    }
+    let output = WasmLocalId::from_index(0);
+    let mut code = WasmFunction::new([]);
+    check_context(&mut code);
+    // An infallible direct result stays on the operand stack above its destination address. A
+    // fallible direct result already uses the ordinary output-pointer form.
+    if !signature.fallible && matches!(signature.result, ResultKind::Direct(_)) {
+        code.instruction(&I::LocalGet(output.as_u32()));
+    }
+    if signature.fallible {
+        context_pointer(&mut code, offset_of!(InvocationState, native_failure));
+    }
+    if signature.output() {
+        code.instruction(&I::LocalGet(output.as_u32()));
+    }
+    code.instruction(&I::Call(index.as_u32()));
+    if signature.fallible {
+        code.instruction(&I::If(BlockType::Empty));
+        store_failure_and_trap(&mut code, FailureCode::Source);
+        code.instruction(&I::End);
+    } else if let ResultKind::Direct(ty) = signature.result {
+        // The temporary boxed harness always reserves at least one aligned Wasm word, even when
+        // the Ferlium result layout (notably bool) is narrower than this ABI store.
+        code.instruction(&match ty {
+            ValType::I32 => I::I32Store(memarg(2)),
+            ValType::F64 => I::F64Store(memarg(3)),
+            _ => return Err("unsupported boxed Wasm direct result".into()),
+        });
+    }
+    code.instruction(&I::End);
+    Ok(code)
+}

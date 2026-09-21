@@ -93,15 +93,39 @@ jobs:
 
       - name: Run WASM tests (${{ matrix.browser }})
         # The language test binary is large enough that loading its full DWARF data can leave Chrome's renderer unresponsive to WebDriver.
-        # Keep debug assertions, but omit debuginfo from the Wasm test artifact.
-        run: CARGO_PROFILE_TEST_DEBUG=0 WASM_BINDGEN_USE_BROWSER=1 WASM_BINDGEN_TEST_TIMEOUT=600 wasm-pack test ${{ matrix.browser_flags }} --headless --test language --lib
+        # Keep debug assertions, omit debuginfo, and use light optimization so browsers do not
+        # spend minutes compiling the otherwise very large opt-level-0 test module.
+        run: CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_TEST_OPT_LEVEL=1 WASM_BINDGEN_USE_BROWSER=1 WASM_BINDGEN_TEST_TIMEOUT=600 wasm-pack test ${{ matrix.browser_flags }} --headless --test language --lib
 
       - name: Run Playground WASM tests (${{ matrix.browser }})
         working-directory: playground/script-api
-        run: CARGO_PROFILE_TEST_DEBUG=0 WASM_BINDGEN_USE_BROWSER=1 WASM_BINDGEN_TEST_TIMEOUT=600 wasm-pack test ${{ matrix.browser_flags }} --headless --lib
+        run: CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_TEST_OPT_LEVEL=1 WASM_BINDGEN_USE_BROWSER=1 WASM_BINDGEN_TEST_TIMEOUT=600 wasm-pack test ${{ matrix.browser_flags }} --headless --lib
 
       - name: Check release Wasm linkage and generation (${{ matrix.browser }})
         run: 'CARGO_PROFILE_TEST_DEBUG=0 WASM_BINDGEN_USE_BROWSER=1 WASM_BINDGEN_TEST_TIMEOUT=600 wasm-pack test --release ${{ matrix.browser_flags }} --headless --lib -- wasm::'
+
+  wasm_release:
+    name: Optimized WASM language tests (Node)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2.9.1
+        with:
+          key: ${{ runner.os }}-cargo-wasm-release
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack
+
+      - name: Run optimized WASM language tests
+        run: CARGO_PROFILE_TEST_DEBUG=0 wasm-pack test --release --node --test language
 
   build_site:
     name: Build and upload playground and book
@@ -208,6 +232,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
     needs:
       - wasm
+      - wasm_release
       - build_site
       - validate_lezer_grammar
       - playground_tests
