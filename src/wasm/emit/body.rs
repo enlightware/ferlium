@@ -210,6 +210,7 @@ pub(super) struct Body<'a, 's> {
     track_depth: bool,
     forwarded_result: Option<Value>,
     fallthrough_return: bool,
+    comparison_fusions: FxHashMap<ValueId, KnownCallee>,
     pub(super) code: WasmFunction,
     source_map: BodySourceMap,
 }
@@ -245,6 +246,7 @@ impl<'a, 's> Body<'a, 's> {
         let dispatched = matches!(control_flow, ControlFlow::Dispatcher);
         let forwarded_result = forwarded_result(body, signature, mode);
         let fallthrough_return = has_fallthrough_return(body, mode, &control_flow);
+        let comparison_fusions = comparison_fusions(body, session);
         let mut this = Self {
             body,
             signature,
@@ -294,6 +296,7 @@ impl<'a, 's> Body<'a, 's> {
             track_depth,
             forwarded_result,
             fallthrough_return,
+            comparison_fusions,
             code: WasmFunction::new([]),
             source_map: Vec::new(),
         };
@@ -1440,9 +1443,11 @@ impl<'a, 's> Body<'a, 's> {
             KnownCallee::IntAdd
             | KnownCallee::IntSub
             | KnownCallee::IntMul
+            | KnownCallee::IntCmpCode
             | KnownCallee::FloatAdd
             | KnownCallee::FloatSub
-            | KnownCallee::FloatMul => 2,
+            | KnownCallee::FloatMul
+            | KnownCallee::FloatCmpCode => 2,
             KnownCallee::IntNeg
             | KnownCallee::IntFromInt
             | KnownCallee::FloatNeg
@@ -1498,6 +1503,27 @@ impl<'a, 's> Body<'a, 's> {
                     KnownCallee::IntMul => I::I32Mul,
                     _ => unreachable!(),
                 });
+            }
+            KnownCallee::IntCmpCode | KnownCallee::FloatCmpCode => {
+                // Preserve the comparison code when it escapes the usual predicate idiom. Wasm
+                // comparisons yield 0 or 1, so `(left > right) - (left < right)` is exactly the
+                // native -1/0/1 convention. The common single-predicate use is fused earlier and
+                // does not materialize this code at all.
+                self.read(inputs[0])?;
+                self.read(inputs[1])?;
+                self.i(match intrinsic {
+                    KnownCallee::IntCmpCode => I::I32GtS,
+                    KnownCallee::FloatCmpCode => I::F64Gt,
+                    _ => unreachable!(),
+                });
+                self.read(inputs[0])?;
+                self.read(inputs[1])?;
+                self.i(match intrinsic {
+                    KnownCallee::IntCmpCode => I::I32LtS,
+                    KnownCallee::FloatCmpCode => I::F64Lt,
+                    _ => unreachable!(),
+                });
+                self.i(I::I32Sub);
             }
             _ => unreachable!("wasm_intrinsic filters unsupported known callees"),
         }
@@ -1899,12 +1925,28 @@ impl<'a, 's> Body<'a, 's> {
         next: Option<BlockId>,
     ) -> Result<(), String> {
         let block = self.body.block(block_id);
-        let operation_count = block.operations().len();
-        for (index, operation) in block.operations().iter().enumerate() {
+        let operations = block.operations();
+        let operation_count = operations.len();
+        let mut index = 0;
+        while index < operations.len() {
+            let operation = &operations[index];
             if self.forwarded_result.is_some()
                 && block_id == self.body.entry()
                 && index + 1 == operation_count
             {
+                index += 1;
+                continue;
+            }
+            if let Some(test) = operations.get(index + 1)
+                && let Some(&intrinsic) = test
+                    .result_id()
+                    .and_then(|result| self.comparison_fusions.get(&result))
+            {
+                let start = self.code.byte_len();
+                self.comparison_predicate(intrinsic, operation, test)?;
+                self.finish_operation_result(test)?;
+                self.record_source(start, operation.span);
+                index += 2;
                 continue;
             }
             let start = self.code.byte_len();
@@ -1916,6 +1958,7 @@ impl<'a, 's> Body<'a, 's> {
                 )
             })?;
             self.record_source(start, operation.span);
+            index += 1;
         }
         let start = self.code.byte_len();
         let span = match &block.terminator().kind {
@@ -2629,6 +2672,10 @@ impl<'a, 's> Body<'a, 's> {
             }
             _ => return Err("unsupported physical operation".into()),
         }
+        self.finish_operation_result(op)
+    }
+
+    fn finish_operation_result(&mut self, op: &Operation) -> Result<(), String> {
         if let Some(id) = op.result_id() {
             self.i(I::LocalSet(self.registers[&id].as_u32()));
             let value = Value::Register(id);
@@ -2644,6 +2691,107 @@ impl<'a, 's> Body<'a, 's> {
         }
         Ok(())
     }
+
+    fn comparison_predicate(
+        &mut self,
+        intrinsic: KnownCallee,
+        call: &Operation,
+        test: &Operation,
+    ) -> Result<(), String> {
+        let [_, left, right, _] = &*call.operands else {
+            return Err("comparison-code call operands".into());
+        };
+        let Value::Pattern(pattern) = &test.operands[1] else {
+            return Err("comparison-code pattern".into());
+        };
+        let code = *pattern
+            .as_primitive_ty::<isize>()
+            .ok_or("comparison-code integer pattern")?;
+        self.read(left)?;
+        self.read(right)?;
+        self.i(match (intrinsic, code) {
+            (KnownCallee::IntCmpCode, -1) => I::I32LtS,
+            (KnownCallee::IntCmpCode, 0) => I::I32Eq,
+            (KnownCallee::IntCmpCode, 1) => I::I32GtS,
+            (KnownCallee::FloatCmpCode, -1) => I::F64Lt,
+            (KnownCallee::FloatCmpCode, 0) => I::F64Eq,
+            (KnownCallee::FloatCmpCode, 1) => I::F64Gt,
+            _ => return Err("comparison-code pattern outside -1/0/1".into()),
+        });
+        Ok(())
+    }
+}
+
+/// Adjacent comparison-code calls whose only result observation is an equality test can select a
+/// target predicate directly. Requiring adjacency keeps the original input values live without
+/// needing alias analysis. Requiring a fresh result allocation, observed only by the call output
+/// and test input, lets emission omit the intermediate code without leaving aliased storage stale.
+fn comparison_fusions(
+    body: &Function,
+    session: &CompilerSession,
+) -> FxHashMap<ValueId, KnownCallee> {
+    let mut uses = FxHashMap::<ValueId, usize>::default();
+    let mut definitions = FxHashMap::<ValueId, &Operation>::default();
+    for block in body.blocks() {
+        let block = body.block(block);
+        for operation in block.operations() {
+            if let Some(result) = operation.result_id() {
+                definitions.insert(result, operation);
+            }
+            for operand in &operation.operands {
+                if let Value::Register(id) = operand {
+                    *uses.entry(*id).or_default() += 1;
+                }
+            }
+        }
+        for operand in block.terminator().operands() {
+            if let Value::Register(id) = operand {
+                *uses.entry(*id).or_default() += 1;
+            }
+        }
+    }
+
+    let mut fused = FxHashMap::default();
+    for block in body.blocks() {
+        for pair in body.block(block).operations().windows(2) {
+            let [call, test] = pair else { unreachable!() };
+            let Some(intrinsic @ (KnownCallee::IntCmpCode | KnownCallee::FloatCmpCode)) =
+                wasm_intrinsic(session, call)
+            else {
+                continue;
+            };
+            let OperationKind::Call { ty, .. } = &call.kind else {
+                continue;
+            };
+            if !ty.result_convention.has_result_place()
+                || !matches!(test.kind, OperationKind::CompareEqual)
+                || call.operands.len() != 4
+                || test.operands.len() != 2
+            {
+                continue;
+            }
+            let output = &call.operands[3];
+            let Value::Register(output_id) = output else {
+                continue;
+            };
+            let Value::Pattern(pattern) = &test.operands[1] else {
+                continue;
+            };
+            if test.operands[0] != *output
+                || uses.get(output_id).copied() != Some(2)
+                || !definitions.get(output_id).is_some_and(|definition| {
+                    matches!(definition.kind, OperationKind::Alloca { .. })
+                })
+                || !matches!(pattern.as_primitive_ty::<isize>(), Some(-1..=1))
+            {
+                continue;
+            }
+            if let Some(result) = test.result_id() {
+                fused.insert(result, intrinsic);
+            }
+        }
+    }
+    fused
 }
 
 fn needs_helper_locals(body: &Function, mode: BodyMode) -> bool {

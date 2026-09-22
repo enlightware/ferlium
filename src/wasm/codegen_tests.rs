@@ -1013,6 +1013,145 @@ fn wasm_codegen_known_float_calls_select_saturating_instructions() {
 }
 
 #[wasm_bindgen_test]
+fn wasm_codegen_comparison_codes_select_predicates() {
+    for (expression, left, right, expected, equality) in [
+        ("x < y", 2, 3, true, false),
+        ("x < y", 3, 3, false, false),
+        ("x <= y", 3, 3, true, false),
+        ("x <= y", 4, 3, false, false),
+        ("x > y", 3, 2, true, false),
+        ("x > y", 3, 3, false, false),
+        ("x >= y", 2, 3, false, false),
+        ("x >= y", 3, 3, true, false),
+        (
+            "match cmp(x, y) { Equal => true, _ => false }",
+            3,
+            3,
+            true,
+            true,
+        ),
+    ] {
+        let mut session = CompilerSession::new();
+        let entry = compile(
+            &mut session,
+            &format!("fn compute(x: int, y: int) -> bool {{ {expression} }}"),
+        );
+        let code = CompiledProgram::compile(&session, entry).unwrap();
+        let ordered = wasm_operator_count(code.bytes(), |op| {
+            matches!(op, Operator::I32LtS | Operator::I32GtS)
+        });
+        assert_eq!(ordered, usize::from(!equality), "{expression}");
+        assert_eq!(
+            wasm_operator_count(code.bytes(), |op| matches!(
+                op,
+                Operator::Call { .. } | Operator::CallIndirect { .. }
+            )),
+            0,
+            "{expression} should not call comparison glue"
+        );
+        assert_eq!(
+            code.instantiate::<(isize, isize), bool>()
+                .unwrap()
+                .run((left, right), WasmLimits::default())
+                .unwrap(),
+            expected
+        );
+    }
+
+    for (expression, left, right, expected, equality) in [
+        ("x < y", 2.0, 3.0, true, false),
+        ("x < y", 3.0, 3.0, false, false),
+        ("x <= y", 3.0, 3.0, true, false),
+        ("x <= y", 4.0, 3.0, false, false),
+        ("x > y", 3.0, 2.0, true, false),
+        ("x > y", 3.0, 3.0, false, false),
+        ("x >= y", 2.0, 3.0, false, false),
+        ("x >= y", 3.0, 3.0, true, false),
+        (
+            "match cmp(x, y) { Equal => true, _ => false }",
+            -0.0,
+            0.0,
+            true,
+            true,
+        ),
+    ] {
+        let mut session = CompilerSession::new();
+        let entry = compile(
+            &mut session,
+            &format!("fn compute(x: float, y: float) -> bool {{ {expression} }}"),
+        );
+        let code = CompiledProgram::compile(&session, entry).unwrap();
+        let ordered = wasm_operator_count(code.bytes(), |op| {
+            matches!(op, Operator::F64Lt | Operator::F64Gt)
+        });
+        assert_eq!(ordered, usize::from(!equality), "{expression}");
+        assert_eq!(
+            wasm_operator_count(code.bytes(), |op| matches!(
+                op,
+                Operator::Call { .. } | Operator::CallIndirect { .. }
+            )),
+            0,
+            "{expression} should not call comparison glue"
+        );
+        assert_eq!(
+            code.instantiate::<(Float, Float), bool>()
+                .unwrap()
+                .run(
+                    (Float::new(left).unwrap(), Float::new(right).unwrap()),
+                    WasmLimits::default(),
+                )
+                .unwrap(),
+            expected
+        );
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_materializes_escaping_comparison_codes() {
+    for ty in ["int", "float"] {
+        let mut session = CompilerSession::new();
+        let entry = compile(
+            &mut session,
+            &format!(
+                "fn compute(x: {ty}, y: {ty}) -> int {{ \
+                    match cmp(x, y) {{ Less => -1, Equal => 0, Greater => 1 }} \
+                }}"
+            ),
+        );
+        let code = CompiledProgram::compile(&session, entry).unwrap();
+        assert_eq!(
+            wasm_operator_count(code.bytes(), |op| matches!(
+                op,
+                Operator::Call { .. } | Operator::CallIndirect { .. }
+            )),
+            0,
+            "escaping {ty} comparison code should not call native glue"
+        );
+        if ty == "int" {
+            let mut instance = code.instantiate::<(isize, isize), isize>().unwrap();
+            for (inputs, expected) in [((2, 3), -1), ((3, 3), 0), ((3, 2), 1)] {
+                assert_eq!(
+                    instance.run(inputs, WasmLimits::default()).unwrap(),
+                    expected
+                );
+            }
+        } else {
+            let mut instance = code.instantiate::<(Float, Float), isize>().unwrap();
+            for (inputs, expected) in [
+                ((Float::new(2.0).unwrap(), Float::new(3.0).unwrap()), -1),
+                ((Float::new(-0.0).unwrap(), Float::new(0.0).unwrap()), 0),
+                ((Float::new(3.0).unwrap(), Float::new(2.0).unwrap()), 1),
+            ] {
+                assert_eq!(
+                    instance.run(inputs, WasmLimits::default()).unwrap(),
+                    expected
+                );
+            }
+        }
+    }
+}
+
+#[wasm_bindgen_test]
 fn wasm_codegen_limits_and_rejection() {
     let mut session = CompilerSession::new();
     let entry = compile(

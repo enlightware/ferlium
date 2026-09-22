@@ -1487,10 +1487,12 @@ fn wasm_intrinsic(session: &CompilerSession, operation: &Operation) -> Option<Kn
             | KnownCallee::IntMul
             | KnownCallee::IntNeg
             | KnownCallee::IntFromInt
+            | KnownCallee::IntCmpCode
             | KnownCallee::FloatAdd
             | KnownCallee::FloatSub
             | KnownCallee::FloatMul
             | KnownCallee::FloatNeg
+            | KnownCallee::FloatCmpCode
             | KnownCallee::BoolNot
     )
     .then_some(known)
