@@ -133,6 +133,22 @@ fn physical_operations(
     false
 }
 
+fn wasm_operator_count(bytes: &[u8], mut matches: impl FnMut(&Operator<'_>) -> bool) -> usize {
+    Parser::new(0)
+        .parse_all(bytes)
+        .filter_map(|payload| match payload.unwrap() {
+            Payload::CodeSectionEntry(body) => Some(
+                body.get_operators_reader()
+                    .unwrap()
+                    .into_iter()
+                    .filter(|operation| matches(operation.as_ref().unwrap()))
+                    .count(),
+            ),
+            _ => None,
+        })
+        .sum()
+}
+
 fn calls_borrowed_subscript_member(program: &ResolvedPhysicalProgram<'_>) -> bool {
     for module in program.modules() {
         for index in 0..module.entry_count() {
@@ -872,6 +888,128 @@ fn wasm_codegen_typed_binding_and_direct_calls() {
         "struct Empty {} fn compute() -> Empty { Empty {} }",
     );
     assert!(CompiledProgram::compile(&session, entry).is_err());
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_known_integer_calls_select_instructions() {
+    let mut session = CompilerSession::new();
+    session.set_mir_optimization(MirOptimization::Disabled);
+    session.set_physical_mir_optimization(MirOptimization::Disabled);
+    let entry = compile(
+        &mut session,
+        "fn compute(x: int, y: int) -> int { x + y - x * -y }",
+    );
+    let code = CompiledProgram::compile(&session, entry).unwrap();
+    let mut add = 0;
+    let mut sub = 0;
+    let mut mul = 0;
+    let mut calls = 0;
+    for payload in Parser::new(0).parse_all(code.bytes()) {
+        if let Payload::CodeSectionEntry(body) = payload.unwrap() {
+            for operation in body.get_operators_reader().unwrap() {
+                match operation.unwrap() {
+                    Operator::I32Add => add += 1,
+                    Operator::I32Sub => sub += 1,
+                    Operator::I32Mul => mul += 1,
+                    Operator::Call { .. } | Operator::CallIndirect { .. } => calls += 1,
+                    _ => (),
+                }
+            }
+        }
+    }
+    // Runtime bookkeeping may add more integer operations; require the source operations without
+    // coupling this test to the current prologue.
+    assert!(add >= 1 && sub >= 2 && mul >= 1);
+    assert_eq!(calls, 0);
+    let mut instance = code.instantiate::<(isize, isize), isize>().unwrap();
+    assert_eq!(instance.run((7, 3), WasmLimits::default()).unwrap(), 31);
+    assert_eq!(
+        instance
+            .run((isize::MAX, 1), WasmLimits::default())
+            .unwrap(),
+        -1,
+        "integer instructions retain Ferlium's wrapping semantics"
+    );
+
+    let entry = compile(&mut session, "fn compute(x: bool) -> bool { not x }");
+    let code = CompiledProgram::compile(&session, entry).unwrap();
+    let calls = wasm_operator_count(code.bytes(), |op| {
+        matches!(op, Operator::Call { .. } | Operator::CallIndirect { .. })
+    });
+    assert_eq!(calls, 0);
+    assert!(
+        !code
+            .instantiate::<(bool,), bool>()
+            .unwrap()
+            .run((true,), WasmLimits::default())
+            .unwrap()
+    );
+    let entry = compile(&mut session, "fn compute(x: int) -> int { from_int(x) }");
+    let code = CompiledProgram::compile(&session, entry).unwrap();
+    let calls = wasm_operator_count(code.bytes(), |op| {
+        matches!(op, Operator::Call { .. } | Operator::CallIndirect { .. })
+    });
+    assert_eq!(calls, 0);
+    assert_eq!(
+        code.instantiate::<(isize,), isize>()
+            .unwrap()
+            .run((37,), WasmLimits::default())
+            .unwrap(),
+        37
+    );
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_known_float_calls_select_saturating_instructions() {
+    for (expression, instruction) in [("x + x", "add"), ("x - -x", "sub"), ("x * x", "mul")] {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Disabled);
+        session.set_physical_mir_optimization(MirOptimization::Disabled);
+        let entry = compile(
+            &mut session,
+            &format!("fn compute(x: float) -> float {{ {expression} }}"),
+        );
+        let code = CompiledProgram::compile(&session, entry).unwrap();
+        let mut arithmetic = 0;
+        let mut minimums = 0;
+        let mut maximums = 0;
+        let mut calls = 0;
+        for payload in Parser::new(0).parse_all(code.bytes()) {
+            if let Payload::CodeSectionEntry(body) = payload.unwrap() {
+                for operation in body.get_operators_reader().unwrap() {
+                    let operation = operation.unwrap();
+                    arithmetic += usize::from(match instruction {
+                        "add" => matches!(operation, Operator::F64Add),
+                        "sub" => matches!(operation, Operator::F64Sub),
+                        "mul" => matches!(operation, Operator::F64Mul),
+                        _ => unreachable!(),
+                    });
+                    minimums += usize::from(matches!(operation, Operator::F64Min));
+                    maximums += usize::from(matches!(operation, Operator::F64Max));
+                    calls += usize::from(matches!(
+                        operation,
+                        Operator::Call { .. } | Operator::CallIndirect { .. }
+                    ));
+                }
+            }
+        }
+        assert_eq!((arithmetic, minimums, maximums, calls), (1, 1, 1, 0));
+        let mut instance = code.instantiate::<(Float,), Float>().unwrap();
+        assert_eq!(
+            instance
+                .run((Float::new(1e308).unwrap(),), WasmLimits::default())
+                .unwrap(),
+            Float::new(f64::MAX).unwrap()
+        );
+        if instruction != "mul" {
+            assert_eq!(
+                instance
+                    .run((Float::new(-1e308).unwrap(),), WasmLimits::default())
+                    .unwrap(),
+                Float::new(-f64::MAX).unwrap()
+            );
+        }
+    }
 }
 
 #[wasm_bindgen_test]

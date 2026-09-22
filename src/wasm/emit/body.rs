@@ -16,6 +16,7 @@ use crate::{
     mir::{
         BlockId, Function, Operation, OperationKind, ParameterId, ParameterKind, Value, ValueId,
         operation::OperationKindDiscriminant,
+        pass::known_callee::KnownCallee,
         physical::{
             ConstructedSubscript, DictionaryReference, constructed_subscript_definitions,
             program::{Descriptor, ResolvedPhysicalProgram},
@@ -52,7 +53,7 @@ use super::{
     allocate_frame, callable, callee, context_pointer,
     control_flow::{ControlFlow, ControlRegion},
     dictionary_table, emit_failure, enter_frame, frame_address, frame_bytes, layout_witness,
-    leave_frame, memarg, operations, scalar, subscript,
+    leave_frame, memarg, operations, scalar, subscript, wasm_intrinsic,
 };
 
 /// Code ranges generated for MIR operations and terminators, with their source spans.
@@ -1386,6 +1387,9 @@ impl<'a, 's> Body<'a, 's> {
             }
             return self.call_dictionary(callee, &inputs, output, invoked);
         };
+        if let Some(intrinsic) = wasm_intrinsic(self.session, op) {
+            return self.call_intrinsic(intrinsic, &inputs, output, invoked);
+        }
         // Static calls bypass fixed Value adapters without adding a source call-depth frame.
         let target = self.program.direct_entry(*target);
         let callees = self.callees;
@@ -1425,6 +1429,83 @@ impl<'a, 's> Body<'a, 's> {
         Ok(())
     }
 
+    fn call_intrinsic(
+        &mut self,
+        intrinsic: KnownCallee,
+        inputs: &[&Value],
+        output: Option<&Value>,
+        invoked: bool,
+    ) -> Result<(), String> {
+        let arity = match intrinsic {
+            KnownCallee::IntAdd
+            | KnownCallee::IntSub
+            | KnownCallee::IntMul
+            | KnownCallee::FloatAdd
+            | KnownCallee::FloatSub
+            | KnownCallee::FloatMul => 2,
+            KnownCallee::IntNeg
+            | KnownCallee::IntFromInt
+            | KnownCallee::FloatNeg
+            | KnownCallee::BoolNot => 1,
+            _ => unreachable!("wasm_intrinsic filters unsupported known callees"),
+        };
+        if inputs.len() != arity {
+            return Err("wasm intrinsic argument count".into());
+        }
+        let output = output.ok_or("wasm intrinsic result storage")?;
+        let ty = self.pointee(output)?;
+        self.prepare_store(output)?;
+        match intrinsic {
+            KnownCallee::IntNeg => {
+                self.i(I::I32Const(0));
+                self.read(inputs[0])?;
+                self.i(I::I32Sub);
+            }
+            KnownCallee::IntFromInt => {
+                self.read(inputs[0])?;
+            }
+            KnownCallee::FloatNeg => {
+                self.read(inputs[0])?;
+                self.i(I::F64Neg);
+            }
+            KnownCallee::BoolNot => {
+                self.read(inputs[0])?;
+                self.i(I::I32Eqz);
+            }
+            KnownCallee::FloatAdd | KnownCallee::FloatSub | KnownCallee::FloatMul => {
+                self.read(inputs[0])?;
+                self.read(inputs[1])?;
+                self.i(match intrinsic {
+                    KnownCallee::FloatAdd => I::F64Add,
+                    KnownCallee::FloatSub => I::F64Sub,
+                    KnownCallee::FloatMul => I::F64Mul,
+                    _ => unreachable!(),
+                });
+                // Ferlium floats are finite. Operations on finite operands cannot produce NaN,
+                // but overflow can produce either infinity; clamp it exactly as
+                // Float::new_saturating does in the native implementation.
+                self.i(I::F64Const((-f64::MAX).into()));
+                self.i(I::F64Max);
+                self.i(I::F64Const(f64::MAX.into()));
+                self.i(I::F64Min);
+            }
+            KnownCallee::IntAdd | KnownCallee::IntSub | KnownCallee::IntMul => {
+                self.read(inputs[0])?;
+                self.read(inputs[1])?;
+                self.i(match intrinsic {
+                    KnownCallee::IntAdd => I::I32Add,
+                    KnownCallee::IntSub => I::I32Sub,
+                    KnownCallee::IntMul => I::I32Mul,
+                    _ => unreachable!(),
+                });
+            }
+            _ => unreachable!("wasm_intrinsic filters unsupported known callees"),
+        }
+        self.finish_store(output, ty);
+        self.call_status(invoked, false);
+        Ok(())
+    }
+
     fn local(&mut self, ty: ValType) -> WasmLocalId {
         let id = WasmLocalId::from_index(
             self.signature.parameter_count() + self.mode.extra_parameters() + self.locals.len(),
@@ -1441,7 +1522,9 @@ impl<'a, 's> Body<'a, 's> {
         for block in self.body.blocks() {
             let block = self.body.block(block);
             for op in operations(block) {
-                let call_abi = if matches!(op.kind, OperationKind::Call { .. })
+                let intrinsic = wasm_intrinsic(self.session, op);
+                let call_abi = if intrinsic.is_none()
+                    && matches!(op.kind, OperationKind::Call { .. })
                     && let Value::Function(target) = &op.operands[0]
                 {
                     self.callees
@@ -1470,7 +1553,9 @@ impl<'a, 's> Body<'a, 's> {
                             false
                         }
                         OperationKind::Call { ty, .. } => {
-                            if index + 1 == op.operands.len()
+                            if intrinsic.is_some() {
+                                false
+                            } else if index + 1 == op.operands.len()
                                 && ty.result_convention.has_result_place()
                             {
                                 call_abi.is_none_or(CallAbi::output)

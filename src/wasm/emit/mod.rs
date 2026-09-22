@@ -24,10 +24,11 @@ use wasm_encoder::{
 };
 
 use crate::{
-    CompilerSession, FxHashMap, FxHashSet, Location,
+    CompilerSession, FxHashMap, FxHashSet, Location, MirOptimization,
     hir::{function::ArgConvention, native_functions::NativeScalar},
     mir::{
         BasicBlock, Function, Operation, OperationKind, ParameterKind, Value,
+        pass::known_callee::KnownCallee,
         physical::{constructed_subscript_definitions, program::ResolvedPhysicalProgram},
         role::MirType,
         terminator::TerminatorKind,
@@ -789,7 +790,9 @@ fn emit_with_export_kind(
                     }
                     _ => (),
                 }
-                if let Some(Value::Function(target)) = callee(operation) {
+                if wasm_intrinsic(session, operation).is_none()
+                    && let Some(Value::Function(target)) = callee(operation)
+                {
                     pending.push(program.direct_entry(*target));
                 }
             }
@@ -1462,6 +1465,35 @@ fn callee(op: &Operation) -> Option<&Value> {
         OperationKind::Drop { .. } | OperationKind::DropInitialized { .. } => Some(&op.operands[1]),
         _ => None,
     }
+}
+
+/// Resolve a direct MIR call for target-specific Wasm instruction selection.
+fn wasm_intrinsic(session: &CompilerSession, operation: &Operation) -> Option<KnownCallee> {
+    if !matches!(operation.kind, OperationKind::Call { .. }) {
+        return None;
+    }
+    let Value::Function(callee) = operation.operands.first()? else {
+        return None;
+    };
+    // Physical lowering always starts from optimized semantic MIR, even when its own optimization
+    // stage is disabled, so its function ids use the optimized artifact's specialization table.
+    let known = session.known_callees().resolve(*callee, |callee| {
+        Some(session.hir_identity_of(callee, MirOptimization::Enabled))
+    })?;
+    matches!(
+        known,
+        KnownCallee::IntAdd
+            | KnownCallee::IntSub
+            | KnownCallee::IntMul
+            | KnownCallee::IntNeg
+            | KnownCallee::IntFromInt
+            | KnownCallee::FloatAdd
+            | KnownCallee::FloatSub
+            | KnownCallee::FloatMul
+            | KnownCallee::FloatNeg
+            | KnownCallee::BoolNot
+    )
+    .then_some(known)
 }
 
 fn result_as_wasm(result: ScalarType) -> Option<ValType> {

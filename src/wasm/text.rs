@@ -210,12 +210,14 @@ mod tests {
         for entry in &text.source_map {
             assert!(entry.from < entry.to && entry.to <= text.text.len());
         }
-        // The multiplication links to the call of its native implementation.
+        // Concrete arithmetic selects a core Wasm instruction rather than importing its native
+        // std implementation.
         let mul = SOURCE.find("x * 3").unwrap();
         assert!(text.source_map.iter().any(|entry| {
             entry.span.start_usize() == mul
                 && entry.span.end_usize() == mul + "x * 3".len()
-                && text.text[entry.from..entry.to].contains("call $std::Num<std::int>::mul")
+                && text.text[entry.from..entry.to].contains("i32.mul")
         }));
+        assert!(!text.text.contains("$std::Num<std::int>::mul"));
     }
 }

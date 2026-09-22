@@ -31,8 +31,8 @@
 //! original needs no accompanying type check. An entry whose meaning depended on the instantiation
 //! could not be admitted without one, and none is.
 //!
-//! Consumers currently include partial call simplification, dead-call elimination, integer range
-//! reasoning, and target-independent physical lowering.
+//! The classification is shared by compiler analyses, transformations, and target-specific
+//! instruction selection.
 #![allow(dead_code)]
 
 use rustc_hash::FxHashMap;
