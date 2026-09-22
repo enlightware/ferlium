@@ -1,6 +1,11 @@
 name: Cargo Build & Test
 
-on: [push, pull_request]
+# Pull requests from branches of this repository would otherwise run once per push and once per
+# pull request event.
+on:
+  push:
+    branches: [main]
+  pull_request:
 
 permissions:
   contents: read
