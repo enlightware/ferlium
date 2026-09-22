@@ -30,6 +30,11 @@ jobs:
         with:
           toolchain: stable
 
+      - name: Resolve dependencies
+        # No lockfile is tracked; resolving one before the cache step keys the cache on the
+        # dependency versions this run actually builds.
+        run: cargo generate-lockfile
+
       - name: Set up Rust cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -81,15 +86,15 @@ jobs:
           toolchain: stable
           targets: wasm32-unknown-unknown
 
+      - name: Resolve dependencies
+        # No lockfile is tracked; resolving one before the cache step keys the cache on the
+        # dependency versions this run actually builds.
+        run: cargo generate-lockfile
+
       - name: Set up Rust cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ runner.os }}-cargo
-
-      - name: Determine wasm-bindgen version
-        id: versions
-        # The test runner must match the wasm-bindgen crate exactly.
-        run: echo "wasm_bindgen=$(cargo pkgid -p wasm-bindgen | sed 's/.*@//')" >> "$GITHUB_OUTPUT"
 
       - name: Install WABT for native ABI probes
         run: sudo apt-get update && sudo apt-get install -y wabt
@@ -119,6 +124,13 @@ jobs:
             test -f "wasm-tests/$file.wasm"
           done
           ls -l wasm-tests/*
+
+      - name: Determine wasm-bindgen version
+        id: versions
+        # The test runner must match the wasm-bindgen crate exactly, as resolved in the lockfile.
+        run: |
+          pkgid=$(cargo pkgid -p wasm-bindgen)
+          echo "wasm_bindgen=${pkgid##*@}" >> "$GITHUB_OUTPUT"
 
       - name: Upload WASM test binaries
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -209,6 +221,11 @@ jobs:
         with:
           toolchain: stable
           targets: wasm32-unknown-unknown
+
+      - name: Resolve dependencies
+        # No lockfile is tracked; resolving one before the cache step keys the cache on the
+        # dependency versions this run actually builds.
+        run: cargo generate-lockfile
 
       - name: Set up Rust cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
