@@ -2,6 +2,9 @@ name: Cargo Build & Test
 
 on: [push, pull_request]
 
+permissions:
+  contents: read
+
 jobs:
   rust:
     name: Rust Tests (${{ matrix.os }})
