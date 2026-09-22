@@ -14,16 +14,18 @@ Gungraun and `make profile-mir` use.
 | `execute_cold` | The first call after compilation |
 | `execute` | Steady-state calls, per invocation |
 
-Execution is measured through generated Wasm and through the physical MIR interpreter on the same
-artifacts, so their ratio is what a codegen change has to move. The axis is post-expansion
-optimization (`optimize:off` is `BenchTarget::UnoptimizedPhysicalMir`), the comparison `make bench`
-offers natively through `BenchTarget::ALL`.
+Execution is measured through generated Wasm by default. Passing `--mir-batch=1` also measures the
+physical MIR interpreter on the same artifacts, so their ratio shows what code generation adds over
+the shared input. This is opt-in because one interpreted linalg call can dominate the wall time of
+the entire Wasm benchmark. The axis is post-expansion optimization (`optimize:off` is
+`BenchTarget::UnoptimizedPhysicalMir`), the comparison `make bench` offers natively through
+`BenchTarget::ALL`.
 
 ```
 make bench-wasm-callgrind                                   # all workloads, both axes
 make bench-wasm-callgrind ARGS="--list"                     # workload names
 make bench-wasm-callgrind ARGS="sieve --jobs=8 --batch=20"  # subset, parallelism, batch size
-make bench-wasm-callgrind ARGS="--no-mir"                   # skip the interpreter comparison
+make bench-wasm-callgrind ARGS="sieve --mir-batch=1"        # include interpreter comparison
 make bench-wasm-callgrind VALGRIND=/path/to/vg-in-place     # an uninstalled Valgrind
 ```
 

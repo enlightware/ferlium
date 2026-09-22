@@ -36,7 +36,9 @@ const AXES = [
 
 const DEFAULT_BATCH = 10;
 const WASM_WARMUP_CALLS = 50;
-const DEFAULT_MIR_BATCH = 1;
+// Interpreted linalg workloads dominate wall time by orders of magnitude. Keep the normal Wasm
+// code-generation benchmark focused, and make the cross-engine comparison an explicit opt-in.
+const DEFAULT_MIR_BATCH = 0;
 
 // --- Worker: the process running under Callgrind ---
 
@@ -459,8 +461,9 @@ async function main() {
         return value;
     };
     const batch = count('batch', DEFAULT_BATCH);
-    // One interpreted call costs orders of magnitude more than a Wasm one, so it is its own batch.
-    const mirBatch = args.includes('--no-mir') ? 0 : count('mir-batch', DEFAULT_MIR_BATCH);
+    // One interpreted call costs orders of magnitude more than a Wasm one, so it is its own,
+    // opt-in batch. --no-mir remains a convenient explicit spelling for scripts.
+    const mirBatch = args.includes('--no-mir') ? 0 : count('mir-batch', DEFAULT_MIR_BATCH, 0);
     const names = args.filter((arg) => !arg.startsWith('--'));
     const selected = names.length === 0 ? available : names;
     for (const name of selected) {
