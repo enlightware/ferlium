@@ -196,6 +196,21 @@ mod tests {
         // Compiler-generated functions are compiled but not exported, even when they have names.
         assert_eq!(text.text.matches("(export ").count(), 5, "{}", text.text);
         assert!(text.text.contains("(export \"setup\""));
+        for global in [
+            "stack",
+            "stack_end",
+            "call_depth",
+            "call_depth_limit",
+            "fuel",
+            "invocation_context",
+            "fuel_enabled",
+        ] {
+            assert!(
+                text.text.contains(&format!("(global ${global}")),
+                "{}",
+                text.text
+            );
+        }
         assert!(!text.source_map.is_empty());
         for entry in &text.source_map {
             assert!(entry.from < entry.to && entry.to <= text.text.len());

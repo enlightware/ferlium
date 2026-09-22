@@ -170,6 +170,20 @@ enum Global {
     FuelEnabled,
 }
 
+impl Global {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Stack => "stack",
+            Self::End => "stack_end",
+            Self::Depth => "call_depth",
+            Self::DepthLimit => "call_depth_limit",
+            Self::Fuel => "fuel",
+            Self::Context => "invocation_context",
+            Self::FuelEnabled => "fuel_enabled",
+        }
+    }
+}
+
 /// Reserve dynamic frame storage without wrapping alignment or extent arithmetic.
 fn allocate_frame(
     code: &mut WasmFunction,
@@ -908,7 +922,7 @@ fn emit_with_export_kind(
             });
     }
     let mut strings = StringLiterals::default();
-    let mut names = FunctionNames::new(session, imports);
+    let mut names = WasmNames::new(session, imports);
     let mut source_map = Vec::new();
     let mut suspension_layouts = FxHashMap::default();
     let mut body_index = 0;
@@ -1353,14 +1367,14 @@ fn dictionary_entry_name(
     format!("{}::{entry}", definition.name)
 }
 
-/// Debug names of the functions, in function index order: imports first, then definitions.
-struct FunctionNames {
-    names: Vec<String>,
+/// Debug names retained in the custom name section.
+struct WasmNames {
+    functions: Vec<String>,
 }
 
-impl FunctionNames {
+impl WasmNames {
     fn new(session: &CompilerSession, imports: &Imports) -> Self {
-        let mut names = imports
+        let mut functions = imports
             .functions()
             .iter()
             .map(|import| import.name.clone())
@@ -1370,23 +1384,29 @@ impl FunctionNames {
                 .expect_fresh_module(id.module)
                 .get_function_name_by_id(id.function)
             {
-                names[index.as_index()] = format!("{}::{name}", module_path(session, id.module));
+                functions[index.as_index()] =
+                    format!("{}::{name}", module_path(session, id.module));
             }
         }
-        Self { names }
+        Self { functions }
     }
 
     fn push(&mut self, name: String) {
-        self.names.push(name);
+        self.functions.push(name);
     }
 
     fn finish(self) -> NameSection {
-        let mut map = NameMap::new();
-        for (index, name) in self.names.iter().enumerate() {
-            map.append(index as u32, name);
+        let mut functions = NameMap::new();
+        for (index, name) in self.functions.iter().enumerate() {
+            functions.append(index as u32, name);
         }
         let mut section = NameSection::new();
-        section.functions(&map);
+        section.functions(&functions);
+        let mut globals = NameMap::new();
+        for global in Global::iter() {
+            globals.append(global as u32, global.name());
+        }
+        section.globals(&globals);
         section
     }
 }
