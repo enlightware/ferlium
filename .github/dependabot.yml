@@ -12,10 +12,14 @@ updates:
 
   # No lockfiles are tracked, so these only raise requirements that exclude new releases.
   # Grouping keeps crates that must move together (e.g. wasm-bindgen, js-sys, web-sys) in one PR.
+  # Major versions are adopted deliberately rather than proposed; security alerts are unaffected.
   - package-ecosystem: cargo
     directory: /
     schedule:
       interval: monthly
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     groups:
       cargo:
         patterns:
@@ -25,6 +29,9 @@ updates:
     directory: /playground
     schedule:
       interval: monthly
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     groups:
       npm:
         patterns:
