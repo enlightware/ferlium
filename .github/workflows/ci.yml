@@ -54,18 +54,17 @@ jobs:
         env:
           RUST_MIN_STACK: "8388608"
 
-  wasm:
-    name: WASM tests (${{ matrix.browser }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - browser: Chrome and Firefox
-            os: ubuntu-latest
-            browser_flags: --chrome --firefox
-          - browser: Safari
-            os: macos-latest
-            browser_flags: --safari
+  wasm_build:
+    name: Build WASM tests
+    runs-on: ubuntu-latest
+    outputs:
+      wasm_bindgen: ${{ steps.versions.outputs.wasm_bindgen }}
+    env:
+      # The language test binary is large enough that loading its full DWARF data can leave Chrome's renderer unresponsive to WebDriver.
+      # Keep debug assertions, omit debuginfo, and use light optimization so browsers do not
+      # spend minutes compiling the otherwise very large opt-level-0 test module.
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_PROFILE_TEST_OPT_LEVEL: "1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -80,52 +79,113 @@ jobs:
         with:
           key: ${{ runner.os }}-cargo
 
-      - name: Install wasm-pack
-        run: cargo install wasm-pack
+      - name: Determine wasm-bindgen version
+        id: versions
+        # The test runner must match the wasm-bindgen crate exactly.
+        run: echo "wasm_bindgen=$(cargo pkgid -p wasm-bindgen | sed 's/.*@//')" >> "$GITHUB_OUTPUT"
 
       - name: Install WABT for native ABI probes
-        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y wabt
 
       - name: Check Rust native entry Wasm signatures
-        if: runner.os == 'Linux'
         run: python3 tests/native_abi/check_wasm.py
 
-      - name: Run WASM tests (${{ matrix.browser }})
-        # The language test binary is large enough that loading its full DWARF data can leave Chrome's renderer unresponsive to WebDriver.
-        # Keep debug assertions, omit debuginfo, and use light optimization so browsers do not
-        # spend minutes compiling the otherwise very large opt-level-0 test module.
-        run: CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_TEST_OPT_LEVEL=1 WASM_BINDGEN_USE_BROWSER=1 WASM_BINDGEN_TEST_TIMEOUT=600 wasm-pack test ${{ matrix.browser_flags }} --headless --test language --lib
+      - name: Build WASM test binaries
+        # The Wasm test binaries do not depend on the host, so they are built once here and run by
+        # the jobs below. The playground is built separately so that its ferlium feature set is
+        # not unified into the ferlium tests.
+        shell: bash
+        run: |
+          set -euo pipefail
+          collect() {
+            local dir=wasm-tests/$1
+            shift
+            mkdir -p "$dir"
+            cargo test --target wasm32-unknown-unknown --no-run --message-format=json-render-diagnostics "$@" \
+              | jq -r 'select(.reason == "compiler-artifact" and .executable != null) | "\(.target.name) \(.executable)"' \
+              | while read -r name executable; do cp "$executable" "$dir/$name.wasm"; done
+          }
+          collect test -p ferlium --lib --test language
+          collect test -p script-api --lib
+          collect release --release -p ferlium --lib --test language
+          for file in test/ferlium test/language test/script_api release/ferlium release/language; do
+            test -f "wasm-tests/$file.wasm"
+          done
+          ls -l wasm-tests/*
+
+      - name: Upload WASM test binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: wasm-tests
+          path: wasm-tests
+          if-no-files-found: error
+          retention-days: 1
+
+  wasm_browser:
+    name: WASM tests (${{ matrix.browser }})
+    needs: wasm_build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - browser: Chrome
+            os: ubuntu-latest
+            webdriver: CHROMEDRIVER=$CHROMEWEBDRIVER/chromedriver
+          - browser: Firefox
+            os: ubuntu-latest
+            webdriver: GECKODRIVER=$GECKOWEBDRIVER/geckodriver
+          - browser: Safari
+            os: macos-latest
+            webdriver: SAFARIDRIVER=/usr/bin/safaridriver
+    env:
+      WASM_BINDGEN_USE_BROWSER: "1"
+      WASM_BINDGEN_TEST_TIMEOUT: "600"
+    steps:
+      - name: Download WASM test binaries
+        uses: actions/download-artifact@v8
+        with:
+          name: wasm-tests
+          path: wasm-tests
+
+      - name: Install wasm-bindgen test runner
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@${{ needs.wasm_build.outputs.wasm_bindgen }}
+
+      - name: Select WebDriver
+        # The runner images provide drivers matching their installed browsers.
+        run: echo "${{ matrix.webdriver }}" >> "$GITHUB_ENV"
+
+      - name: Run WASM library tests (${{ matrix.browser }})
+        run: wasm-bindgen-test-runner wasm-tests/test/ferlium.wasm
+
+      - name: Run WASM language tests (${{ matrix.browser }})
+        run: wasm-bindgen-test-runner wasm-tests/test/language.wasm
 
       - name: Run Playground WASM tests (${{ matrix.browser }})
-        working-directory: playground/script-api
-        run: CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_TEST_OPT_LEVEL=1 WASM_BINDGEN_USE_BROWSER=1 WASM_BINDGEN_TEST_TIMEOUT=600 wasm-pack test ${{ matrix.browser_flags }} --headless --lib
+        run: wasm-bindgen-test-runner wasm-tests/test/script_api.wasm
 
       - name: Check release Wasm linkage and generation (${{ matrix.browser }})
-        run: 'CARGO_PROFILE_TEST_DEBUG=0 WASM_BINDGEN_USE_BROWSER=1 WASM_BINDGEN_TEST_TIMEOUT=600 wasm-pack test --release ${{ matrix.browser_flags }} --headless --lib -- wasm::'
+        run: 'wasm-bindgen-test-runner wasm-tests/release/ferlium.wasm wasm::'
 
-  wasm_release:
+  wasm_node:
     name: Optimized WASM language tests (Node)
+    needs: wasm_build
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Download WASM test binaries
+        uses: actions/download-artifact@v8
         with:
-          targets: wasm32-unknown-unknown
+          name: wasm-tests
+          path: wasm-tests
 
-      - name: Set up Rust cache
-        uses: Swatinem/rust-cache@v2.9.1
+      - name: Install wasm-bindgen test runner
+        uses: taiki-e/install-action@v2
         with:
-          key: ${{ runner.os }}-cargo-wasm-release
-
-      - name: Install wasm-pack
-        run: cargo install wasm-pack
+          tool: wasm-bindgen@${{ needs.wasm_build.outputs.wasm_bindgen }}
 
       - name: Run optimized WASM language tests
-        run: CARGO_PROFILE_TEST_DEBUG=0 wasm-pack test --release --node --test language
+        run: wasm-bindgen-test-runner wasm-tests/release/language.wasm
 
   build_site:
     name: Build and upload playground and book
@@ -231,8 +291,8 @@ jobs:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     needs:
-      - wasm
-      - wasm_release
+      - wasm_browser
+      - wasm_node
       - build_site
       - validate_lezer_grammar
       - playground_tests
