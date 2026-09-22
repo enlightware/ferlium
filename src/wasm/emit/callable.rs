@@ -498,6 +498,7 @@ impl Body<'_, '_> {
         destination: &Value,
         entry: (TraitId, TraitDictionaryEntryIndex),
     ) -> Result<(), String> {
+        let scratch = self.helper_locals().scratch;
         self.i(I::I32Const(0));
         self.i(I::I32Const(1));
         self.i(I::I32Const(1));
@@ -507,15 +508,15 @@ impl Body<'_, '_> {
                 .function_index("allocate_callable_environment")
                 .as_u32(),
         ));
-        self.i(I::LocalSet(self.scratch.as_u32()));
-        frame_address(&mut self.code, self.scratch, Environment::hidden_offset(0));
+        self.i(I::LocalSet(scratch.as_u32()));
+        frame_address(&mut self.code, scratch, Environment::hidden_offset(0));
         self.address(source)?;
         self.i(I::I32Const(size_of::<DictionaryReference>() as i32));
         self.i(I::MemoryCopy {
             src_mem: 0,
             dst_mem: 0,
         });
-        frame_address(&mut self.code, self.scratch, Environment::hidden_offset(0));
+        frame_address(&mut self.code, scratch, Environment::hidden_offset(0));
         self.i(I::Call(
             self.imports.function_index("retain_evidence").as_u32(),
         ));
@@ -525,7 +526,7 @@ impl Body<'_, '_> {
         ));
         self.i(I::I32Store(memarg(2)));
         self.address(destination)?;
-        self.i(I::LocalGet(self.scratch.as_u32()));
+        self.i(I::LocalGet(scratch.as_u32()));
         self.i(I::I32Store(MemArg {
             offset: ENVIRONMENT_OFFSET,
             ..memarg(2)
@@ -626,11 +627,12 @@ impl Body<'_, '_> {
             }));
             return Ok(());
         }
+        let helpers = self.helper_locals();
         let (environment, cursor) = self.callable_locals.expect("closure construction locals");
         if has_env_dict {
             self.dynamic_layout(&op.operands[end])?;
-            self.i(I::LocalGet(self.dynamic_size.as_u32()));
-            self.i(I::LocalGet(self.dynamic_align.as_u32()));
+            self.i(I::LocalGet(helpers.dynamic_size.as_u32()));
+            self.i(I::LocalGet(helpers.dynamic_align.as_u32()));
         } else {
             self.i(I::I32Const(0));
             self.i(I::I32Const(1));
@@ -689,9 +691,9 @@ impl Body<'_, '_> {
             };
             if let Ok(layout) = value_layout_for_type(ty, op.span, &self.env) {
                 self.i(I::I32Const(layout.size as i32));
-                self.i(I::LocalSet(self.dynamic_size.as_u32()));
+                self.i(I::LocalSet(helpers.dynamic_size.as_u32()));
                 self.i(I::I32Const(layout.align as i32));
-                self.i(I::LocalSet(self.dynamic_align.as_u32()));
+                self.i(I::LocalSet(helpers.dynamic_align.as_u32()));
             } else {
                 let witness = self
                     .capture_witness(ty, &op.operands)
@@ -700,12 +702,12 @@ impl Body<'_, '_> {
             }
             // Positional tuple layout: align each field, then advance by its representation size.
             self.i(I::LocalGet(cursor.as_u32()));
-            self.i(I::LocalGet(self.dynamic_align.as_u32()));
+            self.i(I::LocalGet(helpers.dynamic_align.as_u32()));
             self.i(I::I32Const(1));
             self.i(I::I32Sub);
             self.i(I::I32Add);
             self.i(I::I32Const(0));
-            self.i(I::LocalGet(self.dynamic_align.as_u32()));
+            self.i(I::LocalGet(helpers.dynamic_align.as_u32()));
             self.i(I::I32Sub);
             self.i(I::I32And);
             self.i(I::LocalSet(cursor.as_u32()));
@@ -719,13 +721,13 @@ impl Body<'_, '_> {
             self.i(I::LocalGet(cursor.as_u32()));
             self.i(I::I32Add);
             self.address(capture)?;
-            self.i(I::LocalGet(self.dynamic_size.as_u32()));
+            self.i(I::LocalGet(helpers.dynamic_size.as_u32()));
             self.i(I::MemoryCopy {
                 src_mem: 0,
                 dst_mem: 0,
             });
             self.i(I::LocalGet(cursor.as_u32()));
-            self.i(I::LocalGet(self.dynamic_size.as_u32()));
+            self.i(I::LocalGet(helpers.dynamic_size.as_u32()));
             self.i(I::I32Add);
             self.i(I::LocalSet(cursor.as_u32()));
         }

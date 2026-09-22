@@ -9,7 +9,7 @@ use wasm_bindgen_test::wasm_bindgen_test;
 use wasmparser::{Operator, Parser, Payload};
 
 use crate::{
-    CompilerSession, FxHashSet,
+    CompilerSession, FxHashSet, Location,
     compiler::{
         MirOptimization,
         error::{RuntimeErrorKind, SandboxViolationKind, SourceFailureKind},
@@ -22,7 +22,7 @@ use crate::{
         },
     },
     mir::{
-        Operation, OperationKind, Value as MirValue,
+        Operation, OperationKind, ParameterId, Value as MirValue,
         physical::{
             lower_physical_mir, lower_unoptimized_physical_mir,
             program::{ResolvedPhysicalProgram, resolve_physical_program},
@@ -710,6 +710,54 @@ fn wasm_codegen_function_types_are_interned() {
             >= 2,
         "native add and compute must reuse the same Wasm type"
     );
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_trivial_scalar_body_emits_only_its_result() {
+    let mut session = CompilerSession::new();
+    session.set_mir_optimization(MirOptimization::Enabled);
+    session.set_physical_mir_optimization(MirOptimization::Enabled);
+    let entry = compile(&mut session, "fn compute() -> int { 1 + 1 }");
+    let code = CompiledProgram::compile(&session, entry).unwrap();
+    assert_eq!(
+        code.instantiate::<(), isize>()
+            .unwrap()
+            .run((), WasmLimits::default())
+            .unwrap(),
+        2
+    );
+    let mut globals = None;
+    let mut first_body = None;
+    for payload in Parser::new(0).parse_all(code.bytes()) {
+        match payload.unwrap() {
+            Payload::GlobalSection(section) => globals = Some(section.count()),
+            Payload::CodeSectionEntry(body) if first_body.is_none() => first_body = Some(body),
+            _ => (),
+        }
+    }
+    assert_eq!(globals, None);
+    let body = first_body.unwrap();
+    assert_eq!(body.get_locals_reader().unwrap().get_count(), 0);
+    let operations = body
+        .get_operators_reader()
+        .unwrap()
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(matches!(
+        operations.as_slice(),
+        [Operator::I32Const { value: 2 }, Operator::End]
+    ));
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_witnessed_alloca_reserves_helper_locals() {
+    let operation = Operation::alloca_dynamic(
+        Location::new_synthesized(),
+        Type::unit(),
+        MirValue::Parameter(ParameterId::from_index(0)),
+    );
+    assert!(emit::operation_needs_helper_locals(&operation));
 }
 
 #[wasm_bindgen_test]

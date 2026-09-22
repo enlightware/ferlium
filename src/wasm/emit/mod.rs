@@ -15,7 +15,6 @@ use self::{
 
 use std::{iter, mem::offset_of, ops::Range};
 
-use strum::{EnumIter, IntoEnumIterator};
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, ElementSection, Elements, EntityType, ExportKind,
     ExportSection, FuncType as WasmFuncType, Function as WasmFunction, FunctionSection,
@@ -60,6 +59,11 @@ use super::{
     evidence::{self, DictionaryDescriptor, ReachableEvidence},
     execution::{FailureCode, InvocationState},
 };
+
+#[cfg(test)]
+pub(super) fn operation_needs_helper_locals(operation: &Operation) -> bool {
+    body::operation_needs_helper_locals(operation)
+}
 
 /// A Ferlium type checked to belong to the emitter's supported scalar subset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,29 +162,76 @@ impl ScalarType {
 
 // Private invocation state: no extra parameters in the language ABI, and violations trap rather
 // than masquerading as source failures. The host resets all state before each invocation.
-#[derive(Clone, Copy, EnumIter)]
+#[derive(Clone, Copy)]
 #[repr(u32)]
 enum Global {
+    Context,
     Stack,
     End,
-    Depth,
-    DepthLimit,
-    Fuel,
-    Context,
-    FuelEnabled,
 }
 
 impl Global {
     fn name(self) -> &'static str {
         match self {
+            Self::Context => "invocation_context",
             Self::Stack => "stack",
             Self::End => "stack_end",
-            Self::Depth => "call_depth",
-            Self::DepthLimit => "call_depth_limit",
-            Self::Fuel => "fuel",
-            Self::Context => "invocation_context",
-            Self::FuelEnabled => "fuel_enabled",
         }
+    }
+}
+
+const BASE_GLOBALS: [Global; 3] = [Global::Context, Global::Stack, Global::End];
+
+#[derive(Clone, Copy)]
+struct DepthGlobals {
+    depth: u32,
+    limit: u32,
+}
+
+#[derive(Clone, Copy)]
+struct FuelGlobals {
+    fuel: u32,
+    enabled: u32,
+}
+
+#[derive(Clone, Copy)]
+struct RuntimeGlobals {
+    base: bool,
+    depth: Option<DepthGlobals>,
+    fuel: Option<FuelGlobals>,
+    count: u32,
+}
+
+impl RuntimeGlobals {
+    fn new(needs_base: bool, needs_depth: bool, needs_fuel: bool) -> Self {
+        debug_assert!(!(needs_depth || needs_fuel) || needs_base);
+        let mut count = u32::from(needs_base) * BASE_GLOBALS.len() as u32;
+        let depth = needs_depth.then(|| {
+            let globals = DepthGlobals {
+                depth: count,
+                limit: count + 1,
+            };
+            count += 2;
+            globals
+        });
+        let fuel = needs_fuel.then(|| {
+            let globals = FuelGlobals {
+                fuel: count,
+                enabled: count + 1,
+            };
+            count += 2;
+            globals
+        });
+        Self {
+            base: needs_base,
+            depth,
+            fuel,
+            count,
+        }
+    }
+
+    fn base(self) -> impl Iterator<Item = Global> {
+        self.base.then_some(BASE_GLOBALS).into_iter().flatten()
     }
 }
 
@@ -754,6 +805,23 @@ fn emit_with_export_kind(
         }
         bodies.push((id, body, signature, selections));
     }
+    let depth_tracked =
+        depth_tracked_bodies(program, bodies.iter().map(|(id, body, _, _)| (*id, *body)));
+    let needs_fuel = bodies.iter().any(|(_, body, _, _)| {
+        body.blocks().any(|block| {
+            operations(body.block(block))
+                .any(|operation| matches!(operation.kind, OperationKind::CheckFuel))
+        })
+    });
+    let needs_stack = !adapters.is_empty()
+        || !callables.entries.is_empty()
+        || !callables.selected.is_empty()
+        || needs_callable_glue
+        || !subscript_adapters.is_empty()
+        || bodies
+            .iter()
+            .any(|(_, body, signature, _)| !is_trivial_runtime_body(body, signature));
+    let runtime_globals = RuntimeGlobals::new(needs_stack, !depth_tracked.is_empty(), needs_fuel);
     let mut types = FunctionTypes::default();
     let mut import_section = ImportSection::new();
     import_section.import(
@@ -974,6 +1042,8 @@ fn emit_with_export_kind(
             &subscript_entries,
             selections,
             mode,
+            runtime_globals,
+            depth_tracked.contains(id),
         )
         .and_then(Body::emit)
         .map_err(|reason| diagnostic(*id, body, &reason))?;
@@ -1015,6 +1085,8 @@ fn emit_with_export_kind(
                 &subscript_entries,
                 selections,
                 BodyMode::ProjectionResume,
+                runtime_globals,
+                depth_tracked.contains(id),
             )
             .and_then(Body::emit)
             .map_err(|reason| diagnostic(*id, body, &reason))?;
@@ -1136,7 +1208,7 @@ fn emit_with_export_kind(
     );
     let mut globals = GlobalSection::new();
     let mut exports = ExportSection::new();
-    for _ in Global::iter() {
+    for _ in 0..runtime_globals.count {
         globals.global(
             GlobalType {
                 val_type: ValType::I32,
@@ -1183,7 +1255,7 @@ fn emit_with_export_kind(
     // Rust calls this setter directly at invocation boundaries. All state and diagnostics stay
     // in shared memory; no language values or per-call state are passed through JavaScript.
     functions.function(types.intern([ValType::I32], []).as_u32());
-    code.function(&setup());
+    code.function(&setup(runtime_globals));
     names.push("<setup>".into());
     exports.export(SETUP_EXPORT, ExportKind::Func, next_index.as_u32());
     let mut module = Module::new();
@@ -1191,12 +1263,15 @@ fn emit_with_export_kind(
         .section(&types.section)
         .section(&import_section)
         .section(&functions)
-        .section(&tables)
-        .section(&globals)
+        .section(&tables);
+    if runtime_globals.count != 0 {
+        module.section(&globals);
+    }
+    module
         .section(&exports)
         .section(&elements)
         .section(&code)
-        .section(&names.finish());
+        .section(&names.finish(runtime_globals));
     Ok(Emitted {
         bytes: module.finish(),
         strings: strings.values.into_boxed_slice(),
@@ -1214,6 +1289,88 @@ fn operations(block: &BasicBlock) -> impl Iterator<Item = &Operation> {
             TerminatorKind::Invoke { operation, .. } => Some(operation),
             _ => None,
         })
+}
+
+/// Bodies whose active frame contributes to a reachable call-depth check.
+///
+/// Known calls follow the assembled direct-entry graph. An indirect call is conservative: once
+/// any reachable body checks depth, its caller must retain its depth contribution because the
+/// runtime target may be that checked body. Bounded frames outside that guest call graph, such as
+/// a caller that enters a callback through native code, are deliberately not counted; this can
+/// shift the exact limit at which Wasm and the interpreters report call-depth exhaustion.
+fn depth_tracked_bodies<'a>(
+    program: &ResolvedPhysicalProgram<'_>,
+    bodies: impl IntoIterator<Item = (FunctionId, &'a Function)>,
+) -> FxHashSet<FunctionId> {
+    let bodies = bodies.into_iter().collect::<Vec<_>>();
+    let mut tracked = FxHashSet::default();
+    let mut calls = FxHashMap::<FunctionId, Vec<FunctionId>>::default();
+    let mut indirect = FxHashSet::default();
+    for &(id, body) in &bodies {
+        for block in body.blocks() {
+            for operation in operations(body.block(block)) {
+                if matches!(operation.kind, OperationKind::CheckCallDepth) {
+                    tracked.insert(id);
+                }
+                if let Some(callee) = callee(operation) {
+                    if let Value::Function(target) = callee {
+                        calls
+                            .entry(id)
+                            .or_default()
+                            .push(program.direct_entry(*target));
+                    } else {
+                        indirect.insert(id);
+                    }
+                }
+            }
+        }
+    }
+    if tracked.is_empty() {
+        return tracked;
+    }
+    loop {
+        let mut changed = false;
+        for &(id, _) in &bodies {
+            if !tracked.contains(&id)
+                && (indirect.contains(&id)
+                    || calls.get(&id).is_some_and(|targets| {
+                        targets.iter().any(|target| tracked.contains(target))
+                    }))
+            {
+                changed |= tracked.insert(id);
+            }
+        }
+        if !changed {
+            return tracked;
+        }
+    }
+}
+
+/// A body proven not to touch the shadow stack or invocation diagnostics.
+///
+/// This intentionally recognizes only the small scalar leaf shape. More bodies can be admitted as
+/// their storage requirements become explicit emitter metadata.
+fn is_trivial_runtime_body(body: &Function, signature: &CallAbi) -> bool {
+    !signature.fallible
+        && body.result_convention() != CallResultConvention::YIELDED_ONCE
+        && body.blocks().count() == 1
+        && matches!(
+            body.block(body.entry()).terminator().kind,
+            TerminatorKind::Return
+        )
+        && body
+            .parameters()
+            .iter()
+            .all(|parameter| ScalarType::of(parameter.ty).is_ok())
+        && body
+            .constants()
+            .iter()
+            .all(|constant| ScalarType::of(constant.ty).is_ok())
+        && body
+            .block(body.entry())
+            .operations()
+            .iter()
+            .all(|operation| matches!(operation.kind, OperationKind::Store))
 }
 
 fn layout_witness(op: &Operation) -> Option<&Value> {
@@ -1307,25 +1464,17 @@ fn result_as_wasm(result: ScalarType) -> Option<ValType> {
     (!result.is_unit()).then(|| result.wasm())
 }
 
-fn setup() -> WasmFunction {
+fn setup(runtime_globals: RuntimeGlobals) -> WasmFunction {
     let mut code = WasmFunction::new([]);
-    for global in Global::iter() {
+    for global in runtime_globals.base() {
         let offset = match global {
             Global::Context => {
                 code.instruction(&I::LocalGet(0));
                 code.instruction(&I::GlobalSet(global as u32));
                 continue;
             }
-            Global::Depth => {
-                code.instruction(&I::I32Const(0));
-                code.instruction(&I::GlobalSet(global as u32));
-                continue;
-            }
             Global::Stack => offset_of!(InvocationState, stack),
             Global::End => offset_of!(InvocationState, end),
-            Global::DepthLimit => offset_of!(InvocationState, depth_limit),
-            Global::Fuel => offset_of!(InvocationState, fuel),
-            Global::FuelEnabled => offset_of!(InvocationState, fuel_enabled),
         };
         code.instruction(&I::LocalGet(0));
         code.instruction(&I::If(BlockType::Result(ValType::I32)));
@@ -1339,8 +1488,39 @@ fn setup() -> WasmFunction {
         code.instruction(&I::End);
         code.instruction(&I::GlobalSet(global as u32));
     }
+    if let Some(depth) = runtime_globals.depth {
+        code.instruction(&I::I32Const(0));
+        code.instruction(&I::GlobalSet(depth.depth));
+        load_invocation_state(
+            &mut code,
+            depth.limit,
+            offset_of!(InvocationState, depth_limit),
+        );
+    }
+    if let Some(fuel) = runtime_globals.fuel {
+        load_invocation_state(&mut code, fuel.fuel, offset_of!(InvocationState, fuel));
+        load_invocation_state(
+            &mut code,
+            fuel.enabled,
+            offset_of!(InvocationState, fuel_enabled),
+        );
+    }
     code.instruction(&I::End);
     code
+}
+
+fn load_invocation_state(code: &mut WasmFunction, global: u32, offset: usize) {
+    code.instruction(&I::LocalGet(0));
+    code.instruction(&I::If(BlockType::Result(ValType::I32)));
+    code.instruction(&I::LocalGet(0));
+    code.instruction(&I::I32Load(MemArg {
+        offset: offset as u64,
+        ..memarg(2)
+    }));
+    code.instruction(&I::Else);
+    code.instruction(&I::I32Const(0));
+    code.instruction(&I::End);
+    code.instruction(&I::GlobalSet(global));
 }
 
 /// The export of the invocation-state setter, alongside the host-callable functions.
@@ -1402,7 +1582,7 @@ impl WasmNames {
         self.functions.push(name);
     }
 
-    fn finish(self) -> NameSection {
+    fn finish(self, runtime_globals: RuntimeGlobals) -> NameSection {
         let mut functions = NameMap::new();
         for (index, name) in self.functions.iter().enumerate() {
             functions.append(index as u32, name);
@@ -1410,8 +1590,16 @@ impl WasmNames {
         let mut section = NameSection::new();
         section.functions(&functions);
         let mut globals = NameMap::new();
-        for global in Global::iter() {
+        for global in runtime_globals.base() {
             globals.append(global as u32, global.name());
+        }
+        if let Some(depth) = runtime_globals.depth {
+            globals.append(depth.depth, "call_depth");
+            globals.append(depth.limit, "call_depth_limit");
+        }
+        if let Some(fuel) = runtime_globals.fuel {
+            globals.append(fuel.fuel, "fuel");
+            globals.append(fuel.enabled, "fuel_enabled");
         }
         section.globals(&globals);
         section

@@ -47,9 +47,9 @@ use crate::{
 };
 
 use super::{
-    Global, ScalarType, StringLiterals, adapters::NativeOptionalResultAdapter, allocate_frame,
-    callable, callee, context_pointer, dictionary_table, emit_failure, enter_frame, frame_address,
-    frame_bytes, layout_witness, leave_frame, memarg, operations, scalar, subscript,
+    Global, RuntimeGlobals, ScalarType, StringLiterals, adapters::NativeOptionalResultAdapter,
+    allocate_frame, callable, callee, context_pointer, dictionary_table, emit_failure, enter_frame,
+    frame_address, frame_bytes, layout_witness, leave_frame, memarg, operations, scalar, subscript,
 };
 
 /// Code ranges generated for MIR operations and terminators, with their source spans.
@@ -107,6 +107,16 @@ struct LayoutLocals {
     dictionary: WasmLocalId,
     table: WasmLocalId,
     output: WasmLocalId,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct HelperLocals {
+    pub(super) pending_failure: WasmLocalId,
+    pub(super) scratch: WasmLocalId,
+    pub(super) dynamic_size: WasmLocalId,
+    pub(super) dynamic_align: WasmLocalId,
+    pub(super) dynamic_base: WasmLocalId,
+    pub(super) allocation_end: WasmLocalId,
 }
 
 const RESUME_SLOT_OFFSET: u32 = 0;
@@ -167,14 +177,9 @@ pub(super) struct Body<'a, 's> {
     capture_slots: FxHashMap<ValueId, u32>,
     variant_shells: FxHashSet<ValueId>,
     layout_slot: Option<u32>,
-    pub(super) dynamic_size: WasmLocalId,
-    pub(super) dynamic_align: WasmLocalId,
-    dynamic_base: WasmLocalId,
-    allocation_end: WasmLocalId,
+    helpers: Option<HelperLocals>,
     evidence_base: Option<WasmLocalId>,
     layout_locals: Option<LayoutLocals>,
-    pending_failure: WasmLocalId,
-    pub(super) scratch: WasmLocalId,
     scratch_slots: FxHashMap<Type, u32>,
     callees: &'a FxHashMap<FunctionId, (WasmFunctionId, &'a CallAbi)>,
     program: &'a ResolvedPhysicalProgram<'a>,
@@ -189,11 +194,20 @@ pub(super) struct Body<'a, 's> {
     frame: Option<WasmLocalId>,
     pc: Option<WasmLocalId>,
     frame_size: u32,
+    runtime_globals: RuntimeGlobals,
+    track_depth: bool,
+    forwarded_result: Option<Value>,
+    fallthrough_return: bool,
     pub(super) code: WasmFunction,
     source_map: BodySourceMap,
 }
 
 impl<'a, 's> Body<'a, 's> {
+    pub(super) fn helper_locals(&self) -> HelperLocals {
+        self.helpers
+            .expect("body operation requires reserved helper locals")
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         body: &'a Function,
@@ -211,8 +225,12 @@ impl<'a, 's> Body<'a, 's> {
         subscript_entries: &'a subscript::Entries,
         selections: &'s FxHashMap<ValueId, (TraitId, TraitDictionaryEntryIndex)>,
         mode: BodyMode,
+        runtime_globals: RuntimeGlobals,
+        track_depth: bool,
     ) -> Result<Self, String> {
         let constructed_subscripts = constructed_subscript_definitions(body);
+        let forwarded_result = forwarded_result(body, signature, mode);
+        let fallthrough_return = has_fallthrough_return(body, mode);
         let mut this = Self {
             body,
             signature,
@@ -236,14 +254,9 @@ impl<'a, 's> Body<'a, 's> {
             capture_slots: FxHashMap::default(),
             variant_shells: FxHashSet::default(),
             layout_slot: None,
-            dynamic_size: WasmLocalId::default(),
-            dynamic_align: WasmLocalId::default(),
-            dynamic_base: WasmLocalId::default(),
-            allocation_end: WasmLocalId::default(),
+            helpers: None,
             evidence_base: None,
             layout_locals: None,
-            pending_failure: WasmLocalId::default(),
-            scratch: WasmLocalId::default(),
             scratch_slots: FxHashMap::default(),
             callees,
             program,
@@ -262,15 +275,23 @@ impl<'a, 's> Body<'a, 's> {
             } else {
                 0
             },
+            runtime_globals,
+            track_depth,
+            forwarded_result,
+            fallthrough_return,
             code: WasmFunction::new([]),
             source_map: Vec::new(),
         };
-        this.pending_failure = this.local(ValType::I32);
-        this.scratch = this.local(ValType::I32);
-        this.dynamic_size = this.local(ValType::I32);
-        this.dynamic_align = this.local(ValType::I32);
-        this.dynamic_base = this.local(ValType::I32);
-        this.allocation_end = this.local(ValType::I64);
+        if needs_helper_locals(body, mode) {
+            this.helpers = Some(HelperLocals {
+                pending_failure: this.local(ValType::I32),
+                scratch: this.local(ValType::I32),
+                dynamic_size: this.local(ValType::I32),
+                dynamic_align: this.local(ValType::I32),
+                dynamic_base: this.local(ValType::I32),
+                allocation_end: this.local(ValType::I64),
+            });
+        }
         if mode.projection()
             || body.blocks().count() != 1
             || !matches!(
@@ -291,7 +312,8 @@ impl<'a, 's> Body<'a, 's> {
         for (index, parameter) in body.parameters().iter().enumerate() {
             if (parameter.kind == ParameterKind::Return
                 && parameter.ty != Type::never()
-                && !signature.output())
+                && !signature.output()
+                && this.forwarded_result.is_none())
                 || signature
                     .parameters
                     .get(index)
@@ -609,16 +631,17 @@ impl<'a, 's> Body<'a, 's> {
             return Err("optional output must be a value place".into());
         };
         let adapter = NativeOptionalResultAdapter::new(ty, payload, self.env, self.session)?;
+        let helpers = self.helper_locals();
         // Preserve the presence result on the operand stack while preparing the two addresses.
         self.address(output)?;
-        self.i(I::LocalSet(self.dynamic_base.as_u32()));
+        self.i(I::LocalSet(helpers.dynamic_base.as_u32()));
         self.scratch_address(payload);
-        self.i(I::LocalSet(self.dynamic_size.as_u32()));
+        self.i(I::LocalSet(helpers.dynamic_size.as_u32()));
         adapter.emit(
             &mut self.code,
-            self.dynamic_base,
-            self.dynamic_size,
-            self.scratch,
+            helpers.dynamic_base,
+            helpers.dynamic_size,
+            helpers.scratch,
             self.imports.function_index("alloc"),
         );
         Ok(())
@@ -681,6 +704,7 @@ impl<'a, 's> Body<'a, 's> {
     }
 
     fn project(&mut self, op: &Operation, invoked: bool) -> Result<(), String> {
+        let helpers = self.helper_locals();
         let result = op.result_id().expect("project produces a place");
         let callee = &op.operands[0];
         let inputs = &op.operands[1..];
@@ -693,20 +717,20 @@ impl<'a, 's> Body<'a, 's> {
             } else {
                 self.value(&selected.source)?;
             }
-            self.i(I::LocalTee(self.dynamic_base.as_u32()));
+            self.i(I::LocalTee(helpers.dynamic_base.as_u32()));
             self.dictionary_table();
             self.i(I::I32Load(MemArg {
                 offset: u64::from(selected.mut_member) * 4,
                 ..memarg(2)
             }));
-            self.i(I::LocalSet(self.dynamic_size.as_u32()));
+            self.i(I::LocalSet(helpers.dynamic_size.as_u32()));
             self.context_pointer(offset_of!(InvocationState, native_failure));
-            self.i(I::LocalGet(self.dynamic_base.as_u32()));
+            self.i(I::LocalGet(helpers.dynamic_base.as_u32()));
             self.i(I::I32Const(i32::from(selected.materialized)));
             for input in inputs {
                 self.address(input)?;
             }
-            self.i(I::LocalGet(self.dynamic_size.as_u32()));
+            self.i(I::LocalGet(helpers.dynamic_size.as_u32()));
             self.i(I::CallIndirect {
                 type_index: ty.as_u32(),
                 table_index: 0,
@@ -747,11 +771,11 @@ impl<'a, 's> Body<'a, 's> {
         self.i(I::Call(index.as_u32()));
         let yielded = self.registers[&result];
         if abi.fallible {
-            self.i(I::LocalSet(self.dynamic_size.as_u32()));
+            self.i(I::LocalSet(helpers.dynamic_size.as_u32()));
             self.scratch_address(Type::unit());
             self.i(I::I32Load(memarg(2)));
             self.i(I::LocalSet(yielded.as_u32()));
-            self.i(I::LocalGet(self.dynamic_size.as_u32()));
+            self.i(I::LocalGet(helpers.dynamic_size.as_u32()));
         } else {
             self.i(I::LocalSet(yielded.as_u32()));
             self.i(I::I32Const(0));
@@ -769,6 +793,7 @@ impl<'a, 's> Body<'a, 's> {
         output: Option<&Value>,
         invoked: bool,
     ) -> Result<(), String> {
+        let helpers = self.helper_locals();
         let output = output.ok_or("addressor call requires output storage")?;
         let ty = self.subscript_entries.signatures_by_arity[&inputs.len()];
         if selected.materialized {
@@ -776,35 +801,35 @@ impl<'a, 's> Body<'a, 's> {
         } else {
             self.value(&selected.source)?;
         }
-        self.i(I::LocalTee(self.dynamic_base.as_u32()));
+        self.i(I::LocalTee(helpers.dynamic_base.as_u32()));
         self.dictionary_table();
         self.i(I::I32Load(MemArg {
             offset: u64::from(selected.mut_member) * 4,
             ..memarg(2)
         }));
-        self.i(I::LocalSet(self.scratch.as_u32()));
+        self.i(I::LocalSet(helpers.scratch.as_u32()));
         self.context_pointer(offset_of!(InvocationState, native_failure));
-        self.i(I::LocalGet(self.dynamic_base.as_u32()));
+        self.i(I::LocalGet(helpers.dynamic_base.as_u32()));
         self.i(I::I32Const(i32::from(selected.materialized)));
         for input in inputs {
             self.address(input)?;
         }
-        self.i(I::LocalGet(self.scratch.as_u32()));
+        self.i(I::LocalGet(helpers.scratch.as_u32()));
         self.i(I::CallIndirect {
             type_index: ty.as_u32(),
             table_index: 0,
         });
-        self.i(I::LocalSet(self.dynamic_base.as_u32())); // yielded address
-        self.i(I::LocalSet(self.dynamic_align.as_u32())); // retained frame
-        self.i(I::LocalSet(self.dynamic_size.as_u32())); // status
-        self.i(I::LocalGet(self.dynamic_align.as_u32()));
+        self.i(I::LocalSet(helpers.dynamic_base.as_u32())); // yielded address
+        self.i(I::LocalSet(helpers.dynamic_align.as_u32())); // retained frame
+        self.i(I::LocalSet(helpers.dynamic_size.as_u32())); // status
+        self.i(I::LocalGet(helpers.dynamic_align.as_u32()));
         self.i(I::If(BlockType::Empty));
         self.fail(FailureCode::Invariant);
         self.i(I::End);
         self.address(output)?;
-        self.i(I::LocalGet(self.dynamic_base.as_u32()));
+        self.i(I::LocalGet(helpers.dynamic_base.as_u32()));
         self.i(I::I32Store(memarg(2)));
-        self.i(I::LocalGet(self.dynamic_size.as_u32()));
+        self.i(I::LocalGet(helpers.dynamic_size.as_u32()));
         self.call_status(invoked, true);
         Ok(())
     }
@@ -905,8 +930,9 @@ impl<'a, 's> Body<'a, 's> {
 
     /// Restore a MIR stack marker without crossing a suspended continuation frame.
     fn restore_stack(&mut self, marker: &Value) -> Result<(), String> {
+        let helpers = self.helper_locals();
         self.value(marker)?;
-        self.i(I::LocalSet(self.scratch.as_u32()));
+        self.i(I::LocalSet(helpers.scratch.as_u32()));
         if let Some(floor) = self.resume_stack_floor {
             self.raise_stack_floor(floor);
         }
@@ -924,23 +950,24 @@ impl<'a, 's> Body<'a, 's> {
                 offset: SUSPENDED_STACK_END_OFFSET.into(),
                 ..memarg(2)
             }));
-            self.i(I::LocalSet(self.dynamic_base.as_u32()));
-            self.raise_stack_floor(self.dynamic_base);
+            self.i(I::LocalSet(helpers.dynamic_base.as_u32()));
+            self.raise_stack_floor(helpers.dynamic_base);
             self.i(I::End);
         }
-        self.i(I::LocalGet(self.scratch.as_u32()));
+        self.i(I::LocalGet(helpers.scratch.as_u32()));
         Ok(())
     }
 
     /// Raise the pending stack frontier in `scratch` to `floor` when necessary.
     fn raise_stack_floor(&mut self, floor: WasmLocalId) {
-        self.i(I::LocalGet(self.scratch.as_u32()));
+        let scratch = self.helper_locals().scratch;
+        self.i(I::LocalGet(scratch.as_u32()));
         self.i(I::LocalGet(floor.as_u32()));
-        self.i(I::LocalGet(self.scratch.as_u32()));
+        self.i(I::LocalGet(scratch.as_u32()));
         self.i(I::LocalGet(floor.as_u32()));
         self.i(I::I32GtU);
         self.i(I::Select);
-        self.i(I::LocalSet(self.scratch.as_u32()));
+        self.i(I::LocalSet(scratch.as_u32()));
     }
 
     fn release_evidence(&mut self, reference: &Value) -> Result<(), String> {
@@ -971,6 +998,7 @@ impl<'a, 's> Body<'a, 's> {
     }
 
     pub(super) fn dynamic_layout(&mut self, dictionary: &Value) -> Result<(), String> {
+        let helpers = self.helper_locals();
         let slot = self
             .layout_slot
             .expect("layout witness needs output storage");
@@ -1003,9 +1031,9 @@ impl<'a, 's> Body<'a, 's> {
             self.i(I::I32Load(memarg(2)));
             self.i(I::LocalSet(
                 (if index == 0 {
-                    self.dynamic_size
+                    helpers.dynamic_size
                 } else {
-                    self.dynamic_align
+                    helpers.dynamic_align
                 })
                 .as_u32(),
             ));
@@ -1014,12 +1042,13 @@ impl<'a, 's> Body<'a, 's> {
     }
 
     fn dynamic_alloca(&mut self) {
+        let helpers = self.helper_locals();
         allocate_frame(
             &mut self.code,
-            self.dynamic_size,
-            self.dynamic_align,
-            self.dynamic_base,
-            self.allocation_end,
+            helpers.dynamic_size,
+            helpers.dynamic_align,
+            helpers.dynamic_base,
+            helpers.allocation_end,
         );
     }
     fn call_dictionary(
@@ -1086,17 +1115,19 @@ impl<'a, 's> Body<'a, 's> {
     }
 
     fn capture_failure(&mut self) {
+        let pending = self.helper_locals().pending_failure;
         self.context_pointer(offset_of!(InvocationState, diagnostics));
-        self.i(I::LocalGet(self.pending_failure.as_u32()));
+        self.i(I::LocalGet(pending.as_u32()));
         self.i(I::Call(
             self.imports.function_index("capture_failure").as_u32(),
         ));
-        self.i(I::LocalSet(self.pending_failure.as_u32()));
+        self.i(I::LocalSet(pending.as_u32()));
     }
 
     fn propagate_failure(&mut self) {
+        let pending = self.helper_locals().pending_failure;
         self.context_pointer(offset_of!(InvocationState, diagnostics));
-        self.i(I::LocalGet(self.pending_failure.as_u32()));
+        self.i(I::LocalGet(pending.as_u32()));
         self.i(I::Call(
             self.imports.function_index("propagate_failure").as_u32(),
         ));
@@ -1105,7 +1136,7 @@ impl<'a, 's> Body<'a, 's> {
         self.i(I::End);
     }
 
-    fn return_frame(&mut self, failed: bool) -> Result<(), String> {
+    fn return_frame(&mut self, failed: bool, explicit_return: bool) -> Result<(), String> {
         if matches!(self.mode, BodyMode::ProjectionStart { .. }) && !failed {
             // Resume-only blocks share the same MIR body. They are encoded in the start entry but
             // cannot be reached before its Yield; trap if malformed control flow reaches one.
@@ -1145,10 +1176,16 @@ impl<'a, 's> Body<'a, 's> {
                 leave_frame(&mut self.code, frame);
             }
         }
-        self.i(I::GlobalGet(Global::Depth as u32));
-        self.i(I::I32Const(1));
-        self.i(I::I32Sub);
-        self.i(I::GlobalSet(Global::Depth as u32));
+        if self.track_depth {
+            let depth = self
+                .runtime_globals
+                .depth
+                .expect("depth-tracked body has depth globals");
+            self.i(I::GlobalGet(depth.depth));
+            self.i(I::I32Const(1));
+            self.i(I::I32Sub);
+            self.i(I::GlobalSet(depth.depth));
+        }
         if matches!(self.mode, BodyMode::ProjectionStart { .. }) {
             self.i(I::I32Const(1));
             self.i(I::I32Const(0));
@@ -1156,11 +1193,17 @@ impl<'a, 's> Body<'a, 's> {
         } else if matches!(self.mode, BodyMode::ProjectionResume) || self.signature.fallible {
             self.i(I::I32Const(i32::from(failed)));
         } else if matches!(self.signature.result, ResultKind::Direct(_)) {
-            let result =
-                Value::Parameter(ParameterId::from_index(self.body.parameters().len() - 1));
-            self.load_place(&result, self.pointee(&result)?)?;
+            if let Some(result) = self.forwarded_result.clone() {
+                self.value(&result)?;
+            } else {
+                let result =
+                    Value::Parameter(ParameterId::from_index(self.body.parameters().len() - 1));
+                self.load_place(&result, self.pointee(&result)?)?;
+            }
         }
-        self.i(I::Return);
+        if explicit_return {
+            self.i(I::Return);
+        }
         Ok(())
     }
 
@@ -1635,10 +1678,16 @@ impl<'a, 's> Body<'a, 's> {
             enter_frame(&mut self.code, frame, self.frame_size);
         }
         if !matches!(self.mode, BodyMode::ProjectionResume) {
-            self.i(I::GlobalGet(Global::Depth as u32));
-            self.i(I::I32Const(1));
-            self.i(I::I32Add);
-            self.i(I::GlobalSet(Global::Depth as u32));
+            if self.track_depth {
+                let depth = self
+                    .runtime_globals
+                    .depth
+                    .expect("depth-tracked body has depth globals");
+                self.i(I::GlobalGet(depth.depth));
+                self.i(I::I32Const(1));
+                self.i(I::I32Add);
+                self.i(I::GlobalSet(depth.depth));
+            }
             for index in 0..self.owned_evidence.len() {
                 self.address(&Value::Register(self.owned_evidence[index]))?;
                 self.i(I::I64Const(0));
@@ -1693,7 +1742,9 @@ impl<'a, 's> Body<'a, 's> {
         } else {
             self.emit_block(self.body.entry(), None)?;
         }
-        self.i(I::Unreachable);
+        if !self.fallthrough_return {
+            self.i(I::Unreachable);
+        }
         self.i(I::End);
         Ok(EmittedBody {
             function: self.code,
@@ -1704,7 +1755,14 @@ impl<'a, 's> Body<'a, 's> {
 
     fn emit_block(&mut self, block_id: BlockId, dispatch_depth: Option<u32>) -> Result<(), String> {
         let block = self.body.block(block_id);
-        for operation in block.operations() {
+        let operation_count = block.operations().len();
+        for (index, operation) in block.operations().iter().enumerate() {
+            if self.forwarded_result.is_some()
+                && block_id == self.body.entry()
+                && index + 1 == operation_count
+            {
+                continue;
+            }
             let start = self.code.byte_len();
             self.operation(operation).map_err(|e| {
                 format!(
@@ -1774,10 +1832,12 @@ impl<'a, 's> Body<'a, 's> {
                     // A correctly chained cleanup failure already trapped while propagating.
                     self.fail(FailureCode::Invariant);
                 } else {
-                    self.return_frame(true)?;
+                    self.return_frame(true, true)?;
                 }
             }
-            TerminatorKind::Return => self.return_frame(false)?,
+            TerminatorKind::Return => {
+                self.return_frame(false, !self.fallthrough_return)?;
+            }
             TerminatorKind::Yield { place, resume } => self.suspend(place, *resume)?,
             TerminatorKind::InvariantFailure { .. } => self.fail(FailureCode::Invariant),
         }
@@ -1969,6 +2029,7 @@ impl<'a, 's> Body<'a, 's> {
             Project { .. } => return self.project(op, false),
             EndProject => return self.end_project(&args[0], false),
             BuildArray { element_ty } => {
+                let helpers = self.helper_locals();
                 let (destination, elements) = args.split_last().unwrap();
                 let MirType::Lowered(array_ty) = self.pointee_type(destination)? else {
                     return Err("array output must be a value place".into());
@@ -1984,9 +2045,9 @@ impl<'a, 's> Body<'a, 's> {
                 self.i(I::I32Const(bytes as i32));
                 self.i(I::I32Const(element.align as i32));
                 self.i(I::Call(self.imports.function_index("alloc").as_u32()));
-                self.i(I::LocalSet(self.scratch.as_u32()));
+                self.i(I::LocalSet(helpers.scratch.as_u32()));
                 for (index, value) in elements.iter().enumerate() {
-                    self.i(I::LocalGet(self.scratch.as_u32()));
+                    self.i(I::LocalGet(helpers.scratch.as_u32()));
                     self.i(I::I32Const((index as u32 * element.size) as i32));
                     self.i(I::I32Add);
                     if let Ok(ty) = ScalarType::of(*element_ty) {
@@ -2005,7 +2066,7 @@ impl<'a, 's> Body<'a, 's> {
                 for index in 0..4 {
                     self.address(destination)?;
                     if index == 1 {
-                        self.i(I::LocalGet(self.scratch.as_u32()));
+                        self.i(I::LocalGet(helpers.scratch.as_u32()));
                     } else {
                         self.i(I::I32Const(if index == 3 {
                             0
@@ -2153,7 +2214,7 @@ impl<'a, 's> Body<'a, 's> {
                     if matches!(op.kind, MoveBytes { .. }) {
                         self.read(&args[2])?;
                     } else if layout_witness(op).is_some() {
-                        self.i(I::LocalGet(self.dynamic_size.as_u32()));
+                        self.i(I::LocalGet(self.helper_locals().dynamic_size.as_u32()));
                     } else {
                         self.i(I::I32Const(self.size(&ty)? as i32));
                     }
@@ -2169,51 +2230,52 @@ impl<'a, 's> Body<'a, 's> {
                 }
                 self.address(&args[0])?;
                 if layout_witness(op).is_some() {
-                    self.i(I::LocalGet(self.dynamic_size.as_u32()));
+                    self.i(I::LocalGet(self.helper_locals().dynamic_size.as_u32()));
                 } else {
                     self.i(I::I32Const(self.size(&MirType::Lowered(*ty))? as i32));
                 }
                 self.i(I::Call(self.imports.function_index("black_box").as_u32()));
             }
             Replace => {
+                let helpers = self.helper_locals();
                 let MirType::Lowered(ty) = self.pointee_type(&args[0])? else {
                     return Err("pointer replacement".into());
                 };
                 if let Some(witness) = layout_witness(op) {
                     self.dynamic_layout(witness)?;
                     self.i(I::GlobalGet(Global::Stack as u32));
-                    self.i(I::LocalSet(self.scratch.as_u32()));
+                    self.i(I::LocalSet(helpers.scratch.as_u32()));
                     self.dynamic_alloca();
                     self.i(I::Drop);
                 } else {
                     self.scratch_address(ty);
-                    self.i(I::LocalSet(self.dynamic_base.as_u32()));
+                    self.i(I::LocalSet(helpers.dynamic_base.as_u32()));
                     self.i(I::I32Const(self.size(&MirType::Lowered(ty))? as i32));
-                    self.i(I::LocalSet(self.dynamic_size.as_u32()));
+                    self.i(I::LocalSet(helpers.dynamic_size.as_u32()));
                 }
-                self.i(I::LocalGet(self.dynamic_base.as_u32()));
+                self.i(I::LocalGet(helpers.dynamic_base.as_u32()));
                 self.address(&args[0])?;
-                self.i(I::LocalGet(self.dynamic_size.as_u32()));
+                self.i(I::LocalGet(helpers.dynamic_size.as_u32()));
                 self.i(I::MemoryCopy {
                     src_mem: 0,
                     dst_mem: 0,
                 });
                 self.address(&args[0])?;
                 self.address(&args[1])?;
-                self.i(I::LocalGet(self.dynamic_size.as_u32()));
+                self.i(I::LocalGet(helpers.dynamic_size.as_u32()));
                 self.i(I::MemoryCopy {
                     src_mem: 0,
                     dst_mem: 0,
                 });
                 self.address(&args[1])?;
-                self.i(I::LocalGet(self.dynamic_base.as_u32()));
-                self.i(I::LocalGet(self.dynamic_size.as_u32()));
+                self.i(I::LocalGet(helpers.dynamic_base.as_u32()));
+                self.i(I::LocalGet(helpers.dynamic_size.as_u32()));
                 self.i(I::MemoryCopy {
                     src_mem: 0,
                     dst_mem: 0,
                 });
                 if layout_witness(op).is_some() {
-                    self.i(I::LocalGet(self.scratch.as_u32()));
+                    self.i(I::LocalGet(helpers.scratch.as_u32()));
                     self.i(I::GlobalSet(Global::Stack as u32));
                 }
             }
@@ -2283,25 +2345,33 @@ impl<'a, 's> Body<'a, 's> {
                 }
             }
             CheckCallDepth => {
-                self.i(I::GlobalGet(Global::Depth as u32));
-                self.i(I::GlobalGet(Global::DepthLimit as u32));
+                let depth = self
+                    .runtime_globals
+                    .depth
+                    .expect("call-depth check has depth globals");
+                self.i(I::GlobalGet(depth.depth));
+                self.i(I::GlobalGet(depth.limit));
                 self.i(I::I32GeU);
                 self.i(I::If(BlockType::Empty));
                 self.fail(FailureCode::CallDepth);
                 self.i(I::End);
             }
             CheckFuel => {
-                self.i(I::GlobalGet(Global::FuelEnabled as u32));
+                let fuel = self
+                    .runtime_globals
+                    .fuel
+                    .expect("fuel check has fuel globals");
+                self.i(I::GlobalGet(fuel.enabled));
                 self.i(I::If(BlockType::Empty));
-                self.i(I::GlobalGet(Global::Fuel as u32));
+                self.i(I::GlobalGet(fuel.fuel));
                 self.i(I::I32Eqz);
                 self.i(I::If(BlockType::Empty));
                 self.fail(FailureCode::Fuel);
                 self.i(I::End);
-                self.i(I::GlobalGet(Global::Fuel as u32));
+                self.i(I::GlobalGet(fuel.fuel));
                 self.i(I::I32Const(1));
                 self.i(I::I32Sub);
-                self.i(I::GlobalSet(Global::Fuel as u32));
+                self.i(I::GlobalSet(fuel.fuel));
                 self.i(I::End);
             }
             Call { .. } | Clone { .. } | Drop { .. } | DropInitialized { .. } => {
@@ -2333,4 +2403,75 @@ impl<'a, 's> Body<'a, 's> {
         }
         Ok(())
     }
+}
+
+fn needs_helper_locals(body: &Function, mode: BodyMode) -> bool {
+    mode.projection()
+        || body.blocks().any(|block| {
+            let block = body.block(block);
+            matches!(
+                block.terminator().kind,
+                TerminatorKind::Invoke { .. }
+                    | TerminatorKind::PropagateError
+                    | TerminatorKind::FailureDuringCleanup
+            ) || operations(block).any(operation_needs_helper_locals)
+        })
+}
+
+pub(super) fn operation_needs_helper_locals(operation: &Operation) -> bool {
+    layout_witness(operation).is_some()
+        || !matches!(
+            operation.kind,
+            OperationKind::Alloca { .. }
+                | OperationKind::AllocaPlace { .. }
+                | OperationKind::Load
+                | OperationKind::Store
+                | OperationKind::CompareEqual
+                | OperationKind::ExtractTag
+                | OperationKind::ExtractPayloadIndirection
+                | OperationKind::IsInitialized
+                | OperationKind::AddressOffset { .. }
+                | OperationKind::AddressOffsetPlace { .. }
+                | OperationKind::Clear
+                | OperationKind::StackSave
+                | OperationKind::CheckCallDepth
+                | OperationKind::CheckFuel
+                | OperationKind::RuntimeAlloc { .. }
+                | OperationKind::RuntimeDealloc
+        )
+}
+
+fn has_fallthrough_return(body: &Function, mode: BodyMode) -> bool {
+    matches!(mode, BodyMode::Normal)
+        && body.blocks().count() == 1
+        && matches!(
+            body.block(body.entry()).terminator().kind,
+            TerminatorKind::Return
+        )
+}
+
+fn forwarded_result(body: &Function, signature: &CallAbi, mode: BodyMode) -> Option<Value> {
+    if !matches!(mode, BodyMode::Normal)
+        || signature.fallible
+        || !matches!(signature.result, ResultKind::Direct(_))
+        || !has_fallthrough_return(body, mode)
+    {
+        return None;
+    }
+    let block = body.block(body.entry());
+    let return_id = body
+        .parameters()
+        .iter()
+        .position(|parameter| parameter.kind == ParameterKind::Return)?;
+    let destination = Value::Parameter(ParameterId::from_index(return_id));
+    let (last, prefix) = block.operations().split_last()?;
+    if !matches!(last.kind, OperationKind::Store)
+        || last.operands.get(1) != Some(&destination)
+        || prefix
+            .iter()
+            .any(|operation| operation.operands.contains(&destination))
+    {
+        return None;
+    }
+    Some(last.operands[0].clone())
 }
