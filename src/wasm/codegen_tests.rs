@@ -9,7 +9,7 @@ use wasm_bindgen_test::wasm_bindgen_test;
 use wasmparser::{Operator, Parser, Payload};
 
 use crate::{
-    CompilerSession,
+    CompilerSession, FxHashSet,
     compiler::{
         MirOptimization,
         error::{RuntimeErrorKind, SandboxViolationKind, SourceFailureKind},
@@ -657,6 +657,59 @@ fn wasm_codegen_native_addressors() {
             9,
         );
     }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_function_types_are_interned() {
+    let mut session = CompilerSession::new();
+    let entry = compile(&mut session, "fn compute(x: int, y: int) -> int { x + y }");
+    let code = CompiledProgram::compile(&session, entry).unwrap();
+    let mut types = Vec::new();
+    let mut function_types = Vec::new();
+    for payload in Parser::new(0).parse_all(code.bytes()) {
+        match payload.unwrap() {
+            Payload::TypeSection(section) => types.extend(
+                section
+                    .into_iter_err_on_gc_types()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap(),
+            ),
+            Payload::ImportSection(section) => {
+                function_types.extend(section.into_imports().filter_map(|import| {
+                    match import.unwrap().ty {
+                        wasmparser::TypeRef::Func(index)
+                        | wasmparser::TypeRef::FuncExact(index) => Some(index),
+                        _ => None,
+                    }
+                }));
+            }
+            Payload::FunctionSection(section) => {
+                function_types.extend(section.into_iter().map(Result::unwrap));
+            }
+            _ => (),
+        }
+    }
+    assert!(types.len() > 1, "fixture must emit several signatures");
+    assert_eq!(
+        types.len(),
+        types.iter().collect::<FxHashSet<_>>().len(),
+        "duplicate Wasm function types: {types:?}"
+    );
+    let integer_binary = types
+        .iter()
+        .position(|ty| {
+            ty.params() == [wasmparser::ValType::I32, wasmparser::ValType::I32]
+                && ty.results() == [wasmparser::ValType::I32]
+        })
+        .expect("fixture must emit its native add and compute signature");
+    assert!(
+        function_types
+            .iter()
+            .filter(|&&index| index as usize == integer_binary)
+            .count()
+            >= 2,
+        "native add and compute must reuse the same Wasm type"
+    );
 }
 
 #[wasm_bindgen_test]

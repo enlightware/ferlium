@@ -18,9 +18,9 @@ use std::{iter, mem::offset_of, ops::Range};
 use strum::{EnumIter, IntoEnumIterator};
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, ElementSection, Elements, EntityType, ExportKind,
-    ExportSection, Function as WasmFunction, FunctionSection, GlobalSection, GlobalType,
-    ImportSection, Instruction as I, MemArg, MemoryType, Module, NameMap, NameSection, RefType,
-    TableSection, TableType, TypeSection, ValType,
+    ExportSection, FuncType as WasmFuncType, Function as WasmFunction, FunctionSection,
+    GlobalSection, GlobalType, ImportSection, Instruction as I, MemArg, MemoryType, Module,
+    NameMap, NameSection, RefType, TableSection, TableType, TypeSection, ValType,
 };
 
 use crate::{
@@ -181,6 +181,30 @@ impl Global {
             Self::Context => "invocation_context",
             Self::FuelEnabled => "fuel_enabled",
         }
+    }
+}
+
+/// Module-wide structural interner for core-Wasm function types.
+#[derive(Default)]
+struct FunctionTypes {
+    section: TypeSection,
+    indices: FxHashMap<WasmFuncType, WasmTypeId>,
+}
+
+impl FunctionTypes {
+    fn intern(
+        &mut self,
+        parameters: impl IntoIterator<Item = ValType>,
+        results: impl IntoIterator<Item = ValType>,
+    ) -> WasmTypeId {
+        let ty = WasmFuncType::new(parameters, results);
+        if let Some(&id) = self.indices.get(&ty) {
+            return id;
+        }
+        let id = WasmTypeId::new(self.section.len());
+        self.section.ty().func_type(&ty);
+        self.indices.insert(ty, id);
+        id
     }
 }
 
@@ -730,7 +754,7 @@ fn emit_with_export_kind(
         }
         bodies.push((id, body, signature, selections));
     }
-    let mut types = TypeSection::new();
+    let mut types = FunctionTypes::default();
     let mut import_section = ImportSection::new();
     import_section.import(
         IMPORT_MODULE,
@@ -744,8 +768,7 @@ fn emit_with_export_kind(
         },
     );
     for import in imports.functions() {
-        let index = WasmTypeId::new(types.len());
-        types.ty().function(
+        let index = types.intern(
             import.parameters.iter().copied(),
             import.results.iter().copied(),
         );
@@ -779,8 +802,7 @@ fn emit_with_export_kind(
     let mut entry_abis = FxHashMap::default();
     for &(trait_id, entry) in &reachable.entries {
         let abi = dictionary_abi(env, trait_id, entry)?;
-        let index = WasmTypeId::new(types.len());
-        types.ty().function(abi.params(), abi.results());
+        let index = types.intern(abi.params(), abi.results());
         entry_abis.insert((trait_id, entry), (index, abi));
     }
     let dictionary_table = adapters
@@ -883,10 +905,7 @@ fn emit_with_export_kind(
             ),
         }),
     };
-    let resume_signature = WasmTypeId::new(types.len());
-    types
-        .ty()
-        .function([ValType::I32, ValType::I32], [ValType::I32]);
+    let resume_signature = types.intern([ValType::I32, ValType::I32], [ValType::I32]);
     let mut subscript_entries = subscript::Entries {
         signatures_by_arity: FxHashMap::default(),
         resume_signature,
@@ -899,10 +918,8 @@ fn emit_with_export_kind(
     }
     for &arity in &callables.arities {
         callable_entries.signatures.entry(arity).or_insert_with(|| {
-            let index = WasmTypeId::new(types.len());
             let abi = callable::abi(arity);
-            types.ty().function(abi.params(), abi.results());
-            index
+            types.intern(abi.params(), abi.results())
         });
     }
     for &(id, mut_member) in &subscript_adapters {
@@ -913,13 +930,7 @@ fn emit_with_export_kind(
         subscript_entries
             .signatures_by_arity
             .entry(arity)
-            .or_insert_with(|| {
-                let index = WasmTypeId::new(types.len());
-                types
-                    .ty()
-                    .function(subscript::parameters(arity), subscript::results());
-                index
-            });
+            .or_insert_with(|| types.intern(subscript::parameters(arity), subscript::results()));
     }
     let mut strings = StringLiterals::default();
     let mut names = WasmNames::new(session, imports);
@@ -932,14 +943,12 @@ fn emit_with_export_kind(
             module_path(session, id.module),
             body.name
         ));
-        functions.function(WasmTypeId::new(types.len()).as_u32());
-        if body.result_convention() == CallResultConvention::YIELDED_ONCE {
-            types
-                .ty()
-                .function(signature.params(), subscript::results());
+        let ty = if body.result_convention() == CallResultConvention::YIELDED_ONCE {
+            types.intern(signature.params(), subscript::results())
         } else {
-            types.ty().function(signature.params(), signature.results());
-        }
+            types.intern(signature.params(), signature.results())
+        };
+        functions.function(ty.as_u32());
         let mode = if body.result_convention() == CallResultConvention::YIELDED_ONCE {
             BodyMode::ProjectionStart {
                 resume: resume_slots[id],
@@ -985,10 +994,9 @@ fn emit_with_export_kind(
         body_index += 1;
         if body.result_convention() == CallResultConvention::YIELDED_ONCE {
             names.push(format!("<resume {}>", body.name));
-            functions.function(WasmTypeId::new(types.len()).as_u32());
             let mut parameters = signature.params();
             parameters.push(ValType::I32);
-            types.ty().function(parameters, [ValType::I32]);
+            functions.function(types.intern(parameters, [ValType::I32]).as_u32());
             let emitted = Body::new(
                 body,
                 signature,
@@ -1102,11 +1110,9 @@ fn emit_with_export_kind(
     if let Some(methods) = callable_entries.value_methods {
         names.push("<callable clone>".into());
         names.push("<callable drop>".into());
-        functions.function(types.len());
-        types.ty().function([ValType::I32], [ValType::I32]);
+        functions.function(types.intern([ValType::I32], [ValType::I32]).as_u32());
         code.function(&callable::clone_entry(imports, methods.clone));
-        functions.function(types.len());
-        types.ty().function([ValType::I32], []);
+        functions.function(types.intern([ValType::I32], []).as_u32());
         code.function(&callable::drop_entry(imports, methods.drop));
     }
     let mut tables = TableSection::new();
@@ -1150,10 +1156,13 @@ fn emit_with_export_kind(
                 // boundary, without changing the scalar host C signature.
                 debug_assert_eq!(parameters.len(), signature.parameters.len());
                 names.push(format!("<host entry {}>", export.name));
-                functions.function(WasmTypeId::new(types.len()).as_u32());
-                types.ty().function(
-                    parameters.iter().copied().map(ScalarType::wasm),
-                    result_as_wasm(*result),
+                functions.function(
+                    types
+                        .intern(
+                            parameters.iter().copied().map(ScalarType::wasm),
+                            result_as_wasm(*result),
+                        )
+                        .as_u32(),
                 );
                 code.function(&entry_wrapper(*index, signature, *result));
                 exports.export(&export.name, ExportKind::Func, next_index.as_u32());
@@ -1164,8 +1173,7 @@ fn emit_with_export_kind(
             }
             HostExportKind::Boxed { .. } => {
                 names.push(format!("<boxed host entry {}>", export.name));
-                functions.function(WasmTypeId::new(types.len()).as_u32());
-                types.ty().function([ValType::I32], []);
+                functions.function(types.intern([ValType::I32], []).as_u32());
                 code.function(&boxed_entry_wrapper(*index, signature)?);
                 exports.export(&export.name, ExportKind::Func, next_index.as_u32());
                 next_index = WasmFunctionId::from_index(next_index.as_index() + 1);
@@ -1174,14 +1182,13 @@ fn emit_with_export_kind(
     }
     // Rust calls this setter directly at invocation boundaries. All state and diagnostics stay
     // in shared memory; no language values or per-call state are passed through JavaScript.
-    functions.function(WasmTypeId::new(types.len()).as_u32());
-    types.ty().function([ValType::I32], []);
+    functions.function(types.intern([ValType::I32], []).as_u32());
     code.function(&setup());
     names.push("<setup>".into());
     exports.export(SETUP_EXPORT, ExportKind::Func, next_index.as_u32());
     let mut module = Module::new();
     module
-        .section(&types)
+        .section(&types.section)
         .section(&import_section)
         .section(&functions)
         .section(&tables)
