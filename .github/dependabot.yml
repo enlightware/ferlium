@@ -1,0 +1,31 @@
+version: 2
+updates:
+  # Workflow actions are pinned to commit SHAs; this keeps those pins and their version comments current.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  # No lockfiles are tracked, so these only raise requirements that exclude new releases.
+  # Grouping keeps crates that must move together (e.g. wasm-bindgen, js-sys, web-sys) in one PR.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      cargo:
+        patterns:
+          - "*"
+
+  - package-ecosystem: npm
+    directory: /playground
+    schedule:
+      interval: monthly
+    groups:
+      npm:
+        patterns:
+          - "*"
