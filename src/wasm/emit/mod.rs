@@ -1,11 +1,12 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-//! Physical MIR to core Wasm. A dispatcher preserves arbitrary MIR control flow.
+//! Physical MIR to core Wasm, with structured regions and a dispatcher for arbitrary control flow.
 
 mod adapters;
 mod body;
 mod callable;
+mod control_flow;
 mod subscript;
 
 use self::{

@@ -1121,12 +1121,12 @@ fn wasm_codegen_cleanup_failures() {
 }
 
 #[wasm_bindgen_test]
-fn wasm_codegen_dispatch_and_local_storage() {
+fn wasm_codegen_structured_control_flow_and_local_storage() {
     for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
         let mut session = CompilerSession::new();
         session.set_mir_optimization(optimization);
         session.set_physical_mir_optimization(optimization);
-        for (source, dispatched) in [
+        for (source, has_loop) in [
             ("fn compute(x: int) -> int { x * 3 + 1 }", false),
             (
                 "fn compute(x: int) -> int { let mut n = 0; loop { if n >= x { break; }; n += 1; }; n }",
@@ -1167,9 +1167,9 @@ fn wasm_codegen_dispatch_and_local_storage() {
                     _ => (),
                 }
             }
-            assert_eq!(dispatches, usize::from(dispatched));
-            assert_eq!(loops, usize::from(dispatched));
-            if dispatched {
+            assert_eq!(dispatches, 0, "a natural loop must not use the dispatcher");
+            assert_eq!(loops, usize::from(has_loop));
+            if has_loop {
                 assert!(
                     direct_edges > 0,
                     "an adjacent loop edge must branch directly"
