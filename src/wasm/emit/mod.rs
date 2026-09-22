@@ -813,15 +813,18 @@ fn emit_with_export_kind(
                 .any(|operation| matches!(operation.kind, OperationKind::CheckFuel))
         })
     });
-    let needs_stack = !adapters.is_empty()
+    let needs_base = !adapters.is_empty()
         || !callables.entries.is_empty()
         || !callables.selected.is_empty()
         || needs_callable_glue
         || !subscript_adapters.is_empty()
+        || host_exports
+            .iter()
+            .any(|export| matches!(export.kind, HostExportKind::Boxed { .. }))
         || bodies
             .iter()
             .any(|(_, body, signature, _)| !is_trivial_runtime_body(body, signature));
-    let runtime_globals = RuntimeGlobals::new(needs_stack, !depth_tracked.is_empty(), needs_fuel);
+    let runtime_globals = RuntimeGlobals::new(needs_base, !depth_tracked.is_empty(), needs_fuel);
     let mut types = FunctionTypes::default();
     let mut import_section = ImportSection::new();
     import_section.import(

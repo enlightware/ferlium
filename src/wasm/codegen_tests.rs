@@ -43,7 +43,7 @@ use super::{
     callable_environment::LIVE_ENVIRONMENTS as LIVE_CALLABLE_ENVIRONMENTS,
     emit,
     evidence::{BUILT_ENVIRONMENTS, DictionaryDescriptor, LIVE_ENVIRONMENTS},
-    execution::{ENTRY_EXPORT, InvocationState},
+    execution::{ENTRY_EXPORT, InvocationState, run_boxed_entry},
 };
 
 thread_local! { static DROP_LOG: Cell<isize> = const { Cell::new(0) }; }
@@ -748,6 +748,16 @@ fn wasm_codegen_trivial_scalar_body_emits_only_its_result() {
         operations.as_slice(),
         [Operator::I32Const { value: 2 }, Operator::End]
     ));
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_trivial_boxed_entry_keeps_runtime_context() {
+    let mut session = CompilerSession::new();
+    session.set_mir_optimization(MirOptimization::Enabled);
+    session.set_physical_mir_optimization(MirOptimization::Enabled);
+    let entry = compile(&mut session, "fn compute() -> int { 1 + 1 }");
+    let value = run_boxed_entry(&session, entry, WasmLimits::default()).unwrap();
+    assert_eq!(value.as_primitive_ty::<isize>(), Some(&2));
 }
 
 #[wasm_bindgen_test]
