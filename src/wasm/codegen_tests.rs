@@ -1144,10 +1144,12 @@ fn wasm_codegen_dispatch_and_local_storage() {
                 })
                 .unwrap();
             let mut dispatches = 0;
+            let mut direct_edges = 0;
             let mut loops = 0;
             for op in body.get_operators_reader().unwrap() {
                 match op.unwrap() {
                     Operator::BrTable { .. } => dispatches += 1,
+                    Operator::BrIf { .. } => direct_edges += 1,
                     Operator::Loop { .. } => loops += 1,
                     Operator::I32Load { .. }
                     | Operator::I32Load8U { .. }
@@ -1167,6 +1169,12 @@ fn wasm_codegen_dispatch_and_local_storage() {
             }
             assert_eq!(dispatches, usize::from(dispatched));
             assert_eq!(loops, usize::from(dispatched));
+            if dispatched {
+                assert!(
+                    direct_edges > 0,
+                    "an adjacent loop edge must branch directly"
+                );
+            }
         }
     }
 }

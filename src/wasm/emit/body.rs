@@ -292,13 +292,7 @@ impl<'a, 's> Body<'a, 's> {
                 allocation_end: this.local(ValType::I64),
             });
         }
-        if mode.projection()
-            || body.blocks().count() != 1
-            || !matches!(
-                body.block(body.entry()).terminator().kind,
-                TerminatorKind::Return | TerminatorKind::InvariantFailure { .. }
-            )
-        {
+        if !has_linear_control_flow(body, mode) {
             this.pc = Some(this.local(ValType::I32));
         }
         let addressed = this.address_observations();
@@ -1734,13 +1728,17 @@ impl<'a, 's> Body<'a, 's> {
             self.i(I::BrTable((0..count).collect::<Vec<_>>().into(), count));
             for block_id in self.body.blocks() {
                 self.i(I::End);
-                self.emit_block(block_id, Some(count - block_id.as_u32()))?;
+                let next = next_block(self.body, block_id);
+                self.emit_block(block_id, Some(count - block_id.as_u32()), next)?;
             }
             self.i(I::End);
             self.fail(FailureCode::Invariant);
             self.i(I::End);
         } else {
-            self.emit_block(self.body.entry(), None)?;
+            for block_id in self.body.blocks() {
+                let next = next_block(self.body, block_id);
+                self.emit_block(block_id, None, next)?;
+            }
         }
         if !self.fallthrough_return {
             self.i(I::Unreachable);
@@ -1753,7 +1751,12 @@ impl<'a, 's> Body<'a, 's> {
         })
     }
 
-    fn emit_block(&mut self, block_id: BlockId, dispatch_depth: Option<u32>) -> Result<(), String> {
+    fn emit_block(
+        &mut self,
+        block_id: BlockId,
+        dispatch_depth: Option<u32>,
+        next: Option<BlockId>,
+    ) -> Result<(), String> {
         let block = self.body.block(block_id);
         let operation_count = block.operations().len();
         for (index, operation) in block.operations().iter().enumerate() {
@@ -1780,34 +1783,59 @@ impl<'a, 's> Body<'a, 's> {
         };
         match &block.terminator().kind {
             TerminatorKind::Goto { target } => {
-                self.i(I::I32Const(target.as_u32() as i32));
-                self.jump(dispatch_depth);
+                self.branch(*target, dispatch_depth, next);
             }
             TerminatorKind::CondBr {
                 condition,
                 then_target,
                 else_target,
             } => {
-                self.i(I::I32Const(then_target.as_u32() as i32));
-                self.i(I::I32Const(else_target.as_u32() as i32));
-                self.read(condition)?;
-                self.i(I::Select);
-                self.jump(dispatch_depth);
+                if then_target == else_target {
+                    self.branch(*then_target, dispatch_depth, next);
+                } else if Some(*then_target) == next {
+                    self.read(condition)?;
+                    self.i(I::I32Eqz);
+                    self.i(I::I32Const(else_target.as_u32() as i32));
+                    self.branch_if(dispatch_depth);
+                } else if Some(*else_target) == next {
+                    self.read(condition)?;
+                    self.i(I::I32Const(then_target.as_u32() as i32));
+                    self.branch_if(dispatch_depth);
+                } else {
+                    self.i(I::I32Const(then_target.as_u32() as i32));
+                    self.i(I::I32Const(else_target.as_u32() as i32));
+                    self.read(condition)?;
+                    self.i(I::Select);
+                    self.jump(dispatch_depth);
+                }
             }
             TerminatorKind::SwitchVariant {
                 tag,
                 cases,
                 default,
             } => {
-                self.i(I::I32Const(default.as_u32() as i32));
-                for (case, target) in cases {
-                    self.i(I::I32Const(target.as_u32() as i32));
-                    self.value(tag)?;
-                    self.i(I::I32Const(self.session.variant_tag_id(*case) as i32));
-                    self.i(I::I32Ne);
-                    self.i(I::Select);
+                if Some(*default) == next {
+                    for (case, target) in cases {
+                        if Some(*target) == next {
+                            continue;
+                        }
+                        self.value(tag)?;
+                        self.i(I::I32Const(self.session.variant_tag_id(*case) as i32));
+                        self.i(I::I32Eq);
+                        self.i(I::I32Const(target.as_u32() as i32));
+                        self.branch_if(dispatch_depth);
+                    }
+                } else {
+                    self.i(I::I32Const(default.as_u32() as i32));
+                    for (case, target) in cases {
+                        self.i(I::I32Const(target.as_u32() as i32));
+                        self.value(tag)?;
+                        self.i(I::I32Const(self.session.variant_tag_id(*case) as i32));
+                        self.i(I::I32Ne);
+                        self.i(I::Select);
+                    }
+                    self.jump(dispatch_depth);
                 }
-                self.jump(dispatch_depth);
             }
             TerminatorKind::Invoke {
                 operation,
@@ -1815,13 +1843,33 @@ impl<'a, 's> Body<'a, 's> {
                 error,
             } => {
                 self.call_operation(operation, true)?;
-                self.i(I::If(BlockType::Result(ValType::I32)));
-                self.capture_failure();
-                self.i(I::I32Const(error.as_u32() as i32));
-                self.i(I::Else);
-                self.i(I::I32Const(normal.as_u32() as i32));
-                self.i(I::End);
-                self.jump(dispatch_depth);
+                if normal == error {
+                    self.i(I::If(BlockType::Empty));
+                    self.capture_failure();
+                    self.i(I::End);
+                    self.branch(*normal, dispatch_depth, next);
+                } else if Some(*normal) == next {
+                    self.i(I::If(BlockType::Empty));
+                    self.capture_failure();
+                    self.i(I::I32Const(error.as_u32() as i32));
+                    self.branch_from_nested(dispatch_depth);
+                    self.i(I::End);
+                } else if Some(*error) == next {
+                    self.i(I::If(BlockType::Empty));
+                    self.capture_failure();
+                    self.i(I::Else);
+                    self.i(I::I32Const(normal.as_u32() as i32));
+                    self.branch_from_nested(dispatch_depth);
+                    self.i(I::End);
+                } else {
+                    self.i(I::If(BlockType::Result(ValType::I32)));
+                    self.capture_failure();
+                    self.i(I::I32Const(error.as_u32() as i32));
+                    self.i(I::Else);
+                    self.i(I::I32Const(normal.as_u32() as i32));
+                    self.i(I::End);
+                    self.jump(dispatch_depth);
+                }
             }
             TerminatorKind::PropagateError | TerminatorKind::FailureDuringCleanup => {
                 self.propagate_failure();
@@ -1857,6 +1905,35 @@ impl<'a, 's> Body<'a, 's> {
             self.pc.expect("branch needs a dispatcher").as_u32(),
         ));
         self.i(I::Br(dispatch_depth.expect("branch needs a dispatcher")));
+    }
+
+    fn branch(&mut self, target: BlockId, dispatch_depth: Option<u32>, next: Option<BlockId>) {
+        if Some(target) == next {
+            return;
+        }
+        self.i(I::I32Const(target.as_u32() as i32));
+        self.jump(dispatch_depth);
+    }
+
+    /// Dispatch conditionally; expects `[condition, target_pc]` on the operand stack.
+    fn branch_if(&mut self, dispatch_depth: Option<u32>) {
+        self.i(I::LocalSet(
+            self.pc.expect("branch needs a dispatcher").as_u32(),
+        ));
+        self.i(I::BrIf(dispatch_depth.expect("branch needs a dispatcher")));
+    }
+
+    /// Dispatch from inside one emitted Wasm control construct.
+    fn branch_from_nested(&mut self, dispatch_depth: Option<u32>) {
+        self.i(I::LocalSet(
+            self.pc.expect("branch needs a dispatcher").as_u32(),
+        ));
+        self.i(I::Br(
+            dispatch_depth
+                .expect("branch needs a dispatcher")
+                .checked_add(1)
+                .expect("Wasm branch depth"),
+        ));
     }
 
     fn operation(&mut self, op: &Operation) -> Result<(), String> {
@@ -2441,17 +2518,46 @@ pub(super) fn operation_needs_helper_locals(operation: &Operation) -> bool {
         )
 }
 
+fn next_block(body: &Function, block: BlockId) -> Option<BlockId> {
+    (block.as_index() + 1 < body.blocks().count())
+        .then(|| BlockId::from_index(block.as_index() + 1))
+}
+
 fn has_fallthrough_return(body: &Function, mode: BodyMode) -> bool {
     matches!(mode, BodyMode::Normal)
-        && body.blocks().count() == 1
+        && has_linear_control_flow(body, mode)
         && matches!(
-            body.block(body.entry()).terminator().kind,
+            body.block(body.blocks().last().expect("function has a block"))
+                .terminator()
+                .kind,
             TerminatorKind::Return
         )
 }
 
+/// Whether storage order is already a complete structured representation of the body.
+///
+/// Such a body needs neither a program-counter local nor a dispatcher: every non-final block falls
+/// directly into its sole successor, and the final block leaves the function. Projection bodies
+/// retain the dispatcher because suspension persists a resume block as a numeric program counter.
+fn has_linear_control_flow(body: &Function, mode: BodyMode) -> bool {
+    if !matches!(mode, BodyMode::Normal) {
+        return false;
+    }
+    let block_count = body.blocks().count();
+    body.blocks().all(|block_id| {
+        let terminator = &body.block(block_id).terminator().kind;
+        if block_id.as_index() + 1 == block_count {
+            terminator.successors().next().is_none()
+        } else {
+            matches!(terminator, TerminatorKind::Goto { target }
+                if target.as_index() == block_id.as_index() + 1)
+        }
+    })
+}
+
 fn forwarded_result(body: &Function, signature: &CallAbi, mode: BodyMode) -> Option<Value> {
     if !matches!(mode, BodyMode::Normal)
+        || body.blocks().count() != 1
         || signature.fallible
         || !matches!(signature.result, ResultKind::Direct(_))
         || !has_fallthrough_return(body, mode)
@@ -2474,4 +2580,49 @@ fn forwarded_result(body: &Function, signature: &CallAbi, mode: BodyMode) -> Opt
         return None;
     }
     Some(last.operands[0].clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mir::{BasicBlock, terminator::Terminator};
+
+    fn control_flow(terminators: Vec<Terminator>) -> Function {
+        Function::new(
+            "control_flow".into(),
+            CallResultConvention::Value,
+            Vec::new(),
+            Vec::new(),
+            terminators
+                .into_iter()
+                .map(|terminator| BasicBlock::new(Vec::new(), terminator))
+                .collect(),
+        )
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn only_adjacent_goto_chains_are_linear() {
+        let span = Location::new_synthesized();
+        let linear = control_flow(vec![
+            Terminator::goto(span, BlockId::from_index(1)),
+            Terminator::goto(span, BlockId::from_index(2)),
+            Terminator::ret(span),
+        ]);
+        assert!(has_linear_control_flow(&linear, BodyMode::Normal));
+        assert!(has_fallthrough_return(&linear, BodyMode::Normal));
+        assert!(!has_linear_control_flow(
+            &linear,
+            BodyMode::ProjectionStart {
+                resume: DispatchTableSlotId::from_index(0),
+            }
+        ));
+
+        let skipping = control_flow(vec![
+            Terminator::goto(span, BlockId::from_index(2)),
+            Terminator::ret(span),
+            Terminator::ret(span),
+        ]);
+        assert!(!has_linear_control_flow(&skipping, BodyMode::Normal));
+        assert!(!has_fallthrough_return(&skipping, BodyMode::Normal));
+    }
 }
