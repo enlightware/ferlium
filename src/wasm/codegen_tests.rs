@@ -1403,10 +1403,16 @@ fn wasm_codegen_structured_control_flow_and_local_storage() {
         let mut session = CompilerSession::new();
         session.set_mir_optimization(optimization);
         session.set_physical_mir_optimization(optimization);
-        for (source, has_loop) in [
-            ("fn compute(x: int) -> int { x * 3 + 1 }", false),
+        for (source, has_loop, has_branch) in [
+            ("fn compute(x: int) -> int { x * 3 + 1 }", false, false),
             (
                 "fn compute(x: int) -> int { let mut n = 0; loop { if n >= x { break; }; n += 1; }; n }",
+                true,
+                false,
+            ),
+            (
+                "fn compute(x: bool, y: bool) -> int { if x { if y { 1 } else { 2 } } else { 3 } }",
+                false,
                 true,
             ),
         ] {
@@ -1422,11 +1428,13 @@ fn wasm_codegen_structured_control_flow_and_local_storage() {
                 .unwrap();
             let mut dispatches = 0;
             let mut direct_edges = 0;
+            let mut branches = 0;
             let mut loops = 0;
             for op in body.get_operators_reader().unwrap() {
                 match op.unwrap() {
                     Operator::BrTable { .. } => dispatches += 1,
                     Operator::BrIf { .. } => direct_edges += 1,
+                    Operator::If { .. } => branches += 1,
                     Operator::Loop { .. } => loops += 1,
                     Operator::I32Load { .. }
                     | Operator::I32Load8U { .. }
@@ -1444,7 +1452,10 @@ fn wasm_codegen_structured_control_flow_and_local_storage() {
                     _ => (),
                 }
             }
-            assert_eq!(dispatches, 0, "a natural loop must not use the dispatcher");
+            assert_eq!(
+                dispatches, 0,
+                "structured source must not use the dispatcher: {optimization:?}: {source}"
+            );
             assert_eq!(loops, usize::from(has_loop));
             if has_loop {
                 assert!(
@@ -1452,7 +1463,41 @@ fn wasm_codegen_structured_control_flow_and_local_storage() {
                     "an adjacent loop edge must branch directly"
                 );
             }
+            if has_branch {
+                assert!(branches >= 2, "nested source branches must use Wasm ifs");
+            }
         }
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_structured_branches_execute_both_arms() {
+    let source =
+        "fn compute(x: int) -> int { if x < 0 { -x } else { if x == 0 { 7 } else { x + 1 } } }";
+    let mut session = CompilerSession::new();
+    let entry = compile(&mut session, source);
+    let code = CompiledProgram::compile(&session, entry).unwrap();
+    let dispatches = Parser::new(0)
+        .parse_all(code.bytes())
+        .find_map(|payload| match payload.unwrap() {
+            Payload::CodeSectionEntry(body) => Some(
+                body.get_operators_reader()
+                    .unwrap()
+                    .into_iter()
+                    .map(Result::unwrap)
+                    .filter(|operation| matches!(operation, Operator::BrTable { .. }))
+                    .count(),
+            ),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(dispatches, 0, "the executed entry must use structured Wasm");
+    let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+    for (input, expected) in [(-5, 5), (0, 7), (9, 10)] {
+        assert_eq!(
+            instance.run((input,), WasmLimits::default()).unwrap(),
+            expected
+        );
     }
 }
 

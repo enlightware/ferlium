@@ -12,13 +12,15 @@
 //! numbered in depth-first order, so a dominance query is an interval containment and answers in
 //! constant time.
 //!
-//! The queries the verifier asks are unused in a release build, where it is compiled out entirely.
+//! The physical verifier uses dominance for validity checks, while Wasm control-flow recovery uses
+//! dominance on the reversed CFG to find post-dominating joins.
 #![allow(dead_code)]
 
 use crate::graph::reverse_postorder;
 
 /// The dominator tree of a rooted graph, and constant-time dominance queries over it.
 pub(crate) struct Dominance {
+    immediate_dominator: Vec<Option<usize>>,
     children: Vec<Vec<usize>>,
     preorder: Vec<usize>,
     postorder: Vec<usize>,
@@ -102,6 +104,7 @@ impl Dominance {
         }
 
         Self {
+            immediate_dominator,
             children,
             preorder,
             postorder,
@@ -117,6 +120,11 @@ impl Dominance {
             && self.is_reachable(usage)
             && self.preorder[definition] <= self.preorder[usage]
             && self.postorder[usage] <= self.postorder[definition]
+    }
+
+    /// The closest strict dominator of `node`, or `None` when `node` is unreachable or the root.
+    pub(crate) fn immediate_dominator(&self, node: usize) -> Option<usize> {
+        self.immediate_dominator[node].filter(|dominator| *dominator != node)
     }
 
     /// The nodes `node` immediately dominates, which is what a walk of the tree recurses into.

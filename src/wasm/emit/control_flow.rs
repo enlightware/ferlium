@@ -10,6 +10,9 @@ use crate::{
 
 use super::body::BodyMode;
 
+/// Bounds recursive region recovery and the nesting depth of emitted Wasm control constructs.
+const MAX_STRUCTURED_DEPTH: usize = 128;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct NaturalLoop {
     pub(super) header: BlockId,
@@ -18,9 +21,19 @@ pub(super) struct NaturalLoop {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct IfRegion {
+    pub(super) header: BlockId,
+    pub(super) then_regions: Vec<ControlRegion>,
+    pub(super) else_regions: Vec<ControlRegion>,
+    /// The shared MIR join, or `None` when both arms terminate at the function exit.
+    pub(super) join: Option<BlockId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum ControlRegion {
     Block(BlockId),
     Loop(NaturalLoop),
+    If(IfRegion),
 }
 
 impl ControlRegion {
@@ -28,6 +41,7 @@ impl ControlRegion {
         match self {
             Self::Block(block) => *block,
             Self::Loop(region) => region.header,
+            Self::If(region) => region.header,
         }
     }
 }
@@ -45,9 +59,10 @@ impl ControlFlow {
     ///
     /// Natural loops are discovered from dominance backedges rather than source syntax. Blocks are
     /// then scheduled along their CFG edges, so a loop's exit need not follow its body in MIR storage
-    /// order. This first form accepts disjoint loops whose edges are fallthroughs, backedges to the
-    /// header, or exits to one shared block. The dispatcher remains the fallback for nested,
-    /// irreducible, or more generally joined control flow.
+    /// order. Disjoint loops accept fallthroughs, backedges to the header, and exits to one shared
+    /// block. Outside loops, conditional branches whose arms reconverge at one post-dominating join
+    /// become recursive Wasm `if` regions. The dispatcher remains the fallback for nested loops,
+    /// irreducible control flow, and branch forms not represented here.
     pub(super) fn of(body: &Function, mode: BodyMode) -> Self {
         if !matches!(mode, BodyMode::Normal) {
             return Self::Dispatcher;
@@ -178,40 +193,187 @@ impl ControlFlow {
             });
         }
 
-        let mut regions = Vec::new();
-        let mut visited = vec![false; block_count];
-        let mut current = body.entry().as_index();
-        loop {
-            if visited[current] {
-                return Self::Dispatcher;
+        let mut active = vec![true; block_count];
+        let mut structured_successors = successors.clone();
+        for (index, region) in loops.iter().enumerate() {
+            for block in &region.blocks {
+                if *block == region.header {
+                    structured_successors[block.as_index()] = vec![region.exit.as_index()];
+                } else {
+                    active[block.as_index()] = false;
+                    structured_successors[block.as_index()].clear();
+                }
+                debug_assert_eq!(loop_for_block[block.as_index()], Some(index));
             }
-            if let Some(loop_index) = loop_for_block[current] {
-                let region = &loops[loop_index];
-                if region.header.as_index() != current {
-                    return Self::Dispatcher;
+        }
+        for targets in &mut structured_successors {
+            // CondBr and Invoke expose their duplicate pair adjacently. Multiway terminators remain
+            // dispatcher-only, so this is deliberately not general successor interning.
+            targets.dedup();
+        }
+        if active.iter().enumerate().any(|(source, is_active)| {
+            *is_active
+                && structured_successors[source]
+                    .iter()
+                    .any(|target| !active[*target])
+        }) {
+            return Self::Dispatcher;
+        }
+        let Some((postdominance, synthetic_exit)) = postdominance(&structured_successors, &active)
+        else {
+            return Self::Dispatcher;
+        };
+        let mut builder = RegionBuilder {
+            body,
+            successors: &structured_successors,
+            postdominance: &postdominance,
+            loops: &loops,
+            loop_for_block: &loop_for_block,
+            active: &active,
+            synthetic_exit,
+            visited: vec![false; block_count],
+        };
+        let Some(regions) = builder.sequence(body.entry().as_index(), None, 0) else {
+            return Self::Dispatcher;
+        };
+        if builder.visited.iter().any(|visited| !visited) {
+            return Self::Dispatcher;
+        }
+        Self::Structured(regions)
+    }
+}
+
+/// Computes post-dominance over the loop-collapsed graph.
+///
+/// A synthetic exit joins all terminal blocks. Returning `None` means some active node cannot
+/// reach an exit, so it cannot participate in the acyclic region tree.
+fn postdominance(successors: &[Vec<usize>], active: &[bool]) -> Option<(Dominance, usize)> {
+    let block_count = successors.len();
+    let exit = block_count;
+    let mut reverse = vec![Vec::new(); block_count + 1];
+    for (source, targets) in successors
+        .iter()
+        .enumerate()
+        .filter(|(source, _)| active[*source])
+    {
+        if targets.is_empty() {
+            reverse[exit].push(source);
+        } else {
+            for &target in targets {
+                reverse[target].push(source);
+            }
+        }
+    }
+    let dominance = Dominance::of(&reverse, exit);
+    if active
+        .iter()
+        .enumerate()
+        .any(|(node, active)| *active && !dominance.is_reachable(node))
+    {
+        return None;
+    }
+    Some((dominance, exit))
+}
+
+struct RegionBuilder<'a> {
+    body: &'a Function,
+    successors: &'a [Vec<usize>],
+    postdominance: &'a Dominance,
+    loops: &'a [NaturalLoop],
+    loop_for_block: &'a [Option<usize>],
+    active: &'a [bool],
+    synthetic_exit: usize,
+    visited: Vec<bool>,
+}
+
+impl RegionBuilder<'_> {
+    fn sequence(
+        &mut self,
+        start: usize,
+        stop: Option<usize>,
+        depth: usize,
+    ) -> Option<Vec<ControlRegion>> {
+        let mut regions = Vec::new();
+        let mut current = start;
+        while Some(current) != stop {
+            if !self.active[current] || self.visited[current] {
+                return None;
+            }
+            if let Some(loop_index) = self.loop_for_block[current] {
+                let region = &self.loops[loop_index];
+                if region.header.as_index() != current
+                    || region
+                        .blocks
+                        .iter()
+                        .any(|block| self.visited[block.as_index()])
+                {
+                    return None;
                 }
                 for block in &region.blocks {
-                    visited[block.as_index()] = true;
+                    self.visited[block.as_index()] = true;
                 }
                 current = region.exit.as_index();
                 regions.push(ControlRegion::Loop(region.clone()));
                 continue;
             }
-            visited[current] = true;
-            regions.push(ControlRegion::Block(BlockId::from_index(current)));
-            let mut targets = successors[current].iter().copied();
-            let Some(target) = targets.next() else {
-                break;
-            };
-            if targets.any(|other| other != target) {
-                return Self::Dispatcher;
+
+            let block = BlockId::from_index(current);
+            let successors = &self.successors[current];
+            match successors.as_slice() {
+                [] => {
+                    if stop.is_some() {
+                        return None;
+                    }
+                    self.visited[current] = true;
+                    regions.push(ControlRegion::Block(block));
+                    return Some(regions);
+                }
+                [target] => {
+                    self.visited[current] = true;
+                    regions.push(ControlRegion::Block(block));
+                    current = *target;
+                }
+                [_, _] => {
+                    if depth == MAX_STRUCTURED_DEPTH {
+                        return None;
+                    }
+                    let TerminatorKind::CondBr {
+                        then_target,
+                        else_target,
+                        ..
+                    } = self.body.block(block).terminator().kind
+                    else {
+                        return None;
+                    };
+                    let join = self.postdominance.immediate_dominator(current)?;
+                    self.visited[current] = true;
+                    let join_block =
+                        (join != self.synthetic_exit).then(|| BlockId::from_index(join));
+                    let then_regions = self.sequence(
+                        then_target.as_index(),
+                        join_block.map(BlockId::as_index),
+                        depth + 1,
+                    )?;
+                    let else_regions = self.sequence(
+                        else_target.as_index(),
+                        join_block.map(BlockId::as_index),
+                        depth + 1,
+                    )?;
+                    regions.push(ControlRegion::If(IfRegion {
+                        header: block,
+                        then_regions,
+                        else_regions,
+                        join: join_block,
+                    }));
+                    let Some(join) = join_block else {
+                        return Some(regions);
+                    };
+                    current = join.as_index();
+                }
+                _ => return None,
             }
-            current = target;
         }
-        if visited.iter().any(|visited| !visited) {
-            return Self::Dispatcher;
-        }
-        Self::Structured(regions)
+        Some(regions)
     }
 }
 
@@ -327,6 +489,99 @@ mod tests {
         assert_eq!(
             ControlFlow::of(&multiple_exits, BodyMode::Normal),
             ControlFlow::Dispatcher
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn recovers_nested_acyclic_branches() {
+        let span = Location::new_synthesized();
+        // The outer else arm is empty. Its then arm contains a nested diamond before the shared
+        // outer join, and neither join follows its branches in storage order by construction.
+        let nested = control_flow(vec![
+            Terminator::cond_br(
+                span,
+                Value::Constant(ConstantId::from_index(0)),
+                BlockId::from_index(1),
+                BlockId::from_index(5),
+            ),
+            Terminator::cond_br(
+                span,
+                Value::Constant(ConstantId::from_index(1)),
+                BlockId::from_index(2),
+                BlockId::from_index(3),
+            ),
+            Terminator::goto(span, BlockId::from_index(4)),
+            Terminator::goto(span, BlockId::from_index(4)),
+            Terminator::goto(span, BlockId::from_index(5)),
+            Terminator::ret(span),
+        ]);
+        assert_eq!(
+            ControlFlow::of(&nested, BodyMode::Normal),
+            ControlFlow::Structured(vec![
+                ControlRegion::If(IfRegion {
+                    header: BlockId::from_index(0),
+                    then_regions: vec![
+                        ControlRegion::If(IfRegion {
+                            header: BlockId::from_index(1),
+                            then_regions: vec![ControlRegion::Block(BlockId::from_index(2))],
+                            else_regions: vec![ControlRegion::Block(BlockId::from_index(3))],
+                            join: Some(BlockId::from_index(4)),
+                        }),
+                        ControlRegion::Block(BlockId::from_index(4)),
+                    ],
+                    else_regions: Vec::new(),
+                    join: Some(BlockId::from_index(5)),
+                }),
+                ControlRegion::Block(BlockId::from_index(5)),
+            ])
+        );
+
+        // Separate terminal arms share the synthetic function exit and form a terminal Wasm if.
+        let early_return = control_flow(vec![
+            Terminator::cond_br(
+                span,
+                Value::Constant(ConstantId::from_index(0)),
+                BlockId::from_index(1),
+                BlockId::from_index(2),
+            ),
+            Terminator::ret(span),
+            Terminator::ret(span),
+        ]);
+        assert_eq!(
+            ControlFlow::of(&early_return, BodyMode::Normal),
+            ControlFlow::Structured(vec![ControlRegion::If(IfRegion {
+                header: BlockId::from_index(0),
+                then_regions: vec![ControlRegion::Block(BlockId::from_index(1))],
+                else_regions: vec![ControlRegion::Block(BlockId::from_index(2))],
+                join: None,
+            })])
+        );
+
+        let guard_chain = |guard_count| {
+            let mut terminators = Vec::with_capacity(guard_count * 2 + 1);
+            for guard in 0..guard_count {
+                terminators.push(Terminator::cond_br(
+                    span,
+                    Value::Constant(ConstantId::from_index(guard)),
+                    BlockId::from_index(guard_count + guard),
+                    BlockId::from_index(if guard + 1 == guard_count {
+                        guard_count * 2
+                    } else {
+                        guard + 1
+                    }),
+                ));
+            }
+            terminators.extend((0..=guard_count).map(|_| Terminator::ret(span)));
+            control_flow(terminators)
+        };
+        assert!(matches!(
+            ControlFlow::of(&guard_chain(MAX_STRUCTURED_DEPTH), BodyMode::Normal),
+            ControlFlow::Structured(_)
+        ));
+        assert_eq!(
+            ControlFlow::of(&guard_chain(MAX_STRUCTURED_DEPTH + 1), BodyMode::Normal),
+            ControlFlow::Dispatcher,
+            "excessive structured nesting must retain the non-recursive dispatcher"
         );
     }
 }

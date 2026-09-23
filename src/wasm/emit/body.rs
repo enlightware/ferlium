@@ -51,7 +51,7 @@ use super::{
     Global, RuntimeGlobals, ScalarType, StringLiterals,
     adapters::NativeOptionalResultAdapter,
     allocate_frame, callable, callee, context_pointer,
-    control_flow::{ControlFlow, ControlRegion},
+    control_flow::{ControlFlow, ControlRegion, IfRegion},
     dictionary_table, emit_failure, enter_frame, frame_address, frame_bytes, layout_witness,
     leave_frame, memarg, operations, scalar, subscript, wasm_intrinsic,
 };
@@ -1873,38 +1873,7 @@ impl<'a, 's> Body<'a, 's> {
                 self.i(I::End);
             }
             ControlFlow::Structured(regions) => {
-                for (index, region) in regions.iter().enumerate() {
-                    match region {
-                        ControlRegion::Loop(region) => {
-                            // The outer block is `break`; the inner loop is `continue`.
-                            self.i(I::Block(BlockType::Empty));
-                            self.i(I::Loop(BlockType::Empty));
-                            for (block_index, &block_id) in region.blocks.iter().enumerate() {
-                                let next = Some(
-                                    region
-                                        .blocks
-                                        .get(block_index + 1)
-                                        .copied()
-                                        .unwrap_or(region.exit),
-                                );
-                                self.emit_block(
-                                    block_id,
-                                    BranchContext::Loop {
-                                        header: region.header,
-                                        exit: region.exit,
-                                    },
-                                    next,
-                                )?;
-                            }
-                            self.i(I::End);
-                            self.i(I::End);
-                        }
-                        ControlRegion::Block(block_id) => {
-                            let next = regions.get(index + 1).map(ControlRegion::entry);
-                            self.emit_block(*block_id, BranchContext::Linear, next)?;
-                        }
-                    }
-                }
+                self.emit_regions(&regions, None)?;
             }
         }
         if !self.fallthrough_return {
@@ -1918,14 +1887,97 @@ impl<'a, 's> Body<'a, 's> {
         })
     }
 
-    fn emit_block(
+    fn emit_regions(
         &mut self,
-        block_id: BlockId,
-        context: BranchContext,
-        next: Option<BlockId>,
+        regions: &[ControlRegion],
+        following: Option<BlockId>,
     ) -> Result<(), String> {
-        let block = self.body.block(block_id);
-        let operations = block.operations();
+        for (index, region) in regions.iter().enumerate() {
+            let next = regions
+                .get(index + 1)
+                .map(ControlRegion::entry)
+                .or(following);
+            match region {
+                ControlRegion::Loop(region) => {
+                    debug_assert_eq!(next, Some(region.exit));
+                    // The outer block is `break`; the inner loop is `continue`.
+                    self.i(I::Block(BlockType::Empty));
+                    self.i(I::Loop(BlockType::Empty));
+                    for (block_index, &block_id) in region.blocks.iter().enumerate() {
+                        let next = Some(
+                            region
+                                .blocks
+                                .get(block_index + 1)
+                                .copied()
+                                .unwrap_or(region.exit),
+                        );
+                        self.emit_block(
+                            block_id,
+                            BranchContext::Loop {
+                                header: region.header,
+                                exit: region.exit,
+                            },
+                            next,
+                        )?;
+                    }
+                    self.i(I::End);
+                    self.i(I::End);
+                }
+                ControlRegion::If(region) => {
+                    debug_assert_eq!(next, region.join);
+                    self.emit_if(region)?;
+                }
+                ControlRegion::Block(block_id) => {
+                    self.emit_block(*block_id, BranchContext::Linear, next)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_if(&mut self, region: &IfRegion) -> Result<(), String> {
+        self.emit_operations(region.header)?;
+        let block = self.body.block(region.header);
+        let TerminatorKind::CondBr {
+            condition,
+            then_target,
+            else_target,
+        } = &block.terminator().kind
+        else {
+            unreachable!("if region must end in a conditional branch")
+        };
+        debug_assert_eq!(
+            Some(*then_target),
+            region
+                .then_regions
+                .first()
+                .map(ControlRegion::entry)
+                .or(region.join)
+        );
+        debug_assert_eq!(
+            Some(*else_target),
+            region
+                .else_regions
+                .first()
+                .map(ControlRegion::entry)
+                .or(region.join)
+        );
+        let condition = condition.clone();
+        let span = block.terminator().span;
+
+        let start = self.code.byte_len();
+        self.read(&condition)?;
+        self.i(I::If(BlockType::Empty));
+        self.record_source(start, span);
+        self.emit_regions(&region.then_regions, region.join)?;
+        self.i(I::Else);
+        self.emit_regions(&region.else_regions, region.join)?;
+        self.i(I::End);
+        Ok(())
+    }
+
+    fn emit_operations(&mut self, block_id: BlockId) -> Result<(), String> {
+        let operations = self.body.block(block_id).operations();
         let operation_count = operations.len();
         let mut index = 0;
         while index < operations.len() {
@@ -1960,6 +2012,17 @@ impl<'a, 's> Body<'a, 's> {
             self.record_source(start, operation.span);
             index += 1;
         }
+        Ok(())
+    }
+
+    fn emit_block(
+        &mut self,
+        block_id: BlockId,
+        context: BranchContext,
+        next: Option<BlockId>,
+    ) -> Result<(), String> {
+        self.emit_operations(block_id)?;
+        let block = self.body.block(block_id);
         let start = self.code.byte_len();
         let span = match &block.terminator().kind {
             TerminatorKind::Invoke { operation, .. } => operation.span,
