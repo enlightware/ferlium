@@ -239,6 +239,12 @@ pub(crate) struct ValueRoles {
 }
 
 impl ValueRoles {
+    /// Number of slots in the sparse register-role table.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn register_count(&self) -> usize {
+        self.registers.len()
+    }
+
     /// The roles a signature fixes, with no register defined yet.
     pub(crate) fn for_signature(
         parameters: &[Parameter],

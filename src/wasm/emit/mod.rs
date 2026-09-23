@@ -7,6 +7,7 @@ mod adapters;
 mod body;
 mod callable;
 mod control_flow;
+mod expressions;
 mod subscript;
 
 use self::{

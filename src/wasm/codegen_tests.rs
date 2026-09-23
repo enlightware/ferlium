@@ -1471,6 +1471,109 @@ fn wasm_codegen_structured_control_flow_and_local_storage() {
 }
 
 #[wasm_bindgen_test]
+fn wasm_codegen_stackifies_single_use_scalar_expressions() {
+    let mut session = CompilerSession::new();
+    let entry = compile(
+        &mut session,
+        "fn compute(x: int, y: int) -> bool { let sum = x + 1; let scaled = sum * 2; scaled == y }",
+    );
+    let code = CompiledProgram::compile(&session, entry).unwrap();
+    let body = Parser::new(0)
+        .parse_all(code.bytes())
+        .find_map(|payload| match payload.unwrap() {
+            Payload::CodeSectionEntry(body) => Some(body),
+            _ => None,
+        })
+        .unwrap();
+    let operations = body
+        .get_operators_reader()
+        .unwrap()
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let add = operations
+        .iter()
+        .position(|operation| matches!(operation, Operator::I32Add))
+        .expect("fixture must retain its addition");
+    let mul = operations
+        .iter()
+        .position(|operation| matches!(operation, Operator::I32Mul))
+        .expect("fixture must retain its multiplication");
+    assert!(
+        add < mul
+            && !operations[add + 1..mul].iter().any(|operation| matches!(
+                operation,
+                Operator::LocalGet { .. } | Operator::LocalSet { .. }
+            )),
+        "the single-use sum must flow directly into the multiplication: {operations:?}"
+    );
+
+    let mut instance = code.instantiate::<(isize, isize), bool>().unwrap();
+    assert!(instance.run((3, 8), WasmLimits::default()).unwrap());
+    assert!(!instance.run((3, 9), WasmLimits::default()).unwrap());
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_bounds_deep_scalar_expression_emission() {
+    let expression = |depth| {
+        (0..depth).fold("x".to_owned(), |expression, _| {
+            format!("({expression} + 1)")
+        })
+    };
+    let mut session = CompilerSession::new();
+    let entry = compile(
+        &mut session,
+        &format!(
+            "#[inline(never)] fn at_limit(x: int) -> int {{ {} }}
+             #[inline(never)] fn over_limit(x: int) -> int {{ {} }}
+             fn compute(x: int) -> int {{ at_limit(x) + over_limit(x) }}",
+            // Each source addition becomes an alternating place writer and scalar load in
+            // physical MIR, so 64 additions exercise approximately 128 producer hops.
+            expression(64),
+            expression(66),
+        ),
+    );
+    let code = CompiledProgram::compile(&session, entry).unwrap();
+    let maximum_stackified_adds = Parser::new(0)
+        .parse_all(code.bytes())
+        .filter_map(|payload| match payload.unwrap() {
+            Payload::CodeSectionEntry(body) => Some(
+                body.get_operators_reader()
+                    .unwrap()
+                    .into_iter()
+                    .map(Result::unwrap)
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .flat_map(|operations| {
+            operations
+                .split(|operation| {
+                    matches!(
+                        operation,
+                        Operator::LocalGet { .. } | Operator::LocalSet { .. }
+                    )
+                })
+                .map(|segment| {
+                    segment
+                        .iter()
+                        .filter(|operation| matches!(operation, Operator::I32Add))
+                        .count()
+                })
+                .collect::<Vec<_>>()
+        })
+        .max()
+        .unwrap();
+    assert!(
+        maximum_stackified_adds >= 64,
+        "the expression at the depth limit must actually be emitted as one operand-stack chain"
+    );
+
+    let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+    assert_eq!(instance.run((12,), WasmLimits::default()).unwrap(), 154);
+}
+
+#[wasm_bindgen_test]
 fn wasm_codegen_structured_branches_execute_both_arms() {
     let source =
         "fn compute(x: int) -> int { if x < 0 { -x } else { if x == 0 { 7 } else { x + 1 } } }";

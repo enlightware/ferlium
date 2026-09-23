@@ -52,8 +52,11 @@ use super::{
     adapters::NativeOptionalResultAdapter,
     allocate_frame, callable, callee, context_pointer,
     control_flow::{ControlFlow, ControlRegion, IfRegion},
-    dictionary_table, emit_failure, enter_frame, frame_address, frame_bytes, layout_witness,
-    leave_frame, memarg, operations, scalar, subscript, wasm_intrinsic,
+    dictionary_table, emit_failure, enter_frame,
+    expressions::{
+        Analysis as ExpressionAnalysis, Plan as ExpressionPlan, Source as ExpressionSource,
+    },
+    frame_address, frame_bytes, layout_witness, leave_frame, memarg, operations, scalar, subscript,
 };
 
 /// Code ranges generated for MIR operations and terminators, with their source spans.
@@ -64,6 +67,8 @@ enum Storage {
     Local(WasmLocalId),
     /// Byte offset from the function's frame base in linear memory.
     Stack(u32),
+    /// A single-assignment scalar place whose value is emitted at its only read.
+    Expression,
 }
 
 #[derive(Clone, Copy)]
@@ -152,6 +157,12 @@ impl BodyMode {
     }
 }
 
+fn returns_direct_result(mode: BodyMode, signature: &CallAbi) -> bool {
+    matches!(mode, BodyMode::Normal)
+        && !signature.fallible
+        && matches!(signature.result, ResultKind::Direct(_))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct SuspensionLayout {
     pub inputs: Vec<(u32, ValType)>,
@@ -210,7 +221,8 @@ pub(super) struct Body<'a, 's> {
     track_depth: bool,
     forwarded_result: Option<Value>,
     fallthrough_return: bool,
-    comparison_fusions: FxHashMap<ValueId, KnownCallee>,
+    analysis: ExpressionAnalysis,
+    expressions: ExpressionPlan,
     pub(super) code: WasmFunction,
     source_map: BodySourceMap,
 }
@@ -246,7 +258,15 @@ impl<'a, 's> Body<'a, 's> {
         let dispatched = matches!(control_flow, ControlFlow::Dispatcher);
         let forwarded_result = forwarded_result(body, signature, mode);
         let fallthrough_return = has_fallthrough_return(body, mode, &control_flow);
-        let comparison_fusions = comparison_fusions(body, session);
+        let roles = ValueRoles::derive(body);
+        let (analysis, expressions) = ExpressionAnalysis::of(
+            body,
+            &roles,
+            callees,
+            program,
+            session,
+            returns_direct_result(mode, signature) && forwarded_result.is_none(),
+        );
         let mut this = Self {
             body,
             signature,
@@ -277,7 +297,7 @@ impl<'a, 's> Body<'a, 's> {
             callees,
             program,
             session,
-            roles: ValueRoles::derive(body),
+            roles,
             registers: FxHashMap::default(),
             storage: FxHashMap::default(),
             locals: Vec::new(),
@@ -296,7 +316,8 @@ impl<'a, 's> Body<'a, 's> {
             track_depth,
             forwarded_result,
             fallthrough_return,
-            comparison_fusions,
+            analysis,
+            expressions,
             code: WasmFunction::new([]),
             source_map: Vec::new(),
         };
@@ -313,11 +334,10 @@ impl<'a, 's> Body<'a, 's> {
         if dispatched {
             this.pc = Some(this.local(ValType::I32));
         }
-        let addressed = this.address_observations();
         // Constants remain immediate unless an indirect argument or pointer use needs storage.
         for (index, constant) in body.constants().iter().enumerate() {
             let value = Value::Constant(ConstantId::from_index(index));
-            if addressed.contains(&value) || ScalarType::of(constant.ty).is_err() {
+            if this.analysis.is_addressed(&value) || ScalarType::of(constant.ty).is_err() {
                 this.slot(value, this.size(&MirType::Lowered(constant.ty))?)?;
             }
         }
@@ -333,7 +353,9 @@ impl<'a, 's> Body<'a, 's> {
             {
                 let value = Value::Parameter(ParameterId::from_index(index));
                 let ty = this.pointee(&value)?;
-                if addressed.contains(&value) {
+                if this.expressions.has_place(&value) {
+                    this.storage.insert(value, Storage::Expression);
+                } else if this.analysis.is_addressed(&value) {
                     this.slot(value, ty.size())?;
                 } else {
                     let local = if parameter.kind == ParameterKind::Return {
@@ -373,6 +395,9 @@ impl<'a, 's> Body<'a, 's> {
                     this.reserve_scratch(payload)?;
                 }
                 if let Some(id) = operation.result_id() {
+                    if this.expressions.has_pending_value(id) {
+                        continue;
+                    }
                     if let OperationKind::BorrowSubscriptMember { mut_member, .. } = operation.kind
                     {
                         let source = operation.operands[0].clone();
@@ -490,7 +515,9 @@ impl<'a, 's> Body<'a, 's> {
                     };
                     if let Some(ty) = storage_ty {
                         let value = Value::Register(id);
-                        if !addressed.contains(&value)
+                        if this.expressions.has_place(&value) {
+                            this.storage.insert(value, Storage::Expression);
+                        } else if !this.analysis.is_addressed(&value)
                             && let Ok(ty) = scalar(&ty)
                         {
                             let local = this.local(ty.wasm());
@@ -513,7 +540,7 @@ impl<'a, 's> Body<'a, 's> {
                         .into_owned();
                     if let ValueRole::Materialized(MirType::Lowered(ty)) = &role
                         && let Ok(ty) = ScalarType::of(*ty)
-                        && addressed.contains(&Value::Register(id))
+                        && this.analysis.is_addressed(&Value::Register(id))
                     {
                         this.slot(Value::Register(id), ty.size())?;
                     }
@@ -1158,6 +1185,18 @@ impl<'a, 's> Body<'a, 's> {
         if failed && !self.signature.fallible {
             return Err("failure in an infallible entry".into());
         }
+        // Read a direct result while its frame and evidence are still live. Keeping the value on
+        // the Wasm operand stack across the epilogue also lets expression stackification defer its
+        // producer safely to this point.
+        if returns_direct_result(self.mode, self.signature) {
+            if let Some(result) = self.forwarded_result.clone() {
+                self.value(&result)?;
+            } else {
+                let result =
+                    Value::Parameter(ParameterId::from_index(self.body.parameters().len() - 1));
+                self.load_place(&result, self.pointee(&result)?)?;
+            }
+        }
         for index in 0..self.owned_evidence.len() {
             self.release_evidence(&Value::Register(self.owned_evidence[index]))?;
         }
@@ -1204,14 +1243,6 @@ impl<'a, 's> Body<'a, 's> {
             self.i(I::I32Const(0));
         } else if matches!(self.mode, BodyMode::ProjectionResume) || self.signature.fallible {
             self.i(I::I32Const(i32::from(failed)));
-        } else if matches!(self.signature.result, ResultKind::Direct(_)) {
-            if let Some(result) = self.forwarded_result.clone() {
-                self.value(&result)?;
-            } else {
-                let result =
-                    Value::Parameter(ParameterId::from_index(self.body.parameters().len() - 1));
-                self.load_place(&result, self.pointee(&result)?)?;
-            }
         }
         if explicit_return {
             self.i(I::Return);
@@ -1348,7 +1379,12 @@ impl<'a, 's> Body<'a, 's> {
         Ok(())
     }
 
-    fn call_operation(&mut self, op: &Operation, invoked: bool) -> Result<(), String> {
+    fn call_operation(
+        &mut self,
+        op: &Operation,
+        invoked: bool,
+        intrinsic: Option<KnownCallee>,
+    ) -> Result<(), String> {
         if matches!(op.kind, OperationKind::Project { .. }) {
             return self.project(op, invoked);
         }
@@ -1390,7 +1426,7 @@ impl<'a, 's> Body<'a, 's> {
             }
             return self.call_dictionary(callee, &inputs, output, invoked);
         };
-        if let Some(intrinsic) = wasm_intrinsic(self.session, op) {
+        if let Some(intrinsic) = intrinsic {
             return self.call_intrinsic(intrinsic, &inputs, output, invoked);
         }
         // Static calls bypass fixed Value adapters without adding a source call-depth frame.
@@ -1540,75 +1576,6 @@ impl<'a, 's> Body<'a, 's> {
         id
     }
 
-    /// Only explicit content reads/writes permit promotion. Taking an offset, storing a pointer,
-    /// passing an indirect argument, or any unmodelled use keeps that root in memory. No alias
-    /// analysis is needed: deriving an alias already observes the original root's address.
-    fn address_observations(&self) -> FxHashSet<Value> {
-        let mut addressed = FxHashSet::default();
-        for block in self.body.blocks() {
-            let block = self.body.block(block);
-            for op in operations(block) {
-                let intrinsic = wasm_intrinsic(self.session, op);
-                let call_abi = if intrinsic.is_none()
-                    && matches!(op.kind, OperationKind::Call { .. })
-                    && let Value::Function(target) = &op.operands[0]
-                {
-                    self.callees
-                        .get(&self.program.direct_entry(*target))
-                        .map(|(_, abi)| *abi)
-                } else {
-                    None
-                };
-                for (index, operand) in op.operands.iter().enumerate() {
-                    let observes = match &op.kind {
-                        OperationKind::Load
-                        | OperationKind::Clear
-                        | OperationKind::Memcpy
-                        | OperationKind::Move
-                        | OperationKind::MoveBytes { .. }
-                        | OperationKind::CompareEqual => false,
-                        OperationKind::Store if index == 1 => false,
-                        OperationKind::Store => self
-                            .roles
-                            .get(operand, self.body.constants())
-                            .is_some_and(|r| r.is_place_operand()),
-                        OperationKind::AddressOffset { .. }
-                        | OperationKind::AddressOffsetPlace { .. }
-                            if index == 1 =>
-                        {
-                            false
-                        }
-                        OperationKind::Call { ty, .. } => {
-                            if intrinsic.is_some() {
-                                false
-                            } else if index + 1 == op.operands.len()
-                                && ty.result_convention.has_result_place()
-                            {
-                                call_abi.is_none_or(CallAbi::output)
-                            } else {
-                                !index
-                                    .checked_sub(1)
-                                    .and_then(|i| call_abi?.parameters.get(i))
-                                    .is_some_and(|p| matches!(p, ParameterTransport::Direct(_)))
-                            }
-                        }
-                        _ => true,
-                    };
-                    if observes {
-                        addressed.insert(operand.clone());
-                    }
-                }
-            }
-            if !matches!(
-                block.terminator().kind,
-                TerminatorKind::CondBr { .. } | TerminatorKind::Invoke { .. }
-            ) {
-                addressed.extend(block.terminator().operands().iter().cloned());
-            }
-        }
-        addressed
-    }
-
     fn slot(&mut self, value: Value, size: u32) -> Result<(), String> {
         // All slots are 8-aligned, including distinct zero-sized places.
         let offset = self.reserve_bytes(size)?;
@@ -1642,6 +1609,9 @@ impl<'a, 's> Body<'a, 's> {
                 self.frame_address(offset);
             }
             Some(Storage::Local(_)) => return Err("address requested for promoted storage".into()),
+            Some(Storage::Expression) => {
+                return Err("address requested for stackified storage".into());
+            }
             None => self.value(value)?,
         }
         Ok(())
@@ -1675,6 +1645,14 @@ impl<'a, 's> Body<'a, 's> {
         }
         match value {
             Value::Register(id) => {
+                if let Some(source) = self.expressions.take_value(*id) {
+                    let body = self.body;
+                    self.operation(
+                        source,
+                        &body.block(source.block).operations()[source.operation_id().as_index()],
+                    )?;
+                    return Ok(());
+                }
                 let local = self
                     .registers
                     .get(id)
@@ -1757,28 +1735,43 @@ impl<'a, 's> Body<'a, 's> {
     }
 
     fn load_place(&mut self, value: &Value, ty: ScalarType) -> Result<(), String> {
-        if let Some(&Storage::Local(local)) = self.storage.get(value) {
-            self.i(I::LocalGet(local.as_u32()));
-        } else {
-            self.address(value)?;
-            self.load(ty);
+        match self.storage.get(value).copied() {
+            Some(Storage::Local(local)) => self.i(I::LocalGet(local.as_u32())),
+            Some(Storage::Expression) => {
+                let source = self
+                    .expressions
+                    .take_place(value)
+                    .ok_or("stackified scalar place read more than once")?;
+                let body = self.body;
+                self.operation(
+                    source,
+                    &body.block(source.block).operations()[source.operation_id().as_index()],
+                )?;
+            }
+            Some(Storage::Stack(_)) | None => {
+                self.address(value)?;
+                self.load(ty);
+            }
         }
         Ok(())
     }
 
     // A memory store needs its address below the value; a local store needs only the value.
     fn prepare_store(&mut self, destination: &Value) -> Result<(), String> {
-        if !matches!(self.storage.get(destination), Some(Storage::Local(_))) {
+        if !matches!(
+            self.storage.get(destination),
+            Some(Storage::Local(_) | Storage::Expression)
+        ) {
             self.address(destination)?;
         }
         Ok(())
     }
 
     fn finish_store(&mut self, destination: &Value, ty: ScalarType) {
-        if let Some(&Storage::Local(local)) = self.storage.get(destination) {
-            self.i(I::LocalSet(local.as_u32()));
-        } else {
-            self.store(ty);
+        match self.storage.get(destination) {
+            Some(Storage::Local(local)) => self.i(I::LocalSet(local.as_u32())),
+            Some(Storage::Expression) => (),
+            Some(Storage::Stack(_)) | None => self.store(ty),
         }
     }
 
@@ -1879,6 +1872,10 @@ impl<'a, 's> Body<'a, 's> {
         if !self.fallthrough_return {
             self.i(I::Unreachable);
         }
+        debug_assert!(
+            self.expressions.is_fully_emitted(),
+            "every stackified scalar expression and place is consumed"
+        );
         self.i(I::End);
         Ok(EmittedBody {
             function: self.code,
@@ -1982,6 +1979,20 @@ impl<'a, 's> Body<'a, 's> {
         let mut index = 0;
         while index < operations.len() {
             let operation = &operations[index];
+            if self.expressions.skips(
+                ExpressionSource::from_index(block_id, index),
+                &self.analysis,
+            ) {
+                index += 1;
+                continue;
+            }
+            if operation
+                .result_id()
+                .is_some_and(|id| self.expressions.has_pending_value(id))
+            {
+                index += 1;
+                continue;
+            }
             if self.forwarded_result.is_some()
                 && block_id == self.body.entry()
                 && index + 1 == operation_count
@@ -1990,9 +2001,9 @@ impl<'a, 's> Body<'a, 's> {
                 continue;
             }
             if let Some(test) = operations.get(index + 1)
-                && let Some(&intrinsic) = test
+                && let Some(intrinsic) = test
                     .result_id()
-                    .and_then(|result| self.comparison_fusions.get(&result))
+                    .and_then(|result| self.analysis.comparison_fusion(result))
             {
                 let start = self.code.byte_len();
                 self.comparison_predicate(intrinsic, operation, test)?;
@@ -2002,13 +2013,14 @@ impl<'a, 's> Body<'a, 's> {
                 continue;
             }
             let start = self.code.byte_len();
-            self.operation(operation).map_err(|e| {
-                format!(
-                    "{} in block {}: {e}",
-                    OperationKindDiscriminant::from(&operation.kind),
-                    block_id.as_u32()
-                )
-            })?;
+            self.operation(ExpressionSource::from_index(block_id, index), operation)
+                .map_err(|e| {
+                    format!(
+                        "{} in block {}: {e}",
+                        OperationKindDiscriminant::from(&operation.kind),
+                        block_id.as_u32()
+                    )
+                })?;
             self.record_source(start, operation.span);
             index += 1;
         }
@@ -2089,7 +2101,8 @@ impl<'a, 's> Body<'a, 's> {
                 normal,
                 error,
             } => {
-                self.call_operation(operation, true)?;
+                let source = ExpressionSource::from_index(block_id, block.operations().len());
+                self.call_operation(operation, true, self.analysis.intrinsic(source))?;
                 if normal == error {
                     self.i(I::If(BlockType::Empty));
                     self.capture_failure();
@@ -2206,7 +2219,7 @@ impl<'a, 's> Body<'a, 's> {
         }
     }
 
-    fn operation(&mut self, op: &Operation) -> Result<(), String> {
+    fn operation(&mut self, source: ExpressionSource, op: &Operation) -> Result<(), String> {
         use OperationKind::*;
         let args = &op.operands;
         if matches!(op.kind, Store | Move | Memcpy | MoveBytes { .. })
@@ -2722,7 +2735,7 @@ impl<'a, 's> Body<'a, 's> {
                 self.i(I::End);
             }
             Call { .. } | Clone { .. } | Drop { .. } | DropInitialized { .. } => {
-                self.call_operation(op, false)?
+                self.call_operation(op, false, self.analysis.intrinsic(source))?
             }
             RuntimeAlloc { .. } => {
                 self.read(&args[0])?;
@@ -2740,6 +2753,9 @@ impl<'a, 's> Body<'a, 's> {
 
     fn finish_operation_result(&mut self, op: &Operation) -> Result<(), String> {
         if let Some(id) = op.result_id() {
+            if self.expressions.has_value(id) {
+                return Ok(());
+            }
             self.i(I::LocalSet(self.registers[&id].as_u32()));
             let value = Value::Register(id);
             if self.storage.contains_key(&value) {
@@ -2783,78 +2799,6 @@ impl<'a, 's> Body<'a, 's> {
         });
         Ok(())
     }
-}
-
-/// Adjacent comparison-code calls whose only result observation is an equality test can select a
-/// target predicate directly. Requiring adjacency keeps the original input values live without
-/// needing alias analysis. Requiring a fresh result allocation, observed only by the call output
-/// and test input, lets emission omit the intermediate code without leaving aliased storage stale.
-fn comparison_fusions(
-    body: &Function,
-    session: &CompilerSession,
-) -> FxHashMap<ValueId, KnownCallee> {
-    let mut uses = FxHashMap::<ValueId, usize>::default();
-    let mut definitions = FxHashMap::<ValueId, &Operation>::default();
-    for block in body.blocks() {
-        let block = body.block(block);
-        for operation in block.operations() {
-            if let Some(result) = operation.result_id() {
-                definitions.insert(result, operation);
-            }
-            for operand in &operation.operands {
-                if let Value::Register(id) = operand {
-                    *uses.entry(*id).or_default() += 1;
-                }
-            }
-        }
-        for operand in block.terminator().operands() {
-            if let Value::Register(id) = operand {
-                *uses.entry(*id).or_default() += 1;
-            }
-        }
-    }
-
-    let mut fused = FxHashMap::default();
-    for block in body.blocks() {
-        for pair in body.block(block).operations().windows(2) {
-            let [call, test] = pair else { unreachable!() };
-            let Some(intrinsic @ (KnownCallee::IntCmpCode | KnownCallee::FloatCmpCode)) =
-                wasm_intrinsic(session, call)
-            else {
-                continue;
-            };
-            let OperationKind::Call { ty, .. } = &call.kind else {
-                continue;
-            };
-            if !ty.result_convention.has_result_place()
-                || !matches!(test.kind, OperationKind::CompareEqual)
-                || call.operands.len() != 4
-                || test.operands.len() != 2
-            {
-                continue;
-            }
-            let output = &call.operands[3];
-            let Value::Register(output_id) = output else {
-                continue;
-            };
-            let Value::Pattern(pattern) = &test.operands[1] else {
-                continue;
-            };
-            if test.operands[0] != *output
-                || uses.get(output_id).copied() != Some(2)
-                || !definitions.get(output_id).is_some_and(|definition| {
-                    matches!(definition.kind, OperationKind::Alloca { .. })
-                })
-                || !matches!(pattern.as_primitive_ty::<isize>(), Some(-1..=1))
-            {
-                continue;
-            }
-            if let Some(result) = test.result_id() {
-                fused.insert(result, intrinsic);
-            }
-        }
-    }
-    fused
 }
 
 fn needs_helper_locals(body: &Function, mode: BodyMode) -> bool {
