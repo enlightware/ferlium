@@ -8,7 +8,8 @@ import FlatLinkButton from './components/FlatLinkButton.vue';
 import ConsoleOutput from './components/ConsoleOutput.vue';
 import { demoCodes } from './demo-codes';
 import { defined, executionModes } from './types';
-import { onMounted } from 'vue';
+import { onMounted, onUnmounted } from 'vue';
+import { panicEvent, reloadPage, saveCrashState, takeCrashState } from './crash-recovery';
 import type { ExecutionMode, IrText, SourceRange } from './types';
 
 const demoTitles = demoCodes.map(([title, _]) => title);
@@ -19,11 +20,22 @@ const annotationOptionTitles = [
 	"Show simplified type annotations.",
 	"Show full type annotations.",
 ];
+// Set when this page load replaces a Rust instance that crashed.
+const restoredState = takeCrashState();
 const editor = ref<typeof CodeEditor>();
 const console = ref<typeof ConsoleOutput>();
 const isRunDisabled = ref(false);
-const annotationMode = ref<AnnotationMode>("light");
-const executionMode = ref<ExecutionMode>("hir");
+const annotationMode = ref<AnnotationMode>(
+	annotationModes.find(mode => mode === restoredState?.annotationMode) ?? "light"
+);
+const executionMode = ref<ExecutionMode>(
+	executionModes.find(mode => mode.value === restoredState?.executionMode)?.value ?? "hir"
+);
+// Whether the restored code is being compiled, so a crash doing so must not reload in a loop.
+let isRestoring = false;
+// Set once the reload is triggered: a panic is followed by the trap it causes, which must not
+// overwrite the saved panic message.
+let isReloading = false;
 const ir = ref<IrText>();
 const sourceSelection = ref<SourceRange>();
 const irTitle = computed(() => defined(executionModes.find(mode => mode.value === executionMode.value)).label);
@@ -115,7 +127,51 @@ function setRunAvailability(status: boolean) {
 	isRunDisabled.value = !status;
 }
 
+/**
+ * Reload the page to replace the Rust instance that is panicking, keeping the playground state.
+ * This runs within the panic hook, so it must not call into Rust.
+ */
+function recoverFromPanic(event: Event) {
+	if (isReloading) {
+		return;
+	}
+	const panic = String((event as CustomEvent).detail);
+	const saved = saveCrashState({
+		code: defined(editor.value).getText(),
+		executionMode: executionMode.value,
+		annotationMode: annotationMode.value,
+		message: `The compiler crashed and the playground was reloaded: ${panic}`,
+		compile: !isRestoring,
+	});
+	if (saved) {
+		isReloading = true;
+		reloadPage();
+	} else {
+		const consoleOutput = defined(console.value);
+		consoleOutput.appendHtml(`<span class="error">${escapeHtml(
+			`The compiler crashed and the playground state could not be saved, reload the page! ${panic}`
+		)}</span>`);
+	}
+}
+
+onUnmounted(() => window.removeEventListener(panicEvent, recoverFromPanic));
+
 onMounted(() => {
+	window.addEventListener(panicEvent, recoverFromPanic);
+	if (restoredState !== undefined) {
+		const consoleOutput = defined(console.value);
+		consoleOutput.appendHtml(`<span class="error">${escapeHtml(restoredState.message)}</span>`);
+		if (!restoredState.compile) {
+			consoleOutput.appendHtml("<span class=\"warning\">Compiling this code crashed again, it will be compiled at the next edit.</span>");
+		}
+		isRestoring = true;
+		try {
+			defined(editor.value).setText(restoredState.code, restoredState.compile);
+		} finally {
+			isRestoring = false;
+		}
+		return;
+	}
 	const queryString = window.location.search;
 	const urlParams = new URLSearchParams(queryString);
 	const code = urlParams.get('code');
@@ -136,7 +192,7 @@ onMounted(() => {
 			</SimpleButton>
 			<DropdownSelect
 				:items="executionModes.map(mode => mode.label)"
-				:initial-index="0"
+				:initial-index="executionModes.findIndex(mode => mode.value === executionMode)"
 				placeholder="Execution"
 				@selection-changed="updateExecutionMode"
 			/>
@@ -151,7 +207,7 @@ onMounted(() => {
 			<DropdownSelect
 				:items="[...annotationModes]"
 				:item-titles="annotationOptionTitles"
-				:initial-index="1"
+				:initial-index="annotationModes.indexOf(annotationMode)"
 				placeholder="annotation"
 				@selection-changed="updateAnnotationMode"
 			/>

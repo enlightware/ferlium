@@ -17,7 +17,7 @@ log = "0.4"
 wasm-logger = "0.2.0"
 html-escape = "0.2.13"
 ferlium = { path = "../..", default-features = false, features = ["wasm-text"] }
-web-sys = { version = "0.3.105", features = ["Document", "Element", "Node", "Text", "Window"] }
+web-sys = { version = "0.3.105", features = ["CustomEvent", "CustomEventInit", "Document", "Element", "EventTarget", "Node", "Text", "Window"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.78"

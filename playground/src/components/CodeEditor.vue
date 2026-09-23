@@ -12,6 +12,7 @@ import { basicSetup } from "codemirror";
 import { renderAnnotationsPlugin, setAnnotations } from "../annotation-extension";
 import { languageExtension } from "../language/language-extension";
 import { positionPanel } from "../position-panel-extension";
+import { reportEngineTrap } from "../crash-recovery";
 
 const editor = ref<HTMLElement>();
 const view = ref<EditorView>();
@@ -46,6 +47,7 @@ const myKeymap = keymap.of([
 
 let forceLint = false;
 let annotationsAvailable = false;
+let skipCompilation = false;
 
 function linterNeedsRefresh() {
 	if (forceLint) {
@@ -75,6 +77,10 @@ const extensions = [
 	linter(() => diagnostics, { delay: 0, needsRefresh: linterNeedsRefresh }),
 	lintGutter(),
 	editorTheme,
+	EditorView.exceptionSink.of(error => {
+		reportEngineTrap(error);
+		console.error(error);
+	}),
 ];
 
 function fillDiagnostics(diagnosticData: ErrorData[]) {
@@ -100,9 +106,9 @@ function processUpdate(update: ViewUpdate) {
 		emit("sourceSelection", { from: selection.from, to: selection.to });
 	}
 	if (update.docChanged) {
-		const report = compiler.compile(text);
-		fillDiagnostics(report.diagnostics);
-		if (!report.succeeded) {
+		const report = skipCompilation ? undefined : compiler.compile(text);
+		fillDiagnostics(report?.diagnostics ?? []);
+		if (!report?.succeeded) {
 			annotationsAvailable = false;
 			setAnnotations(view, []);
 			emit("setRunAvailability", false);
@@ -150,6 +156,7 @@ function refreshIr() {
 				: compiler.mir_text(props.executionMode === "optimized-mir")) as IrText;
 		emit("irChanged", ir.text === "" ? undefined : ir);
 	} catch (error) {
+		reportEngineTrap(error);
 		emit("irChanged", props.executionMode === "wasm"
 			? { text: `Unable to generate Wasm: ${String(error)}`, source_map: [] }
 			: props.executionMode === "physical-mir"
@@ -161,12 +168,20 @@ function refreshIr() {
 watch(() => props.annotationMode, refreshAnnotations);
 watch(() => props.executionMode, refreshIr);
 
-const setText = (newText: string) => {
+/** Replace the source; without `compile`, it stays uncompiled until the next edit. */
+const setText = (newText: string, compile = true) => {
 	if (view.value) {
 		const text = view.value.state.doc.toString();
-		view.value.dispatch({changes: {from: 0, to: text.length, insert: newText}});
+		skipCompilation = !compile;
+		try {
+			view.value.dispatch({changes: {from: 0, to: text.length, insert: newText}});
+		} finally {
+			skipCompilation = false;
+		}
 	}
 };
+
+const getText = () => view.value?.state.doc.toString() ?? "";
 
 const runCode = (executionMode: ExecutionMode = props.executionMode) => {
 	if (executionMode === "wasm") {
@@ -186,6 +201,7 @@ const runCode = (executionMode: ExecutionMode = props.executionMode) => {
 		}
 		return result;
 	} catch (e) {
+		reportEngineTrap(e);
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		return `The compiler crashed, reload the page! Error: ${(e as any).toString()}`;
 	}
@@ -200,6 +216,7 @@ const selectRange = (range: SourceRange) => {
 
 defineExpose({
 	setText,
+	getText,
 	runCode,
 	selectRange,
 });

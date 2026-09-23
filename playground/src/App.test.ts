@@ -42,6 +42,11 @@ vi.mock("./compiler-api", () => ({
 	},
 }));
 
+vi.mock("./crash-recovery", async importOriginal => ({
+	...await importOriginal<typeof import("./crash-recovery")>(),
+	reloadPage: vi.fn(),
+}));
+
 vi.mock("./annotation-extension", () => ({
 	renderAnnotationsPlugin: [],
 	setAnnotations: vi.fn(),
@@ -56,6 +61,23 @@ vi.mock("./position-panel-extension", () => ({
 }));
 
 import App from "./App.vue";
+import { panicEvent, reloadPage, type CrashState } from "./crash-recovery";
+
+const crashStateKey = "ferlium-playground-crash-state";
+
+function savedCrashState(): CrashState {
+	return JSON.parse(sessionStorage.getItem(crashStateKey) ?? "null") as CrashState;
+}
+
+/** Simulate a Rust panic: the panic hook dispatches the event, then the instance traps. */
+function panic(message: string): never {
+	window.dispatchEvent(new CustomEvent(panicEvent, { detail: message }));
+	throw new WebAssembly.RuntimeError("unreachable");
+}
+
+function editorText(): string | undefined {
+	return document.body.querySelector(".source-pane .cm-content")?.textContent ?? undefined;
+}
 
 /** The toolbar exposes the execution mode, the code sample and the annotation mode, in that order. */
 function selects(wrapper: VueWrapper) {
@@ -71,6 +93,8 @@ describe("App", () => {
 	let wrapper: VueWrapper | undefined;
 
 	afterEach(() => {
+		sessionStorage.clear();
+		vi.mocked(reloadPage).mockClear();
 		wrapper?.unmount();
 		wrapper = undefined;
 		document.body.replaceChildren();
@@ -164,5 +188,81 @@ describe("App", () => {
 		await selects(app).executionMode.setValue("phy. MIR");
 		await selects(app).sample.setValue("Factorial");
 		await vi.waitFor(() => expect(irText()).toContain("Unable to prepare MIR: unsupported native ABI"));
+	});
+
+	it("reloads with the playground state when the Rust instance crashes", async () => {
+		const app = mountApp();
+		await selects(app).executionMode.setValue("opt. MIR");
+		await selects(app).sample.setValue("Factorial");
+		compiler.runMir.mockImplementationOnce(() => panic("panicked at src/lib.rs:1:1:\nboom"));
+		await app.get(".execution-controls button").trigger("click");
+		expect(reloadPage).toHaveBeenCalledOnce();
+		expect(savedCrashState()).toEqual({
+			code: expect.stringContaining("fn factorial"),
+			executionMode: "optimized-mir",
+			annotationMode: "light",
+			message: "The compiler crashed and the playground was reloaded: panicked at src/lib.rs:1:1:\nboom",
+			compile: true,
+		});
+	});
+
+	it("reloads with the playground state when the engine traps without a panic", async () => {
+		const app = mountApp();
+		compiler.compile.mockImplementationOnce(() => { throw new RangeError("Maximum call stack size exceeded"); });
+		await selects(app).sample.setValue("Factorial");
+		expect(reloadPage).toHaveBeenCalledOnce();
+		expect(savedCrashState()).toMatchObject({
+			code: expect.stringContaining("fn factorial"),
+			message: "The compiler crashed and the playground was reloaded: RangeError: Maximum call stack size exceeded",
+			compile: true,
+		});
+	});
+
+	it("reloads when IR generation traps", async () => {
+		const app = mountApp();
+		compiler.wasmText.mockImplementationOnce(() => { throw new RangeError("Maximum call stack size exceeded"); });
+		await selects(app).executionMode.setValue("Wasm");
+		await selects(app).sample.setValue("Factorial");
+		await vi.waitFor(() => expect(reloadPage).toHaveBeenCalledOnce());
+		expect(savedCrashState()).toMatchObject({ executionMode: "wasm", compile: true });
+	});
+
+	it("restores the playground state after a crash", async () => {
+		sessionStorage.setItem(crashStateKey, JSON.stringify({
+			code: "fn restored() {}",
+			executionMode: "physical-mir",
+			annotationMode: "full",
+			message: "The compiler crashed and the playground was reloaded: boom",
+			compile: true,
+		}));
+		const app = mountApp();
+		expect(editorText()).toBe("fn restored() {}");
+		expect(compiler.compile).toHaveBeenLastCalledWith("fn restored() {}");
+		expect(selects(app).executionMode.element.value).toBe("phy. MIR");
+		await vi.waitFor(() => expect(irText()).toContain("Physical MIR of fn restored"));
+		expect(app.text()).toContain("The compiler crashed and the playground was reloaded: boom");
+		expect(sessionStorage.getItem(crashStateKey)).toBe(null);
+	});
+
+	it("defers compiling restored code whose compilation crashed again", () => {
+		sessionStorage.setItem(crashStateKey, JSON.stringify({
+			code: "fn crashing() {}",
+			executionMode: "hir",
+			annotationMode: "light",
+			message: "boom",
+			compile: true,
+		}));
+		compiler.compile.mockImplementationOnce(() => panic("boom"));
+		mountApp();
+		expect(reloadPage).toHaveBeenCalledOnce();
+		expect(savedCrashState()).toMatchObject({ code: "fn crashing() {}", compile: false });
+
+		wrapper?.unmount();
+		document.body.replaceChildren();
+		compiler.compile.mockClear();
+		const app = mountApp();
+		expect(editorText()).toBe("fn crashing() {}");
+		expect(compiler.compile).not.toHaveBeenCalled();
+		expect(app.text()).toContain("it will be compiled at the next edit");
 	});
 });

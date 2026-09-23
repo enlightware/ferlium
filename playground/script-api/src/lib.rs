@@ -1,6 +1,8 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
+use std::{panic, sync::Once};
+
 use wasm_bindgen::prelude::*;
 
 use ferlium::ide::PositionEncoding;
@@ -100,11 +102,37 @@ pub fn init_rust_api() {
 }
 
 pub fn set_panic_hook() {
-    // When the `console_error_panic_hook` feature is enabled, we can call the
-    // `set_panic_hook` function at least once during initialization, and then
-    // we will get better error messages if our code ever panics.
-    console_error_panic_hook::set_once();
+    // Log panics to the browser console, and tell the playground, which reloads the page to replace
+    // this instance, as a panic aborts it.
+    static SET_HOOK: Once = Once::new();
+    SET_HOOK.call_once(|| {
+        panic::set_hook(Box::new(|info| {
+            console_error_panic_hook::hook(info);
+            notify_panic(&info.to_string());
+        }));
+    });
 }
+
+/// Listened to by `App.vue` in the playground, keep in sync.
+#[cfg(target_arch = "wasm32")]
+const PANIC_EVENT: &str = "ferlium-panic";
+
+/// Synchronously dispatch the panic event on the window, with the message as detail.
+#[cfg(target_arch = "wasm32")]
+fn notify_panic(message: &str) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let init = web_sys::CustomEventInit::new();
+    init.set_detail(&JsValue::from_str(message));
+    if let Ok(event) = web_sys::CustomEvent::new_with_event_init_dict(PANIC_EVENT, &init) {
+        // Nothing more can be done if dispatching fails; the message is in the console anyway.
+        let _ = window.dispatch_event(&event);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn notify_panic(_message: &str) {}
 
 extern "C" fn console_print(message: &FerliumString) {
     append_to_playground_console(message.as_ref());
