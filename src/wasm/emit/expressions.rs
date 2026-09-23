@@ -484,6 +484,8 @@ enum Uses {
     One(Source),
     Two,
     Multiple,
+    /// Emission may skip one of the uses, so the value cannot be deferred to its consumer.
+    Elidable,
 }
 
 impl Uses {
@@ -492,13 +494,14 @@ impl Uses {
             Self::None => Self::One(source),
             Self::One(_) => Self::Two,
             Self::Two | Self::Multiple => Self::Multiple,
+            Self::Elidable => Self::Elidable,
         };
     }
 
     fn one(self) -> Option<Source> {
         match self {
             Self::One(source) => Some(source),
-            Self::None | Self::Two | Self::Multiple => None,
+            Self::None | Self::Two | Self::Multiple | Self::Elidable => None,
         }
     }
 
@@ -709,9 +712,18 @@ impl<'a> OperandScan<'a> {
     ) {
         for (index, operand) in operation.operands.iter().enumerate() {
             self.operand(operand, source, classify_access(operation, index));
+            if is_elidable_operand(operation, index) {
+                self.elidable_operand(operand);
+            }
             if observes_address(operation, index, intrinsic, call_abi, self.roles, self.body) {
                 self.mark_addressed(operand);
             }
+        }
+    }
+
+    fn elidable_operand(&mut self, operand: &Value) {
+        if let Value::Register(id) = operand {
+            self.value_uses[id.as_index()] = Uses::Elidable;
         }
     }
 
@@ -795,6 +807,14 @@ fn observes_address(
         }
         _ => true,
     }
+}
+
+/// Whether emission may skip reading an operand.
+///
+/// Scalar byte moves are emitted as a load and store of their pointee type, leaving their explicit
+/// size unread.
+fn is_elidable_operand(operation: &Operation, index: usize) -> bool {
+    matches!(operation.kind, OperationKind::MoveBytes { .. }) && index == 2
 }
 
 fn classify_access(op: &Operation, index: usize) -> Option<AccessKind> {
