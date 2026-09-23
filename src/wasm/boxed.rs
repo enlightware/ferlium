@@ -51,6 +51,9 @@ pub(super) fn native_outputs(
     outputs
 }
 
+const FUNCTION_RESULT_UNSUPPORTED: &str = "function values cannot be returned to the host yet";
+const SUBSCRIPT_RESULT_UNSUPPORTED: &str = "subscript values cannot be returned to the host yet";
+
 fn error(message: impl Into<String>) -> String {
     message.into()
 }
@@ -174,9 +177,8 @@ pub(super) fn validate_result(
         match &*structural.data() {
             TypeKind::Native(_) if outputs.contains_key(&structural) => Ok(()),
             TypeKind::Native(_) => Err(error("native boxed Wasm result has no export glue")),
-            TypeKind::Function(_) | TypeKind::Subscript(_) => {
-                Err(error("host callable results are unsupported"))
-            }
+            TypeKind::Function(_) => Err(error(FUNCTION_RESULT_UNSUPPORTED)),
+            TypeKind::Subscript(_) => Err(error(SUBSCRIPT_RESULT_UNSUPPORTED)),
             TypeKind::Never => Ok(()),
             TypeKind::Variable(_) | TypeKind::Named(_) => {
                 Err(error("unresolved boxed Wasm result type"))
@@ -362,8 +364,11 @@ pub(super) fn export(
                                 })?;
                                 values.push(unsafe { output(address) });
                             }
-                            TypeKind::Function(_) | TypeKind::Subscript(_) => {
-                                return Err(error("host callable results are unsupported"));
+                            TypeKind::Function(_) => {
+                                return Err(error(FUNCTION_RESULT_UNSUPPORTED));
+                            }
+                            TypeKind::Subscript(_) => {
+                                return Err(error(SUBSCRIPT_RESULT_UNSUPPORTED));
                             }
                             TypeKind::Never => {
                                 return Err(error("successful never-valued Wasm result"));
