@@ -21,6 +21,10 @@ const compiler = vi.hoisted(() => {
 			html_message: () => "42: int",
 			error_data: () => undefined,
 		})),
+		runWasm: vi.fn(() => ({
+			html_message: () => "120: int",
+			error_data: () => undefined,
+		})),
 	};
 });
 
@@ -36,6 +40,7 @@ vi.mock("./compiler-api", () => ({
 		run_expr() { return compiler.runHir(); }
 		run_expr_mir(optimized: boolean) { return compiler.runMir(optimized); }
 		run_expr_physical_mir() { return compiler.runPhysicalMir(); }
+		run_expr_wasm() { return compiler.runWasm(); }
 		mir_text() { return compiler.mirText(); }
 		physical_mir_text() { return compiler.physicalMirText(); }
 		wasm_text() { return compiler.wasmText(); }
@@ -158,7 +163,7 @@ describe("App", () => {
 		expect(compiler.runMir).toHaveBeenCalledWith(true);
 	});
 
-	it("inspects Wasm without executing any interpreter", async () => {
+	it("inspects and executes Wasm without executing any interpreter", async () => {
 		for (const run of [compiler.runHir, compiler.runMir, compiler.runPhysicalMir]) {
 			run.mockClear();
 		}
@@ -170,7 +175,8 @@ describe("App", () => {
 		expect(compiler.runHir).not.toHaveBeenCalled();
 		expect(compiler.runMir).not.toHaveBeenCalled();
 		expect(compiler.runPhysicalMir).not.toHaveBeenCalled();
-		expect(app.text()).toContain("Wasm execution is not available in the playground yet");
+		expect(compiler.runWasm).toHaveBeenCalledOnce();
+		expect(app.text()).toContain("120: int");
 	});
 
 	it("shows Wasm generation errors in the IR pane", async () => {

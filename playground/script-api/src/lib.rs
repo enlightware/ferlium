@@ -75,6 +75,11 @@ impl PlaygroundCompiler {
         self.inner.wasm_text()
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub fn run_expr_wasm(&mut self) -> Option<ExecutionResult> {
+        self.inner.run_expr_wasm()
+    }
+
     pub fn get_annotations(&mut self) -> Vec<AnnotationData> {
         self.inner.get_annotations()
     }
@@ -236,5 +241,46 @@ mod tests {
                 && entry.source_from <= entry.source_to
                 && entry.source_to as usize <= source.encode_utf16().count()
         }));
+    }
+
+    #[wasm_bindgen_test]
+    fn wasm_execution_in_browser() {
+        set_panic_hook();
+        let mut compiler = PlaygroundCompiler::new();
+        assert!(
+            compiler
+                .compile("fn triple(x: int) -> int { x * 3 }\ntriple(14)")
+                .succeeded
+        );
+        assert_eq!(compiler.run_expr_wasm().unwrap().html_message(), "42: int");
+        // Print goes through the playground's own native module.
+        assert!(compiler.compile(r#"print("hello"); 1"#).succeeded);
+        assert_eq!(compiler.run_expr_wasm().unwrap().html_message(), "1: int");
+    }
+
+    #[wasm_bindgen_test]
+    fn wasm_execution_errors_in_browser() {
+        set_panic_hook();
+        let mut compiler = PlaygroundCompiler::new();
+        let errors = [
+            ("fn f() -> float { 1.0 / 0 }\nf()", "Division by zero"),
+            (
+                "fn recurse(n: int) -> int { recurse(n + 1) }\nrecurse(0)",
+                "Call depth limit exceeded",
+            ),
+            ("fn spin() -> int { loop { } }\nspin()", "fuel"),
+            (
+                "fn identity(x: int) -> int { x }\nidentity",
+                "function values cannot be returned to the host yet",
+            ),
+        ];
+        for (source, expected) in errors {
+            assert!(compiler.compile(source).succeeded, "{source}");
+            let message = compiler.run_expr_wasm().unwrap().html_message();
+            assert!(message.contains(expected), "{source}: {message}");
+        }
+        // A failed execution must leave the instance usable.
+        assert!(compiler.compile("40 + 2").succeeded);
+        assert_eq!(compiler.run_expr_wasm().unwrap().html_message(), "42: int");
     }
 }

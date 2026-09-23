@@ -13,12 +13,17 @@ use crate::{
     execution::{DEFAULT_INTERACTIVE_FUEL_LIMIT, ExecutionTarget, ReferenceInterpreterLimits},
     format::FormatWith,
     hir::value::{NativeValue, Value},
-    module::Uses,
+    module::{LocalFunctionId, ModuleId, Uses},
     run_fn_native,
     types::{
         r#type::{Type, tuple_type},
         type_scheme_display::TypeSchemeConstraintRenderMode,
     },
+};
+#[cfg(target_arch = "wasm32")]
+use crate::{
+    module::FunctionId,
+    wasm::{WasmLimits, run_boxed_entry},
 };
 use regex::Regex;
 #[cfg(target_arch = "wasm32")]
@@ -203,6 +208,21 @@ impl Compiler {
         self.run_expr_with_target(ExecutionTarget::PhysicalMir, MirOptimization::Enabled)
     }
 
+    /// Runs the current expression as generated Wasm, linked into this instance.
+    #[cfg(target_arch = "wasm32")]
+    pub fn run_expr_wasm(&mut self) -> Option<ExecutionResult> {
+        self.run_expr_with(
+            MirOptimization::Enabled,
+            |session, module_id, expr, limits| {
+                let limits = WasmLimits {
+                    execution: limits.execution,
+                    ..WasmLimits::default()
+                };
+                run_boxed_entry(session, FunctionId::new(module_id, expr), limits)
+            },
+        )
+    }
+
     /// Returns verified, host-matched physical MIR with source-link metadata.
     pub fn physical_mir_text(&mut self) -> Result<IrText, String> {
         self.mir_text_at(true, true)
@@ -298,6 +318,22 @@ impl Compiler {
         target: ExecutionTarget,
         optimization: MirOptimization,
     ) -> Option<ExecutionResult> {
+        self.run_expr_with(optimization, |session, module_id, expr, limits| {
+            session.run_entry_with_limits(target, module_id, expr, vec![], limits)
+        })
+    }
+
+    /// Runs the current expression with `run`, and renders its value or error.
+    fn run_expr_with(
+        &mut self,
+        optimization: MirOptimization,
+        run: impl FnOnce(
+            &mut CompilerSession,
+            ModuleId,
+            LocalFunctionId,
+            ReferenceInterpreterLimits,
+        ) -> Result<Value, RuntimeError>,
+    ) -> Option<ExecutionResult> {
         self.session.set_mir_optimization(optimization);
         let expr = self.user_module.expr?;
         Some((|| {
@@ -321,11 +357,7 @@ impl Compiler {
                 let ty = function.definition.ty_scheme.ty.ret;
                 let limits = ReferenceInterpreterLimits::default()
                     .with_fuel_limit(self.execution_fuel_limit);
-                (
-                    self.session
-                        .run_entry_with_limits(target, module_id, expr, vec![], limits),
-                    ty,
-                )
+                (run(&mut self.session, module_id, expr, limits), ty)
             };
             match value {
                 Ok(value) => {

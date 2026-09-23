@@ -184,15 +184,14 @@ const setText = (newText: string, compile = true) => {
 const getText = () => view.value?.state.doc.toString() ?? "";
 
 const runCode = (executionMode: ExecutionMode = props.executionMode) => {
-	if (executionMode === "wasm") {
-		return "Wasm execution is not available in the playground yet; this mode only shows the generated code.";
-	}
 	try {
 		const result = executionMode === "hir"
 			? compiler.run_expr()
 			: executionMode === "physical-mir"
 				? compiler.run_expr_physical_mir()
-				: compiler.run_expr_mir(executionMode === "optimized-mir");
+				: executionMode === "wasm"
+					? compiler.run_expr_wasm()
+					: compiler.run_expr_mir(executionMode === "optimized-mir");
 		const errorData = result?.error_data();
 		if (errorData !== undefined && view.value) {
 			fillDiagnostics([errorData]);
