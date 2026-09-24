@@ -1,254 +1,149 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-//! Recovery of directly representable Wasm control-flow regions from physical MIR.
+//! Translation of physical MIR control flow into structured Wasm control flow.
+//!
+//! This follows Norman Ramsey, *Beyond Relooper: Recursive Translation of Unstructured Control
+//! Flow to Structured Control Flow* (ICFP 2022). The translation walks the dominator tree. Each
+//! block is classified by its incoming edges: a *loop header* is the target of a backedge and gets
+//! a Wasm `loop`; a *merge node* has several forward predecessors, so its code follows a Wasm
+//! `block` opened in its immediate dominator, and its predecessors branch out of that `block`.
+//! Every other block has a single forward predecessor, its immediate dominator, and is emitted
+//! inline in that predecessor's terminator. Any reducible control-flow graph is translated this
+//! way; irreducible ones keep the program-counter dispatcher.
+//!
+//! Among the inline targets of a terminator, the one with the largest dominator subtree continues
+//! the enclosing sequence without a test, and the others are nested in Wasm `if`s. A chain of
+//! guards thus stays flat, and the nesting of `if`s grows logarithmically with the body size.
+
+use std::cmp::Reverse;
 
 use crate::{
+    graph::reverse_postorder,
     mir::{BlockId, Function, dominance::Dominance, terminator::TerminatorKind},
     module::id::Id,
 };
 
 use super::body::BodyMode;
 
-/// Bounds recursive region recovery and the nesting depth of emitted Wasm control constructs.
+/// Bounds the nesting depth of emitted Wasm control constructs, and the recursion producing them.
 const MAX_STRUCTURED_DEPTH: usize = 128;
 
+/// One step of a structured body. A sequence of items is emitted in order; only its last item
+/// may end without transferring control to the next one.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct NaturalLoop {
-    pub(super) header: BlockId,
-    pub(super) blocks: Vec<BlockId>,
-    pub(super) exit: BlockId,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct IfRegion {
-    pub(super) header: BlockId,
-    pub(super) then_regions: Vec<ControlRegion>,
-    pub(super) else_regions: Vec<ControlRegion>,
-    /// The shared MIR join, or `None` when both arms terminate at the function exit.
-    pub(super) join: Option<BlockId>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum ControlRegion {
-    Block(BlockId),
-    Loop(NaturalLoop),
-    If(IfRegion),
-}
-
-impl ControlRegion {
-    pub(super) fn entry(&self) -> BlockId {
-        match self {
-            Self::Block(block) => *block,
-            Self::Loop(region) => region.header,
-            Self::If(region) => region.header,
-        }
-    }
+pub(super) enum Item {
+    /// A Wasm `block` that `body` exits by branching to `follower`. The items after this one in
+    /// the sequence start with the code of `follower`.
+    Block { follower: BlockId, body: Vec<Item> },
+    /// A Wasm `loop` that `body` continues by branching to `header`; `body` starts with `header`.
+    /// It is the last item of its sequence.
+    Loop { header: BlockId, body: Vec<Item> },
+    /// The operations and terminator of a MIR block. The terminator enters each target in
+    /// `nested` inside a Wasm `if` at its arm, and `continuation`, when present, without a test:
+    /// the items after this one start with its code. Other targets are branches to the label of an
+    /// enclosing `block` or `loop`. A node without continuation is the last item of its sequence.
+    Node {
+        block: BlockId,
+        nested: Vec<(BlockId, Vec<Item>)>,
+        continuation: Option<BlockId>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum ControlFlow {
-    /// A sequence of directly representable blocks and natural-loop regions.
-    Structured(Vec<ControlRegion>),
-    /// Arbitrary control flow retains the program-counter dispatcher.
+    /// The items of the entry block's dominator subtree, which covers the whole body.
+    Structured(Vec<Item>),
+    /// Projections, irreducible control flow and excessive nesting use the program-counter
+    /// dispatcher.
     Dispatcher,
 }
 
 impl ControlFlow {
-    /// Recovers the structured subset that can be represented directly with Wasm blocks and loops.
+    /// Translates the body into structured control flow, or selects the dispatcher.
     ///
-    /// Natural loops are discovered from dominance backedges rather than source syntax. Blocks are
-    /// then scheduled along their CFG edges, so a loop's exit need not follow its body in MIR storage
-    /// order. Disjoint loops accept fallthroughs, backedges to the header, and exits to one shared
-    /// block. Outside loops, conditional branches whose arms reconverge at one post-dominating join
-    /// become recursive Wasm `if` regions. Variant switches selecting between two blocks count as
-    /// conditional branches. The dispatcher remains the fallback for nested loops,
-    /// irreducible control flow, and branch forms not represented here.
+    /// Projection bodies resume at suspension points inside their body, so they keep the
+    /// dispatcher. So do bodies with unreachable blocks, which the dispatcher emits regardless.
     pub(super) fn of(body: &Function, mode: BodyMode) -> Self {
-        if !matches!(mode, BodyMode::Normal) {
+        if !matches!(mode, BodyMode::Normal)
+            || body.blocks().any(|block| {
+                matches!(
+                    body.block(block).terminator().kind,
+                    TerminatorKind::Yield { .. }
+                )
+            })
+        {
             return Self::Dispatcher;
         }
-        let block_count = body.blocks().count();
         let successors = body
             .blocks()
             .map(|block| {
-                body.block(block)
-                    .terminator()
-                    .successors()
+                distinct_targets(&body.block(block).terminator().kind)
+                    .into_iter()
                     .map(BlockId::as_index)
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        let mut predecessors = vec![Vec::new(); block_count];
+        let entry = body.entry().as_index();
+        let order = reverse_postorder(&successors, entry);
+        if order.len() != successors.len() {
+            return Self::Dispatcher;
+        }
+        let mut order_index = vec![0; successors.len()];
+        for (index, &block) in order.iter().enumerate() {
+            order_index[block] = index;
+        }
+        let dominance = Dominance::of(&successors, entry);
+
+        let mut forward_predecessors = vec![0_usize; successors.len()];
+        let mut loop_header = vec![false; successors.len()];
         for (source, targets) in successors.iter().enumerate() {
             for &target in targets {
-                predecessors[target].push(source);
-            }
-        }
-        let dominance = Dominance::of(&successors, body.entry().as_index());
-        let mut latches = vec![Vec::new(); block_count];
-        for (source, targets) in successors.iter().enumerate() {
-            for &target in targets {
-                if dominance.dominates(target, source) {
-                    latches[target].push(source);
-                }
-            }
-        }
-
-        let mut loops = Vec::new();
-        let mut loop_for_block = vec![None; block_count];
-        for (header, latches) in latches.iter().enumerate() {
-            if latches.is_empty() {
-                continue;
-            }
-            let mut members = vec![false; block_count];
-            members[header] = true;
-            let mut pending = latches.clone();
-            while let Some(block) = pending.pop() {
-                if members[block] {
-                    continue;
-                }
-                members[block] = true;
-                pending.extend(predecessors[block].iter().copied());
-            }
-            if predecessors.iter().enumerate().any(|(block, incoming)| {
-                members[block] && block != header && incoming.iter().any(|source| !members[*source])
-            }) {
-                return Self::Dispatcher;
-            }
-            let mut exit = None;
-            for target in members
-                .iter()
-                .enumerate()
-                .filter(|(_, member)| **member)
-                .flat_map(|(block, _)| successors[block].iter().copied())
-                .filter(|target| !members[*target])
-            {
-                if exit
-                    .replace(target)
-                    .is_some_and(|previous| previous != target)
-                {
-                    return Self::Dispatcher;
-                }
-            }
-            let Some(exit) = exit else {
-                return Self::Dispatcher;
-            };
-
-            let mut blocks = Vec::new();
-            let mut visited = vec![false; block_count];
-            let mut current = header;
-            loop {
-                if visited[current] || !members[current] {
-                    return Self::Dispatcher;
-                }
-                visited[current] = true;
-                blocks.push(BlockId::from_index(current));
-                let kind = &body.block(BlockId::from_index(current)).terminator().kind;
-                if !matches!(kind, TerminatorKind::Goto { .. })
-                    && conditional_targets(kind).is_none()
-                {
-                    return Self::Dispatcher;
-                }
-                let mut forward = None;
-                for &target in &successors[current] {
-                    if target == header || target == exit {
-                        continue;
-                    }
-                    if !members[target] || visited[target] {
-                        return Self::Dispatcher;
-                    }
-                    if forward
-                        .replace(target)
-                        .is_some_and(|previous| previous != target)
-                    {
-                        return Self::Dispatcher;
-                    }
-                }
-                let Some(next) = forward else {
-                    break;
-                };
-                current = next;
-            }
-            if members
-                .iter()
-                .enumerate()
-                .any(|(block, member)| *member && !visited[block])
-            {
-                return Self::Dispatcher;
-            }
-            let loop_index = loops.len();
-            for block in &blocks {
-                if loop_for_block[block.as_index()]
-                    .replace(loop_index)
-                    .is_some()
-                {
-                    // Nested and overlapping natural loops are left to the dispatcher for now.
-                    return Self::Dispatcher;
-                }
-            }
-            loops.push(NaturalLoop {
-                header: BlockId::from_index(header),
-                blocks,
-                exit: BlockId::from_index(exit),
-            });
-        }
-
-        let mut active = vec![true; block_count];
-        let mut structured_successors = successors.clone();
-        for (index, region) in loops.iter().enumerate() {
-            for block in &region.blocks {
-                if *block == region.header {
-                    structured_successors[block.as_index()] = vec![region.exit.as_index()];
+                if order_index[target] > order_index[source] {
+                    forward_predecessors[target] += 1;
+                } else if dominance.dominates(target, source) {
+                    loop_header[target] = true;
                 } else {
-                    active[block.as_index()] = false;
-                    structured_successors[block.as_index()].clear();
-                }
-                debug_assert_eq!(loop_for_block[block.as_index()], Some(index));
-            }
-        }
-        for targets in &mut structured_successors {
-            // A branch is classified by its distinct targets: a switch whose cases share targets
-            // can be conditional, and a conditional whose targets coincide is a jump.
-            let mut index = 0;
-            while index < targets.len() {
-                if targets[..index].contains(&targets[index]) {
-                    targets.remove(index);
-                } else {
-                    index += 1;
+                    // A retreating edge that is not a backedge makes the graph irreducible.
+                    return Self::Dispatcher;
                 }
             }
         }
-        if active.iter().enumerate().any(|(source, is_active)| {
-            *is_active
-                && structured_successors[source]
-                    .iter()
-                    .any(|target| !active[*target])
-        }) {
-            return Self::Dispatcher;
+        // Dominator-tree children follow their parent in reverse postorder.
+        let mut weight = vec![1_usize; successors.len()];
+        for &block in order.iter().rev() {
+            if let Some(dominator) = dominance.immediate_dominator(block) {
+                weight[dominator] += weight[block];
+            }
         }
-        let Some((postdominance, synthetic_exit)) = postdominance(&structured_successors, &active)
-        else {
-            return Self::Dispatcher;
+        let translation = Translation {
+            successors: &successors,
+            dominance: &dominance,
+            order_index: &order_index,
+            merge: forward_predecessors
+                .iter()
+                .map(|count| *count > 1)
+                .collect(),
+            loop_header,
+            weight,
         };
-        let mut builder = RegionBuilder {
-            body,
-            successors: &structured_successors,
-            postdominance: &postdominance,
-            loops: &loops,
-            loop_for_block: &loop_for_block,
-            active: &active,
-            synthetic_exit,
-            visited: vec![false; block_count],
-        };
-        let Some(regions) = builder.sequence(body.entry().as_index(), None, 0) else {
-            return Self::Dispatcher;
-        };
-        if builder.visited.iter().any(|visited| !visited) {
-            return Self::Dispatcher;
+        let mut items = Vec::new();
+        match translation.tree(entry, 0, &mut items) {
+            Some(()) => Self::Structured(items),
+            None => Self::Dispatcher,
         }
-        Self::Structured(regions)
     }
+}
+
+/// Returns the distinct targets of a terminator, in the order of its successors.
+pub(super) fn distinct_targets(kind: &TerminatorKind) -> Vec<BlockId> {
+    let mut targets = Vec::new();
+    for target in kind.successors() {
+        if !targets.contains(&target) {
+            targets.push(target);
+        }
+    }
+    targets
 }
 
 /// Returns the `(then, else)` targets of a terminator that selects between at most two blocks
@@ -278,131 +173,121 @@ pub(super) fn conditional_targets(kind: &TerminatorKind) -> Option<(BlockId, Blo
     }
 }
 
-/// Computes post-dominance over the loop-collapsed graph.
-///
-/// A synthetic exit joins all terminal blocks. Returning `None` means some active node cannot
-/// reach an exit, so it cannot participate in the acyclic region tree.
-fn postdominance(successors: &[Vec<usize>], active: &[bool]) -> Option<(Dominance, usize)> {
-    let block_count = successors.len();
-    let exit = block_count;
-    let mut reverse = vec![Vec::new(); block_count + 1];
-    for (source, targets) in successors
-        .iter()
-        .enumerate()
-        .filter(|(source, _)| active[*source])
-    {
-        if targets.is_empty() {
-            reverse[exit].push(source);
-        } else {
-            for &target in targets {
-                reverse[target].push(source);
-            }
-        }
-    }
-    let dominance = Dominance::of(&reverse, exit);
-    if active
-        .iter()
-        .enumerate()
-        .any(|(node, active)| *active && !dominance.is_reachable(node))
-    {
-        return None;
-    }
-    Some((dominance, exit))
-}
-
-struct RegionBuilder<'a> {
-    body: &'a Function,
+struct Translation<'a> {
     successors: &'a [Vec<usize>],
-    postdominance: &'a Dominance,
-    loops: &'a [NaturalLoop],
-    loop_for_block: &'a [Option<usize>],
-    active: &'a [bool],
-    synthetic_exit: usize,
-    visited: Vec<bool>,
+    dominance: &'a Dominance,
+    order_index: &'a [usize],
+    merge: Vec<bool>,
+    loop_header: Vec<bool>,
+    /// The size of each block's dominator subtree.
+    weight: Vec<usize>,
 }
 
-impl RegionBuilder<'_> {
-    fn sequence(
-        &mut self,
-        start: usize,
-        stop: Option<usize>,
-        depth: usize,
-    ) -> Option<Vec<ControlRegion>> {
-        let mut regions = Vec::new();
-        let mut current = start;
-        while Some(current) != stop {
-            if !self.active[current] || self.visited[current] {
+impl Translation<'_> {
+    /// Appends the items of `block`'s dominator subtree to `out`, at nesting `depth`.
+    fn tree(&self, block: usize, depth: usize, out: &mut Vec<Item>) -> Option<()> {
+        if !self.loop_header[block] {
+            return self.within(block, depth, out);
+        }
+        if depth == MAX_STRUCTURED_DEPTH {
+            return None;
+        }
+        let mut body = Vec::new();
+        self.within(block, depth + 1, &mut body)?;
+        out.push(Item::Loop {
+            header: BlockId::from_index(block),
+            body,
+        });
+        Some(())
+    }
+
+    /// Appends `block`'s code, wrapped in one `block` per merge child, followed by the trees of
+    /// these merge children. Continuations and the last merge tree are tails, so that sequential
+    /// regions are translated iteratively and only actual nesting recurses.
+    fn within(&self, mut block: usize, depth: usize, out: &mut Vec<Item>) -> Option<()> {
+        loop {
+            // Children are in reverse postorder; the last one gets the outermost `block`, so that
+            // every merge child is emitted after all the blocks that can branch to it.
+            let merges = self
+                .dominance
+                .children(block)
+                .iter()
+                .copied()
+                .filter(|child| self.merge[*child])
+                .collect::<Vec<_>>();
+            let Some((&last, inner)) = merges.split_last() else {
+                let Some(continuation) = self.node(block, depth, out)? else {
+                    return Some(());
+                };
+                if self.loop_header[continuation] {
+                    return self.tree(continuation, depth, out);
+                }
+                block = continuation;
+                continue;
+            };
+            let inner_depth = depth + merges.len();
+            if inner_depth > MAX_STRUCTURED_DEPTH {
                 return None;
             }
-            if let Some(loop_index) = self.loop_for_block[current] {
-                let region = &self.loops[loop_index];
-                if region.header.as_index() != current
-                    || region
-                        .blocks
-                        .iter()
-                        .any(|block| self.visited[block.as_index()])
-                {
-                    return None;
-                }
-                for block in &region.blocks {
-                    self.visited[block.as_index()] = true;
-                }
-                current = region.exit.as_index();
-                regions.push(ControlRegion::Loop(region.clone()));
+            let mut body = Vec::new();
+            if let Some(continuation) = self.node(block, inner_depth, &mut body)? {
+                self.tree(continuation, inner_depth, &mut body)?;
+            }
+            for (index, &merge) in inner.iter().enumerate() {
+                let mut enclosing = vec![Item::Block {
+                    follower: BlockId::from_index(merge),
+                    body,
+                }];
+                self.tree(merge, inner_depth - index - 1, &mut enclosing)?;
+                body = enclosing;
+            }
+            out.push(Item::Block {
+                follower: BlockId::from_index(last),
+                body,
+            });
+            if self.loop_header[last] {
+                return self.tree(last, depth, out);
+            }
+            block = last;
+        }
+    }
+
+    /// Appends the node item of `block` and returns its continuation.
+    fn node(&self, block: usize, depth: usize, out: &mut Vec<Item>) -> Option<Option<usize>> {
+        let inline = self.successors[block]
+            .iter()
+            .copied()
+            .filter(|target| {
+                self.order_index[*target] > self.order_index[block] && !self.merge[*target]
+            })
+            .collect::<Vec<_>>();
+        debug_assert!(
+            inline
+                .iter()
+                .all(|target| self.dominance.immediate_dominator(*target) == Some(block))
+        );
+        let continuation = inline
+            .iter()
+            .copied()
+            .max_by_key(|target| (self.weight[*target], Reverse(*target)));
+        let mut nested = Vec::new();
+        for &target in &inline {
+            if Some(target) == continuation {
                 continue;
             }
-
-            let block = BlockId::from_index(current);
-            let successors = &self.successors[current];
-            match successors.as_slice() {
-                [] => {
-                    if stop.is_some() {
-                        return None;
-                    }
-                    self.visited[current] = true;
-                    regions.push(ControlRegion::Block(block));
-                    return Some(regions);
-                }
-                [target] => {
-                    self.visited[current] = true;
-                    regions.push(ControlRegion::Block(block));
-                    current = *target;
-                }
-                [_, _] => {
-                    if depth == MAX_STRUCTURED_DEPTH {
-                        return None;
-                    }
-                    let (then_target, else_target) =
-                        conditional_targets(&self.body.block(block).terminator().kind)?;
-                    let join = self.postdominance.immediate_dominator(current)?;
-                    self.visited[current] = true;
-                    let join_block =
-                        (join != self.synthetic_exit).then(|| BlockId::from_index(join));
-                    let then_regions = self.sequence(
-                        then_target.as_index(),
-                        join_block.map(BlockId::as_index),
-                        depth + 1,
-                    )?;
-                    let else_regions = self.sequence(
-                        else_target.as_index(),
-                        join_block.map(BlockId::as_index),
-                        depth + 1,
-                    )?;
-                    regions.push(ControlRegion::If(IfRegion {
-                        header: block,
-                        then_regions,
-                        else_regions,
-                        join: join_block,
-                    }));
-                    let Some(join) = join_block else {
-                        return Some(regions);
-                    };
-                    current = join.as_index();
-                }
-                _ => return None,
+            if depth == MAX_STRUCTURED_DEPTH {
+                return None;
             }
+            let mut items = Vec::new();
+            self.tree(target, depth + 1, &mut items)?;
+            nested.push((BlockId::from_index(target), items));
         }
-        Some(regions)
+        out.push(Item::Node {
+            block: BlockId::from_index(block),
+            nested,
+            continuation: continuation.map(BlockId::from_index),
+        });
+        Some(continuation)
     }
 }
 
@@ -428,241 +313,258 @@ mod tests {
         )
     }
 
+    fn b(index: usize) -> BlockId {
+        BlockId::from_index(index)
+    }
+
+    fn span() -> Location {
+        Location::new_synthesized()
+    }
+
+    fn goto(target: usize) -> Terminator {
+        Terminator::goto(span(), b(target))
+    }
+
+    fn cond_br(then_target: usize, else_target: usize) -> Terminator {
+        Terminator::cond_br(
+            span(),
+            Value::Constant(ConstantId::from_index(0)),
+            b(then_target),
+            b(else_target),
+        )
+    }
+
+    fn switch(cases: &[usize], default: usize) -> Terminator {
+        Terminator::switch_variant(
+            span(),
+            Value::Constant(ConstantId::from_index(0)),
+            cases
+                .iter()
+                .enumerate()
+                .map(|(index, target)| (format!("V{index}").into(), b(*target)))
+                .collect(),
+            b(default),
+        )
+    }
+
+    fn ret() -> Terminator {
+        Terminator::ret(span())
+    }
+
+    fn node(block: usize, continuation: Option<usize>) -> Item {
+        nesting(block, Vec::new(), continuation)
+    }
+
+    fn nesting(block: usize, nested: Vec<(usize, Vec<Item>)>, continuation: Option<usize>) -> Item {
+        Item::Node {
+            block: b(block),
+            nested: nested
+                .into_iter()
+                .map(|(target, items)| (b(target), items))
+                .collect(),
+            continuation: continuation.map(b),
+        }
+    }
+
+    fn structured(terminators: Vec<Terminator>) -> Vec<Item> {
+        match ControlFlow::of(&control_flow(terminators), BodyMode::Normal) {
+            ControlFlow::Structured(items) => items,
+            ControlFlow::Dispatcher => panic!("expected structured control flow"),
+        }
+    }
+
+    /// The nesting depth of Wasm control constructs.
+    fn depth(items: &[Item]) -> usize {
+        items
+            .iter()
+            .map(|item| match item {
+                Item::Block { body, .. } | Item::Loop { body, .. } => 1 + depth(body),
+                Item::Node { nested, .. } => nested
+                    .iter()
+                    .map(|(_, items)| 1 + depth(items))
+                    .max()
+                    .unwrap_or(0),
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn recovers_linear_bodies_and_schedules_natural_loops() {
-        let span = Location::new_synthesized();
-        let linear = control_flow(vec![
-            Terminator::goto(span, BlockId::from_index(1)),
-            Terminator::goto(span, BlockId::from_index(2)),
-            Terminator::ret(span),
-        ]);
+    fn sequences_single_predecessor_blocks_inline() {
         assert_eq!(
-            ControlFlow::of(&linear, BodyMode::Normal),
-            ControlFlow::Structured(vec![
-                ControlRegion::Block(BlockId::from_index(0)),
-                ControlRegion::Block(BlockId::from_index(1)),
-                ControlRegion::Block(BlockId::from_index(2)),
-            ])
+            structured(vec![goto(1), goto(2), ret()]),
+            vec![node(0, Some(1)), node(1, Some(2)), node(2, None)]
         );
         assert_eq!(
             ControlFlow::of(
-                &linear,
+                &control_flow(vec![goto(1), ret()]),
                 BodyMode::ProjectionStart {
                     resume: crate::wasm::abi::DispatchTableSlotId::from_index(0),
                 }
             ),
-            ControlFlow::Dispatcher
-        );
-
-        // Storage order puts the exit before the latch, as physical MIR commonly does.
-        let natural_loop = control_flow(vec![
-            Terminator::goto(span, BlockId::from_index(1)),
-            Terminator::cond_br(
-                span,
-                Value::Constant(ConstantId::from_index(0)),
-                BlockId::from_index(3),
-                BlockId::from_index(2),
-            ),
-            Terminator::ret(span),
-            Terminator::goto(span, BlockId::from_index(1)),
-        ]);
-        assert_eq!(
-            ControlFlow::of(&natural_loop, BodyMode::Normal),
-            ControlFlow::Structured(vec![
-                ControlRegion::Block(BlockId::from_index(0)),
-                ControlRegion::Loop(NaturalLoop {
-                    header: BlockId::from_index(1),
-                    blocks: vec![BlockId::from_index(1), BlockId::from_index(3)],
-                    exit: BlockId::from_index(2),
-                }),
-                ControlRegion::Block(BlockId::from_index(2)),
-            ])
-        );
-
-        let skipping = control_flow(vec![
-            Terminator::goto(span, BlockId::from_index(2)),
-            Terminator::ret(span),
-            Terminator::ret(span),
-        ]);
-        assert_eq!(
-            ControlFlow::of(&skipping, BodyMode::Normal),
-            ControlFlow::Dispatcher
-        );
-
-        let exit_free = control_flow(vec![
-            Terminator::goto(span, BlockId::from_index(1)),
-            Terminator::goto(span, BlockId::from_index(1)),
-        ]);
-        assert_eq!(
-            ControlFlow::of(&exit_free, BodyMode::Normal),
-            ControlFlow::Dispatcher
-        );
-
-        let multiple_exits = control_flow(vec![
-            Terminator::goto(span, BlockId::from_index(1)),
-            Terminator::cond_br(
-                span,
-                Value::Constant(ConstantId::from_index(0)),
-                BlockId::from_index(2),
-                BlockId::from_index(3),
-            ),
-            Terminator::cond_br(
-                span,
-                Value::Constant(ConstantId::from_index(0)),
-                BlockId::from_index(1),
-                BlockId::from_index(4),
-            ),
-            Terminator::ret(span),
-            Terminator::ret(span),
-        ]);
-        assert_eq!(
-            ControlFlow::of(&multiple_exits, BodyMode::Normal),
-            ControlFlow::Dispatcher
-        );
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    fn recovers_nested_acyclic_branches() {
-        let span = Location::new_synthesized();
-        // The outer else arm is empty. Its then arm contains a nested diamond before the shared
-        // outer join, and neither join follows its branches in storage order by construction.
-        let nested = control_flow(vec![
-            Terminator::cond_br(
-                span,
-                Value::Constant(ConstantId::from_index(0)),
-                BlockId::from_index(1),
-                BlockId::from_index(5),
-            ),
-            Terminator::cond_br(
-                span,
-                Value::Constant(ConstantId::from_index(1)),
-                BlockId::from_index(2),
-                BlockId::from_index(3),
-            ),
-            Terminator::goto(span, BlockId::from_index(4)),
-            Terminator::goto(span, BlockId::from_index(4)),
-            Terminator::goto(span, BlockId::from_index(5)),
-            Terminator::ret(span),
-        ]);
-        assert_eq!(
-            ControlFlow::of(&nested, BodyMode::Normal),
-            ControlFlow::Structured(vec![
-                ControlRegion::If(IfRegion {
-                    header: BlockId::from_index(0),
-                    then_regions: vec![
-                        ControlRegion::If(IfRegion {
-                            header: BlockId::from_index(1),
-                            then_regions: vec![ControlRegion::Block(BlockId::from_index(2))],
-                            else_regions: vec![ControlRegion::Block(BlockId::from_index(3))],
-                            join: Some(BlockId::from_index(4)),
-                        }),
-                        ControlRegion::Block(BlockId::from_index(4)),
-                    ],
-                    else_regions: Vec::new(),
-                    join: Some(BlockId::from_index(5)),
-                }),
-                ControlRegion::Block(BlockId::from_index(5)),
-            ])
-        );
-
-        // Separate terminal arms share the synthetic function exit and form a terminal Wasm if.
-        let early_return = control_flow(vec![
-            Terminator::cond_br(
-                span,
-                Value::Constant(ConstantId::from_index(0)),
-                BlockId::from_index(1),
-                BlockId::from_index(2),
-            ),
-            Terminator::ret(span),
-            Terminator::ret(span),
-        ]);
-        assert_eq!(
-            ControlFlow::of(&early_return, BodyMode::Normal),
-            ControlFlow::Structured(vec![ControlRegion::If(IfRegion {
-                header: BlockId::from_index(0),
-                then_regions: vec![ControlRegion::Block(BlockId::from_index(1))],
-                else_regions: vec![ControlRegion::Block(BlockId::from_index(2))],
-                join: None,
-            })])
-        );
-
-        let guard_chain = |guard_count| {
-            let mut terminators = Vec::with_capacity(guard_count * 2 + 1);
-            for guard in 0..guard_count {
-                terminators.push(Terminator::cond_br(
-                    span,
-                    Value::Constant(ConstantId::from_index(guard)),
-                    BlockId::from_index(guard_count + guard),
-                    BlockId::from_index(if guard + 1 == guard_count {
-                        guard_count * 2
-                    } else {
-                        guard + 1
-                    }),
-                ));
-            }
-            terminators.extend((0..=guard_count).map(|_| Terminator::ret(span)));
-            control_flow(terminators)
-        };
-        assert!(matches!(
-            ControlFlow::of(&guard_chain(MAX_STRUCTURED_DEPTH), BodyMode::Normal),
-            ControlFlow::Structured(_)
-        ));
-        assert_eq!(
-            ControlFlow::of(&guard_chain(MAX_STRUCTURED_DEPTH + 1), BodyMode::Normal),
             ControlFlow::Dispatcher,
-            "excessive structured nesting must retain the non-recursive dispatcher"
+            "projections resume through the dispatcher"
         );
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn recovers_variant_switches_with_two_targets_as_branches() {
-        let span = Location::new_synthesized();
-        let tag = || Value::Constant(ConstantId::from_index(0));
-        // Two cases share the then target, the third one shares the default target.
-        let two_targets = control_flow(vec![
-            Terminator::switch_variant(
-                span,
-                tag(),
-                vec![
-                    ("A".into(), BlockId::from_index(1)),
-                    ("B".into(), BlockId::from_index(2)),
-                    ("C".into(), BlockId::from_index(1)),
-                ],
-                BlockId::from_index(2),
-            ),
-            Terminator::goto(span, BlockId::from_index(3)),
-            Terminator::goto(span, BlockId::from_index(3)),
-            Terminator::ret(span),
-        ]);
+    fn places_merge_nodes_after_blocks_in_their_dominator() {
+        // Both arms reach the join, so it follows a `block` that they exit.
         assert_eq!(
-            ControlFlow::of(&two_targets, BodyMode::Normal),
-            ControlFlow::Structured(vec![
-                ControlRegion::If(IfRegion {
-                    header: BlockId::from_index(0),
-                    then_regions: vec![ControlRegion::Block(BlockId::from_index(1))],
-                    else_regions: vec![ControlRegion::Block(BlockId::from_index(2))],
-                    join: Some(BlockId::from_index(3)),
-                }),
-                ControlRegion::Block(BlockId::from_index(3)),
-            ])
+            structured(vec![cond_br(1, 2), goto(3), goto(3), ret()]),
+            vec![
+                Item::Block {
+                    follower: b(3),
+                    body: vec![
+                        nesting(0, vec![(2, vec![node(2, None)])], Some(1)),
+                        node(1, None),
+                    ],
+                },
+                node(3, None),
+            ]
         );
-
-        let three_targets = control_flow(vec![
-            Terminator::switch_variant(
-                span,
-                tag(),
-                vec![
-                    ("A".into(), BlockId::from_index(1)),
-                    ("B".into(), BlockId::from_index(2)),
-                ],
-                BlockId::from_index(3),
-            ),
-            Terminator::goto(span, BlockId::from_index(3)),
-            Terminator::goto(span, BlockId::from_index(3)),
-            Terminator::ret(span),
-        ]);
+        // Two merge nodes of one dominator nest in reverse postorder: the later, outer one can be
+        // reached from the earlier one.
         assert_eq!(
-            ControlFlow::of(&three_targets, BodyMode::Normal),
+            structured(vec![cond_br(1, 2), cond_br(3, 4), goto(3), goto(4), ret()]),
+            vec![
+                Item::Block {
+                    follower: b(4),
+                    body: vec![
+                        Item::Block {
+                            follower: b(3),
+                            body: vec![
+                                nesting(0, vec![(2, vec![node(2, None)])], Some(1)),
+                                node(1, None),
+                            ],
+                        },
+                        node(3, None),
+                    ],
+                },
+                node(4, None),
+            ]
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn translates_loops_with_several_exits_and_nesting() {
+        // Storage order puts the exit before the latch, as physical MIR commonly does.
+        assert_eq!(
+            structured(vec![goto(1), cond_br(3, 2), ret(), goto(1)]),
+            vec![
+                node(0, Some(1)),
+                Item::Loop {
+                    header: b(1),
+                    body: vec![
+                        nesting(1, vec![(3, vec![node(3, None)])], Some(2)),
+                        node(2, None)
+                    ],
+                },
+            ]
+        );
+        // A loop leaving to a shared exit from its header and from its body, as a `break` does.
+        // The header dominates the exit, so the exit follows a `block` inside the `loop`.
+        assert_eq!(
+            structured(vec![goto(1), cond_br(2, 4), cond_br(4, 3), goto(1), ret()]),
+            vec![
+                node(0, Some(1)),
+                Item::Loop {
+                    header: b(1),
+                    body: vec![
+                        Item::Block {
+                            follower: b(4),
+                            body: vec![node(1, Some(2)), node(2, Some(3)), node(3, None)],
+                        },
+                        node(4, None),
+                    ],
+                },
+            ]
+        );
+        // Nested loops, with a branch in the inner body.
+        let items = structured(vec![
+            goto(1),
+            cond_br(2, 7),
+            cond_br(3, 6),
+            cond_br(4, 5),
+            goto(5),
+            goto(2),
+            goto(1),
+            ret(),
+        ]);
+        let loops = |items: &[Item]| {
+            fn count(items: &[Item]) -> usize {
+                items
+                    .iter()
+                    .map(|item| match item {
+                        Item::Loop { body, .. } => 1 + count(body),
+                        Item::Block { body, .. } => count(body),
+                        Item::Node { nested, .. } => {
+                            nested.iter().map(|(_, items)| count(items)).sum()
+                        }
+                    })
+                    .sum()
+            }
+            count(items)
+        };
+        assert_eq!(loops(&items), 2);
+        // An exit-free loop.
+        assert_eq!(
+            structured(vec![goto(1), goto(1)]),
+            vec![
+                node(0, Some(1)),
+                Item::Loop {
+                    header: b(1),
+                    body: vec![node(1, None)],
+                },
+            ]
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn translates_variant_switches_of_any_arity() {
+        let items = structured(vec![
+            switch(&[1, 2, 1], 3),
+            goto(4),
+            goto(4),
+            goto(4),
+            ret(),
+        ]);
+        let [Item::Block { body, .. }, _] = items.as_slice() else {
+            panic!("expected one join: {items:?}");
+        };
+        let Item::Node { nested, .. } = &body[0] else {
+            panic!("expected the switch first: {body:?}");
+        };
+        assert_eq!(nested.len(), 2, "three targets: one continues, two nest");
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn keeps_guard_chains_flat() {
+        // Each guard exits to its own return block and continues to the next guard.
+        let guard_count = 4 * MAX_STRUCTURED_DEPTH;
+        let mut terminators = Vec::with_capacity(guard_count * 2 + 1);
+        for guard in 0..guard_count {
+            terminators.push(cond_br(guard_count + 1 + guard, guard + 1));
+        }
+        terminators.push(ret());
+        terminators.extend((0..guard_count).map(|_| ret()));
+        let items = structured(terminators);
+        assert_eq!(items.len(), guard_count + 1);
+        assert_eq!(depth(&items), 1);
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn keeps_the_dispatcher_for_irreducible_or_unreachable_blocks() {
+        // The cycle between 1 and 2 has two entries.
+        assert_eq!(
+            ControlFlow::of(
+                &control_flow(vec![cond_br(1, 2), cond_br(2, 3), goto(1), ret()]),
+                BodyMode::Normal
+            ),
+            ControlFlow::Dispatcher
+        );
+        assert_eq!(
+            ControlFlow::of(&control_flow(vec![goto(2), ret(), ret()]), BodyMode::Normal),
             ControlFlow::Dispatcher
         );
     }

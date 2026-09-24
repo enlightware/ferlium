@@ -12,8 +12,8 @@
 //! numbered in depth-first order, so a dominance query is an interval containment and answers in
 //! constant time.
 //!
-//! The physical verifier uses dominance for validity checks, while Wasm control-flow recovery uses
-//! dominance on the reversed CFG to find post-dominating joins.
+//! The physical verifier uses dominance for validity checks, while Wasm control-flow translation
+//! walks the dominator tree to place blocks in structured Wasm control constructs.
 #![allow(dead_code)]
 
 use crate::graph::reverse_postorder;

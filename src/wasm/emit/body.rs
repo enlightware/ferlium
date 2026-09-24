@@ -51,7 +51,7 @@ use super::{
     Global, RuntimeGlobals, ScalarType, StringLiterals,
     adapters::NativeOptionalResultAdapter,
     allocate_frame, callable, callee, context_pointer,
-    control_flow::{ControlFlow, ControlRegion, IfRegion, conditional_targets},
+    control_flow::{ControlFlow, Item, conditional_targets, distinct_targets},
     dictionary_table, emit_failure, enter_frame,
     expressions::{
         Analysis as ExpressionAnalysis, Plan as ExpressionPlan, Source as ExpressionSource,
@@ -72,11 +72,15 @@ enum Storage {
     Expression,
 }
 
-#[derive(Clone, Copy)]
-enum BranchContext {
-    Linear,
-    Loop { header: BlockId, exit: BlockId },
-    Dispatcher { depth: u32 },
+/// An enclosing Wasm construct of structured emission.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Label {
+    /// A `block` whose end leads to the given MIR block.
+    Block(BlockId),
+    /// A `loop` whose start is the given MIR block.
+    Loop(BlockId),
+    /// An `if` entering one arm of a terminator.
+    If,
 }
 
 fn wasm_value_size(ty: ValType) -> u32 {
@@ -217,11 +221,14 @@ pub(super) struct Body<'a, 's> {
     frame: Option<WasmLocalId>,
     pc: Option<WasmLocalId>,
     control_flow: Option<ControlFlow>,
+    /// Enclosing constructs of structured emission, innermost last.
+    labels: Vec<Label>,
     frame_size: u32,
     runtime_globals: RuntimeGlobals,
     track_depth: bool,
     forwarded_result: Option<Value>,
-    fallthrough_return: bool,
+    /// The block whose return falls through the end of the function, if any.
+    fallthrough_return: Option<BlockId>,
     analysis: ExpressionAnalysis,
     expressions: ExpressionPlan,
     no_op_stack_markers: FxHashSet<ValueId>,
@@ -315,6 +322,7 @@ impl<'a, 's> Body<'a, 's> {
             frame: None,
             pc: None,
             control_flow: Some(control_flow),
+            labels: Vec::new(),
             frame_size: if mode.projection() {
                 CONTINUATION_HEADER_SIZE
             } else {
@@ -1872,28 +1880,29 @@ impl<'a, 's> Body<'a, 's> {
                 for block_id in self.body.blocks() {
                     self.i(I::End);
                     let next = next_block(self.body, block_id);
-                    self.emit_block(
-                        block_id,
-                        BranchContext::Dispatcher {
-                            depth: count - block_id.as_u32(),
-                        },
-                        next,
-                    )?;
+                    self.emit_dispatched_block(block_id, count - block_id.as_u32(), next)?;
                 }
                 self.i(I::End);
                 self.fail(FailureCode::Invariant);
                 self.i(I::End);
             }
-            ControlFlow::Structured(regions) => {
-                self.emit_regions(&regions, None)?;
+            ControlFlow::Structured(items) => {
+                self.emit_items(&items, None)?;
+                debug_assert!(self.labels.is_empty());
             }
         }
-        if !self.fallthrough_return {
+        if self.fallthrough_return.is_none() {
             self.i(I::Unreachable);
         }
         debug_assert!(
             self.expressions.is_fully_emitted(),
             "every stackified scalar expression and place is consumed"
+        );
+        debug_assert!(
+            self.source_map
+                .windows(2)
+                .all(|pair| pair[0].0.end <= pair[1].0.start),
+            "source regions are ordered and disjoint, as source lookup bisects them"
         );
         self.i(I::End);
         Ok(EmittedBody {
@@ -1903,111 +1912,220 @@ impl<'a, 's> Body<'a, 's> {
         })
     }
 
-    fn emit_regions(
-        &mut self,
-        regions: &[ControlRegion],
-        following: Option<BlockId>,
-    ) -> Result<(), String> {
-        for (index, region) in regions.iter().enumerate() {
-            let next = regions
-                .get(index + 1)
-                .map(ControlRegion::entry)
-                .or(following);
-            match region {
-                ControlRegion::Loop(region) => {
-                    debug_assert_eq!(next, Some(region.exit));
-                    // The outer block is `break`; the inner loop is `continue`.
+    /// Emits a structured sequence; `next` is the block reached by falling off its end.
+    fn emit_items(&mut self, items: &[Item], next: Option<BlockId>) -> Result<(), String> {
+        for (index, item) in items.iter().enumerate() {
+            match item {
+                Item::Block { follower, body } => {
                     self.i(I::Block(BlockType::Empty));
+                    self.labels.push(Label::Block(*follower));
+                    self.emit_items(body, Some(*follower))?;
+                    self.labels.pop();
+                    self.i(I::End);
+                }
+                Item::Loop { header, body } => {
+                    debug_assert_eq!(index + 1, items.len(), "a loop ends its sequence");
                     self.i(I::Loop(BlockType::Empty));
-                    for (block_index, &block_id) in region.blocks.iter().enumerate() {
-                        let next = Some(
-                            region
-                                .blocks
-                                .get(block_index + 1)
-                                .copied()
-                                .unwrap_or(region.exit),
-                        );
-                        self.emit_block(
-                            block_id,
-                            BranchContext::Loop {
-                                header: region.header,
-                                exit: region.exit,
-                            },
-                            next,
-                        )?;
-                    }
-                    self.i(I::End);
+                    self.labels.push(Label::Loop(*header));
+                    self.emit_items(body, next)?;
+                    self.labels.pop();
                     self.i(I::End);
                 }
-                ControlRegion::If(region) => {
-                    debug_assert_eq!(next, region.join);
-                    self.emit_if(region)?;
-                }
-                ControlRegion::Block(block_id) => {
-                    self.emit_block(*block_id, BranchContext::Linear, next)?;
+                Item::Node {
+                    block,
+                    nested,
+                    continuation,
+                } => {
+                    debug_assert_eq!(
+                        continuation.is_none(),
+                        index + 1 == items.len(),
+                        "only a node without continuation ends its sequence"
+                    );
+                    self.emit_node(*block, nested, *continuation, next)?;
                 }
             }
         }
         Ok(())
     }
 
-    fn emit_if(&mut self, region: &IfRegion) -> Result<(), String> {
-        self.emit_operations(region.header)?;
-        let block = self.body.block(region.header);
-        let (then_target, else_target) = conditional_targets(&block.terminator().kind)
-            .expect("if region must end in a conditional branch");
-        debug_assert_eq!(
-            Some(then_target),
-            region
-                .then_regions
-                .first()
-                .map(ControlRegion::entry)
-                .or(region.join)
-        );
-        debug_assert_eq!(
-            Some(else_target),
-            region
-                .else_regions
-                .first()
-                .map(ControlRegion::entry)
-                .or(region.join)
-        );
-        let span = block.terminator().span;
-
-        let start = self.code.byte_len();
-        self.branch_condition(region.header, then_target, false)?;
-        self.i(I::If(BlockType::Empty));
-        self.record_source(start, span);
-        self.emit_regions(&region.then_regions, region.join)?;
-        self.i(I::Else);
-        self.emit_regions(&region.else_regions, region.join)?;
-        self.i(I::End);
+    /// Emits a block and its terminator in structured control flow.
+    ///
+    /// Each target other than the one taken without a test is entered after its arm's condition:
+    /// a nested target inside an `if`, any other one by a branch to its label. The untested
+    /// target is the continuation, else `next` when it is a target, so that no branch is needed.
+    fn emit_node(
+        &mut self,
+        block_id: BlockId,
+        nested: &[(BlockId, Vec<Item>)],
+        continuation: Option<BlockId>,
+        next: Option<BlockId>,
+    ) -> Result<(), String> {
+        self.emit_operations(block_id)?;
+        let body = self.body;
+        let terminator = body.block(block_id).terminator();
+        let mut start = self.code.byte_len();
+        let targets = distinct_targets(&terminator.kind);
+        let untested = continuation
+            .or_else(|| targets.iter().copied().find(|target| Some(*target) == next))
+            .or_else(|| match &terminator.kind {
+                TerminatorKind::CondBr { else_target, .. } => Some(*else_target),
+                TerminatorKind::SwitchVariant { default, .. } => Some(*default),
+                TerminatorKind::Invoke { normal, .. } => Some(*normal),
+                _ => targets.first().copied(),
+            });
+        match &terminator.kind {
+            TerminatorKind::Invoke {
+                operation,
+                normal,
+                error,
+            } => {
+                let source =
+                    ExpressionSource::from_index(block_id, body.block(block_id).operations().len());
+                self.call_operation(operation, true, self.analysis.intrinsic(source))?;
+                if normal == error {
+                    self.i(I::If(BlockType::Empty));
+                    self.capture_failure();
+                    self.i(I::End);
+                } else if untested == Some(*normal) {
+                    self.i(I::If(BlockType::Empty));
+                    self.labels.push(Label::If);
+                    self.capture_failure();
+                    self.enter(*error, nested, operation.span, &mut start)?;
+                    self.labels.pop();
+                    self.i(I::End);
+                } else {
+                    self.i(I::I32Eqz);
+                    self.enter_if(*normal, nested, operation.span, &mut start)?;
+                    self.capture_failure();
+                }
+                self.record_source(start, operation.span);
+            }
+            TerminatorKind::Goto { .. }
+            | TerminatorKind::CondBr { .. }
+            | TerminatorKind::SwitchVariant { .. } => {
+                for &target in &targets {
+                    if Some(target) != untested {
+                        self.arm_condition(block_id, target)?;
+                        self.enter_if(target, nested, terminator.span, &mut start)?;
+                    }
+                }
+                self.record_source(start, terminator.span);
+            }
+            TerminatorKind::Yield { .. } => unreachable!("projections use the dispatcher"),
+            TerminatorKind::Return
+            | TerminatorKind::PropagateError
+            | TerminatorKind::FailureDuringCleanup
+            | TerminatorKind::InvariantFailure { .. } => {
+                self.exit(block_id)?;
+                self.record_source(start, terminator.span);
+                return Ok(());
+            }
+        }
+        let untested = untested.expect("a terminator with targets has an untested one");
+        if Some(untested) != continuation && Some(untested) != next {
+            let start = self.code.byte_len();
+            self.i(I::Br(self.label_depth(untested)));
+            self.record_source(start, terminator.span);
+        }
         Ok(())
     }
 
-    /// Pushes whether a conditional terminator selects `then_target`, or the opposite if `negate`.
-    fn branch_condition(
+    /// Enters `target` when the condition on the operand stack holds.
+    ///
+    /// The terminator's code since `start` maps to `span`. A nested arm splits it, so that source
+    /// ranges stay ordered and disjoint: the code before the arm is recorded, and `start` resumes
+    /// after it.
+    fn enter_if(
         &mut self,
-        block_id: BlockId,
-        then_target: BlockId,
-        negate: bool,
+        target: BlockId,
+        nested: &[(BlockId, Vec<Item>)],
+        span: Location,
+        start: &mut usize,
     ) -> Result<(), String> {
+        if nested.iter().any(|(block, _)| *block == target) {
+            self.i(I::If(BlockType::Empty));
+            self.labels.push(Label::If);
+            self.enter(target, nested, span, start)?;
+            self.labels.pop();
+            self.i(I::End);
+        } else {
+            self.i(I::BrIf(self.label_depth(target)));
+        }
+        Ok(())
+    }
+
+    /// Enters `target` from inside an arm whose end must not be reached; see
+    /// [`enter_if`](Self::enter_if) for `span` and `start`.
+    fn enter(
+        &mut self,
+        target: BlockId,
+        nested: &[(BlockId, Vec<Item>)],
+        span: Location,
+        start: &mut usize,
+    ) -> Result<(), String> {
+        if let Some((_, items)) = nested.iter().find(|(block, _)| *block == target) {
+            self.record_source(*start, span);
+            self.emit_items(items, None)?;
+            *start = self.code.byte_len();
+            Ok(())
+        } else {
+            self.i(I::Br(self.label_depth(target)));
+            Ok(())
+        }
+    }
+
+    /// The relative depth of the enclosing label that branching to `target` uses.
+    fn label_depth(&self, target: BlockId) -> u32 {
+        self.labels
+            .iter()
+            .rev()
+            .position(|label| matches!(label, Label::Block(block) | Label::Loop(block) if *block == target))
+            .expect("a branch target has an enclosing label") as u32
+    }
+
+    /// Pushes whether the terminator of `block_id` selects `target`.
+    fn arm_condition(&mut self, block_id: BlockId, target: BlockId) -> Result<(), String> {
         let body = self.body;
         match &body.block(block_id).terminator().kind {
-            TerminatorKind::CondBr { condition, .. } => {
+            TerminatorKind::CondBr {
+                condition,
+                then_target,
+                ..
+            } => {
                 self.read(condition)?;
-                if negate {
+                if target != *then_target {
                     self.i(I::I32Eqz);
                 }
             }
-            TerminatorKind::SwitchVariant { tag, cases, .. } => {
-                let (compare, combine) = if negate {
-                    (I::I32Ne, I::I32And)
+            TerminatorKind::SwitchVariant {
+                tag,
+                cases,
+                default,
+            } => {
+                // The default arm is selected by no case reaching another target.
+                let (selected, compare, combine) = if target == *default {
+                    (
+                        cases
+                            .iter()
+                            .filter(|(_, case_target)| case_target != default)
+                            .collect::<Vec<_>>(),
+                        I::I32Ne,
+                        I::I32And,
+                    )
                 } else {
-                    (I::I32Eq, I::I32Or)
+                    (
+                        cases
+                            .iter()
+                            .filter(|(_, case_target)| *case_target == target)
+                            .collect::<Vec<_>>(),
+                        I::I32Eq,
+                        I::I32Or,
+                    )
                 };
-                let matching = cases.iter().filter(|(_, target)| *target == then_target);
-                for (index, (case, _)) in matching.enumerate() {
+                if selected.is_empty() {
+                    self.i(I::I32Const(1));
+                }
+                for (index, (case, _)) in selected.into_iter().enumerate() {
                     self.value(tag)?;
                     self.i(I::I32Const(self.session.variant_tag_id(*case) as i32));
                     self.i(compare.clone());
@@ -2017,6 +2135,27 @@ impl<'a, 's> Body<'a, 's> {
                 }
             }
             _ => unreachable!("expected a conditional terminator"),
+        }
+        Ok(())
+    }
+
+    /// Emits a terminator without successors.
+    fn exit(&mut self, block_id: BlockId) -> Result<(), String> {
+        match &self.body.block(block_id).terminator().kind {
+            TerminatorKind::PropagateError => {
+                self.propagate_failure();
+                self.return_frame(true, true)?;
+            }
+            TerminatorKind::FailureDuringCleanup => {
+                self.propagate_failure();
+                // A correctly chained cleanup failure already trapped while propagating.
+                self.fail(FailureCode::Invariant);
+            }
+            TerminatorKind::Return => {
+                self.return_frame(false, self.fallthrough_return != Some(block_id))?;
+            }
+            TerminatorKind::InvariantFailure { .. } => self.fail(FailureCode::Invariant),
+            _ => unreachable!("expected a terminator without successors"),
         }
         Ok(())
     }
@@ -2079,10 +2218,11 @@ impl<'a, 's> Body<'a, 's> {
         Ok(())
     }
 
-    fn emit_block(
+    /// Emits a block of the program-counter dispatcher, whose loop is `depth` labels up.
+    fn emit_dispatched_block(
         &mut self,
         block_id: BlockId,
-        context: BranchContext,
+        depth: u32,
         next: Option<BlockId>,
     ) -> Result<(), String> {
         self.emit_operations(block_id)?;
@@ -2094,29 +2234,26 @@ impl<'a, 's> Body<'a, 's> {
         };
         if let Some((then_target, else_target)) = conditional_targets(&block.terminator().kind) {
             if then_target == else_target {
-                self.branch(then_target, context, next, 0);
+                self.dispatch_branch(then_target, depth, next, 0);
             } else if Some(then_target) == next {
-                self.branch_condition(block_id, then_target, true)?;
-                self.branch_if(else_target, context, 0);
+                self.arm_condition(block_id, else_target)?;
+                self.dispatch_branch_if(else_target, depth);
             } else if Some(else_target) == next {
-                self.branch_condition(block_id, then_target, false)?;
-                self.branch_if(then_target, context, 0);
+                self.arm_condition(block_id, then_target)?;
+                self.dispatch_branch_if(then_target, depth);
             } else {
-                if !matches!(context, BranchContext::Dispatcher { .. }) {
-                    unreachable!("structured conditional must have a fallthrough target");
-                }
                 self.i(I::I32Const(then_target.as_u32() as i32));
                 self.i(I::I32Const(else_target.as_u32() as i32));
-                self.branch_condition(block_id, then_target, false)?;
+                self.arm_condition(block_id, then_target)?;
                 self.i(I::Select);
-                self.dispatch(context, 0);
+                self.dispatch(depth, 0);
             }
             self.record_source(start, span);
             return Ok(());
         }
         match &block.terminator().kind {
             TerminatorKind::Goto { target } => {
-                self.branch(*target, context, next, 0);
+                self.dispatch_branch(*target, depth, next, 0);
             }
             TerminatorKind::CondBr { .. } => unreachable!("conditional branches are handled above"),
             TerminatorKind::SwitchVariant {
@@ -2132,7 +2269,7 @@ impl<'a, 's> Body<'a, 's> {
                         self.value(tag)?;
                         self.i(I::I32Const(self.session.variant_tag_id(*case) as i32));
                         self.i(I::I32Eq);
-                        self.branch_if(*target, context, 0);
+                        self.dispatch_branch_if(*target, depth);
                     }
                 } else {
                     self.i(I::I32Const(default.as_u32() as i32));
@@ -2143,7 +2280,7 @@ impl<'a, 's> Body<'a, 's> {
                         self.i(I::I32Ne);
                         self.i(I::Select);
                     }
-                    self.dispatch(context, 0);
+                    self.dispatch(depth, 0);
                 }
             }
             TerminatorKind::Invoke {
@@ -2157,17 +2294,17 @@ impl<'a, 's> Body<'a, 's> {
                     self.i(I::If(BlockType::Empty));
                     self.capture_failure();
                     self.i(I::End);
-                    self.branch(*normal, context, next, 0);
+                    self.dispatch_branch(*normal, depth, next, 0);
                 } else if Some(*normal) == next {
                     self.i(I::If(BlockType::Empty));
                     self.capture_failure();
-                    self.branch(*error, context, None, 1);
+                    self.dispatch_branch(*error, depth, None, 1);
                     self.i(I::End);
                 } else if Some(*error) == next {
                     self.i(I::If(BlockType::Empty));
                     self.capture_failure();
                     self.i(I::Else);
-                    self.branch(*normal, context, None, 1);
+                    self.dispatch_branch(*normal, depth, None, 1);
                     self.i(I::End);
                 } else {
                     self.i(I::If(BlockType::Result(ValType::I32)));
@@ -2176,26 +2313,14 @@ impl<'a, 's> Body<'a, 's> {
                     self.i(I::Else);
                     self.i(I::I32Const(normal.as_u32() as i32));
                     self.i(I::End);
-                    self.dispatch(context, 0);
+                    self.dispatch(depth, 0);
                 }
-            }
-            TerminatorKind::PropagateError | TerminatorKind::FailureDuringCleanup => {
-                self.propagate_failure();
-                if matches!(
-                    block.terminator().kind,
-                    TerminatorKind::FailureDuringCleanup
-                ) {
-                    // A correctly chained cleanup failure already trapped while propagating.
-                    self.fail(FailureCode::Invariant);
-                } else {
-                    self.return_frame(true, true)?;
-                }
-            }
-            TerminatorKind::Return => {
-                self.return_frame(false, !self.fallthrough_return)?;
             }
             TerminatorKind::Yield { place, resume } => self.suspend(place, *resume)?,
-            TerminatorKind::InvariantFailure { .. } => self.fail(FailureCode::Invariant),
+            TerminatorKind::Return
+            | TerminatorKind::PropagateError
+            | TerminatorKind::FailureDuringCleanup
+            | TerminatorKind::InvariantFailure { .. } => self.exit(block_id)?,
         }
         self.record_source(start, span);
         Ok(())
@@ -2208,65 +2333,29 @@ impl<'a, 's> Body<'a, 's> {
         }
     }
 
-    fn dispatch(&mut self, context: BranchContext, nested: u32) {
-        let BranchContext::Dispatcher { depth } = context else {
-            unreachable!("structured control flow cannot require dispatch")
-        };
+    /// Continues the dispatcher loop, `depth + nested` labels up, at the block on the stack.
+    fn dispatch(&mut self, depth: u32, nested: u32) {
         self.i(I::LocalSet(
             self.pc.expect("branch needs a dispatcher").as_u32(),
         ));
         self.i(I::Br(depth.checked_add(nested).expect("Wasm branch depth")));
     }
 
-    fn branch(
-        &mut self,
-        target: BlockId,
-        context: BranchContext,
-        next: Option<BlockId>,
-        nested: u32,
-    ) {
+    fn dispatch_branch(&mut self, target: BlockId, depth: u32, next: Option<BlockId>, nested: u32) {
         if Some(target) == next {
             return;
         }
-        match context {
-            BranchContext::Loop { header, .. } if target == header => {
-                self.i(I::Br(nested));
-            }
-            BranchContext::Loop { exit, .. } if target == exit => {
-                self.i(I::Br(1 + nested));
-            }
-            BranchContext::Dispatcher { .. } => {
-                self.i(I::I32Const(target.as_u32() as i32));
-                self.dispatch(context, nested);
-            }
-            BranchContext::Linear | BranchContext::Loop { .. } => {
-                unreachable!("unstructured edge reached structured Wasm emission")
-            }
-        }
+        self.i(I::I32Const(target.as_u32() as i32));
+        self.dispatch(depth, nested);
     }
 
-    /// Branch conditionally to a MIR block; expects its condition on the operand stack.
-    fn branch_if(&mut self, target: BlockId, context: BranchContext, nested: u32) {
-        match context {
-            BranchContext::Loop { header, .. } if target == header => {
-                self.i(I::BrIf(nested));
-            }
-            BranchContext::Loop { exit, .. } if target == exit => {
-                self.i(I::BrIf(1 + nested));
-            }
-            BranchContext::Dispatcher { depth } => {
-                self.i(I::I32Const(target.as_u32() as i32));
-                self.i(I::LocalSet(
-                    self.pc.expect("branch needs a dispatcher").as_u32(),
-                ));
-                self.i(I::BrIf(
-                    depth.checked_add(nested).expect("Wasm branch depth"),
-                ));
-            }
-            BranchContext::Linear | BranchContext::Loop { .. } => {
-                unreachable!("unstructured edge reached structured Wasm emission")
-            }
-        }
+    /// Dispatches to a MIR block if the condition on the operand stack holds.
+    fn dispatch_branch_if(&mut self, target: BlockId, depth: u32) {
+        self.i(I::I32Const(target.as_u32() as i32));
+        self.i(I::LocalSet(
+            self.pc.expect("branch needs a dispatcher").as_u32(),
+        ));
+        self.i(I::BrIf(depth));
     }
 
     fn operation(&mut self, source: ExpressionSource, op: &Operation) -> Result<(), String> {
@@ -2917,13 +3006,25 @@ fn next_block(body: &Function, block: BlockId) -> Option<BlockId> {
         .then(|| BlockId::from_index(block.as_index() + 1))
 }
 
-fn has_fallthrough_return(body: &Function, mode: BodyMode, control_flow: &ControlFlow) -> bool {
-    let ControlFlow::Structured(regions) = control_flow else {
-        return false;
+/// Returns the block whose return is the last code of a structured body, so that it can fall
+/// through the end of the function.
+fn has_fallthrough_return(
+    body: &Function,
+    mode: BodyMode,
+    control_flow: &ControlFlow,
+) -> Option<BlockId> {
+    let ControlFlow::Structured(items) = control_flow else {
+        return None;
     };
-    matches!(mode, BodyMode::Normal)
-        && matches!(regions.last(), Some(ControlRegion::Block(block))
-            if matches!(body.block(*block).terminator().kind, TerminatorKind::Return))
+    match items.last() {
+        Some(Item::Node { block, .. })
+            if matches!(mode, BodyMode::Normal)
+                && matches!(body.block(*block).terminator().kind, TerminatorKind::Return) =>
+        {
+            Some(*block)
+        }
+        _ => None,
+    }
 }
 
 fn forwarded_result(body: &Function, signature: &CallAbi, mode: BodyMode) -> Option<Value> {

@@ -37,6 +37,26 @@ pub(crate) fn module_text(
     session: &CompilerSession,
     module_id: ModuleId,
 ) -> Result<MirText, RuntimeError> {
+    let Some(emitted) = emit_module(session, module_id)? else {
+        return Ok(MirText {
+            text: String::new(),
+            source_map: Vec::new(),
+        });
+    };
+    let mut text = print(&emitted.bytes, &emitted.source_map)
+        .map_err(|error| RuntimeError::Backend(format!("Wasm printing: {error}")))?;
+    let env = session
+        .modules()
+        .env_for(session.expect_fresh_module(module_id));
+    text.text.push_str(&host_data(&emitted, &env));
+    Ok(text)
+}
+
+/// Compile every physical entry of the module into one Wasm module, if it has any.
+fn emit_module(
+    session: &CompilerSession,
+    module_id: ModuleId,
+) -> Result<Option<Emitted>, RuntimeError> {
     let program = session.prepare_physical_program(module_id)?;
     let artifacts = program
         .module(module_id)
@@ -47,25 +67,16 @@ pub(crate) fn module_text(
         .map(|id| FunctionId::new(module_id, id))
         .collect::<Vec<_>>();
     if roots.is_empty() {
-        return Ok(MirText {
-            text: String::new(),
-            source_map: Vec::new(),
-        });
+        return Ok(None);
     }
     let exports = source_exports(session, module_id, &roots)
         .filter(|(function, _)| emit::host_signature(&program, *function).is_ok())
         .collect::<Vec<_>>();
     let mut imports = Imports::new()
         .map_err(|error| RuntimeError::Backend(format!("Wasm imports: {error:?}")))?;
-    let emitted = emit::emit(&program, &roots, &exports, &mut imports, session)
-        .map_err(RuntimeError::Backend)?;
-    let mut text = print(&emitted.bytes, &emitted.source_map)
-        .map_err(|error| RuntimeError::Backend(format!("Wasm printing: {error}")))?;
-    let env = session
-        .modules()
-        .env_for(session.expect_fresh_module(module_id));
-    text.text.push_str(&host_data(&emitted, &env));
-    Ok(text)
+    emit::emit(&program, &roots, &exports, &mut imports, session)
+        .map(Some)
+        .map_err(RuntimeError::Backend)
 }
 
 /// Describe the host-owned data that the module reads through the invocation context, as
@@ -270,7 +281,7 @@ mod tests {
 
     use crate::{CompilerSession, Path};
 
-    use super::module_text;
+    use super::{emit_module, module_text};
 
     const SOURCE: &str = "fn helper(x: int) -> int { x * 3 }\n\
         fn compute(x: int) -> int { if x > 0 { helper(x) } else { 1 } }\n\
@@ -324,6 +335,26 @@ mod tests {
                 && text.text[entry.from..entry.to].contains("i32.mul")
         }));
         assert!(!text.text.contains("$std::Num<std::int>::mul"));
+    }
+
+    #[wasm_bindgen_test]
+    fn source_map_ranges_are_ordered_through_nested_branch_arms() {
+        let source = "fn compute(x: int, y: int) -> int { \
+            if x > 0 { if y > 0 { x * 5 } else { x * 7 } } else { x * 11 } }";
+        let mut session = CompilerSession::new();
+        let module = session
+            .compile(source, "wasm_text", Path::single_str("wasm_text"))
+            .unwrap()
+            .module_id;
+        let emitted = emit_module(&session, module).unwrap().unwrap();
+        // Source lookup bisects the entries, so they must be ordered and disjoint in each body.
+        for pair in emitted.source_map.windows(2) {
+            assert!(
+                pair[0].body < pair[1].body
+                    || (pair[0].body == pair[1].body && pair[0].bytes.end <= pair[1].bytes.start),
+                "{pair:?}"
+            );
+        }
     }
 
     #[wasm_bindgen_test]

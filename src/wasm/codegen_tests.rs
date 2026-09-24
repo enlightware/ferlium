@@ -1576,7 +1576,7 @@ fn wasm_codegen_structured_control_flow_and_local_storage() {
             for op in body.get_operators_reader().unwrap() {
                 match op.unwrap() {
                     Operator::BrTable { .. } => dispatches += 1,
-                    Operator::BrIf { .. } => direct_edges += 1,
+                    Operator::Br { .. } | Operator::BrIf { .. } => direct_edges += 1,
                     Operator::If { .. } => branches += 1,
                     Operator::Loop { .. } => loops += 1,
                     Operator::I32Load { .. }
@@ -1601,10 +1601,7 @@ fn wasm_codegen_structured_control_flow_and_local_storage() {
             );
             assert_eq!(loops, usize::from(has_loop));
             if has_loop {
-                assert!(
-                    direct_edges > 0,
-                    "an adjacent loop edge must branch directly"
-                );
+                assert!(direct_edges > 0, "loop edges must branch directly");
             }
             if has_branch {
                 assert!(branches >= 2, "nested source branches must use Wasm ifs");
@@ -1826,7 +1823,7 @@ fn wasm_codegen_structured_branches_execute_both_arms() {
 }
 
 #[wasm_bindgen_test]
-fn wasm_codegen_structures_two_way_variant_switches() {
+fn wasm_codegen_structures_reducible_control_flow() {
     for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
         let mut session = CompilerSession::new();
         session.set_mir_optimization(optimization);
@@ -1840,6 +1837,24 @@ fn wasm_codegen_structures_two_way_variant_switches() {
                 "fn compute(x: int) -> int { let o = if x > 0 { Some(x) } else { None }; \
                  match o { Some(v) => v * 2, None => 7 } }",
                 [(-3, 7), (0, 7), (4, 8)],
+            ),
+            // Nested loops with `continue`, and an `if` inside the inner loop.
+            (
+                "fn compute(n: int) -> int { let mut s = 0; for i in 0..n { \
+                 for j in 0..i { if j == 2 { continue; }; s = s + j } }; s }",
+                [(0, 0), (3, 1), (6, 14)],
+            ),
+            // An early return from a loop, and fallible indexing whose failure leaves the loop.
+            (
+                "fn compute(n: int) -> int { let a = [1, 2, 3, 4, 5]; let mut s = 0; \
+                 for i in 0..n { if s > 5 { return s * 10 }; s = s + a[i] }; s }",
+                [(0, 0), (2, 3), (5, 60)],
+            ),
+            // A switch with three targets.
+            (
+                "fn compute(x: int) -> int { let v = if x < 0 { A } else if x == 0 { B } else { C }; \
+                 match v { A => 1, B => 2, C => 3 } }",
+                [(-1, 1), (0, 2), (1, 3)],
             ),
         ] {
             let entry = compile(&mut session, source);
@@ -1860,7 +1875,7 @@ fn wasm_codegen_structures_two_way_variant_switches() {
                 .unwrap();
             assert_eq!(
                 dispatches, 0,
-                "a two-way switch must be structured: {optimization:?}: {source}"
+                "reducible control flow must be structured: {optimization:?}: {source}"
             );
             let mut instance = code.instantiate::<(isize,), isize>().unwrap();
             for (input, expected) in cases {
