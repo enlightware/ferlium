@@ -307,7 +307,25 @@ impl ValueRoles {
     /// renderer can annotate a malformed function instead of aborting inside the diagnostic that
     /// was about to report it.
     pub(crate) fn derive(func: &Function) -> Self {
-        let mut roles = Self::for_signature(func.parameters(), func.result_convention());
+        Self::derive_from_parts(
+            func.parameters(),
+            func.result_convention(),
+            func.constants(),
+            func.blocks().map(|block| {
+                let block = func.block(block);
+                (block.operations(), &block.terminator().kind)
+            }),
+        )
+    }
+
+    /// [`Self::derive`] over a function's parts, for a body that is still being edited.
+    pub(crate) fn derive_from_parts<'a>(
+        parameters: &[Parameter],
+        result_convention: CallResultConvention,
+        constants: &[Constant],
+        blocks: impl Iterator<Item = (&'a [Operation], &'a TerminatorKind)>,
+    ) -> Self {
+        let mut roles = Self::for_signature(parameters, result_convention);
 
         fn define<'a>(definitions: &mut Vec<Option<&'a Operation>>, operation: &'a Operation) {
             let Some(id) = operation.result_id() else {
@@ -321,12 +339,11 @@ impl ValueRoles {
         }
 
         let mut definitions: Vec<Option<&Operation>> = Vec::new();
-        for block in func.blocks() {
-            let block = func.block(block);
-            for operation in block.operations() {
+        for (operations, terminator) in blocks {
+            for operation in operations {
                 define(&mut definitions, operation);
             }
-            if let TerminatorKind::Invoke { operation, .. } = &block.terminator().kind {
+            if let TerminatorKind::Invoke { operation, .. } = terminator {
                 define(&mut definitions, operation);
             }
         }
@@ -337,7 +354,7 @@ impl ValueRoles {
             roles.ensure(
                 ValueId::from_index(index),
                 &definitions,
-                func.constants(),
+                constants,
                 &mut resolving,
             );
         }

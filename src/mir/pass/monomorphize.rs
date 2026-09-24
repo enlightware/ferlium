@@ -56,6 +56,7 @@ use crate::{
         ValueId,
         edit::FunctionEdit,
         operation::SourceFallibility,
+        role::MirType,
         terminator::{Terminator, TerminatorKind, TerminatorKindDiscriminant},
         value::StaticEvidence,
     },
@@ -789,6 +790,7 @@ fn elide_trivial_ownership_operations(edit: &mut FunctionEdit, env: ModuleEnv<'_
 /// a backend would honour it and emit dynamic layout code for a value whose layout it knows. The
 /// MIR interpreter ignores it, so this changes no behaviour today.
 pub(crate) fn drop_redundant_layout_witnesses(edit: &mut FunctionEdit, env: ModuleEnv<'_>) {
+    let moved_types = moved_place_types(edit, env);
     for block_id in edit.blocks().collect::<Vec<_>>() {
         let block = edit.block_mut(block_id);
         let operations = block
@@ -808,11 +810,12 @@ pub(crate) fn drop_redundant_layout_witnesses(edit: &mut FunctionEdit, env: Modu
                         operation.operands = Box::new([]);
                     }
                 }
-                // `move` records no type, so the witnessed type is read back from the `Value<T>`
-                // dictionary that witnesses it.
+                // `move` records no type, so the moved type is read back from the witnessing
+                // `Value<T>` dictionary, or else from the places it connects.
                 OperationKind::Move | OperationKind::Replace => {
                     if operation.operands.len() == 3
                         && let Some(ty) = witnessed_type(&operation.operands[2], env)
+                            .or_else(|| moved_types.get(&operation.operands[0]).copied())
                         && type_has_static_layout(ty, span, &env)
                     {
                         let source = operation.operands[0].clone();
@@ -883,6 +886,46 @@ pub(crate) fn drop_redundant_layout_witnesses(edit: &mut FunctionEdit, env: Modu
     }
 }
 
+/// The pointee types of the places a witnessed `move` or `replace` reads, when its witness does not
+/// name the moved type itself.
+///
+/// A dictionary built at run time, or of a generic impl, witnesses a type its impl key alone does
+/// not say. Substitution has made the places' own types concrete, so they answer
+/// instead. Roles are derived only for a body that has such a witness, which is rare.
+fn moved_place_types(edit: &FunctionEdit, env: ModuleEnv<'_>) -> FxHashMap<mir::Value, Type> {
+    let unresolved = |operation: &Operation| {
+        matches!(operation.kind, OperationKind::Move | OperationKind::Replace)
+            && operation.operands.len() == 3
+            && witnessed_type(&operation.operands[2], env).is_none()
+    };
+    let sources: Vec<mir::Value> = edit
+        .blocks()
+        .flat_map(|block| {
+            let block = edit.block(block);
+            block.operations.iter().chain(match &block.terminator.kind {
+                TerminatorKind::Invoke { operation, .. } => Some(operation),
+                _ => None,
+            })
+        })
+        .filter(|operation| unresolved(operation))
+        .map(|operation| operation.operands[0].clone())
+        .collect();
+    if sources.is_empty() {
+        return FxHashMap::default();
+    }
+    let roles = edit.value_roles();
+    sources
+        .into_iter()
+        .filter_map(|source| {
+            let role = roles.get(&source, edit.constants())?;
+            let MirType::Lowered(ty) = role.place_pointee_type()? else {
+                return None;
+            };
+            Some((source, ty))
+        })
+        .collect()
+}
+
 /// Visits the members of an existing product-witness schema and identifies the ordered subset
 /// retained by layout recomputation.
 fn visit_product_witness_retention(
@@ -901,7 +944,10 @@ fn visit_product_witness_retention(
     required_index == required.len()
 }
 
-/// The type a `Value<T>` dictionary operand witnesses the layout of.
+/// The type a `Value<T>` dictionary operand witnesses the layout of, when its impl names it.
+///
+/// A generic impl's key is its own generic type, such as `(A, A)`; its captures would say what `A`
+/// is, so the key alone names no concrete type.
 fn witnessed_type(witness: &mir::Value, env: ModuleEnv<'_>) -> Option<Type> {
     let id = match witness {
         mir::Value::Dictionary(id) => *id,
@@ -913,7 +959,7 @@ fn witnessed_type(witness: &mir::Value, env: ModuleEnv<'_>) -> Option<Type> {
     };
     let module = env.module_by_id(id.module_id)?;
     let key = module.get_impl_trait_key_by_id(id.impl_id)?;
-    key.input_tys().first().copied()
+    key.input_tys().first().copied().filter(Type::is_constant)
 }
 
 fn static_evidence_operand(value: &mir::Value) -> Option<StaticEvidence> {

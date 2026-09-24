@@ -316,7 +316,8 @@ Substitution answers questions the generic body could not, so four things follow
   `call` has no effect variables to instantiate.
 - **Layout witnesses are dropped where the type is now statically sized.** `alloca` and `move` carry
   a `Value` dictionary witnessing a run-time layout; substitution is precisely what makes the layout
-  static.
+  static. A `move` records no type, so when its dictionary is built or closed over captures, the
+  moved place's own type decides; this also covers a generic body inlined into a concrete caller.
 - **Clones and drops of types that now own nothing become `memcpy` and nothing.** This retakes the
   decision `resolve_local_clone` and `resolve_local_drop` make during elaboration. The dictionary
   entries they read are then unread, and `dce` removes them.
@@ -770,7 +771,10 @@ Deliberately narrow, and intra-function only.
   of those rewrites actually fired.
 - An unread `dict_entry` or `subfield` goes. Both derive places without side effects or owned
   results, so deleting one discharges no obligation. A linear use-count worklist handles nested
-  `subfield` chains: removing an unread leaf can make its base derivation unread.
+  `subfield` chains: removing an unread leaf can make its base derivation unread. An unread
+  `build_dictionary` or `build_subscript_evidence` goes too: it closes a definition over borrowed
+  evidence, and a backend releases only what a body still builds. Specialization and inlining
+  strand one when the layout witnesses it fed become static.
 - A `build_array` destination (or a bare function constant slot) used only by its cleanup is removed
   together with every matching drop. Treating construction and cleanup as one dead lifetime avoids
   both leaking a constructed resource and dropping uninitialized storage; arbitrary resource

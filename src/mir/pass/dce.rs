@@ -22,8 +22,9 @@
 //!   orphan a resource — which the verifier would reject, and which is the trap any wider rule
 //!   falls into first.
 //!
-//! Unread `dict_entry` and `subfield` place derivations are also removed. They neither own a value
-//! nor have side effects, and a linear use-count worklist handles nested `subfield` chains.
+//! Unread `dict_entry` and `subfield` place derivations are also removed, as are unread
+//! `build_dictionary` and `build_subscript_evidence`. They neither own a value nor have side
+//! effects, and a linear use-count worklist handles chains such as an entry of a built dictionary.
 //! After inlining, an unread concrete `TrivialCopy` result place and its complete write-only
 //! subfield tree are removed together. Any observing use rejects the root, and an owned producer
 //! is removed only when its declared consuming-use contract and representation make that safe.
@@ -816,6 +817,8 @@ impl DceCensus {
                 } else if matches!(
                     operation.kind,
                     OperationKind::DictEntry { .. }
+                        | OperationKind::BuildDictionary { .. }
+                        | OperationKind::BuildSubscriptEvidence { .. }
                         | OperationKind::Subfield { .. }
                         | OperationKind::AddressOffset { .. }
                         | OperationKind::AddressOffsetPlace { .. }
@@ -1094,6 +1097,9 @@ impl DceCensus {
     /// Removing one is safe without any of the analysis the `alloca` rule needs: `dict_entry` reads
     /// evidence and `subfield` only extends a place path. Neither has a side effect or yields an
     /// owned value, so an unread result discharges no drop obligation and consumes nothing.
+    /// Evidence construction is the same: it closes a definition over borrowed evidence, and a
+    /// backend releases only the evidence a body still builds. Specialization and inlining strand
+    /// it when the layout witnesses that read it become static.
     ///
     /// `subfield`s can form chains, so use counts are retired through a worklist: deleting an
     /// unread leaf may make its base derivation unread too.
@@ -1261,6 +1267,44 @@ mod tests {
         assert!(
             !caller.contains("dict_entry"),
             "the entry it no longer reads must be gone:\n{caller}"
+        );
+    }
+
+    /// Specialization makes a generic body's layout witnesses static, which strands the evidence
+    /// it built only to witness layouts.
+    #[test]
+    fn specialization_leaves_no_unread_evidence_construction() {
+        let module = optimized(
+            "fn sum2(seq) { let mut sum = 0; for i in seq { sum += i * i }; sum }\n\
+             fn range_sum2(start, end) { sum2(start..end) }",
+        );
+        let body = body_of(&module, "sum2#spec");
+
+        assert!(
+            !body.contains("build_dictionary"),
+            "no specialized operation reads a built dictionary:\n{body}"
+        );
+    }
+
+    /// An inlined generic body keeps the caller's evidence as a closed dictionary. Its concrete
+    /// places still make every layout static, so the move needs no witness and the dictionary
+    /// built for it goes, exactly as in a specialization.
+    #[test]
+    fn inlining_leaves_no_layout_witness_of_a_concrete_type() {
+        let module = optimized(
+            "#[inline(never)] fn flip(p) { (p.1, p.0) }\n\
+             fn update(a) { a = flip(a) }\n\
+             fn pairs(a: &mut (int, int)) { update(a) }",
+        );
+        let body = body_of(&module, "pairs");
+
+        assert!(
+            body.contains("move ") && !body.contains(" using "),
+            "the concrete move must carry no layout witness:\n{body}"
+        );
+        assert!(
+            !body.contains("build_dictionary"),
+            "the dictionary built for the witness must be gone:\n{body}"
         );
     }
 

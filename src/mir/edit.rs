@@ -43,6 +43,7 @@ use crate::{
     mir::{
         self, BasicBlock, BlockId, Function, Operation, OperationResult, Parameter, ParameterId,
         ValueId,
+        role::ValueRoles,
         terminator::{Terminator, TerminatorKind},
         value::{Constant, ConstantId},
     },
@@ -171,6 +172,22 @@ impl FunctionEdit {
     /// which renumbers.
     pub(crate) fn constants_mut(&mut self) -> &mut [Constant] {
         &mut self.constants
+    }
+
+    pub(crate) fn constants(&self) -> &[Constant] {
+        &self.constants
+    }
+
+    /// The roles of the body as it currently stands; see [`ValueRoles::derive`].
+    pub(crate) fn value_roles(&self) -> ValueRoles {
+        ValueRoles::derive_from_parts(
+            &self.parameters,
+            self.result_convention,
+            &self.constants,
+            self.blocks
+                .iter()
+                .map(|block| (block.operations.as_slice(), &block.terminator.kind)),
+        )
     }
 
     pub(crate) fn constant(&self, id: ConstantId) -> &Constant {
