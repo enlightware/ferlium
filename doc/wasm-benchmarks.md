@@ -7,6 +7,16 @@ time and parallel engine compilation; only the second is immune to what else run
 Both drive `examples/wasm-profile` over the corpus in `benches/runtime_workloads.rs`, the one
 Gungraun and `make profile-mir` use.
 
+## Wall-clock runner
+
+`make bench-wasm` builds the Node profile runner and executes every workload. Set
+`ARGS="quicksort sieve"` to select workloads or `ARGS="--list"` to list them. Each workload checks
+a fixed result and reports Ferlium compilation/emission, engine instantiation, the first call,
+median warmed execution, and generated module bytes separately. It uses the same generated
+parameterless entry as the interpreter measurements.
+
+## Callgrind runner
+
 | Phase | Covers |
 | --- | --- |
 | `std_build` | Lowering the standard library to physical MIR, once per process |
