@@ -154,7 +154,7 @@ itself leaves it unchanged. The main groups are:
 | calls/projections | `call`, `project`, `end_project` | Proven source-infallible forms are ordinary operations. Potentially source-fallible forms occur only inside `invoke`. |
 | ownership | `clone`, `drop`, `build_closure`, `clone_closure_env`, `drop_closure_env`, `build_subscript`, `clone_subscript_env`, `drop_subscript_env` | Semantic ownership actions are explicit. `Value::clone` and `Value::drop` are source-infallible by contract. |
 | matching | `comp_eq` | Compares a borrowed/materialized runtime value with compile-time pattern data. |
-| stack/runtime | `stack_save`, `stack_restore`, `check_call_depth`, `check_fuel` | Stack markers describe allocation frontiers. Runtime guards are pinned operations whose sandbox violations leave the MIR CFG. |
+| stack/runtime | `stack_save`, `stack_restore`, `check_call_depth`, `check_fuel` | Stack markers describe allocation frontiers. Stack regions nest with projections: a projection opened after a marker is saved has ended before that marker is restored, a marker saved inside a projection is not restored after it ends, and a marker saved before a `yield` is not restored after it. Runtime guards are pinned operations whose sandbox violations leave the MIR CFG. |
 
 **Copying and releasing come in a representation-level and a semantic form**, and both forms are
 operations rather than one being a call:

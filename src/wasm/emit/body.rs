@@ -57,7 +57,7 @@ use super::{
         Analysis as ExpressionAnalysis, Plan as ExpressionPlan, Source as ExpressionSource,
     },
     frame_address, frame_bytes, is_elided_stack_operation, layout_witness, leave_frame, memarg,
-    operations, scalar, subscript,
+    operations, scalar, stack, subscript,
     suspension::Crossing,
 };
 
@@ -229,8 +229,9 @@ pub(super) struct Body<'a, 's> {
     /// The block where execution starts: the resume block for a resume body.
     entry: BlockId,
     suspension: Option<SuspensionLayout>,
-    /// Stack frontier on entry to a resumed accessor, below which its restores may not reach.
-    resume_stack_floor: Option<WasmLocalId>,
+    /// Stack frontier on entry to a resumed accessor, which completion compares with the frontier
+    /// at suspension to tell whether its caller allocated above the continuation.
+    resume_frontier: Option<WasmLocalId>,
     frame: Option<WasmLocalId>,
     pc: Option<WasmLocalId>,
     control_flow: Option<ControlFlow>,
@@ -278,6 +279,7 @@ impl<'a, 's> Body<'a, 's> {
         runtime_globals: RuntimeGlobals,
         track_depth: bool,
     ) -> Result<Self, String> {
+        stack::check_nesting(body)?;
         let constructed_subscripts = constructed_subscript_definitions(body);
         let crossing = mode.projection().then(|| Crossing::of(body)).transpose()?;
         let entry = match mode {
@@ -344,7 +346,7 @@ impl<'a, 's> Body<'a, 's> {
             mode,
             entry,
             suspension: None,
-            resume_stack_floor: None,
+            resume_frontier: None,
             frame: None,
             pc: None,
             control_flow: Some(control_flow),
@@ -705,7 +707,7 @@ impl<'a, 's> Body<'a, 's> {
                 BodyMode::Normal => unreachable!(),
             });
             if matches!(mode, BodyMode::ProjectionResume) {
-                this.resume_stack_floor = Some(this.local(ValType::I32));
+                this.resume_frontier = Some(this.local(ValType::I32));
             }
         } else if this.frame_size != 0
             || body
@@ -973,10 +975,6 @@ impl<'a, 's> Body<'a, 's> {
         self.i(I::Else);
         self.i(I::I32Const(0));
         self.i(I::End);
-        // The retained frame is dead on both success and source failure. Keeping zero in the
-        // local also lets later stack restores ignore this completed projection.
-        self.i(I::I32Const(0));
-        self.i(I::LocalSet(frame.as_u32()));
         self.call_status(invoked, true);
         Ok(())
     }
@@ -1002,9 +1000,8 @@ impl<'a, 's> Body<'a, 's> {
         self.frame_address(RESUME_SLOT_OFFSET);
         self.i(I::I32Const(resume.as_u32() as i32));
         self.i(I::I32Store(memarg(2)));
-        // The caller may allocate above this retained frame before resuming it. Remember the
-        // frontier so its stack restores cannot reclaim the continuation and completion can tell
-        // caller-owned storage from allocations made by the resumed half itself.
+        // The caller may allocate above this retained frame before resuming it. Completion
+        // reclaims the frame only if the frontier is still this one when it resumes.
         self.frame_address(SUSPENDED_STACK_END_OFFSET);
         self.i(I::GlobalGet(Global::Stack as u32));
         self.i(I::I32Store(memarg(2)));
@@ -1024,48 +1021,6 @@ impl<'a, 's> Body<'a, 's> {
             self.load_local_from_frame(local, offset, ty);
         }
         self.suspension = Some(layout);
-    }
-
-    /// Restore a MIR stack marker without crossing a suspended continuation frame.
-    fn restore_stack(&mut self, marker: &Value) -> Result<(), String> {
-        let helpers = self.helper_locals();
-        self.value(marker)?;
-        self.i(I::LocalSet(helpers.scratch.as_u32()));
-        if let Some(floor) = self.resume_stack_floor {
-            self.raise_stack_floor(floor);
-        }
-        let mut frames = self
-            .projection_frames
-            .iter()
-            .map(|(id, frame)| (*id, *frame))
-            .collect::<Vec<_>>();
-        frames.sort_by_key(|(id, _)| id.as_index());
-        for (_, frame) in frames {
-            self.i(I::LocalGet(frame.as_u32()));
-            self.i(I::If(BlockType::Empty));
-            self.i(I::LocalGet(frame.as_u32()));
-            self.i(I::I32Load(MemArg {
-                offset: SUSPENDED_STACK_END_OFFSET.into(),
-                ..memarg(2)
-            }));
-            self.i(I::LocalSet(helpers.dynamic_base.as_u32()));
-            self.raise_stack_floor(helpers.dynamic_base);
-            self.i(I::End);
-        }
-        self.i(I::LocalGet(helpers.scratch.as_u32()));
-        Ok(())
-    }
-
-    /// Raise the pending stack frontier in `scratch` to `floor` when necessary.
-    fn raise_stack_floor(&mut self, floor: WasmLocalId) {
-        let scratch = self.helper_locals().scratch;
-        self.i(I::LocalGet(scratch.as_u32()));
-        self.i(I::LocalGet(floor.as_u32()));
-        self.i(I::LocalGet(scratch.as_u32()));
-        self.i(I::LocalGet(floor.as_u32()));
-        self.i(I::I32GtU);
-        self.i(I::Select);
-        self.i(I::LocalSet(scratch.as_u32()));
     }
 
     fn release_evidence(&mut self, reference: &Value) -> Result<(), String> {
@@ -1261,15 +1216,15 @@ impl<'a, 's> Body<'a, 's> {
         }
         if let Some(frame) = self.frame {
             if matches!(self.mode, BodyMode::ProjectionResume) {
-                let floor = self
-                    .resume_stack_floor
+                let resumed = self
+                    .resume_frontier
                     .expect("projection resume records its entry stack frontier");
-                // Reclaim both the retained continuation and allocations made after resumption
-                // when no caller-owned storage was already above the frame. The current stack
-                // frontier cannot answer that question because the resumed half may have pushed
-                // its own dynamic allocations. Otherwise retain the frame and caller storage but
-                // still restore the resume-entry frontier to discard those later allocations.
-                self.i(I::LocalGet(floor.as_u32()));
+                // Reclaim the continuation and everything above it when the caller allocated
+                // nothing above it while it was suspended. The current frontier cannot tell,
+                // because the resumed half may have allocated too. Otherwise the caller's storage
+                // is live: keep the continuation, which the caller reclaims with it, and only
+                // discard what the resumed half allocated.
+                self.i(I::LocalGet(resumed.as_u32()));
                 self.i(I::LocalGet(frame.as_u32()));
                 self.i(I::I32Load(MemArg {
                     offset: SUSPENDED_STACK_END_OFFSET.into(),
@@ -1279,7 +1234,7 @@ impl<'a, 's> Body<'a, 's> {
                 self.i(I::If(BlockType::Empty));
                 leave_frame(&mut self.code, frame);
                 self.i(I::Else);
-                self.i(I::LocalGet(floor.as_u32()));
+                self.i(I::LocalGet(resumed.as_u32()));
                 self.i(I::GlobalSet(Global::Stack as u32));
                 self.i(I::End);
             } else {
@@ -1889,7 +1844,7 @@ impl<'a, 's> Body<'a, 's> {
         } else {
             self.i(I::GlobalGet(Global::Stack as u32));
             self.i(I::LocalSet(
-                self.resume_stack_floor
+                self.resume_frontier
                     .expect("resumed projection has a stack floor")
                     .as_u32(),
             ));
@@ -2829,7 +2784,8 @@ impl<'a, 's> Body<'a, 's> {
             }
             Clear => (), // Lifetimes are explicit in MIR; backing bytes may remain stale after cleanup.
             StackRestore => {
-                self.restore_stack(&args[0])?;
+                // Nesting was checked: this reclaims no open continuation or caller storage.
+                self.value(&args[0])?;
                 self.i(I::GlobalSet(Global::Stack as u32));
             }
             Variant { tag, storage, .. } => {
@@ -3038,6 +2994,7 @@ pub(super) fn operation_needs_helper_locals(operation: &Operation) -> bool {
                 | OperationKind::AddressOffsetPlace { .. }
                 | OperationKind::Clear
                 | OperationKind::StackSave
+                | OperationKind::StackRestore
                 | OperationKind::CheckCallDepth
                 | OperationKind::CheckFuel
                 | OperationKind::RuntimeAlloc { .. }

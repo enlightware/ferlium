@@ -8,6 +8,7 @@ mod body;
 mod callable;
 mod control_flow;
 mod expressions;
+mod stack;
 mod subscript;
 mod suspension;
 
