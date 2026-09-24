@@ -426,6 +426,70 @@ fn wasm_codegen_subscript_resume_failure() {
 }
 
 #[wasm_bindgen_test]
+fn wasm_codegen_subscript_caller_failure_resumes_owned_evidence() {
+    // The generic accessor builds a captured environment for `(T, T)` before its yield and only
+    // releases it after resumption. An out-of-bounds index on the projected array fails in the
+    // caller while the projection is open. Its cleanup must still resume the accessor, and so
+    // release that environment. The generic driver keeps the accessor generic in raw programs.
+    let source = r#"
+        subscript cell<T>(slot: &mut [int], value: T) -> [int] where T: Value {
+            mut {
+                let values = [(value, value)];
+                let mut local = slot;
+                yield local;
+                local[0] = local[0] + len(values);
+                slot = local
+            }
+        }
+        #[inline(never)]
+        fn drive<T>(slot: &mut [int], value: T, index: int) where T: Value {
+            slot->[cell](value)[index] += 1
+        }
+        fn compute(x: int) -> int {
+            let mut slot = [x];
+            drive(slot, to_string(x), x);
+            slot[0]
+        }
+    "#;
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        let mut session = CompilerSession::new();
+        session.set_allow_experimental(true);
+        session.set_mir_optimization(optimization);
+        session.set_physical_mir_optimization(optimization);
+        let entry = compile(&mut session, source);
+        let mut instance = compile_raw(&session, entry)
+            .instantiate::<(isize,), isize>()
+            .unwrap();
+        for input in [1_isize, 0, 1] {
+            let before = LIVE_ENVIRONMENTS.get();
+            let built = BUILT_ENVIRONMENTS.get();
+            let actual = instance
+                .run((input,), WasmLimits::default())
+                .map_err(|error| error.kind());
+            if input == 0 {
+                assert_eq!(actual, Ok(2));
+            } else {
+                assert_eq!(
+                    actual,
+                    Err(RuntimeErrorKind::SourceFailure(SourceFailureKind::Aborted(
+                        Some("Array access out of bounds: index 1 for length 1".into())
+                    )))
+                );
+            }
+            assert!(
+                BUILT_ENVIRONMENTS.get() > built,
+                "the accessor must build its environment before the caller fails ({optimization:?})"
+            );
+            assert_eq!(
+                LIVE_ENVIRONMENTS.get(),
+                before,
+                "input {input} ({optimization:?})"
+            );
+        }
+    }
+}
+
+#[wasm_bindgen_test]
 fn wasm_codegen_closure_cleanup() {
     for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
         let mut session = CompilerSession::new();
