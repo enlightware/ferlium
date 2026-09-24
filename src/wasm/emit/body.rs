@@ -58,6 +58,7 @@ use super::{
     },
     frame_address, frame_bytes, is_elided_stack_operation, layout_witness, leave_frame, memarg,
     operations, scalar, subscript,
+    suspension::Crossing,
 };
 
 /// Code ranges generated for MIR operations and terminators, with their source spans.
@@ -168,10 +169,13 @@ fn returns_direct_result(mode: BodyMode, signature: &CallAbi) -> bool {
         && matches!(signature.result, ResultKind::Direct(_))
 }
 
+/// Where a suspended accessor retains what its resumed half reads, in its frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct SuspensionLayout {
-    pub inputs: Vec<(u32, ValType)>,
-    locals: Vec<(u32, ValType)>,
+    /// The slot of each direct parameter, if the resumed half reads it.
+    pub inputs: Vec<Option<(u32, ValType)>>,
+    /// The retained locals, in this body's numbering, with their slots.
+    locals: Vec<(WasmLocalId, u32, ValType)>,
 }
 
 pub(super) struct EmittedBody {
@@ -613,26 +617,52 @@ impl<'a, 's> Body<'a, 's> {
             });
         }
         if mode.projection() {
-            let inputs = signature
-                .parameters
-                .iter()
-                .map(|parameter| {
+            // Only what the resumed half reads from before the yield is retained. Other locals,
+            // like helpers and the dispatcher's program counter, are written before being read.
+            let crossing = Crossing::of(body);
+            let mut inputs = Vec::with_capacity(signature.parameters.len());
+            for (index, parameter) in signature.parameters.iter().enumerate() {
+                // A parameter held in the frame is read from there instead of from its local.
+                let value = Value::Parameter(ParameterId::from_index(index));
+                let local = !matches!(
+                    this.storage.get(&value),
+                    Some(Storage::Stack(_) | Storage::Expression)
+                );
+                inputs.push(if crossing.inputs[index] && local {
                     let ty = match parameter {
                         ParameterTransport::Direct(ty) => *ty,
                         ParameterTransport::Indirect => ValType::I32,
                     };
-                    let offset = this.reserve_bytes(wasm_value_size(ty))?;
-                    Ok((offset, ty))
+                    Some((this.reserve_bytes(wasm_value_size(ty))?, ty))
+                } else {
+                    None
+                });
+            }
+            let mut retained = crossing
+                .registers
+                .iter()
+                .filter_map(|id| {
+                    this.registers.get(id).copied().or_else(|| {
+                        match this.storage.get(&Value::Register(*id)) {
+                            Some(Storage::Local(local)) => Some(*local),
+                            _ => None,
+                        }
+                    })
                 })
-                .collect::<Result<Vec<_>, String>>()?;
-            let local_count = this.locals.len();
-            let locals = (0..local_count)
-                .map(|index| {
-                    let ty = this.locals[index];
-                    let offset = this.reserve_bytes(wasm_value_size(ty))?;
-                    Ok((offset, ty))
-                })
-                .collect::<Result<Vec<_>, String>>()?;
+                .chain(
+                    crossing
+                        .projection_frames
+                        .iter()
+                        .map(|id| this.projection_frames[id]),
+                )
+                .collect::<Vec<_>>();
+            retained.sort_by_key(|local| local.as_index());
+            let first_local = signature.parameter_count() + mode.extra_parameters();
+            let mut locals = Vec::with_capacity(retained.len());
+            for local in retained {
+                let ty = this.locals[local.as_index() - first_local];
+                locals.push((local, this.reserve_bytes(wasm_value_size(ty))?, ty));
+            }
             this.suspension = Some(SuspensionLayout { inputs, locals });
             this.frame = Some(match mode {
                 BodyMode::ProjectionStart { .. } => this.local(ValType::I32),
@@ -742,23 +772,6 @@ impl<'a, 's> Body<'a, 's> {
         self.frame_address(offset);
         self.i(local_load(ty, 0));
         self.i(I::LocalSet(local.as_u32()));
-    }
-
-    fn initialize_suspension(&mut self) {
-        let input_count = self
-            .suspension
-            .as_ref()
-            .expect("projected body has a suspension layout")
-            .inputs
-            .len();
-        for index in 0..input_count {
-            let (offset, ty) = self
-                .suspension
-                .as_ref()
-                .expect("projected body has a suspension layout")
-                .inputs[index];
-            self.store_local_in_frame(self.signature.input_local(index), offset, ty);
-        }
     }
 
     fn finish_project(&mut self, result: ValueId, invoked: bool) {
@@ -938,21 +951,19 @@ impl<'a, 's> Body<'a, 's> {
             }
             BodyMode::Normal => return Err("ordinary call yielded a place".into()),
         };
-        let local_count = self
+        let layout = self
             .suspension
-            .as_ref()
-            .expect("projected body has a suspension layout")
-            .locals
-            .len();
-        for index in 0..local_count {
-            let (offset, ty) = self
-                .suspension
-                .as_ref()
-                .expect("projected body has a suspension layout")
-                .locals[index];
-            let local = WasmLocalId::from_index(self.signature.parameter_count() + index);
+            .take()
+            .expect("projected body has a suspension layout");
+        for (index, input) in layout.inputs.iter().enumerate() {
+            if let Some((offset, ty)) = *input {
+                self.store_local_in_frame(self.signature.input_local(index), offset, ty);
+            }
+        }
+        for &(local, offset, ty) in &layout.locals {
             self.store_local_in_frame(local, offset, ty);
         }
+        self.suspension = Some(layout);
         self.frame_address(RESUME_SLOT_OFFSET);
         self.i(I::I32Const(entry.as_u32() as i32));
         self.i(I::I32Store(memarg(2)));
@@ -973,21 +984,14 @@ impl<'a, 's> Body<'a, 's> {
     }
 
     fn restore_suspension(&mut self) {
-        let local_count = self
+        let layout = self
             .suspension
-            .as_ref()
-            .expect("projected body has a suspension layout")
-            .locals
-            .len();
-        for index in 0..local_count {
-            let (offset, ty) = self
-                .suspension
-                .as_ref()
-                .expect("projected body has a suspension layout")
-                .locals[index];
-            let local = WasmLocalId::from_index(self.signature.parameter_count() + 1 + index);
+            .take()
+            .expect("projected body has a suspension layout");
+        for &(local, offset, ty) in &layout.locals {
             self.load_local_from_frame(local, offset, ty);
         }
+        self.suspension = Some(layout);
         let pc = self.pc.expect("projected body uses a dispatcher");
         self.frame_address(RESUME_BLOCK_OFFSET);
         self.i(I::I32Load(memarg(2)));
@@ -1847,9 +1851,6 @@ impl<'a, 's> Body<'a, 's> {
                     self.i(I::LocalGet(self.signature.input_local(index).as_u32()));
                     self.store(ScalarType::of(self.body.parameters()[index].ty)?);
                 }
-            }
-            if matches!(self.mode, BodyMode::ProjectionStart { .. }) {
-                self.initialize_suspension();
             }
         } else {
             self.i(I::GlobalGet(Global::Stack as u32));

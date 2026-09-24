@@ -9,6 +9,7 @@ mod callable;
 mod control_flow;
 mod expressions;
 mod subscript;
+mod suspension;
 
 use self::{
     adapters::{boxed_entry_wrapper, dictionary_adapter, entry_wrapper},
