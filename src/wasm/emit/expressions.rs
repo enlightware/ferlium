@@ -4,7 +4,7 @@
 //! Shared scalar-storage facts and conservative Wasm expression-tree plans.
 
 use crate::{
-    CompilerSession, FxHashMap, define_id_type,
+    CompilerSession, FxHashMap, FxHashSet, define_id_type,
     mir::{
         BasicBlock, BlockId, Function, Operation, OperationKind, ParameterId, ParameterKind, Value,
         ValueId,
@@ -18,7 +18,7 @@ use crate::{
     wasm::abi::{CallAbi, Parameter as ParameterTransport, WasmFunctionId},
 };
 
-use super::{scalar, wasm_intrinsic};
+use super::{is_elided_stack_operation, scalar, wasm_intrinsic};
 
 const MAX_EXPRESSION_DEPTH: usize = 128;
 
@@ -104,6 +104,7 @@ impl Analysis {
         program: &ResolvedPhysicalProgram<'_>,
         session: &CompilerSession,
         returns_direct_place: bool,
+        no_op_stack_markers: &FxHashSet<ValueId>,
     ) -> (Self, Plan) {
         let layout = OperationLayout::of(body);
         let inputs = Inputs::of(
@@ -116,7 +117,14 @@ impl Analysis {
             &layout,
         );
         let comparison_fusions = comparison_fusions(body, &layout, &inputs);
-        let plan = Plan::of(body, roles, &inputs, &comparison_fusions, &layout);
+        let plan = Plan::of(
+            body,
+            roles,
+            &inputs,
+            &comparison_fusions,
+            &layout,
+            no_op_stack_markers,
+        );
         let analysis = Self {
             parameter_count: body.parameters().len(),
             register_count: roles.register_count(),
@@ -174,6 +182,7 @@ impl Plan {
         inputs: &Inputs,
         comparison_fusions: &[Option<KnownCallee>],
         layout: &OperationLayout,
+        no_op_stack_markers: &FxHashSet<ValueId>,
     ) -> Self {
         let parameter_count = body.parameters().len();
         let value_count = roles.register_count();
@@ -379,7 +388,10 @@ impl Plan {
                     group_ultimate_root[root_index].expect("non-empty expression group");
                 let contiguous = (first.as_index()..root_index).all(|operation| {
                     ultimate_roots[operation] == Some(ultimate_root)
-                        || is_neutral(&block.operations()[operation - base.as_index()])
+                        || is_neutral(
+                            &block.operations()[operation - base.as_index()],
+                            no_op_stack_markers,
+                        )
                 });
                 accepted[root_index] = contiguous;
             }
@@ -838,11 +850,11 @@ fn classify_access(op: &Operation, index: usize) -> Option<AccessKind> {
     })
 }
 
-fn is_neutral(operation: &Operation) -> bool {
+fn is_neutral(operation: &Operation, no_op_stack_markers: &FxHashSet<ValueId>) -> bool {
     matches!(
         operation.kind,
         OperationKind::Alloca { .. } | OperationKind::AllocaPlace { .. } | OperationKind::Clear
-    )
+    ) || is_elided_stack_operation(operation, no_op_stack_markers)
 }
 
 fn stackifiable_operation(operation: &Operation) -> bool {

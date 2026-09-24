@@ -22,7 +22,8 @@ use crate::{
         },
     },
     mir::{
-        Operation, OperationKind, ParameterId, Value as MirValue,
+        BlockId, Operation, OperationKind, ParameterId, Value as MirValue,
+        pass::stack_region::no_op_stack_markers,
         physical::{
             lower_physical_mir, lower_unoptimized_physical_mir,
             program::{ResolvedPhysicalProgram, resolve_physical_program},
@@ -33,7 +34,7 @@ use crate::{
     std::{math::Float, option::option_type, string::String},
     types::{
         effects::{PrimitiveEffect, effect, no_effects},
-        r#type::Type,
+        r#type::{CallImplType, FnType, Type},
     },
     ustr,
 };
@@ -147,6 +148,56 @@ fn wasm_operator_count(bytes: &[u8], mut matches: impl FnMut(&Operator<'_>) -> b
             _ => None,
         })
         .sum()
+}
+
+/// Instructions of a named exported function, independent of code-section ordering.
+///
+/// This follows the export exactly, so a fallible scalar entry resolves to its generated wrapper
+/// rather than the wrapped Ferlium function.
+fn exported_function_operators<'a>(bytes: &'a [u8], name: &str) -> Vec<Operator<'a>> {
+    let mut imported_functions = 0usize;
+    let mut function_index = None;
+    for payload in Parser::new(0).parse_all(bytes) {
+        match payload.unwrap() {
+            Payload::ImportSection(section) => {
+                imported_functions += section
+                    .into_imports()
+                    .filter(|import| {
+                        matches!(
+                            import.as_ref().unwrap().ty,
+                            wasmparser::TypeRef::Func(_) | wasmparser::TypeRef::FuncExact(_)
+                        )
+                    })
+                    .count();
+            }
+            Payload::ExportSection(section) => {
+                for export in section {
+                    let export = export.unwrap();
+                    if export.name == name && export.kind == wasmparser::ExternalKind::Func {
+                        function_index = Some(export.index as usize);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let body_index = function_index
+        .expect("fixture must export its entry")
+        .checked_sub(imported_functions)
+        .expect("exported entry must be defined in the generated module");
+    let body = Parser::new(0)
+        .parse_all(bytes)
+        .filter_map(|payload| match payload.unwrap() {
+            Payload::CodeSectionEntry(body) => Some(body),
+            _ => None,
+        })
+        .nth(body_index)
+        .expect("exported entry must have a code body");
+    body.get_operators_reader()
+        .unwrap()
+        .into_iter()
+        .collect::<Result<_, _>>()
+        .unwrap()
 }
 
 fn calls_borrowed_subscript_member(program: &ResolvedPhysicalProgram<'_>) -> bool {
@@ -784,6 +835,98 @@ fn wasm_codegen_witnessed_alloca_reserves_helper_locals() {
         MirValue::Parameter(ParameterId::from_index(0)),
     );
     assert!(emit::operation_needs_helper_locals(&operation));
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_identifies_stack_frontier_changes() {
+    let span = Location::new_synthesized();
+    let dynamic = Operation::alloca_dynamic(
+        span,
+        Type::unit(),
+        MirValue::Parameter(ParameterId::from_index(0)),
+    );
+    assert!(emit::operation_changes_stack_frontier(&dynamic));
+    assert!(!emit::operation_changes_stack_frontier(&Operation::alloca(
+        span,
+        Type::unit()
+    )));
+    assert!(emit::operation_changes_stack_frontier(
+        &Operation::end_project(span, MirValue::Parameter(ParameterId::from_index(0)))
+    ));
+    assert!(emit::operation_changes_stack_frontier(&Operation::project(
+        span,
+        MirValue::Parameter(ParameterId::from_index(0)),
+        [],
+        Type::unit(),
+        CallImplType::value(FnType::new_by_val([], Type::unit(), no_effects())),
+    )));
+    assert!(emit::terminator_changes_stack_frontier(
+        &TerminatorKind::Yield {
+            place: MirValue::Parameter(ParameterId::from_index(0)),
+            resume: BlockId::from_index(0),
+        }
+    ));
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_dynamic_callee_reclaims_its_stack_frontier() {
+    let mut session = CompilerSession::new();
+    session.set_mir_optimization(MirOptimization::Disabled);
+    session.set_physical_mir_optimization(MirOptimization::Disabled);
+    let entry = compile(
+        &mut session,
+        r#"
+            #[inline(never)]
+            fn replace<T>(slot: &mut T, value: T) where T: Value { slot = value; }
+            fn compute(limit: int) -> int {
+                let mut value = (0, false);
+                let mut i = 0;
+                loop {
+                    if i >= limit { break; };
+                    replace(value, (i, true));
+                    i += 1;
+                };
+                value.0
+            }
+        "#,
+    );
+    let program = session.prepare_physical_program(entry.module).unwrap();
+    assert!(physical_operations(&program, |operation| {
+        matches!(operation.kind, OperationKind::Alloca { .. }) && !operation.operands.is_empty()
+    }));
+    let caller = program.function(entry).unwrap();
+    let elided = no_op_stack_markers(
+        caller,
+        emit::operation_changes_stack_frontier,
+        emit::terminator_changes_stack_frontier,
+    );
+    let saves = caller
+        .blocks()
+        .flat_map(|block| caller.block(block).operations())
+        .filter_map(|operation| {
+            matches!(operation.kind, OperationKind::StackSave)
+                .then(|| operation.result_id())
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    assert!(!saves.is_empty());
+    assert!(saves.iter().all(|marker| elided.contains(marker)));
+
+    let mut instance = compile_raw(&session, entry)
+        .instantiate::<(isize,), isize>()
+        .unwrap();
+    assert_eq!(
+        instance
+            .run(
+                (256,),
+                WasmLimits {
+                    stack_bytes: 512,
+                    ..WasmLimits::default()
+                },
+            )
+            .unwrap(),
+        255
+    );
 }
 
 #[wasm_bindgen_test]
@@ -1471,26 +1614,108 @@ fn wasm_codegen_structured_control_flow_and_local_storage() {
 }
 
 #[wasm_bindgen_test]
+fn wasm_codegen_omits_noop_stack_markers_in_loops() {
+    let mut session = CompilerSession::new();
+    let entry = compile(
+        &mut session,
+        "fn compute(limit: int) -> int { \
+             let mut i = 0; let mut sum = 0; \
+             loop { if i >= limit { break; }; sum += i; i += 1; }; \
+             sum \
+         }",
+    );
+    let program = session.prepare_physical_program(entry.module).unwrap();
+    let body = program.function(entry).unwrap();
+    assert!(
+        body.blocks()
+            .flat_map(|block| body.block(block).operations())
+            .any(|operation| matches!(operation.kind, OperationKind::StackSave))
+    );
+    assert!(
+        body.blocks()
+            .flat_map(|block| body.block(block).operations())
+            .any(|operation| matches!(operation.kind, OperationKind::StackRestore))
+    );
+    assert!(
+        !no_op_stack_markers(
+            body,
+            emit::operation_changes_stack_frontier,
+            emit::terminator_changes_stack_frontier,
+        )
+        .is_empty(),
+        "the loop bracket must be redundant under the Wasm frontier model"
+    );
+
+    let code = CompiledProgram::compile(&session, entry).unwrap();
+    for operation in exported_function_operators(code.bytes(), ENTRY_EXPORT) {
+        match operation {
+            Operator::GlobalGet { global_index } | Operator::GlobalSet { global_index } => {
+                assert_ne!(
+                    global_index,
+                    emit::STACK_GLOBAL_INDEX,
+                    "the no-op loop bracket must not access the Wasm stack frontier"
+                );
+            }
+            _ => {}
+        }
+    }
+
+    let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+    assert_eq!(instance.run((10,), WasmLimits::default()).unwrap(), 45);
+}
+
+#[wasm_bindgen_test]
 fn wasm_codegen_stackifies_single_use_scalar_expressions() {
     let mut session = CompilerSession::new();
     let entry = compile(
         &mut session,
-        "fn compute(x: int, y: int) -> bool { let sum = x + 1; let scaled = sum * 2; scaled == y }",
+        "fn compute(x: int, y: int) -> bool {
+             let sum = x + 1; let scaled = sum * 2; scaled == y
+         }",
     );
     let code = CompiledProgram::compile(&session, entry).unwrap();
-    let body = Parser::new(0)
-        .parse_all(code.bytes())
-        .find_map(|payload| match payload.unwrap() {
-            Payload::CodeSectionEntry(body) => Some(body),
-            _ => None,
-        })
-        .unwrap();
-    let operations = body
-        .get_operators_reader()
-        .unwrap()
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
+    assert_stackified_add_mul(&exported_function_operators(code.bytes(), ENTRY_EXPORT));
+
+    let mut instance = code.instantiate::<(isize, isize), bool>().unwrap();
+    assert!(instance.run((3, 8), WasmLimits::default()).unwrap());
+    assert!(!instance.run((3, 9), WasmLimits::default()).unwrap());
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_stackifies_across_elided_stack_markers() {
+    let mut session = CompilerSession::new();
+    let entry = compile(
+        &mut session,
+        "fn add_one(x: int) -> int { x + 1 }
+         fn compute(x: int, y: int) -> bool {
+             let sum = add_one(x); let scaled = sum * 2; scaled == y
+         }",
+    );
+    let program = session.prepare_physical_program(entry.module).unwrap();
+    let physical = program.function(entry).unwrap();
+    assert!(
+        physical
+            .blocks()
+            .flat_map(|block| physical.block(block).operations())
+            .any(|operation| matches!(operation.kind, OperationKind::StackSave))
+    );
+    assert!(
+        !no_op_stack_markers(
+            physical,
+            emit::operation_changes_stack_frontier,
+            emit::terminator_changes_stack_frontier,
+        )
+        .is_empty()
+    );
+    let code = CompiledProgram::compile(&session, entry).unwrap();
+    assert_stackified_add_mul(&exported_function_operators(code.bytes(), ENTRY_EXPORT));
+
+    let mut instance = code.instantiate::<(isize, isize), bool>().unwrap();
+    assert!(instance.run((3, 8), WasmLimits::default()).unwrap());
+    assert!(!instance.run((3, 9), WasmLimits::default()).unwrap());
+}
+
+fn assert_stackified_add_mul(operations: &[Operator<'_>]) {
     let add = operations
         .iter()
         .position(|operation| matches!(operation, Operator::I32Add))
@@ -1507,10 +1732,6 @@ fn wasm_codegen_stackifies_single_use_scalar_expressions() {
             )),
         "the single-use sum must flow directly into the multiplication: {operations:?}"
     );
-
-    let mut instance = code.instantiate::<(isize, isize), bool>().unwrap();
-    assert!(instance.run((3, 8), WasmLimits::default()).unwrap());
-    assert!(!instance.run((3, 9), WasmLimits::default()).unwrap());
 }
 
 #[wasm_bindgen_test]

@@ -28,7 +28,7 @@ use crate::{
     CompilerSession, FxHashMap, FxHashSet, Location, MirOptimization,
     hir::{function::ArgConvention, native_functions::NativeScalar},
     mir::{
-        BasicBlock, Function, Operation, OperationKind, ParameterKind, Value,
+        BasicBlock, Function, Operation, OperationKind, ParameterKind, Value, ValueId,
         pass::known_callee::KnownCallee,
         physical::{constructed_subscript_definitions, program::ResolvedPhysicalProgram},
         role::MirType,
@@ -66,6 +66,25 @@ use super::{
 #[cfg(test)]
 pub(super) fn operation_needs_helper_locals(operation: &Operation) -> bool {
     body::operation_needs_helper_locals(operation)
+}
+
+#[cfg(test)]
+pub(super) use body::{operation_changes_stack_frontier, terminator_changes_stack_frontier};
+
+fn is_elided_stack_operation(
+    operation: &Operation,
+    no_op_stack_markers: &FxHashSet<ValueId>,
+) -> bool {
+    match operation.kind {
+        OperationKind::StackSave => operation
+            .result_id()
+            .is_some_and(|marker| no_op_stack_markers.contains(&marker)),
+        OperationKind::StackRestore => matches!(
+            operation.operands.first(),
+            Some(Value::Register(marker)) if no_op_stack_markers.contains(marker)
+        ),
+        _ => false,
+    }
 }
 
 /// A Ferlium type checked to belong to the emitter's supported scalar subset.
@@ -172,6 +191,9 @@ enum Global {
     Stack,
     End,
 }
+
+#[cfg(test)]
+pub(super) const STACK_GLOBAL_INDEX: u32 = Global::Stack as u32;
 
 impl Global {
     fn name(self) -> &'static str {
@@ -1446,10 +1468,17 @@ fn frame_bytes(size: u32) -> Result<u32, String> {
     Ok(size.max(1).checked_add(7).ok_or("frame size overflow")? & !7)
 }
 
+/// Saves a callee's entry frontier and reserves its fixed frame.
+///
+/// Every emitted callee or trampoline that may leave dynamic storage above its entry frontier must
+/// pair this with [`leave_frame`]. Ordinary calls are consequently frontier-neutral to callers.
 fn enter_frame(code: &mut WasmFunction, frame: WasmLocalId, size: u32) {
-    // Check before addition, so a large frame cannot wrap the linear-memory stack pointer.
     code.instruction(&I::GlobalGet(Global::Stack as u32));
     code.instruction(&I::LocalSet(frame.as_u32()));
+    if size == 0 {
+        return;
+    }
+    // Check before addition, so a large frame cannot wrap the linear-memory stack pointer.
     code.instruction(&I::GlobalGet(Global::End as u32));
     code.instruction(&I::LocalGet(frame.as_u32()));
     code.instruction(&I::I32Sub);

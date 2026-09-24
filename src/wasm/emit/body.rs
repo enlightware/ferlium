@@ -16,7 +16,7 @@ use crate::{
     mir::{
         BlockId, Function, Operation, OperationKind, ParameterId, ParameterKind, Value, ValueId,
         operation::OperationKindDiscriminant,
-        pass::known_callee::KnownCallee,
+        pass::{known_callee::KnownCallee, stack_region::no_op_stack_markers},
         physical::{
             ConstructedSubscript, DictionaryReference, constructed_subscript_definitions,
             program::{Descriptor, ResolvedPhysicalProgram},
@@ -56,7 +56,8 @@ use super::{
     expressions::{
         Analysis as ExpressionAnalysis, Plan as ExpressionPlan, Source as ExpressionSource,
     },
-    frame_address, frame_bytes, layout_witness, leave_frame, memarg, operations, scalar, subscript,
+    frame_address, frame_bytes, is_elided_stack_operation, layout_witness, leave_frame, memarg,
+    operations, scalar, subscript,
 };
 
 /// Code ranges generated for MIR operations and terminators, with their source spans.
@@ -223,6 +224,7 @@ pub(super) struct Body<'a, 's> {
     fallthrough_return: bool,
     analysis: ExpressionAnalysis,
     expressions: ExpressionPlan,
+    no_op_stack_markers: FxHashSet<ValueId>,
     pub(super) code: WasmFunction,
     source_map: BodySourceMap,
 }
@@ -259,6 +261,11 @@ impl<'a, 's> Body<'a, 's> {
         let forwarded_result = forwarded_result(body, signature, mode);
         let fallthrough_return = has_fallthrough_return(body, mode, &control_flow);
         let roles = ValueRoles::derive(body);
+        let no_op_stack_markers = no_op_stack_markers(
+            body,
+            operation_changes_stack_frontier,
+            terminator_changes_stack_frontier,
+        );
         let (analysis, expressions) = ExpressionAnalysis::of(
             body,
             &roles,
@@ -266,6 +273,7 @@ impl<'a, 's> Body<'a, 's> {
             program,
             session,
             returns_direct_result(mode, signature) && forwarded_result.is_none(),
+            &no_op_stack_markers,
         );
         let mut this = Self {
             body,
@@ -318,10 +326,11 @@ impl<'a, 's> Body<'a, 's> {
             fallthrough_return,
             analysis,
             expressions,
+            no_op_stack_markers,
             code: WasmFunction::new([]),
             source_map: Vec::new(),
         };
-        if needs_helper_locals(body, mode) {
+        if needs_helper_locals(body, mode, &this.no_op_stack_markers) {
             this.helpers = Some(HelperLocals {
                 pending_failure: this.local(ValType::I32),
                 scratch: this.local(ValType::I32),
@@ -369,6 +378,9 @@ impl<'a, 's> Body<'a, 's> {
         }
         for block in body.blocks() {
             for operation in operations(body.block(block)) {
+                if is_elided_stack_operation(operation, &this.no_op_stack_markers) {
+                    continue;
+                }
                 if matches!(operation.kind, OperationKind::BuildClosure { .. }) {
                     if this.callable_locals.is_none() {
                         this.callable_locals =
@@ -622,7 +634,14 @@ impl<'a, 's> Body<'a, 's> {
             if matches!(mode, BodyMode::ProjectionResume) {
                 this.resume_stack_floor = Some(this.local(ValType::I32));
             }
-        } else if this.frame_size != 0 {
+        } else if this.frame_size != 0
+            || body
+                .blocks()
+                .any(|block| operations(body.block(block)).any(operation_changes_stack_frontier))
+        {
+            // A zero-sized frame is still an entry-frontier guard. Witnessed allocas are not part
+            // of the fixed frame, so a normal callee must restore their storage before returning;
+            // callers may then safely regard calls as frontier-transparent.
             this.frame = Some(this.local(ValType::I32));
         }
         this.code = WasmFunction::new(this.locals.iter().map(|ty| (1, *ty)));
@@ -1979,6 +1998,10 @@ impl<'a, 's> Body<'a, 's> {
         let mut index = 0;
         while index < operations.len() {
             let operation = &operations[index];
+            if is_elided_stack_operation(operation, &self.no_op_stack_markers) {
+                index += 1;
+                continue;
+            }
             if self.expressions.skips(
                 ExpressionSource::from_index(block_id, index),
                 &self.analysis,
@@ -2801,7 +2824,11 @@ impl<'a, 's> Body<'a, 's> {
     }
 }
 
-fn needs_helper_locals(body: &Function, mode: BodyMode) -> bool {
+fn needs_helper_locals(
+    body: &Function,
+    mode: BodyMode,
+    no_op_stack_markers: &FxHashSet<ValueId>,
+) -> bool {
     mode.projection()
         || body.blocks().any(|block| {
             let block = body.block(block);
@@ -2810,8 +2837,29 @@ fn needs_helper_locals(body: &Function, mode: BodyMode) -> bool {
                 TerminatorKind::Invoke { .. }
                     | TerminatorKind::PropagateError
                     | TerminatorKind::FailureDuringCleanup
-            ) || operations(block).any(operation_needs_helper_locals)
+            ) || operations(block).any(|operation| {
+                !is_elided_stack_operation(operation, no_op_stack_markers)
+                    && operation_needs_helper_locals(operation)
+            })
         })
+}
+
+/// Whether an operation can change the Wasm shadow-stack frontier beyond its own execution.
+///
+/// Statically sized MIR allocas already have fixed frame slots and calls reclaim their own frames.
+/// Witnessed allocas and retained projection frames can raise the frontier, while ending a
+/// projection can lower it. A `yield` is handled separately as a terminator because its caller may
+/// allocate before resumption.
+pub(in crate::wasm) fn operation_changes_stack_frontier(operation: &Operation) -> bool {
+    matches!(operation.kind, OperationKind::Alloca { .. }) && !operation.operands.is_empty()
+        || matches!(
+            operation.kind,
+            OperationKind::Project { .. } | OperationKind::EndProject
+        )
+}
+
+pub(in crate::wasm) fn terminator_changes_stack_frontier(terminator: &TerminatorKind) -> bool {
+    matches!(terminator, TerminatorKind::Yield { .. })
 }
 
 pub(super) fn operation_needs_helper_locals(operation: &Operation) -> bool {

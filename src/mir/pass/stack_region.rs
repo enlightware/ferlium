@@ -23,10 +23,10 @@
 //! instruction, which is what separates this from deleting a bracket that does work.
 //!
 //! The analysis is a forward fixpoint whose state is the set of markers known equal to the current
-//! frontier, intersected at joins. Anything that may leave frame storage clears it; that predicate
-//! is [`dce`]'s, so the two passes cannot drift on what grows a frame.
+//! frontier, intersected at joins. Its caller supplies what changes that frontier: the MIR cleanup
+//! pass uses [`dce`]'s storage predicate, while a backend may model its own storage representation.
 
-use std::cmp::Ordering;
+use std::{cmp::Ordering, collections::VecDeque};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -103,7 +103,10 @@ pub(crate) fn remove_redundant_stack_markers(func: &Function) -> Option<Function
     }
 
     let roles = ValueRoles::derive(func);
-    let entry_states = analyze(func, &roles);
+    let invalidates = |operation: &Operation| may_leave_frame_storage(operation, func, &roles);
+    // In the physical interpreter, yielding transfers control without changing the frame-storage
+    // frontier. Backends with retained suspension frames supply their own terminator predicate.
+    let entry_states = analyze(func, &invalidates, &|_| false);
 
     // A redundant save's marker is replaced by one already holding the same frontier. The
     // substitution is justified where it is *decided* — the two markers are equal integers there —
@@ -112,7 +115,7 @@ pub(crate) fn remove_redundant_stack_markers(func: &Function) -> Option<Function
     let mut substitution: FxHashMap<ValueId, ValueId> = FxHashMap::default();
     let mut dead = FxHashMap::<BlockId, FxHashSet<OperationIndex>>::default();
     for block in func.blocks() {
-        let Some(state) = entry_states.get(&block) else {
+        let Some(state) = entry_states[block.as_index()].as_ref() else {
             continue;
         };
         let mut state = state.clone();
@@ -136,7 +139,7 @@ pub(crate) fn remove_redundant_stack_markers(func: &Function) -> Option<Function
                 }
                 _ => {}
             }
-            step(operation, func, &roles, &mut state);
+            step(operation, &invalidates, &mut state);
         }
     }
     if dead.is_empty() {
@@ -164,6 +167,61 @@ pub(crate) fn remove_redundant_stack_markers(func: &Function) -> Option<Function
     Some(edit.finish_unverified())
 }
 
+/// Finds stack markers whose restores never change the allocation frontier under a target's
+/// storage model.
+///
+/// `changes_frontier` identifies operations which may change the target's current frontier.
+/// `terminator_changes_frontier` does the same for transfers, such as suspension into another
+/// caller.
+/// A marker is returned only when it is known to remain at the current frontier on every reachable
+/// restore, so a backend may omit both the save and all restores naming it.
+// Used by backends whose storage frontier differs from physical MIR's.
+#[cfg_attr(all(not(target_arch = "wasm32"), not(test)), allow(dead_code))]
+pub(crate) fn no_op_stack_markers(
+    func: &Function,
+    changes_frontier: impl Fn(&Operation) -> bool,
+    terminator_changes_frontier: impl Fn(&TerminatorKind) -> bool,
+) -> FxHashSet<ValueId> {
+    let mut no_op = func
+        .blocks()
+        .flat_map(|block| func.block(block).operations())
+        .filter_map(|operation| {
+            matches!(operation.kind, OperationKind::StackSave)
+                .then(|| operation.result_id())
+                .flatten()
+        })
+        .collect::<FxHashSet<_>>();
+    if no_op.is_empty() {
+        return no_op;
+    }
+
+    let entry_states = analyze(func, &changes_frontier, &terminator_changes_frontier);
+    for block in func.blocks() {
+        let Some(mut state) = entry_states[block.as_index()].clone() else {
+            continue;
+        };
+        let basic_block = func.block(block);
+        for operation in basic_block.operations() {
+            reject_changing_restore(operation, &state, &mut no_op);
+            step(operation, &changes_frontier, &mut state);
+        }
+    }
+    no_op
+}
+
+fn reject_changing_restore(
+    operation: &Operation,
+    state: &Frontier,
+    no_op: &mut FxHashSet<ValueId>,
+) {
+    if matches!(operation.kind, OperationKind::StackRestore)
+        && let Some(mir::Value::Register(marker)) = operation.operands.first()
+        && !holds(state, *marker)
+    {
+        no_op.remove(marker);
+    }
+}
+
 /// The marker a redundant save defers to: the lowest live one, which the ordering makes the first.
 fn representative(state: &Frontier) -> Option<ValueId> {
     state.first().copied()
@@ -182,35 +240,44 @@ fn resolve(substitution: &FxHashMap<ValueId, ValueId>, marker: ValueId) -> Value
 }
 
 /// The frontier state on entry to each reachable block.
-fn analyze(func: &Function, roles: &ValueRoles) -> FxHashMap<BlockId, Frontier> {
-    let mut entry_states: FxHashMap<BlockId, Frontier> = FxHashMap::default();
-    entry_states.insert(func.entry(), Frontier::default());
+fn analyze(
+    func: &Function,
+    changes_frontier: &impl Fn(&Operation) -> bool,
+    terminator_changes_frontier: &impl Fn(&TerminatorKind) -> bool,
+) -> Vec<Option<Frontier>> {
+    let mut entry_states = vec![None; func.blocks().count()];
+    entry_states[func.entry().as_index()] = Some(Frontier::default());
+    let mut pending = VecDeque::from([func.entry()]);
+    let mut queued = vec![false; entry_states.len()];
+    queued[func.entry().as_index()] = true;
 
-    // Blocks are visited in index order until nothing changes, as `dataflow` does: bodies are
-    // small, and the state can only shrink, so this settles in a couple of sweeps.
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for block in func.blocks() {
-            let Some(entry) = entry_states.get(&block).cloned() else {
-                continue;
-            };
-            let mut state = entry;
-            let basic_block = func.block(block);
-            for operation in basic_block.operations() {
-                step(operation, func, roles, &mut state);
-            }
-            if let TerminatorKind::Invoke { operation, .. } = &basic_block.terminator().kind {
-                step(operation, func, roles, &mut state);
-            }
-            for successor in basic_block.terminator().successors() {
-                let updated = match entry_states.get(&successor) {
-                    Some(existing) => intersect(existing, &state),
-                    None => state.clone(),
-                };
-                if entry_states.get(&successor) != Some(&updated) {
-                    entry_states.insert(successor, updated);
-                    changed = true;
+    // A state is initialized by its first reached predecessor and can only shrink afterwards.
+    // Revisit just the successors of a changed block rather than sweeping the whole function.
+    while let Some(block) = pending.pop_front() {
+        queued[block.as_index()] = false;
+        let mut state = entry_states[block.as_index()]
+            .clone()
+            .expect("only reached blocks enter the frontier worklist");
+        let basic_block = func.block(block);
+        for operation in basic_block.operations() {
+            step(operation, changes_frontier, &mut state);
+        }
+        if let TerminatorKind::Invoke { operation, .. } = &basic_block.terminator().kind {
+            step(operation, changes_frontier, &mut state);
+        }
+        if terminator_changes_frontier(&basic_block.terminator().kind) {
+            state.clear();
+        }
+        for successor in basic_block.terminator().successors() {
+            let slot = &mut entry_states[successor.as_index()];
+            let updated = slot
+                .as_ref()
+                .map_or_else(|| state.clone(), |existing| intersect(existing, &state));
+            if slot.as_ref() != Some(&updated) {
+                *slot = Some(updated);
+                if !queued[successor.as_index()] {
+                    queued[successor.as_index()] = true;
+                    pending.push_back(successor);
                 }
             }
         }
@@ -219,7 +286,11 @@ fn analyze(func: &Function, roles: &ValueRoles) -> FxHashMap<BlockId, Frontier> 
 }
 
 /// Advances the frontier state across one operation.
-fn step(operation: &Operation, func: &Function, roles: &ValueRoles, state: &mut Frontier) {
+fn step(
+    operation: &Operation,
+    changes_frontier: &impl Fn(&Operation) -> bool,
+    state: &mut Frontier,
+) {
     match &operation.kind {
         OperationKind::StackSave => {
             if let Some(marker) = operation.result_id() {
@@ -237,7 +308,7 @@ fn step(operation: &Operation, func: &Function, roles: &ValueRoles, state: &mut 
             }
         }
         _ => {
-            if may_leave_frame_storage(operation, func, roles) {
+            if changes_frontier(operation) {
                 state.clear();
             }
         }
@@ -246,12 +317,44 @@ fn step(operation: &Operation, func: &Function, roles: &ValueRoles, state: &mut 
 
 #[cfg(test)]
 mod tests {
-    use crate::{CompilerSession, MirOptimization};
+    use super::*;
+    use crate::mir::{Value, builder::FunctionBuilder, terminator::Terminator};
+    use crate::{CompilerSession, Location, MirOptimization};
 
     fn optimized(src: &str) -> String {
         let mut session = CompilerSession::new();
         session.set_mir_optimization(MirOptimization::Enabled);
         session.emit_mir("stack", src)
+    }
+
+    #[test]
+    fn target_storage_model_decides_whether_cross_block_markers_are_no_ops() {
+        let session = CompilerSession::new();
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new("target_stack".into(), Default::default());
+        let entry = builder.add_block();
+        let body = builder.add_block();
+        let marker = builder
+            .append_operation(entry, Operation::stack_save(span))
+            .unwrap();
+        builder.set_terminator(entry, Terminator::goto(span, body));
+        builder.append_operation(body, Operation::check_fuel(span));
+        builder.append_operation(body, Operation::stack_restore(span, marker.clone()));
+        builder.set_terminator(body, Terminator::ret(span));
+        let function = builder.finish(session.module_env());
+        let Value::Register(marker) = marker else {
+            unreachable!()
+        };
+
+        assert!(no_op_stack_markers(&function, |_| false, |_| false).contains(&marker));
+        assert!(
+            !no_op_stack_markers(
+                &function,
+                |operation| matches!(operation.kind, OperationKind::CheckFuel),
+                |_| false,
+            )
+            .contains(&marker)
+        );
     }
 
     /// Two `stack_save`s with nothing between them take the same mark, so one must go. This is the
