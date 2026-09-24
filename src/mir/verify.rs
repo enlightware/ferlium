@@ -28,7 +28,7 @@ use crate::{
         terminator::TerminatorKind,
     },
     module::{ModuleEnv, id::Id},
-    std::array::array_type,
+    std::{array::array_type, math::readable_as},
     types::{
         effects::{Effect, PrimitiveEffect},
         r#type::{CallImplType, CallResultConvention, Type, TypeKind},
@@ -955,12 +955,18 @@ impl<'a> Verifier<'a> {
                     - usize::from(ty.result_convention.has_result_place());
                 for (offset, argument) in ty.fn_ty.args.iter().enumerate() {
                     let index = visible_start + offset;
-                    self.verify_place_representation(
-                        node,
-                        index,
-                        &operands[index],
-                        MirType::Lowered(argument.ty),
-                    );
+                    let read_only = argument
+                        .mut_ty
+                        .as_resolved()
+                        .is_some_and(|mutability| !mutability.is_mutable())
+                        && !metadata
+                            .as_ref()
+                            .is_some_and(|metadata| metadata.owned_arguments.contains(offset));
+                    let expected = MirType::Lowered(argument.ty);
+                    if read_only && self.readable_as(&operands[index], &expected) {
+                        continue;
+                    }
+                    self.verify_place_representation(node, index, &operands[index], expected);
                 }
                 if let Some(metadata) = metadata {
                     for argument in metadata.owned_arguments.iter_ones() {
@@ -1208,6 +1214,16 @@ impl<'a> Verifier<'a> {
             substituted.ret.format_with(&self.env),
             ty.fn_ty.ret.format_with(&self.env),
         );
+    }
+
+    /// Whether a place argument the callee only reads refines its expected type, which is
+    /// otherwise checked for an equal representation. See [`readable_as`].
+    fn readable_as(&self, value: &mir::Value, expected: &MirType) -> bool {
+        matches!(
+            (self.place_pointee_type(value), expected),
+            (Some(MirType::Lowered(stored)), MirType::Lowered(expected))
+                if readable_as(stored, *expected)
+        )
     }
 
     fn verify_place_representation(
@@ -2223,7 +2239,11 @@ mod tests {
             terminator::Terminator,
         },
         module::{FunctionId, LocalFunctionId, ModuleId},
-        std::{logic::bool_type, math::int_type, string::string_type},
+        std::{
+            logic::bool_type,
+            math::{Float, float_type, int_type, raw_float_type},
+            string::string_type,
+        },
         types::{
             effects::{PrimitiveEffect, effect, no_effects},
             r#type::{CallImplType, CallResultConvention, FnType, Type},
@@ -2774,6 +2794,66 @@ mod tests {
         );
         terminate_return(&mut f, block, span);
         verify(f);
+    }
+
+    /// A call reading a `raw_float` argument from `float` storage, the argument being mutable if
+    /// `mutable`.
+    fn call_reading_raw_float_from_float(mutable: bool) -> FunctionBuilder {
+        let span = Location::new_synthesized();
+        let mut f = FunctionBuilder::new("refined_call_argument".into(), Default::default());
+        let block = f.add_block();
+        let argument = append_result(&mut f, block, Operation::alloca(span, float_type()));
+        let literal = float_literal(&mut f);
+        append(
+            &mut f,
+            block,
+            Operation::store(span, literal, argument.clone()),
+        );
+        let result = append_result(&mut f, block, Operation::alloca(span, raw_float_type()));
+        append(
+            &mut f,
+            block,
+            Operation::call(
+                span,
+                Value::Function(FunctionId::new(
+                    ModuleId::default(),
+                    LocalFunctionId::default(),
+                )),
+                [argument, result],
+                CallImplType::value(FnType::new_mut_resolved(
+                    [(raw_float_type(), mutable)],
+                    raw_float_type(),
+                    no_effects(),
+                )),
+            ),
+        );
+        terminate_return(&mut f, block, span);
+        f
+    }
+
+    fn float_literal(f: &mut FunctionBuilder) -> Value {
+        let session = CompilerSession::new();
+        Value::Constant(f.add_constant(
+            float_type(),
+            LiteralValue::new_native(Float::new(1.5).unwrap()),
+            &session.module_env(),
+        ))
+    }
+
+    /// `float` refines `raw_float`, so storage of the former may be read as the latter.
+    #[test]
+    fn accepts_float_storage_for_a_read_raw_float_argument() {
+        verify(call_reading_raw_float_from_float(false));
+    }
+
+    /// The refinement holds for reading only: a callee writing a `raw_float` into `float` storage
+    /// could store an infinity.
+    #[test]
+    #[should_panic(
+        expected = "operand 1 place representation float differs from expected raw_float"
+    )]
+    fn rejects_float_storage_for_a_mutable_raw_float_argument() {
+        verify(call_reading_raw_float_from_float(true));
     }
 
     #[test]

@@ -207,6 +207,59 @@ fn float_arithmetic_saturates_to_finite_bounds() {
     );
 }
 
+/// Optimized targets compute chains of float arithmetic without per-operation saturation when the
+/// result proves finite, and fall back to saturating each operation otherwise. Every case here
+/// overflows mid-chain, where the unsaturated chain would compute a different value.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn float_chains_saturate_every_operation() {
+    let mut session = TestSession::new();
+    let big = r#"let x = match parse_float("1e308") { Some(x) => x, None => 0.0 };"#;
+    // Without saturation, `inf - 1e308` stays infinite and `inf * 0.5` too.
+    assert_val_eq!(
+        session.run(&format!("{big} (x + x) - x")),
+        float(f64::MAX - 1e308)
+    );
+    assert_val_eq!(
+        session.run(&format!("{big} (x + x) * 0.5")),
+        float(f64::MAX * 0.5)
+    );
+    // Without saturation, `inf - inf` and `inf * 0` are NaN.
+    assert_val_eq!(session.run(&format!("{big} (x * x) - (x + x)")), float(0.0));
+    assert_val_eq!(
+        session.run(&format!("{big} let zero = x - x; (x * x) * zero")),
+        float(0.0)
+    );
+    // Without saturation, `inf - 1e308 > 1e308` would hold.
+    assert_val_eq!(session.run(&format!("{big} (x + x) - x > x")), bool(false));
+    assert_val_eq!(
+        session.run(&format!("{big} -(x * 2.0) - x * 3.0")),
+        float(-f64::MAX)
+    );
+    // A chain that stays finite takes the unsaturated path and must agree exactly.
+    assert_val_eq!(
+        session.run(&format!("{big} (x * 0.25 + 1.0) * 2.0 - 1.0")),
+        float((1e308 * 0.25 + 1.0) * 2.0 - 1.0)
+    );
+    // The saturating fallback reads each input as it was when the chain first read it: here an
+    // inlined callee's released storage, and a variable reassigned mid-chain.
+    assert_val_eq!(
+        session.run(&format!(
+            "fn g(x: float, y: float) -> float {{ let p = (x, y); p.0 * p.1 }}
+             fn f(a: float, b: float) -> float {{ g(a, b) * b - a }}
+             {big} f(x, 10.0)"
+        )),
+        float(f64::MAX - 1e308)
+    );
+    assert_val_eq!(
+        session.run(&format!(
+            "fn f(x: float, y: float) -> float {{ let mut a = x; let t = a * y; a = 2.0; (t + a) * y }}
+             {big} f(x, 10.0)"
+        )),
+        float(f64::MAX)
+    );
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn real() {

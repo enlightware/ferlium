@@ -24,7 +24,10 @@ use crate::{
         value::{LiteralNativeValue, LiteralValue, Value, ValueRef},
     },
     module::{ELocalDecl, ModuleEnv, ProjectionIndex, ULocalDecl},
-    std::{math::Float, string::StaticStr},
+    std::{
+        math::{Float, RawFloat},
+        string::StaticStr,
+    },
     types::{
         r#type::{
             CallImplType, CallResultConvention, FnArgType, FnType, Type,
@@ -724,6 +727,8 @@ impl trivial_copy_private::Sealed for isize {}
 unsafe impl NativeTrivialCopy for isize {}
 impl trivial_copy_private::Sealed for Float {}
 unsafe impl NativeTrivialCopy for Float {}
+impl trivial_copy_private::Sealed for RawFloat {}
+unsafe impl NativeTrivialCopy for RawFloat {}
 
 fn literal_of_trivial_copy_native_typed<T: NativeTrivialCopy + LiteralNativeValue>(
     value: ValueRef<'_>,
@@ -752,6 +757,7 @@ pub(crate) fn literal_of_trivial_copy_native<'a>(
         .or_else(|| literal_of_trivial_copy_native_typed::<bool>(value))
         .or_else(|| literal_of_trivial_copy_native_typed::<isize>(value))
         .or_else(|| literal_of_trivial_copy_native_typed::<Float>(value))
+        .or_else(|| literal_of_trivial_copy_native_typed::<RawFloat>(value))
         .or_else(|| literal_of_trivial_copy_native_typed::<StaticStr>(value))
 }
 

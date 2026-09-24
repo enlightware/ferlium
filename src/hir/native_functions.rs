@@ -99,7 +99,7 @@ use crate::{
     eval::{EvalCtx, EvalResult, RuntimeError, ValOrMut},
     hir::value::{NativeValue, Value},
     module::{ELocalDecl, ModuleEnv, ModuleFunction},
-    std::math::Float,
+    std::math::{Float, RawFloat},
     types::{
         effects::{EffType, Effect, PrimitiveEffect},
         mutability::MutType,
@@ -216,14 +216,15 @@ impl NativeLayout {
     }
 }
 
-/// C scalar transport. `Int` has the target's pointer width, independently of `Float`.
-/// Rust `Float` and `f64` share this scalar ABI through `Float`'s transparent representation.
+/// C scalar transport. `Int` has the target's pointer width, independently of `F64`.
+/// This is a representation class, not a type: Rust `f64`, `Float` and the compiler-internal
+/// `RawFloat` all share the `F64` ABI through their transparent representations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum NativeScalar {
     Bool,
     Int,
-    Float,
+    F64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -579,8 +580,9 @@ macro_rules! scalar_argument {
 }
 scalar_argument!(bool, bool, Bool, |value| value);
 scalar_argument!(isize, isize, Int, |value| value);
-scalar_argument!(f64, Float, Float, Float::into_inner);
-scalar_argument!(Float, Float, Float, |value| value);
+scalar_argument!(f64, Float, F64, Float::into_inner);
+scalar_argument!(Float, Float, F64, |value| value);
+scalar_argument!(RawFloat, RawFloat, F64, |value| value);
 
 impl<T: NativeValue> sealed::Argument for &T {}
 impl<T: NativeValue> NativeArgument for &'static T {
@@ -697,7 +699,8 @@ macro_rules! scalar_result {
 }
 scalar_result!(bool, bool, Bool, |value| value);
 scalar_result!(isize, isize, Int, |value| value);
-scalar_result!(Float, Float, Float, |value| value);
+scalar_result!(Float, Float, F64, |value| value);
+scalar_result!(RawFloat, RawFloat, F64, |value| value);
 
 impl sealed::Result for () {}
 impl NativeDirectResult for () {
@@ -1729,8 +1732,8 @@ mod tests {
             (
                 native_value_clone_function::<Float>(),
                 Value::native(Float::new(1.25).unwrap()),
-                NativeParameter::Scalar(NativeLayout::of::<Float>(), NativeScalar::Float),
-                NativeResult::Scalar(NativeLayout::of::<Float>(), NativeScalar::Float),
+                NativeParameter::Scalar(NativeLayout::of::<Float>(), NativeScalar::F64),
+                NativeResult::Scalar(NativeLayout::of::<Float>(), NativeScalar::F64),
             ),
             (
                 native_value_clone_function::<()>(),
@@ -1993,7 +1996,7 @@ mod tests {
             float.native_entry().unwrap().signature.parameters,
             [NativeParameter::Scalar(
                 NativeLayout::of::<Float>(),
-                NativeScalar::Float
+                NativeScalar::F64
             )]
         );
         let value = float

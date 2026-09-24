@@ -20,7 +20,7 @@ use crate::{
     module::{ProjectionIndex, id::Id},
     std::{
         buffer::buffer_element_type,
-        math::Float,
+        math::{Float, RawFloat, readable_as},
         string::{StaticStr, String as NativeString},
         value::{
             TypeLayoutEnv, product_layout_spec, product_member_types, structural_variant,
@@ -85,6 +85,7 @@ pub(super) enum ScalarKind {
     Bool,
     Int,
     Float,
+    RawFloat,
 }
 
 impl ScalarKind {
@@ -94,6 +95,7 @@ impl ScalarKind {
             Self::Bool => Type::primitive::<bool>(),
             Self::Int => Type::primitive::<isize>(),
             Self::Float => Type::primitive::<Float>(),
+            Self::RawFloat => Type::primitive::<RawFloat>(),
         }
     }
     pub(super) fn for_type(ty: Type) -> Result<Self, RuntimeError> {
@@ -105,6 +107,8 @@ impl ScalarKind {
             Ok(Self::Int)
         } else if ty == Type::primitive::<Float>() {
             Ok(Self::Float)
+        } else if ty == Type::primitive::<RawFloat>() {
+            Ok(Self::RawFloat)
         } else {
             Err(unsupported("non-scalar storage types"))
         }
@@ -117,6 +121,7 @@ impl ScalarKind {
             Self::Bool => NativeLayout::of::<bool>(),
             Self::Int => NativeLayout::of::<isize>(),
             Self::Float => NativeLayout::of::<Float>(),
+            Self::RawFloat => NativeLayout::of::<RawFloat>(),
         };
         if expected != layout {
             return Err(invalid("native scalar layout mismatch"));
@@ -130,6 +135,7 @@ impl ScalarKind {
             Self::Bool => Layout::new::<bool>(),
             Self::Int => Layout::new::<isize>(),
             Self::Float => Layout::new::<Float>(),
+            Self::RawFloat => Layout::new::<RawFloat>(),
         }
     }
 }
@@ -140,6 +146,7 @@ pub(super) enum Scalar {
     Bool(bool),
     Int(isize),
     Float(Float),
+    RawFloat(RawFloat),
 }
 
 impl Scalar {
@@ -151,6 +158,7 @@ impl Scalar {
             Self::Bool(value) => from_mut(value).cast(),
             Self::Int(value) => from_mut(value).cast(),
             Self::Float(value) => from_mut(value).cast(),
+            Self::RawFloat(value) => from_mut(value).cast(),
         }
     }
     pub(super) fn kind(self) -> ScalarKind {
@@ -159,6 +167,7 @@ impl Scalar {
             Self::Bool(_) => ScalarKind::Bool,
             Self::Int(_) => ScalarKind::Int,
             Self::Float(_) => ScalarKind::Float,
+            Self::RawFloat(_) => ScalarKind::RawFloat,
         }
     }
     pub(super) fn from_value(value: &Value) -> Result<Self, RuntimeError> {
@@ -170,6 +179,8 @@ impl Scalar {
             Ok(Self::Int(*v))
         } else if let Some(v) = value.as_primitive_ty::<Float>() {
             Ok(Self::Float(*v))
+        } else if let Some(v) = value.as_primitive_ty::<RawFloat>() {
+            Ok(Self::RawFloat(*v))
         } else {
             Err(unsupported("non-scalar host arguments"))
         }
@@ -183,6 +194,8 @@ impl Scalar {
             Ok(Self::Int(*v))
         } else if let Some(v) = value.as_primitive_ty::<Float>() {
             Ok(Self::Float(*v))
+        } else if let Some(v) = value.as_primitive_ty::<RawFloat>() {
+            Ok(Self::RawFloat(*v))
         } else {
             Err(unsupported("non-scalar constants"))
         }
@@ -193,6 +206,7 @@ impl Scalar {
             Self::Bool(v) => Value::native(v),
             Self::Int(v) => Value::native(v),
             Self::Float(v) => Value::native(v),
+            Self::RawFloat(v) => Value::native(v),
         }
     }
 }
@@ -696,6 +710,7 @@ impl Default for Memory {
             ScalarKind::Bool,
             ScalarKind::Int,
             ScalarKind::Float,
+            ScalarKind::RawFloat,
         ] {
             layouts.insert(kind.ty(), Rc::new(StorageLayout::scalar(kind.ty(), kind)));
         }
@@ -792,11 +807,27 @@ impl Memory {
         address: Address,
         layout: NativeLayout,
     ) -> Result<(), RuntimeError> {
+        self.check_native_storage(address, layout, address.ty == layout.ty)
+    }
+
+    /// Like [`check_native`](Self::check_native), for a scalar the native receives by copy and
+    /// therefore only reads, whose storage may refine the parameter type (see [`readable_as`]).
+    pub(super) fn check_native_scalar_input(
+        &self,
+        address: Address,
+        layout: NativeLayout,
+    ) -> Result<(), RuntimeError> {
+        self.check_native_storage(address, layout, readable_as(address.ty, layout.ty))
+    }
+
+    fn check_native_storage(
+        &self,
+        address: Address,
+        layout: NativeLayout,
+        type_matches: bool,
+    ) -> Result<(), RuntimeError> {
         self.check_layout(address, layout.size, layout.align)?;
-        if address.ty != layout.ty
-            || self.is_pointer_slot(address)?
-            || !self.initialized(address)?
-        {
+        if !type_matches || self.is_pointer_slot(address)? || !self.initialized(address)? {
             return Err(invalid("invalid native input storage"));
         }
         self.native_identity(address)?;
@@ -2225,6 +2256,7 @@ impl Memory {
                 ScalarKind::Bool => Scalar::Bool(pointer.cast::<bool>().read()),
                 ScalarKind::Int => Scalar::Int(pointer.cast::<isize>().read()),
                 ScalarKind::Float => Scalar::Float(pointer.cast::<Float>().read()),
+                ScalarKind::RawFloat => Scalar::RawFloat(pointer.cast::<RawFloat>().read()),
             }
         }
     }
@@ -2576,6 +2608,7 @@ impl Memory {
                         Scalar::Bool(v) => pointer.cast::<bool>().write(*v),
                         Scalar::Int(v) => pointer.cast::<isize>().write(*v),
                         Scalar::Float(v) => pointer.cast::<Float>().write(*v),
+                        Scalar::RawFloat(v) => pointer.cast::<RawFloat>().write(*v),
                     }
                 }
                 self.node_mut(address)?.state = StorageState::Value(true);

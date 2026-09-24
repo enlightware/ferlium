@@ -44,7 +44,7 @@ use crate::{
         edit::FunctionEdit,
         pass::{
             dataflow::{Root, escaping_roots},
-            dce,
+            dce, float_speculation,
             known_callee::{KnownCallee, KnownCallees},
             physical::optimize,
         },
@@ -536,7 +536,7 @@ pub(crate) fn lower_physical_mir(
     env: ModuleEnv<'_>,
     known: &KnownCallees,
 ) -> Result<BackendReadyMirArtifacts, BackendReadinessError> {
-    let entries = expand_physical_mir(module, semantic, env, known)?;
+    let entries = expand_physical_mir(module, semantic, env, known, true)?;
     let entries = optimize(&entries, semantic, env, known);
     let (mut entries, direct) = results::select(entries, env);
     // Result selection exposes dead zero-sized storage. Keep this cleanup out of the unoptimized
@@ -556,16 +556,22 @@ pub(crate) fn lower_unoptimized_physical_mir(
     env: ModuleEnv<'_>,
     known: &KnownCallees,
 ) -> Result<BackendReadyMirArtifacts, BackendReadinessError> {
-    let (entries, direct) =
-        results::select(expand_physical_mir(module, semantic, env, known)?, env);
+    let (entries, direct) = results::select(
+        expand_physical_mir(module, semantic, env, known, false)?,
+        env,
+    );
     prepare_physical_mir(entries, direct, semantic, env)
 }
 
+/// With `speculate_floats`, float arithmetic trees are first speculated without per-operation
+/// saturation. Only final bodies are rewritten: semantic MIR, which callers inline, keeps the
+/// saturating trees, so an inlined callee's tree can join its caller's and is checked once.
 fn expand_physical_mir(
     module: ModuleId,
     semantic: &MirArtifacts,
     env: ModuleEnv<'_>,
     known: &KnownCallees,
+    speculate_floats: bool,
 ) -> Result<Vec<Option<Function>>, BackendReadinessError> {
     assert_eq!(
         env.current.module_id(),
@@ -645,6 +651,22 @@ fn expand_physical_mir(
             let original = semantic
                 .specialization(local)
                 .map_or(function, |specialization| specialization.original);
+            let body = if speculate_floats {
+                float_speculation::speculate_float_trees(
+                    &body,
+                    known,
+                    &|callee| {
+                        (callee.module == module)
+                            .then(|| semantic.specialization(callee.function))
+                            .flatten()
+                            .map(|specialization| specialization.original)
+                    },
+                    env,
+                )
+                .unwrap_or(body)
+            } else {
+                body
+            };
             let body = drop_elaboration::elaborate(body, semantic, env, |variant, payload| {
                 lowerer.intern_variant_payload_release(variant, payload)
             });

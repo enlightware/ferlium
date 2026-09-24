@@ -43,6 +43,7 @@ pub(crate) mod dataflow;
 pub(crate) mod dce;
 pub(crate) mod dead_evidence;
 pub(crate) mod dead_store;
+pub(crate) mod float_speculation;
 pub(crate) mod fold;
 pub(crate) mod inline;
 pub(crate) mod known_callee;

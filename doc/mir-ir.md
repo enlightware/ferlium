@@ -226,6 +226,12 @@ them. Call/storage representations are independently checked when both sides are
 witnessed generic moves and calls retain that inference boundary. Standalone serialization requires
 explicit normalized-layout/equality metadata to preserve those proofs.
 
+One refinement relaxes that check: `float` storage may be passed for a `raw_float` argument the
+callee only reads, neither mutably nor owned. Every `float` is a valid compiler-internal
+`raw_float` with the same representation. The subtyping holds for reading only, since a written
+`raw_float` could put an infinity in `float` storage. The physical interpreter accepts the same
+refinement for scalar native inputs.
+
 ## Physical MIR stage
 
 Physical lowering consumes the complete optimized `MirArtifacts`, including declared bodies and

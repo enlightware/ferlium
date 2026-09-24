@@ -30,6 +30,7 @@ impl NativeTypeCatalog {
         catalog.register("std::bool", bare_native_type::<bool>());
         catalog.register("std::int", bare_native_type::<math::Int>());
         catalog.register("std::float", bare_native_type::<math::Float>());
+        catalog.register("std::raw_float", bare_native_type::<math::RawFloat>());
         catalog.register("std::string", bare_native_type::<string::String>());
         catalog.register("std::hash", bare_native_type::<hash::HashValue>());
         catalog.register("std::hasher", bare_native_type::<hash::Hasher>());

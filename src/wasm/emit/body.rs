@@ -30,7 +30,7 @@ use crate::{
     module::{FunctionId, ModuleEnv, ProjectionIndex, TraitId, id::Id},
     std::{
         logic::bool_type,
-        math::Float,
+        math::{Float, RawFloat},
         string::StaticStr,
         value::{product_layout_spec, value_layout_for_type},
     },
@@ -243,6 +243,10 @@ pub(super) struct Body<'a, 's> {
     no_op_stack_markers: FxHashSet<ValueId>,
     /// The blocks emitted so far, indexed by block.
     emitted: Vec<bool>,
+    /// `raw_float_to_float` calls only reachable once their operand has been checked finite.
+    checked_float_conversions: FxHashSet<ExpressionSource>,
+    /// The local an unchecked `raw_float_to_float` holds its operand in, for its fallback.
+    float_conversion_local: Option<WasmLocalId>,
     pub(super) code: Code,
     source_map: BodySourceMap,
 }
@@ -357,6 +361,8 @@ impl<'a, 's> Body<'a, 's> {
             track_depth,
             forwarded_result,
             fallthrough_return,
+            checked_float_conversions: checked_float_conversions(body, &analysis),
+            float_conversion_local: None,
             analysis,
             expressions,
             no_op_stack_markers,
@@ -378,6 +384,16 @@ impl<'a, 's> Body<'a, 's> {
                 dynamic_base: this.local(ValType::I32),
                 allocation_end: this.local(ValType::I64),
             });
+        }
+        let unchecked_float_conversion = body.blocks().any(|block| {
+            (0..body.block(block).operations().len()).any(|index| {
+                let source = ExpressionSource::from_index(block, index);
+                this.analysis.intrinsic(source) == Some(KnownCallee::RawFloatToFloat)
+                    && !this.checked_float_conversions.contains(&source)
+            })
+        });
+        if unchecked_float_conversion {
+            this.float_conversion_local = Some(this.local(ValType::F64));
         }
         if dispatched {
             this.pc = Some(this.local(ValType::I32));
@@ -1416,8 +1432,9 @@ impl<'a, 's> Body<'a, 's> {
         &mut self,
         op: &Operation,
         invoked: bool,
-        intrinsic: Option<KnownCallee>,
+        source: ExpressionSource,
     ) -> Result<(), String> {
+        let intrinsic = self.analysis.intrinsic(source);
         if matches!(op.kind, OperationKind::Project { .. }) {
             return self.project(op, invoked);
         }
@@ -1460,7 +1477,8 @@ impl<'a, 's> Body<'a, 's> {
             return self.call_dictionary(callee, &inputs, output, invoked);
         };
         if let Some(intrinsic) = intrinsic {
-            return self.call_intrinsic(intrinsic, &inputs, output, invoked);
+            let checked = self.checked_float_conversions.contains(&source);
+            return self.call_intrinsic(intrinsic, &inputs, output, invoked, checked);
         }
         // Static calls bypass fixed Value adapters without adding a source call-depth frame.
         let target = self.program.direct_entry(*target);
@@ -1503,12 +1521,15 @@ impl<'a, 's> Body<'a, 's> {
         Ok(())
     }
 
+    /// Emits a known callee inline. `checked` says that a `raw_float_to_float` operand is known
+    /// to be finite, which makes the conversion the identity.
     fn call_intrinsic(
         &mut self,
         intrinsic: KnownCallee,
         inputs: &[&Value],
         output: Option<&Value>,
         invoked: bool,
+        checked: bool,
     ) -> Result<(), String> {
         let arity = match intrinsic {
             KnownCallee::IntAdd
@@ -1529,10 +1550,16 @@ impl<'a, 's> Body<'a, 's> {
             | KnownCallee::FloatLe
             | KnownCallee::FloatGt
             | KnownCallee::FloatGe
-            | KnownCallee::FloatEq => 2,
+            | KnownCallee::FloatEq
+            | KnownCallee::RawFloatAdd
+            | KnownCallee::RawFloatSub
+            | KnownCallee::RawFloatMul => 2,
             KnownCallee::IntNeg
             | KnownCallee::IntFromInt
             | KnownCallee::FloatNeg
+            | KnownCallee::RawFloatNeg
+            | KnownCallee::RawFloatIsFinite
+            | KnownCallee::RawFloatToFloat
             | KnownCallee::BoolNot => 1,
             _ => unreachable!("wasm_intrinsic filters unsupported known callees"),
         };
@@ -1575,6 +1602,40 @@ impl<'a, 's> Body<'a, 's> {
                 self.i(I::F64Max);
                 self.i(I::F64Const(f64::MAX.into()));
                 self.i(I::F64Min);
+            }
+            // Both float types are f64 values, so a raw operation reads a `float` input as is.
+            KnownCallee::RawFloatAdd | KnownCallee::RawFloatSub | KnownCallee::RawFloatMul => {
+                self.read(inputs[0])?;
+                self.read(inputs[1])?;
+                self.i(match intrinsic {
+                    KnownCallee::RawFloatAdd => I::F64Add,
+                    KnownCallee::RawFloatSub => I::F64Sub,
+                    KnownCallee::RawFloatMul => I::F64Mul,
+                    _ => unreachable!(),
+                });
+            }
+            KnownCallee::RawFloatNeg => {
+                self.read(inputs[0])?;
+                self.i(I::F64Neg);
+            }
+            KnownCallee::RawFloatIsFinite => {
+                self.read(inputs[0])?;
+                self.finite_test();
+            }
+            KnownCallee::RawFloatToFloat if checked => {
+                self.read(inputs[0])?;
+            }
+            KnownCallee::RawFloatToFloat => {
+                // The total fallback: the value itself when finite, and zero otherwise.
+                let value = self
+                    .float_conversion_local
+                    .expect("an unchecked float conversion reserved its local");
+                self.read(inputs[0])?;
+                self.i(I::LocalTee(value.as_u32()));
+                self.i(I::F64Const(0.0.into()));
+                self.i(I::LocalGet(value.as_u32()));
+                self.finite_test();
+                self.i(I::Select);
             }
             KnownCallee::IntAdd | KnownCallee::IntSub | KnownCallee::IntMul => {
                 self.read(inputs[0])?;
@@ -1651,6 +1712,15 @@ impl<'a, 's> Body<'a, 's> {
         self.finish_store(output, ty, offset);
         self.call_status(invoked, false);
         Ok(())
+    }
+
+    /// Replaces the f64 on the stack by whether it is finite: `x * 0` is a zero exactly when `x`
+    /// is finite, and NaN for an infinity or NaN.
+    fn finite_test(&mut self) {
+        self.i(I::F64Const(0.0.into()));
+        self.i(I::F64Mul);
+        self.i(I::F64Const(0.0.into()));
+        self.i(I::F64Eq);
     }
 
     fn local(&mut self, ty: ValType) -> WasmLocalId {
@@ -1812,6 +1882,8 @@ impl<'a, 's> Body<'a, 's> {
         } else if let Some(value) = literal.as_primitive_ty::<bool>() {
             self.i(I::I32Const(i32::from(*value)));
         } else if let Some(value) = literal.as_primitive_ty::<Float>() {
+            self.i(I::F64Const(value.into_inner().into()));
+        } else if let Some(value) = literal.as_primitive_ty::<RawFloat>() {
             self.i(I::F64Const(value.into_inner().into()));
         } else if literal.as_primitive_ty::<()>().is_some() {
             self.i(I::I32Const(0));
@@ -2088,7 +2160,7 @@ impl<'a, 's> Body<'a, 's> {
             } => {
                 let source =
                     ExpressionSource::from_index(block_id, body.block(block_id).operations().len());
-                self.call_operation(operation, true, self.analysis.intrinsic(source))?;
+                self.call_operation(operation, true, source)?;
                 if normal == error {
                     self.i(I::If(BlockType::Empty));
                     self.capture_failure();
@@ -2425,7 +2497,7 @@ impl<'a, 's> Body<'a, 's> {
                 error,
             } => {
                 let source = ExpressionSource::from_index(block_id, block.operations().len());
-                self.call_operation(operation, true, self.analysis.intrinsic(source))?;
+                self.call_operation(operation, true, source)?;
                 if normal == error {
                     self.i(I::If(BlockType::Empty));
                     self.capture_failure();
@@ -3049,7 +3121,7 @@ impl<'a, 's> Body<'a, 's> {
                 self.i(I::End);
             }
             Call { .. } | Clone { .. } | Drop { .. } | DropInitialized { .. } => {
-                self.call_operation(op, false, self.analysis.intrinsic(source))?
+                self.call_operation(op, false, source)?
             }
             RuntimeAlloc { .. } => {
                 self.read(&args[0])?;
@@ -3194,6 +3266,86 @@ fn constants_only_stored(body: &Function) -> Vec<bool> {
         }
     }
     only_stored
+}
+
+/// The `raw_float_to_float` calls whose operand is known to be finite where they execute.
+///
+/// Float speculation branches on `raw_float_is_finite(r)` into a block converting `r`. When that
+/// block has no other predecessor and nothing rewrites `r` or the tested flag in between, the
+/// conversion's fallback can never be taken. Anything else, such as a later pass merging the block
+/// with another path, simply keeps the fallback: this is a local proof, never an assumption.
+fn checked_float_conversions(
+    body: &Function,
+    analysis: &ExpressionAnalysis,
+) -> FxHashSet<ExpressionSource> {
+    let mut checked = FxHashSet::default();
+    let mut predecessors: FxHashMap<BlockId, usize> = FxHashMap::default();
+    for block in body.blocks() {
+        for successor in body.block(block).terminator().successors() {
+            *predecessors.entry(successor).or_default() += 1;
+        }
+    }
+    let is = |source, known| analysis.intrinsic(source) == Some(known);
+    for block_id in body.blocks() {
+        let block = body.block(block_id);
+        let TerminatorKind::CondBr {
+            condition: Value::Register(condition),
+            then_target,
+            else_target,
+        } = &block.terminator().kind
+        else {
+            continue;
+        };
+        if then_target == else_target || predecessors.get(then_target) != Some(&1) {
+            continue;
+        }
+        let operations = block.operations();
+        let Some(load) = operations
+            .iter()
+            .position(|operation| operation.result_id() == Some(*condition))
+        else {
+            continue;
+        };
+        if !matches!(operations[load].kind, OperationKind::Load) {
+            continue;
+        }
+        let flag = &operations[load].operands[0];
+        let Some(test) = (0..load)
+            .rev()
+            .find(|&index| operations[index].operands.contains(flag))
+        else {
+            continue;
+        };
+        if !is(
+            ExpressionSource::from_index(block_id, test),
+            KnownCallee::RawFloatIsFinite,
+        ) || operations[test].operands.last() != Some(flag)
+        {
+            continue;
+        }
+        let tested = &operations[test].operands[1];
+        let untouched = operations[test + 1..]
+            .iter()
+            .enumerate()
+            .all(|(offset, operation)| {
+                test + 1 + offset == load
+                    || !(operation.operands.contains(tested) || operation.operands.contains(flag))
+            });
+        if !untouched {
+            continue;
+        }
+        for (index, operation) in body.block(*then_target).operations().iter().enumerate() {
+            if !operation.operands.contains(tested) {
+                continue;
+            }
+            let source = ExpressionSource::from_index(*then_target, index);
+            if !is(source, KnownCallee::RawFloatToFloat) || operation.operands[1] != *tested {
+                break;
+            }
+            checked.insert(source);
+        }
+    }
+    checked
 }
 
 fn needs_helper_locals(

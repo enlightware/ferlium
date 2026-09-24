@@ -38,7 +38,7 @@ use crate::{
         },
     },
     types::effects::{PrimitiveEffect, effect, no_effects},
-    types::r#type::Type,
+    types::r#type::{Type, bare_native_type},
 };
 
 pub fn int_type() -> Type {
@@ -161,6 +161,95 @@ impl NativeDisplay for Float {
     fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.into_inner())
     }
+}
+
+pub(crate) const RAW_FLOAT_ADD_FUNCTION_NAME: &str = "raw_float_add";
+pub(crate) const RAW_FLOAT_SUB_FUNCTION_NAME: &str = "raw_float_sub";
+pub(crate) const RAW_FLOAT_MUL_FUNCTION_NAME: &str = "raw_float_mul";
+pub(crate) const RAW_FLOAT_NEG_FUNCTION_NAME: &str = "raw_float_neg";
+pub(crate) const RAW_FLOAT_IS_FINITE_FUNCTION_NAME: &str = "raw_float_is_finite";
+pub(crate) const RAW_FLOAT_TO_FLOAT_FUNCTION_NAME: &str = "raw_float_to_float";
+
+pub(crate) fn raw_float_type() -> Type {
+    cached_primitive_ty!(RawFloat)
+}
+
+/// Whether storage holding a `stored` value may be read as an `expected` one, without conversion.
+///
+/// Types are equal or `float` refines `raw_float`: every float is a raw float with the same
+/// representation, so reading one as the other is free. That subtyping holds for reading only.
+/// Writing a `raw_float` into `float` storage could store an infinity, so a place anything may
+/// write or consume keeps its exact type.
+pub(crate) fn readable_as(stored: Type, expected: Type) -> bool {
+    stored == expected || (stored == float_type() && expected == raw_float_type())
+}
+
+/// A compiler-internal IEEE double without Ferlium's finiteness contract.
+///
+/// Source code cannot name this type. Float speculation (`mir::pass::float_speculation`) computes
+/// a chain of float arithmetic in it without the per-operation saturation, reading its `float`
+/// inputs directly (see [`readable_as`]), then converts the chain's result back to [`Float`] only
+/// after checking that it is finite. Both types are 64-bit doubles;
+/// only the finiteness contract differs. Its values may therefore be
+/// infinite or NaN; its equality and hash are bitwise so that a folded constant has one identity.
+#[derive(Clone, Copy, Debug)]
+#[repr(transparent)]
+pub(crate) struct RawFloat(f64);
+
+impl PartialEq for RawFloat {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bits() == other.0.to_bits()
+    }
+}
+
+impl Eq for RawFloat {}
+
+impl Hash for RawFloat {
+    fn hash<H: StdHasher>(&self, state: &mut H) {
+        self.0.to_bits().hash(state);
+    }
+}
+
+impl RawFloat {
+    // Only the Wasm backend materializes raw float constants.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub(crate) fn into_inner(self) -> f64 {
+        self.0
+    }
+}
+
+impl NativeDisplay for RawFloat {
+    fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "raw {}", self.0)
+    }
+}
+
+extern "C" fn raw_float_add(lhs: RawFloat, rhs: RawFloat) -> RawFloat {
+    RawFloat(lhs.0 + rhs.0)
+}
+
+extern "C" fn raw_float_sub(lhs: RawFloat, rhs: RawFloat) -> RawFloat {
+    RawFloat(lhs.0 - rhs.0)
+}
+
+extern "C" fn raw_float_mul(lhs: RawFloat, rhs: RawFloat) -> RawFloat {
+    RawFloat(lhs.0 * rhs.0)
+}
+
+extern "C" fn raw_float_neg(value: RawFloat) -> RawFloat {
+    RawFloat(-value.0)
+}
+
+extern "C" fn raw_float_is_finite(value: RawFloat) -> bool {
+    value.0.is_finite()
+}
+
+/// The conversion back to a finite float is only meaningful for a finite value, which is where
+/// float speculation uses it. It is nevertheless total, mapping every non-finite value to zero, so
+/// that it can be executed, moved or folded like any other pure operation without ever producing an
+/// invalid [`Float`].
+extern "C" fn raw_float_to_float(value: RawFloat) -> Float {
+    Float::new(value.0).unwrap_or_else(|_| Float::new(0.0).expect("zero is finite"))
 }
 
 fn invalid_real_argument(message: StdString) -> SourceFailureKind {
@@ -677,6 +766,66 @@ pub fn add_to_module(to: &mut Module) {
         )
         .inline_never()
         .add_to(to, ustr("compare_float"), Visibility::Module);
+    // Compiler-internal float speculation support: see `RawFloat`.
+    to.add_private_bare_native_type_alias_str("raw_float", bare_native_type::<RawFloat>());
+    to.add_native_concrete_impl(
+        trivial_copy_trait_id,
+        [raw_float_type()],
+        [],
+        Vec::<Function>::new(),
+    );
+    for (name, function) in [
+        (
+            RAW_FLOAT_ADD_FUNCTION_NAME,
+            NativeFnNN::new(raw_float_add).description(
+                ["left", "right"],
+                "Internal: IEEE addition without saturation.",
+                no_effects(),
+            ),
+        ),
+        (
+            RAW_FLOAT_SUB_FUNCTION_NAME,
+            NativeFnNN::new(raw_float_sub).description(
+                ["left", "right"],
+                "Internal: IEEE subtraction without saturation.",
+                no_effects(),
+            ),
+        ),
+        (
+            RAW_FLOAT_MUL_FUNCTION_NAME,
+            NativeFnNN::new(raw_float_mul).description(
+                ["left", "right"],
+                "Internal: IEEE multiplication without saturation.",
+                no_effects(),
+            ),
+        ),
+        (
+            RAW_FLOAT_NEG_FUNCTION_NAME,
+            NativeFnN::new(raw_float_neg).description(
+                ["value"],
+                "Internal: IEEE negation.",
+                no_effects(),
+            ),
+        ),
+        (
+            RAW_FLOAT_IS_FINITE_FUNCTION_NAME,
+            NativeFnN::new(raw_float_is_finite).description(
+                ["value"],
+                "Internal: whether a raw float is finite.",
+                no_effects(),
+            ),
+        ),
+        (
+            RAW_FLOAT_TO_FLOAT_FUNCTION_NAME,
+            NativeFnN::new(raw_float_to_float).description(
+                ["value"],
+                "Internal: the raw float as a finite float: itself when finite, zero otherwise.",
+                no_effects(),
+            ),
+        ),
+    ] {
+        to.add_function_with_visibility(ustr(name), function, Visibility::Module);
+    }
     to.add_native_concrete_impl(
         div_trait_id,
         [float_type()],

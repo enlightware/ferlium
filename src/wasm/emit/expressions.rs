@@ -393,6 +393,25 @@ impl Plan {
             }
         }
 
+        // What each tree's producers read, by position. Deferral moves a producer down to its
+        // tree's root, so it must not cross a write to one of these.
+        let mut tree_reads: FxHashMap<FlatOperationId, Vec<(usize, PlaceSlotId)>> =
+            FxHashMap::default();
+        for candidate in &candidates {
+            let source = layout.index(candidate.source).as_index();
+            let Some(ultimate_root) = ultimate_roots[source] else {
+                continue;
+            };
+            let producer = &body.block(candidate.source.block).operations()
+                [candidate.source.operation_id().as_index()];
+            let reads = tree_reads.entry(ultimate_root).or_default();
+            for operand in &producer.operands {
+                if let Some(slot) = place_index(operand, parameter_count) {
+                    reads.push((source, slot));
+                }
+            }
+        }
+
         let mut accepted = vec![false; layout.operation_count];
         for block_id in body.blocks() {
             let block = body.block(block_id);
@@ -421,14 +440,32 @@ impl Plan {
                 }
                 let ultimate_root =
                     group_ultimate_root[root_index].expect("non-empty expression group");
-                let contiguous = (first.as_index()..root_index).all(|operation| {
+                // Every other operation between the tree's first producer and its root is emitted
+                // before the tree. That is invisible unless it writes what an earlier producer
+                // reads, or it has effects of its own.
+                let reads = tree_reads
+                    .get(&ultimate_root)
+                    .map_or(&[][..], Vec::as_slice);
+                let unaffected = (first.as_index()..root_index).all(|operation| {
+                    let offset = operation - base.as_index();
+                    let other = &block.operations()[offset];
                     ultimate_roots[operation] == Some(ultimate_root)
-                        || is_neutral(
-                            &block.operations()[operation - base.as_index()],
-                            no_op_stack_markers,
+                        || is_neutral(other, no_op_stack_markers)
+                        || local_writes(
+                            other,
+                            Source::from_index(block_id, offset),
+                            inputs,
+                            layout,
+                            parameter_count,
+                            value_count,
                         )
+                        .is_some_and(|writes| {
+                            !reads.iter().any(|&(producer, slot)| {
+                                producer < operation && writes.contains(&slot)
+                            })
+                        })
                 });
-                accepted[root_index] = contiguous;
+                accepted[root_index] = unaffected;
             }
         }
 
@@ -904,6 +941,36 @@ fn classify_access(op: &Operation, index: usize) -> Option<AccessKind> {
         OperationKind::Clone { .. } if index == 1 => AccessKind::Unsupported,
         _ => AccessKind::Read,
     })
+}
+
+/// The storage `operation` writes, if it has no other effect and writes only scalar roots whose
+/// address nothing observes, which therefore only operands naming them can access.
+fn local_writes(
+    operation: &Operation,
+    source: Source,
+    inputs: &Inputs,
+    layout: &OperationLayout,
+    parameter_count: usize,
+    value_count: usize,
+) -> Option<Vec<PlaceSlotId>> {
+    // In-block operations cannot fail, and intrinsics are emitted inline without traps.
+    let written = match operation.kind {
+        OperationKind::Load | OperationKind::CompareEqual => None,
+        OperationKind::Store | OperationKind::Memcpy => Some(1),
+        OperationKind::Call { ref ty, .. } if inputs.intrinsic(layout, source).is_some() => ty
+            .result_convention
+            .has_result_place()
+            .then(|| operation.operands.len() - 1),
+        _ => return None,
+    };
+    let Some(written) = written else {
+        return Some(Vec::new());
+    };
+    let place = &operation.operands[written];
+    let slot = place_index(place, parameter_count)?;
+    (inputs.place_roots[slot.as_index()]
+        && !inputs.is_addressed(place, parameter_count, value_count))
+    .then(|| vec![slot])
 }
 
 fn is_neutral(operation: &Operation, no_op_stack_markers: &FxHashSet<ValueId>) -> bool {

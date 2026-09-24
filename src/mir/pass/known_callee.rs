@@ -51,7 +51,11 @@ use crate::{
             BITS_TRAIT_NAME, ITERATOR_TRAIT_NAME, NUM_TRAIT_NAME, ORD_TRAIT_NAME, VALUE_TRAIT_NAME,
         },
         logic::bool_type,
-        math::{float_type, int_type},
+        math::{
+            RAW_FLOAT_ADD_FUNCTION_NAME, RAW_FLOAT_IS_FINITE_FUNCTION_NAME,
+            RAW_FLOAT_MUL_FUNCTION_NAME, RAW_FLOAT_NEG_FUNCTION_NAME, RAW_FLOAT_SUB_FUNCTION_NAME,
+            RAW_FLOAT_TO_FLOAT_FUNCTION_NAME, float_type, int_type,
+        },
     },
     types::{
         effects::EffType,
@@ -111,6 +115,18 @@ pub(crate) enum KnownCallee {
     FloatMul,
     /// `Num<float>::neg(value)` — `-value`.
     FloatNeg,
+    /// `raw_float_add(left, right)` — IEEE `left + right`, which may overflow to an infinity.
+    RawFloatAdd,
+    /// `raw_float_sub(left, right)` — IEEE `left - right`, which may overflow to an infinity.
+    RawFloatSub,
+    /// `raw_float_mul(left, right)` — IEEE `left * right`, which may overflow to an infinity.
+    RawFloatMul,
+    /// `raw_float_neg(value)` — IEEE `-value`.
+    RawFloatNeg,
+    /// `raw_float_is_finite(value)` — whether the raw double is neither infinite nor NaN.
+    RawFloatIsFinite,
+    /// `raw_float_to_float(value)` — the raw double as a float when finite, and zero otherwise.
+    RawFloatToFloat,
     /// `Ord<float>::cmp(left, right)` — `Less`, `Equal` or `Greater`.
     ///
     /// Ferlium floats are finite and ordered, rather than IEEE values admitting NaN and infinity.
@@ -200,6 +216,12 @@ impl KnownCallee {
                 | Self::FloatGt
                 | Self::FloatGe
                 | Self::FloatEq
+                | Self::RawFloatAdd
+                | Self::RawFloatSub
+                | Self::RawFloatMul
+                | Self::RawFloatNeg
+                | Self::RawFloatIsFinite
+                | Self::RawFloatToFloat
                 | Self::BoolNot
                 | Self::BoolEq
         )
@@ -254,6 +276,8 @@ pub(crate) struct KnownCallees {
     int_cmp_ty: CallImplType,
     array_offset_unchecked: FunctionId,
     array_offset_unchecked_effects: EffType,
+    /// The compiler-internal raw float operations float speculation emits, with their call types.
+    raw_float: Vec<(KnownCallee, FunctionId, CallImplType)>,
     layouts: Layouts,
     /// The type definitions a place has to be an instance of for a field position above to mean
     /// anything.
@@ -288,6 +312,26 @@ impl KnownCallees {
         let array_index = resolver.subscript_mut_member("array_index");
         let array_offset_unchecked = resolver.subscript_mut_member("array_offset_unchecked");
         resolver.assert_retargetable(array_index, array_offset_unchecked);
+        let raw_float: Vec<_> = [
+            (RAW_FLOAT_ADD_FUNCTION_NAME, KnownCallee::RawFloatAdd),
+            (RAW_FLOAT_SUB_FUNCTION_NAME, KnownCallee::RawFloatSub),
+            (RAW_FLOAT_MUL_FUNCTION_NAME, KnownCallee::RawFloatMul),
+            (RAW_FLOAT_NEG_FUNCTION_NAME, KnownCallee::RawFloatNeg),
+            (
+                RAW_FLOAT_IS_FINITE_FUNCTION_NAME,
+                KnownCallee::RawFloatIsFinite,
+            ),
+            (
+                RAW_FLOAT_TO_FLOAT_FUNCTION_NAME,
+                KnownCallee::RawFloatToFloat,
+            ),
+        ]
+        .into_iter()
+        .map(|(name, known)| {
+            let function = resolver.function(name);
+            (known, function, resolver.call_impl_type(function))
+        })
+        .collect();
         let entries = [
             (resolver.function("black_box"), KnownCallee::BlackBox),
             (int_add, KnownCallee::IntAdd),
@@ -395,6 +439,11 @@ impl KnownCallees {
             ),
         ];
         let mut by_id: FxHashMap<_, _> = entries.into_iter().collect();
+        by_id.extend(
+            raw_float
+                .iter()
+                .map(|(known, function, _)| (*function, *known)),
+        );
         by_id.extend(resolver.std_module.functions.iter().enumerate().filter_map(
             |(index, function)| {
                 let CallableOrigin::BufferPrimitive(primitive) = function.origin else {
@@ -425,6 +474,7 @@ impl KnownCallees {
             int_cmp_ty: resolver.call_impl_type(int_cmp),
             array_offset_unchecked,
             array_offset_unchecked_effects: resolver.effects(array_offset_unchecked),
+            raw_float,
             layouts: Layouts {
                 array_len: resolver.field("array", "len"),
                 range: resolver.range_layout("RangeIterator", "Range"),
@@ -481,6 +531,18 @@ impl KnownCallees {
             self.array_offset_unchecked,
             &self.array_offset_unchecked_effects,
         )
+    }
+
+    /// The compiler-internal raw float operation `known` names, with its complete call type.
+    ///
+    /// Panics for any other callee: only float speculation emits these, and only these.
+    pub(crate) fn raw_float(&self, known: KnownCallee) -> (FunctionId, &CallImplType) {
+        let (_, function, ty) = self
+            .raw_float
+            .iter()
+            .find(|(candidate, _, _)| *candidate == known)
+            .unwrap_or_else(|| panic!("{known:?} is not a raw float operation"));
+        (*function, ty)
     }
 
     /// Whether `ty` is the std array type, at any element type.
@@ -713,7 +775,7 @@ mod tests {
         let session = CompilerSession::new();
         assert_eq!(
             known_callees(&session).by_id.len(),
-            48,
+            54,
             "two known callees resolved to the same function id"
         );
     }

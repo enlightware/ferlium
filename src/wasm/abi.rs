@@ -145,6 +145,6 @@ impl CallAbi {
 pub(super) fn scalar_type(scalar: NativeScalar) -> ValType {
     match scalar {
         NativeScalar::Bool | NativeScalar::Int => ValType::I32,
-        NativeScalar::Float => ValType::F64,
+        NativeScalar::F64 => ValType::F64,
     }
 }

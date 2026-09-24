@@ -1006,6 +1006,34 @@ are rebuilt and physical verification runs before the optimized artifact is publ
 `CompilerSession::set_physical_mir_optimization` selects expanded or optimized physical artifacts
 independently of the semantic MIR setting; the expanded comparison stage is built only on request.
 
+### Float speculation
+
+Expansion of optimized bodies first runs `mir::pass::float_speculation`. A tree of saturating float
+`+`, `-`, `*` and negation, with at least two overflowing operations, is computed without saturation
+in the compiler-internal `raw_float` type and its root checked once; the original tree runs when it
+is not finite. Non-finiteness is sticky through these operations, so a finite root proves every
+saturation was the identity. Division is excluded, since `finite / inf` is a finite zero. The
+module documentation states the tree conditions and the soundness argument.
+
+Only final bodies are rewritten: semantic MIR, which callers inline, keeps the saturating trees, so
+an inlined callee's tree joins its caller's. Unoptimized expansion skips the pass, so differential
+execution compares both. Every `raw_float` operation is total, so shared passes treat them as
+ordinary pure calls. The Wasm backend emits them as bare `f64` instructions and drops the conversion's
+fallback where the check provably guards it.
+
+**Decisions not to revisit.** The pass once ran in semantic MIR, but callers then inlined an already
+speculated body and speculated its slow path again. The raw operations read their `float` inputs
+directly, through the read-only refinement in `doc/mir-ir.md`: a separate widening operation was
+shared by CSE and kept the fast path off the Wasm stack. Merging the check and the conversion into
+one operation has no cheap MIR encoding: a mutable output must already be initialized, an optional
+result lives in memory on Wasm, and an `invoke` error edge may not rejoin. The backend's elision
+instead saves about 5% of the bytes of float-bound code. One check per block rather than per tree
+was not pursued, since it would not remove the duplicated slow paths.
+
+**Result and open question.** On `float_kernel` execution drops by 57%. The cost is compile time
+and bytes: each tree's slow path is duplicated, bounded only by the operation minimum and not by a
+growth budget. That should be priced with code growth globally.
+
 ## Budgets
 
 All in `mir::pass::budget`, where their values are defined. A budget change is a user-visible

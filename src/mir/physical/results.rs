@@ -852,7 +852,8 @@ mod tests {
         let semantic = session
             .mir_artifacts_for(module, MirOptimization::Enabled)
             .unwrap();
-        let expanded = expand_physical_mir(module, semantic, env, session.known_callees()).unwrap();
+        let expanded =
+            expand_physical_mir(module, semantic, env, session.known_callees(), false).unwrap();
         let original =
             prepare_physical_mir(expanded.clone(), DirectEntries::default(), semantic, env)
                 .unwrap();

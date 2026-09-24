@@ -42,7 +42,7 @@ use crate::{
     std::{
         core_traits_names::VALUE_TRAIT_NAME,
         logic::bool_type,
-        math::{float_type, int_type},
+        math::{float_type, int_type, raw_float_type},
         string::StaticStr,
         value::{
             TypeLayoutEnv, VALUE_ALIGN_ASSOC_CONST_INDEX, VALUE_CLONE_METHOD_INDEX,
@@ -98,10 +98,16 @@ pub(super) struct ScalarType(Type);
 impl ScalarType {
     /// Primitive host bindings do not require a module environment.
     pub(super) fn of(ty: Type) -> Result<Self, String> {
-        [Type::unit(), bool_type(), int_type(), float_type()]
-            .contains(&ty)
-            .then_some(Self(ty))
-            .ok_or_else(|| format!("unsupported Wasm storage type {ty:?}"))
+        [
+            Type::unit(),
+            bool_type(),
+            int_type(),
+            float_type(),
+            raw_float_type(),
+        ]
+        .contains(&ty)
+        .then_some(Self(ty))
+        .ok_or_else(|| format!("unsupported Wasm storage type {ty:?}"))
     }
 
     pub(super) fn in_env(ty: Type, env: &impl TypeLayoutEnv) -> Result<Self, String> {
@@ -122,7 +128,7 @@ impl ScalarType {
         Self(match scalar {
             NativeScalar::Bool => bool_type(),
             NativeScalar::Int => int_type(),
-            NativeScalar::Float => float_type(),
+            NativeScalar::F64 => float_type(),
         })
     }
 
@@ -132,11 +138,23 @@ impl ScalarType {
 
     fn is_tag(self) -> bool {
         // Construction already proved that every non-primitive scalar is a closed unit variant.
-        ![Type::unit(), bool_type(), int_type(), float_type()].contains(&self.0)
+        ![
+            Type::unit(),
+            bool_type(),
+            int_type(),
+            float_type(),
+            raw_float_type(),
+        ]
+        .contains(&self.0)
+    }
+
+    /// `float` and the compiler-internal `raw_float` are both a Wasm `f64`.
+    fn is_f64(self) -> bool {
+        self.0 == float_type() || self.0 == raw_float_type()
     }
 
     fn wasm(self) -> ValType {
-        if self.0 == float_type() {
+        if self.is_f64() {
             ValType::F64
         } else {
             ValType::I32
@@ -149,7 +167,7 @@ impl ScalarType {
             I::I32Const(0)
         } else if self.0 == bool_type() {
             I::I32Load8U(memarg(0))
-        } else if self.0 == float_type() {
+        } else if self.is_f64() {
             I::F64Load(memarg(3))
         } else {
             I::I32Load(memarg(2))
@@ -168,7 +186,7 @@ impl ScalarType {
             I::Drop
         } else if self.0 == bool_type() {
             I::I32Store8(memarg_at(0, offset))
-        } else if self.0 == float_type() {
+        } else if self.is_f64() {
             I::F64Store(memarg_at(3, offset))
         } else {
             I::I32Store(memarg_at(2, offset))
@@ -177,11 +195,7 @@ impl ScalarType {
     }
 
     fn equal(self) -> I<'static> {
-        if self.0 == float_type() {
-            I::F64Eq
-        } else {
-            I::I32Eq
-        }
+        if self.is_f64() { I::F64Eq } else { I::I32Eq }
     }
 
     fn pointer() -> Self {
@@ -193,7 +207,7 @@ impl ScalarType {
             0
         } else if self.0 == bool_type() {
             1
-        } else if self.0 == float_type() {
+        } else if self.is_f64() {
             8
         } else {
             4
@@ -1589,6 +1603,12 @@ fn wasm_intrinsic(session: &CompilerSession, operation: &Operation) -> Option<Kn
             | KnownCallee::FloatGt
             | KnownCallee::FloatGe
             | KnownCallee::FloatEq
+            | KnownCallee::RawFloatAdd
+            | KnownCallee::RawFloatSub
+            | KnownCallee::RawFloatMul
+            | KnownCallee::RawFloatNeg
+            | KnownCallee::RawFloatIsFinite
+            | KnownCallee::RawFloatToFloat
             | KnownCallee::BoolNot
             | KnownCallee::BoolEq
     )

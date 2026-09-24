@@ -1382,6 +1382,107 @@ fn wasm_codegen_known_float_calls_select_saturating_instructions() {
     }
 }
 
+/// Counts selected operators across every function body of a compiled program.
+fn count_operators(code: &CompiledProgram, mut counted: impl FnMut(&Operator) -> bool) -> usize {
+    let mut count = 0;
+    for payload in Parser::new(0).parse_all(code.bytes()) {
+        if let Payload::CodeSectionEntry(body) = payload.unwrap() {
+            for operation in body.get_operators_reader().unwrap() {
+                count += usize::from(counted(&operation.unwrap()));
+            }
+        }
+    }
+    count
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_speculated_float_tree_saturates_only_on_its_slow_path() {
+    let mut session = CompilerSession::new();
+    let entry = compile(
+        &mut session,
+        "fn compute(x: float, y: float) -> float { (x * y + 1.0) * x - y }",
+    );
+    let code = CompiledProgram::compile(&session, entry).unwrap();
+    // Four saturating operations remain, all on the slow path; the fast path checks its root once
+    // and converts it back without a fallback, since the conversion is only reached when finite.
+    assert_eq!(
+        count_operators(&code, |operation| matches!(operation, Operator::F64Min)),
+        4
+    );
+    assert_eq!(
+        count_operators(&code, |operation| matches!(operation, Operator::F64Max)),
+        4
+    );
+    assert_eq!(
+        count_operators(&code, |operation| matches!(operation, Operator::Select)),
+        0
+    );
+    assert_eq!(
+        count_operators(&code, |operation| matches!(
+            operation,
+            Operator::Call { .. }
+        )),
+        0
+    );
+    // The language semantics: every operation saturates.
+    let saturate = |value: f64| value.clamp(-f64::MAX, f64::MAX);
+    let expected = |x: f64, y: f64| saturate(saturate(saturate(saturate(x * y) + 1.0) * x) - y);
+    let mut instance = code.instantiate::<(Float, Float), Float>().unwrap();
+    for (x, y) in [
+        (3.0, 2.0),
+        // `x * y` overflows, so the slow path computes the result.
+        (f64::MAX, 2.0),
+        (0.0, f64::MAX),
+        (f64::MAX, -f64::MAX),
+        (-0.0, 1.0),
+    ] {
+        let result = instance
+            .run(
+                (Float::new(x).unwrap(), Float::new(y).unwrap()),
+                WasmLimits::default(),
+            )
+            .unwrap()
+            .into_inner();
+        assert_eq!(result.to_bits(), expected(x, y).to_bits(), "({x}, {y})");
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_speculated_float_trees_match_per_operation_saturation() {
+    let max = f64::MAX;
+    for (source, x, y) in [
+        // Overflow then cancellation: per-operation saturation gives 0, the raw tree NaN.
+        ("(x + x) - y", max, max),
+        // Overflow then scaling: per-operation saturation gives MAX / 2, the raw tree MAX.
+        ("(x + x) * y", max, 0.5),
+        // Overflow then multiplication by zero: 0 with saturation, NaN without.
+        ("(x * x) * y", max, 0.0),
+        ("-(x * y) - (x * y)", max, -2.0),
+        ("(x * y + 1.0) * x - y", -3.5, 1.25),
+    ] {
+        let expressions =
+            [MirOptimization::Disabled, MirOptimization::Enabled].map(|optimization| {
+                let mut session = CompilerSession::new();
+                session.set_mir_optimization(optimization);
+                let entry = compile(
+                    &mut session,
+                    &format!("fn compute(x: float, y: float) -> float {{ {source} }}"),
+                );
+                let code = CompiledProgram::compile(&session, entry).unwrap();
+                let mut instance = code.instantiate::<(Float, Float), Float>().unwrap();
+                instance
+                    .run(
+                        (Float::new(x).unwrap(), Float::new(y).unwrap()),
+                        WasmLimits::default(),
+                    )
+                    .unwrap()
+                    .into_inner()
+                    .to_bits()
+            });
+        assert_eq!(expressions[0], expressions[1], "{source} at ({x}, {y})");
+    }
+}
+
 #[wasm_bindgen_test]
 fn wasm_codegen_ordered_comparisons_select_predicates() {
     for (expression, left, right, expected, equality) in [

@@ -2270,7 +2270,12 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         let mut addresses = Vec::with_capacity(inputs.len());
         for (input, parameter) in inputs.iter().zip(&signature.parameters) {
             let address = input.place()?;
-            self.memory.check_native(address, parameter.layout())?;
+            match parameter {
+                NativeParameter::Scalar(..) => self
+                    .memory
+                    .check_native_scalar_input(address, parameter.layout())?,
+                _ => self.memory.check_native(address, parameter.layout())?,
+            }
             match parameter {
                 NativeParameter::Mutable(_) => self.memory.check_write(address)?,
                 NativeParameter::Consuming(_) => self.memory.check_consume(address)?,
