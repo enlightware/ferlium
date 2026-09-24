@@ -223,7 +223,7 @@ function report(results, baseline, options) {
         (name) => Object.values(workloadPhases(name, options.mirBatch > 0)),
     )];
     for (const phase of phases) {
-        for (const axis of AXES) {
+        for (const axis of options.axes) {
             const metrics = results.get(axis.id).get(phase);
             if (!metrics) {
                 continue;
@@ -239,6 +239,10 @@ function report(results, baseline, options) {
         }
     }
 
+    if (!results.has('optimize:off')) {
+        reportTrailer(results, options);
+        return;
+    }
     console.log('\nOptimization effect (optimize:on against optimize:off, Estimated Cycles)');
     const width = Math.max(...phases.map((phase) => phase.length)) + 2;
     console.log(`  ${'phase'.padEnd(width)}${'on'.padStart(14)}${'off'.padStart(14)}${'change'.padStart(13)}`);
@@ -254,8 +258,12 @@ function report(results, baseline, options) {
 
     reportModuleSizes(results, options.selected);
 
+    reportTrailer(results, options);
+}
+
+function reportTrailer(results, options) {
     if (options.mirBatch > 0) {
-        for (const axis of AXES) {
+        for (const axis of options.axes) {
             reportEngines(results.get(axis.id), axis.id, options);
         }
     }
@@ -464,6 +472,9 @@ async function main() {
     // One interpreted call costs orders of magnitude more than a Wasm one, so it is its own,
     // opt-in batch. --no-mir remains a convenient explicit spelling for scripts.
     const mirBatch = args.includes('--no-mir') ? 0 : count('mir-batch', DEFAULT_MIR_BATCH, 0);
+    // The unoptimized axis is only a reference point; skipping it halves the processes to run,
+    // leaving room for a concurrent run of another checkout.
+    const axes = args.includes('--optimized-only') ? AXES.filter((axis) => axis.optimized) : AXES;
     const names = args.filter((arg) => !arg.startsWith('--'));
     const selected = names.length === 0 ? available : names;
     for (const name of selected) {
@@ -484,20 +495,22 @@ async function main() {
     // wall time. That trade is only sound because Callgrind counts the simulated program: what
     // else runs on the machine cannot move the numbers.
     const jobs = count('jobs', Math.max(1, Math.round(Number(process.env.BENCH_JOBS ?? availableParallelism() / 2))));
+    // Shard as if both axes ran, even when one does: the runtime code a workload executes depends on
+    // what ran before it in the same process, so only equal shardings give comparable counts.
     const shards = shardsOf(selected, Math.max(1, Math.min(Math.floor(jobs / AXES.length), selected.length)));
-    console.log(`${AXES.length} axes x ${shards.length} shard(s) of ${selected.length} workload(s), ${jobs} at a time\n`);
+    console.log(`${axes.length} axes x ${shards.length} shard(s) of ${selected.length} workload(s), ${jobs} at a time\n`);
 
-    const options = { batch, mirBatch, selected };
+    const options = { axes, batch, mirBatch, selected };
     const started = Date.now();
-    const finished = await inParallel(jobs, AXES.flatMap(
+    const finished = await inParallel(jobs, axes.flatMap(
         (axis) => shards.map((names, shard) => () => runShard(valgrind, axis, shard, options, names)),
     ));
     console.log(`measured in ${((Date.now() - started) / 1000).toFixed(0)}s\n`);
 
-    const results = new Map(AXES.map(
+    const results = new Map(axes.map(
         (axis) => [axis.id, mergeShards(finished.filter((shard) => shard.axis === axis.id))],
     ));
-    validate(results, selected, batch, mirBatch);
+    validate(results, axes, selected, batch, mirBatch);
 
     // Counts only mean the same thing under the same engine, tool and batch sizes.
     const run = { node: process.version, valgrind: version, arch: process.arch, batch, mirBatch };
@@ -530,8 +543,8 @@ async function inParallel(limit, tasks) {
 }
 
 /// Fail loudly rather than report a range that measured nothing.
-function validate(results, selected, batch, mirBatch) {
-    for (const axis of AXES) {
+function validate(results, axes, selected, batch, mirBatch) {
+    for (const axis of axes) {
         const dumps = results.get(axis.id);
         if (!dumps.get('phase=std_build')?.Instructions) {
             throw new Error(`${axis.id} collected nothing for the standard library build`);

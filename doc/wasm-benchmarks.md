@@ -36,10 +36,14 @@ make bench-wasm-callgrind                                   # all workloads, bot
 make bench-wasm-callgrind ARGS="--list"                     # workload names
 make bench-wasm-callgrind ARGS="sieve --jobs=8 --batch=20"  # subset, parallelism, batch size
 make bench-wasm-callgrind ARGS="sieve --mir-batch=1"        # include interpreter comparison
+make bench-wasm-callgrind ARGS="--optimized-only"           # skip the optimize:off axis, half the load
 make bench-wasm-callgrind VALGRIND=/path/to/vg-in-place     # an uninstalled Valgrind
 ```
 
-Each run compares against `target/wasm-callgrind/baseline.json`, written by the previous one.
+Each run compares against `target/wasm-callgrind/baseline.json`, written by the previous one. Compare
+only runs with the same workload selection and job count: they decide how workloads are sharded, and
+the runtime code a workload runs (evidence construction, allocation) varies with what ran earlier in
+its process. `--optimized-only` keeps the sharding of a full run.
 `VALGRIND_INCLUDE` overrides where `callgrind.h` is found for the marker addon, which exists because
 neither the compiler nor the generated code can issue client requests — both are Wasm.
 
