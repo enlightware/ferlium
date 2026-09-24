@@ -1,0 +1,14 @@
+/// A float-bound loop over plain locals: no arrays or projections, only arithmetic whose every
+/// operation saturates. It isolates the cost of float arithmetic from indexing.
+pub fn float_kernel(n: int) -> float {
+	let mut x = 0.5;
+	let mut v = 0.0;
+	let mut acc = 0.0;
+	for i in 0..n {
+		let a = (x * 0.75 - 0.25) * x + 0.125;
+		v = v * 0.5 + a * 0.25;
+		x = x * 0.5 + v * 0.25 + 0.125;
+		acc = acc + x * v
+	};
+	acc
+}

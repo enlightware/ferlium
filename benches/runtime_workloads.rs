@@ -183,7 +183,15 @@ impl RuntimeWorkload {
         569.0,
     );
 
-    pub const ALL: [Self; 12] = [
+    pub const FLOAT_KERNEL: Self = Self::single(
+        "float_kernel",
+        include_str!("../tests/modules/float_kernel.fer"),
+        include_str!("runtime/float_kernel.fer"),
+        RuntimeResult::Float,
+        316.051_308_470_353_8,
+    );
+
+    pub const ALL: [Self; 13] = [
         Self::QUICKSORT,
         Self::FIBONACCI,
         Self::SIEVE,
@@ -196,6 +204,7 @@ impl RuntimeWorkload {
         Self::LINALG_GRID,
         Self::ITER_PIPELINE,
         Self::DATA_TEXT_ROUNDTRIP,
+        Self::FLOAT_KERNEL,
     ];
 
     pub const fn name(self) -> &'static str {
