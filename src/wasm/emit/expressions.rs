@@ -459,8 +459,13 @@ impl Plan {
             .unwrap_or(false)
     }
 
-    pub(super) fn is_fully_emitted(&self) -> bool {
-        self.values.iter().all(Option::is_none) && self.places.iter().all(Option::is_none)
+    /// Whether every expression of the blocks that were `emitted` has been consumed.
+    pub(super) fn is_fully_emitted(&self, emitted: impl Fn(BlockId) -> bool) -> bool {
+        self.values
+            .iter()
+            .chain(&self.places)
+            .flatten()
+            .all(|source| !emitted(source.block))
     }
 }
 

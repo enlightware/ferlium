@@ -22,6 +22,8 @@ use super::{control_flow::distinct_targets, operations};
 /// only read by its `end_project`, which does not read the yielded address itself.
 #[derive(Debug, Default)]
 pub(super) struct Crossing {
+    /// Where the resumed half starts, if the accessor can yield.
+    pub resume: Option<BlockId>,
     /// Indexed by parameter.
     pub inputs: Vec<bool>,
     pub registers: FxHashSet<ValueId>,
@@ -29,21 +31,26 @@ pub(super) struct Crossing {
 }
 
 impl Crossing {
-    pub(super) fn of(body: &Function) -> Self {
+    pub(super) fn of(body: &Function) -> Result<Self, String> {
         let successors = |block: BlockId| match body.block(block).terminator().kind {
             // Suspension returns to the caller; resumption enters the resume block afresh.
             TerminatorKind::Yield { .. } => Vec::new(),
             ref kind => distinct_targets(kind),
         };
         let before = reachable(body, [body.entry()], successors);
-        let resumes = body
+        let mut resumes = body
             .blocks()
             .filter(|block| before[block.as_index()])
             .filter_map(|block| match body.block(block).terminator().kind {
                 TerminatorKind::Yield { resume, .. } => Some(resume),
                 _ => None,
             });
-        let after = reachable(body, resumes, successors);
+        // The front end rejects several reachable yields, and no pass duplicates one.
+        let resume = resumes.next();
+        if resumes.any(|other| Some(other) != resume) {
+            return Err("yielded accessor with several resume blocks".into());
+        }
+        let after = reachable(body, resume, successors);
 
         let mut definitions = FxHashMap::default();
         let mut borrowed = FxHashMap::default();
@@ -58,6 +65,7 @@ impl Crossing {
             }
         }
         let mut crossing = Self {
+            resume,
             inputs: vec![false; body.parameters().len()],
             ..Self::default()
         };
@@ -107,7 +115,7 @@ impl Crossing {
                 _ => (),
             }
         }
-        crossing
+        Ok(crossing)
     }
 }
 

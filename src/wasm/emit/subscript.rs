@@ -1,7 +1,7 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-//! Uniform subscript-member dispatch and yielded-accessor continuation adapters.
+//! Uniform subscript-member dispatch.
 
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction as I, MemArg, ValType};
 
@@ -21,11 +21,7 @@ use crate::{
     },
 };
 
-use super::{
-    ScalarType,
-    body::{SuspensionLayout, local_load},
-    enter_frame, leave_frame, memarg,
-};
+use super::{ScalarType, enter_frame, leave_frame, memarg};
 
 /// A member selected from symbolic evidence or an owning materialized subscript.
 #[derive(Clone)]
@@ -187,44 +183,6 @@ pub(super) fn member_adapter(
     }
     code.instruction(&I::End);
     Ok(code)
-}
-
-/// Reload a suspended accessor's retained direct parameters, then enter its resume body.
-pub(super) fn resume_adapter(
-    direct: &CallAbi,
-    layout: &SuspensionLayout,
-    resume: WasmFunctionId,
-) -> WasmFunction {
-    let mut code = WasmFunction::new([]);
-    code.instruction(&I::LocalGet(0));
-    for (input, transport) in layout.inputs.iter().zip(&direct.parameters) {
-        match (*input, transport) {
-            (Some((offset, ty)), _) => {
-                code.instruction(&I::LocalGet(1));
-                code.instruction(&local_load(ty, offset));
-            }
-            // The resumed half does not read this parameter.
-            (None, ParameterTransport::Direct(ValType::I64)) => {
-                code.instruction(&I::I64Const(0));
-            }
-            (None, ParameterTransport::Direct(ValType::F32)) => {
-                code.instruction(&I::F32Const(0.0.into()));
-            }
-            (None, ParameterTransport::Direct(ValType::F64)) => {
-                code.instruction(&I::F64Const(0.0.into()));
-            }
-            (None, _) => {
-                code.instruction(&I::I32Const(0));
-            }
-        }
-    }
-    if direct.output() {
-        code.instruction(&I::I32Const(0));
-    }
-    code.instruction(&I::LocalGet(1));
-    code.instruction(&I::Call(resume.as_u32()));
-    code.instruction(&I::End);
-    code
 }
 
 pub(super) fn is_addressor_native(

@@ -92,7 +92,7 @@ fn wasm_value_size(ty: ValType) -> u32 {
     }
 }
 
-pub(super) fn local_load(ty: ValType, offset: u32) -> I<'static> {
+fn local_load(ty: ValType, offset: u32) -> I<'static> {
     match ty {
         ValType::I32 => I::I32Load(MemArg {
             offset: offset.into(),
@@ -142,9 +142,11 @@ pub(super) struct HelperLocals {
 }
 
 const RESUME_SLOT_OFFSET: u32 = 0;
-const RESUME_BLOCK_OFFSET: u32 = 4;
-const SUSPENDED_STACK_END_OFFSET: u32 = 8;
-const CONTINUATION_HEADER_SIZE: u32 = 16;
+const SUSPENDED_STACK_END_OFFSET: u32 = 4;
+const CONTINUATION_HEADER_SIZE: u32 = 8;
+/// A resume body receives the failure destination and its retained frame, and restores the
+/// parameters it reads from that frame into the locals that follow.
+const RESUME_PARAMETER_COUNT: usize = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum BodyMode {
@@ -154,8 +156,12 @@ pub(super) enum BodyMode {
 }
 
 impl BodyMode {
-    fn extra_parameters(self) -> usize {
-        usize::from(matches!(self, Self::ProjectionResume))
+    /// The Wasm index of the first local after the parameters.
+    fn local_base(self, signature: &CallAbi) -> usize {
+        match self {
+            Self::ProjectionResume => RESUME_PARAMETER_COUNT,
+            _ => signature.parameter_count(),
+        }
     }
 
     fn projection(self) -> bool {
@@ -169,19 +175,18 @@ fn returns_direct_result(mode: BodyMode, signature: &CallAbi) -> bool {
         && matches!(signature.result, ResultKind::Direct(_))
 }
 
-/// Where a suspended accessor retains what its resumed half reads, in its frame.
+/// The locals that a suspended accessor retains for its resumed half: the parameters and the
+/// registers that the resumed half reads. Each one has a slot in the frame, at a byte offset from
+/// the frame base.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct SuspensionLayout {
-    /// The slot of each direct parameter, if the resumed half reads it.
-    pub inputs: Vec<Option<(u32, ValType)>>,
-    /// The retained locals, in this body's numbering, with their slots.
+struct SuspensionLayout {
+    /// The local holding each value, in this body's numbering, with its slot offset and type.
     locals: Vec<(WasmLocalId, u32, ValType)>,
 }
 
 pub(super) struct EmittedBody {
     pub function: WasmFunction,
     pub source_map: BodySourceMap,
-    pub suspension: Option<SuspensionLayout>,
 }
 
 pub(super) struct Body<'a, 's> {
@@ -213,12 +218,16 @@ pub(super) struct Body<'a, 's> {
     layout_locals: Option<LayoutLocals>,
     scratch_slots: FxHashMap<Type, u32>,
     callees: &'a FxHashMap<FunctionId, (WasmFunctionId, &'a CallAbi)>,
+    /// The resume body of each projection whose accessor is known.
+    direct_resumes: FxHashMap<ValueId, WasmFunctionId>,
     program: &'a ResolvedPhysicalProgram<'a>,
     session: &'a CompilerSession,
     registers: FxHashMap<ValueId, WasmLocalId>,
     storage: FxHashMap<Value, Storage>,
     locals: Vec<ValType>,
     mode: BodyMode,
+    /// The block where execution starts: the resume block for a resume body.
+    entry: BlockId,
     suspension: Option<SuspensionLayout>,
     /// Stack frontier on entry to a resumed accessor, below which its restores may not reach.
     resume_stack_floor: Option<WasmLocalId>,
@@ -236,6 +245,8 @@ pub(super) struct Body<'a, 's> {
     analysis: ExpressionAnalysis,
     expressions: ExpressionPlan,
     no_op_stack_markers: FxHashSet<ValueId>,
+    /// The blocks emitted so far, indexed by block.
+    emitted: Vec<bool>,
     pub(super) code: WasmFunction,
     source_map: BodySourceMap,
 }
@@ -251,6 +262,7 @@ impl<'a, 's> Body<'a, 's> {
         body: &'a Function,
         signature: &'a CallAbi,
         callees: &'a FxHashMap<FunctionId, (WasmFunctionId, &'a CallAbi)>,
+        resumes: &'a FxHashMap<FunctionId, WasmFunctionId>,
         program: &'a ResolvedPhysicalProgram<'a>,
         session: &'a CompilerSession,
         env: ModuleEnv<'a>,
@@ -267,7 +279,15 @@ impl<'a, 's> Body<'a, 's> {
         track_depth: bool,
     ) -> Result<Self, String> {
         let constructed_subscripts = constructed_subscript_definitions(body);
-        let control_flow = ControlFlow::of(body, mode);
+        let crossing = mode.projection().then(|| Crossing::of(body)).transpose()?;
+        let entry = match mode {
+            BodyMode::ProjectionResume => crossing
+                .as_ref()
+                .and_then(|crossing| crossing.resume)
+                .ok_or("resumed accessor without a yield")?,
+            _ => body.entry(),
+        };
+        let control_flow = ControlFlow::of(body, entry);
         let dispatched = matches!(control_flow, ControlFlow::Dispatcher);
         let forwarded_result = forwarded_result(body, signature, mode);
         let fallthrough_return = has_fallthrough_return(body, mode, &control_flow);
@@ -314,6 +334,7 @@ impl<'a, 's> Body<'a, 's> {
             layout_locals: None,
             scratch_slots: FxHashMap::default(),
             callees,
+            direct_resumes: FxHashMap::default(),
             program,
             session,
             roles,
@@ -321,6 +342,7 @@ impl<'a, 's> Body<'a, 's> {
             storage: FxHashMap::default(),
             locals: Vec::new(),
             mode,
+            entry,
             suspension: None,
             resume_stack_floor: None,
             frame: None,
@@ -339,9 +361,15 @@ impl<'a, 's> Body<'a, 's> {
             analysis,
             expressions,
             no_op_stack_markers,
+            emitted: vec![false; body.blocks().count()],
             code: WasmFunction::new([]),
             source_map: Vec::new(),
         };
+        if matches!(mode, BodyMode::ProjectionResume) {
+            // The parameters other than the failure destination become locals, in their order.
+            let parameters = signature.params();
+            this.locals.extend(parameters.iter().skip(1));
+        }
         if needs_helper_locals(body, mode, &this.no_op_stack_markers) {
             this.helpers = Some(HelperLocals {
                 pending_failure: this.local(ValType::I32),
@@ -382,7 +410,7 @@ impl<'a, 's> Body<'a, 's> {
                     let local = if parameter.kind == ParameterKind::Return {
                         this.local(ty.wasm())
                     } else {
-                        signature.input_local(index)
+                        this.input_local(index)
                     };
                     this.storage.insert(value, Storage::Local(local));
                 }
@@ -444,6 +472,11 @@ impl<'a, 's> Body<'a, 's> {
                         continue;
                     }
                     if matches!(operation.kind, OperationKind::Project { .. }) {
+                        if let Value::Function(target) = &operation.operands[0]
+                            && let Some(resume) = resumes.get(&program.direct_entry(*target))
+                        {
+                            this.direct_resumes.insert(id, *resume);
+                        }
                         let local = this.local(ValType::I32);
                         this.registers.insert(id, local);
                         let frame = this.local(ValType::I32);
@@ -616,29 +649,27 @@ impl<'a, 's> Body<'a, 's> {
                 output: this.local(ValType::I32),
             });
         }
-        if mode.projection() {
+        if let Some(crossing) = crossing {
             // Only what the resumed half reads from before the yield is retained. Other locals,
             // like helpers and the dispatcher's program counter, are written before being read.
-            let crossing = Crossing::of(body);
-            let mut inputs = Vec::with_capacity(signature.parameters.len());
+            let mut retained = Vec::new();
             for (index, parameter) in signature.parameters.iter().enumerate() {
                 // A parameter held in the frame is read from there instead of from its local.
                 let value = Value::Parameter(ParameterId::from_index(index));
-                let local = !matches!(
-                    this.storage.get(&value),
-                    Some(Storage::Stack(_) | Storage::Expression)
-                );
-                inputs.push(if crossing.inputs[index] && local {
+                if crossing.inputs[index]
+                    && !matches!(
+                        this.storage.get(&value),
+                        Some(Storage::Stack(_) | Storage::Expression)
+                    )
+                {
                     let ty = match parameter {
                         ParameterTransport::Direct(ty) => *ty,
                         ParameterTransport::Indirect => ValType::I32,
                     };
-                    Some((this.reserve_bytes(wasm_value_size(ty))?, ty))
-                } else {
-                    None
-                });
+                    retained.push((this.input_local(index), ty));
+                }
             }
-            let mut retained = crossing
+            let mut registers = crossing
                 .registers
                 .iter()
                 .filter_map(|id| {
@@ -656,17 +687,21 @@ impl<'a, 's> Body<'a, 's> {
                         .map(|id| this.projection_frames[id]),
                 )
                 .collect::<Vec<_>>();
-            retained.sort_by_key(|local| local.as_index());
-            let first_local = signature.parameter_count() + mode.extra_parameters();
+            registers.sort_by_key(|local| local.as_index());
+            let local_base = mode.local_base(signature);
+            retained.extend(
+                registers
+                    .into_iter()
+                    .map(|local| (local, this.locals[local.as_index() - local_base])),
+            );
             let mut locals = Vec::with_capacity(retained.len());
-            for local in retained {
-                let ty = this.locals[local.as_index() - first_local];
+            for (local, ty) in retained {
                 locals.push((local, this.reserve_bytes(wasm_value_size(ty))?, ty));
             }
-            this.suspension = Some(SuspensionLayout { inputs, locals });
+            this.suspension = Some(SuspensionLayout { locals });
             this.frame = Some(match mode {
                 BodyMode::ProjectionStart { .. } => this.local(ValType::I32),
-                BodyMode::ProjectionResume => WasmLocalId::from_index(signature.parameter_count()),
+                BodyMode::ProjectionResume => WasmLocalId::from_index(RESUME_PARAMETER_COUNT - 1),
                 BodyMode::Normal => unreachable!(),
             });
             if matches!(mode, BodyMode::ProjectionResume) {
@@ -922,15 +957,19 @@ impl<'a, 's> Body<'a, 's> {
         self.i(I::If(BlockType::Result(ValType::I32)));
         self.context_pointer(offset_of!(InvocationState, native_failure));
         self.i(I::LocalGet(frame.as_u32()));
-        self.i(I::LocalGet(frame.as_u32()));
-        self.i(I::I32Load(MemArg {
-            offset: RESUME_SLOT_OFFSET as u64,
-            ..memarg(2)
-        }));
-        self.i(I::CallIndirect {
-            type_index: self.subscript_entries.resume_signature.as_u32(),
-            table_index: 0,
-        });
+        if let Some(resume) = self.direct_resumes.get(id) {
+            self.i(I::Call(resume.as_u32()));
+        } else {
+            self.i(I::LocalGet(frame.as_u32()));
+            self.i(I::I32Load(MemArg {
+                offset: RESUME_SLOT_OFFSET as u64,
+                ..memarg(2)
+            }));
+            self.i(I::CallIndirect {
+                type_index: self.subscript_entries.resume_signature.as_u32(),
+                table_index: 0,
+            });
+        }
         self.i(I::Else);
         self.i(I::I32Const(0));
         self.i(I::End);
@@ -942,8 +981,8 @@ impl<'a, 's> Body<'a, 's> {
         Ok(())
     }
 
-    fn suspend(&mut self, yielded: &Value, resume: BlockId) -> Result<(), String> {
-        let entry = match self.mode {
+    fn suspend(&mut self, yielded: &Value) -> Result<(), String> {
+        let resume = match self.mode {
             BodyMode::ProjectionStart { resume } => resume,
             BodyMode::ProjectionResume => {
                 self.fail(FailureCode::Invariant);
@@ -955,19 +994,12 @@ impl<'a, 's> Body<'a, 's> {
             .suspension
             .take()
             .expect("projected body has a suspension layout");
-        for (index, input) in layout.inputs.iter().enumerate() {
-            if let Some((offset, ty)) = *input {
-                self.store_local_in_frame(self.signature.input_local(index), offset, ty);
-            }
-        }
         for &(local, offset, ty) in &layout.locals {
             self.store_local_in_frame(local, offset, ty);
         }
         self.suspension = Some(layout);
+        // A caller that does not know the accessor resumes it through this slot.
         self.frame_address(RESUME_SLOT_OFFSET);
-        self.i(I::I32Const(entry.as_u32() as i32));
-        self.i(I::I32Store(memarg(2)));
-        self.frame_address(RESUME_BLOCK_OFFSET);
         self.i(I::I32Const(resume.as_u32() as i32));
         self.i(I::I32Store(memarg(2)));
         // The caller may allocate above this retained frame before resuming it. Remember the
@@ -992,10 +1024,6 @@ impl<'a, 's> Body<'a, 's> {
             self.load_local_from_frame(local, offset, ty);
         }
         self.suspension = Some(layout);
-        let pc = self.pc.expect("projected body uses a dispatcher");
-        self.frame_address(RESUME_BLOCK_OFFSET);
-        self.i(I::I32Load(memarg(2)));
-        self.i(I::LocalSet(pc.as_u32()));
     }
 
     /// Restore a MIR stack marker without crossing a suspended continuation frame.
@@ -1600,11 +1628,17 @@ impl<'a, 's> Body<'a, 's> {
     }
 
     fn local(&mut self, ty: ValType) -> WasmLocalId {
-        let id = WasmLocalId::from_index(
-            self.signature.parameter_count() + self.mode.extra_parameters() + self.locals.len(),
-        );
+        let id = WasmLocalId::from_index(self.mode.local_base(self.signature) + self.locals.len());
         self.locals.push(ty);
         id
+    }
+
+    /// The local holding a parameter, which a resume body restores from its frame.
+    fn input_local(&self, index: usize) -> WasmLocalId {
+        match self.mode {
+            BodyMode::ProjectionResume => WasmLocalId::from_index(RESUME_PARAMETER_COUNT + index),
+            _ => self.signature.input_local(index),
+        }
     }
 
     fn slot(&mut self, value: Value, size: u32) -> Result<(), String> {
@@ -1693,9 +1727,9 @@ impl<'a, 's> Body<'a, 's> {
             }
             Value::Parameter(id) => self.i(I::LocalGet(
                 (if self.body.parameters()[id.as_index()].kind == ParameterKind::Return {
-                    self.signature.output_local()
+                    self.input_local(self.signature.parameters.len())
                 } else {
-                    self.signature.input_local(id.as_index())
+                    self.input_local(id.as_index())
                 })
                 .as_u32(),
             )),
@@ -1848,7 +1882,7 @@ impl<'a, 's> Body<'a, 's> {
                     && matches!(self.storage.get(&value), Some(Storage::Stack(_)))
                 {
                     self.address(&value)?;
-                    self.i(I::LocalGet(self.signature.input_local(index).as_u32()));
+                    self.i(I::LocalGet(self.input_local(index).as_u32()));
                     self.store(ScalarType::of(self.body.parameters()[index].ty)?);
                 }
             }
@@ -1860,6 +1894,10 @@ impl<'a, 's> Body<'a, 's> {
                     .as_u32(),
             ));
             self.restore_suspension();
+            if let Some(pc) = self.pc {
+                self.i(I::I32Const(self.entry.as_u32() as i32));
+                self.i(I::LocalSet(pc.as_u32()));
+            }
         }
         let control_flow = self
             .control_flow
@@ -1896,7 +1934,8 @@ impl<'a, 's> Body<'a, 's> {
             self.i(I::Unreachable);
         }
         debug_assert!(
-            self.expressions.is_fully_emitted(),
+            self.expressions
+                .is_fully_emitted(|block| self.emitted[block.as_index()]),
             "every stackified scalar expression and place is consumed"
         );
         debug_assert!(
@@ -1909,7 +1948,6 @@ impl<'a, 's> Body<'a, 's> {
         Ok(EmittedBody {
             function: self.code,
             source_map: self.source_map,
-            suspension: self.suspension,
         })
     }
 
@@ -2012,7 +2050,11 @@ impl<'a, 's> Body<'a, 's> {
                 }
                 self.record_source(start, terminator.span);
             }
-            TerminatorKind::Yield { .. } => unreachable!("projections use the dispatcher"),
+            TerminatorKind::Yield { place, .. } => {
+                self.suspend(place)?;
+                self.record_source(start, terminator.span);
+                return Ok(());
+            }
             TerminatorKind::Return
             | TerminatorKind::PropagateError
             | TerminatorKind::FailureDuringCleanup
@@ -2162,6 +2204,7 @@ impl<'a, 's> Body<'a, 's> {
     }
 
     fn emit_operations(&mut self, block_id: BlockId) -> Result<(), String> {
+        self.emitted[block_id.as_index()] = true;
         let operations = self.body.block(block_id).operations();
         let operation_count = operations.len();
         let mut index = 0;
@@ -2317,7 +2360,7 @@ impl<'a, 's> Body<'a, 's> {
                     self.dispatch(depth, 0);
                 }
             }
-            TerminatorKind::Yield { place, resume } => self.suspend(place, *resume)?,
+            TerminatorKind::Yield { place, .. } => self.suspend(place)?,
             TerminatorKind::Return
             | TerminatorKind::PropagateError
             | TerminatorKind::FailureDuringCleanup

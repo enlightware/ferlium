@@ -964,7 +964,9 @@ fn emit_with_export_kind(
         .collect::<FxHashMap<_, _>>();
     let table_count =
         adapters.len() + callable_count + subscript_adapters.len() + resume_slots.len();
-    let glue_base = WasmFunctionId::from_index(adapter_base.as_index() + table_count);
+    // Resume slots hold the resume bodies themselves; every other slot holds an adapter.
+    let adapter_count = table_count - resume_slots.len();
+    let glue_base = WasmFunctionId::from_index(adapter_base.as_index() + adapter_count);
     let mut evidence =
         evidence::Image::build(program, &reachable, &dictionary_table, &subscript_table);
     let emit_callable_glue = callable_count != 0 || needs_callable_glue;
@@ -1040,7 +1042,6 @@ fn emit_with_export_kind(
     let mut strings = StringLiterals::default();
     let mut names = WasmNames::new(session, imports);
     let mut source_map = Vec::new();
-    let mut suspension_layouts = FxHashMap::default();
     let mut body_index = 0;
     for (id, body, signature, selections) in &bodies {
         names.push(format!(
@@ -1065,6 +1066,7 @@ fn emit_with_export_kind(
             body,
             signature,
             &callees,
+            &resume_indices,
             program,
             session,
             session
@@ -1084,9 +1086,6 @@ fn emit_with_export_kind(
         )
         .and_then(Body::emit)
         .map_err(|reason| diagnostic(*id, body, &reason))?;
-        if let Some(layout) = emitted.suspension {
-            suspension_layouts.insert(*id, layout);
-        }
         code.function(&emitted.function);
         source_map.extend(
             emitted
@@ -1101,13 +1100,12 @@ fn emit_with_export_kind(
         body_index += 1;
         if body.result_convention() == CallResultConvention::YIELDED_ONCE {
             names.push(format!("<resume {}>", body.name));
-            let mut parameters = signature.params();
-            parameters.push(ValType::I32);
-            functions.function(types.intern(parameters, [ValType::I32]).as_u32());
+            functions.function(subscript_entries.resume_signature.as_u32());
             let emitted = Body::new(
                 body,
                 signature,
                 &callees,
+                &resume_indices,
                 program,
                 session,
                 session
@@ -1127,7 +1125,6 @@ fn emit_with_export_kind(
             )
             .and_then(Body::emit)
             .map_err(|reason| diagnostic(*id, body, &reason))?;
-            debug_assert!(emitted.suspension.is_some());
             code.function(&emitted.function);
             source_map.extend(emitted.source_map.into_iter().map(|(bytes, span)| {
                 CodeSourceMapEntry {
@@ -1199,23 +1196,6 @@ fn emit_with_export_kind(
             program, definition, mut_member, abi, index,
         )?);
     }
-    for &target in bodies
-        .iter()
-        .filter(|(_, body, _, _)| body.result_convention() == CallResultConvention::YIELDED_ONCE)
-        .map(|(id, _, _, _)| id)
-    {
-        let (_, abi) = callees[&target];
-        names.push(format!(
-            "<subscript resume {}>",
-            program.function(target).unwrap().name
-        ));
-        functions.function(subscript_entries.resume_signature.as_u32());
-        code.function(&subscript::resume_adapter(
-            abi,
-            &suspension_layouts[&target],
-            resume_indices[&target],
-        ));
-    }
     if let Some(methods) = callable_entries.value_methods {
         names.push("<callable clone>".into());
         names.push("<callable drop>".into());
@@ -1237,8 +1217,14 @@ fn emit_with_export_kind(
         None,
         &ConstExpr::i32_const(1),
         Elements::Functions(
-            (0..table_count)
-                .map(|index| WasmFunctionId::from_index(adapter_base.as_index() + index).as_u32())
+            (0..adapter_count)
+                .map(|index| WasmFunctionId::from_index(adapter_base.as_index() + index))
+                .chain(
+                    bodies
+                        .iter()
+                        .filter_map(|(id, _, _, _)| resume_indices.get(id).copied()),
+                )
+                .map(WasmFunctionId::as_u32)
                 .collect::<Vec<_>>()
                 .into(),
         ),

@@ -24,8 +24,6 @@ use crate::{
     module::id::Id,
 };
 
-use super::body::BodyMode;
-
 /// Bounds the nesting depth of emitted Wasm control constructs, and the recursion producing them.
 const MAX_STRUCTURED_DEPTH: usize = 128;
 
@@ -52,43 +50,32 @@ pub(super) enum Item {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum ControlFlow {
-    /// The items of the entry block's dominator subtree, which covers the whole body.
+    /// The items of the entry block's dominator subtree, which covers every reachable block.
     Structured(Vec<Item>),
-    /// Projections, irreducible control flow and excessive nesting use the program-counter
-    /// dispatcher.
+    /// Irreducible control flow and excessive nesting use the program-counter dispatcher.
     Dispatcher,
 }
 
 impl ControlFlow {
-    /// Translates the body into structured control flow, or selects the dispatcher.
+    /// Translates the blocks reachable from `entry` into structured control flow, or selects the
+    /// dispatcher.
     ///
-    /// Projection bodies resume at suspension points inside their body, so they keep the
-    /// dispatcher. So do bodies with unreachable blocks, which the dispatcher emits regardless.
-    pub(super) fn of(body: &Function, mode: BodyMode) -> Self {
-        if !matches!(mode, BodyMode::Normal)
-            || body.blocks().any(|block| {
-                matches!(
-                    body.block(block).terminator().kind,
-                    TerminatorKind::Yield { .. }
-                )
-            })
-        {
-            return Self::Dispatcher;
-        }
+    /// A `yield` leaves the function, so that each half of a yielded accessor is translated on its
+    /// own: the start from the body's entry and the resumption from the resume block. Blocks not
+    /// reachable from `entry` are not emitted.
+    pub(super) fn of(body: &Function, entry: BlockId) -> Self {
         let successors = body
             .blocks()
-            .map(|block| {
-                distinct_targets(&body.block(block).terminator().kind)
+            .map(|block| match &body.block(block).terminator().kind {
+                TerminatorKind::Yield { .. } => Vec::new(),
+                kind => distinct_targets(kind)
                     .into_iter()
                     .map(BlockId::as_index)
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>(),
             })
             .collect::<Vec<_>>();
-        let entry = body.entry().as_index();
+        let entry = entry.as_index();
         let order = reverse_postorder(&successors, entry);
-        if order.len() != successors.len() {
-            return Self::Dispatcher;
-        }
         let mut order_index = vec![0; successors.len()];
         for (index, &block) in order.iter().enumerate() {
             order_index[block] = index;
@@ -97,8 +84,8 @@ impl ControlFlow {
 
         let mut forward_predecessors = vec![0_usize; successors.len()];
         let mut loop_header = vec![false; successors.len()];
-        for (source, targets) in successors.iter().enumerate() {
-            for &target in targets {
+        for &source in &order {
+            for &target in &successors[source] {
                 if order_index[target] > order_index[source] {
                     forward_predecessors[target] += 1;
                 } else if dominance.dominates(target, source) {
@@ -367,7 +354,7 @@ mod tests {
     }
 
     fn structured(terminators: Vec<Terminator>) -> Vec<Item> {
-        match ControlFlow::of(&control_flow(terminators), BodyMode::Normal) {
+        match ControlFlow::of(&control_flow(terminators), b(0)) {
             ControlFlow::Structured(items) => items,
             ControlFlow::Dispatcher => panic!("expected structured control flow"),
         }
@@ -395,15 +382,24 @@ mod tests {
             structured(vec![goto(1), goto(2), ret()]),
             vec![node(0, Some(1)), node(1, Some(2)), node(2, None)]
         );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn translates_each_half_of_a_yielded_body_from_its_entry() {
+        let function = control_flow(vec![
+            goto(1),
+            Terminator::r#yield(span(), Value::Constant(ConstantId::from_index(0)), b(2)),
+            goto(3),
+            ret(),
+        ]);
+        // The start ends at its yield, and resumption starts at the resume block.
         assert_eq!(
-            ControlFlow::of(
-                &control_flow(vec![goto(1), ret()]),
-                BodyMode::ProjectionStart {
-                    resume: crate::wasm::abi::DispatchTableSlotId::from_index(0),
-                }
-            ),
-            ControlFlow::Dispatcher,
-            "projections resume through the dispatcher"
+            ControlFlow::of(&function, b(0)),
+            ControlFlow::Structured(vec![node(0, Some(1)), node(1, None)])
+        );
+        assert_eq!(
+            ControlFlow::of(&function, b(2)),
+            ControlFlow::Structured(vec![node(2, Some(3)), node(3, None)])
         );
     }
 
@@ -554,18 +550,22 @@ mod tests {
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn keeps_the_dispatcher_for_irreducible_or_unreachable_blocks() {
+    fn keeps_the_dispatcher_for_irreducible_blocks() {
         // The cycle between 1 and 2 has two entries.
         assert_eq!(
             ControlFlow::of(
                 &control_flow(vec![cond_br(1, 2), cond_br(2, 3), goto(1), ret()]),
-                BodyMode::Normal
+                b(0)
             ),
             ControlFlow::Dispatcher
         );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn omits_unreachable_blocks() {
         assert_eq!(
-            ControlFlow::of(&control_flow(vec![goto(2), ret(), ret()]), BodyMode::Normal),
-            ControlFlow::Dispatcher
+            structured(vec![goto(2), ret(), ret()]),
+            vec![node(0, Some(2)), node(2, None)]
         );
     }
 }
