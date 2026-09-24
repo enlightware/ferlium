@@ -1826,6 +1826,55 @@ fn wasm_codegen_structured_branches_execute_both_arms() {
 }
 
 #[wasm_bindgen_test]
+fn wasm_codegen_structures_two_way_variant_switches() {
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(optimization);
+        session.set_physical_mir_optimization(optimization);
+        for (source, cases) in [
+            (
+                "fn compute(n: int) -> int { let mut s = 0; for i in 0..n { s = s + i * 2 }; s }",
+                [(0, 0), (1, 0), (10, 90)],
+            ),
+            (
+                "fn compute(x: int) -> int { let o = if x > 0 { Some(x) } else { None }; \
+                 match o { Some(v) => v * 2, None => 7 } }",
+                [(-3, 7), (0, 7), (4, 8)],
+            ),
+        ] {
+            let entry = compile(&mut session, source);
+            let code = CompiledProgram::compile(&session, entry).unwrap();
+            let dispatches = Parser::new(0)
+                .parse_all(code.bytes())
+                .find_map(|payload| match payload.unwrap() {
+                    Payload::CodeSectionEntry(body) => Some(
+                        body.get_operators_reader()
+                            .unwrap()
+                            .into_iter()
+                            .map(Result::unwrap)
+                            .filter(|operation| matches!(operation, Operator::BrTable { .. }))
+                            .count(),
+                    ),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(
+                dispatches, 0,
+                "a two-way switch must be structured: {optimization:?}: {source}"
+            );
+            let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+            for (input, expected) in cases {
+                assert_eq!(
+                    instance.run((input,), WasmLimits::default()).unwrap(),
+                    expected,
+                    "{optimization:?}: {source}"
+                );
+            }
+        }
+    }
+}
+
+#[wasm_bindgen_test]
 fn wasm_codegen_inactive_entry_does_not_write_memory() {
     let mut session = CompilerSession::new();
     // Force a memory frame so the raw call reaches fail() with no active invocation. A pure

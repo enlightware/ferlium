@@ -51,7 +51,7 @@ use super::{
     Global, RuntimeGlobals, ScalarType, StringLiterals,
     adapters::NativeOptionalResultAdapter,
     allocate_frame, callable, callee, context_pointer,
-    control_flow::{ControlFlow, ControlRegion, IfRegion},
+    control_flow::{ControlFlow, ControlRegion, IfRegion, conditional_targets},
     dictionary_table, emit_failure, enter_frame,
     expressions::{
         Analysis as ExpressionAnalysis, Plan as ExpressionPlan, Source as ExpressionSource,
@@ -1954,16 +1954,10 @@ impl<'a, 's> Body<'a, 's> {
     fn emit_if(&mut self, region: &IfRegion) -> Result<(), String> {
         self.emit_operations(region.header)?;
         let block = self.body.block(region.header);
-        let TerminatorKind::CondBr {
-            condition,
-            then_target,
-            else_target,
-        } = &block.terminator().kind
-        else {
-            unreachable!("if region must end in a conditional branch")
-        };
+        let (then_target, else_target) = conditional_targets(&block.terminator().kind)
+            .expect("if region must end in a conditional branch");
         debug_assert_eq!(
-            Some(*then_target),
+            Some(then_target),
             region
                 .then_regions
                 .first()
@@ -1971,24 +1965,59 @@ impl<'a, 's> Body<'a, 's> {
                 .or(region.join)
         );
         debug_assert_eq!(
-            Some(*else_target),
+            Some(else_target),
             region
                 .else_regions
                 .first()
                 .map(ControlRegion::entry)
                 .or(region.join)
         );
-        let condition = condition.clone();
         let span = block.terminator().span;
 
         let start = self.code.byte_len();
-        self.read(&condition)?;
+        self.branch_condition(region.header, then_target, false)?;
         self.i(I::If(BlockType::Empty));
         self.record_source(start, span);
         self.emit_regions(&region.then_regions, region.join)?;
         self.i(I::Else);
         self.emit_regions(&region.else_regions, region.join)?;
         self.i(I::End);
+        Ok(())
+    }
+
+    /// Pushes whether a conditional terminator selects `then_target`, or the opposite if `negate`.
+    fn branch_condition(
+        &mut self,
+        block_id: BlockId,
+        then_target: BlockId,
+        negate: bool,
+    ) -> Result<(), String> {
+        let body = self.body;
+        match &body.block(block_id).terminator().kind {
+            TerminatorKind::CondBr { condition, .. } => {
+                self.read(condition)?;
+                if negate {
+                    self.i(I::I32Eqz);
+                }
+            }
+            TerminatorKind::SwitchVariant { tag, cases, .. } => {
+                let (compare, combine) = if negate {
+                    (I::I32Ne, I::I32And)
+                } else {
+                    (I::I32Eq, I::I32Or)
+                };
+                let matching = cases.iter().filter(|(_, target)| *target == then_target);
+                for (index, (case, _)) in matching.enumerate() {
+                    self.value(tag)?;
+                    self.i(I::I32Const(self.session.variant_tag_id(*case) as i32));
+                    self.i(compare.clone());
+                    if index > 0 {
+                        self.i(combine.clone());
+                    }
+                }
+            }
+            _ => unreachable!("expected a conditional terminator"),
+        }
         Ok(())
     }
 
@@ -2063,35 +2092,33 @@ impl<'a, 's> Body<'a, 's> {
             TerminatorKind::Invoke { operation, .. } => operation.span,
             _ => block.terminator().span,
         };
+        if let Some((then_target, else_target)) = conditional_targets(&block.terminator().kind) {
+            if then_target == else_target {
+                self.branch(then_target, context, next, 0);
+            } else if Some(then_target) == next {
+                self.branch_condition(block_id, then_target, true)?;
+                self.branch_if(else_target, context, 0);
+            } else if Some(else_target) == next {
+                self.branch_condition(block_id, then_target, false)?;
+                self.branch_if(then_target, context, 0);
+            } else {
+                if !matches!(context, BranchContext::Dispatcher { .. }) {
+                    unreachable!("structured conditional must have a fallthrough target");
+                }
+                self.i(I::I32Const(then_target.as_u32() as i32));
+                self.i(I::I32Const(else_target.as_u32() as i32));
+                self.branch_condition(block_id, then_target, false)?;
+                self.i(I::Select);
+                self.dispatch(context, 0);
+            }
+            self.record_source(start, span);
+            return Ok(());
+        }
         match &block.terminator().kind {
             TerminatorKind::Goto { target } => {
                 self.branch(*target, context, next, 0);
             }
-            TerminatorKind::CondBr {
-                condition,
-                then_target,
-                else_target,
-            } => {
-                if then_target == else_target {
-                    self.branch(*then_target, context, next, 0);
-                } else if Some(*then_target) == next {
-                    self.read(condition)?;
-                    self.i(I::I32Eqz);
-                    self.branch_if(*else_target, context, 0);
-                } else if Some(*else_target) == next {
-                    self.read(condition)?;
-                    self.branch_if(*then_target, context, 0);
-                } else {
-                    if !matches!(context, BranchContext::Dispatcher { .. }) {
-                        unreachable!("structured conditional must have a fallthrough target");
-                    }
-                    self.i(I::I32Const(then_target.as_u32() as i32));
-                    self.i(I::I32Const(else_target.as_u32() as i32));
-                    self.read(condition)?;
-                    self.i(I::Select);
-                    self.dispatch(context, 0);
-                }
-            }
+            TerminatorKind::CondBr { .. } => unreachable!("conditional branches are handled above"),
             TerminatorKind::SwitchVariant {
                 tag,
                 cases,

@@ -61,7 +61,8 @@ impl ControlFlow {
     /// then scheduled along their CFG edges, so a loop's exit need not follow its body in MIR storage
     /// order. Disjoint loops accept fallthroughs, backedges to the header, and exits to one shared
     /// block. Outside loops, conditional branches whose arms reconverge at one post-dominating join
-    /// become recursive Wasm `if` regions. The dispatcher remains the fallback for nested loops,
+    /// become recursive Wasm `if` regions. Variant switches selecting between two blocks count as
+    /// conditional branches. The dispatcher remains the fallback for nested loops,
     /// irreducible control flow, and branch forms not represented here.
     pub(super) fn of(body: &Function, mode: BodyMode) -> Self {
         if !matches!(mode, BodyMode::Normal) {
@@ -143,10 +144,10 @@ impl ControlFlow {
                 }
                 visited[current] = true;
                 blocks.push(BlockId::from_index(current));
-                if !matches!(
-                    body.block(BlockId::from_index(current)).terminator().kind,
-                    TerminatorKind::Goto { .. } | TerminatorKind::CondBr { .. }
-                ) {
+                let kind = &body.block(BlockId::from_index(current)).terminator().kind;
+                if !matches!(kind, TerminatorKind::Goto { .. })
+                    && conditional_targets(kind).is_none()
+                {
                     return Self::Dispatcher;
                 }
                 let mut forward = None;
@@ -207,9 +208,16 @@ impl ControlFlow {
             }
         }
         for targets in &mut structured_successors {
-            // CondBr and Invoke expose their duplicate pair adjacently. Multiway terminators remain
-            // dispatcher-only, so this is deliberately not general successor interning.
-            targets.dedup();
+            // A branch is classified by its distinct targets: a switch whose cases share targets
+            // can be conditional, and a conditional whose targets coincide is a jump.
+            let mut index = 0;
+            while index < targets.len() {
+                if targets[..index].contains(&targets[index]) {
+                    targets.remove(index);
+                } else {
+                    index += 1;
+                }
+            }
         }
         if active.iter().enumerate().any(|(source, is_active)| {
             *is_active
@@ -240,6 +248,33 @@ impl ControlFlow {
             return Self::Dispatcher;
         }
         Self::Structured(regions)
+    }
+}
+
+/// Returns the `(then, else)` targets of a terminator that selects between at most two blocks
+/// by a condition.
+///
+/// A variant switch qualifies when its cases reach one target besides `default`: `then` is taken
+/// when the tag matches one of these cases. The targets coincide when the branch is a jump.
+pub(super) fn conditional_targets(kind: &TerminatorKind) -> Option<(BlockId, BlockId)> {
+    match kind {
+        TerminatorKind::CondBr {
+            then_target,
+            else_target,
+            ..
+        } => Some((*then_target, *else_target)),
+        TerminatorKind::SwitchVariant { cases, default, .. } => {
+            let then_target = cases
+                .iter()
+                .map(|(_, target)| *target)
+                .find(|target| target != default)
+                .unwrap_or(*default);
+            cases
+                .iter()
+                .all(|(_, target)| *target == then_target || target == default)
+                .then_some((then_target, *default))
+        }
+        _ => None,
     }
 }
 
@@ -337,14 +372,8 @@ impl RegionBuilder<'_> {
                     if depth == MAX_STRUCTURED_DEPTH {
                         return None;
                     }
-                    let TerminatorKind::CondBr {
-                        then_target,
-                        else_target,
-                        ..
-                    } = self.body.block(block).terminator().kind
-                    else {
-                        return None;
-                    };
+                    let (then_target, else_target) =
+                        conditional_targets(&self.body.block(block).terminator().kind)?;
                     let join = self.postdominance.immediate_dominator(current)?;
                     self.visited[current] = true;
                     let join_block =
@@ -582,6 +611,59 @@ mod tests {
             ControlFlow::of(&guard_chain(MAX_STRUCTURED_DEPTH + 1), BodyMode::Normal),
             ControlFlow::Dispatcher,
             "excessive structured nesting must retain the non-recursive dispatcher"
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn recovers_variant_switches_with_two_targets_as_branches() {
+        let span = Location::new_synthesized();
+        let tag = || Value::Constant(ConstantId::from_index(0));
+        // Two cases share the then target, the third one shares the default target.
+        let two_targets = control_flow(vec![
+            Terminator::switch_variant(
+                span,
+                tag(),
+                vec![
+                    ("A".into(), BlockId::from_index(1)),
+                    ("B".into(), BlockId::from_index(2)),
+                    ("C".into(), BlockId::from_index(1)),
+                ],
+                BlockId::from_index(2),
+            ),
+            Terminator::goto(span, BlockId::from_index(3)),
+            Terminator::goto(span, BlockId::from_index(3)),
+            Terminator::ret(span),
+        ]);
+        assert_eq!(
+            ControlFlow::of(&two_targets, BodyMode::Normal),
+            ControlFlow::Structured(vec![
+                ControlRegion::If(IfRegion {
+                    header: BlockId::from_index(0),
+                    then_regions: vec![ControlRegion::Block(BlockId::from_index(1))],
+                    else_regions: vec![ControlRegion::Block(BlockId::from_index(2))],
+                    join: Some(BlockId::from_index(3)),
+                }),
+                ControlRegion::Block(BlockId::from_index(3)),
+            ])
+        );
+
+        let three_targets = control_flow(vec![
+            Terminator::switch_variant(
+                span,
+                tag(),
+                vec![
+                    ("A".into(), BlockId::from_index(1)),
+                    ("B".into(), BlockId::from_index(2)),
+                ],
+                BlockId::from_index(3),
+            ),
+            Terminator::goto(span, BlockId::from_index(3)),
+            Terminator::goto(span, BlockId::from_index(3)),
+            Terminator::ret(span),
+        ]);
+        assert_eq!(
+            ControlFlow::of(&three_targets, BodyMode::Normal),
+            ControlFlow::Dispatcher
         );
     }
 }
