@@ -320,6 +320,9 @@ Substitution answers questions the generic body could not, so four things follow
 - **Clones and drops of types that now own nothing become `memcpy` and nothing.** This retakes the
   decision `resolve_local_clone` and `resolve_local_drop` make during elaboration. The dictionary
   entries they read are then unread, and `dce` removes them.
+- **Replacements of such types become moves when the displaced value is unobserved.** The source
+  must be an unaliased temporary that is only initialized (by a store, copy, move or call result)
+  and replaced once, so a specialized assignment matches the `move` a concrete one emits directly.
 
 ### Where specializations live
 

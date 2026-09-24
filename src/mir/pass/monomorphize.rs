@@ -731,7 +731,8 @@ fn elide_trivial_ownership_operations(edit: &mut FunctionEdit, env: ModuleEnv<'_
 
     // A trivial drop is gone, but replacement still preserves the displaced value. Turn it into
     // a move only when that value (including its initialization state) is never observed: the
-    // source must be an unaliased local used solely for initialization and one replacement.
+    // source must be an unaliased local used solely for initialization (by a store, copy, move or
+    // call result) and one replacement.
     // Existing copy forwarding can then eliminate the temporary altogether.
     let mut replacements = FxHashSet::default();
     for block_id in edit.blocks() {
@@ -744,9 +745,14 @@ fn elide_trivial_ownership_operations(edit: &mut FunctionEdit, env: ModuleEnv<'_
                 if !trivial_temporaries.contains(root) {
                     continue;
                 }
-                let allowed = match operation.kind {
+                let allowed = match &operation.kind {
                     OperationKind::Store | OperationKind::Memcpy | OperationKind::Move => {
                         position == 1
+                    }
+                    // A result place is written by the call; its inputs are separate operands.
+                    OperationKind::Call { ty, .. } => {
+                        ty.result_convention.has_result_place()
+                            && position + 1 == operation.operands.len()
                     }
                     OperationKind::Replace => position == 0 && replacements.insert(*root),
                     _ => false,
@@ -2305,6 +2311,32 @@ mod tests {
         assert!(body("ints").contains("memcpy %p1 to %p0"));
         let managed = body("strings");
         assert!(managed.find("replace ").unwrap() < managed.find("drop string ").unwrap());
+    }
+
+    /// The assigned value may be computed into its temporary by a call rather than a copy; the
+    /// displaced value is equally unobserved, so the replacement must become a move there too.
+    #[test]
+    fn specialized_computed_assignment_matches_direct_trivial_assignment() {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let module = session.emit_mir(
+            "assignment",
+            "fn add_to(a, b) { a = a + b }\n\
+             fn ints(a: &mut int, b: int) { add_to(a, b) }\n\
+             fn direct(a: &mut int, b: int) { a = a + b }",
+        );
+        let body = |name: &str| {
+            module
+                .split(&format!("fn {name}("))
+                .nth(1)
+                .expect("function exists")
+                .split("\nfn ")
+                .next()
+                .unwrap()
+                .trim()
+        };
+        assert!(!body("ints").contains("replace "), "{}", body("ints"));
+        assert_eq!(body("ints"), body("direct"));
     }
 
     #[test]
