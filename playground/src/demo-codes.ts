@@ -132,6 +132,35 @@ pixel.x += 1;
 
 (dist2(Point { x: 3, y: 4 }), dist2(pixel), pixel.x)
 `],
+['Subscripts', `struct Grid {
+	width: int,
+	cells: [int]
+}
+
+// Address a cell by coordinates, for both reading and writing.
+subscript cell(grid: &mut Grid, x: int, y: int) -> int {
+	ref mut {
+		grid.cells[y * grid.width + x]
+	}
+}
+
+// Code after \`yield\` runs once the caller is done with the place.
+subscript clamped(value: &mut int, lo: int, hi: int) -> int {
+	ref mut {
+		let mut local = value;
+		yield local;
+		value = if local < lo { lo } else if local > hi { hi } else { local }
+	}
+}
+
+let mut grid = Grid { width: 3, cells: [0, 0, 0, 0, 0, 0] };
+grid->[cell](1, 0) = 5;
+grid->[cell](2, 1) += 7;
+grid->[cell](2, 1)->[clamped](0, 9) += 7;
+grid->[cell](0, 1)->[clamped](0, 9) -= 3;
+
+(grid.cells, grid->[cell](2, 1))
+`],
 ['Effects', `fn a(i, f, g) {
 	if i > 0 {
 	    b(i - 1, f, g); ()
