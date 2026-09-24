@@ -238,6 +238,25 @@ fn linalg() {
     );
 }
 
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn image_adjust() {
+    let mut session = TestSession::new();
+    // Pixels are reached through named subscripts, which are gated as experimental.
+    session.allow_experimental();
+    let module_id = session
+        .compile(include_str!("../modules/image_adjust.fer"))
+        .module_id;
+    let checksum = run_fn_native!(
+        session.session(),
+        module_id,
+        "adjust",
+        [16 => isize, 8 => isize, 2 => isize] -> isize
+    )
+    .unwrap();
+    assert_eq!(checksum, 315954);
+}
+
 // helpers for calling Ferlium functions from Rust
 
 fn run_native_int_int(

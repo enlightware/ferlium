@@ -1,0 +1,91 @@
+// Grey-level image adjustment through subscripts.
+//
+// Pixels are reached through `pixel`, a place-only subscript, and every write goes through
+// `clamped`, a subscript whose code after `yield` saturates the level once the caller has updated
+// it in place. Each adjusted pixel thus suspends and resumes a projection, which isolates the cost
+// of resumable subscripts in hot loops.
+
+pub struct Image {
+	width: int,
+	height: int,
+	pixels: [int],
+}
+
+/// The pixel at column `x`, row `y`, as a place.
+pub subscript pixel(image: &mut Image, x: int, y: int) -> int {
+	ref mut {
+		image.pixels[y * image.width + x]
+	}
+}
+
+/// A level that is saturated into `lo..=hi` once the caller is done updating it.
+pub subscript clamped(level: &mut int, lo: int, hi: int) -> int {
+	ref mut {
+		let mut local = level;
+		yield local;
+		level = if local < lo { lo } else if local > hi { hi } else { local }
+	}
+}
+
+/// A diagonal gradient pattern, wrapping around the 0..=255 range.
+pub fn gradient(width, height) {
+	let mut pixels = [];
+	for y in 0..height {
+		for x in 0..width {
+			array_append(pixels, rem(x * 7 + y * 13, 256))
+		}
+	};
+	Image { width: width, height: height, pixels: pixels }
+}
+
+pub fn brighten(image: &mut Image, delta) {
+	for y in 0..image.height {
+		for x in 0..image.width {
+			image->[pixel](x, y)->[clamped](0, 255) += delta
+		}
+	}
+}
+
+/// Scales the distance of each level to mid-grey by `numerator / denominator`.
+pub fn contrast(image: &mut Image, numerator, denominator) {
+	for y in 0..image.height {
+		for x in 0..image.width {
+			let level = image->[pixel](x, y);
+			image->[pixel](x, y)->[clamped](0, 255) = 128 + idiv((level - 128) * numerator, denominator)
+		}
+	}
+}
+
+/// Adds half the difference to the left neighbour, which accentuates horizontal edges.
+pub fn sharpen(image: &mut Image) {
+	for y in 0..image.height {
+		let mut previous = image->[pixel](0, y);
+		for x in 1..image.width {
+			let level = image->[pixel](x, y);
+			image->[pixel](x, y)->[clamped](0, 255) += idiv(level - previous, 2);
+			previous = level
+		}
+	}
+}
+
+/// A position-weighted sum of the levels, so that misplaced pixels change it.
+pub fn checksum(image: &mut Image) {
+	let mut sum = 0;
+	for y in 0..image.height {
+		for x in 0..image.width {
+			sum = sum + image->[pixel](x, y) * (x + 2 * y + 1)
+		}
+	};
+	sum
+}
+
+pub fn adjust(width, height, rounds) {
+	let mut image = gradient(width, height);
+	for round in 0..rounds {
+		brighten(image, 40);
+		contrast(image, 5, 4);
+		sharpen(image);
+		brighten(image, -30)
+	};
+	checksum(image)
+}

@@ -303,6 +303,20 @@ runtime_benchmark!(
     isize,
     run_int
 );
+runtime_benchmark!(
+    bench_float_kernel,
+    setup_float_kernel,
+    RuntimeWorkload::FLOAT_KERNEL,
+    Float,
+    run_float
+);
+runtime_benchmark!(
+    bench_image_adjust,
+    setup_image_adjust,
+    RuntimeWorkload::IMAGE_ADJUST,
+    isize,
+    run_int
+);
 
 // --- Gungraun setup ---
 
@@ -332,7 +346,9 @@ library_benchmark_group!(
         bench_linalg_transform,
         bench_linalg_grid,
         bench_iter_pipeline,
-        bench_data_text_roundtrip
+        bench_data_text_roundtrip,
+        bench_float_kernel,
+        bench_image_adjust
     ]
 );
 

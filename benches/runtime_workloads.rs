@@ -191,7 +191,16 @@ impl RuntimeWorkload {
         316.051_308_470_353_8,
     );
 
-    pub const ALL: [Self; 13] = [
+    pub const IMAGE_ADJUST: Self = Self::single(
+        "image_adjust",
+        include_str!("../tests/modules/image_adjust.fer"),
+        include_str!("runtime/image_adjust.fer"),
+        RuntimeResult::Int,
+        12_957_045.0,
+    )
+    .experimental();
+
+    pub const ALL: [Self; 14] = [
         Self::QUICKSORT,
         Self::FIBONACCI,
         Self::SIEVE,
@@ -205,6 +214,7 @@ impl RuntimeWorkload {
         Self::ITER_PIPELINE,
         Self::DATA_TEXT_ROUNDTRIP,
         Self::FLOAT_KERNEL,
+        Self::IMAGE_ADJUST,
     ];
 
     pub const fn name(self) -> &'static str {

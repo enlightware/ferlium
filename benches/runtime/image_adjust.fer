@@ -1,0 +1,3 @@
+fn benchmark_entry() {
+    adjust(black_box(48), black_box(32), black_box(2))
+}
