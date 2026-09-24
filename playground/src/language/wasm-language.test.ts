@@ -27,4 +27,17 @@ describe("Wasm language highlighting", () => {
 		expect(tokens).toContainEqual(["3", "tok-number"]);
 		expect(tokens).toContainEqual([";; tail", "tok-comment"]);
 	});
+
+	it("highlights host data annotations", () => {
+		const tokens = highlightedTokens(
+			")\n;; String literals: host table\n(@strings\n  (;0;) \"a\\\"b\"\n)\n"
+			+ "(@evidence\n  (dictionary \"std::impl Value for string\")\n)",
+		);
+		expect(tokens).toContainEqual([";; String literals: host table", "tok-comment"]);
+		expect(tokens).toContainEqual(["@strings", "tok-meta"]);
+		expect(tokens).toContainEqual(["@evidence", "tok-meta"]);
+		expect(tokens).toContainEqual(["(;0;)", "tok-comment"]);
+		expect(tokens).toContainEqual(["\"a\\\"b\"", "tok-string"]);
+		expect(tokens).toContainEqual(["\"std::impl Value for string\"", "tok-string"]);
+	});
 });

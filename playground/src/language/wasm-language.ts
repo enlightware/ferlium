@@ -60,6 +60,10 @@ export const wasmLanguage = StreamLanguage.define({
 		if (stream.match(/\$"(?:[^"\\]|\\.)*"/) || stream.match(/\$[^\s()"]+/)) {
 			return "variableName";
 		}
+		// Custom annotations, such as the host data sections listed after the module.
+		if (stream.match(/@[A-Za-z0-9_.]+/)) {
+			return "meta";
+		}
 		if (stream.match(/[()]/)) {
 			return "punctuation";
 		}

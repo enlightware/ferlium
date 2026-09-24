@@ -3,7 +3,12 @@
 
 //! Wasm text format of a compiled module, with source links for the IDE.
 
-use std::{io, ops::Range};
+use std::{
+    fmt::{self, Write},
+    io,
+    mem::{offset_of, size_of},
+    ops::Range,
+};
 
 use wasmparser::{Parser, Payload};
 use wasmprinter::{Config, Print};
@@ -12,12 +17,17 @@ use crate::{
     CompilerSession, Location,
     emit_mir::{MirText, TextSourceMapEntry},
     eval::RuntimeError,
-    module::{FunctionId, LocalFunctionId, ModuleId, id::Id},
+    module::{
+        FunctionId, LocalFunctionId, ModuleEnv, ModuleId, TraitDictionaryId,
+        format_impl_header_by_key, id::Id,
+    },
+    std::string::StaticStr,
 };
 
 use super::{
     Imports,
-    emit::{self, CodeSourceMapEntry},
+    emit::{self, CodeSourceMapEntry, Emitted},
+    execution::InvocationState,
 };
 
 /// Compile every physical entry of the module into one Wasm module and print it. Functions
@@ -49,8 +59,103 @@ pub(crate) fn module_text(
         .map_err(|error| RuntimeError::Backend(format!("Wasm imports: {error:?}")))?;
     let emitted = emit::emit(&program, &roots, &exports, &mut imports, session)
         .map_err(RuntimeError::Backend)?;
-    print(&emitted.bytes, &emitted.source_map)
-        .map_err(|error| RuntimeError::Backend(format!("Wasm printing: {error}")))
+    let mut text = print(&emitted.bytes, &emitted.source_map)
+        .map_err(|error| RuntimeError::Backend(format!("Wasm printing: {error}")))?;
+    let env = session
+        .modules()
+        .env_for(session.expect_fresh_module(module_id));
+    text.text.push_str(&host_data(&emitted, &env));
+    Ok(text)
+}
+
+/// Describe the host-owned data that the module reads through the invocation context, as
+/// custom annotations following the module since it is not part of the module itself.
+fn host_data(emitted: &Emitted, env: &ModuleEnv<'_>) -> String {
+    let mut text = String::new();
+    if !emitted.strings.is_empty() {
+        writeln!(
+            text,
+            "\n;; String literals: host table at $invocation_context offset {}, {} bytes per entry",
+            offset_of!(InvocationState, strings),
+            size_of::<StaticStr>()
+        )
+        .unwrap();
+        text.push_str("(@strings\n");
+        for (index, string) in emitted.strings.iter().enumerate() {
+            writeln!(text, "  (;{index};) {}", quoted(string.as_str())).unwrap();
+        }
+        text.push_str(")\n");
+    }
+    if !emitted.dictionaries.is_empty() || emitted.subscript_count != 0 {
+        writeln!(
+            text,
+            "\n;; Evidence: dictionaries described by the host image at $invocation_context offset {}",
+            offset_of!(InvocationState, evidence)
+        )
+        .unwrap();
+        text.push_str("(@evidence\n");
+        for &id in &emitted.dictionaries {
+            let name = DictionaryName { id, env }.to_string();
+            writeln!(text, "  (dictionary {})", quoted(&name)).unwrap();
+        }
+        if emitted.subscript_count != 0 {
+            writeln!(text, "  (subscripts {})", emitted.subscript_count).unwrap();
+        }
+        text.push_str(")\n");
+    }
+    text
+}
+
+/// The implementation header of a dictionary, qualified by its module.
+struct DictionaryName<'a> {
+    id: TraitDictionaryId,
+    env: &'a ModuleEnv<'a>,
+}
+
+impl fmt::Display for DictionaryName<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self { id, env } = self;
+        let module = if id.module_id == env.current.module_id() {
+            env.current
+        } else {
+            env.modules
+                .get(id.module_id)
+                .and_then(|entry| entry.module())
+                .expect("dictionary module is compiled")
+        };
+        let path = env
+            .modules
+            .get_name(id.module_id)
+            .expect("dictionary module has a path");
+        match (
+            module.get_impl_trait_key_by_id(id.impl_id),
+            module.get_impl_data(id.impl_id),
+        ) {
+            (Some(key), Some(imp)) => {
+                write!(f, "{path}::")?;
+                format_impl_header_by_key(f, &key, imp, env).map(|_| ())
+            }
+            _ => write!(f, "{path}::<anonymous #{}>", id.impl_id),
+        }
+    }
+}
+
+/// Quote text as a Wasm text format string.
+fn quoted(text: &str) -> String {
+    let mut quoted = String::from("\"");
+    for c in text.chars() {
+        match c {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            '\t' => quoted.push_str("\\t"),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            c if c.is_control() => write!(quoted, "\\u{{{:x}}}", c as u32).unwrap(),
+            c => quoted.push(c),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 /// The roots declared in the module source, with their `module::function` export names.
@@ -219,5 +324,41 @@ mod tests {
                 && text.text[entry.from..entry.to].contains("i32.mul")
         }));
         assert!(!text.text.contains("$std::Num<std::int>::mul"));
+    }
+
+    #[wasm_bindgen_test]
+    fn module_text_lists_host_data() {
+        let mut session = CompilerSession::new();
+        let module = session
+            .compile(
+                r#"#[inline(never)] fn pairs<T>(value: T) -> int { len([(value, value)]) }
+                fn f() -> int { let a = "tab\t \"q\""; pairs("é") + pairs(a) }"#,
+                "wasm_host",
+                Path::single_str("wasm_host"),
+            )
+            .unwrap()
+            .module_id;
+        let text = module_text(&session, module).unwrap().text;
+        let strings = text.find("\n(@strings\n").unwrap() + 1;
+        let evidence = text.find("\n(@evidence\n").unwrap() + 1;
+        // Host data follows the module, each section after its heading comment.
+        let module_end = text.find("\n)\n").unwrap();
+        assert!(module_end < strings && strings < evidence, "{text}");
+        let heading = |at: usize| text[..at - 1].rsplit('\n').next().unwrap();
+        assert!(
+            heading(strings).starts_with(";; String literals:"),
+            "{text}"
+        );
+        assert!(heading(evidence).starts_with(";; Evidence:"), "{text}");
+        assert!(
+            text[strings..evidence].contains(r#") "tab\t \"q\"""#),
+            "{text}"
+        );
+        assert!(text[strings..evidence].contains(r#") "é""#), "{text}");
+        assert!(
+            text[evidence..].contains(r#"(dictionary "std::impl Value for string")"#),
+            "{text}"
+        );
+        assert!(text[evidence..].ends_with("\")\n)\n"), "{text}");
     }
 }

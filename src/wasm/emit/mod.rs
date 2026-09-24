@@ -34,7 +34,7 @@ use crate::{
         role::MirType,
         terminator::TerminatorKind,
     },
-    module::{FunctionId, ModuleEnv, ModuleId, TraitId, id::Id},
+    module::{FunctionId, ModuleEnv, ModuleId, TraitDictionaryId, TraitId, id::Id},
     std::{
         core_traits_names::VALUE_TRAIT_NAME,
         logic::bool_type,
@@ -411,6 +411,12 @@ pub(super) struct Emitted {
     pub strings: Box<[StaticStr]>,
     pub exports: Vec<HostExport>,
     pub evidence: evidence::Image,
+    /// Dictionaries described in the evidence image, in image order.
+    #[cfg_attr(not(feature = "wasm-text"), allow(dead_code))]
+    pub dictionaries: Box<[TraitDictionaryId]>,
+    /// Number of subscripts described in the evidence image.
+    #[cfg_attr(not(feature = "wasm-text"), allow(dead_code))]
+    pub subscript_count: usize,
     /// Source regions of the code generated for MIR operations and terminators.
     #[cfg_attr(not(feature = "wasm-text"), allow(dead_code))]
     pub source_map: Vec<CodeSourceMapEntry>,
@@ -1285,6 +1291,8 @@ fn emit_with_export_kind(
         strings: strings.values.into_boxed_slice(),
         exports: host_exports,
         evidence,
+        dictionaries: reachable.dictionaries.into_boxed_slice(),
+        subscript_count: reachable.subscripts.len(),
         source_map,
     })
 }
