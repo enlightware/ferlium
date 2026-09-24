@@ -40,7 +40,7 @@ VALGRIND_MIN_VERSION := 3.19.0
 
 install-deps:
 	cargo install cargo-nextest --locked
-	cargo install --version 0.18.2 gungraun-runner
+	cargo install --version 0.19.4 gungraun-runner
 
 test-local:
 	RUST_LOG=ferlium=debug cargo nextest run --no-fail-fast

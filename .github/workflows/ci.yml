@@ -70,7 +70,7 @@ jobs:
         env:
           RUST_MIN_STACK: "8388608"
 
-  wasm_build:
+  wasm_build_test:
     name: Build WASM tests
     runs-on: ubuntu-latest
     outputs:
@@ -109,26 +109,18 @@ jobs:
 
       - name: Build WASM test binaries
         # The Wasm test binaries do not depend on the host, so they are built once here and run by
-        # the jobs below. The playground is built separately so that its ferlium feature set is
-        # not unified into the ferlium tests.
+        # the jobs below.
         shell: bash
         run: |
           set -euo pipefail
-          collect() {
-            local dir=wasm-tests/$1
-            shift
-            mkdir -p "$dir"
-            cargo test --target wasm32-unknown-unknown --no-run --message-format=json-render-diagnostics "$@" \
-              | jq -r 'select(.reason == "compiler-artifact" and .executable != null) | "\(.target.name) \(.executable)"' \
-              | while read -r name executable; do cp "$executable" "$dir/$name.wasm"; done
-          }
-          collect test -p ferlium --lib --test language
-          collect test -p script-api --lib
-          collect release --release -p ferlium --lib --test language
-          for file in test/ferlium test/language test/script_api release/ferlium release/language; do
-            test -f "wasm-tests/$file.wasm"
+          mkdir -p wasm-tests/test
+          cargo test --target wasm32-unknown-unknown --no-run --message-format=json-render-diagnostics -p ferlium -p script-api --lib --test language \
+            | jq -r 'select(.reason == "compiler-artifact" and .executable != null) | "\(.target.name) \(.executable)"' \
+            | while read -r name executable; do cp "$executable" "wasm-tests/test/$name.wasm"; done
+          for file in ferlium language script_api; do
+            test -f "wasm-tests/test/$file.wasm"
           done
-          ls -l wasm-tests/*
+          ls -l wasm-tests/test
 
       - name: Determine wasm-bindgen version
         id: versions
@@ -140,14 +132,70 @@ jobs:
       - name: Upload WASM test binaries
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: wasm-tests
+          name: wasm-tests-test
+          path: wasm-tests
+          if-no-files-found: error
+          retention-days: 1
+
+  wasm_build_release:
+    name: Build optimized WASM tests
+    # Built in its own job so that it runs in parallel with the test-profile build.
+    runs-on: ubuntu-latest
+    outputs:
+      wasm_bindgen: ${{ steps.versions.outputs.wasm_bindgen }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - name: Resolve dependencies
+        # No lockfile is tracked; resolving one before the cache step keys the cache on the
+        # dependency versions this run actually builds.
+        run: cargo generate-lockfile
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ runner.os }}-cargo
+
+      - name: Build WASM test binaries
+        # The Wasm test binaries do not depend on the host, so they are built once here and run by
+        # the jobs below.
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p wasm-tests/release
+          cargo test --target wasm32-unknown-unknown --no-run --message-format=json-render-diagnostics --release -p ferlium --lib --test language \
+            | jq -r 'select(.reason == "compiler-artifact" and .executable != null) | "\(.target.name) \(.executable)"' \
+            | while read -r name executable; do cp "$executable" "wasm-tests/release/$name.wasm"; done
+          for file in ferlium language; do
+            test -f "wasm-tests/release/$file.wasm"
+          done
+          ls -l wasm-tests/release
+
+      - name: Determine wasm-bindgen version
+        id: versions
+        # The test runner must match the wasm-bindgen crate exactly, as resolved in the lockfile.
+        run: |
+          pkgid=$(cargo pkgid -p wasm-bindgen)
+          echo "wasm_bindgen=${pkgid##*@}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload WASM test binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wasm-tests-release
           path: wasm-tests
           if-no-files-found: error
           retention-days: 1
 
   wasm_browser:
     name: WASM tests (${{ matrix.browser }})
-    needs: wasm_build
+    needs: [wasm_build_test, wasm_build_release]
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -168,13 +216,14 @@ jobs:
       - name: Download WASM test binaries
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: wasm-tests
+          pattern: wasm-tests-*
+          merge-multiple: true
           path: wasm-tests
 
       - name: Install wasm-bindgen test runner
         uses: taiki-e/install-action@dfae9bf3d6f6c6f20ef4ebb3486c01a51341ff12 # v2.87.18
         with:
-          tool: wasm-bindgen@${{ needs.wasm_build.outputs.wasm_bindgen }}
+          tool: wasm-bindgen@${{ needs.wasm_build_test.outputs.wasm_bindgen }}
 
       - name: Select WebDriver
         # The runner images provide drivers matching their installed browsers.
@@ -194,19 +243,19 @@ jobs:
 
   wasm_node:
     name: Optimized WASM language tests (Node)
-    needs: wasm_build
+    needs: wasm_build_release
     runs-on: ubuntu-latest
     steps:
       - name: Download WASM test binaries
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: wasm-tests
+          name: wasm-tests-release
           path: wasm-tests
 
       - name: Install wasm-bindgen test runner
         uses: taiki-e/install-action@dfae9bf3d6f6c6f20ef4ebb3486c01a51341ff12 # v2.87.18
         with:
-          tool: wasm-bindgen@${{ needs.wasm_build.outputs.wasm_bindgen }}
+          tool: wasm-bindgen@${{ needs.wasm_build_release.outputs.wasm_bindgen }}
 
       - name: Run optimized WASM language tests
         run: wasm-bindgen-test-runner wasm-tests/release/language.wasm
