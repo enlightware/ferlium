@@ -47,6 +47,8 @@ use std::{
     borrow::Cow,
     cmp::{Ordering, Reverse},
     collections::BinaryHeap,
+    fmt,
+    ops::Deref,
 };
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -318,25 +320,98 @@ impl Interner {
 /// arithmetic, so a form is an exact statement about the machine integers rather than an
 /// approximation of mathematical ones. A consumer reasoning about magnitudes must account for that
 /// itself.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(crate) struct Affine {
     pub constant: Int,
-    /// Sorted by symbol, never holding a zero coefficient, never longer than [`MAX_TERMS`].
-    terms: Vec<(SymbolId, Int)>,
+    terms: Terms,
+}
+
+/// An affine form's terms: sorted by symbol, never holding a zero coefficient, never longer than
+/// [`MAX_TERMS`].
+///
+/// A fixed array, as the bound allows, so that a form is plain data and copying a state's facts
+/// allocates nothing. Only the first `len` entries are terms, which is why comparison is over the
+/// slice they form rather than derived.
+#[derive(Clone, Copy)]
+struct Terms {
+    len: u8,
+    entries: [(SymbolId, Int); MAX_TERMS],
+}
+
+impl Terms {
+    const EMPTY: Terms = Terms {
+        len: 0,
+        entries: [(SymbolId::new(0), 0); MAX_TERMS],
+    };
+
+    /// Terms from ones sorted by symbol, dropping zero coefficients, or `None` past the bound.
+    fn from_sorted(terms: impl IntoIterator<Item = (SymbolId, Int)>) -> Option<Terms> {
+        let mut result = Terms::EMPTY;
+        for (symbol, coefficient) in terms {
+            if coefficient == 0 {
+                continue;
+            }
+            let len = usize::from(result.len);
+            if len == MAX_TERMS {
+                return None;
+            }
+            debug_assert!(
+                len == 0 || result.entries[len - 1].0 < symbol,
+                "terms arrive sorted and distinct"
+            );
+            result.entries[len] = (symbol, coefficient);
+            result.len += 1;
+        }
+        Some(result)
+    }
+}
+
+impl Deref for Terms {
+    type Target = [(SymbolId, Int)];
+
+    fn deref(&self) -> &Self::Target {
+        &self.entries[..usize::from(self.len)]
+    }
+}
+
+impl PartialEq for Terms {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl Eq for Terms {}
+
+impl PartialOrd for Terms {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Terms {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (**self).cmp(&**other)
+    }
+}
+
+impl fmt::Debug for Terms {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        (**self).fmt(f)
+    }
 }
 
 impl Affine {
     pub(crate) fn constant(value: Int) -> Self {
         Self {
             constant: value,
-            terms: Vec::new(),
+            terms: Terms::EMPTY,
         }
     }
 
     pub(crate) fn symbol(symbol: SymbolId) -> Self {
         Self {
             constant: 0,
-            terms: vec![(symbol, 1)],
+            terms: Terms::from_sorted([(symbol, 1)]).expect("one term is within the bound"),
         }
     }
 
@@ -351,25 +426,34 @@ impl Affine {
 
     /// The single symbol this form is, if it is exactly one symbol with no offset.
     pub(crate) fn as_symbol(&self) -> Option<SymbolId> {
-        match self.terms.as_slice() {
-            [(symbol, 1)] if self.constant == 0 => Some(*symbol),
+        match *self.terms {
+            [(symbol, 1)] if self.constant == 0 => Some(symbol),
             _ => None,
         }
     }
 
     /// `self + other`, or `None` when the sum would exceed [`MAX_TERMS`].
     pub(crate) fn add(&self, other: &Affine) -> Option<Affine> {
-        let mut terms = self.terms.clone();
-        for (symbol, coefficient) in &other.terms {
-            match terms.binary_search_by_key(symbol, |(existing, _)| *existing) {
-                Ok(index) => terms[index].1 = terms[index].1.wrapping_add(*coefficient),
-                Err(index) => terms.insert(index, (*symbol, *coefficient)),
-            }
-        }
-        terms.retain(|(_, coefficient)| *coefficient != 0);
-        (terms.len() <= MAX_TERMS).then(|| Affine {
+        // Both sides are sorted, so their sum is a merge.
+        let (mut ours, mut theirs) = (
+            self.terms.iter().copied().peekable(),
+            other.terms.iter().copied().peekable(),
+        );
+        let merged = std::iter::from_fn(|| match (ours.peek().copied(), theirs.peek().copied()) {
+            (Some((a, x)), Some((b, y))) => match a.cmp(&b) {
+                Ordering::Less => ours.next(),
+                Ordering::Greater => theirs.next(),
+                Ordering::Equal => {
+                    ours.next();
+                    theirs.next();
+                    Some((a, x.wrapping_add(y)))
+                }
+            },
+            _ => ours.next().or_else(|| theirs.next()),
+        });
+        Some(Affine {
             constant: self.constant.wrapping_add(other.constant),
-            terms,
+            terms: Terms::from_sorted(merged)?,
         })
     }
 
@@ -377,17 +461,15 @@ impl Affine {
         self.add(&other.scale(-1))
     }
 
+    /// `self × factor`. A wrapping product may vanish, and then its term goes.
     pub(crate) fn scale(&self, factor: Int) -> Affine {
-        if factor == 0 {
-            return Affine::constant(0);
-        }
+        let terms = self
+            .terms
+            .iter()
+            .map(|&(symbol, coefficient)| (symbol, coefficient.wrapping_mul(factor)));
         Affine {
             constant: self.constant.wrapping_mul(factor),
-            terms: self
-                .terms
-                .iter()
-                .map(|(symbol, coefficient)| (*symbol, coefficient.wrapping_mul(factor)))
-                .collect(),
+            terms: Terms::from_sorted(terms).expect("scaling adds no term"),
         }
     }
 
@@ -428,9 +510,9 @@ impl Predicate {
     pub(crate) fn between(left: &Affine, comparison: Comparison, right: &Affine) -> Option<Self> {
         Some(match comparison {
             Comparison::Less | Comparison::LessOrEqual => Self {
-                left: left.clone(),
+                left: *left,
                 comparison,
-                right: right.clone(),
+                right: *right,
             },
             Comparison::Equal | Comparison::NotEqual => {
                 let difference = left.sub(right)?;
@@ -451,14 +533,14 @@ impl Predicate {
             Comparison::Equal | Comparison::NotEqual => (&self.left, &self.right),
         };
         Self {
-            left: left.clone(),
+            left: *left,
             comparison: match self.comparison {
                 Comparison::Less => Comparison::LessOrEqual,
                 Comparison::LessOrEqual => Comparison::Less,
                 Comparison::Equal => Comparison::NotEqual,
                 Comparison::NotEqual => Comparison::Equal,
             },
-            right: right.clone(),
+            right: *right,
         }
     }
 
@@ -655,9 +737,9 @@ impl State {
         };
         let zero = Affine::constant(0);
         self.holds(&Predicate {
-            left: zero.clone(),
+            left: zero,
             comparison: Comparison::LessOrEqual,
-            right: goal.right.clone(),
+            right: goal.right,
         }) && self.holds(&Predicate {
             left: offset,
             comparison: goal.comparison,
@@ -713,7 +795,7 @@ impl State {
     pub(crate) fn place_affine(&self, place: PlaceId, interner: &mut Interner) -> Affine {
         let symbol = self.symbol_of(place, interner);
         if let Some(Fact::Value(affine)) = self.fact(symbol) {
-            return affine.clone();
+            return *affine;
         }
         let mut ancestor = place;
         while let Some(above) = interner.places.parent(ancestor) {
@@ -2291,8 +2373,8 @@ fn result_fact(
                 return None;
             };
             Some(Fact::Ordering {
-                left: left.clone(),
-                right: right.clone(),
+                left: *left,
+                right: *right,
             })
         }
         // `array_len` *is* the field read, and saying so is what lets a bound and a check agree.
@@ -2992,7 +3074,7 @@ mod tests {
     fn negating_an_order_swaps_its_sides() {
         let left = Affine {
             constant: 3,
-            terms: vec![(SymbolId::new(0), 1)],
+            ..Affine::symbol(SymbolId::new(0))
         };
         let right = Affine::symbol(SymbolId::new(1));
         let less = Predicate::between(&left, Comparison::Less, &right).unwrap();
@@ -3254,9 +3336,8 @@ mod tests {
     fn an_over_wide_form_is_refused_rather_than_truncated() {
         let wide = Affine {
             constant: 0,
-            terms: (0..MAX_TERMS as u32)
-                .map(|index| (SymbolId::new(index), 1))
-                .collect(),
+            terms: Terms::from_sorted((0..MAX_TERMS as u32).map(|index| (SymbolId::new(index), 1)))
+                .unwrap(),
         };
         assert_eq!(
             wide.add(&Affine::symbol(SymbolId::from_index(MAX_TERMS))),
@@ -3267,5 +3348,12 @@ mod tests {
             wide.add(&Affine::symbol(SymbolId::new(0))).is_some(),
             "a sum that merges into an existing term stays within the bound"
         );
+    }
+
+    /// A wrapping product can be zero, and a zero term must go, or two equal forms would differ.
+    #[test]
+    fn a_vanishing_product_drops_its_term() {
+        let symbol = Affine::symbol(SymbolId::new(0));
+        assert_eq!(symbol.scale(1 << 62).scale(4), Affine::constant(0));
     }
 }

@@ -48,6 +48,12 @@ pub(crate) fn hot_cost(func: &Function) -> usize {
         .sum()
 }
 
+/// Whether [`hot_cost`] exceeds `limit`, without finding the hot blocks when the whole body is
+/// within it, which bounds its hot part.
+pub(crate) fn hot_cost_exceeds(func: &Function, limit: usize) -> bool {
+    cost(func) > limit && hot_cost(func) > limit
+}
+
 /// A block's operations, including the call an `invoke` terminator makes.
 fn block_cost(func: &Function, block: BlockId) -> usize {
     let block = func.block(block);

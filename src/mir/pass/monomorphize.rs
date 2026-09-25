@@ -1628,7 +1628,7 @@ fn worth_specializing<Ty: TypeLike>(
         }
     }
 
-    if reads_bound_evidence && cost::hot_cost(body) <= budget::INLINE_CALLEE_COST {
+    if reads_bound_evidence && !cost::hot_cost_exceeds(body, budget::INLINE_CALLEE_COST) {
         return true;
     }
 

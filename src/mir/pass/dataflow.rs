@@ -28,7 +28,7 @@
 //! or edge is distinct from a reachable state with no known values and contributes nothing at joins.
 #![allow(dead_code)]
 
-use std::{borrow::Cow, cmp::Reverse, collections::BinaryHeap, rc::Rc};
+use std::{borrow::Cow, cmp::Reverse, collections::BinaryHeap, hash::Hash, rc::Rc};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -318,42 +318,49 @@ impl State {
         remove_subtree(&mut self.places, bindings, place);
     }
 
-    fn join(&self, other: &State) -> State {
-        let mut places = FxHashMap::default();
-        for (key, fact) in &self.places {
-            // A slot tracked on one edge and absent on the other is Unknown on that edge, so it
-            // joins to Unknown and is simply dropped.
-            if let Some(theirs) = other.places.get(key) {
-                let joined = fact.join(theirs);
-                if joined != Fact::Unknown {
-                    places.insert(*key, joined);
+    /// Joins `other` into this state, returning whether anything changed.
+    ///
+    /// Joining in place keeps a merge that changes nothing, the common case at a converging loop
+    /// header, from allocating and comparing a whole new state.
+    fn join_from(&mut self, other: &State) -> bool {
+        fn join_facts<K: Copy + Eq + Hash>(
+            facts: &mut FxHashMap<K, Fact>,
+            theirs: &FxHashMap<K, Fact>,
+            keep_unknown: bool,
+        ) -> bool {
+            let mut changed = false;
+            facts.retain(|key, fact| {
+                // A fact tracked on one edge and absent on the other is Unknown on that edge.
+                let Some(theirs) = theirs.get(key) else {
+                    changed = true;
+                    return false;
+                };
+                if fact != theirs {
+                    let joined = fact.join(theirs);
+                    // A subset of our outcomes joins back to them.
+                    if joined != *fact {
+                        *fact = joined;
+                        changed = true;
+                    }
                 }
-            }
+                // A slot's Unknown is its absence; a register keeps its entry.
+                keep_unknown || *fact != Fact::Unknown
+            });
+            changed
         }
-        let mut registers = FxHashMap::default();
-        for (id, fact) in &self.registers {
-            if let Some(theirs) = other.registers.get(id) {
-                registers.insert(*id, fact.join(theirs));
-            }
+        fn keep_agreeing<K: Eq + Hash, V: PartialEq>(
+            ours: &mut FxHashMap<K, V>,
+            theirs: &FxHashMap<K, V>,
+        ) -> bool {
+            let before = ours.len();
+            ours.retain(|key, value| theirs.get(key) == Some(value));
+            ours.len() != before
         }
-        let tests = self
-            .tests
-            .iter()
-            .filter(|(id, test)| other.tests.get(id) == Some(test))
-            .map(|(id, test)| (*id, test.clone()))
-            .collect();
-        let origins = self
-            .origins
-            .iter()
-            .filter(|(id, subject)| other.origins.get(id) == Some(subject))
-            .map(|(id, subject)| (*id, *subject))
-            .collect();
-        State {
-            places,
-            registers,
-            tests,
-            origins,
-        }
+        // Every operand is evaluated: `|` does not short-circuit.
+        join_facts(&mut self.places, &other.places, false)
+            | join_facts(&mut self.registers, &other.registers, true)
+            | keep_agreeing(&mut self.tests, &other.tests)
+            | keep_agreeing(&mut self.origins, &other.origins)
     }
 }
 
@@ -811,23 +818,39 @@ pub(crate) fn analyze(func: &Function, env: ModuleEnv<'_>) -> Analysis {
         for operation in block.operations() {
             transfer(operation, func, env, &escaped, &register_places, &mut state);
         }
-        if let TerminatorKind::Invoke { operation, .. } = &block.terminator().kind {
+        let terminator = &block.terminator().kind;
+        if let TerminatorKind::Invoke { operation, .. } = terminator {
             transfer(operation, func, env, &escaped, &register_places, &mut state);
         }
-        for successor in block.terminator().successors() {
-            let Some(edge) = state.on_edge(&block.terminator().kind, successor, &register_places)
-            else {
+        let mut state = Some(state);
+        let mut successors = block.terminator().successors().peekable();
+        while let Some(successor) = successors.next() {
+            let exit = state
+                .as_ref()
+                .expect("the exit state is taken at the last edge");
+            let Some(edge) = exit.on_edge(terminator, successor, &register_places) else {
                 continue;
             };
             let successor = successor.as_index();
-            let updated = match &entry_states[successor] {
-                Some(existing) => existing.join(&edge),
-                None => edge.into_owned(),
+            let changed = match (&mut entry_states[successor], edge) {
+                (Some(existing), edge) => existing.join_from(&edge),
+                (entry, Cow::Owned(edge)) => {
+                    *entry = Some(edge);
+                    true
+                }
+                // The last edge that leaves the state unchanged takes it instead of copying it.
+                (entry, Cow::Borrowed(_)) if successors.peek().is_none() => {
+                    *entry = state.take();
+                    true
+                }
+                (entry, Cow::Borrowed(edge)) => {
+                    *entry = Some(edge.clone());
+                    true
+                }
             };
-            if entry_states[successor].as_ref() == Some(&updated) {
+            if !changed {
                 continue;
             }
-            entry_states[successor] = Some(updated);
             if !queued[successor] {
                 queued[successor] = true;
                 worklist.push(Reverse((reverse_postorder[successor], successor)));

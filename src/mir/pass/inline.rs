@@ -284,7 +284,7 @@ fn plan_inlinings<'a>(
             // Substitution never grows a body, so the generic cost bounds the concrete one. Asking
             // here keeps a callee that is too large either way from paying for a substitution whose
             // only use would be to refuse it.
-            if cost::hot_cost(body) > budget::INLINE_CALLEE_COST {
+            if cost::hot_cost_exceeds(body, budget::INLINE_CALLEE_COST) {
                 refuse(NotInlinable::CalleeTooLarge);
                 continue;
             }
