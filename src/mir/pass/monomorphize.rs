@@ -46,9 +46,10 @@ use ustr::{Ustr, ustr};
 use super::{
     budget,
     site::{OperationIndex, OperationSite},
+    stage::body_stage,
 };
 use crate::{
-    CompilerSession, MirOptimization,
+    CompilerSession,
     compiler::Specialization,
     format::FormatWith,
     mir::{
@@ -295,7 +296,7 @@ pub(crate) struct Specializations {
     /// copy of every specialized body — the bodies are already in `raw`, which is what a candidate
     /// is confirmed against. See [`BodyStructure`].
     structures: FxHashMap<u64, LocalFunctionId>,
-    /// Keys whose raw bodies expose none of the payoffs specialization can currently realize.
+    /// Keys whose callee bodies expose none of the payoffs specialization can currently realize.
     ///
     /// A rejected key can occur at many call sites. Remembering it keeps the admission scan linear
     /// in the number of distinct candidates rather than in candidate call sites times body size.
@@ -376,7 +377,7 @@ impl Specializations {
     /// The body of a specialization as it was created, before the worklist optimized it.
     ///
     /// This is what a pass consulting a callee reads, so that its decision does not depend on
-    /// optimization order — the same rule that makes every other callee lookup read the raw stage.
+    /// optimization order — the same rule that makes every lookup in this module read the raw stage.
     pub(crate) fn raw_body(&self, id: LocalFunctionId) -> Option<&Function> {
         self.raw.get(id.as_index().checked_sub(self.first_index)?)
     }
@@ -397,7 +398,7 @@ impl Specializations {
         self.rejected.contains(key)
     }
 
-    /// Records that `key` exposes no specialization payoff in its raw body.
+    /// Records that `key` exposes no specialization payoff in its callee body.
     pub(crate) fn reject(&mut self, key: SpecializationKey) {
         self.rejected.insert(key);
     }
@@ -1227,7 +1228,7 @@ fn substitute_in_operation(operation: &mut Operation, mapper: &mut impl TypeMapp
 /// - the budget allows another specialization, unless this one is already cached.
 ///
 /// The callee may live in another module: the specialization is still created in the *optimizing*
-/// module's table, from the callee's raw body, which is safe because the session tracks the
+/// module's table, from the callee's optimized body, which is safe because the session tracks the
 /// dependency.
 pub(crate) fn specialize_call_sites(
     func: &Function,
@@ -1319,15 +1320,15 @@ fn specialization_for(
     let mir::Value::Function(callee) = &operation.operands[0] else {
         return None;
     };
-    // A specialization is never a callee to specialize again. The check only means anything for
-    // this module's own table; another module's raw bodies contain no specializations at all.
+    // A specialization is never a callee to specialize again. A dependency's own specializations,
+    // which its optimized bodies call, have no HIR record and are refused just below.
     if specializations.is_specialization(*callee) {
         return None;
     }
     // The callee's own module, which need not be the one being optimized: a user module calling a
     // generic `std` helper is the case that matters, since otherwise every std generic stays generic
     // and uninlinable in every module but its own. Safe for the same reason cross-module *inlining*
-    // is: a dependency's revision is immutable, so its raw body cannot change under us.
+    // is: a dependency's revision is immutable, so its optimized body cannot change under us.
     let module = session.expect_fresh_module(callee.module);
     let scheme = &module
         .get_function_by_id(callee.function)?
@@ -1341,10 +1342,13 @@ fn specialization_for(
     if instantiation.ty_args.iter().any(Type::is_variable) {
         return None;
     }
-    // Raw rather than optimized, like every other body the driver consults, so that what a
-    // specialization contains never depends on the order functions are optimized in.
+    // From the same stage inlining reads: raw within this module, so that what a specialization
+    // contains never depends on the order functions are optimized in, optimized for a dependency.
     let body = session
-        .mir_artifacts_for(callee.module, MirOptimization::Disabled)?
+        .mir_artifacts_for(
+            callee.module,
+            body_stage(callee.module, specializations.module()),
+        )?
         .get(callee.function)?;
 
     let visible_start = operation
@@ -1382,7 +1386,7 @@ fn specialization_for(
 
 /// Whether substitution exposes a reason Ferlium keeps a specialized body.
 ///
-/// This is a linear preflight over the raw body, before cloning, verification or insertion into the
+/// This is a linear preflight over the callee body, before cloning, verification or insertion into the
 /// specialization worklist. It deliberately answers only “can this buy anything we know how to
 /// realize?”, not “is the benefit worth this body size?” — useful specializations still need a
 /// growth policy, but bodies that expose no payoff should not be built at all.

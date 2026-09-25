@@ -2487,6 +2487,95 @@ mod tests {
         );
     }
 
+    /// A module reads its own bodies raw, so while std optimizes itself an inlined comparison still
+    /// reaches its branch as `compare_int_code` followed by `ordering_from_code`. The ordering must
+    /// carry the relation the code proved.
+    #[test]
+    fn an_ordering_built_from_a_comparison_code_keeps_its_relation() {
+        use ustr::ustr;
+
+        use crate::{
+            Location,
+            containers::b,
+            hir::value::LiteralValue,
+            mir::{ParameterKind, builder::FunctionBuilder, terminator::Terminator},
+            std::{STD_MODULE_ID, math::int_type, ordering::ordering_type},
+            types::r#type::CallImplType,
+        };
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let std = session.expect_fresh_module(STD_MODULE_ID);
+        let std_call = |name: &str, operands: Vec<mir::Value>| {
+            let local = std.get_local_function_id(ustr(name)).unwrap();
+            let definition = &std.get_function_by_id(local).unwrap().definition;
+            Operation::call(
+                span,
+                mir::Value::Function(FunctionId::new(STD_MODULE_ID, local)),
+                operands,
+                CallImplType::value(definition.ty_scheme.ty.clone()),
+            )
+        };
+
+        let mut builder = FunctionBuilder::new("below".into(), Default::default());
+        let left = builder.add_parameter(int_type(), ParameterKind::Parameter(ArgConvention::Let));
+        let right = builder.add_parameter(int_type(), ParameterKind::Parameter(ArgConvention::Let));
+        let entry = builder.add_block();
+        let less = builder.add_block();
+        let other = builder.add_block();
+        let code = builder
+            .append_operation(entry, Operation::alloca(span, int_type()))
+            .unwrap();
+        builder.append_operation(
+            entry,
+            std_call(
+                "compare_int_code",
+                vec![
+                    mir::Value::Parameter(left),
+                    mir::Value::Parameter(right),
+                    code.clone(),
+                ],
+            ),
+        );
+        let ordering = builder
+            .append_operation(entry, Operation::alloca(span, ordering_type()))
+            .unwrap();
+        builder.append_operation(
+            entry,
+            std_call("ordering_from_code", vec![code, ordering.clone()]),
+        );
+        let tag = builder
+            .append_operation(entry, Operation::extract_tag(span, ordering))
+            .unwrap();
+        let test = builder
+            .append_operation(
+                entry,
+                Operation::compare_eq(
+                    span,
+                    tag,
+                    mir::Value::Pattern(b(LiteralValue::new_variant_tag(ustr("Less")))),
+                ),
+            )
+            .unwrap();
+        builder.set_terminator(entry, Terminator::cond_br(span, test, less, other));
+        builder.set_terminator(less, Terminator::ret(span));
+        builder.set_terminator(other, Terminator::ret(span));
+        let function = builder.finish(env);
+
+        let analysis = analyze(&function, session.known_callees(), &|_| None);
+        let known = analysis
+            .entry_state(less)
+            .map(State::known)
+            .unwrap_or_default();
+        assert!(
+            known
+                .iter()
+                .any(|predicate| predicate.comparison == Comparison::Less
+                    && predicate.difference.terms().len() == 2),
+            "the `Less` edge must know `left < right`, got {known:?}"
+        );
+    }
+
     /// The default of a multiway switch excludes every named case.
     #[test]
     fn a_multiway_switch_default_negates_every_named_case() {

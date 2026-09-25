@@ -354,7 +354,7 @@ pub(crate) fn refusals_of(
 /// caller's own quantifiers. Specializing the caller is what makes such a site concrete on a later
 /// round.
 /// Owns its result only when substitution actually produced a new body; an already-concrete callee
-/// is borrowed straight from the raw stage and never copied.
+/// is borrowed straight from its stage and never copied.
 fn concrete_body_for_stage<'a>(
     body: &'a Function,
     callee: FunctionId,

@@ -72,12 +72,24 @@ impl<'a> OptimizationStage<'a> {
     }
 }
 
-/// Callee identities and facts for semantic optimization; each module answers for its own.
+/// The stage a body of `callee_module` is read from while optimizing `optimized`.
+///
+/// The module being optimized is read raw, so that no decision depends on the order its functions
+/// are optimized in. A dependency is optimized before its dependents and immutable, so its callees
+/// arrive simplified, as they do in most optimizing compilers.
+pub(crate) fn body_stage(callee_module: ModuleId, optimized: ModuleId) -> MirOptimization {
+    if callee_module == optimized {
+        MirOptimization::Disabled
+    } else {
+        MirOptimization::Enabled
+    }
+}
+
+/// Callee identities, bodies and facts for semantic optimization; each module answers for its own.
 ///
 /// The module being optimized is read raw, with its specializations from the table under
-/// construction, so that no decision depends on optimization order. A dependency is already
-/// optimized and immutable, so its identities resolve through its optimized artifact. Without a
-/// table, every module resolves through its optimized artifact.
+/// construction; a dependency resolves through its optimized artifact (see [`body_stage`]).
+/// Without a table, every module resolves through its optimized artifact.
 #[derive(Clone, Copy)]
 pub(crate) struct SemanticCallees<'a> {
     session: &'a CompilerSession,
@@ -123,15 +135,18 @@ impl<'a> SemanticCallees<'a> {
             .map_or(callee, |specialization| specialization.original)
     }
 
-    /// The raw body of `callee`; a specialization of this module is read as it was created.
+    /// The body of `callee`, from the stage its identity resolves in; a specialization of this
+    /// module is read as it was created.
     pub(crate) fn body(self, callee: FunctionId) -> Option<&'a Function> {
-        if let Some(specializations) = self.specializations
-            && specializations.is_specialization(callee)
-        {
-            return specializations.raw_body(callee.function);
-        }
+        let stage = match self.specializations {
+            Some(specializations) if specializations.is_specialization(callee) => {
+                return specializations.raw_body(callee.function);
+            }
+            Some(specializations) => body_stage(callee.module, specializations.module()),
+            None => MirOptimization::Enabled,
+        };
         self.session
-            .mir_artifacts_for(callee.module, MirOptimization::Disabled)?
+            .mir_artifacts_for(callee.module, stage)?
             .get(callee.function)
     }
 

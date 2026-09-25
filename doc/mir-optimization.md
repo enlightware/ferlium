@@ -77,10 +77,13 @@ and the calls that become direct are new candidates for all three. One pass cann
 cycle. Fold first within a round: it is cheap, it is what makes arguments known, and it shrinks a
 function before the inliner measures it against the growth budget.
 
-**Every pass reads *raw* bodies.** A callee's body, whether in this module or another, is taken from
-the raw stage, so what a pass decides never depends on the order functions are optimized in. A
-specialization has no raw artifact, so the table keeps each one as it was created, before the
-worklist optimized it; that copy is its raw stage.
+**A module reads its own bodies raw and its dependencies optimized.** A callee of the module being
+optimized is taken from the raw stage, so what a pass decides never depends on the order functions
+are optimized in. A specialization has no raw artifact, so the table keeps each one as it was
+created, before the worklist optimized it; that copy is its raw stage. A dependency is optimized
+before its dependents and immutable, so inlining and specialization copy its optimized bodies, as
+LLVM, GCC and rustc do: each callee is simplified once, arrives at its final size for the inline
+budget, and its dependents' passes must accept their own output (`mir::pass::stage::body_stage`).
 
 **Each module answers for the callees it owns.** `SemanticCallees` (`mir::pass::stage`) resolves a
 callee to its source function and reads its summaries. The module being optimized resolves through
@@ -292,7 +295,7 @@ The admission preflight recognizes local devirtualization, trivial-copy clone/dr
 static-layout witness removal, making a small generic body inlinable, and propagation of concrete
 types or evidence into a direct generic callee. The last two matter because an apparently unchanged
 specialized body can enable work in its caller or callees. Accepted and rejected specialization keys
-are both memoized, so a distinct raw body is scanned at most once however many call sites request it.
+are both memoized, so a distinct callee body is scanned at most once however many call sites request it.
 
 A caller that forwards its own quantifiers records a *variable* instantiation and is skipped —
 specializing that caller is what makes its inner call sites concrete on a later round. This is the
@@ -362,7 +365,8 @@ and removes the operands that pass it, running once after the
 specialization worklist has drained so that every optimization decision above it is taken against
 the signatures the optimizer has always seen. One module suffices: `specialize_call_sites` only ever
 writes a specialization into a `call` callee operand, self-calls are redirected within the same
-table, and every cross-module lookup reads the raw stage, which contains no specializations.
+table, and a dependency's bodies name only its own specializations, which its finished artifact
+keeps with their final signatures.
 
 ## Owned argument forwarding
 
@@ -420,7 +424,7 @@ a copy for, and may inline that copy, specialize the caller so the reference mov
 or redirect the call to an owned-ABI variant — each leaves a finished body nothing names. Unlike a
 declared body, a specialization needs no root analysis to be shown unreachable: `specialize_call_sites`
 only ever writes one into a call callee operand, self-calls are redirected inside the same table,
-every cross-module lookup reads the raw stage, which holds no specializations, and dictionaries name
+a dependency's bodies name only its own, already final specializations, and dictionaries name
 impls rather than functions. So the declared bodies are the roots in full, and one transitive closure
 answers it — transitive because a dropped body may be the only thing naming its own callees, and
 without a fixpoint because liveness only shrinks. `MirArtifacts::pruned_specializations` records how
@@ -955,8 +959,8 @@ single synthetic MIR score would assert backend costs the interpreter cannot est
 ## Post-expansion optimization
 
 Physical MIR reuses shared folding, CSE, inlining, storage, control-flow, and stack-region cleanup
-passes. Stage-specific callee lookup reads immutable inputs: raw semantic bodies for semantic
-optimization, expanded module-local bodies and helpers for physical optimization. Foreign physical
+passes. Stage-specific callee lookup reads immutable inputs: the module's raw and its dependencies'
+optimized semantic bodies for semantic optimization, expanded module-local bodies and helpers for physical optimization. Foreign physical
 bodies remain opaque. Generic specialization and constructive semantic reification do not run on
 physical bodies; arithmetic/boolean identities and constant integer arithmetic need no script
 evaluation. Both stages fold constant wrapping integer addition, subtraction, multiplication and

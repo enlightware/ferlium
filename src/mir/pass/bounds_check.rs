@@ -568,7 +568,7 @@ mod tests {
     }
 
     /// Concrete storage also needs the whole-accessor rewrite when earlier accesses spend the
-    /// inline budget. In particular, partially inlined comparison guards must retain their facts.
+    /// inline budget.
     #[test]
     fn a_proved_whole_negative_array_index_becomes_unchecked() {
         let module = optimized(
@@ -590,10 +590,6 @@ mod tests {
             body.matches("call std::array_offset_unchecked").count(),
             1,
             "the final concrete whole accessor must use its proved normalized offset:\n{body}"
-        );
-        assert!(
-            body.contains("call std::ordering_from_code"),
-            "the fixture must exercise a partially inlined comparison guard:\n{body}"
         );
     }
 

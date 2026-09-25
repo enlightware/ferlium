@@ -13,7 +13,7 @@
 //! body would: an embedder can call any of them, so the roots have to be defined before anything can
 //! be shown unreachable. A specialization is reachable from outside the module by no route at all —
 //! `specialize_call_sites` only ever writes one into a call callee operand, self-calls are
-//! redirected inside the same table, every cross-module lookup reads the raw stage, which holds no
+//! redirected inside the same table, a dependency's bodies name only its own, already final
 //! specializations, and dictionaries name impls rather than functions. So the declared bodies are
 //! the roots, in full, and the question is only which specializations they reach.
 //!
