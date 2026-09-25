@@ -334,6 +334,11 @@ impl Specializations {
         }
     }
 
+    /// The module being optimized, whose table this is.
+    pub(crate) fn module(&self) -> ModuleId {
+        self.module
+    }
+
     pub(crate) fn into_created(self) -> Vec<Specialization> {
         self.created
     }

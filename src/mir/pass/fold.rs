@@ -318,7 +318,7 @@ pub(crate) fn fold_function(
     // Physical folding uses shared algebraic/CFG rules, never the boxed script evaluator or
     // semantic dictionary-entry adaptation.
     let session = match stage {
-        OptimizationStage::Semantic { session, .. } => Some(session),
+        OptimizationStage::Semantic(callees) => Some(callees.session()),
         OptimizationStage::Physical { .. } => None,
     };
     let resources = FoldResources::new(

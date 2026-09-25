@@ -799,6 +799,7 @@ mod tests {
     use ustr::ustr;
 
     use super::{OptimizationStage, hoist_transfer_field_addresses};
+    use crate::mir::pass::SemanticCallees;
     use crate::{
         CompilerSession, ExecutionTarget, Location, MirOptimization, Path,
         compiler::MirArtifacts,
@@ -836,10 +837,7 @@ mod tests {
         super::forward_redundant_storage(
             func,
             env,
-            OptimizationStage::Semantic {
-                session,
-                specializations: None,
-            },
+            OptimizationStage::Semantic(SemanticCallees::new(session, None)),
         )
     }
 

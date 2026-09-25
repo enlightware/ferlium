@@ -43,7 +43,9 @@ use std::borrow::Cow;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::{OptimizationStage, Specializations, budget, monomorphize, site::OperationIndex};
+use super::{
+    OptimizationStage, SemanticCallees, Specializations, budget, monomorphize, site::OperationIndex,
+};
 use crate::{
     CompilerSession, Location,
     containers::DenseBitSet,
@@ -332,10 +334,7 @@ pub(crate) fn refusals_of(
         func,
         func.operation_count(),
         env,
-        OptimizationStage::Semantic {
-            session,
-            specializations: None,
-        },
+        OptimizationStage::Semantic(SemanticCallees::new(session, None)),
         &mut Some(&mut refusals),
     );
     refusals
@@ -364,10 +363,14 @@ fn concrete_body_for_stage<'a>(
     env: ModuleEnv<'_>,
 ) -> Result<Cow<'a, Function>, NotInlinable> {
     match stage {
-        OptimizationStage::Semantic {
-            session,
-            specializations,
-        } => concrete_body(body, callee, instantiation, session, specializations, env),
+        OptimizationStage::Semantic(callees) => concrete_body(
+            body,
+            callee,
+            instantiation,
+            callees.session(),
+            callees.specializations(),
+            env,
+        ),
         // Semantic substitution can create operations requiring physical expansion. Keep generic
         // physical bodies shared; concrete helpers and specializations need no substitution.
         OptimizationStage::Physical { .. } => {

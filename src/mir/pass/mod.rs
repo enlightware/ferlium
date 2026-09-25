@@ -66,15 +66,13 @@ pub(crate) mod tail_merge;
 pub(crate) mod will_return;
 
 pub(crate) use monomorphize::Specializations;
-pub(crate) use stage::OptimizationStage;
+pub(crate) use stage::{OptimizationStage, SemanticCallees};
 
 use crate::{
-    compiler::{CompilerSession, MirOptimization},
+    compiler::CompilerSession,
     mir::Function,
     module::{FunctionId, ModuleEnv, ModuleId},
 };
-
-use self::provenance::AddressorSummary;
 
 /// Aggregate facts about rewrites whose results cannot be reconstructed from final MIR.
 ///
@@ -122,7 +120,7 @@ fn cleanup_dead_representation_chains(
     mut current: Function,
     env: ModuleEnv<'_>,
     context: &OptimizationContext,
-    specializations: &Specializations,
+    callees: SemanticCallees<'_>,
     will_return: &impl Fn(FunctionId) -> bool,
 ) -> Function {
     loop {
@@ -135,7 +133,7 @@ fn cleanup_dead_representation_chains(
             &current,
             env,
             context.known_callees,
-            &|callee| specializations.original(callee),
+            &callees.original_of(),
             will_return,
         ) {
             current = cleaned;
@@ -177,17 +175,13 @@ pub(crate) fn optimize_function(
         // have become the caller's places.
         let mut changed = false;
         let source = current.as_ref().unwrap_or(function);
+        let callees = SemanticCallees::new(session, Some(specializations));
         if let Some(folded) = fold::fold_function(
             source,
             original_size,
             env,
-            OptimizationStage::Semantic {
-                session,
-                specializations: Some(specializations),
-            },
-            fold::KnownCallSemantics::new(context.known_callees, &|callee| {
-                specializations.original(callee)
-            }),
+            OptimizationStage::Semantic(callees),
+            fold::KnownCallSemantics::new(context.known_callees, &callees.original_of()),
             &context.string_materializer,
         ) {
             current = Some(folded.body);
@@ -212,18 +206,13 @@ pub(crate) fn optimize_function(
         // are substituted or operations removed. An unresolved original remains conservatively
         // non-repeatable even when its concrete copy could prove more.
         let source = current.as_ref().unwrap_or(function);
-        let summary_of = |callee| {
-            let original = specializations.original(callee).unwrap_or(callee);
-            session
-                .mir_artifacts_for(original.module, MirOptimization::Disabled)
-                .map_or(AddressorSummary::UNKNOWN, |artifacts| {
-                    artifacts.addressor_summary(original.module, original.function)
-                })
-        };
+        // Read-only until the next round specializes.
+        let callees = SemanticCallees::new(session, Some(specializations));
+        let summary_of = |callee| callees.addressor_summary(callee);
         if let Some(merged) = cse::eliminate_common_calls(source, env, &summary_of, &|callee| {
             context
                 .known_callees
-                .resolve(callee, |callee| specializations.original(callee))
+                .resolve(callee, callees.original_of())
                 .is_some_and(known_callee::KnownCallee::is_optimization_barrier)
         }) {
             current = Some(merged);
@@ -237,10 +226,7 @@ pub(crate) fn optimize_function(
         if let Some(forwarded) = copy_forward::forward_redundant_storage(
             source,
             env,
-            OptimizationStage::Semantic {
-                session,
-                specializations: Some(specializations),
-            },
+            OptimizationStage::Semantic(callees),
         ) {
             current = Some(forwarded);
             changed = true;
@@ -261,10 +247,7 @@ pub(crate) fn optimize_function(
             source,
             original_size,
             env,
-            OptimizationStage::Semantic {
-                session,
-                specializations: Some(specializations),
-            },
+            OptimizationStage::Semantic(callees),
         ) {
             current = Some(inlined);
             changed = true;
@@ -275,6 +258,8 @@ pub(crate) fn optimize_function(
             break;
         }
     }
+    // The specialization table is final from here.
+    let callees = SemanticCallees::new(session, Some(specializations));
     if rounds_exhausted {
         // The last changing round may have exposed place computations and storage transfers after
         // their pre-inline placements. When a no-change round ended the loop, those placements have
@@ -287,26 +272,14 @@ pub(crate) fn optimize_function(
         if let Some(forwarded) = copy_forward::forward_redundant_storage(
             source,
             env,
-            OptimizationStage::Semantic {
-                session,
-                specializations: Some(specializations),
-            },
+            OptimizationStage::Semantic(callees),
         ) {
             current = Some(forwarded);
         }
     }
     // Whether a callee is proved to return, which the cleanups below and loop-invariant motion
-    // all ask. The rounds have settled, so the specialization table this reads is final.
-    let will_return = |callee| {
-        let original = specializations.original(callee).unwrap_or(callee);
-        session
-            .mir_artifacts_for(original.module, MirOptimization::Disabled)
-            .is_some_and(|artifacts| {
-                artifacts
-                    .will_return(original.module, original.function)
-                    .is_proven()
-            })
-    };
+    // all ask.
+    let will_return = |callee| callees.will_return(callee);
 
     // Inlined predicates often materialize `true`/`false` in two arms only for the caller to
     // compare that slot with `true` and branch again. Forward the known edge information while
@@ -332,10 +305,7 @@ pub(crate) fn optimize_function(
         if let Some(forwarded) = copy_forward::forward_redundant_storage(
             source,
             env,
-            OptimizationStage::Semantic {
-                session,
-                specializations: Some(specializations),
-            },
+            OptimizationStage::Semantic(callees),
         ) {
             current = Some(forwarded);
         }
@@ -357,7 +327,7 @@ pub(crate) fn optimize_function(
             forwarded,
             env,
             context,
-            specializations,
+            callees,
             &will_return,
         ));
     }
@@ -391,11 +361,12 @@ pub(crate) fn optimize_function(
     // After devirtualization, which is what makes a subscript's checks direct calls the analysis can
     // resolve at all, and before DCE, which removes the cleanup blocks a removed check strands.
     let source = current.as_ref().unwrap_or(function);
-    if let Some((rewritten, removed)) =
-        bounds_check::eliminate_bounds_checks(source, env, context.known_callees, &|callee| {
-            specializations.original(callee)
-        })
-    {
+    if let Some((rewritten, removed)) = bounds_check::eliminate_bounds_checks(
+        source,
+        env,
+        context.known_callees,
+        &callees.original_of(),
+    ) {
         stats.bounds_checks_removed += removed;
         current = Some(rewritten);
     }
@@ -407,7 +378,7 @@ pub(crate) fn optimize_function(
     if let Some(hoisted) = licm::hoist_loop_invariant_calls(source, env, &will_return, &|callee| {
         context
             .known_callees
-            .resolve(callee, |callee| specializations.original(callee))
+            .resolve(callee, callees.original_of())
             .is_some_and(known_callee::KnownCallee::is_optimization_barrier)
     }) {
         current = Some(hoisted);
@@ -423,7 +394,7 @@ pub(crate) fn optimize_function(
                 cleaned,
                 env,
                 context,
-                specializations,
+                callees,
                 &will_return,
             ));
         }
@@ -437,7 +408,7 @@ pub(crate) fn optimize_function(
         source,
         env,
         context.known_callees,
-        &|callee| specializations.original(callee),
+        &callees.original_of(),
         &will_return,
     ) {
         current = Some(cleaned);
@@ -493,7 +464,7 @@ pub(crate) fn optimize_function(
                 forwarded,
                 env,
                 context,
-                specializations,
+                callees,
                 &will_return,
             ));
             changed = true;
@@ -505,7 +476,7 @@ pub(crate) fn optimize_function(
                     simplified.body,
                     env,
                     context,
-                    specializations,
+                    callees,
                     &will_return,
                 )
             } else {
@@ -521,7 +492,7 @@ pub(crate) fn optimize_function(
                 simplified,
                 env,
                 context,
-                specializations,
+                callees,
                 &will_return,
             ));
             changed = true;

@@ -76,6 +76,12 @@ the raw stage, so what a pass decides never depends on the order functions are o
 specialization has no raw artifact, so the table keeps each one as it was created, before the
 worklist optimized it; that copy is its raw stage.
 
+**Each module answers for the callees it owns.** `SemanticCallees` (`mir::pass::stage`) resolves a
+callee to its source function and reads its summaries. The module being optimized resolves through
+its specialization table; a dependency, including specializations its own optimization appended,
+through its optimized artifact, which is complete and immutable because dependencies are optimized
+first.
+
 **Termination** rests on three independent bounds: the dataflow lattice is monotone within a run,
 inlining is bounded by its growth budget and the non-recursive restriction, and `MAX_ROUNDS` bounds
 the outer loop. Work per function is a product of named constants.
