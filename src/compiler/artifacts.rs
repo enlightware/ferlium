@@ -23,8 +23,9 @@ use crate::{
     mir::{
         self,
         pass::{
-            OptimizationContext, OptimizationStats, Specializations, dead_evidence,
-            optimize_function, owned_arguments,
+            OptimizationContext, OptimizationStats, Specializations,
+            call_graph::CallGraph,
+            dead_evidence, optimize_function, owned_arguments,
             provenance::{AddressorSummaries, AddressorSummary},
             prune_specializations, share_specializations,
             will_return::{WillReturn, WillReturnSummaries},
@@ -236,6 +237,10 @@ pub(crate) struct MirArtifacts {
     pruned_specializations: usize,
     /// Rewrite counts that final MIR cannot reconstruct because cleanup removed the evidence.
     optimization_stats: OptimizationStats,
+    /// The strongly connected components of these bodies' call graph, callees first: the order the
+    /// summaries below are derived in and the optimizer walks. Recorded only by the raw stage, which
+    /// is what the optimizer reads.
+    call_components: Vec<Vec<LocalFunctionId>>,
     /// The cached provenance and repeatability of every addressor.
     ///
     /// Derived once, from the *raw* bodies, and carried into the optimized stage unchanged:
@@ -308,6 +313,15 @@ impl MirArtifacts {
                     .map(|_| build_mir_function(id, env))
             })
             .collect();
+        Self::raw(functions, module, modules)
+    }
+
+    /// Raw artifacts over `functions`, with the summaries derived from them.
+    fn raw(functions: Vec<Option<mir::Function>>, module: &Module, modules: &Modules) -> Self {
+        let env = ModuleEnv::new(module, modules);
+        let module_id = module.module_id();
+        let call_components =
+            CallGraph::of_module(&functions, module_id).components_callees_first();
         // Every dependency's artifacts are built before this module's, so a cross-module callee's
         // summary is already installed and can simply be read.
         let external = |callee: FunctionId| {
@@ -319,7 +333,7 @@ impl MirArtifacts {
                 })
         };
         let addressor_summaries =
-            AddressorSummaries::of_module(&functions, module.module_id(), env, &external);
+            AddressorSummaries::of_module(&functions, &call_components, module_id, env, &external);
         let external_will_return = |callee: FunctionId| {
             modules
                 .get(callee.module)
@@ -328,13 +342,18 @@ impl MirArtifacts {
                     artifacts.will_return(callee.module, callee.function)
                 })
         };
-        let will_return_summaries =
-            WillReturnSummaries::of_module(&functions, module.module_id(), &external_will_return);
+        let will_return_summaries = WillReturnSummaries::of_module(
+            &functions,
+            &call_components,
+            module_id,
+            &external_will_return,
+        );
         Self {
             functions,
             specializations: Vec::new(),
             pruned_specializations: 0,
             optimization_stats: OptimizationStats::default(),
+            call_components,
             addressor_summaries,
             will_return_summaries,
         }
@@ -399,29 +418,35 @@ impl MirArtifacts {
         let context = OptimizationContext::new(session, env);
         let mut optimization_stats = OptimizationStats::default();
 
-        let mut functions: Vec<Option<mir::Function>> = raw
-            .functions
-            .iter()
-            .map(|function| {
-                function.as_ref().map(|function| {
-                    optimize_function(
-                        function,
-                        env,
-                        session,
-                        module_id,
-                        &mut specializations,
-                        &context,
-                        &mut optimization_stats,
-                    )
+        // Callees first, so a caller inlines and specializes from bodies already simplified, as
+        // it does across modules.
+        for component in &raw.call_components {
+            let bodies = component
+                .iter()
+                .filter_map(|&id| {
+                    let body = raw.get(id)?;
+                    Some((
+                        id,
+                        optimize_function(
+                            body,
+                            env,
+                            session,
+                            module_id,
+                            &mut specializations,
+                            &context,
+                            &mut optimization_stats,
+                        ),
+                    ))
                 })
-            })
-            .collect();
+                .collect();
+            specializations.finish(bodies);
+        }
 
-        // Drain the worklist. A specialization created while optimizing one is appended past the
-        // end, so this walk reaches it too.
+        // Drain the worklist, with every declared body finished. A specialization created while
+        // optimizing one is appended past the end, so this walk reaches it too.
         let mut next = 0;
         while next < specializations.len() {
-            let id = LocalFunctionId::from_index(functions.len() + next);
+            let id = LocalFunctionId::from_index(raw.functions.len() + next);
             let body = specializations
                 .body(id)
                 .expect("a specialization just created has a body")
@@ -438,6 +463,7 @@ impl MirArtifacts {
             specializations.set_body(id, optimized);
             next += 1;
         }
+        let mut functions = specializations.take_finished();
 
         // Share the copies that became identical only under optimization. Creation-time sharing
         // reaches every group that is identical as substituted; this reaches the ones that started
@@ -505,6 +531,7 @@ impl MirArtifacts {
             // Carried across unchanged: optimization preserves a proved root and repeatability.
             // A specialization may admit a more precise summary after substitution, but reusing
             // its original's conservative answer is sound and avoids per-stage recomputation.
+            call_components: Vec::new(),
             addressor_summaries: raw.addressor_summaries.clone(),
             will_return_summaries: raw.will_return_summaries.clone(),
         }
@@ -517,35 +544,7 @@ impl MirArtifacts {
         module: &Module,
         modules: &Modules,
     ) -> Self {
-        let env = ModuleEnv::new(module, modules);
-        let external = |callee: FunctionId| {
-            modules
-                .get(callee.module)
-                .and_then(|entry| entry.raw_mir())
-                .map_or(AddressorSummary::UNKNOWN, |artifacts| {
-                    artifacts.addressor_summary(callee.module, callee.function)
-                })
-        };
-        let addressor_summaries =
-            AddressorSummaries::of_module(&functions, module.module_id(), env, &external);
-        let external_will_return = |callee: FunctionId| {
-            modules
-                .get(callee.module)
-                .and_then(|entry| entry.raw_mir())
-                .map_or(WillReturn::Unknown, |artifacts| {
-                    artifacts.will_return(callee.module, callee.function)
-                })
-        };
-        let will_return_summaries =
-            WillReturnSummaries::of_module(&functions, module.module_id(), &external_will_return);
-        Self {
-            functions,
-            specializations: Vec::new(),
-            pruned_specializations: 0,
-            optimization_stats: OptimizationStats::default(),
-            addressor_summaries,
-            will_return_summaries,
-        }
+        Self::raw(functions, module, modules)
     }
 
     /// Reconstruct optimized artifacts, retaining semantic summaries from their raw prerequisite.
@@ -562,6 +561,7 @@ impl MirArtifacts {
             specializations,
             pruned_specializations,
             optimization_stats,
+            call_components: Vec::new(),
             addressor_summaries: raw.addressor_summaries.clone(),
             will_return_summaries: raw.will_return_summaries.clone(),
         }

@@ -16,7 +16,6 @@
 
 use std::{collections::VecDeque, mem};
 
-use super::call_graph::CallGraph;
 use crate::{
     mir::{Function, Operation, OperationKind, Value, terminator::TerminatorKind},
     module::{FunctionId, LocalFunctionId, ModuleId, id::Id},
@@ -47,22 +46,22 @@ pub(crate) struct WillReturnSummaries {
 impl WillReturnSummaries {
     /// Proves the finite call DAG rooted at each raw MIR body.
     ///
-    /// Components are visited callees-first. Starting every script function at `Unknown` prevents
+    /// `components` are visited callees-first. Starting every script function at `Unknown` prevents
     /// recursion from proving itself; mutually dependent non-call references may still settle to
     /// `Proven` through the monotone fixed point. A bodyless local function is native and therefore
     /// inherits the host termination contract.
     pub(crate) fn of_module(
         bodies: &[Option<Function>],
+        components: &[Vec<LocalFunctionId>],
         module: ModuleId,
         external: &dyn Fn(FunctionId) -> WillReturn,
     ) -> Self {
-        let graph = CallGraph::of_module(bodies, module);
         let mut of = vec![WillReturn::Unknown; bodies.len()];
 
-        for component in graph.components_callees_first() {
+        for component in components {
             loop {
                 let mut changed = false;
-                for &id in &component {
+                for &id in component {
                     if of[id.as_index()] == WillReturn::Proven {
                         continue;
                     }
@@ -250,8 +249,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        CompilerSession, ExecutionTarget, Location, MirOptimization, module::Path,
-        std::STD_MODULE_ID,
+        CompilerSession, ExecutionTarget, Location, MirOptimization,
+        mir::pass::call_graph::CallGraph, module::Path, std::STD_MODULE_ID,
     };
 
     fn summaries_of(src: &str) -> (WillReturnSummaries, impl Fn(&str) -> LocalFunctionId) {
@@ -269,7 +268,9 @@ mod tests {
             let artifacts = session
                 .mir_artifacts_for(module_id, MirOptimization::Disabled)
                 .expect("raw MIR must be prepared");
-            WillReturnSummaries::of_module(artifacts.bodies(), module_id, &|callee| {
+            let components =
+                CallGraph::of_module(artifacts.bodies(), module_id).components_callees_first();
+            WillReturnSummaries::of_module(artifacts.bodies(), &components, module_id, &|callee| {
                 session
                     .mir_artifacts_for(callee.module, MirOptimization::Disabled)
                     .map_or(WillReturn::Unknown, |artifacts| {

@@ -26,9 +26,7 @@ use std::{cmp::Reverse, fmt};
 
 use ustr::Ustr;
 
-use super::{
-    fold, inline, inline::NotInlinable, stage::body_stage, string_accumulate::StringFunctions,
-};
+use super::{fold, inline, inline::NotInlinable, string_accumulate::StringFunctions};
 use crate::{
     Location, MirOptimization,
     compiler::{CompilerSession, MirArtifacts, Specialization},
@@ -106,19 +104,14 @@ pub struct SpecializationRemark {
     pub name: Ustr,
     /// The function this was specialized from.
     pub original: FunctionId,
-    /// Operations in the original's body as specialization copied it: what asking for this copy
-    /// duplicated, and the only size a cost model could consult.
+    /// Operations in the original's raw body.
     pub original_size: usize,
-    /// The stage `original_size` was measured in: raw for an original of this module, optimized for
-    /// a dependency's (see [`body_stage`](super::stage::body_stage)).
-    pub original_stage: MirOptimization,
-    /// Operations in the original after *it* was optimized, where that is known.
+    /// Operations in the original's optimized body, where that is known: what specialization
+    /// copied, unless the original shares a recursive component with the caller that asked.
     ///
-    /// Only a diagnostic, and deliberately not a candidate predictor — it is unavailable at the
-    /// moment of the decision, and depends on optimization order besides. It is here to separate
-    /// two stories that `size` alone conflates: a specialization that is large because its body
-    /// genuinely is, and one that is large because being concrete made it a target the inliner
-    /// then filled. Only the second would be answered by re-pricing inlining rather than
+    /// It separates two stories that `size` alone conflates: a specialization that is large because
+    /// its body genuinely is, and one that is large because being concrete made it a target the
+    /// inliner then filled. Only the second would be answered by re-pricing inlining rather than
     /// specialization.
     pub original_optimized_size: Option<usize>,
     /// Operations in the specialized body, after it was itself optimized. The real cost, since
@@ -304,7 +297,7 @@ pub(crate) fn build(
         specializations: optimized
             .specializations()
             .iter()
-            .map(|specialization| specialization_remark(session, module_id, specialization))
+            .map(|specialization| specialization_remark(session, specialization))
             .collect(),
         pruned_specializations: optimized.pruned_specializations(),
     }
@@ -318,7 +311,6 @@ pub(crate) fn build(
 /// and must not be the thing that brings a session down.
 fn specialization_remark(
     session: &CompilerSession,
-    module_id: ModuleId,
     specialization: &Specialization,
 ) -> SpecializationRemark {
     let body_of = |stage| {
@@ -326,20 +318,18 @@ fn specialization_remark(
             .mir_artifacts_for(specialization.original.module, stage)
             .and_then(|artifacts| artifacts.get(specialization.original.function).cloned())
     };
-    let copied_stage = body_stage(specialization.original.module, module_id);
-    let copied = body_of(copied_stage);
+    let raw = body_of(MirOptimization::Disabled);
     let optimized = body_of(MirOptimization::Enabled);
     // The `_before` figures come from the *optimized* original wherever there is one, because the
     // question is what specializing bought over what the call site would otherwise have reached —
     // and what it would otherwise have reached is a body the optimizer had already been over.
     // Measuring against the raw original instead credits specialization with every fold and inline
     // the original got anyway, which is most of the difference on a body of any size.
-    let baseline = optimized.as_ref().or(copied.as_ref());
+    let baseline = optimized.as_ref().or(raw.as_ref());
     SpecializationRemark {
         name: specialization.name,
         original: specialization.original,
-        original_size: copied.as_ref().map_or(0, |body| body.operation_count()),
-        original_stage: copied_stage,
+        original_size: raw.as_ref().map_or(0, |body| body.operation_count()),
         original_optimized_size: optimized.as_ref().map(|body| body.operation_count()),
         size: specialization.body.operation_count(),
         indirect_before: baseline.map_or(0, indirect_calls),
@@ -444,12 +434,9 @@ impl FormatWith<ModuleEnv<'_>> for OptimizationReport {
             let mut ranked: Vec<&SpecializationRemark> = self.specializations.iter().collect();
             ranked.sort_by_key(|s| Reverse(s.size / s.payoff().max(1)));
             for s in ranked {
-                let original = match (s.original_stage, s.original_optimized_size) {
-                    (MirOptimization::Disabled, Some(optimized)) => {
-                        format!("{} raw, {optimized} optimized", s.original_size)
-                    }
-                    (MirOptimization::Disabled, None) => format!("{} raw", s.original_size),
-                    (MirOptimization::Enabled, _) => format!("{} optimized", s.original_size),
+                let original = match s.original_optimized_size {
+                    Some(optimized) => format!("{} raw, {optimized} optimized", s.original_size),
+                    None => format!("{} raw", s.original_size),
                 };
                 writeln!(
                     f,
@@ -680,10 +667,5 @@ mod tests {
             "the removed layout witness must be counted as specialization payoff:\n{rendered}"
         );
         assert!(specialization.payoff() > 0, "{rendered}");
-        assert_eq!(
-            specialization.original_stage,
-            MirOptimization::Disabled,
-            "a local original is copied raw:\n{rendered}"
-        );
     }
 }

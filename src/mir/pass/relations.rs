@@ -2487,9 +2487,9 @@ mod tests {
         );
     }
 
-    /// A module reads its own bodies raw, so while std optimizes itself an inlined comparison still
-    /// reaches its branch as `compare_int_code` followed by `ordering_from_code`. The ordering must
-    /// carry the relation the code proved.
+    /// A callee read raw, as within a recursive component, still reaches its branch as
+    /// `compare_int_code` followed by `ordering_from_code`. The ordering must carry the relation
+    /// the code proved.
     #[test]
     fn an_ordering_built_from_a_comparison_code_keeps_its_relation() {
         use ustr::ustr;

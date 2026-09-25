@@ -10,7 +10,9 @@ use crate::{
 };
 
 use super::{
-    OptimizationStage, branch_forward, budget, copy_forward, cse, dce, dead_store, fold, inline,
+    OptimizationStage, branch_forward, budget,
+    call_graph::CallGraph,
+    copy_forward, cse, dce, dead_store, fold, inline,
     known_callee::KnownCallees,
     peephole,
     provenance::{AddressorSummaries, AddressorSummary},
@@ -31,8 +33,11 @@ pub(crate) fn optimize(
         bodies,
         semantic,
     };
-    let summaries =
-        AddressorSummaries::of_module(bodies, module, env, &|_| AddressorSummary::UNKNOWN);
+    // Expansion adds edges the raw graph lacks, such as calls to generated helpers.
+    let components = CallGraph::of_module(bodies, module).components_callees_first();
+    let summaries = AddressorSummaries::of_module(bodies, &components, module, env, &|_| {
+        AddressorSummary::UNKNOWN
+    });
     let summary = |callee: FunctionId| {
         if callee.module == module {
             summaries.summary(callee.function)

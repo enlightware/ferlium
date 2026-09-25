@@ -46,7 +46,7 @@ use ustr::{Ustr, ustr};
 use super::{
     budget,
     site::{OperationIndex, OperationSite},
-    stage::body_stage,
+    stage::SemanticCallees,
 };
 use crate::{
     CompilerSession,
@@ -280,6 +280,11 @@ pub(crate) struct Specializations {
     /// The module whose optimized artifacts will hold these, which is not in general the module a
     /// specialized callee came from: the identities below index *this* module's table.
     module: ModuleId,
+    /// This module's declared functions whose component has been optimized, callees first.
+    ///
+    /// A component is published only once all its members are done, so a body read here never
+    /// depends on the order within a recursive component, which reads its own members raw.
+    finished: Vec<Option<Function>>,
     created: Vec<Specialization>,
     /// Each specialization as it was created, before the worklist optimized it.
     ///
@@ -324,6 +329,7 @@ impl Specializations {
     pub(crate) fn new(module: ModuleId, function_count: usize, declared_body_count: usize) -> Self {
         Self {
             module,
+            finished: vec![None; function_count],
             created: Vec::new(),
             raw: Vec::new(),
             cache: FxHashMap::default(),
@@ -338,6 +344,34 @@ impl Specializations {
     /// The module being optimized, whose table this is.
     pub(crate) fn module(&self) -> ModuleId {
         self.module
+    }
+
+    /// The optimized body of a declared function of this module, once its component is finished.
+    pub(crate) fn finished_body(&self, id: LocalFunctionId) -> Option<&Function> {
+        self.finished.get(id.as_index())?.as_ref()
+    }
+
+    /// Publishes the optimized bodies of one component of the call graph.
+    pub(crate) fn finish(&mut self, bodies: Vec<(LocalFunctionId, Function)>) {
+        // What was decided or copied from a member's raw body must not outlive its publication.
+        // Specializations already created stay; later call sites copy the optimized body.
+        let module = self.module;
+        let raw = |callee: &FunctionId| {
+            callee.module == module && bodies.iter().any(|(id, _)| *id == callee.function)
+        };
+        self.substituted
+            .get_mut()
+            .retain(|(callee, _), _| !raw(callee));
+        self.cache.retain(|key, _| !raw(&key.callee));
+        self.rejected.retain(|key| !raw(&key.callee));
+        for (id, body) in bodies {
+            self.finished[id.as_index()] = Some(body);
+        }
+    }
+
+    /// The optimized declared bodies, aligned with the module's function table.
+    pub(crate) fn take_finished(&mut self) -> Vec<Option<Function>> {
+        mem::take(&mut self.finished)
     }
 
     pub(crate) fn into_created(self) -> Vec<Specialization> {
@@ -377,7 +411,7 @@ impl Specializations {
     /// The body of a specialization as it was created, before the worklist optimized it.
     ///
     /// This is what a pass consulting a callee reads, so that its decision does not depend on
-    /// optimization order — the same rule that makes every lookup in this module read the raw stage.
+    /// optimization order, as a recursive component reads its own members raw.
     pub(crate) fn raw_body(&self, id: LocalFunctionId) -> Option<&Function> {
         self.raw.get(id.as_index().checked_sub(self.first_index)?)
     }
@@ -1342,15 +1376,6 @@ fn specialization_for(
     if instantiation.ty_args.iter().any(Type::is_variable) {
         return None;
     }
-    // From the same stage inlining reads: raw within this module, so that what a specialization
-    // contains never depends on the order functions are optimized in, optimized for a dependency.
-    let body = session
-        .mir_artifacts_for(
-            callee.module,
-            body_stage(callee.module, specializations.module()),
-        )?
-        .get(callee.function)?;
-
     let visible_start = operation
         .operands
         .len()
@@ -1373,6 +1398,9 @@ fn specialization_for(
     if specializations.is_full() {
         return None;
     }
+    // The body inlining reads, so a specialization copies what the call site would have spliced.
+    let callees = SemanticCallees::new(session, Some(specializations));
+    let body = callees.body(*callee)?;
     if !worth_specializing(body, scheme, instantiation, &key.dictionaries, env) {
         specializations.reject(key);
         return None;
@@ -2509,6 +2537,48 @@ mod tests {
         );
 
         assert_eq!(pure, reading);
+        assert_eq!(specializations.len(), 1);
+    }
+
+    /// Publishing a callee ends what was decided from its raw body; the copy already made stays.
+    #[test]
+    fn publishing_a_callee_forgets_decisions_taken_from_its_raw_body() {
+        let mut session = CompilerSession::new();
+        let module_id = compile(&mut session, "fn identity(value: int) -> int { value }");
+        let (function, function_count, scheme) = {
+            let module = session.expect_fresh_module(module_id);
+            let function = module
+                .get_local_function_id(ustr("identity"))
+                .expect("identity was just compiled");
+            let scheme = module
+                .get_function_by_id(function)
+                .expect("identity was just compiled")
+                .definition
+                .ty_scheme
+                .clone();
+            (function, module.function_count(), scheme)
+        };
+        session.prepare_execution_target(ExecutionTarget::Mir, module_id);
+        let body = body(&session, module_id, "identity").clone();
+        let callee = FunctionId::new(module_id, function);
+        let key = |effects| SpecializationKey {
+            callee,
+            instantiation: Instantiation {
+                ty_args: Vec::new(),
+                eff_args: vec![effects],
+            },
+            dictionaries: Vec::new(),
+        };
+        let mut specializations = Specializations::new(module_id, function_count, 1);
+        let created = key(EffType::empty());
+        let rejected = key(EffType::single_primitive(PrimitiveEffect::Read));
+        specializations.get_or_create(created.clone(), &scheme, &body, session.module_env());
+        specializations.reject(rejected.clone());
+
+        specializations.finish(vec![(function, body)]);
+
+        assert!(specializations.cached(&created).is_none());
+        assert!(!specializations.is_rejected(&rejected));
         assert_eq!(specializations.len(), 1);
     }
 

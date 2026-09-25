@@ -20,7 +20,7 @@
 //!
 use rustc_hash::FxHashMap;
 
-use super::{call_graph::CallGraph, dataflow::call_operands};
+use super::dataflow::call_operands;
 use crate::{
     define_id_type,
     hir::function::ArgConvention,
@@ -78,7 +78,8 @@ pub(crate) struct AddressorSummaries {
 }
 
 impl AddressorSummaries {
-    /// Derives the provenance of every function in `bodies`, callees before callers.
+    /// Derives the provenance of every function in `bodies`, callees before callers as `components`
+    /// lists them.
     ///
     /// A component of more than one function is a recursive group, and its members are iterated to
     /// a fixpoint from `Unknown` — the *conservative* start, so that a cycle which never resolves
@@ -87,15 +88,14 @@ impl AddressorSummaries {
     /// module's artifacts were built — dependencies are always built first, so the answer is there.
     pub(crate) fn of_module(
         bodies: &[Option<Function>],
+        components: &[Vec<LocalFunctionId>],
         module: ModuleId,
         env: ModuleEnv<'_>,
         external: &dyn Fn(FunctionId) -> AddressorSummary,
     ) -> Self {
-        let graph = CallGraph::of_module(bodies, module);
         let mut of = vec![AddressorSummary::UNKNOWN; bodies.len()];
 
-        let components = graph.components_callees_first();
-        for component in &components {
+        for component in components {
             // A single function cannot depend on itself here: a self-call would have put it in a
             // component of its own size, so one pass settles it.
             let mut changed = true;
@@ -124,7 +124,7 @@ impl AddressorSummaries {
             let mut changed = true;
             while changed {
                 changed = false;
-                for &id in &component {
+                for &id in component {
                     let repeatable = match &bodies[id.as_index()] {
                         Some(body) => derive_repeatable(body, module, &of, external),
                         None => declared(id, env).repeatable,
@@ -531,6 +531,7 @@ mod tests {
         CompilerSession, ExecutionTarget, Location, MirOptimization,
         compiler::ensure_mir_artifacts,
         hir::value::LiteralValue,
+        mir::pass::call_graph::CallGraph,
         mir::{Operation, builder::FunctionBuilder, terminator::Terminator},
         module::{LocalSubscriptId, Path, SubscriptId},
         std::math::int_type,
@@ -555,8 +556,11 @@ mod tests {
             let artifacts = session
                 .mir_artifacts_for(module_id, MirOptimization::Disabled)
                 .expect("raw MIR must be prepared");
+            let components =
+                CallGraph::of_module(artifacts.bodies(), module_id).components_callees_first();
             AddressorSummaries::of_module(
                 artifacts.bodies(),
+                &components,
                 module_id,
                 ModuleEnv::new(module, modules),
                 &|_| AddressorSummary::UNKNOWN,
@@ -610,8 +614,11 @@ mod tests {
         let artifacts = session
             .mir_artifacts_for(std_id, MirOptimization::Disabled)
             .expect("std raw MIR must be prepared");
+        let components =
+            CallGraph::of_module(artifacts.bodies(), std_id).components_callees_first();
         let provenances = AddressorSummaries::of_module(
             artifacts.bodies(),
+            &components,
             std_id,
             ModuleEnv::new(module, modules),
             &|_| AddressorSummary::UNKNOWN,

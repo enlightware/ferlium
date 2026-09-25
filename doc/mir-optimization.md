@@ -77,13 +77,15 @@ and the calls that become direct are new candidates for all three. One pass cann
 cycle. Fold first within a round: it is cheap, it is what makes arguments known, and it shrinks a
 function before the inliner measures it against the growth budget.
 
-**A module reads its own bodies raw and its dependencies optimized.** A callee of the module being
-optimized is taken from the raw stage, so what a pass decides never depends on the order functions
-are optimized in. A specialization has no raw artifact, so the table keeps each one as it was
-created, before the worklist optimized it; that copy is its raw stage. A dependency is optimized
-before its dependents and immutable, so inlining and specialization copy its optimized bodies, as
-LLVM, GCC and rustc do: each callee is simplified once, arrives at its final size for the inline
-budget, and its dependents' passes must accept their own output (`mir::pass::stage::body_stage`).
+**Callees are optimized before their callers.** `MirArtifacts::optimize` walks the module's call
+graph (`mir::pass::call_graph`) in strongly connected components, callees first, and publishes a
+component's bodies only once all its members are done. Inlining and specialization read a
+finished callee optimized and any other body of the module raw, so members of a recursive component
+read each other raw and no decision depends on the order within one. A dependency is optimized
+before its dependents and immutable, so its bodies are always read optimized. This is LLVM's CGSCC
+order, also followed by GCC and rustc: each callee is simplified once, arrives at its final size for
+the inline budget, and its callers' passes must accept their own output. A specialization is read as
+it was created, before the worklist optimized it.
 
 **Each module answers for the callees it owns.** `SemanticCallees` (`mir::pass::stage`) resolves a
 callee to its source function and reads its summaries. The module being optimized resolves through
@@ -959,8 +961,8 @@ single synthetic MIR score would assert backend costs the interpreter cannot est
 ## Post-expansion optimization
 
 Physical MIR reuses shared folding, CSE, inlining, storage, control-flow, and stack-region cleanup
-passes. Stage-specific callee lookup reads immutable inputs: the module's raw and its dependencies'
-optimized semantic bodies for semantic optimization, expanded module-local bodies and helpers for physical optimization. Foreign physical
+passes. Stage-specific callee lookup reads immutable inputs: the module's finished or raw and its
+dependencies' optimized semantic bodies for semantic optimization, expanded module-local bodies and helpers for physical optimization. Foreign physical
 bodies remain opaque. Generic specialization and constructive semantic reification do not run on
 physical bodies; arithmetic/boolean identities and constant integer arithmetic need no script
 evaluation. Both stages fold constant wrapping integer addition, subtraction, multiplication and

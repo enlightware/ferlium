@@ -201,6 +201,7 @@ struct StaticAppend {
 /// The result place must be a fresh local with exactly three uses: the materializing call writes
 /// it, `string_push_str` reads it, and its concrete `Value<string>::drop` ends it. Keeping all three
 /// in one block makes replacing the sequence independent of control-flow and cleanup reasoning.
+/// No stack restore may come between the materialization and the append, which now reads the text.
 pub(crate) fn fuse_static_string_appends(
     func: &Function,
     functions: StringFunctions,
@@ -302,6 +303,15 @@ fn plan_static_append(
         || drop.block != materialization.block
         || materialization.index.as_index() >= push.index.as_index()
         || push.index.as_index() >= drop.index.as_index()
+    {
+        return None;
+    }
+    // The append reads the text where the materialization did; a stack restore in between may
+    // free its alloca, as it does around an inlined body.
+    let operations = func.block(push.block).operations();
+    if operations[materialization.index.as_index()..push.index.as_index()]
+        .iter()
+        .any(|operation| matches!(operation.kind, OperationKind::StackRestore))
     {
         return None;
     }
@@ -751,6 +761,96 @@ mod tests {
                 && !body.contains("call std::string_push_str"),
             "the owned literal temporary should disappear:\n{body}"
         );
+    }
+
+    /// An inlined body brackets its allocas in a stack region; its text is gone once it is restored.
+    #[test]
+    fn keeps_a_literal_whose_region_is_restored_before_the_append() {
+        use crate::{
+            Location,
+            hir::{function::ArgConvention, value::LiteralValue},
+            mir::{
+                self, Operation, ParameterKind, builder::FunctionBuilder, terminator::Terminator,
+            },
+            std::string::{StaticStr, static_str_type, string_type},
+            types::r#type::{CallImplType, FnType, Type},
+        };
+
+        use super::{StringFunctions, fuse_static_string_appends};
+
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let functions = StringFunctions::resolve(env);
+        let span = Location::new_synthesized();
+        let call = |callee, operands: Vec<mir::Value>, args: Vec<Type>, ret| {
+            let ty = FnType::new_by_val(args, ret, Default::default());
+            Operation::call(
+                span,
+                mir::Value::Function(callee),
+                operands,
+                CallImplType::value(ty),
+            )
+        };
+
+        let mut builder = FunctionBuilder::new("append".into(), Default::default());
+        let out = mir::Value::Parameter(builder.add_parameter(
+            string_type(),
+            ParameterKind::Parameter(ArgConvention::MutableRef),
+        ));
+        let entry = builder.add_block();
+        let text_value = builder.add_constant(
+            static_str_type(),
+            LiteralValue::new_native(StaticStr::new("abc")),
+            &env,
+        );
+        let rendered = builder
+            .append_operation(entry, Operation::alloca(span, string_type()))
+            .unwrap();
+        let marker = builder
+            .append_operation(entry, Operation::stack_save(span))
+            .unwrap();
+        let text = builder
+            .append_operation(entry, Operation::alloca(span, static_str_type()))
+            .unwrap();
+        builder.append_operation(
+            entry,
+            Operation::store(span, mir::Value::Constant(text_value), text.clone()),
+        );
+        builder.append_operation(
+            entry,
+            call(
+                functions.from_static,
+                vec![text, rendered.clone()],
+                vec![static_str_type()],
+                string_type(),
+            ),
+        );
+        builder.append_operation(entry, Operation::stack_restore(span, marker));
+        let unit = builder
+            .append_operation(entry, Operation::alloca(span, Type::unit()))
+            .unwrap();
+        builder.append_operation(
+            entry,
+            call(
+                functions.push,
+                vec![out, rendered.clone(), unit],
+                vec![string_type(), string_type()],
+                Type::unit(),
+            ),
+        );
+        builder.append_operation(
+            entry,
+            Operation::drop(
+                span,
+                rendered,
+                mir::Value::Function(functions.drop),
+                string_type(),
+            ),
+        );
+        builder.set_terminator(entry, Terminator::ret(span));
+        let function = builder.finish(env);
+
+        assert!(fuse_static_string_appends(&function, functions).is_none());
     }
 
     #[test]
