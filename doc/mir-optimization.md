@@ -134,13 +134,11 @@ scan unless the inliner changed the function.
 
 A trivial variant shell is removed with its stores when no other use survives. A read, move, call
 result, drop, terminator operand or unknown role rejects the complete root. Managed results and
-non-inlined calls remain unchanged. On the runtime workload suite this removes 3,009 optimized
-operations (0.12%); `data_text_roundtrip` activates almost all of it, falling from 139,164 to
-136,183 operations (2.14%) with unchanged peak cells.
+non-inlined calls remain unchanged.
 
 ## Placement rules
 
-Four rules, each of which cost a measurement to establish. They apply to any new pass.
+Four rules, which apply to any new pass.
 
 1. **Internal pass edits restore canonical form but do not cross a verification boundary.** The
    optimizer owns every intermediate body, then verifies final artifacts once after whole-module
@@ -150,7 +148,7 @@ Four rules, each of which cost a measurement to establish. They apply to any new
 2. **A rewrite that cannot enable another rewrite must not grant a round.** `Folded` carries
    `warrants_another_round` for this. Devirtualization sets it false: the callees a dictionary entry
    resolves to are overwhelmingly natives, which cannot be inlined and only fold with known
-   arguments, so granting a round buys a full cycle that finds nothing — measured +19.2%.
+   arguments, so granting a round buys a full cycle that finds nothing.
 3. **Reuse an analysis rather than building a second one.** The dataflow analysis is the cost of most
    rewrites. Devirtualization rides along with folding for this reason. A final devirtualization
    sweep exists only for dictionary-entry callees exposed after the last fold round; it first runs a
@@ -465,9 +463,14 @@ Refused when: the callee is not statically known, has no body, uses an unsupport
 is **generic** — meaning any parameter type is not constant — is recursive (its `check_call_depth` is
 the local evidence), carries `#[inline(never)]`, contains a scoped accessor, or is over budget. Also
 when the call site is on a cleanup path and the callee has error flow of its own, since copying it
-there would shift its failure states by one level. The annotation remains on the source HIR
-definition; the inliner resolves a MIR callee identity back to that definition, and specializations
+there would shift its failure states by one level, and when it is on a failure path. The
+annotation remains on the source HIR definition; the inliner resolves a MIR callee identity back to that definition, and specializations
 inherit the policy of their original function.
+
+**Cost is what the backend emits.** Frame bookkeeping (static slots, stack marks, static field
+offsets) lowers to no instruction, so it is free. A failure path — code that can only end in a call
+returning `never`, such as `panic` — runs at most once: a callee is judged by the cost of its other
+paths, and a call on a failure path is not inlined. Growth still counts everything copied.
 
 A dictionary parameter is *not* itself a reason to refuse: splicing binds `@extra` parameters like
 any other, and a genuinely generic body is already refused for its non-constant parameter types. What
@@ -582,13 +585,7 @@ such as `call add(%x, %y, %x)` without weakening the fresh-result contract for s
 
 Its cheap structural scan runs each optimization round before the inliner prices the body, and once
 more before final DCE. The linear whole-function use census runs only when that scan finds a viable
-candidate, and tracks only participating allocations. The original CSE result-slot shape has no
-dynamically executed site in the corpus; a focused interpreter profile does execute it:
-`(x - y) * (x - y)` falls from six MIR events to four, losing one executed result allocation as well
-as the repeated call. General producer forwarding reduces optimized execution on the eleven-workload
-profile from 3,517,325 to 3,423,626 events (-2.66%), including moves from 59,248 to 18,155 and
-allocations from 812,240 to 767,872. `iter_pipeline` falls from 603,589 to 576,801 events (-4.44%),
-with moves from 14,039 to 645, allocations from 136,187 to 122,793, and peak cells from 59 to 58.
+candidate, and tracks only participating allocations.
 
 ## Register forwarding through cells
 
@@ -651,13 +648,9 @@ becomes a load of it, with no path proof. The arms then store literal flags, the
 forwarding, materialization and finite-domain simplification already consume, and the unread
 variant is collected as a discarded result.
 
-Across the runtime corpus, this variant rule removes 62 dispatches and 302 executed MIR events
-(0.013%): `iter_pipeline` falls from 82,712 to 82,425 and `data_text_roundtrip` from 121,339 to
-121,324, while the other workloads are unchanged. The small result supports keeping the local
-linear proof without extending it into a general scalar-replacement analysis. Structural gates
+The proof stays local and linear rather than a general scalar-replacement analysis. Structural gates
 restrict type-property queries to allocations that receive at least two tagged shells and count
-uses only for tag-extraction results; the complete rule adds 0.07% to standard-library
-MIR-optimization instructions.
+uses only for tag-extraction results.
 
 ## Boolean condition forwarding
 
@@ -670,18 +663,14 @@ The pass walks a boolean back to the register that computes it, counting the neg
 and rewrites the consumer to name that register: a `condbr` swaps its targets when the count is
 odd, and a `comp_eq` against a boolean flips the literal it tests. It removes nothing itself — the
 chain becomes unread, and the dead-representation cleanup shared with tail merging collects the
-cell, its store, its load and any comparison left over. `if not a { .. }` falls from five
-operations to two, and `if not (x < y) { .. }` loses the negation entirely: the branch tests the
-ordering comparison with its arms swapped.
+cell, its store, its load and any comparison left over. `if not (x < y) { .. }` loses the negation
+entirely: the branch tests the ordering comparison with its arms swapped.
 
 **Cost.** The pass is skipped outright unless the body contains a comparison — every negation is
 one, so a body without one has nothing to forward, while a body with a branch would otherwise pay
 for a definition map, a use census and a dominator tree to discover that. The census and the
 dominator tree are built only on the first walk that reaches a cell, so a condition the branch can
-already test directly asks for neither. Measured on std: 24 negations rewritten, optimized std MIR
-from 15,322 to 15,245 operations, for +1.7% of MIR optimization instructions. The gating is most of
-what makes that number small — running the analysis on every body cost +2.9%. The eleven runtime
-workloads move within their own ±0.7% run-to-run spread, since none of them negates in a hot loop.
+already test directly asks for neither.
 
 Two rules carry the proof. **A register is immutable**, so stepping from a comparison to its
 scrutinee needs no reasoning about what happens in between. **A cell is not**, so a cell may be
@@ -748,7 +737,10 @@ removes stranded blocks and DCE collects dead panic storage and cleanup. The pas
 boolean flow has been canonicalized, so an inlined guard reaches it as a `condbr` on the comparison
 itself rather than on a flag stored in the comparison's arms, which the analysis could not relate.
 
-The proof is a forward value-version analysis over affine integer forms and predicates. Direct,
+The proof is a forward value-version analysis over affine integer forms and predicates. Because
+`int` wraps, only an equality is reduced to a difference: an order keeps both sides, since
+`x + 1 < x` holds at the maximum. An offset crosses an order only where it cannot wrap, as a
+non-positive offset from a non-negative value, which is how `len + i < len` follows from `i < 0`. Direct,
 known standard-library calls supply their documented arithmetic, comparison, range and array-length
 semantics. `BuildArray` defines its destination's `len` field as its literal operand count even when
 the element values are unknown; a constant access or matching constant-bounded loop can therefore
@@ -756,14 +748,18 @@ use the local shape fact. A successful checked access refines its normal edge. F
 `array_index`, a non-negative source index can be used directly only when `0 <= index < len` is
 proved. A negative source index instead requires the actual wrapped form `len + index` to be proved
 in that range; the emitted addition is the same known std operation the affine analysis modeled.
-A canonical range loop supplies a non-negative constant-start induction fact, and bounds are
-attached to its yielded cursor only where the flow state also proves `start <= end`.
+A canonical range loop starting at a non-negative constant has the invariant `start <= end ⇒ 0 <=
+cursor`. A `next` call keeps it by its known semantics. An inlined `next` is recognized structurally:
+the invariant is assumed, and each write of the cursor must be shown to keep it, or the induction is
+dropped. An edge whose condition contradicts what is known, or that follows a call returning
+`never`, is dead: nothing flows along it, and the pass turns a branch with a dead edge into a jump.
+That is how an inlined check, and an inlined range step's direction test, disappear.
 Place contents receive fresh symbols after writes and distinct incoming values receive join symbols,
 so a predicate cannot silently survive mutation. Registers that name places are structural SSA
 facts kept outside the flow state.
 
-Only functions containing a relevant known call are admitted. Induction recognition locally
-interprets a loop's construction block, then one reverse-postorder-prioritized fixed point computes
+Only functions containing a relevant known call, a call returning `never` or a range iterator are
+admitted. Induction recognition locally interprets a loop's construction block, then one reverse-postorder-prioritized fixed point computes
 the proof; replay performs the rewrite. Refusing a proof retains the original check. The pass runs
 after the final devirtualization because inlining may expose `array_resolve_index` and may leave a
 whole `array_index`, and immediately before DCE because removing either error edge strands cleanup.
@@ -978,17 +974,17 @@ independently of the semantic MIR setting; the expanded comparison stage is buil
 
 ## Budgets
 
-All in `mir::pass::budget`. A budget change is a user-visible change: the optimization report cites
-the inlining limits by name.
+All in `mir::pass::budget`, where their values are defined. A budget change is a user-visible
+change: the optimization report cites the inlining limits by name.
 
-| budget | value | bounds |
-|---|---:|---|
-| `MAX_ROUNDS` | 4 | the driver's outer loop |
-| `INLINE_CALLEE_OPERATIONS` | 32 | the largest callee inlining will copy |
-| `INLINE_FUNCTION_GROWTH` | 128 | growth beyond the size a function had *before* optimization |
-| `REIFIED_STRING_BYTES` | 64 KiB | immutable text embedded by one constructive string result |
-| `specialization_limit` | `max(512, 4 × declared MIR bodies)` | specializations per module, against the cascade |
-| `owned_argument_variant_limit` | `max(256, 2 × stable source bodies)` | ownership-taking ABI variants per module |
+| budget | bounds |
+|---|---|
+| `MAX_ROUNDS` | the driver's outer loop |
+| `INLINE_CALLEE_COST` | the largest hot cost of a callee inlining will copy |
+| `INLINE_FUNCTION_GROWTH` | cost growth beyond what a function had *before* optimization |
+| `REIFIED_STRING_BYTES` | immutable text embedded by one constructive string result |
+| `specialization_limit` | specializations per module, against the cascade |
+| `owned_argument_variant_limit` | ownership-taking ABI variants per module |
 
 Inlining budgets are per function; generated-variant budgets are per module to cap call-graph
 cascades. Constructive folds reserve their added setup operations against

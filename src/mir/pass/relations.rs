@@ -410,88 +410,99 @@ pub(crate) enum Comparison {
     NotEqual,
 }
 
-/// A comparison against zero.
+/// `left ⋈ right`.
 ///
-/// Every relation is normalized to `difference ⋈ 0` so that `i < len` and `i - len < 0` are one
-/// fact rather than two spellings a consumer would have to reconcile.
+/// Ferlium's `int` wraps, so only an equality may be moved to one side: subtraction is a bijection,
+/// which makes `l == r` and `l - r == 0` one fact, but `x + 1 < x` holds at the maximum where
+/// `1 < 0` never does. An equality is therefore stored as `difference == 0`, with the difference's
+/// sign chosen canonically, and an order keeps both sides as written.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(crate) struct Predicate {
-    pub difference: Affine,
+    pub left: Affine,
     pub comparison: Comparison,
+    pub right: Affine,
 }
 
 impl Predicate {
-    /// `left ⋈ right`, normalized. `None` when the difference is not affine.
+    /// `left ⋈ right`, normalized. `None` when an equality's difference is not affine.
     pub(crate) fn between(left: &Affine, comparison: Comparison, right: &Affine) -> Option<Self> {
-        Some(Self {
-            difference: left.sub(right)?,
-            comparison,
+        Some(match comparison {
+            Comparison::Less | Comparison::LessOrEqual => Self {
+                left: left.clone(),
+                comparison,
+                right: right.clone(),
+            },
+            Comparison::Equal | Comparison::NotEqual => {
+                let difference = left.sub(right)?;
+                let flipped = difference.scale(-1);
+                Self {
+                    left: difference.min(flipped),
+                    comparison,
+                    right: Affine::constant(0),
+                }
+            }
         })
     }
 
-    /// The predicate that holds exactly when this one does not.
-    ///
-    /// Expressed by flipping the difference rather than by widening [`Comparison`] with the mirror
-    /// of every relation: `¬(d < 0)` is `-d ≤ 0`. Keeping one direction is what lets two spellings
-    /// of a fact compare equal, which the fixpoint depends on.
+    /// The predicate that holds exactly when this one does not: `¬(l < r)` is `r <= l`.
     pub(crate) fn negated(&self) -> Self {
-        match self.comparison {
-            Comparison::Less => Self {
-                difference: self.difference.scale(-1),
-                comparison: Comparison::LessOrEqual,
+        let (left, right) = match self.comparison {
+            Comparison::Less | Comparison::LessOrEqual => (&self.right, &self.left),
+            Comparison::Equal | Comparison::NotEqual => (&self.left, &self.right),
+        };
+        Self {
+            left: left.clone(),
+            comparison: match self.comparison {
+                Comparison::Less => Comparison::LessOrEqual,
+                Comparison::LessOrEqual => Comparison::Less,
+                Comparison::Equal => Comparison::NotEqual,
+                Comparison::NotEqual => Comparison::Equal,
             },
-            Comparison::LessOrEqual => Self {
-                difference: self.difference.scale(-1),
-                comparison: Comparison::Less,
-            },
-            Comparison::Equal => Self {
-                difference: self.difference.clone(),
-                comparison: Comparison::NotEqual,
-            },
-            Comparison::NotEqual => Self {
-                difference: self.difference.clone(),
-                comparison: Comparison::Equal,
-            },
+            right: right.clone(),
         }
     }
 
-    /// Whether this holds outright, from its own constant.
+    /// Whether this holds outright: both sides constant, or one form on both.
     fn is_certain(&self) -> Option<bool> {
-        let constant = self.difference.as_constant()?;
+        let (left, right) = match (self.left.as_constant(), self.right.as_constant()) {
+            (Some(left), Some(right)) => (left, right),
+            _ if self.left == self.right => (0, 0),
+            _ => return None,
+        };
         Some(match self.comparison {
-            Comparison::Less => constant < 0,
-            Comparison::LessOrEqual => constant <= 0,
-            Comparison::Equal => constant == 0,
-            Comparison::NotEqual => constant != 0,
+            Comparison::Less => left < right,
+            Comparison::LessOrEqual => left <= right,
+            Comparison::Equal => left == right,
+            Comparison::NotEqual => left != right,
         })
     }
 
     /// Whether holding `self` means `goal` holds too.
     ///
-    /// **Deliberately syntactic beyond the constant case.** The obvious strengthening — `d < 0` and
-    /// `goal - d` a non-positive constant, therefore `goal < 0` — is *unsound* on Ferlium's `int`,
-    /// which wraps: a difference near the bottom of the range plus a negative offset comes back
-    /// round as a positive number. Admitting it needs a proof that neither side overflows, which
-    /// nothing here has. Normalized affine forms make the syntactic test stronger than it sounds:
-    /// two comparisons written over different slots reduce to the same difference whenever their
-    /// values do.
+    /// **Deliberately syntactic.** Shifting both sides of an order by one offset is unsound on a
+    /// wrapping `int`. The one shift allowed is the strictness step: `l < r` puts `l` below the
+    /// maximum and `r` above the minimum, so `l + 1 <= r` and `l <= r - 1` cannot have wrapped.
     fn entails(&self, goal: &Predicate) -> bool {
-        let Some(offset) = goal
-            .difference
-            .sub(&self.difference)
-            .and_then(|difference| difference.as_constant())
-        else {
+        if self == goal {
+            return true;
+        }
+        if self.comparison != Comparison::Less {
             return false;
-        };
-        match (self.comparison, goal.comparison, offset) {
-            (a, b, 0) if a == b => true,
-            // `<` is the stronger of each pair.
-            (Comparison::Less, Comparison::LessOrEqual | Comparison::NotEqual, 0) => true,
-            // The strictness step, which is the one offset the wrapping caveat above does not
-            // forbid: on integers `d < 0` puts `d` at or below `-1`, so `d + 1` is at or below zero
-            // and cannot have come back round to reach it. `x < y` and `x + 1 <= y` are one fact.
-            (Comparison::Less, Comparison::LessOrEqual, 1) => true,
-            _ => false,
+        }
+        let one = Affine::constant(1);
+        match goal.comparison {
+            Comparison::LessOrEqual => {
+                (goal.left == self.left && goal.right == self.right)
+                    || (goal.right == self.right
+                        && self.left.add(&one).as_ref() == Some(&goal.left))
+                    || (goal.left == self.left
+                        && self.right.sub(&one).as_ref() == Some(&goal.right))
+            }
+            Comparison::NotEqual => {
+                Predicate::between(&self.left, Comparison::NotEqual, &self.right).as_ref()
+                    == Some(goal)
+            }
+            Comparison::Less | Comparison::Equal => false,
         }
     }
 }
@@ -624,8 +635,34 @@ impl State {
 
     /// Whether `goal` follows from what is known here.
     pub(crate) fn implies(&self, goal: &Predicate) -> bool {
+        self.holds(goal) || self.holds_by_offset(goal)
+    }
+
+    /// Whether `goal` is certain or entailed by one known fact.
+    fn holds(&self, goal: &Predicate) -> bool {
         goal.is_certain()
             .unwrap_or_else(|| self.known.iter().any(|fact| fact.entails(goal)))
+    }
+
+    /// `r + d ⋈ r` from `0 <= r` and `d ⋈ 0`: a non-positive offset from a non-negative value
+    /// cannot wrap. This is how `len + i < len` follows from `i < 0` for an array's length.
+    fn holds_by_offset(&self, goal: &Predicate) -> bool {
+        if !matches!(goal.comparison, Comparison::Less | Comparison::LessOrEqual) {
+            return false;
+        }
+        let Some(offset) = goal.left.sub(&goal.right) else {
+            return false;
+        };
+        let zero = Affine::constant(0);
+        self.holds(&Predicate {
+            left: zero.clone(),
+            comparison: Comparison::LessOrEqual,
+            right: goal.right.clone(),
+        }) && self.holds(&Predicate {
+            left: offset,
+            comparison: goal.comparison,
+            right: zero,
+        })
     }
 
     /// Records a comparison that holds from here on.
@@ -824,6 +861,30 @@ impl Analysis {
         self.exit_states.get(&block)
     }
 
+    /// Whether the edge from `block` into `successor` is never taken, as a proof: a block the
+    /// analysis did not reach claims nothing.
+    pub(crate) fn edge_is_dead(
+        &mut self,
+        func: &Function,
+        known: &KnownCallees,
+        original_of: &dyn Fn(FunctionId) -> Option<FunctionId>,
+        block: BlockId,
+        successor: BlockId,
+    ) -> bool {
+        let Some(exit) = self.exit_states.get(&block) else {
+            return false;
+        };
+        let context = Context {
+            func,
+            semantics: Semantics { known, original_of },
+            escaped: &self.escaped,
+            types: &self.types,
+            inductions: &self.inductions,
+        };
+        let terminator = &func.block(block).terminator().kind;
+        refine(exit, terminator, successor, &context, &mut self.interner).is_none()
+    }
+
     /// Replays a block from its entry state, handing each operation the state that reaches it.
     ///
     /// The state a rewrite needs is the one at its own call site, which is mid-block and which
@@ -879,6 +940,8 @@ struct Induction {
     /// The cursor's non-negative constant start, retained to state the `start <= end` obligation
     /// that distinguishes an ascending range from a descending one.
     start: Int,
+    /// The one block writing the iterator outside its steps, which dominates every step.
+    construction: BlockId,
 }
 
 /// Everything one analysis run reads and never changes.
@@ -933,6 +996,7 @@ impl Context<'_> {
 ///
 /// Boxed as one closure because both the escape scan and the transfer function ask the same
 /// question, once before the walk and once during it.
+#[derive(Clone, Copy)]
 struct Semantics<'a> {
     known: &'a KnownCallees,
     original_of: &'a dyn Fn(FunctionId) -> Option<FunctionId>,
@@ -962,11 +1026,15 @@ pub(crate) fn worth_analyzing(
     original_of: &dyn Fn(FunctionId) -> Option<FunctionId>,
 ) -> bool {
     let semantics = Semantics { known, original_of };
+    // A diverging call is what an inlined check guards, and a range iterator is what a loop's
+    // induction lives in.
     let candidate = |operation: &Operation| {
-        matches!(
-            semantics.of(operation),
-            Some(KnownCallee::ArrayResolveIndex | KnownCallee::ArrayIndex)
-        )
+        operation.diverges()
+            || matches!(
+                semantics.of(operation),
+                Some(KnownCallee::ArrayResolveIndex | KnownCallee::ArrayIndex)
+            )
+            || matches!(&operation.kind, OperationKind::Alloca { ty } if known.range_iterator(*ty).is_some())
     };
     func.blocks().any(|block| {
         func.block(block).operations().iter().any(candidate)
@@ -1021,25 +1089,108 @@ pub(crate) fn analyze(
         types: &types,
         inductions: &no_inductions,
     };
-    let mut interner = Interner::default();
-    seed_register_places(func, &escaped, &mut interner);
-    let inductions = recognize(&context, &register_places, &mut interner);
-    let settled = run(
-        &Context {
-            inductions: &inductions,
+    // An inlined step is assumed to keep its induction's invariant, then checked against the settled
+    // states. An induction with an unproved step is refuted and the analysis rerun; each rerun
+    // refutes one of finitely many inductions.
+    let mut refuted = FxHashSet::default();
+    loop {
+        let mut interner = Interner::default();
+        seed_register_places(func, &escaped, &mut interner);
+        let mut recognized = recognize(&context, &register_places, &mut interner);
+        recognized
+            .inductions
+            .retain(|root, _| !refuted.contains(root));
+        let context = Context {
+            inductions: &recognized.inductions,
             ..context
-        },
-        interner,
-    );
-
-    Analysis {
-        entry_states: settled.entry_states,
-        exit_states: settled.exit_states,
-        interner: settled.interner,
-        escaped,
-        types,
-        inductions,
+        };
+        let mut settled = run(&context, recognized.dominance.as_ref(), interner);
+        let unproved = unproved_steps(&context, &recognized.steps, &mut settled);
+        if unproved.is_empty() {
+            return Analysis {
+                entry_states: settled.entry_states,
+                exit_states: settled.exit_states,
+                interner: settled.interner,
+                escaped,
+                types,
+                inductions: recognized.inductions,
+            };
+        }
+        refuted.extend(unproved);
     }
+}
+
+/// The inductions whose inlined steps the settled states do not show keeping the invariant.
+///
+/// A step keeps `start <= end ⇒ start <= cursor` when it adds one to a cursor proved below `end`,
+/// which cannot wrap, or when it runs where `end < start`, since the range is never written again
+/// and the implication then holds vacuously. A step the analysis never reaches cannot run.
+fn unproved_steps(
+    context: &Context<'_>,
+    steps: &[(Root, OperationSite)],
+    settled: &mut Run,
+) -> FxHashSet<Root> {
+    let mut unproved = FxHashSet::default();
+    let mut steps: Vec<_> = steps.iter().map(|&(root, step)| (step, root)).collect();
+    steps.sort_unstable_by_key(|(step, _)| (step.block.as_index(), step.index.as_index()));
+    // One replay per block, checking each step as the replay reaches it.
+    for group in steps.chunk_by(|(a, _), (b, _)| a.block == b.block) {
+        let block_id = group[0].0.block;
+        let Some(entry) = settled.entry_states.get(&block_id) else {
+            continue;
+        };
+        let interner = &mut settled.interner;
+        let mut state = entry.clone();
+        let block = context.func.block(block_id);
+        let invoked = match &block.terminator().kind {
+            TerminatorKind::Invoke { operation, .. } => Some(operation),
+            _ => None,
+        };
+        let mut pending = group.iter().peekable();
+        for (index, operation) in block.operations().iter().chain(invoked).enumerate() {
+            if pending.peek().is_none() {
+                break;
+            }
+            // The steps here not already vacuous, with the cursor they must leave one higher.
+            let mut incrementing = Vec::new();
+            while let Some(&(_, root)) = pending.next_if(|(step, _)| step.index.as_index() == index)
+            {
+                let Some(induction) = context.inductions.get(&root) else {
+                    continue;
+                };
+                let iterator = interner.place_root(root);
+                let cursor = interner.place_field(iterator, induction.layout.next);
+                let range = interner.place_field(iterator, induction.layout.range);
+                let end = interner.place_field(range, induction.layout.end);
+                let end = state.place_affine(end, interner);
+                let before = state.place_affine(cursor, interner);
+                let start = Affine::constant(induction.start);
+                let guarded = |predicate: Option<Predicate>| {
+                    predicate.is_some_and(|predicate| state.implies(&predicate))
+                };
+                if guarded(Predicate::between(&end, Comparison::Less, &start)) {
+                    continue;
+                }
+                let below_end = guarded(Predicate::between(&before, Comparison::Less, &end));
+                let incremented = before.add(&Affine::constant(1)).filter(|_| below_end);
+                incrementing.push((root, cursor, incremented));
+            }
+            transfer(
+                operation,
+                site(block_id, index),
+                context,
+                interner,
+                &mut state,
+            );
+            for (root, cursor, incremented) in incrementing {
+                if incremented != Some(state.place_affine(cursor, interner)) {
+                    unproved.insert(root);
+                }
+            }
+        }
+        assert!(pending.peek().is_none(), "a step site names an operation");
+    }
+    unproved
 }
 
 /// One run of the fixpoint.
@@ -1064,7 +1215,7 @@ const MAX_ROUNDS: usize = 64;
 /// header: the back edge's first visit carries facts about the cursor as the construction defined
 /// it, and its second about the cursor as the join defines it. Intersecting those two across
 /// rounds throws away both, and with them every bound the loop was analysed for.
-fn run(context: &Context<'_>, mut interner: Interner) -> Run {
+fn run(context: &Context<'_>, dominance: Option<&Dominance>, mut interner: Interner) -> Run {
     let func = context.func;
     let block_count = func.blocks().count();
     let mut predecessors: Vec<Vec<BlockId>> = vec![Vec::new(); block_count];
@@ -1126,15 +1277,20 @@ fn run(context: &Context<'_>, mut interner: Interner) -> Run {
                     continue;
                 };
                 let terminator = &func.block(*predecessor).terminator().kind;
-                let edge = refine(exit, terminator, block_id, context, &mut interner);
+                let Some(edge) = refine(exit, terminator, block_id, context, &mut interner) else {
+                    continue;
+                };
                 joined = Some(match joined {
                     Some(existing) => rejoin(&existing, &edge, block_id, &mut interner),
                     None => edge.into_owned(),
                 });
             }
-            let Some(joined) = joined else {
+            let Some(mut joined) = joined else {
                 continue;
             };
+            if let Some(dominance) = dominance {
+                state_cursor_invariants(&mut joined, block_id, context, dominance, &mut interner);
+            }
             joined
         };
         if entry_states.get(&block_id) == Some(&entry) && exit_states.contains_key(&block_id) {
@@ -1181,6 +1337,50 @@ fn run(context: &Context<'_>, mut interner: Interner) -> Run {
         entry_states,
         exit_states,
         interner,
+    }
+}
+
+/// States `0 <= cursor` for each induction whose cursor a join merged, where the range is ascending.
+///
+/// Below its construction, `start <= end ⇒ start <= cursor` holds: every step keeps it (see
+/// [`unproved_steps`]). Only a join makes the cursor a value no earlier fact relates to.
+fn state_cursor_invariants(
+    state: &mut State,
+    block: BlockId,
+    context: &Context<'_>,
+    dominance: &Dominance,
+    interner: &mut Interner,
+) {
+    for (root, induction) in context.inductions {
+        let construction = induction.construction.as_index();
+        if construction == block.as_index() || !dominance.dominates(construction, block.as_index())
+        {
+            continue;
+        }
+        let iterator = interner.place_root(*root);
+        let cursor = interner.place_field(iterator, induction.layout.next);
+        let symbol = state.symbol_of(cursor, interner);
+        if symbol != interner.symbol(Symbol::Stored(cursor, DefSite::Join(block))) {
+            continue;
+        }
+        let range = interner.place_field(iterator, induction.layout.range);
+        let end = interner.place_field(range, induction.layout.end);
+        let end = state.place_affine(end, interner);
+        let ascending = Predicate::between(
+            &Affine::constant(induction.start),
+            Comparison::LessOrEqual,
+            &end,
+        );
+        let above_zero = Predicate::between(
+            &Affine::constant(0),
+            Comparison::LessOrEqual,
+            &Affine::symbol(symbol),
+        );
+        if let (Some(ascending), Some(above_zero)) = (ascending, above_zero)
+            && state.implies(&ascending)
+        {
+            state.assume(above_zero);
+        }
     }
 }
 
@@ -1278,7 +1478,7 @@ fn recognize(
     context: &Context<'_>,
     register_places: &PlaceBindings,
     interner: &mut Interner,
-) -> FxHashMap<Root, Induction> {
+) -> Recognized {
     let func = context.func;
     let candidates: Vec<(Root, RangeLayout, bool)> = func
         .blocks()
@@ -1296,7 +1496,7 @@ fn recognize(
         })
         .collect();
     if candidates.is_empty() {
-        return FxHashMap::default();
+        return Recognized::default();
     }
 
     let successor_lists: Vec<Vec<usize>> = func
@@ -1311,11 +1511,19 @@ fn recognize(
         .collect();
     let dominance = Dominance::of(&successor_lists, func.entry().as_index());
 
-    let mut recognized = FxHashMap::default();
+    let mut recognized = Recognized::default();
     for (root, layout, inclusive) in candidates {
-        let Some(construction) =
-            construction_block(context, register_places, root, &dominance, &successor_lists)
-        else {
+        let iterator = interner.place_root(root);
+        let cursor = interner.place_field(iterator, layout.next);
+        let Some((construction, steps)) = construction_block(
+            context,
+            register_places,
+            root,
+            cursor,
+            interner,
+            &dominance,
+            &successor_lists,
+        ) else {
             continue;
         };
         // The shape above proves this one block contains every non-step write to the iterator. A
@@ -1342,8 +1550,6 @@ fn recognize(
                 &mut state,
             );
         }
-        let iterator = interner.place_root(root);
-        let cursor = interner.place_field(iterator, layout.next);
         let range = interner.place_field(iterator, layout.range);
         let lower = interner.place_field(range, layout.start);
         let constant =
@@ -1353,36 +1559,62 @@ fn recognize(
             continue;
         };
         if cursor == lower && cursor >= 0 {
-            recognized.insert(
+            recognized.inductions.insert(
                 root,
                 Induction {
                     layout,
                     inclusive,
                     start: cursor,
+                    construction,
                 },
             );
+            recognized
+                .steps
+                .extend(steps.into_iter().map(|site| (root, site)));
         }
+    }
+    if !recognized.inductions.is_empty() {
+        recognized.dominance = Some(dominance);
     }
     recognized
 }
 
+/// What [`recognize`] found: the inductions, the inlined steps each one still owes a proof for,
+/// and the dominance their invariant is stated under.
+#[derive(Default)]
+struct Recognized {
+    inductions: FxHashMap<Root, Induction>,
+    steps: Vec<(Root, OperationSite)>,
+    dominance: Option<Dominance>,
+}
+
 /// The one block that writes an iterator outside its steps, if the shape [`recognize`] requires
-/// holds.
+/// holds, and the inlined steps among those.
+///
+/// A step is a call to the iterator's `next`, or what inlining leaves of one: a write of the cursor
+/// alone, outside the construction, which [`unproved_steps`] later checks.
 fn construction_block(
     context: &Context<'_>,
     register_places: &PlaceBindings,
     root: Root,
+    cursor: PlaceId,
+    interner: &Interner,
     dominance: &Dominance,
     successor_lists: &[Vec<usize>],
-) -> Option<BlockId> {
+) -> Option<(BlockId, Vec<OperationSite>)> {
     let func = context.func;
     let mut construction: Option<BlockId> = None;
-    let mut steps = Vec::new();
+    let mut calls = Vec::new();
+    let mut cursor_writes = Vec::new();
     for block in func.blocks() {
-        let mut scan = |operation: &Operation| -> bool {
-            let writes = writes_into(operation, root, register_places);
-            if !writes {
-                return true;
+        let operations = func.block(block).operations().iter();
+        let invoked = match &func.block(block).terminator().kind {
+            TerminatorKind::Invoke { operation, .. } => Some(operation),
+            _ => None,
+        };
+        for (index, operation) in operations.chain(invoked).enumerate() {
+            if !writes_into(operation, root, register_places) {
+                continue;
             }
             if context.semantics.of(operation).is_some_and(|known| {
                 matches!(
@@ -1390,30 +1622,29 @@ fn construction_block(
                     KnownCallee::RangeNext | KnownCallee::RangeInclusiveNext
                 )
             }) {
-                steps.push(block);
-                return true;
-            }
-            match construction {
-                Some(existing) if existing != block => false,
-                _ => {
-                    construction = Some(block);
-                    true
+                calls.push(block);
+            } else if writes_only(operation, cursor, root, register_places, interner) {
+                cursor_writes.push(OperationSite {
+                    block,
+                    index: OperationIndex::from_index(index),
+                });
+            } else {
+                match construction {
+                    Some(existing) if existing != block => return None,
+                    _ => construction = Some(block),
                 }
             }
-        };
-        for operation in func.block(block).operations() {
-            if !scan(operation) {
-                return None;
-            }
-        }
-        if let TerminatorKind::Invoke { operation, .. } = &func.block(block).terminator().kind
-            && !scan(operation)
-        {
-            return None;
         }
     }
 
+    // A cursor write in the construction block is part of the construction, which the local
+    // interpretation in `recognize` reads.
     let construction = construction?;
+    cursor_writes.retain(|site| site.block != construction);
+    let steps: Vec<BlockId> = calls
+        .into_iter()
+        .chain(cursor_writes.iter().map(|site| site.block))
+        .collect();
     if steps.is_empty() {
         return None;
     }
@@ -1422,7 +1653,35 @@ fn construction_block(
         .iter()
         .all(|step| dominance.dominates(construction.as_index(), step.as_index()))
         .then_some(())?;
-    (!reaches_construction.contains(&construction.as_index())).then_some(construction)
+    (!reaches_construction.contains(&construction.as_index()))
+        .then_some((construction, cursor_writes))
+}
+
+/// Whether `operation` writes `place` and nothing else inside `root`.
+fn writes_only(
+    operation: &Operation,
+    place: PlaceId,
+    root: Root,
+    register_places: &PlaceBindings,
+    interner: &Interner,
+) -> bool {
+    let names = |operand: &mir::Value| matches!(operand, mir::Value::Register(id) if interner.register_place(*id) == Some(place));
+    let rooted = |operand: &mir::Value| matches!(operand, mir::Value::Register(id) if register_places.root_of_register(*id) == Some(root));
+    match &operation.kind {
+        OperationKind::Store => names(&operation.operands[1]),
+        OperationKind::Memcpy | OperationKind::Move | OperationKind::MoveBytes { .. } => {
+            names(&operation.operands[1]) && !operation.operands.iter().skip(2).any(rooted)
+        }
+        OperationKind::Call { ty, .. } => {
+            call_operands(&operation.operands, ty).is_some_and(|call| {
+                names(call.result)
+                    && !call.arguments.iter().any(|(operand, convention)| {
+                        matches!(convention, ArgConvention::MutableRef) && rooted(operand)
+                    })
+            })
+        }
+        _ => false,
+    }
 }
 
 /// The blocks reachable from any of `from`, following its own edges.
@@ -1500,13 +1759,16 @@ fn writes_into(operation: &Operation, root: Root, register_places: &PlaceBinding
 ///
 /// An `invoke` of a bounds check refines its normal edge with what returning proved, which is
 /// [`resolved_index_bounds`].
+///
+/// `None` when the edge cannot be taken: its condition contradicts what is known, or it is the
+/// normal edge of a call that [diverges](Operation::diverges).
 fn refine<'a>(
     state: &'a State,
     terminator: &TerminatorKind,
     successor: BlockId,
     context: &Context<'_>,
     interner: &mut Interner,
-) -> Cow<'a, State> {
+) -> Option<Cow<'a, State>> {
     // Borrowed on every path that adds nothing, which is most edges: a state is several maps, and
     // cloning one per edge per visit was pure waste.
     let assumed = match terminator {
@@ -1516,7 +1778,7 @@ fn refine<'a>(
             else_target,
         } => {
             if then_target == else_target {
-                return Cow::Borrowed(state);
+                return Some(Cow::Borrowed(state));
             }
             match condition_fact(state, condition, interner) {
                 Some(Fact::Truth(predicate)) => vec![if successor == *then_target {
@@ -1525,7 +1787,7 @@ fn refine<'a>(
                     predicate.negated()
                 }],
                 Some(Fact::Implies(predicates)) if successor == *then_target => predicates,
-                _ => return Cow::Borrowed(state),
+                _ => return Some(Cow::Borrowed(state)),
             }
         }
         TerminatorKind::SwitchVariant {
@@ -1534,7 +1796,7 @@ fn refine<'a>(
             default,
         } => {
             let Some(scrutinee) = condition_fact(state, tag, interner) else {
-                return Cow::Borrowed(state);
+                return Some(Cow::Borrowed(state));
             };
             let matching: Vec<_> = cases
                 .iter()
@@ -1544,45 +1806,56 @@ fn refine<'a>(
                 match variant_case_fact(&scrutinee, matching[0].0) {
                     Some(Fact::Truth(predicate)) => vec![predicate],
                     Some(Fact::Implies(predicates)) => predicates,
-                    _ => return Cow::Borrowed(state),
+                    _ => return Some(Cow::Borrowed(state)),
                 }
             } else if *default == successor && matching.is_empty() && !cases.is_empty() {
                 let mut predicates = Vec::with_capacity(cases.len());
                 for (case, _) in cases {
                     match variant_case_fact(&scrutinee, *case) {
                         Some(Fact::Truth(predicate)) => predicates.push(predicate.negated()),
-                        _ => return Cow::Borrowed(state),
+                        _ => return Some(Cow::Borrowed(state)),
                     }
                 }
                 predicates
             } else {
-                return Cow::Borrowed(state);
+                return Some(Cow::Borrowed(state));
             }
         }
+        TerminatorKind::Invoke {
+            operation, normal, ..
+        } if successor == *normal && operation.diverges() => return None,
         TerminatorKind::Invoke {
             operation, normal, ..
         } if successor == *normal => match context.semantics.of(operation) {
             Some(KnownCallee::ArrayResolveIndex) => {
                 match resolved_index_bounds(state, operation, context, interner) {
                     Some(predicates) => predicates,
-                    None => return Cow::Borrowed(state),
+                    None => return Some(Cow::Borrowed(state)),
                 }
             }
             Some(KnownCallee::ArrayIndex) => {
                 match checked_array_index_bounds(state, operation, context, interner) {
                     Some(predicates) => predicates,
-                    None => return Cow::Borrowed(state),
+                    None => return Some(Cow::Borrowed(state)),
                 }
             }
-            _ => return Cow::Borrowed(state),
+            _ => return Some(Cow::Borrowed(state)),
         },
-        _ => return Cow::Borrowed(state),
+        _ => return Some(Cow::Borrowed(state)),
     };
+    // An edge whose condition contradicts what is known is never taken. Nothing flows along it, so
+    // a join below does not lose what the feasible edges agree on.
+    if assumed
+        .iter()
+        .any(|predicate| state.implies(&predicate.negated()))
+    {
+        return None;
+    }
     let mut refined = state.clone();
     for predicate in assumed {
         refined.assume(predicate);
     }
-    Cow::Owned(refined)
+    Some(Cow::Owned(refined))
 }
 
 /// What a bounds check proves by returning at all, for the edge along which it returned.
@@ -2465,7 +2738,7 @@ mod tests {
     /// A comparison must survive the call producing an `Ordering`, tag extraction and semantic
     /// switch, and arrive on the selected edge as one predicate.
     #[test]
-    fn a_comparison_becomes_a_predicate_on_the_difference() {
+    fn a_comparison_becomes_a_predicate_between_its_sides() {
         with_analysis(
             "fn below(i: int, n: int) -> int { if i < n { 1 } else { 0 } }",
             "below",
@@ -2480,8 +2753,9 @@ mod tests {
                     predicates
                         .iter()
                         .any(|predicate| predicate.comparison == Comparison::Less
-                            && predicate.difference.terms().len() == 2),
-                    "`i < n` must become `i - n < 0`, got {predicates:?}"
+                            && predicate.left.as_symbol().is_some()
+                            && predicate.right.as_symbol().is_some()),
+                    "`i < n` must become a predicate between `i` and `n`, got {predicates:?}"
                 );
             },
         );
@@ -2571,7 +2845,8 @@ mod tests {
             known
                 .iter()
                 .any(|predicate| predicate.comparison == Comparison::Less
-                    && predicate.difference.terms().len() == 2),
+                    && predicate.left.as_symbol().is_some()
+                    && predicate.right.as_symbol().is_some()),
             "the `Less` edge must know `left < right`, got {known:?}"
         );
     }
@@ -2631,7 +2906,7 @@ mod tests {
 
     /// The loop this whole item exists for: the index arrives from an un-inlined
     /// `Iterator::next`, whose iterator is a `&mut` argument. Folding has to escape that place;
-    /// this analysis must not, or the induction variable is out of reach before step 3 starts.
+    /// this analysis must not, or the induction variable is out of reach.
     #[test]
     fn a_known_callees_mutable_argument_stays_tracked() {
         with_analysis(
@@ -2711,54 +2986,101 @@ mod tests {
         );
     }
 
-    /// The negation has to be expressible in the one direction predicates are normalized to, or a
-    /// guard would refine only the arm it was written for.
+    /// The negation of an order swaps its sides, and negating twice gives back the original, or an
+    /// arm reached twice would drift.
     #[test]
-    fn negating_a_predicate_flips_the_difference_rather_than_the_relation() {
-        let difference = Affine {
+    fn negating_an_order_swaps_its_sides() {
+        let left = Affine {
             constant: 3,
             terms: vec![(SymbolId::new(0), 1)],
         };
-        let less = Predicate {
-            difference: difference.clone(),
-            comparison: Comparison::Less,
-        };
+        let right = Affine::symbol(SymbolId::new(1));
+        let less = Predicate::between(&left, Comparison::Less, &right).unwrap();
         let negated = less.negated();
-        assert_eq!(negated.comparison, Comparison::LessOrEqual);
-        assert_eq!(negated.difference, difference.scale(-1));
         assert_eq!(
-            negated.negated(),
-            less,
-            "negation must be its own inverse, or an arm reached twice would drift"
+            negated,
+            Predicate::between(&right, Comparison::LessOrEqual, &left).unwrap()
         );
+        assert_eq!(negated.negated(), less);
+        let equal = Predicate::between(&left, Comparison::Equal, &right).unwrap();
+        assert_eq!(
+            equal,
+            Predicate::between(&right, Comparison::Equal, &left).unwrap(),
+            "an equality is one fact whichever side is written first"
+        );
+        assert_eq!(equal.negated().negated(), equal);
     }
 
-    /// A goal decided by its own constant needs nothing assumed, and one that is not must not be
+    /// A goal decided by its own constants needs nothing assumed, and one that is not must not be
     /// waved through by an unrelated fact.
     #[test]
     fn entailment_refuses_what_it_cannot_show() {
         let mut state = State::default();
-        let below = |constant| Predicate {
-            difference: Affine::constant(constant),
-            comparison: Comparison::Less,
+        let zero = Affine::constant(0);
+        let below = |constant| {
+            Predicate::between(&Affine::constant(constant), Comparison::Less, &zero).unwrap()
         };
         assert!(state.implies(&below(-1)), "`-1 < 0` holds on its own");
         assert!(!state.implies(&below(0)), "`0 < 0` does not");
 
-        let goal = Predicate {
-            difference: Affine::symbol(SymbolId::new(0)),
-            comparison: Comparison::Less,
-        };
+        let symbol = |index| Affine::symbol(SymbolId::new(index));
+        let goal = Predicate::between(&symbol(0), Comparison::Less, &zero).unwrap();
         assert!(!state.implies(&goal), "nothing is known about the symbol");
-        state.assume(Predicate {
-            difference: Affine::symbol(SymbolId::new(1)),
-            comparison: Comparison::Less,
-        });
+        state.assume(Predicate::between(&symbol(1), Comparison::Less, &zero).unwrap());
         assert!(
             !state.implies(&goal),
             "a fact about another symbol must not decide this one"
         );
         state.assume(goal.clone());
+        assert!(state.implies(&goal));
+    }
+
+    /// `int` wraps, so an order is not decided by the difference of its sides: `x + 1 < x` holds at
+    /// the maximum, and `0 <= MIN` never does although `0 - MIN` wraps to `MIN`.
+    #[test]
+    fn an_order_is_not_decided_by_a_wrapping_difference() {
+        let state = State::default();
+        let x = Affine::symbol(SymbolId::new(0));
+        let successor = x.add(&Affine::constant(1)).unwrap();
+        let wrapped = Predicate::between(&successor, Comparison::Less, &x).unwrap();
+        assert!(!state.implies(&wrapped));
+        assert!(!state.implies(&wrapped.negated()));
+        let minimum = Predicate::between(
+            &Affine::constant(0),
+            Comparison::LessOrEqual,
+            &Affine::constant(Int::MIN),
+        )
+        .unwrap();
+        assert!(!state.implies(&minimum));
+        assert!(state.implies(&minimum.negated()));
+
+        let known =
+            Predicate::between(&x, Comparison::Less, &Affine::symbol(SymbolId::new(1))).unwrap();
+        let shifted = Predicate::between(
+            &successor,
+            Comparison::Less,
+            &Affine::symbol(SymbolId::new(1))
+                .add(&Affine::constant(1))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !known.entails(&shifted),
+            "`x < y` must not give `x + 1 < y + 1`, which fails at `y` the maximum"
+        );
+    }
+
+    /// `len + i < len` needs both `i < 0` and `0 <= len`: without the second, the sum can wrap.
+    #[test]
+    fn a_negative_offset_stays_below_a_non_negative_base() {
+        let zero = Affine::constant(0);
+        let len = Affine::symbol(SymbolId::new(0));
+        let i = Affine::symbol(SymbolId::new(1));
+        let goal = Predicate::between(&len.add(&i).unwrap(), Comparison::Less, &len).unwrap();
+        let mut state = State::default();
+        state.assume(Predicate::between(&i, Comparison::Less, &zero).unwrap());
+        assert!(!state.implies(&goal), "`len` may be negative");
+        state.assume(Predicate::between(&zero, Comparison::LessOrEqual, &len).unwrap());
         assert!(state.implies(&goal));
     }
 
@@ -2773,55 +3095,61 @@ mod tests {
     /// range needs to count upwards.
     const LOOP_FROM_ONE: &str = "fn total(mut a: [int]) -> int { let mut t = a[0]; for i in 1..len(a) { t = t + a[i] }; t }";
 
-    /// Whether any block is entered holding a bound on a yielded cursor from both sides, which is
-    /// what a range loop has to establish for its body's check to be removable.
+    /// Whether any block is entered knowing `0 <= x` and `x < end` for one value `x`: the bounds a
+    /// range loop's body needs for its check to be removable, whether its step is a call or inlined.
     fn bounds_its_cursor(function: &Function, analysis: &Analysis) -> bool {
         function.blocks().any(|block| {
-            analysis.exit_state(block).is_some_and(|state| {
-                state
-                    .facts
-                    .values()
-                    .any(|fact| matches!(fact, Fact::Yield { present_when, .. } if present_when.len() == 2))
+            analysis.entry_state(block).is_some_and(|state| {
+                state.known().iter().any(|lower| {
+                    lower.comparison == Comparison::LessOrEqual
+                        && lower.left.as_constant() == Some(0)
+                        && lower.right.as_symbol().is_some_and(|value| {
+                            state.known().iter().any(|upper| {
+                                upper.comparison == Comparison::Less
+                                    && upper.left.as_symbol() == Some(value)
+                            })
+                        })
+                })
             })
         })
     }
 
-    /// The whole point of steps 1 through 3: a step of a zero-based range loop yields a value the
-    /// analysis can bound from both sides, and the loop body is entered knowing both bounds.
-    ///
-    /// Stated over the facts rather than over the check the loop contains, because removing that
-    /// check is the consumer's job and these facts are what it will ask for.
+    /// The accesses in `function` that still check their index, including inlined checks.
+    fn checked_accesses(function: &Function, known: &KnownCallees) -> usize {
+        let checked = |operation: &Operation| {
+            operation.diverges()
+                || matches!(
+                    resolved_callee(operation, known, &|_| None),
+                    Some(KnownCallee::ArrayResolveIndex | KnownCallee::ArrayIndex)
+                )
+        };
+        function
+            .blocks()
+            .map(|block| {
+                let block = function.block(block);
+                let invoked = match &block.terminator().kind {
+                    TerminatorKind::Invoke { operation, .. } => Some(operation),
+                    _ => None,
+                };
+                block
+                    .operations()
+                    .iter()
+                    .chain(invoked)
+                    .filter(|operation| checked(operation))
+                    .count()
+            })
+            .sum()
+    }
+
+    /// The body of a zero-based range loop is entered knowing its cursor bounded from both sides.
+    /// With the access's check gone, only the induction can have said so.
     #[test]
-    fn a_zero_based_range_loop_bounds_what_it_yields() {
-        with_analysis(LOOP, "total", |function, analysis, _| {
-            let yielded = function.blocks().any(|block| {
-                analysis.exit_state(block).is_some_and(|state| {
-                    state.facts.values().any(|fact| {
-                        matches!(fact, Fact::Yield { value, present_when }
-                        if present_when.len() == 2
-                            && present_when.iter().any(|predicate| {
-                                predicate.comparison == Comparison::LessOrEqual
-                                    && predicate.difference.terms() == [(*value, -1)]
-                            }))
-                    })
-                })
-            });
+    fn a_zero_based_range_loop_bounds_its_cursor() {
+        with_analysis(LOOP, "total", |function, analysis, known| {
+            assert_eq!(checked_accesses(function, known), 0);
             assert!(
-                yielded,
-                "a step must yield a value known non-negative when the option is `Some`"
-            );
-            let bounded = function.blocks().any(|block| {
-                analysis.entry_state(block).is_some_and(|state| {
-                    state.known().len() >= 3
-                        && state
-                            .known()
-                            .iter()
-                            .any(|predicate| predicate.comparison == Comparison::Less)
-                })
-            });
-            assert!(
-                bounded,
-                "the loop body must be entered knowing both bounds and the length's sign"
+                bounds_its_cursor(function, analysis),
+                "the loop body must be entered knowing `0 <= i < len`"
             );
         });
     }
@@ -2855,38 +3183,44 @@ mod tests {
                     analysis.entry_state(block).is_some_and(|state| {
                         state.known().iter().any(|predicate| {
                             predicate.comparison == Comparison::Less
-                                && predicate.difference.constant == 0
-                                && predicate.difference.terms().len() == 1
-                                && predicate.difference.terms()[0].1 == -1
+                                && predicate.left.as_constant() == Some(0)
+                                && predicate.right.as_symbol().is_some()
                         })
                     })
                 });
                 assert!(
                     bounded,
-                    "returning from `a[0]` must leave `0 - len < 0` known below it"
+                    "returning from `a[0]` must leave `0 < len` known below it"
                 );
             },
         );
     }
 
-    /// Steps 3b and this one together: the start need only be a non-negative constant. The seed's
-    /// successful check proves `0 < len`, which entails the `1 <= len` ascending obligation.
+    /// The start need only be a non-negative constant. The seed's successful check proves
+    /// `0 < len`, which entails the `1 <= len` ascending obligation, so only the seed stays checked.
     #[test]
     fn a_loop_from_one_is_bounded_by_the_check_that_preceded_it() {
-        with_analysis(LOOP_FROM_ONE, "total", |function, analysis, _| {
+        let mut seed_checks = 0;
+        with_analysis(
+            "fn first(mut a: [int]) -> int { a[0] }",
+            "first",
+            |function, _, known| seed_checks = checked_accesses(function, known),
+        );
+        with_analysis(LOOP_FROM_ONE, "total", |function, analysis, known| {
+            assert_eq!(checked_accesses(function, known), seed_checks);
             assert!(
                 bounds_its_cursor(function, analysis),
                 "`1..len(a)` after `a[0]` must bound its cursor from both sides"
             );
         });
         // The same loop without the seed: nothing says `n` is above the start, so the range may
-        // count down and neither bound holds.
+        // count down and the access keeps its check.
         with_analysis(
             "fn total(mut a: [int], n: int) -> int { let mut t = 0; for i in 1..n { t = t + a[i] }; t }",
             "total",
-            |function, analysis, _| {
+            |function, _, known| {
                 assert!(
-                    !bounds_its_cursor(function, analysis),
+                    checked_accesses(function, known) > 0,
                     "a range from one to an unknown end must not be assumed ascending"
                 );
             },

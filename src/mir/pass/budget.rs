@@ -30,16 +30,16 @@
 /// being the monotone lattice and the inlining growth budget).
 pub const MAX_ROUNDS: usize = 4;
 
-/// The largest callee, in operations, that inlining will copy into a caller.
+/// The largest [hot cost](super::cost::hot_cost) of a callee inlining will copy into a caller.
 ///
 /// Generous rather than tuned: the point of inlining here is to hand folding a body whose arguments
 /// are known, and the callees that pays off for are small — accessors, arithmetic helpers, trait
 /// method bodies. A cap that a routine edit can cross would make the speedup fragile, which is the
 /// stability requirement that a user who annotates a hot path must not lose the optimization to
 /// an unrelated edit.
-pub const INLINE_CALLEE_OPERATIONS: usize = 32;
+pub const INLINE_CALLEE_COST: usize = 32;
 
-/// How much inlining may grow one function, in operations, beyond the size it had *before*
+/// How much inlining may grow one function's [`cost`](super::cost) beyond the cost it had *before*
 /// optimization started.
 ///
 /// Bounds the whole of optimization rather than each site or each round: a function full of small

@@ -1275,7 +1275,7 @@ mod tests {
     #[test]
     fn specialization_leaves_no_unread_evidence_construction() {
         let module = optimized(
-            "fn sum2(seq) { let mut sum = 0; for i in seq { sum += i * i }; sum }\n\
+            "#[inline(never)] fn sum2(seq) { let mut sum = 0; for i in seq { sum += i * i }; sum }\n\
              fn range_sum2(start, end) { sum2(start..end) }",
         );
         let body = body_of(&module, "sum2#spec");

@@ -36,6 +36,7 @@ use ustr::{Ustr, ustr};
 use super::{
     OptimizationStage,
     budget::INLINE_FUNCTION_GROWTH,
+    cost,
     dataflow::{self, Analysis, Const, Fact, Root, State},
     known_callee::{KnownCallee, KnownCallees},
     site::OperationIndex,
@@ -774,7 +775,7 @@ fn plan_folds_with(
     };
     let analysis = &context.analysis;
     let mut plan = Plan::default();
-    let mut planned_size = func.operation_count();
+    let mut planned_size = cost::cost(func);
 
     for block in func.blocks() {
         // Stepping from the block's entry state, rather than only reading it, lets a fold teach the
@@ -864,7 +865,7 @@ fn plan_folds_with(
                 {
                     if reserve_growth(
                         &mut planned_size,
-                        0,
+                        1,
                         reification_operation_count(&result),
                         original_size,
                     ) {
@@ -1666,7 +1667,11 @@ mod tests {
                 let [entry, call] = pair else {
                     return None;
                 };
-                if entry.contains("= dict_entry ") && call.starts_with("call %r") {
+                // An entry of a parameter's dictionary stays indirect; only a constant one resolves.
+                if entry.contains("= dict_entry ")
+                    && entry.contains(" from dict(")
+                    && call.starts_with("call %r")
+                {
                     Some(format!("{entry}\n{call}"))
                 } else {
                     None

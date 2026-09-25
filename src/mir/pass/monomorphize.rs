@@ -44,7 +44,7 @@ use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use ustr::{Ustr, ustr};
 
 use super::{
-    budget,
+    budget, cost,
     site::{OperationIndex, OperationSite},
     stage::SemanticCallees,
 };
@@ -1628,7 +1628,7 @@ fn worth_specializing<Ty: TypeLike>(
         }
     }
 
-    if reads_bound_evidence && body.operation_count() <= budget::INLINE_CALLEE_OPERATIONS {
+    if reads_bound_evidence && cost::hot_cost(body) <= budget::INLINE_CALLEE_COST {
         return true;
     }
 
@@ -1829,10 +1829,14 @@ mod tests {
         // original schemes; a caller with entirely static evidence may specialize the thunk, but
         // the module-owned open definition itself must remain valid for dynamic captures.
         let optimized = session.emit_mir_module(module_id);
+        let thunk = optimized
+            .split("fn std::Value<[std::int]>::clone#impl:")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn ").next())
+            .expect("the open concrete thunk must remain");
         assert!(
-            optimized.contains("fn std::Value<[std::int]>::clone#impl:")
-                && optimized.contains("call std::Value<[A]>::clone#impl:"),
-            "the open concrete thunk must retain its evidence-forwarding call:\n{optimized}"
+            thunk.contains("from %p1"),
+            "the open concrete thunk must still read its element evidence:\n{thunk}"
         );
     }
 
@@ -2036,7 +2040,7 @@ mod tests {
              fn use_it(x: string) -> string { outer(x) }",
         );
         let mut site = site(&session, module, "use_it", "outer");
-        let padding = budget::INLINE_CALLEE_OPERATIONS + 1 - site.body.operation_count();
+        let padding = budget::INLINE_CALLEE_COST + 1 - cost::hot_cost(&site.body);
         let entry = mir::BlockId::from_index(0);
         let span = site.body.block(entry).operations()[0].span;
         let mut edit = FunctionEdit::new(site.body);
@@ -2045,7 +2049,7 @@ mod tests {
             .extend((0..padding).map(|_| Operation::check_fuel(span)));
         site.body = edit.finish(session.module_env());
 
-        assert!(site.body.operation_count() > budget::INLINE_CALLEE_OPERATIONS);
+        assert!(cost::hot_cost(&site.body) > budget::INLINE_CALLEE_COST);
         assert!(worth_specializing(
             &site.body,
             &site.scheme,
@@ -2475,10 +2479,12 @@ mod tests {
             "append",
             "fn grow(n: int) -> [int] { let mut a = []; array_append(a, n); a }",
         );
+        // The specialization, or `grow` once that specialization is inlined into it.
         let specialized = module
             .split("fn array_append#spec:[int]")
             .nth(1)
-            .expect("array_append must specialize at int, or this test proves nothing")
+            .or_else(|| module.split("fn grow(").nth(1))
+            .expect("the module declares `grow`")
             .split("\nfn ")
             .next()
             .expect("the specialization has a body");
@@ -2622,7 +2628,7 @@ mod tests {
         session.set_mir_optimization(MirOptimization::Enabled);
         // Compiling at all is the assertion: every specialized body goes through `verify_function`,
         // which is what rejected this before `demote_infallible_invokes` existed. The arms are
-        // padded past `INLINE_CALLEE_OPERATIONS` so the copy survives into the final artifact and is
+        // padded past `INLINE_CALLEE_COST` so the copy survives into the final artifact and is
         // verified in its own right — inlined into its only caller, it would be pruned as
         // unreachable and only the splice would be checked.
         let module = session.emit_mir(

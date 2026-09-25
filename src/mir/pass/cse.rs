@@ -1628,7 +1628,7 @@ mod tests {
             "swap#spec:[int]",
         );
         assert_eq!(
-            body.matches("call std::array_resolve_index").count(),
+            body.matches("call std::panic(").count(),
             2,
             "one bounds/index computation per distinct subscript:\n{body}"
         );
@@ -1650,7 +1650,7 @@ mod tests {
             "around_append",
         );
         assert_eq!(
-            body.matches("call std::array_resolve_index").count(),
+            body.matches("call std::panic(").count(),
             2,
             "append may reallocate the array, so the second address must be recomputed:\n{body}"
         );

@@ -37,6 +37,7 @@ pub(crate) mod branch_forward;
 pub mod budget;
 pub(crate) mod call_graph;
 pub(crate) mod copy_forward;
+pub(crate) mod cost;
 pub(crate) mod cse;
 pub(crate) mod dataflow;
 pub(crate) mod dce;
@@ -212,7 +213,7 @@ pub(crate) fn optimize_function(
     context: &OptimizationContext,
     stats: &mut OptimizationStats,
 ) -> Function {
-    let original_size = function.operation_count();
+    let original_size = cost::cost(function);
     let mut current: Option<Function> = None;
     let mut rounds_exhausted = true;
     let mut inlined_any = false;

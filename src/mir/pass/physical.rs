@@ -12,7 +12,7 @@ use crate::{
 use super::{
     OptimizationStage, branch_forward, budget,
     call_graph::CallGraph,
-    copy_forward, cse, dce, dead_store, fold, inline,
+    copy_forward, cost, cse, dce, dead_store, fold, inline,
     known_callee::KnownCallees,
     peephole,
     provenance::{AddressorSummaries, AddressorSummary},
@@ -51,7 +51,7 @@ pub(crate) fn optimize(
         .iter()
         .map(|body| {
             body.as_ref().map(|body| {
-                let original_size = body.operation_count();
+                let original_size = cost::cost(body);
                 let mut current = body.clone();
                 for _ in 0..budget::MAX_ROUNDS {
                     let mut changed = false;

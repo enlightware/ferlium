@@ -14,57 +14,10 @@
 //! library, is rewritten through `FunctionEdit`, which runs the full MIR verifier on the result in
 //! test builds. See `doc/plans/partial-evaluation.md`.
 
-use ferlium::{CompilerSession, MirOptimization, mir::pass::budget::INLINE_FUNCTION_GROWTH};
+use ferlium::{CompilerSession, MirOptimization};
 
-/// Snippets chosen to cover the operation and control-flow forms a rewrite must carry through:
-/// calls, generics and dictionary passing, closures, aggregates, variants and matching, loops,
-/// mutation, strings, and fallible operations.
-const CORPUS: &[(&str, &str)] = &[
-    ("literal", "fn main() -> int { 42 }"),
-    ("arithmetic", "fn main() -> int { let x = 2 + 3; x * 7 }"),
-    (
-        "generic",
-        "fn twice(f, x) { f(f(x)) }\nfn main() -> int { twice(|v| v + 1, 0) }",
-    ),
-    (
-        "conditional",
-        "fn main() -> int { let mut n = 0; if n == 0 { n = 1 } else { n = 2 }; n }",
-    ),
-    (
-        "loop",
-        "fn main() -> int { let mut sum = 0; for i in 0..5 { sum = sum + i }; sum }",
-    ),
-    (
-        "tuple_and_record",
-        "fn main() -> int { let t = (1, 2); let r = { a: t.0, b: t.1 }; r.a + r.b }",
-    ),
-    (
-        "variant_match",
-        "fn classify(v) { match v { Some(x) => x, None => 0 } }\n\
-         fn main() -> int { classify(Some(3)) + classify(None) }",
-    ),
-    (
-        "string",
-        "fn main() -> string { let s = \"ab\"; string_concat(s, \"cd\") }",
-    ),
-    (
-        "closure_capture",
-        "fn main() -> int { let n = 5; let add = |x| x + n; add(1) + add(2) }",
-    ),
-    (
-        "array",
-        "fn main() -> int { let mut a = [1, 2, 3]; a[0] = 10; a[0] + a[2] }",
-    ),
-    // Indexing is source-fallible, so this lowers through `invoke` terminators and error edges.
-    ("invoke", "fn main() -> int { let a = [1, 2]; a[0] + a[1] }"),
-    // A fallible call whose arguments *are* known: it is a fold candidate in every respect except
-    // that folding it would have to rewrite the `invoke` terminator's control flow.
-    ("invoke_constant", "fn main() -> int { idiv(6, 3) }"),
-    (
-        "recursion",
-        "fn fact(n) { if n <= 1 { 1 } else { n * fact(n - 1) } }\nfn main() -> int { fact(5) }",
-    ),
-];
+/// Snippets covering the forms a rewrite must carry through, shared with the crate's budget test.
+const CORPUS: &[(&str, &str)] = include!("harness/mir_corpus.rs");
 
 fn session(optimization: MirOptimization) -> CompilerSession {
     let mut session = CompilerSession::new();
@@ -77,46 +30,13 @@ fn emit(name: &str, src: &str, optimization: MirOptimization) -> String {
     session(optimization).emit_mir(name, src)
 }
 
-/// Optimization respects its growth budget.
-///
-/// Inlining copies a callee's body into its caller, and constructive rewrites can introduce a few
-/// setup operations, so "optimization never adds anything" is not true. What remains true, and is
-/// what the stability requirement rests on, is that a function grows by at most
-/// `INLINE_FUNCTION_GROWTH` operations over the whole of optimization, not per round or per site.
-///
-/// A panic here means a pass produced a function the verifier rejects — which is the real point of
-/// running this over the whole corpus and the whole standard library.
+/// Every corpus snippet optimizes. A panic here means a pass produced a function the verifier
+/// rejects, which is the point of running this over the whole corpus and the standard library.
 #[test]
-fn optimization_respects_its_growth_budget() {
+fn every_corpus_snippet_optimizes() {
     for (name, src) in CORPUS {
-        let raw = operations_per_function(&emit(name, src, MirOptimization::Disabled));
-        let optimized = operations_per_function(&emit(name, src, MirOptimization::Enabled));
-        for (function, before) in raw {
-            let Some(after) = optimized.get(&function) else {
-                continue;
-            };
-            assert!(
-                *after <= before + INLINE_FUNCTION_GROWTH,
-                "optimizing `{name}` grew `{function}` from {before} to {after}, beyond the \
-                 budget of {INLINE_FUNCTION_GROWTH}"
-            );
-        }
+        emit(name, src, MirOptimization::Enabled);
     }
-}
-
-/// Operation counts per rendered function, keyed by signature line.
-fn operations_per_function(mir: &str) -> std::collections::HashMap<String, usize> {
-    let mut counts = std::collections::HashMap::new();
-    let mut current = String::new();
-    for line in mir.lines() {
-        if let Some(signature) = line.strip_prefix("fn ") {
-            current = signature.split('(').next().unwrap_or(signature).to_string();
-            counts.entry(current.clone()).or_insert(0);
-        } else if line.starts_with("    ") && !line.trim_start().starts_with("b") {
-            *counts.entry(current.clone()).or_insert(0) += 1;
-        }
-    }
-    counts
 }
 
 /// The folding gate from `doc/plans/partial-evaluation.md`: constant arithmetic collapses into a

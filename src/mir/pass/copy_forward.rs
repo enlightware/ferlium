@@ -1099,7 +1099,14 @@ mod tests {
     #[test]
     fn a_copy_immediately_moved_to_its_destination_skips_staging_storage() {
         let module = optimized("[1] |> map(|x| x)");
-        let lines: Vec<_> = module.lines().map(str::trim).collect();
+        // The array clone's element loop transfers between two loaded element addresses, which
+        // this pass cannot prove disjoint, so it keeps its staging slot.
+        let lines: Vec<_> = module
+            .split("\nfn ")
+            .filter(|function| !function.starts_with("std::Value<[std::int]>::clone"))
+            .flat_map(str::lines)
+            .map(str::trim)
+            .collect();
         let staged = lines.windows(2).any(|pair| {
             let Some((_, temporary)) = pair[0]
                 .strip_prefix("memcpy ")

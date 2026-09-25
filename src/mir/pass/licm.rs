@@ -819,10 +819,12 @@ mod tests {
 
     #[test]
     fn hoists_a_proved_terminating_script_call() {
-        // Larger than the inliner's per-callee operation budget, so the direct script call reaches
-        // LICM. Its raw MIR is nevertheless an acyclic call DAG and proves `will_return`.
+        // Costlier than the inliner's per-callee budget, so the direct script call reaches LICM.
+        // Its raw MIR is nevertheless an acyclic call DAG and proves `will_return`.
         let module = optimized(
             "fn large_sum(x: int) -> int {\n\
+                 x + x + x + x + x + x + x + x + x + x +\n\
+                 x + x + x + x + x + x + x + x + x + x +\n\
                  x + x + x + x + x + x + x + x + x + x +\n\
                  x + x + x + x + x + x + x + x + x + x\n\
              }\n\

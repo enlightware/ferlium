@@ -85,6 +85,11 @@ impl Operation {
         (kind, operands)
     }
 
+    /// Whether this is a call that cannot return normally, its result type being `never`.
+    pub fn diverges(&self) -> bool {
+        matches!(&self.kind, OperationKind::Call { ty, .. } if ty.fn_ty.ret == Type::never())
+    }
+
     /// Returns the stable identity assigned to this operation's result, if any.
     pub fn result_id(&self) -> Option<ValueId> {
         self.result_id

@@ -44,7 +44,8 @@ use std::borrow::Cow;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{
-    OptimizationStage, SemanticCallees, Specializations, budget, monomorphize, site::OperationIndex,
+    OptimizationStage, SemanticCallees, Specializations, budget, cost, monomorphize,
+    site::OperationIndex,
 };
 use crate::{
     CompilerSession, Location,
@@ -122,7 +123,9 @@ pub(crate) enum NotInlinable {
     /// The site is inside a cleanup path and the callee has error flow of its own, so copying it
     /// would shift its failure states by one level.
     InCleanupPath,
-    /// The callee is larger than [`budget::INLINE_CALLEE_OPERATIONS`].
+    /// The site is on a failure path, which runs at most once and gains nothing from a copy.
+    ColdCallSite,
+    /// The callee's [hot cost](cost::hot_cost) exceeds [`budget::INLINE_CALLEE_COST`].
     CalleeTooLarge,
     /// Inlining here would exceed [`budget::INLINE_FUNCTION_GROWTH`] for this caller.
     GrowthBudgetExhausted,
@@ -143,6 +146,7 @@ impl NotInlinable {
             Self::InlineNever => "callee is marked #[inline(never)]",
             Self::UnsupportedShape => "callee contains a scoped accessor",
             Self::InCleanupPath => "call site is on a cleanup path",
+            Self::ColdCallSite => "call site is on a failure path",
             Self::CalleeTooLarge => "callee is over the size budget",
             Self::GrowthBudgetExhausted => "caller is at its growth budget",
         }
@@ -189,9 +193,9 @@ pub(crate) fn inline_function(
 
 /// Chooses the call sites to inline.
 ///
-/// `original_size` is the function's size before *any* round ran, so the growth budget bounds the
-/// whole of optimization rather than each round — otherwise a function could grow by the budget
-/// again on every round, and the cap would only bound growth per round.
+/// `original_size` is the function's [`cost`](cost::cost) before *any* round ran, so the growth
+/// budget bounds the whole of optimization rather than each round — otherwise a function could grow
+/// by the budget again on every round, and the cap would only bound growth per round.
 ///
 /// `refusals`, when present, collects why each call site was left alone — the optimization report
 /// runs this over an already-optimized body precisely so its answers cannot drift from the pass's.
@@ -203,8 +207,9 @@ fn plan_inlinings<'a>(
     refusals: &mut Option<&mut Vec<Refusal>>,
 ) -> Vec<Inlining<'a>> {
     let mut sites = Vec::new();
-    let mut size = func.operation_count();
+    let mut size = cost::cost(func);
     let cleanup = cleanup_blocks(func);
+    let hot = cost::hot_blocks(func);
 
     for block in func.blocks() {
         let in_cleanup = cleanup.contains(&block);
@@ -259,6 +264,10 @@ fn plan_inlinings<'a>(
                 refuse(NotInlinable::CalleeNotDirect);
                 continue;
             };
+            if !hot[block.as_index()] {
+                refuse(NotInlinable::ColdCallSite);
+                continue;
+            }
             if stage.inline_never(callee, env) {
                 refuse(NotInlinable::InlineNever);
                 continue;
@@ -272,10 +281,10 @@ fn plan_inlinings<'a>(
                 refuse(NotInlinable::NoBody);
                 continue;
             };
-            // Substitution never grows a body, so the generic size bounds the concrete one. Asking
+            // Substitution never grows a body, so the generic cost bounds the concrete one. Asking
             // here keeps a callee that is too large either way from paying for a substitution whose
             // only use would be to refuse it.
-            if body.operation_count() > budget::INLINE_CALLEE_OPERATIONS {
+            if cost::hot_cost(body) > budget::INLINE_CALLEE_COST {
                 refuse(NotInlinable::CalleeTooLarge);
                 continue;
             }
@@ -302,19 +311,14 @@ fn plan_inlinings<'a>(
                     continue;
                 }
             };
-            let callee_size = body.operation_count();
-            // The call goes; the callee's operations arrive, plus a `stack_save` and one
-            // `stack_restore` per exit — bounded by the block count.
-            let cost = callee_size + body.blocks().count() + 1;
-            if callee_size > budget::INLINE_CALLEE_OPERATIONS {
-                refuse(NotInlinable::CalleeTooLarge);
-                continue;
-            }
-            if size + cost > original_size + budget::INLINE_FUNCTION_GROWTH {
+            // The callee's operations arrive and the call goes, whether an operation or an
+            // `invoke`. The stack marks around the splice are free.
+            let growth = cost::cost(&body).saturating_sub(1);
+            if size + growth > original_size + budget::INLINE_FUNCTION_GROWTH {
                 refuse(NotInlinable::GrowthBudgetExhausted);
                 continue;
             }
-            size += cost;
+            size += growth;
             sites.push(Inlining { site, callee, body });
         }
     }
@@ -332,7 +336,7 @@ pub(crate) fn refusals_of(
     // round would inline this site, not what the budget was when optimization started.
     plan_inlinings(
         func,
-        func.operation_count(),
+        cost::cost(func),
         env,
         OptimizationStage::Semantic(SemanticCallees::new(session, None)),
         &mut Some(&mut refusals),

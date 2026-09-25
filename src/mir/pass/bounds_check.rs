@@ -12,6 +12,9 @@
 //! in the negative case. In either shape, the panic is the only reason the call can fail, so its
 //! `invoke` becomes straight-line code and its error edge dies with it.
 //!
+//! An inlined check is a branch into a diverging `panic`; a branch whose edge the analysis proves
+//! dead becomes a jump, and so does any other branch it decides.
+//!
 //! What goes away is more than one call. The error edge strands its cleanup block, the panic
 //! message's `alloca`s become dead, and `dce` collects all of it. That is the same population the
 //! plan's cold-path `alloca` item was about.
@@ -126,9 +129,11 @@ fn add_offset(
     )
 }
 
-/// Replaces every bounds check whose index is provably in range with a copy.
+/// Replaces every bounds check whose index is provably in range with a copy, and every branch the
+/// analysis decides with a jump.
 ///
-/// Returns the rewritten body and how many checks it removed, or `None` when it removed none.
+/// Returns the rewritten body and how many checks and branches it removed, or `None` when it
+/// removed none.
 pub(crate) fn eliminate_bounds_checks(
     func: &Function,
     env: ModuleEnv<'_>,
@@ -269,12 +274,38 @@ pub(crate) fn eliminate_bounds_checks(
         }
     }
     proved.retain(|check| check.operation.is_some() || check.normal.is_some());
-    if proved.is_empty() {
+    // An inlined check is a branch into a diverging call; one whose failing edge is dead goes
+    // straight to its other target, as does any other branch the analysis decides.
+    let mut decided = Vec::new();
+    for block in func.blocks() {
+        let TerminatorKind::CondBr {
+            then_target,
+            else_target,
+            ..
+        } = func.block(block).terminator().kind
+        else {
+            continue;
+        };
+        if then_target == else_target {
+            continue;
+        }
+        let mut dead = |target| analysis.edge_is_dead(func, known, original_of, block, target);
+        match (dead(then_target), dead(else_target)) {
+            (true, false) => decided.push((block, else_target)),
+            (false, true) => decided.push((block, then_target)),
+            _ => {}
+        }
+    }
+    if proved.is_empty() && decided.is_empty() {
         return None;
     }
 
-    let removed = proved.len();
+    let removed = proved.len() + decided.len();
     let mut edit = FunctionEdit::new(func.clone());
+    for (block, target) in decided {
+        let span = func.block(block).terminator().span;
+        edit.block_mut(block).terminator = Terminator::goto(span, target);
+    }
     // Replacing one check can insert several operations, so process each block from the back to
     // keep the operation indices recorded by replay valid. A terminator is ordered after every
     // ordinary operation; appending its replacement does not move any of them.
@@ -398,6 +429,14 @@ mod tests {
         session.emit_mir("bounds", src)
     }
 
+    /// Whether an access in `body` is still checked: by a checked indexing call, or inlined as a
+    /// branch into the out-of-bounds panic.
+    fn is_checked(body: &str) -> bool {
+        body.contains("array_resolve_index")
+            || body.contains("array_index")
+            || body.contains("Array access out of bounds")
+    }
+
     /// The body of a function in the emitted module, which is its optimized stage: `emit_mir`
     /// prints one stage, and the session above has optimization on.
     fn body_of<'a>(module: &'a str, name: &str) -> &'a str {
@@ -415,10 +454,7 @@ mod tests {
             "fn total(mut a: [int]) -> int { let mut t = 0; for i in 0..len(a) { t = t + a[i] }; t }",
         );
         let body = body_of(&module, "total");
-        assert!(
-            !body.contains("array_resolve_index"),
-            "the check must be gone:\n{body}"
-        );
+        assert!(!is_checked(body), "the check must be gone:\n{body}");
         assert!(
             !body.contains("propagate_error"),
             "and with it the error edge it needed:\n{body}"
@@ -437,7 +473,7 @@ mod tests {
             optimized("fn third(x: int, y: int, z: int) -> int { let a = [x, y, z]; a[2] }");
         let body = body_of(&module, "third");
         assert!(
-            !body.contains("array_resolve_index") && !body.contains("array_index"),
+            !is_checked(body),
             "the constructor's literal length must prove the access in range:\n{body}"
         );
         assert!(
@@ -460,8 +496,21 @@ mod tests {
         );
         let body = body_of(&module, "total");
         assert!(
-            !body.contains("array_resolve_index") && !body.contains("array_index"),
+            !is_checked(body),
             "the literal-sized loop must use the constructed length:\n{body}"
+        );
+    }
+
+    /// `int` wraps, so `x + 1 < x` holds at the maximum: the branch reaching the panic is live.
+    #[test]
+    fn a_comparison_that_holds_only_on_wrapping_keeps_its_branch() {
+        let module = optimized(
+            "fn wrapped(x: int) -> int { if x + 1 < x { panic(\"wrapped\") } else { 0 } }",
+        );
+        let body = body_of(&module, "wrapped");
+        assert!(
+            body.contains("call std::panic("),
+            "the wrapping arm must survive:\n{body}"
         );
     }
 
@@ -472,7 +521,7 @@ mod tests {
             optimized("fn fourth(x: int, y: int, z: int) -> int { let a = [x, y, z]; a[3] }");
         let body = body_of(&module, "fourth");
         assert!(
-            body.contains("array_resolve_index") || body.contains("array_index"),
+            is_checked(body),
             "an access at the constructed length must remain checked:\n{body}"
         );
     }
@@ -488,7 +537,7 @@ mod tests {
         );
         let body = body_of(&module, "total");
         assert_eq!(
-            body.matches("array_resolve_index").count(),
+            body.matches("call std::panic(").count(),
             1,
             "the seed remains checked, but the loop access must use what it proved:\n{body}"
         );
@@ -533,7 +582,7 @@ mod tests {
         );
         let body = body_of(&module, "from_end");
         assert!(
-            !body.contains("array_resolve_index") && !body.contains("array_index"),
+            !is_checked(body),
             "the proved negative access must contain no checked indexing call:\n{body}"
         );
         assert!(
@@ -604,7 +653,7 @@ mod tests {
         );
         let body = body_of(&module, "from_end");
         assert!(
-            body.contains("array_resolve_index") || body.contains("array_index"),
+            is_checked(body),
             "a negative index with no lower bound can still be out of range:\n{body}"
         );
     }
@@ -638,7 +687,7 @@ mod tests {
         let module = optimized("fn get(mut a: [int], i: int) -> int { a[i] }");
         let body = body_of(&module, "get");
         assert!(
-            body.contains("array_resolve_index") || body.contains("array_index"),
+            is_checked(body),
             "an index nothing bounds must still be checked:\n{body}"
         );
     }
@@ -654,7 +703,7 @@ mod tests {
         );
         let body = body_of(&module, "total");
         assert!(
-            body.contains("array_resolve_index") || body.contains("array_index"),
+            is_checked(body),
             "a semantically valid but unproved negative index must still be resolved:\n{body}"
         );
     }
