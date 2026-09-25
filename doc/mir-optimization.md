@@ -35,13 +35,17 @@ for round in 0..MAX_ROUNDS:
     specialize    // point generic calls at concrete copies
     call CSE      // merge repeated addressor and trivial value calls before copying their bodies
     copy forward  // coalesce redundant trivial-copy storage exposed during the round
+    store forward // read single-store cells as the register stored into them
     place CSE     // merge repeated subfield and dictionary-entry places
     inline        // budget-limited; block merging inside its own edit
     stop if nothing warranted another round
 place CSE          // merge places which inlining exposes
 copy forward      // catch trivial-copy storage exposed after the last round
+store forward     // likewise for single-store cells
+shadow tag tests  // test a local variant's tag through a boolean its stores keep in step
 branch forward    // bypass booleans stored in branch arms only to control a second branch
 peephole          // collapse small local CFG/value patterns
+store forward     // read the predicates materialization stored
 negation          // test a boolean where it is computed, inverting the branch when negated
 string rewrites   // fuse static construction into appends; forward self-prefixed builders
 devirtualize      // final dictionary-entry callees exposed too late for a fold round
@@ -53,9 +57,14 @@ dead stores       // remove unread initialization overwritten on every following
 dce               // on every body, not only a changed one
 stack markers     // drop a mark duplicating one already held, and restores that pop nothing
 dead snapshots    // collect stack saves whose last restore disappeared
-tail merge        // hash-cons equivalent tails, collapse equal edges, and fold empty blocks
-finite domains    // collapse exhaustive tests; materialize Boolean results with identical cleanup
-dead proven + dce // after tail sharing/equal-edge folding, collect its newly dead predicate
+repeat while the body shrinks:
+    stack markers     // on a repeated sweep: rewrites below concatenate arms' restores
+    store forward     // outcome simplification stores computed predicates
+    negation          // on a repeated sweep, or after store forwarding
+    branch forward    // with the dead predicates it leaves
+    tail merge        // hash-cons equivalent tails, collapse equal edges, and fold empty blocks
+    finite domains    // collapse exhaustive tests; materialize Boolean results
+    dead proven + dce // after each rewrite, collect its newly dead predicate
 finish            // restores canonical form without exposing the intermediate body
 ```
 
@@ -578,6 +587,25 @@ profile from 3,517,325 to 3,423,626 events (-2.66%), including moves from 59,248
 allocations from 812,240 to 767,872. `iter_pipeline` falls from 603,589 to 576,801 events (-4.44%),
 with moves from 14,039 to 645, allocations from 136,187 to 122,793, and peak cells from 59 to 58.
 
+## Register forwarding through cells
+
+MIR has no φ: a value meeting a join, or leaving an inlined callee through its `@ret`, travels
+through a cell, so its reader sees `store %v to %cell; …; %x = load %cell`. `mir::pass::store_forward`
+rewrites such reads to `%v` when `%cell` is a local `TrivialCopy` `alloca` whose only write is that
+store, whose every other use is a `load` or a `comp_eq` scrutinee, and whose store dominates the
+read. `%v` must hold a materialized value: a stored place register is bridged to a pointer by the
+store, which the register itself is not. Registers are defined once, so that dominance also proves
+`%v` still holds the stored value. A forwarded load stored into another cell resolves to the root
+register.
+A cell whose every read was forwarded is removed with its store and loads; being `TrivialCopy`, it
+holds no drop obligation.
+
+It is a canonicalizer: every later pass may assume a value is tested where it is computed, not
+where a rewrite parked it. It therefore runs in each round next to storage forwarding, after the
+rounds, after boolean materialization, and in the final cleanup sweep, where outcome simplification
+stores computed predicates. Structural gates restrict type queries to allocations receiving a
+register store that the use census keeps.
+
 ## Local branch forwarding
 
 `mir::pass::branch_forward` removes a boolean storage round-trip created when one control-flow
@@ -592,10 +620,13 @@ against a boolean literal carries the same information. Each names the slot and 
 `load` takes the *then* edge when the arm stored `true`, while a `comp_eq` takes it when the arm
 stored the pattern it compares against.
 
+An arm may also store a computed boolean: it cannot pick an edge itself, so it ends in a `condbr`
+on the value it stored, which is the join's read and branch run on that arm alone.
+
 The proof is a linear use and predecessor census and deliberately narrower than general jump
-threading. The slot must be a local boolean `alloca`; its only uses must be one known-boolean store
+threading. The slot must be a local boolean `alloca`; its only uses must be one boolean store
 per incoming predecessor and the final read; every predecessor must jump unconditionally to the
-join; and the join may contain only `stack_restore`s before that read. Other operations, additional
+join; and the join may contain only `stack_restore`s besides that read. Other operations, additional
 uses, unknown stores and self-edges all refuse the rewrite.
 
 The same pass forwards a concrete `TrivialCopy` variant when every whole-place definition stores a
@@ -604,6 +635,14 @@ directly to the selected case, retaining payload storage and replaying interveni
 The variant place must not escape; managed variants, other whole-place uses and general aggregate
 scalar replacement remain outside the rule. Place CSE runs after a successful rewrite so identical
 payload projections share one address calculation.
+
+A one-case tag test, `comp_eq (extract_tag v) C`, is instead reduced to the boolean rule. A local
+`TrivialCopy` variant written only by whole stores of tagged shells holds, at every read, the tag of
+the last store, since payload writes cannot change it. Pairing each store with a store of the
+literal `tag == C` into a boolean cell keeps that cell equal to the test everywhere, so the test
+becomes a load of it, with no path proof. The arms then store literal flags, the shape boolean
+forwarding, materialization and finite-domain simplification already consume, and the unread
+variant is collected as a discarded result.
 
 Across the runtime corpus, this variant rule removes 62 dispatches and 302 executed MIR events
 (0.013%): `iter_pipeline` falls from 82,712 to 82,425 and `data_text_roundtrip` from 121,339 to
@@ -856,6 +895,11 @@ body, and a body spliced directly inside another's bracket takes its mark at the
 The analysis is a forward fixpoint over the set of markers known equal to the frontier, intersected
 at joins, cleared by anything that may leave frame storage. It shares that predicate with `dce` so
 the two cannot disagree about what grows a frame.
+
+One sweep is idempotent: a restore is redundant when the frontier holds any marker equal to its own
+after this sweep's substitutions, since substituted markers are equal integers. Rewrites in the
+final cleanup loop can still concatenate arms' restores, so a repeated sweep of that loop
+canonicalizes again before tail merging.
 
 It runs *before* tail merging, and the order matters in one direction only: canonicalization
 **creates** the alpha-equivalence tail merging looks for. Two mutually exclusive arms which restore

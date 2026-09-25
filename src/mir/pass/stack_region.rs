@@ -131,8 +131,13 @@ pub(crate) fn remove_redundant_stack_markers(func: &Function) -> Option<Function
                     }
                 }
                 OperationKind::StackRestore => {
+                    // Substituted markers are equal integers, so a marker this sweep merged into
+                    // another's is held whenever that one is.
                     if let Some(mir::Value::Register(marker)) = operation.operands.first()
-                        && holds(&state, *marker)
+                        && (holds(&state, *marker)
+                            || state.iter().any(|held| {
+                                resolve(&substitution, *held) == resolve(&substitution, *marker)
+                            }))
                     {
                         dead.entry(block).or_default().insert(index);
                     }

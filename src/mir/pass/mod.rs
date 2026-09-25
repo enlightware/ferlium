@@ -61,6 +61,7 @@ pub(crate) use crate::mir::site;
 pub(crate) mod specialization_table;
 pub(crate) mod stack_region;
 mod stage;
+pub(crate) mod store_forward;
 pub(crate) mod string_accumulate;
 pub(crate) mod tail_merge;
 pub(crate) mod will_return;
@@ -231,6 +232,13 @@ pub(crate) fn optimize_function(
             current = Some(forwarded);
             changed = true;
         }
+        // Its register counterpart: a value parked in a single-store cell, such as an inlined
+        // callee's `@ret`, is read where it is computed.
+        let source = current.as_ref().unwrap_or(function);
+        if let Some(forwarded) = store_forward::forward_stored_registers(source, env) {
+            current = Some(forwarded);
+            changed = true;
+        }
         // The place-producing operations are merged here too, before inlining rather than only
         // after it, because their redundancy is already present: a generic body reads the same
         // `dict_entry` once per use of the trait method. Merging them shrinks the body before the
@@ -276,6 +284,10 @@ pub(crate) fn optimize_function(
         ) {
             current = Some(forwarded);
         }
+        let source = current.as_ref().unwrap_or(function);
+        if let Some(forwarded) = store_forward::forward_stored_registers(source, env) {
+            current = Some(forwarded);
+        }
     }
     // Whether a callee is proved to return, which the cleanups below and loop-invariant motion
     // all ask.
@@ -284,6 +296,11 @@ pub(crate) fn optimize_function(
     // Inlined predicates often materialize `true`/`false` in two arms only for the caller to
     // compare that slot with `true` and branch again. Forward the known edge information while
     // retaining any stack restoration at the join. DCE below then removes the dead slot/stores.
+    // A one-case test of a local variant's tag is first turned into that shape.
+    let source = current.as_ref().unwrap_or(function);
+    if let Some(shadowed) = branch_forward::shadow_variant_tag_tests(source, env) {
+        current = Some(shadowed);
+    }
     let source = current.as_ref().unwrap_or(function);
     if let Some(forwarded) = branch_forward::forward_boolean_branches(source) {
         current = Some(forwarded);
@@ -321,6 +338,10 @@ pub(crate) fn optimize_function(
     // folded into a comparison, and a materialized predicate stored to be tested again. Forward
     // each condition to the register that computes it, inverting the branch when the path
     // negates; DCE below collects the cells, stores and comparisons that become unread.
+    let source = current.as_ref().unwrap_or(function);
+    if let Some(forwarded) = store_forward::forward_stored_registers(source, env) {
+        current = Some(forwarded);
+    }
     let source = current.as_ref().unwrap_or(function);
     if let Some(forwarded) = negation::forward_boolean_negations(source) {
         current = Some(cleanup_dead_representation_chains(
@@ -453,10 +474,38 @@ pub(crate) fn optimize_function(
     // their operations, collapse a conditional whose two edges now agree, and fold shared empty
     // exits into their predecessors. Only the first two can make computations dead; revisit
     // proven-total calls and storage for those, while an exit-only rewrite pays no second cleanup.
+    let mut repeated = false;
     loop {
+        // The placements above canonicalized the first sweep's input. A repeated sweep follows
+        // rewrites that can concatenate arms' restores, which would hide their equivalence from
+        // tail merging, and store computed predicates in front of negations and branches.
+        if repeated {
+            let source = current.as_ref().unwrap_or(function);
+            if let Some(canonicalized) = stack_region::remove_redundant_stack_markers(source) {
+                current = Some(canonicalized);
+            }
+        }
         let source = current.as_ref().unwrap_or(function);
         let before = source.operation_count() + source.blocks().count();
         let mut changed = false;
+        let stored = store_forward::forward_stored_registers(source, env);
+        let negations_exposed = repeated || stored.is_some();
+        if let Some(forwarded) = stored {
+            current = Some(forwarded);
+            changed = true;
+        }
+        let source = current.as_ref().unwrap_or(function);
+        if negations_exposed && let Some(forwarded) = negation::forward_boolean_negations(source) {
+            current = Some(cleanup_dead_representation_chains(
+                forwarded,
+                env,
+                context,
+                callees,
+                &will_return,
+            ));
+            changed = true;
+        }
+        let source = current.as_ref().unwrap_or(function);
         // Variant forwarding and dead-storage cleanup can expose a boolean diamond only now:
         // for example a comparison wrapper followed by negation. Forward its result directly.
         if let Some(forwarded) = branch_forward::forward_boolean_branches(source) {
@@ -504,6 +553,7 @@ pub(crate) fn optimize_function(
         if !changed || result.operation_count() + result.blocks().count() >= before {
             break;
         }
+        repeated = true;
     }
     // Final artifact verification covers unchanged functions too, so cloning is the identity here.
     match current {

@@ -19,12 +19,15 @@
 //!
 //! Both forms of that read are recognized. Each names the flag and carries a polarity: a `load`
 //! takes the *then* edge when the arm stored `true`, while a `comp_eq` takes it when the arm stored
-//! the pattern being compared.
+//! the pattern being compared. An arm may instead store a computed boolean; it then ends in a
+//! `condbr` on that value.
 //!
 //! A concrete `TrivialCopy` variant follows the same control shape. Each incoming path stores a
 //! statically tagged shell, and the join extracts that tag only to feed `switch_variant`. The pass
 //! redirects each construction path to the selected consumer while retaining payload storage for
-//! projections in that consumer. Escaping storage and managed payloads are outside this rule.
+//! projections in that consumer. Escaping storage and managed payloads are outside this rule. A
+//! one-case `comp_eq` tag test is instead replaced by a boolean shadow of the variant's stores,
+//! which leaves the flag shape above.
 //!
 //! A store need not sit in an immediate predecessor of the join. A short-circuit `or` or `and` with
 //! three or more arms lowers to a *tree* of stores, whose deeper arms reach the join through a
@@ -44,13 +47,12 @@
 //! only edge cleanup, and replays that cleanup on each arm it redirects.
 //!
 //! The proof is intentionally local and linear. The flag must be a local boolean `alloca`; every
-//! use must be one known-boolean store or the one final read; every block on a walked path
+//! use must be one boolean store or the one final read; every block on a walked path
 //! must end in an unconditional jump; a store-free block on a path may contain only
-//! `stack_restore`s; the join may contain only `stack_restore`s before the read; and the
+//! `stack_restore`s; the join may contain only `stack_restore`s besides the read; and the
 //! stores found must be exactly those the use census saw, which is what proves no other definition
 //! reaches the join. Two paths may not meet at one block, since rewriting it would mean duplicating
-//! it. General predicate propagation — forwarding a boolean that is *computed* rather than stored
-//! as a literal — is a separate optimization with a larger dataflow proof.
+//! it.
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use ustr::Ustr;
@@ -60,6 +62,8 @@ use super::{
     site::{OperationIndex, OperationSite},
 };
 use crate::{
+    Location,
+    hir::value::LiteralValue,
     mir::{
         self, BlockId, Function, Operation, OperationKind,
         edit::FunctionEdit,
@@ -78,9 +82,16 @@ struct Stored<T> {
     value: T,
 }
 
+/// What one store writes into a boolean flag.
+#[derive(Clone, Copy)]
+enum Flag {
+    Literal(bool),
+    Computed(ValueId),
+}
+
 #[derive(Default)]
 struct Uses {
-    stores: Vec<Stored<bool>>,
+    stores: Vec<Stored<Flag>>,
     reads: Vec<OperationSite>,
     other: bool,
 }
@@ -96,8 +107,19 @@ struct VariantUses {
 /// rewrite removes between it and the join.
 struct Arm {
     source: BlockId,
-    target: BlockId,
+    exit: Exit,
     replay: Vec<Operation>,
+}
+
+/// Where a redirected arm goes: straight to the consumer's target, or, when it stored a computed
+/// boolean, to a branch on that value.
+enum Exit {
+    Goto(BlockId),
+    Branch {
+        condition: ValueId,
+        then_target: BlockId,
+        else_target: BlockId,
+    },
 }
 
 struct Forward {
@@ -153,7 +175,7 @@ pub(crate) fn forward_boolean_branches(func: &Function) -> Option<Function> {
             let block = edit.block_mut(arm.source);
             block.operations.extend(arm.replay);
             let span = block.terminator.span;
-            block.terminator = Terminator::goto(span, arm.target);
+            block.terminator = arm.exit.terminator(span);
         }
     }
     edit.remove_unreachable_blocks();
@@ -319,7 +341,7 @@ pub(crate) fn forward_variant_branches(func: &Function, env: ModuleEnv<'_>) -> O
             let block = edit.block_mut(arm.source);
             block.operations.extend(arm.replay);
             let span = block.terminator.span;
-            block.terminator = Terminator::goto(span, arm.target);
+            block.terminator = arm.exit.terminator(span);
         }
     }
     edit.remove_unreachable_blocks();
@@ -385,11 +407,215 @@ fn plan_variant_join(
         replay.extend(join_prefix.iter().cloned());
         arms.push(Arm {
             source: reaching.source,
-            target,
+            exit: Exit::Goto(target),
             replay,
         });
     }
     Some(Forward { arms })
+}
+
+/// Replaces tag tests on local variants with loads of boolean shadows, returning `None` when there
+/// is none.
+///
+/// A concrete `TrivialCopy` local written only by whole stores of statically tagged shells holds,
+/// at every read, the tag of the last store; payload writes cannot change it. Pairing each store
+/// with a store of the literal `tag == C` into a boolean cell keeps that cell equal to the test, so
+/// `comp_eq (extract_tag v) C` becomes a load of it. The arms then carry the literal-flag shape
+/// that boolean forwarding and materialization consume, and DCE collects the unread variant.
+pub(crate) fn shadow_variant_tag_tests(func: &Function, env: ModuleEnv<'_>) -> Option<Function> {
+    let mut variant_tags = FxHashMap::default();
+    let mut tag_reads = FxHashMap::default();
+    let mut allocas = FxHashMap::default();
+    let mut tests = Vec::new();
+    for block in func.blocks() {
+        for (index, operation) in func.block(block).operations().iter().enumerate() {
+            let Some(result) = operation.result_id() else {
+                continue;
+            };
+            let site = OperationSite {
+                block,
+                index: OperationIndex::from_index(index),
+            };
+            match (&operation.kind, operation.operands.as_ref()) {
+                (OperationKind::Alloca { ty }, _) => {
+                    allocas.insert(result, (site, *ty));
+                }
+                (OperationKind::Variant { tag, .. }, _) => {
+                    variant_tags.insert(result, *tag);
+                }
+                (OperationKind::ExtractTag, [mir::Value::Register(storage)]) => {
+                    tag_reads.insert(result, *storage);
+                }
+                (
+                    OperationKind::CompareEqual,
+                    [mir::Value::Register(tag), mir::Value::Pattern(pattern)],
+                ) if let Some(case) = pattern.as_variant_tag() => {
+                    tests.push((site, *tag, *case));
+                }
+                _ => {}
+            }
+        }
+    }
+    tests.retain(|(_, tag, _)| {
+        tag_reads
+            .get(tag)
+            .is_some_and(|storage| allocas.contains_key(storage))
+    });
+    if tests.is_empty() {
+        return None;
+    }
+
+    // Every use of a candidate storage must be a tagged whole store, a tag read or a payload
+    // projection, and every use of its tag reads a test.
+    #[derive(Default)]
+    struct Shadowed {
+        stores: Vec<(OperationSite, Ustr)>,
+        other: bool,
+    }
+    let mut storages: FxHashMap<ValueId, Shadowed> = tests
+        .iter()
+        .map(|(_, tag, _)| (tag_reads[tag], Shadowed::default()))
+        .collect();
+    let tested: FxHashSet<OperationSite> = tests.iter().map(|(site, ..)| *site).collect();
+    for block in func.blocks() {
+        let basic_block = func.block(block);
+        for (index, operation) in basic_block.operations().iter().enumerate() {
+            let site = OperationSite {
+                block,
+                index: OperationIndex::from_index(index),
+            };
+            for (position, operand) in operation.operands.iter().enumerate() {
+                let mir::Value::Register(id) = operand else {
+                    continue;
+                };
+                if let Some(storage) = tag_reads.get(id)
+                    && !tested.contains(&site)
+                    && let Some(shadowed) = storages.get_mut(storage)
+                {
+                    shadowed.other = true;
+                }
+                let Some(shadowed) = storages.get_mut(id) else {
+                    continue;
+                };
+                match (&operation.kind, position) {
+                    (OperationKind::Store, 1) => match &operation.operands[0] {
+                        mir::Value::Register(shell) if let Some(tag) = variant_tags.get(shell) => {
+                            shadowed.stores.push((site, *tag));
+                        }
+                        _ => shadowed.other = true,
+                    },
+                    (OperationKind::ExtractTag, 0)
+                    | (
+                        OperationKind::Subfield {
+                            variant_payload: true,
+                            ..
+                        },
+                        0,
+                    ) => {}
+                    _ => shadowed.other = true,
+                }
+            }
+        }
+        for operand in basic_block.terminator().operands() {
+            if let mir::Value::Register(id) = operand {
+                for storage in [tag_reads.get(id).copied(), Some(*id)]
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(shadowed) = storages.get_mut(&storage) {
+                        shadowed.other = true;
+                    }
+                }
+            }
+        }
+    }
+    storages.retain(|storage, shadowed| {
+        !shadowed.other
+            && !shadowed.stores.is_empty()
+            && concrete_type_is_trivial_copy(allocas[storage].1, &env)
+    });
+    tests.retain(|(_, tag, _)| storages.contains_key(&tag_reads[tag]));
+    if tests.is_empty() {
+        return None;
+    }
+
+    // Insertions after each site, and a flag per tested (storage, case).
+    let span_at =
+        |site: OperationSite| func.block(site.block).operations()[site.index.as_index()].span;
+    let mut edit = FunctionEdit::new(func.clone());
+    let mut flags: FxHashMap<(ValueId, Ustr), ValueId> = FxHashMap::default();
+    let mut inserted: FxHashMap<OperationSite, Vec<Operation>> = FxHashMap::default();
+    let literal = |edit: &mut FunctionEdit, value: bool| {
+        mir::Value::Constant(edit.add_constant(bool_type(), LiteralValue::new_native(value), &env))
+    };
+    for (site, tag, case) in &tests {
+        let storage = tag_reads[tag];
+        let flag = match flags.get(&(storage, *case)) {
+            Some(flag) => *flag,
+            None => {
+                let definition = allocas[&storage].0;
+                let mut alloca = Operation::alloca(span_at(definition), bool_type());
+                let flag = edit.new_value();
+                alloca.assign_result_id(Some(flag));
+                inserted.entry(definition).or_default().push(alloca);
+                for (store, stored_tag) in &storages[&storage].stores {
+                    let value = literal(&mut edit, stored_tag == case);
+                    inserted.entry(*store).or_default().push(Operation::store(
+                        span_at(*store),
+                        value,
+                        mir::Value::Register(flag),
+                    ));
+                }
+                flags.insert((storage, *case), flag);
+                flag
+            }
+        };
+        let test = &mut edit.block_mut(site.block).operations[site.index.as_index()];
+        let mut load = Operation::load(test.span, mir::Value::Register(flag));
+        load.assign_result_id(test.result_id());
+        *test = load;
+    }
+    // Every use of a shadowed tag was a test, now a load.
+    let unread_tags: FxHashSet<ValueId> = tests.iter().map(|(_, tag, _)| *tag).collect();
+    for block in func.blocks() {
+        let operations = std::mem::take(&mut edit.block_mut(block).operations);
+        let mut rebuilt = Vec::with_capacity(operations.len());
+        for (index, operation) in operations.into_iter().enumerate() {
+            if !operation
+                .result_id()
+                .is_some_and(|result| unread_tags.contains(&result))
+            {
+                rebuilt.push(operation);
+            }
+            let site = OperationSite {
+                block,
+                index: OperationIndex::from_index(index),
+            };
+            if let Some(after) = inserted.remove(&site) {
+                rebuilt.extend(after);
+            }
+        }
+        edit.block_mut(block).operations = rebuilt;
+    }
+    Some(edit.finish_unverified())
+}
+
+impl Exit {
+    fn terminator(self, span: Location) -> Terminator {
+        match self {
+            Self::Goto(target) => Terminator::goto(span, target),
+            Self::Branch {
+                condition,
+                then_target,
+                else_target,
+            } => Terminator::cond_br(
+                span,
+                mir::Value::Register(condition),
+                then_target,
+                else_target,
+            ),
+        }
+    }
 }
 
 fn incoming_predecessors(func: &Function) -> Vec<Vec<BlockId>> {
@@ -421,11 +647,17 @@ fn census_uses(func: &Function, uses: &mut FxHashMap<ValueId, Uses>) -> FxHashMa
                 };
                 match operation.kind {
                     OperationKind::Store if operand_index == 1 => {
-                        if let Some(value) = bool_value(func, &operation.operands[0]) {
-                            summary.stores.push(Stored { block, value });
-                        } else {
-                            summary.other = true;
-                        }
+                        let value = match &operation.operands[0] {
+                            mir::Value::Register(value) => Flag::Computed(*value),
+                            literal => match bool_value(func, literal) {
+                                Some(value) => Flag::Literal(value),
+                                None => {
+                                    summary.other = true;
+                                    continue;
+                                }
+                            },
+                        };
+                        summary.stores.push(Stored { block, value });
                     }
                     OperationKind::CompareEqual | OperationKind::Load => summary.reads.push(site),
                     _ => summary.other = true,
@@ -452,15 +684,6 @@ fn plan_join(
     value_uses: &FxHashMap<ValueId, usize>,
 ) -> Option<Forward> {
     let block = func.block(join);
-    let (read_index, read) = block.operations().len().checked_sub(1).and_then(|index| {
-        let operation = &block.operations()[index];
-        matches!(
-            operation.kind,
-            OperationKind::CompareEqual | OperationKind::Load
-        )
-        .then_some((index, operation))
-    })?;
-    let result = read.result_id()?;
     let TerminatorKind::CondBr {
         condition: mir::Value::Register(condition),
         then_target,
@@ -469,7 +692,14 @@ fn plan_join(
     else {
         return None;
     };
-    if condition != result || value_uses.get(&result) != Some(&1) {
+    let read_index = block
+        .operations()
+        .iter()
+        .rposition(|operation| operation.result_id() == Some(condition))?;
+    let read = &block.operations()[read_index];
+    if !matches!(read.kind, OperationKind::CompareEqual | OperationKind::Load)
+        || value_uses.get(&condition) != Some(&1)
+    {
         return None;
     }
     if then_target == join || else_target == join {
@@ -484,31 +714,47 @@ fn plan_join(
         block: join,
         index: OperationIndex::from_index(read_index),
     };
-    if summary.other
-        || summary.reads.as_slice() != [read_site]
-        || summary.stores.len() < 2
-        || !block.operations()[..read_index]
-            .iter()
-            .all(|operation| matches!(operation.kind, OperationKind::StackRestore))
-    {
+    if summary.other || summary.reads.as_slice() != [read_site] || summary.stores.len() < 2 {
         return None;
     }
 
     // The join's own cleanup runs after whatever the path already replayed, exactly as it did when
-    // control still passed through these blocks in order.
-    let join_prefix = &block.operations()[..read_index];
+    // control still passed through these blocks in order. The read itself goes with the join.
+    let join_cleanup: Vec<_> = block
+        .operations()
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != read_index)
+        .map(|(_, operation)| operation)
+        .collect();
+    if !join_cleanup
+        .iter()
+        .all(|operation| matches!(operation.kind, OperationKind::StackRestore))
+    {
+        return None;
+    }
     let arms = reaching_stores(func, join, &summary.stores, incoming)?
         .into_iter()
         .map(|reaching| {
             let mut replay = reaching.replay;
-            replay.extend(join_prefix.iter().cloned());
+            replay.extend(join_cleanup.iter().copied().cloned());
+            let (then_target, else_target) = if expected {
+                (then_target, else_target)
+            } else {
+                (else_target, then_target)
+            };
+            let exit = match reaching.value {
+                Flag::Literal(true) => Exit::Goto(then_target),
+                Flag::Literal(false) => Exit::Goto(else_target),
+                Flag::Computed(condition) => Exit::Branch {
+                    condition,
+                    then_target,
+                    else_target,
+                },
+            };
             Arm {
                 source: reaching.source,
-                target: if reaching.value == expected {
-                    then_target
-                } else {
-                    else_target
-                },
+                exit,
                 replay,
             }
         })
@@ -631,7 +877,9 @@ fn bool_value(func: &Function, value: &mir::Value) -> Option<bool> {
 mod tests {
     use ustr::ustr;
 
-    use super::{bool_value, forward_boolean_branches, forward_variant_branches};
+    use super::{
+        bool_value, forward_boolean_branches, forward_variant_branches, shadow_variant_tag_tests,
+    };
     use crate::{
         CompilerSession, Location, MirOptimization,
         containers::b,
@@ -640,8 +888,9 @@ mod tests {
             value::{LiteralValue, VariantPayloadStorage},
         },
         mir::{
-            Operation, OperationKind, ParameterKind, Value, builder::FunctionBuilder,
-            terminator::Terminator,
+            Operation, OperationKind, ParameterKind, Value,
+            builder::FunctionBuilder,
+            terminator::{Terminator, TerminatorKind},
         },
         std::math::int_type,
         types::{
@@ -993,6 +1242,165 @@ mod tests {
         assert!(
             stored_with(true, &OperationKind::CheckCallDepth),
             "the arm storing the other value must take the else edge"
+        );
+    }
+
+    /// An arm storing a computed boolean cannot pick an edge itself, but it can branch on what it
+    /// stored: the join's read and branch then run on that arm alone.
+    #[test]
+    fn an_arm_storing_a_computed_boolean_branches_on_it() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let bool_ty = Type::primitive::<bool>();
+        let mut builder = FunctionBuilder::new("computed_join".into(), Default::default());
+        let argument = builder.add_parameter(bool_ty, ParameterKind::Parameter(ArgConvention::Let));
+        let true_value = builder.add_constant(bool_ty, LiteralValue::new_native(true), &env);
+        let entry = builder.add_block();
+        let left = builder.add_block();
+        let right = builder.add_block();
+        let join = builder.add_block();
+        let yes = builder.add_block();
+        let no = builder.add_block();
+
+        let flag = builder
+            .append_operation(entry, Operation::alloca(span, bool_ty))
+            .unwrap();
+        let condition = builder
+            .append_operation(entry, Operation::load(span, Value::Parameter(argument)))
+            .unwrap();
+        builder.set_terminator(entry, Terminator::cond_br(span, condition, left, right));
+        builder.append_operation(
+            left,
+            Operation::store(span, Value::Constant(true_value), flag.clone()),
+        );
+        builder.set_terminator(left, Terminator::goto(span, join));
+        let computed = builder
+            .append_operation(
+                right,
+                Operation::compare_eq(
+                    span,
+                    Value::Parameter(argument),
+                    Value::Pattern(b(LiteralValue::new_native(false))),
+                ),
+            )
+            .unwrap();
+        builder.append_operation(
+            right,
+            Operation::store(span, computed.clone(), flag.clone()),
+        );
+        builder.set_terminator(right, Terminator::goto(span, join));
+        let read = builder
+            .append_operation(join, Operation::load(span, flag))
+            .unwrap();
+        builder.set_terminator(join, Terminator::cond_br(span, read, yes, no));
+        builder.append_operation(yes, Operation::check_fuel(span));
+        builder.set_terminator(yes, Terminator::ret(span));
+        builder.append_operation(no, Operation::check_call_depth(span));
+        builder.set_terminator(no, Terminator::ret(span));
+
+        let forwarded = forward_boolean_branches(&builder.finish(env))
+            .expect("a computed store must be threaded");
+        assert!(
+            !forwarded
+                .blocks()
+                .flat_map(|block| forwarded.block(block).operations())
+                .any(|operation| matches!(operation.kind, OperationKind::Load)
+                    && operation.operands[0] != Value::Parameter(argument)),
+            "the join's read must be gone"
+        );
+        assert!(
+            forwarded.blocks().any(|block| matches!(
+                &forwarded.block(block).terminator().kind,
+                TerminatorKind::CondBr { condition, .. } if *condition == computed
+            )),
+            "the computing arm must branch on its own value"
+        );
+    }
+
+    /// A tag test on a local variant whose every write is a tagged shell becomes a load of a
+    /// boolean each write keeps in step, so the arms store literals and the variant goes unread.
+    #[test]
+    fn a_tag_test_reads_a_boolean_shadow() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let bool_ty = Type::primitive::<bool>();
+        let (less, greater) = (ustr("Less"), ustr("Greater"));
+        let variant_ty = Type::variant([(less, Type::unit()), (greater, Type::unit())]);
+        let mut builder = FunctionBuilder::new("shadowed_tag".into(), Default::default());
+        let argument = builder.add_parameter(bool_ty, ParameterKind::Parameter(ArgConvention::Let));
+        let entry = builder.add_block();
+        let left = builder.add_block();
+        let right = builder.add_block();
+        let join = builder.add_block();
+        let yes = builder.add_block();
+        let no = builder.add_block();
+
+        let storage = builder
+            .append_operation(entry, Operation::alloca(span, variant_ty))
+            .unwrap();
+        let condition = builder
+            .append_operation(entry, Operation::load(span, Value::Parameter(argument)))
+            .unwrap();
+        builder.set_terminator(entry, Terminator::cond_br(span, condition, left, right));
+        for (block, tag) in [(left, less), (right, greater)] {
+            let shell = builder
+                .append_operation(
+                    block,
+                    Operation::variant(
+                        span,
+                        tag,
+                        variant_ty,
+                        Type::unit(),
+                        Some(VariantPayloadStorage::Inline),
+                        None,
+                        None,
+                    ),
+                )
+                .unwrap();
+            builder.append_operation(block, Operation::store(span, shell, storage.clone()));
+            builder.set_terminator(block, Terminator::goto(span, join));
+        }
+        let tag = builder
+            .append_operation(join, Operation::extract_tag(span, storage))
+            .unwrap();
+        let test = builder
+            .append_operation(
+                join,
+                Operation::compare_eq(
+                    span,
+                    tag,
+                    Value::Pattern(b(LiteralValue::new_variant_tag(less))),
+                ),
+            )
+            .unwrap();
+        builder.set_terminator(join, Terminator::cond_br(span, test, yes, no));
+        builder.set_terminator(yes, Terminator::ret(span));
+        builder.set_terminator(no, Terminator::ret(span));
+
+        let shadowed = shadow_variant_tag_tests(&builder.finish(env), env)
+            .expect("the tag test must read a shadow");
+        let operations: Vec<_> = shadowed
+            .blocks()
+            .flat_map(|block| shadowed.block(block).operations())
+            .collect();
+        assert!(
+            !operations.iter().any(|operation| matches!(
+                operation.kind,
+                OperationKind::ExtractTag | OperationKind::CompareEqual
+            )),
+            "the tag read and test must be gone"
+        );
+        let stored = |value: bool| {
+            operations.iter().any(|operation| {
+                matches!(operation.kind, OperationKind::Store)
+                    && bool_value(&shadowed, &operation.operands[0]) == Some(value)
+            })
+        };
+        assert!(
+            stored(true) && stored(false),
+            "each arm must store its outcome"
         );
     }
 
