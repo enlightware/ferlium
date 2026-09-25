@@ -388,7 +388,11 @@ mod tests {
         assert!(
             matches!(&entry.terminator().kind, TerminatorKind::CondBr { condition, .. } if *condition == root)
         );
-        assert_eq!(entry.operations().len(), 1, "only the root load must remain");
+        assert_eq!(
+            entry.operations().len(),
+            1,
+            "only the root load must remain"
+        );
     }
 
     #[test]

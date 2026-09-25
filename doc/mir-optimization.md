@@ -45,8 +45,7 @@ store forward     // likewise for single-store cells
 shadow tag tests  // test a local variant's tag through a boolean its stores keep in step
 branch forward    // bypass booleans stored in branch arms only to control a second branch
 peephole          // collapse small local CFG/value patterns
-store forward     // read the predicates materialization stored
-negation          // test a boolean where it is computed, inverting the branch when negated
+boolean flow      // repeat while the body shrinks: store forward, negation, branch forward
 string rewrites   // fuse static construction into appends; forward self-prefixed builders
 devirtualize      // final dictionary-entry callees exposed too late for a fold round
 bounds checks     // prove array indices in range and remove checked access/failure edges
@@ -59,9 +58,7 @@ stack markers     // drop a mark duplicating one already held, and restores that
 dead snapshots    // collect stack saves whose last restore disappeared
 repeat while the body shrinks:
     stack markers     // on a repeated sweep: rewrites below concatenate arms' restores
-    store forward     // outcome simplification stores computed predicates
-    negation          // on a repeated sweep, or after store forwarding
-    branch forward    // with the dead predicates it leaves
+    boolean flow      // cleanup and outcome simplification expose new boolean flow
     tail merge        // hash-cons equivalent tails, collapse equal edges, and fold empty blocks
     finite domains    // collapse exhaustive tests; materialize Boolean results
     dead proven + dce // after each rewrite, collect its newly dead predicate
@@ -601,9 +598,13 @@ A cell whose every read was forwarded is removed with its store and loads; being
 holds no drop obligation.
 
 It is a canonicalizer: every later pass may assume a value is tested where it is computed, not
-where a rewrite parked it. It therefore runs in each round next to storage forwarding, after the
-rounds, after boolean materialization, and in the final cleanup sweep, where outcome simplification
-stores computed predicates. Structural gates restrict type queries to allocations receiving a
+where a rewrite parked it. It therefore runs in each round next to storage forwarding and after the
+rounds. With negation and boolean branch forwarding it also forms *boolean flow*, repeated while
+the body shrinks because each of the three produces shapes another reads: negation leaves a flag
+diamond that branch forwarding dissolves, which leaves a single-store cell. Boolean flow runs after
+boolean materialization, so the analyses that read branch conditions, such as bounds-check
+elimination, see its canonical form, and again in each final cleanup sweep, where outcome
+simplification stores computed predicates. Structural gates restrict type queries to allocations receiving a
 register store that the use census keeps.
 
 ## Local branch forwarding
@@ -737,7 +738,9 @@ retargeted to std's internal `array_offset_unchecked`; the negative case first r
 and materializes that normalized offset. The out-place and generic instantiation are unchanged,
 while the call-site effect row comes from the unchecked callee. If either checked call was an
 `invoke`, its failure edge is unreachable and becomes a jump to the normal successor; the pass
-removes stranded blocks and DCE collects dead panic storage and cleanup.
+removes stranded blocks and DCE collects dead panic storage and cleanup. The pass runs after
+boolean flow has been canonicalized, so an inlined guard reaches it as a `condbr` on the comparison
+itself rather than on a flag stored in the comparison's arms, which the analysis could not relate.
 
 The proof is a forward value-version analysis over affine integer forms and predicates. Direct,
 known standard-library calls supply their documented arithmetic, comparison, range and array-length

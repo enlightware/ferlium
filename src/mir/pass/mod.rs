@@ -117,6 +117,53 @@ impl<'a> OptimizationContext<'a> {
 /// alternate to a fixed point: removing a trivial representation result can expose a proven-total
 /// call, whose removal can in turn make its result storage dead. Every successful step removes at
 /// least one operation, so the loop is bounded by the rewritten body's operation count.
+/// Forwards stored registers, negations and boolean joins to their canonical form, repeating while
+/// the body shrinks: each pass can produce the shape another reads.
+fn canonicalize_boolean_flow(
+    function: &Function,
+    env: ModuleEnv<'_>,
+    context: &OptimizationContext,
+    callees: SemanticCallees<'_>,
+    will_return: &impl Fn(FunctionId) -> bool,
+) -> Option<Function> {
+    let mut current: Option<Function> = None;
+    loop {
+        let source = current.as_ref().unwrap_or(function);
+        let before = source.operation_count() + source.blocks().count();
+        let mut changed = false;
+        if let Some(forwarded) = store_forward::forward_stored_registers(source, env) {
+            current = Some(forwarded);
+            changed = true;
+        }
+        let source = current.as_ref().unwrap_or(function);
+        if let Some(forwarded) = negation::forward_boolean_negations(source) {
+            current = Some(cleanup_dead_representation_chains(
+                forwarded,
+                env,
+                context,
+                callees,
+                will_return,
+            ));
+            changed = true;
+        }
+        let source = current.as_ref().unwrap_or(function);
+        if let Some(forwarded) = branch_forward::forward_boolean_branches(source) {
+            current = Some(cleanup_dead_representation_chains(
+                forwarded,
+                env,
+                context,
+                callees,
+                will_return,
+            ));
+            changed = true;
+        }
+        let result = current.as_ref().unwrap_or(function);
+        if !changed || result.operation_count() + result.blocks().count() >= before {
+            return current;
+        }
+    }
+}
+
 fn cleanup_dead_representation_chains(
     mut current: Function,
     env: ModuleEnv<'_>,
@@ -335,22 +382,12 @@ pub(crate) fn optimize_function(
         current = Some(materialized);
     }
     // Both of the rewrites above leave a boolean where its consumer already had one: a `not` call
-    // folded into a comparison, and a materialized predicate stored to be tested again. Forward
-    // each condition to the register that computes it, inverting the branch when the path
-    // negates; DCE below collects the cells, stores and comparisons that become unread.
+    // folded into a comparison, and a materialized predicate stored to be tested again. Bring
+    // boolean flow to its canonical form before the analyses below read branch conditions.
     let source = current.as_ref().unwrap_or(function);
-    if let Some(forwarded) = store_forward::forward_stored_registers(source, env) {
+    if let Some(forwarded) = canonicalize_boolean_flow(source, env, context, callees, &will_return)
+    {
         current = Some(forwarded);
-    }
-    let source = current.as_ref().unwrap_or(function);
-    if let Some(forwarded) = negation::forward_boolean_negations(source) {
-        current = Some(cleanup_dead_representation_chains(
-            forwarded,
-            env,
-            context,
-            callees,
-            &will_return,
-        ));
     }
     // A constructively reified string is `StaticStr` plus `string_from_static`. If its only purpose
     // is an append, use the static appender directly and leave no owned temporary to construct or
@@ -488,34 +525,12 @@ pub(crate) fn optimize_function(
         let source = current.as_ref().unwrap_or(function);
         let before = source.operation_count() + source.blocks().count();
         let mut changed = false;
-        let stored = store_forward::forward_stored_registers(source, env);
-        let negations_exposed = repeated || stored.is_some();
-        if let Some(forwarded) = stored {
+        // Dead-storage cleanup and the rewrites below expose boolean flow the placement before the
+        // analyses could not see.
+        if let Some(forwarded) =
+            canonicalize_boolean_flow(source, env, context, callees, &will_return)
+        {
             current = Some(forwarded);
-            changed = true;
-        }
-        let source = current.as_ref().unwrap_or(function);
-        if negations_exposed && let Some(forwarded) = negation::forward_boolean_negations(source) {
-            current = Some(cleanup_dead_representation_chains(
-                forwarded,
-                env,
-                context,
-                callees,
-                &will_return,
-            ));
-            changed = true;
-        }
-        let source = current.as_ref().unwrap_or(function);
-        // Variant forwarding and dead-storage cleanup can expose a boolean diamond only now:
-        // for example a comparison wrapper followed by negation. Forward its result directly.
-        if let Some(forwarded) = branch_forward::forward_boolean_branches(source) {
-            current = Some(cleanup_dead_representation_chains(
-                forwarded,
-                env,
-                context,
-                callees,
-                &will_return,
-            ));
             changed = true;
         }
         let source = current.as_ref().unwrap_or(function);
