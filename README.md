@@ -55,18 +55,20 @@ The same `CompilerSession` API is what powers the [Playground](https://enlightwa
 
 ## Why Ferlium
 
-* **Type inference with generics.** Functions are automatically generalised — write `fn add(a, b) { a + b }` and Ferlium infers a polymorphic numeric signature; you get parametric polymorphism for free, with no annotations required. The engine is [Hindley–Milner-style with constrained types](https://www.researchgate.net/profile/Martin-Sulzmann/publication/220346751_Type_Inference_with_Constrained_Types/links/5ab00c0b0f7e9b4897c1d25b/Type-Inference-with-Constrained-Types.pdf), and partial annotations with `_` holes are supported where they aid readability.
-* **Mutable value semantics.** A simplified version of Rust's ownership model, based on [recent academic work](https://www.jot.fm/issues/issue_2022_02/article2.pdf): conceptually function arguments are either values or mutable references to values on the stack, and a small borrow checker keeps mutation memory-safe. No garbage collector, no Rust-level lifetime annotations.
-* **Algebraic data, traits, modules.** Structural records and tagged unions, recursive algebraic data types (including equirecursive structural types), Rust-style new types over them, traits (type classes) with multi-parameter and associated-type support, row polymorphism, and a `module::name` / `use module::*;` system.
-* **Functional core.** First-class and anonymous functions with closures (capture by value), pattern matching for destructuring data, and `|>` pipelining for chained transformations.
-* **Host-controlled capabilities.** The language has no I/O, no FFI, no filesystem, and no network of its own. Every function a script can call is one the embedding application has explicitly registered. There is no `eval`, no dynamic loader — the host is the security boundary.
-* **Compile-time effect tracking.** Effects (`read`, `write`, `fallible`) are inferred per function and propagate through call chains. They show up in inferred signatures and diagnostics, so a reviewer can see at a glance whether a function only computes, touches host state, or might fail. Effects are compile-time information, not a runtime sandbox; the host configures execution limits and remains responsible for its isolation boundary.
+* **Type inference with generics.** Ferlium infers generic function signatures across a whole module, so `fn add(a, b) { a + b }` needs no annotations. Its inference is [Hindley–Milner-style with constrained types](https://www.researchgate.net/profile/Martin-Sulzmann/publication/220346751_Type_Inference_with_Constrained_Types/links/5ab00c0b0f7e9b4897c1d25b/Type-Inference-with-Constrained-Types.pdf); partial annotations can use `_`.
+* **Mutable value semantics.** [Values can be safely mutated with the help of a small borrow checker](https://www.jot.fm/issues/issue_2022_02/article2.pdf), without a garbage collector or explicit lifetime annotations.
+* **Algebraic data types.** Records, tuples and tagged unions can be open to additional fields or variants through row polymorphism, or closed. Independently, each can remain structural or gain nominal identity through a Rust-style newtype.
+* **Traits and modules.** Traits (type classes) support multiple parameters and associated types, while `module::name` and `use module::*;` organize code.
+* **Functional core.** First-class and anonymous functions with closures, pattern matching for destructuring data, and `|>` pipelining for chained transformations.
+* **Subscripts and custom projections.** Array indexing and custom projections use subscripts to read or update places; scoped subscripts can run code around an access with `yield`.
+* **Compile-time effect tracking.** Ferlium infers `read`, `write`, and `fallible` effects and shows them in signatures and diagnostics, so you can see which functions touch host state or may fail before running them.
+* **Optimizing compiler with WebAssembly output.** Ferlium [optimizes its intermediate representation](doc/mir-optimization.md) before generating WebAssembly for browser and Node hosts.
 
 ## Getting started
 
 * **Online playground:** <https://enlightware.github.io/ferlium/playground/>
-* **REPL:** `cargo run --example ferlium` (use `print(string)` in REPL to print to console)
-* **Experimental features:** pass `--allow-experimental` to the example REPL or pipe mode to try safe, unstable language features. See the [experimental features chapter](docs/book/en/src/experimental.md).
+* **REPL:** `cargo run --example ferlium` (use `print(string)` in REPL to print to console).
+  Pass `--allow-experimental` to the example REPL or pipe mode to try safe, [experimental language features](docs/book/en/src/experimental.md).
 * **Book:** <https://enlightware.github.io/ferlium/book/>
 * **Chat:** [ferlium.zulipchat.com](https://ferlium.zulipchat.com)
 
@@ -81,25 +83,14 @@ If your host application benefits from catching type errors before the script ru
 The integration story also differs from other Rust-embedded scripting engines:
 
 * **No native-type duplication.** Ferlium's intermediate representation does not re-declare primitives like `int` and `bool` as language constructs — they remain native Rust types throughout, which keeps host bindings lean.
-* **Direct binding to Rust functions.** Native Rust functions are exposed as Ferlium-callable functions through direct binding (interpreted today, with a small [ABI](doc/abi.md) planned alongside the MIR/WebAssembly backend) — no value-conversion ritual, no generated glue.
+* **Direct binding to Rust functions.** Native Rust functions are exposed as Ferlium-callable functions through direct binding in the interpreters and a shared [ABI](doc/abi.md) for generated WebAssembly — no value-conversion ritual, no generated glue. The host chooses which functions scripts can call; scripts have no ambient I/O.
 * **Native value handles for host objects.** Host-owned objects can be wrapped as opaque Ferlium values and threaded through scripts — useful for game-engine entities, GPU resources, file descriptors, and the like — without copying.
-
-### Performance roadmap
-
-Ferlium executes through its HIR tree-walking interpreter by default. It also has a MIR lowering and
-reference interpreter, exercised alongside the HIR interpreter by the language test suite. A
-[Gungraun](https://gungraun.github.io/gungraun/latest/html/index.html)-based benchmark suite tracks
-instruction counts to catch regressions reliably. A WebAssembly backend is planned on top of MIR,
-with the goal of calling Rust-compiled-to-WebAssembly hosts with no FFI overhead.
 
 ### Current limitations
 
 Ferlium is pre-1.0; expect breaking changes in syntax, APIs, and standard library.
 
-* The MIR reference interpreter can be selected through the embedding API or the REPL's `--mir`
-  mode. The WebAssembly backend is not implemented yet.
 * The compiler is single-threaded — it currently panics if its interned type-universe lock is contended.
-* Dynamic dispatch is out of scope.
 * No file-based module discovery from script source: module organisation is the host's responsibility (see the [Modules chapter](https://enlightware.github.io/ferlium/book/modules.html) of the book).
 
 The [issue tracker](https://github.com/enlightware/ferlium/issues?q=is%3Aissue+is%3Aopen+type%3AFeature) lists planned features.
@@ -124,20 +115,8 @@ Its inspirations are:
 
 ### Running benchmarks
 
-Install the Gungraun runner once with `make install-deps`, ensure Valgrind 3.19 or newer is
-available, then run `make bench`. Gungraun measures instruction counts and other Valgrind-based
-metrics, which catch small optimisations and regressions reliably even in noisy environments.
-Valgrind 3.18 silently collects zero events because its Rust v0 demangler is broken. Select a
-non-system or uninstalled build with `make bench VALGRIND=/path/to/vg-in-place`.
-
-For fast optimizer iteration, `make profile-mir` runs the same runtime workloads natively through
-the MIR interpreter and compares unweighted instruction counts for raw and optimized MIR. Select a
-subset with `make profile-mir WORKLOADS="fibonacci sieve"`; this does not require Valgrind.
-
-`make bench-wasm` times the same workloads through the WebAssembly backend under Node, and
-`make bench-wasm-callgrind` measures them under Callgrind, in Gungraun's metrics: per phase, per
-optimization setting, and for generated Wasm against physical MIR interpretation. See
-[doc/wasm-benchmarks.md](doc/wasm-benchmarks.md).
+Run `make bench` for instruction counts, `make profile-mir` for a quick optimizer comparison, or `make bench-wasm` for WebAssembly timings.
+Setup, Callgrind measurements, options, and caveats are in the [benchmark guide](doc/benchmarks.md).
 
 ### Fuzzing
 

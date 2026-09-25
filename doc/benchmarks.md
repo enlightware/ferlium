@@ -1,13 +1,28 @@
-# Wasm benchmarks
+# Benchmarks
+
+The Rust-hosted and WebAssembly runners use the workload corpus in
+`benches/runtime_workloads.rs`.
+
+## Rust-hosted benchmarks
+
+Install the Gungraun runner with `make install-deps`, then run `make bench` to measure instruction
+counts and other Valgrind-based metrics. Valgrind 3.19 or newer is required: version 3.18 silently
+collects zero events because its Rust v0 demangler is broken. Select an uninstalled build with
+`make bench VALGRIND=/path/to/vg-in-place`.
+
+For faster optimizer iteration, `make profile-mir` compares unweighted instruction counts for raw
+and optimized MIR through the MIR interpreter. Use `make profile-mir WORKLOADS="fibonacci sieve"`
+to select workloads. This runner does not require Valgrind.
+
+## WebAssembly benchmarks
 
 `make bench-wasm` reports wall-clock times under normal Node behaviour. `make bench-wasm-callgrind`
 runs the same workloads under Callgrind, in Gungraun's metrics. Only the first sees real cold-start
 time and parallel engine compilation; only the second is immune to what else runs on the machine.
 
-Both drive `examples/wasm-profile` over the corpus in `benches/runtime_workloads.rs`, the one
-Gungraun and `make profile-mir` use.
+Both drive `examples/wasm-profile` over the shared workload corpus.
 
-## Wall-clock runner
+### Wall-clock runner
 
 `make bench-wasm` builds the Node profile runner and executes every workload. Set
 `ARGS="quicksort sieve"` to select workloads or `ARGS="--list"` to list them. Each workload checks
@@ -15,7 +30,7 @@ a fixed result and reports Ferlium compilation/emission, engine instantiation, t
 median warmed execution, and generated module bytes separately. It uses the same generated
 parameterless entry as the interpreter measurements.
 
-## Callgrind runner
+### Callgrind runner
 
 | Phase | Covers |
 | --- | --- |
@@ -47,7 +62,7 @@ its process. `--optimized-only` keeps the sharding of a full run.
 `VALGRIND_INCLUDE` overrides where `callgrind.h` is found for the marker addon, which exists because
 neither the compiler nor the generated code can issue client requests — both are Wasm.
 
-## Why the controls are there
+### Why the controls are there
 
 Instrumentation is enabled once and only collection is toggled afterwards; restarting it would flush
 Valgrind's translations and distort later ranges.
@@ -70,7 +85,7 @@ standard library build. That trade is sound only because Callgrind counts the si
 `BENCH_JOBS` or `--jobs` sets the process count. The repeated standard library builds double as a
 check that a repeated measurement lands on the same counts.
 
-## Comparing results
+### Comparing results
 
 Ranges are reproducible to within a few instructions and comparable across shard layouts.
 
