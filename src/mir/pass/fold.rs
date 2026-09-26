@@ -784,7 +784,7 @@ fn plan_folds_with(
         let basic_block = func.block(block);
         for (index, operation) in basic_block.operations().iter().enumerate() {
             if let OperationKind::Call { ty, .. } = &operation.kind
-                && let Some(call) = dataflow::call_operands(&operation.operands, ty)
+                && let Some(destination) = dataflow::call_result_operand(&operation.operands, ty)
                 && let Some(result) = partial_call_outcome(operation, ty, &state, &context)
                     .filter(|rewrite| {
                         context.evaluator.is_some()
@@ -801,7 +801,7 @@ fn plan_folds_with(
                     call_rewrite_operation_count(&result),
                     original_size,
                 ) {
-                    let destination = call.result.clone();
+                    let destination = destination.clone();
                     // Only a rewrite that produced a value the next round can reason about buys
                     // one.
                     plan.warrants_another_round |= yields_known_value(&result, &state, analysis);
@@ -861,7 +861,8 @@ fn plan_folds_with(
             } => {
                 if let OperationKind::Call { ty, .. } = &operation.kind
                     && let Some(result) = fold_outcome(operation, ty, &state, &context, refusals)
-                    && let Some(call) = dataflow::call_operands(&operation.operands, ty)
+                    && let Some(destination) =
+                        dataflow::call_result_operand(&operation.operands, ty)
                 {
                     if reserve_growth(
                         &mut planned_size,
@@ -873,7 +874,7 @@ fn plan_folds_with(
                         plan.warrants_another_round = true;
                         plan.invokes.push(InvokeFold {
                             block,
-                            destination: call.result.clone(),
+                            destination: destination.clone(),
                             result,
                             normal: *normal,
                         });
@@ -1279,7 +1280,8 @@ fn why_operand_names_no_place(
 ///
 /// Deliberately approximate: it matches a call's result operand by register identity, so it sees
 /// the `%r = alloca; call f(.., %r)` shape that lowering actually emits and not a write through a
-/// `subfield`. It reads call layout through [`dataflow::call_operands`] rather than restating it.
+/// `subfield`. It reads call layout through [`dataflow::call_result_operand`]
+/// rather than restating it.
 /// This feeds a report, not a rewrite, so an approximation that is honest about its edges is the
 /// right trade — a precise answer would mean recording a cause alongside every `Unknown` the
 /// dataflow produces.
@@ -1287,8 +1289,8 @@ fn call_destinations(func: &Function) -> FxHashSet<ValueId> {
     let mut destinations = FxHashSet::default();
     let mut record = |operation: &Operation| {
         if let OperationKind::Call { ty, .. } = &operation.kind
-            && let Some(call) = dataflow::call_operands(&operation.operands, ty)
-            && let mir::Value::Register(id) = call.result
+            && let Some(mir::Value::Register(id)) =
+                dataflow::call_result_operand(&operation.operands, ty)
         {
             destinations.insert(*id);
         }

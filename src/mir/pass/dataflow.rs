@@ -672,8 +672,8 @@ impl State {
                 operation, error, ..
             } if successor == *error => {
                 if let OperationKind::Call { ty, .. } = &operation.kind
-                    && let Some(call) = call_operands(&operation.operands, ty)
-                    && let Some(place) = bindings.place_of(call.result)
+                    && let Some(result) = call_result_operand(&operation.operands, ty)
+                    && let Some(place) = bindings.place_of(result)
                 {
                     state.to_mut().set_place(place, Fact::Unknown, bindings);
                 }
@@ -1105,8 +1105,8 @@ fn transfer(
         OperationKind::Call { ty, .. } => {
             // The callee replaces its result slot. Only the type or adapter's result-domain
             // contract is known without evaluating it; no effects or operand laws follow.
-            if let Some(call) = call_operands(&operation.operands, ty)
-                && let Some(place) = place_of(call.result)
+            if let Some(result) = call_result_operand(&operation.operands, ty)
+                && let Some(place) = place_of(result)
                 && tracked(place)
             {
                 let fact = match native_result_fact(&operation.operands[0], env) {
@@ -1453,8 +1453,8 @@ pub(crate) struct CallOperands<'a> {
 
 /// Returns the caller-provided result-place operand's index.
 ///
-/// This is the allocation-free part of [`call_operands`]. Consumers that only classify the result
-/// place should use it rather than constructing visible argument/convention pairs.
+/// Use this for comparisons of operand positions. Consumers that only need the result place
+/// should use [`call_result_operand`] to avoid constructing visible argument/convention pairs.
 pub(crate) fn call_result_operand_index(
     operands: &[mir::Value],
     ty: &CallImplType,
@@ -1466,6 +1466,14 @@ pub(crate) fn call_result_operand_index(
     // callee + extras + args + ret
     let extras = operands.len().checked_sub(visible + 2)?;
     Some(1 + extras + visible)
+}
+
+/// Returns the caller-provided result place without constructing argument/convention pairs.
+pub(crate) fn call_result_operand<'a>(
+    operands: &'a [mir::Value],
+    ty: &CallImplType,
+) -> Option<&'a mir::Value> {
+    call_result_operand_index(operands, ty).map(|index| &operands[index])
 }
 
 pub(crate) fn call_operands<'a>(
