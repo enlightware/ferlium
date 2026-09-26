@@ -746,6 +746,31 @@ fn apply_devirtualizations(edit: &mut FunctionEdit, devirtualizations: Vec<Devir
     }
 }
 
+/// Every consumer of the planner's dataflow facts must be represented here. Stop at the first
+/// possible consumer; bodies without one need neither analysis nor a replay of their operations.
+fn may_have_fold_consumer(func: &Function, devirtualize: bool) -> bool {
+    let consumes = |operation: &Operation| {
+        matches!(
+            operation.kind,
+            OperationKind::Call { .. } | OperationKind::BuildArray { .. }
+        ) || (devirtualize && dispatch_callee(operation).is_some_and(is_indirect_callee))
+    };
+    func.blocks().any(|block| {
+        let block = func.block(block);
+        block.operations().iter().any(consumes)
+            || match &block.terminator().kind {
+                TerminatorKind::Invoke { operation, .. } => consumes(operation),
+                TerminatorKind::CondBr { .. } | TerminatorKind::SwitchVariant { .. } => true,
+                TerminatorKind::Goto { .. }
+                | TerminatorKind::Yield { .. }
+                | TerminatorKind::Return
+                | TerminatorKind::PropagateError
+                | TerminatorKind::FailureDuringCleanup
+                | TerminatorKind::InvariantFailure { .. } => false,
+            }
+    })
+}
+
 fn plan_folds_with(
     func: &Function,
     resources: FoldResources<'_, '_>,
@@ -754,6 +779,15 @@ fn plan_folds_with(
     refusals: &mut Option<&mut Vec<Refusal>>,
     devirtualizations: &mut Option<&mut Vec<Devirtualization>>,
 ) -> Plan {
+    // Keep the detailed-report path unchanged, though it could also skip consumer-free bodies.
+    let skip_analysis =
+        refusals.is_none() && !may_have_fold_consumer(func, devirtualizations.is_some());
+    if skip_analysis && !cfg!(debug_assertions) {
+        return Plan::default();
+    }
+    // Debug builds run the full planner to catch consumers missing from the structural filter.
+    #[cfg(debug_assertions)]
+    let initial_devirtualizations = devirtualizations.as_ref().map_or(0, |items| items.len());
     let FoldResources {
         original_size,
         env,
@@ -926,6 +960,14 @@ fn plan_folds_with(
             | TerminatorKind::FailureDuringCleanup
             | TerminatorKind::InvariantFailure { .. } => {}
         }
+    }
+    #[cfg(debug_assertions)]
+    if skip_analysis {
+        debug_assert!(plan.is_empty() && !plan.warrants_another_round);
+        debug_assert_eq!(
+            devirtualizations.as_ref().map_or(0, |items| items.len()),
+            initial_devirtualizations,
+        );
     }
     plan
 }
