@@ -688,22 +688,34 @@ impl State {
 fn type_fact(mut ty: Type, env: ModuleEnv<'_>) -> Fact {
     let mut visited = FxHashSet::default();
     loop {
-        let named = {
-            let kind = ty.data();
-            match &*kind {
-                TypeKind::Named(named) => named.clone(),
-                TypeKind::Variant(cases) if cases.len() <= MAX_OUTCOMES => {
-                    return Fact::from_outcomes(cases.iter().map(|(tag, _)| Outcome::Tag(*tag)));
-                }
-                _ => return Fact::Unknown,
-            }
+        let def = match &*ty.data() {
+            TypeKind::Named(named) => named.def,
+            TypeKind::Variant(cases) => return variant_fact(cases),
+            _ => return Fact::Unknown,
         };
+        // Substitution rewrites payloads, never tags, so the definition's own shape answers
+        // unless it is itself a variable or a named type. Instantiating a record shape only to
+        // discard it dominated this function's cost.
+        match &*env.type_def(def).shape_ty().data() {
+            TypeKind::Variant(cases) => return variant_fact(cases),
+            TypeKind::Variable(_) | TypeKind::Named(_) => {}
+            _ => return Fact::Unknown,
+        }
         if !visited.insert(ty) {
             break;
         }
+        let named = ty.data().as_named().cloned().expect("checked above");
         ty = named.instantiated_shape(&env);
     }
     Fact::Unknown
+}
+
+fn variant_fact(cases: &[(Ustr, Type)]) -> Fact {
+    if cases.len() <= MAX_OUTCOMES {
+        Fact::from_outcomes(cases.iter().map(|(tag, _)| Outcome::Tag(*tag)))
+    } else {
+        Fact::Unknown
+    }
 }
 
 /// Seed only unconditional parameter-type invariants, never facts specific to the first visit.
