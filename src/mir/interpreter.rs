@@ -197,7 +197,9 @@ pub struct Interpreter<'a> {
     ///
     /// Compile-time evaluation uses this to notice a `black_box` reached through any number of
     /// ordinary calls without changing the function's effects or turning the observation into a
-    /// runtime error. Ordinary interpretation leaves it unset.
+    /// runtime error. Reaching it exhausts the remaining fuel: the evaluation's result will be
+    /// discarded, so running on to completion would only waste compile time. The caller reports
+    /// the barrier, not the exhaustion. Ordinary interpretation leaves it unset.
     const_eval_barrier: Option<FunctionId>,
     reached_const_eval_barrier: bool,
     /// Memoized semantic classification used only by debug call-boundary assertions.
@@ -550,6 +552,7 @@ impl<'a> Interpreter<'a> {
             .is_some_and(|observed| self.session.hir_identity_of(entered, self.stage) == observed)
         {
             self.reached_const_eval_barrier = true;
+            self.ctx.exhaust_fuel();
         }
         let function = self.function(key);
         assert_eq!(

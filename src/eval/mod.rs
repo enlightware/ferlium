@@ -222,6 +222,11 @@ impl<'a> EvalCtx<'a> {
         self.compiler_session
     }
 
+    /// Makes the next fuel check fail, ending execution through the ordinary exhaustion path.
+    pub(crate) fn exhaust_fuel(&mut self) {
+        self.fuel_remaining = Some(0);
+    }
+
     pub fn check_fuel(&mut self, span: Location) -> Result<(), RuntimeError> {
         let Some(fuel) = &mut self.fuel_remaining else {
             return Ok(());
