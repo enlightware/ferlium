@@ -19,6 +19,7 @@ use dyn_eq::DynEq;
 use enum_as_inner::EnumAsInner;
 use indexmap::IndexSet;
 use nonmax::NonMaxU32;
+use rustc_hash::FxBuildHasher;
 use ustr::{Ustr, ustr};
 
 use crate::{
@@ -2896,7 +2897,8 @@ impl graph::Node for TypeKind {
 
 /// A set of types representing a "world" of types,
 /// i.e. a collection of types that can reference each other.
-type TypeWorld = IndexSet<InternedType>;
+/// Positions follow insertion order, so the hasher never affects which index a type receives.
+type TypeWorld = IndexSet<InternedType, FxBuildHasher>;
 
 /// Cached set of free variables of an interned type, used to short-circuit  substitutions that cannot affect the type.
 /// Computed once per interned type at insertion time and stored alongside its `TypeKind` in `InternedType`.
@@ -3202,7 +3204,7 @@ struct TypeUniverse {
 impl TypeUniverse {
     fn new_empty() -> Self {
         Self {
-            worlds: vec![IndexSet::new()],
+            worlds: vec![TypeWorld::default()],
             local_to_world: FxHashMap::default(),
         }
     }
@@ -3441,7 +3443,7 @@ impl TypeUniverse {
                     })
                     .collect();
                 let summaries = self.compute_scc_summaries(&kinds_renormalized, global_world_index);
-                let global_world: IndexSet<_> = kinds_renormalized
+                let global_world: TypeWorld = kinds_renormalized
                     .into_iter()
                     .zip(summaries)
                     .map(|(kind, summary)| InternedType { kind, summary })
@@ -4382,7 +4384,7 @@ mod tests {
             TypeKind::Tuple(vec![int, Type::new_local(0)]),
         ];
 
-        let mut existing_world = IndexSet::new();
+        let mut existing_world = TypeWorld::default();
         existing_world.insert(test_interned(container_kind(Type::new_global(1, 0))));
         existing_world.insert(test_interned(TypeKind::Tuple(vec![
             int,
@@ -4418,7 +4420,7 @@ mod tests {
 
         // Existing: [Variant{V(global[1,1])}, Array([global[1,0]])]
         // Same types but REVERSED order
-        let mut existing_world = IndexSet::new();
+        let mut existing_world = TypeWorld::default();
         existing_world.insert(test_interned(TypeKind::Variant(vec![(
             ustr("V"),
             Type::new_global(1, 2),
@@ -4464,7 +4466,7 @@ mod tests {
         ];
 
         // Existing: [Array([global[1,0]]), Array([global[1,1]])]
-        let mut existing_world = IndexSet::new();
+        let mut existing_world = TypeWorld::default();
         existing_world.insert(test_interned(container_kind(Type::new_global(1, 0))));
         existing_world.insert(test_interned(container_kind(Type::new_global(1, 1))));
 
