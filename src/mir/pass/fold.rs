@@ -30,6 +30,8 @@
 
 #![allow(dead_code)]
 
+use std::rc::Rc;
+
 use rustc_hash::FxHashSet;
 use ustr::{Ustr, ustr};
 
@@ -418,7 +420,7 @@ fn known_array_elements(
         .filter_map(|(index, operand)| {
             let place = analysis.tracked_place_of(operand)?;
             match state.place(place) {
-                Fact::Known(Const::Literal(literal)) => Some((index, literal)),
+                Fact::Known(Const::Literal(literal)) => Some((index, Rc::unwrap_or_clone(literal))),
                 _ => None,
             }
         })
@@ -1052,7 +1054,7 @@ fn partial_call_outcome(
     let literal = |index: usize| -> Option<LiteralValue> {
         let place = context.analysis.tracked_place_of(argument(index)?)?;
         match state.place(place) {
-            Fact::Known(Const::Literal(literal)) => Some(literal),
+            Fact::Known(Const::Literal(literal)) => Some(Rc::unwrap_or_clone(literal)),
             _ => None,
         }
     };
@@ -1240,7 +1242,7 @@ fn record_refusal(
 fn fact_for_reification(reification: &Reification) -> Fact {
     match reification {
         Reification::Constant(constant) => {
-            Fact::Known(Const::Literal(constant.representation.clone()))
+            Fact::Known(Const::literal(constant.representation.clone()))
         }
         Reification::Array {
             element_ty,
@@ -1458,7 +1460,9 @@ fn try_fold_call(
             Some(Fact::Known(Const::Literal(literal)))
                 if literal.has_representation_type_in(parameter.ty, &context.env) =>
             {
-                arguments.push(ConstArgument::Value(literal.into_value()))
+                arguments.push(ConstArgument::Value(
+                    Rc::unwrap_or_clone(literal).into_value(),
+                ))
             }
             Some(Fact::Known(Const::Array {
                 element_ty,

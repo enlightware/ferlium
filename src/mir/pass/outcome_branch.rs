@@ -17,6 +17,8 @@
 //! must have identical stores/cleanup/continuations and no other incoming edges. No calls or writes
 //! except the one Boolean store are crossed, and no computed result may escape its original tail.
 
+use std::rc::Rc;
+
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
@@ -275,7 +277,7 @@ fn plan_boolean_result(
 
 fn outcome_pattern(outcome: Outcome) -> LiteralValue {
     match outcome.constant() {
-        Const::Literal(value) => value,
+        Const::Literal(value) => Rc::unwrap_or_clone(value),
         Const::VariantTag(tag) => LiteralValue::new_variant_tag(tag),
         _ => unreachable!("outcomes are integers or tags"),
     }

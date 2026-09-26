@@ -2662,7 +2662,7 @@ mod tests {
                 }
                 assert_eq!(
                     state.place(constants.place_of(&field).unwrap()),
-                    dataflow::Fact::Known(dataflow::Const::Literal(LiteralValue::new_native(
+                    dataflow::Fact::Known(dataflow::Const::literal(LiteralValue::new_native(
                         42isize
                     )))
                 );

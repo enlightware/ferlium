@@ -205,7 +205,8 @@ impl PlaceBindings {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Const {
     /// A trivially-copyable value, in the form a MIR constant pool holds.
-    Literal(LiteralValue),
+    /// Shared, because every flow state copy would otherwise box each literal again.
+    Literal(Rc<LiteralValue>),
     /// A known function, as a `dict_entry` on a constant dictionary resolves to.
     Function(FunctionId),
     /// A known trait dictionary.
@@ -224,6 +225,12 @@ pub(crate) enum Const {
         element_ty: Type,
         elements: Box<[LiteralValue]>,
     },
+}
+
+impl Const {
+    pub(crate) fn literal(value: LiteralValue) -> Self {
+        Self::Literal(Rc::new(value))
+    }
 }
 
 /// What is known about one storage slot, or about a materialized value.
@@ -478,7 +485,7 @@ impl Outcome {
 
     pub(crate) fn constant(&self) -> Const {
         match self {
-            Self::Int(value) => Const::Literal(LiteralValue::new_native(*value)),
+            Self::Int(value) => Const::literal(LiteralValue::new_native(*value)),
             Self::Tag(tag) => Const::VariantTag(*tag),
         }
     }
@@ -573,7 +580,7 @@ impl State {
         let values = scrutinee.outcomes()?;
         let contains = values.clone().any(|value| value == pattern);
         if !contains || values.clone().count() == 1 {
-            return Some(Fact::Known(Const::Literal(LiteralValue::new_native(
+            return Some(Fact::Known(Const::literal(LiteralValue::new_native(
                 contains,
             ))));
         }
@@ -944,7 +951,7 @@ fn transfer(
                         None => value_operand_fact(operand, func, state),
                     };
                     match fact {
-                        Fact::Known(Const::Literal(literal)) => Some(literal),
+                        Fact::Known(Const::Literal(literal)) => Some(Rc::unwrap_or_clone(literal)),
                         _ => None,
                     }
                 })
@@ -1067,7 +1074,7 @@ fn transfer(
                     (Some(Const::VariantTag(actual)), mir::Value::Pattern(pattern))
                         if pattern.as_variant_tag().is_some() =>
                     {
-                        Fact::Known(Const::Literal(LiteralValue::new_native(
+                        Fact::Known(Const::literal(LiteralValue::new_native(
                             pattern.as_variant_tag() == Some(actual),
                         )))
                     }
@@ -1075,12 +1082,12 @@ fn transfer(
                         // Compared exactly as the interpreter does, rather than by comparing literal
                         // trees: pattern matching has representation rules of its own (a `StaticStr`
                         // pattern matches a `String` value), and this must not disagree with them.
-                        let value = literal.clone().into_value();
+                        let value = LiteralValue::clone(literal).into_value();
                         let equal = pattern.try_matches_runtime_value(&value);
                         value.discard_storage();
                         match equal {
                             Ok(equal) => {
-                                Fact::Known(Const::Literal(LiteralValue::new_native(equal)))
+                                Fact::Known(Const::literal(LiteralValue::new_native(equal)))
                             }
                             Err(_) => Fact::Unknown,
                         }
@@ -1199,7 +1206,7 @@ fn value_operand_fact(operand: &mir::Value, func: &Function, state: &State) -> F
         // A pool constant is the base case of the whole analysis: `let x = 5` lowers to a store of
         // one, and everything folding knows grows from there.
         mir::Value::Constant(id) => {
-            Fact::Known(Const::Literal(func.constant(*id).representation.clone()))
+            Fact::Known(Const::literal(func.constant(*id).representation.clone()))
         }
         mir::Value::Function(id) => Fact::Known(Const::Function(*id)),
         mir::Value::Dictionary(id) => Fact::Known(Const::Dictionary(*id)),
@@ -1588,7 +1595,7 @@ mod tests {
 
         let (analysis, state) = entry_block_exit(&func, env);
         let key = analysis.place_of(&slot).expect("the alloca names a place");
-        let expected = Fact::Known(Const::Literal(LiteralValue::new_native(5isize)));
+        let expected = Fact::Known(Const::literal(LiteralValue::new_native(5isize)));
         assert_eq!(state.place(key), expected);
         let mir::Value::Register(slot) = slot else {
             panic!("`alloca` defines a register");
@@ -1655,7 +1662,7 @@ mod tests {
         };
         assert_eq!(
             state.register(equal),
-            Some(&Fact::Known(Const::Literal(LiteralValue::new_native(true))))
+            Some(&Fact::Known(Const::literal(LiteralValue::new_native(true))))
         );
     }
 
@@ -1818,7 +1825,7 @@ mod tests {
         for (place, expected) in places.iter().zip([2isize, 1]) {
             assert_eq!(
                 state.place(analysis.place_of(place).unwrap()),
-                Fact::Known(Const::Literal(LiteralValue::new_native(expected)))
+                Fact::Known(Const::literal(LiteralValue::new_native(expected)))
             );
         }
     }
@@ -1954,7 +1961,7 @@ mod tests {
         assert_eq!(field, same_field, "identical paths must share one place id");
         let bindings = builder.finish();
 
-        let known = |value| Fact::Known(Const::Literal(LiteralValue::new_native(value)));
+        let known = |value| Fact::Known(Const::literal(LiteralValue::new_native(value)));
         let mut state = State::default();
         state.places.insert(root, known(1isize));
         state.places.insert(field, known(2isize));
@@ -2181,7 +2188,7 @@ mod tests {
             analysis
                 .entry_state(join)
                 .place(analysis.place_of(&slot).unwrap()),
-            Fact::Known(Const::Literal(LiteralValue::new_native(1isize)))
+            Fact::Known(Const::literal(LiteralValue::new_native(1isize)))
         );
     }
 
@@ -2231,7 +2238,7 @@ mod tests {
             analysis
                 .entry_state(exit)
                 .place(analysis.place_of(&slot).unwrap()),
-            Fact::Known(Const::Literal(LiteralValue::new_native(1isize)))
+            Fact::Known(Const::literal(LiteralValue::new_native(1isize)))
         );
     }
 
