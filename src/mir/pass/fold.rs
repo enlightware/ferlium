@@ -144,13 +144,13 @@ struct Devirtualization {
     site: Site,
     operand: usize,
     callee: FunctionId,
-    hidden_evidence: Vec<StaticEvidence>,
+    hidden_evidence: Rc<[StaticEvidence]>,
 }
 
 struct ResolvedCallee {
     operand: usize,
     callee: FunctionId,
-    hidden_evidence: Vec<StaticEvidence>,
+    hidden_evidence: Rc<[StaticEvidence]>,
 }
 
 /// Where a dispatch sits in its block: an ordinary operation, or the `Invoke` terminator.
@@ -740,8 +740,8 @@ fn apply_devirtualizations(edit: &mut FunctionEdit, devirtualizations: Vec<Devir
                 devirtualized.operand + 1..devirtualized.operand + 1,
                 devirtualized
                     .hidden_evidence
-                    .into_iter()
-                    .map(|evidence| mir::Value::Evidence(Box::new(evidence))),
+                    .iter()
+                    .map(|evidence| mir::Value::Evidence(Box::new(evidence.clone()))),
             );
             operation.operands = operands.into_boxed_slice();
         }
@@ -1191,7 +1191,7 @@ fn resolved_callee(
         return None;
     }
     let (callee, hidden_evidence) = match state.place(place) {
-        Fact::Known(Const::Function(id)) => (id, Vec::new()),
+        Fact::Known(Const::Function(id)) => (id, Rc::default()),
         Fact::Known(Const::ClosedFunction {
             function,
             hidden_evidence,
@@ -1249,7 +1249,7 @@ fn fact_for_reification(reification: &Reification) -> Fact {
             elements,
         } => Fact::Known(Const::Array {
             element_ty: *element_ty,
-            elements: elements.clone(),
+            elements: Rc::from(&elements[..]),
         }),
         Reification::BareFunction(function) => Fact::Known(Const::Function(*function)),
         // Owned strings are not constants: the recipe constructs a fresh value at run time.
@@ -1470,8 +1470,8 @@ fn try_fold_call(
             })) if parameter.ty == array_type(element_ty) => {
                 arguments.push(ConstArgument::Value(array_value_from_vec(
                     elements
-                        .into_vec()
-                        .into_iter()
+                        .iter()
+                        .cloned()
                         .map(LiteralValue::into_value)
                         .collect(),
                 )))

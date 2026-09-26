@@ -202,28 +202,32 @@ impl PlaceBindings {
 }
 
 /// A compile-time constant the analysis can carry.
+///
+/// Every flow state copy clones its facts, so heap payloads are shared rather than owned. Keeping
+/// each payload within 24 bytes also gives this enum a tag word of its own: an inline
+/// `StaticEvidence` would lend its tag byte as a niche for both this enum and [`Fact`], and
+/// decoding and copying that packed layout made cloning facts slower despite the smaller size.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Const {
     /// A trivially-copyable value, in the form a MIR constant pool holds.
-    /// Shared, because every flow state copy would otherwise box each literal again.
     Literal(Rc<LiteralValue>),
     /// A known function, as a `dict_entry` on a constant dictionary resolves to.
     Function(FunctionId),
     /// A known trait dictionary.
     Dictionary(TraitDictionaryId),
     /// Recursively static hidden evidence.
-    Evidence(StaticEvidence),
+    Evidence(Rc<StaticEvidence>),
     /// A dictionary entry function together with its closed hidden evidence.
     ClosedFunction {
         function: FunctionId,
-        hidden_evidence: Vec<StaticEvidence>,
+        hidden_evidence: Rc<[StaticEvidence]>,
     },
     /// A symbolic discriminant, kept independent of compilation-session numeric tag ids.
     VariantTag(Ustr),
     /// A fresh array construction whose statically `TrivialCopy` elements are all known.
     Array {
         element_ty: Type,
-        elements: Box<[LiteralValue]>,
+        elements: Rc<[LiteralValue]>,
     },
 }
 
@@ -959,7 +963,7 @@ fn transfer(
             let fact = elements.map_or(Fact::Unknown, |elements| {
                 Fact::Known(Const::Array {
                     element_ty: *element_ty,
-                    elements: elements.into_boxed_slice(),
+                    elements: elements.into(),
                 })
             });
             state.set_place(place, fact, register_places);
@@ -1111,7 +1115,7 @@ fn transfer(
                     } else {
                         Fact::Known(Const::ClosedFunction {
                             function,
-                            hidden_evidence,
+                            hidden_evidence: hidden_evidence.into(),
                         })
                     }
                 })
@@ -1210,7 +1214,9 @@ fn value_operand_fact(operand: &mir::Value, func: &Function, state: &State) -> F
         }
         mir::Value::Function(id) => Fact::Known(Const::Function(*id)),
         mir::Value::Dictionary(id) => Fact::Known(Const::Dictionary(*id)),
-        mir::Value::Evidence(evidence) => Fact::Known(Const::Evidence((**evidence).clone())),
+        mir::Value::Evidence(evidence) => {
+            Fact::Known(Const::Evidence(Rc::new((**evidence).clone())))
+        }
         // Compile-time pattern data belongs to `comp_eq`, and a subscript is evidence rather than
         // data; a parameter naming a materialized value cannot occur, parameters being places.
         mir::Value::Subscript(_) | mir::Value::Pattern(_) | mir::Value::Parameter(_) => {
