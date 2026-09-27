@@ -122,13 +122,48 @@ pub(crate) fn hot_blocks(func: &Function) -> Vec<bool> {
     hot
 }
 
+/// The blocks that lie on a cycle of the control-flow graph, by block index: a call there runs once
+/// per iteration.
+pub(crate) fn cyclic_blocks(func: &Function) -> Vec<bool> {
+    struct Block(Vec<usize>);
+    impl graph::Node for Block {
+        type Index = usize;
+        fn neighbors(&self) -> impl Iterator<Item = usize> {
+            self.0.iter().copied()
+        }
+    }
+    let blocks: Vec<Block> = func
+        .blocks()
+        .map(|block| {
+            Block(
+                func.block(block)
+                    .terminator()
+                    .successors()
+                    .map(|target| target.as_index())
+                    .collect(),
+            )
+        })
+        .collect();
+    let mut cyclic = vec![false; blocks.len()];
+    for component in graph::find_strongly_connected_components(&blocks) {
+        let [single] = component.as_slice() else {
+            for &block in &component {
+                cyclic[block] = true;
+            }
+            continue;
+        };
+        cyclic[*single] = blocks[*single].0.contains(single);
+    }
+    cyclic
+}
+
 #[cfg(test)]
 mod tests {
     use super::cost;
     use crate::{
         CompilerSession, ExecutionTarget,
         compiler::MirOptimization,
-        mir::pass::budget::INLINE_FUNCTION_GROWTH,
+        mir::pass::budget::INLINE_LOOP_GROWTH,
         module::{LocalFunctionId, ModuleId, Path, id::Id},
         std::STD_MODULE_ID,
     };
@@ -167,7 +202,7 @@ mod tests {
         ("sudoku", include_str!("../../../tests/modules/sudoku.fer")),
     ];
 
-    /// Every function in `module` whose cost grew beyond `INLINE_FUNCTION_GROWTH`.
+    /// Every function in `module` whose cost grew beyond `INLINE_LOOP_GROWTH`, the larger budget.
     fn overgrown(session: &CompilerSession, module: ModuleId) -> Vec<String> {
         let raw = session
             .mir_artifacts_for(module, MirOptimization::Disabled)
@@ -181,14 +216,14 @@ mod tests {
             .filter_map(|(index, before)| {
                 let after = optimized.get(LocalFunctionId::from_index(index))?;
                 let (before, after_cost) = (cost(before.as_ref()?), cost(after));
-                (after_cost > before + INLINE_FUNCTION_GROWTH)
+                (after_cost > before + INLINE_LOOP_GROWTH)
                     .then(|| format!("`{}` grew from {before} to {after_cost}", after.name))
             })
             .collect()
     }
 
     /// Inlining and constructive folds may add operations, but no function's cost grows by more
-    /// than `INLINE_FUNCTION_GROWTH` over the whole of optimization, standard library included.
+    /// than `INLINE_LOOP_GROWTH` over the whole of optimization, standard library included.
     #[test]
     fn optimization_grows_no_function_beyond_its_budget() {
         for (index, (name, src)) in CORPUS.iter().chain(PROGRAMS).enumerate() {

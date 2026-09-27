@@ -37,7 +37,7 @@ use ustr::{Ustr, ustr};
 
 use super::{
     OptimizationStage,
-    budget::INLINE_FUNCTION_GROWTH,
+    budget::{INLINE_FUNCTION_GROWTH, INLINE_LOOP_GROWTH},
     cost,
     dataflow::{self, Analysis, Const, Fact, Root, State},
     known_callee::{KnownCallee, KnownCallees},
@@ -568,17 +568,27 @@ fn call_rewrite_operation_count(rewrite: &CallRewrite) -> usize {
     }
 }
 
-/// Reserves the structural growth of one planned rewrite against the same whole-function budget
+/// Reserves the structural growth of one planned rewrite against the same whole-function budgets
 /// used by inlining. Cleanup may later make the rewrite net-shrinking, but relying on that would
 /// make the documented bound empirical rather than guaranteed by construction.
+///
+/// A rewrite that does not grow the function is always accepted, since the function is already
+/// within its budget: inlining sites in a loop may have taken it past `INLINE_FUNCTION_GROWTH`, and
+/// the folds they expose must not be refused for it. A growing rewrite is bounded like an inlined
+/// call at the same place: by `INLINE_LOOP_GROWTH` in a loop, `INLINE_FUNCTION_GROWTH` elsewhere.
+/// `in_loop` is asked only when the smaller budget does not suffice.
 fn reserve_growth(
     planned_size: &mut usize,
     removed: usize,
     added: usize,
     original_size: usize,
+    in_loop: impl FnOnce() -> bool,
 ) -> bool {
     let next = planned_size.saturating_sub(removed).saturating_add(added);
-    if next > original_size + INLINE_FUNCTION_GROWTH {
+    if added > removed
+        && next > original_size + INLINE_FUNCTION_GROWTH
+        && (next > original_size + INLINE_LOOP_GROWTH || !in_loop())
+    {
         return false;
     }
     *planned_size = next;
@@ -812,6 +822,8 @@ fn plan_folds_with(
     let analysis = &context.analysis;
     let mut plan = Plan::default();
     let mut planned_size = cost::cost(func);
+    // Found only if a growing rewrite needs the loop budget.
+    let mut cyclic = None;
 
     for block in func.blocks() {
         // Stepping from the block's entry state, rather than only reading it, lets a fold teach the
@@ -836,6 +848,7 @@ fn plan_folds_with(
                     1,
                     call_rewrite_operation_count(&result),
                     original_size,
+                    || cyclic.get_or_insert_with(|| cost::cyclic_blocks(func))[block.as_index()],
                 ) {
                     let destination = destination.clone();
                     // Only a rewrite that produced a value the next round can reason about buys
@@ -905,6 +918,10 @@ fn plan_folds_with(
                         1,
                         reification_operation_count(&result),
                         original_size,
+                        || {
+                            cyclic.get_or_insert_with(|| cost::cyclic_blocks(func))
+                                [block.as_index()]
+                        },
                     ) {
                         // An evaluated fallible call yields a constant and removes an error edge.
                         plan.warrants_another_round = true;
@@ -1523,7 +1540,7 @@ fn discard(arguments: Vec<ConstArgument>, reason: NotFoldable) -> Result<Reifica
 
 #[cfg(test)]
 mod tests {
-    use super::{INLINE_FUNCTION_GROWTH, reserve_growth};
+    use super::{INLINE_FUNCTION_GROWTH, INLINE_LOOP_GROWTH, reserve_growth};
     use crate::{CompilerSession, MirOptimization};
 
     #[test]
@@ -1531,10 +1548,67 @@ mod tests {
         let original_size = 10;
         let mut planned_size = original_size;
         for _ in 0..64 {
-            assert!(reserve_growth(&mut planned_size, 1, 3, original_size));
+            assert!(reserve_growth(
+                &mut planned_size,
+                1,
+                3,
+                original_size,
+                || false
+            ));
         }
         assert_eq!(planned_size, original_size + INLINE_FUNCTION_GROWTH);
-        assert!(!reserve_growth(&mut planned_size, 1, 3, original_size));
+        assert!(!reserve_growth(
+            &mut planned_size,
+            1,
+            3,
+            original_size,
+            || false
+        ));
+    }
+
+    #[test]
+    fn folds_in_loops_reserve_the_loop_growth_budget() {
+        let original_size = 10;
+        let mut planned_size = original_size + INLINE_FUNCTION_GROWTH;
+        assert!(!reserve_growth(
+            &mut planned_size,
+            1,
+            3,
+            original_size,
+            || false
+        ));
+        while planned_size + 2 <= original_size + INLINE_LOOP_GROWTH {
+            assert!(reserve_growth(
+                &mut planned_size,
+                1,
+                3,
+                original_size,
+                || true
+            ));
+        }
+        assert!(!reserve_growth(
+            &mut planned_size,
+            1,
+            3,
+            original_size,
+            || true
+        ));
+    }
+
+    /// Inlining sites in a loop may take a function past `INLINE_FUNCTION_GROWTH`; the folds they
+    /// expose must still go through when they do not grow it.
+    #[test]
+    fn folds_that_do_not_grow_are_accepted_beyond_the_budget() {
+        let original_size = 10;
+        let mut planned_size = original_size + INLINE_LOOP_GROWTH + 5;
+        assert!(reserve_growth(
+            &mut planned_size,
+            1,
+            1,
+            original_size,
+            || { unreachable!("a non-growing rewrite needs no loop information") }
+        ));
+        assert_eq!(planned_size, original_size + INLINE_LOOP_GROWTH + 5);
     }
 
     fn optimized_function<'a>(module: &'a str, name: &str) -> &'a str {

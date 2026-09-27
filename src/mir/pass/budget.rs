@@ -49,6 +49,16 @@ pub const INLINE_CALLEE_COST: usize = 32;
 /// these by name.
 pub const INLINE_FUNCTION_GROWTH: usize = 128;
 
+/// How much inlining may grow one function's [`cost`](super::cost) beyond the cost it had *before*
+/// optimization started, counting only call sites inside a loop.
+///
+/// A site in a loop runs once per iteration, so it pays far more than a straight-line one: on the
+/// runtime corpus, granting the larger allowance to all sites instead would add more than twice the
+/// compile time for the same execution gain. Loop sites spend it first, and other sites stop at
+/// [`INLINE_FUNCTION_GROWTH`], so a function without loops grows as before. Constructive folds
+/// reserve their growth against the same budget as an inlined call at the same place.
+pub const INLINE_LOOP_GROWTH: usize = 256;
+
 /// Largest owned string result one compile-time evaluation may embed as a constructive recipe.
 ///
 /// A string is not stored in the constant pool: reification interns its immutable text as a

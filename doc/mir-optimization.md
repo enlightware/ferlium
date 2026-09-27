@@ -472,6 +472,12 @@ offsets) lowers to no instruction, so it is free. A failure path — code that c
 returning `never`, such as `panic` — runs at most once: a callee is judged by the cost of its other
 paths, and a call on a failure path is not inlined. Growth still counts everything copied.
 
+**The growth budget is spent by priority.** Each round first collects every site that passes the
+other checks, then admits sites in a loop before the others and cheaper callees before larger ones,
+with position breaking ties. A site in a loop runs once per iteration, so it may grow the function
+up to `INLINE_LOOP_GROWTH`, the others up to `INLINE_FUNCTION_GROWTH`. In block order, a large callee
+early in a function would refuse the smaller or hotter sites after it.
+
 A dictionary parameter is *not* itself a reason to refuse: splicing binds `@extra` parameters like
 any other, and a genuinely generic body is already refused for its non-constant parameter types. What
 remains is a specialization, whose evidence parameters are concrete and unread.
@@ -982,13 +988,16 @@ change: the optimization report cites the inlining limits by name.
 | `MAX_ROUNDS` | the driver's outer loop |
 | `INLINE_CALLEE_COST` | the largest hot cost of a callee inlining will copy |
 | `INLINE_FUNCTION_GROWTH` | cost growth beyond what a function had *before* optimization |
+| `INLINE_LOOP_GROWTH` | the same growth, for call sites in a loop |
 | `REIFIED_STRING_BYTES` | immutable text embedded by one constructive string result |
 | `specialization_limit` | specializations per module, against the cascade |
 | `owned_argument_variant_limit` | ownership-taking ABI variants per module |
 
 Inlining budgets are per function; generated-variant budgets are per module to cap call-graph
-cascades. Constructive folds reserve their added setup operations against
-`INLINE_FUNCTION_GROWTH` before being planned, so the bound covers folding as well as inlining. The
+cascades. Constructive folds reserve their added setup operations against the same budgets as an
+inlined call at the same place before being planned, so the bound covers folding as well as
+inlining; a fold that does not grow the function is always accepted, so that a function which loop
+inlining took past `INLINE_FUNCTION_GROWTH` still folds what inlining exposed. The
 specialization population is measured before optimization; the owned-variant source
 population is the declared bodies plus completed specializations entering that final pass. Neither
 kind of generated output enlarges its own allowance. For each generated-variant budget, the fixed

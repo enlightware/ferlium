@@ -95,6 +95,14 @@ struct Inlining<'a> {
     body: Cow<'a, Function>,
 }
 
+/// A site that passed every check but the growth budget, which is spent once all are known.
+struct Candidate<'a> {
+    in_loop: bool,
+    growth: usize,
+    span: Location,
+    inlining: Inlining<'a>,
+}
+
 /// Why one call site was not inlined.
 ///
 /// Kept apart from [`NotFoldable`](crate::mir::const_eval::NotFoldable) rather than merged into it:
@@ -127,7 +135,8 @@ pub(crate) enum NotInlinable {
     ColdCallSite,
     /// The callee's [hot cost](cost::hot_cost) exceeds [`budget::INLINE_CALLEE_COST`].
     CalleeTooLarge,
-    /// Inlining here would exceed [`budget::INLINE_FUNCTION_GROWTH`] for this caller.
+    /// Inlining here would exceed [`budget::INLINE_FUNCTION_GROWTH`] for this caller, or
+    /// [`budget::INLINE_LOOP_GROWTH`] for a site in a loop.
     GrowthBudgetExhausted,
 }
 
@@ -197,6 +206,12 @@ pub(crate) fn inline_function(
 /// budget bounds the whole of optimization rather than each round — otherwise a function could grow
 /// by the budget again on every round, and the cap would only bound growth per round.
 ///
+/// The growth budget is spent by priority rather than in block order: sites in a loop first, since
+/// they run once per iteration, then the cheapest, with position breaking ties. Loop sites may grow
+/// the function up to [`budget::INLINE_LOOP_GROWTH`], other sites up to
+/// [`budget::INLINE_FUNCTION_GROWTH`]. Spent in block order, a large callee early in a function
+/// would refuse the smaller or hotter sites after it.
+///
 /// `refusals`, when present, collects why each call site was left alone — the optimization report
 /// runs this over an already-optimized body precisely so its answers cannot drift from the pass's.
 fn plan_inlinings<'a>(
@@ -206,10 +221,11 @@ fn plan_inlinings<'a>(
     stage: OptimizationStage<'a>,
     refusals: &mut Option<&mut Vec<Refusal>>,
 ) -> Vec<Inlining<'a>> {
-    let mut sites = Vec::new();
     let mut size = cost::cost(func);
     let cleanup = cleanup_blocks(func);
     let hot = cost::hot_blocks(func);
+    let in_loop = cost::cyclic_blocks(func);
+    let mut admissible = Vec::new();
 
     for block in func.blocks() {
         let in_cleanup = cleanup.contains(&block);
@@ -314,15 +330,47 @@ fn plan_inlinings<'a>(
             // The callee's operations arrive and the call goes, whether an operation or an
             // `invoke`. The stack marks around the splice are free.
             let growth = cost::cost(&body).saturating_sub(1);
-            if size + growth > original_size + budget::INLINE_FUNCTION_GROWTH {
-                refuse(NotInlinable::GrowthBudgetExhausted);
-                continue;
-            }
-            size += growth;
-            sites.push(Inlining { site, callee, body });
+            admissible.push(Candidate {
+                in_loop: in_loop[block.as_index()],
+                growth,
+                span: operation.span,
+                inlining: Inlining { site, callee, body },
+            });
         }
     }
-    sites
+
+    let mut order: Vec<usize> = (0..admissible.len()).collect();
+    order.sort_by_key(|&index| {
+        let candidate = &admissible[index];
+        (!candidate.in_loop, candidate.growth, index)
+    });
+    let mut admitted = vec![false; admissible.len()];
+    for index in order {
+        let candidate = &admissible[index];
+        let allowance = if candidate.in_loop {
+            budget::INLINE_LOOP_GROWTH
+        } else {
+            budget::INLINE_FUNCTION_GROWTH
+        };
+        if size + candidate.growth > original_size + allowance {
+            if let Some(refusals) = refusals.as_mut() {
+                refusals.push(Refusal {
+                    site: candidate.span,
+                    callee: Some(candidate.inlining.callee),
+                    reason: NotInlinable::GrowthBudgetExhausted,
+                });
+            }
+            continue;
+        }
+        size += candidate.growth;
+        admitted[index] = true;
+    }
+    // Back in position order, which reversed is the order they can be spliced in.
+    admissible
+        .into_iter()
+        .zip(admitted)
+        .filter_map(|(candidate, admitted)| admitted.then_some(candidate.inlining))
+        .collect()
 }
 
 /// Classifies every call site of `func` that inlining left alone, for the optimization report.
