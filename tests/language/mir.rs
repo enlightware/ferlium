@@ -1017,7 +1017,7 @@ fn factorial() {
     %r1: place int = alloca int
     call std::Num<std::int>::from_int#impl:25eabc6b(%r0, %r1)
     %r2: place bool = alloca bool
-    call std::gt(dict(std::Ord<std::int>), %p0, %r1, %r2)
+    call std::Ord<std::int>::gt#impl:e18c78bb(%p0, %r1, %r2)
     br b1
   b1:
     %r3: bool = load %r2

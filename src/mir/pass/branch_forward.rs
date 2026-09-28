@@ -47,7 +47,7 @@
 //! only edge cleanup, and replays that cleanup on each arm it redirects.
 //!
 //! The proof is intentionally local and linear. The flag must be a local boolean `alloca`; every
-//! use must be one boolean store or the one final read; every block on a walked path
+//! use must be a boolean store, a call result destination, or the one final read; every block on a walked path
 //! must end in an unconditional jump; a store-free block on a path may contain only
 //! `stack_restore`s; the join may contain only `stack_restore`s besides the read; and the
 //! stores found must be exactly those the use census saw, which is what proves no other definition
@@ -87,6 +87,7 @@ struct Stored<T> {
 enum Flag {
     Literal(bool),
     Computed(ValueId),
+    CallResult(ValueId),
 }
 
 #[derive(Default)]
@@ -115,6 +116,11 @@ struct Arm {
 /// boolean, to a branch on that value.
 enum Exit {
     Goto(BlockId),
+    TestPlace {
+        place: ValueId,
+        then_target: BlockId,
+        else_target: BlockId,
+    },
     Branch {
         condition: ValueId,
         then_target: BlockId,
@@ -172,10 +178,11 @@ pub(crate) fn forward_boolean_branches(func: &Function) -> Option<Function> {
     let mut edit = FunctionEdit::new(func.clone());
     for forward in forwards {
         for arm in forward.arms {
+            let span = edit.block(arm.source).terminator.span;
+            let terminator = arm.exit.terminator(span, &mut edit, arm.source);
             let block = edit.block_mut(arm.source);
             block.operations.extend(arm.replay);
-            let span = block.terminator.span;
-            block.terminator = arm.exit.terminator(span);
+            block.terminator = terminator;
         }
     }
     edit.remove_unreachable_blocks();
@@ -338,10 +345,11 @@ pub(crate) fn forward_variant_branches(func: &Function, env: ModuleEnv<'_>) -> O
     let mut edit = FunctionEdit::new(func.clone());
     for forward in forwards {
         for arm in forward.arms {
+            let span = edit.block(arm.source).terminator.span;
+            let terminator = arm.exit.terminator(span, &mut edit, arm.source);
             let block = edit.block_mut(arm.source);
             block.operations.extend(arm.replay);
-            let span = block.terminator.span;
-            block.terminator = arm.exit.terminator(span);
+            block.terminator = terminator;
         }
     }
     edit.remove_unreachable_blocks();
@@ -601,9 +609,21 @@ pub(crate) fn shadow_variant_tag_tests(func: &Function, env: ModuleEnv<'_>) -> O
 }
 
 impl Exit {
-    fn terminator(self, span: Location) -> Terminator {
+    fn terminator(self, span: Location, edit: &mut FunctionEdit, block: BlockId) -> Terminator {
         match self {
             Self::Goto(target) => Terminator::goto(span, target),
+            Self::TestPlace {
+                place,
+                then_target,
+                else_target,
+            } => {
+                // Read before replaying the join's stack cleanup. The call and its
+                // result storage remain in place; only the redundant join goes.
+                let condition = edit
+                    .append_operation(block, Operation::load(span, mir::Value::Register(place)))
+                    .expect("load has a result");
+                Terminator::cond_br(span, condition, then_target, else_target)
+            }
             Self::Branch {
                 condition,
                 then_target,
@@ -658,6 +678,15 @@ fn census_uses(func: &Function, uses: &mut FxHashMap<ValueId, Uses>) -> FxHashMa
                             },
                         };
                         summary.stores.push(Stored { block, value });
+                    }
+                    OperationKind::Call { ref ty, .. }
+                        if dataflow::call_result_operand_index(&operation.operands, ty)
+                            == Some(operand_index) =>
+                    {
+                        summary.stores.push(Stored {
+                            block,
+                            value: Flag::CallResult(*id),
+                        });
                     }
                     OperationKind::CompareEqual | OperationKind::Load => summary.reads.push(site),
                     _ => summary.other = true,
@@ -746,6 +775,11 @@ fn plan_join(
             let exit = match reaching.value {
                 Flag::Literal(true) => Exit::Goto(then_target),
                 Flag::Literal(false) => Exit::Goto(else_target),
+                Flag::CallResult(place) => Exit::TestPlace {
+                    place,
+                    then_target,
+                    else_target,
+                },
                 Flag::Computed(condition) => Exit::Branch {
                     condition,
                     then_target,
@@ -920,7 +954,9 @@ mod tests {
     /// without materializing an intermediate boolean.
     #[test]
     fn an_integer_comparison_needs_no_materialized_boolean() {
-        let module = optimized("fn choose(x: int) -> int { if x < 10 { 1 } else { 2 } }");
+        let module = optimized(
+            "fn choose(x: int) -> int { if (match cmp(x, 10) { Less => true, _ => false }) { 1 } else { 2 } }",
+        );
         let body = body_of(&module, "choose");
 
         assert_eq!(
@@ -942,7 +978,9 @@ mod tests {
     /// The composed boolean remains control flow rather than becoming a stored flag.
     #[test]
     fn short_circuit_integer_comparisons_need_no_materialized_boolean() {
-        let module = optimized("fn f(i: int, n: int) { if i < 0 or i >= n { 1 } else { 2 } }");
+        let module = optimized(
+            "fn f(i: int, n: int) { if (match cmp(i, 0) { Less => true, _ => false }) or (match cmp(i, n) { Less => false, _ => true }) { 1 } else { 2 } }",
+        );
         let body = body_of(&module, "f");
 
         assert_eq!(
@@ -963,6 +1001,34 @@ mod tests {
             body.matches("stack_restore").count() >= 3,
             "every redirected arm must still restore the frames it passed:\n{body}"
         );
+    }
+
+    /// Native predicates return into places. Their result may be the last operand
+    /// of a short-circuit expression without retaining the shared Boolean join.
+    #[test]
+    fn short_circuit_predicate_results_branch_at_their_calls() {
+        let module =
+            optimized("fn f(i: int, n: int) -> int { if i < 0 or i >= n { 1 } else { 2 } }");
+        let body = body_of(&module, "f");
+        assert_eq!(body.matches("condbr").count(), 2, "{body}");
+        assert_eq!(body.matches("call std::lt_int").count(), 1, "{body}");
+        assert_eq!(body.matches("call std::ge_int").count(), 1, "{body}");
+    }
+
+    #[test]
+    fn forwarding_call_results_preserves_short_circuit_effects() {
+        let source = "fn tick(n: &mut int) -> bool { n = n + 1; n == 1 }
+            fn main() { let mut n = 0; let flag = black_box(true);
+                if flag or tick(n) { () };
+                if not flag and tick(n) { () };
+                if not flag or tick(n) { () };
+                n
+            }";
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        assert_eq!(session.eval_mir("forward_calls", source), "1");
+        session.set_mir_optimization(MirOptimization::Disabled);
+        assert_eq!(session.eval_mir("raw_calls", source), "1");
     }
 
     #[test]

@@ -5,9 +5,17 @@ fn ordering_from_code(code: int) -> Ordering {
 
 impl Ord {
     fn cmp(left: int, right: int) -> Ordering { ordering_from_code(compare_int_code(left, right)) }
+    fn lt(left: int, right: int) -> bool { lt_int(left, right) }
+    fn le(left: int, right: int) -> bool { le_int(left, right) }
+    fn gt(left: int, right: int) -> bool { gt_int(left, right) }
+    fn ge(left: int, right: int) -> bool { ge_int(left, right) }
 }
 impl Ord {
     fn cmp(left: float, right: float) -> Ordering { ordering_from_code(compare_float_code(left, right)) }
+    fn lt(left: float, right: float) -> bool { lt_float(left, right) }
+    fn le(left: float, right: float) -> bool { le_float(left, right) }
+    fn gt(left: float, right: float) -> bool { gt_float(left, right) }
+    fn ge(left: float, right: float) -> bool { ge_float(left, right) }
 }
 impl Ord {
     fn cmp(left: string, right: string) -> Ordering { ordering_from_code(compare_string_code(left, right)) }
@@ -16,38 +24,6 @@ impl Ord {
 /// Returns `true` if `left` is NOT equal to `right`, otherwise `false`.
 pub fn ne(left, right) {
 	not eq(left, right)
-}
-
-/// Tests less than (for `left` and `right`) and is used by the < operator.
-pub fn lt(left, right) {
-	match cmp(left, right) {
-		Less => true,
-		_ => false,
-	}
-}
-
-/// Tests less than or equal to (for `left` and `right`) and is used by the <= operator.
-pub fn le(left, right) {
-	match cmp(left, right) {
-		Greater => false,
-		_ => true,
-	}
-}
-
-/// Tests greater than (for `left` and `right`) and is used by the > operator.
-pub fn gt(left, right) {
-	match cmp(left, right) {
-		Greater => true,
-		_ => false,
-	}
-}
-
-/// Tests greater than or equal to (for `left` and `right`) and is used by the >= operator.
-pub fn ge(left, right) {
-	match cmp(left, right) {
-		Less => false,
-		_ => true,
-	}
 }
 
 /// Returns the minimum of two values.

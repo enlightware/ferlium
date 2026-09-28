@@ -123,3 +123,13 @@ Ferlium's mutable value semantics does not require a distinct borrowed host hand
 Immutable compiled code and type metadata remain reusable after a runtime reset; mutable Ferlium
 handles from the poisoned generation do not. Browser Wasm memory boundaries and the required host
 headroom are specified in [runtime-memory-limits.md](runtime-memory-limits.md).
+
+## Native calls and re-entry
+
+A native entry must not call back into the current Ferlium execution, including through host
+global or thread-local state. Typed native adapters provide no current-executor capability.
+An independent execution has its own sandbox limits. Interpreter-only host callbacks are not
+covered by this guarantee and remain conservative in recursion analysis.
+
+Recursion analysis can exclude native calls and script helpers proven to have no indirect
+callbacks. Unknown calls retain their guards; an empty effect row alone is not such a proof.

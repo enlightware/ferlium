@@ -320,3 +320,61 @@ fn real_overflow_saturates_to_finite_bounds() {
         float(f64::MAX)
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn ord_predicates_agree_with_cmp() {
+    let mut session = TestSession::new();
+    for (left, right) in [
+        ("(-2147483647 - 1)", "2147483647"),
+        ("7", "-5"),
+        ("0", "0"),
+        ("-0.0", "0.0"),
+        ("1.5", "-2.5"),
+        (
+            "-(1000000000.0 * 1000000000.0)",
+            "(1000000000.0 * 1000000000.0)",
+        ),
+        ("\"a\"", "\"b\""),
+        ("\"b\"", "\"a\""),
+        ("\"same\"", "\"same\""),
+    ] {
+        assert_val_eq!(
+            session.run(&format!(
+                r#"
+            let a = black_box({left});
+            let b = black_box({right});
+            let order = cmp(a, b);
+            (a < b) == (match order {{ Less => true, _ => false }}) and
+            (a <= b) == (match order {{ Greater => false, _ => true }}) and
+            (a > b) == (match order {{ Greater => true, _ => false }}) and
+            (a >= b) == (match order {{ Less => false, _ => true }})
+        "#
+            )),
+            bool(true)
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn ord_operators_use_overrides_through_generic_evidence() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+        struct Ranked(int)
+        impl Ord for Ranked {
+            fn cmp(left: Ranked, right: Ranked) -> Ordering { cmp(left.0, right.0) }
+            // Deliberately disagrees with cmp to make dispatch observable.
+            fn lt(left: Ranked, right: Ranked) -> bool { true }
+        }
+        fn below<T>(left: T, right: T) -> bool where T: Ord { left < right }
+        let a = Ranked(black_box(3));
+        let b = Ranked(black_box(2));
+        below(a, b) and (a < b) and not (a <= b) and (a > b) and (a >= b)
+    "#
+        ),
+        bool(true)
+    );
+}

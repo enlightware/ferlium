@@ -399,7 +399,8 @@ pub trait Callable: DynClone {
     /// Native entry address and ABI contract, when available.
     ///
     /// Backend lowering retains the contract; runtime linking resolves the address.
-    /// Interpreter-only callbacks provide no native entry.
+    /// An entry must not re-enter the current Ferlium execution; recursion analysis
+    /// relies on that contract. Interpreter-only callbacks provide no native entry.
     fn native_entry(&self) -> Option<&NativeEntry> {
         None
     }

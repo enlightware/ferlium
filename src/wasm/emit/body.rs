@@ -1494,10 +1494,18 @@ impl<'a, 's> Body<'a, 's> {
             | KnownCallee::IntSub
             | KnownCallee::IntMul
             | KnownCallee::IntCmpCode
+            | KnownCallee::IntLt
+            | KnownCallee::IntLe
+            | KnownCallee::IntGt
+            | KnownCallee::IntGe
             | KnownCallee::FloatAdd
             | KnownCallee::FloatSub
             | KnownCallee::FloatMul
-            | KnownCallee::FloatCmpCode => 2,
+            | KnownCallee::FloatCmpCode
+            | KnownCallee::FloatLt
+            | KnownCallee::FloatLe
+            | KnownCallee::FloatGt
+            | KnownCallee::FloatGe => 2,
             KnownCallee::IntNeg
             | KnownCallee::IntFromInt
             | KnownCallee::FloatNeg
@@ -1551,6 +1559,31 @@ impl<'a, 's> Body<'a, 's> {
                     KnownCallee::IntAdd => I::I32Add,
                     KnownCallee::IntSub => I::I32Sub,
                     KnownCallee::IntMul => I::I32Mul,
+                    _ => unreachable!(),
+                });
+            }
+            KnownCallee::IntLt | KnownCallee::IntLe | KnownCallee::IntGt | KnownCallee::IntGe => {
+                self.read(inputs[0])?;
+                self.read(inputs[1])?;
+                self.i(match intrinsic {
+                    KnownCallee::IntLt => I::I32LtS,
+                    KnownCallee::IntLe => I::I32LeS,
+                    KnownCallee::IntGt => I::I32GtS,
+                    KnownCallee::IntGe => I::I32GeS,
+                    _ => unreachable!(),
+                });
+            }
+            KnownCallee::FloatLt
+            | KnownCallee::FloatLe
+            | KnownCallee::FloatGt
+            | KnownCallee::FloatGe => {
+                self.read(inputs[0])?;
+                self.read(inputs[1])?;
+                self.i(match intrinsic {
+                    KnownCallee::FloatLt => I::F64Lt,
+                    KnownCallee::FloatLe => I::F64Le,
+                    KnownCallee::FloatGt => I::F64Gt,
+                    KnownCallee::FloatGe => I::F64Ge,
                     _ => unreachable!(),
                 });
             }

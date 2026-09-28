@@ -1442,10 +1442,10 @@ AddOp: Vec<&'static str> = {
 CompOp: Vec<&'static str> = {
     "==" => vec!["std", "Value", "eq"],
     "!=" => vec!["std", "ne"],
-    "<=" => vec!["std", "le"],
-    "<" => vec!["std", "lt"],
-    ">=" => vec!["std", "ge"],
-    ">" => vec!["std", "gt"],
+    "<=" => vec!["std", "Ord", "le"],
+    "<" => vec!["std", "Ord", "lt"],
+    ">=" => vec!["std", "Ord", "ge"],
+    ">" => vec!["std", "Ord", "gt"],
 }
 
 LogicalAndOp: () = {

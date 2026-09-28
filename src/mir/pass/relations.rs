@@ -2356,6 +2356,30 @@ fn result_fact(
         // The conversion every integer literal is desugared into, and at `int` it converts nothing:
         // the result is the argument, so it must not become an unrelated symbol.
         KnownCallee::IntFromInt => Some(Fact::Value(affine(0, interner)?)),
+        KnownCallee::IntLt => Predicate::between(
+            &affine(0, interner)?,
+            Comparison::Less,
+            &affine(1, interner)?,
+        )
+        .map(Fact::Truth),
+        KnownCallee::IntLe => Predicate::between(
+            &affine(0, interner)?,
+            Comparison::LessOrEqual,
+            &affine(1, interner)?,
+        )
+        .map(Fact::Truth),
+        KnownCallee::IntGt => Predicate::between(
+            &affine(1, interner)?,
+            Comparison::Less,
+            &affine(0, interner)?,
+        )
+        .map(Fact::Truth),
+        KnownCallee::IntGe => Predicate::between(
+            &affine(1, interner)?,
+            Comparison::LessOrEqual,
+            &affine(0, interner)?,
+        )
+        .map(Fact::Truth),
         KnownCallee::IntCmp => Some(Fact::Ordering {
             left: affine(0, interner)?,
             right: affine(1, interner)?,
@@ -3354,6 +3378,9 @@ mod tests {
     #[test]
     fn a_vanishing_product_drops_its_term() {
         let symbol = Affine::symbol(SymbolId::new(0));
-        assert_eq!(symbol.scale(1 << 62).scale(4), Affine::constant(0));
+        assert_eq!(
+            symbol.scale(1isize << (isize::BITS - 2)).scale(4),
+            Affine::constant(0)
+        );
     }
 }

@@ -25,6 +25,11 @@
 //! Both consumers are the same walk, and it stops at the first thing it cannot see through, so a
 //! partial resolution still pays.
 //!
+//! A terminal comparison of a local Boolean place used only by a branch can also
+//! become a load at the comparison's original site, with polarity expressed by
+//! the branch targets. This does not forward across writes or move the read, and
+//! leaves comparisons with other consumers unchanged.
+//!
 //! # What the walk is allowed to assume
 //!
 //! **A register is immutable**, so stepping from a comparison to its scrutinee needs no proof about
@@ -96,6 +101,8 @@ pub(crate) fn forward_boolean_negations(func: &Function) -> Option<Function> {
     let resolver = Resolver::new(func);
     let mut branches = Vec::new();
     let mut compares = Vec::new();
+    let mut loads = Vec::new();
+    let use_counts = OnceCell::new();
 
     for block in func.blocks() {
         let basic_block = func.block(block);
@@ -123,11 +130,37 @@ pub(crate) fn forward_boolean_negations(func: &Function) -> Option<Function> {
             });
         }
 
-        if let TerminatorKind::CondBr { condition, .. } = &basic_block.terminator().kind
-            && let mir::Value::Register(condition) = condition
-            && let Some(source) = resolver.resolve(*condition)
+        if let TerminatorKind::CondBr {
+            condition: mir::Value::Register(condition),
+            ..
+        } = &basic_block.terminator().kind
         {
-            branches.push(BranchRewrite { block, source });
+            if let Some(source) = resolver.resolve(*condition) {
+                branches.push(BranchRewrite { block, source });
+            } else if let Some(&site) = resolver.definitions.get(condition) {
+                let operation = resolver.operation(site);
+                // A call result lives in a place rather than a register. When this
+                // comparison is used only by the branch, read that place at the
+                // original comparison site and express its polarity in the edges.
+                if operation.kind == OperationKind::CompareEqual
+                    && as_register(&operation.operands[0])
+                        .is_some_and(|id| resolver.allocas.contains(&id))
+                    && let Some(pattern) = bool_operand(func, &operation.operands[1])
+                    && use_counts
+                        .get_or_init(|| register_use_counts(func))
+                        .get(condition)
+                        == Some(&1)
+                {
+                    loads.push(site);
+                    branches.push(BranchRewrite {
+                        block,
+                        source: Source {
+                            value: *condition,
+                            negated: !pattern,
+                        },
+                    });
+                }
+            }
         }
     }
 
@@ -141,6 +174,11 @@ pub(crate) fn forward_boolean_negations(func: &Function) -> Option<Function> {
             &mut edit.block_mut(compare.site.block).operations[compare.site.index.as_index()];
         operation.operands[0] = mir::Value::Register(compare.source.value);
         operation.operands[1] = mir::Value::Pattern(b(LiteralValue::new_native(compare.pattern)));
+    }
+    for site in loads {
+        let operation = &mut edit.block_mut(site.block).operations[site.index.as_index()];
+        operation.kind = OperationKind::Load;
+        operation.operands = Box::new([operation.operands[0].clone()]);
     }
     for branch in branches {
         let terminator = &mut edit.block_mut(branch.block).terminator;
@@ -165,6 +203,24 @@ pub(crate) fn forward_boolean_negations(func: &Function) -> Option<Function> {
         );
     }
     Some(edit.finish_unverified())
+}
+
+fn register_use_counts(func: &Function) -> FxHashMap<ValueId, usize> {
+    let mut counts = FxHashMap::default();
+    for block in func.blocks() {
+        let block = func.block(block);
+        for operand in block
+            .operations()
+            .iter()
+            .flat_map(|op| op.operands.iter())
+            .chain(block.terminator().operands())
+        {
+            if let Some(id) = as_register(operand) {
+                *counts.entry(id).or_default() += 1;
+            }
+        }
+    }
+    counts
 }
 
 /// Whether any boolean in this body is even written as a comparison.
@@ -451,8 +507,9 @@ mod tests {
         format::FormatWith,
         hir::{function::ArgConvention, value::LiteralValue},
         mir::{
-            self, Function, Operation, ParameterKind, builder::FunctionBuilder,
-            terminator::Terminator,
+            self, Function, Operation, OperationKind, ParameterKind,
+            builder::FunctionBuilder,
+            terminator::{Terminator, TerminatorKind},
         },
         std::logic::bool_type,
     };
@@ -545,7 +602,7 @@ mod tests {
     #[test]
     fn negating_a_comparison_inverts_the_branch_instead() {
         let body = optimized_function(
-            "fn pick(x: int, y: int) -> int { if not (x < y) { 1 } else { 2 } }",
+            "fn pick(x: int, y: int) -> int { if not (match cmp(x, y) { Less => true, _ => false }) { 1 } else { 2 } }",
             "pick",
         );
         assert!(
@@ -562,6 +619,93 @@ mod tests {
             "2",
             "`x < y` holding must now take the arm the source spelled second:\n{body}"
         );
+    }
+
+    #[test]
+    fn negating_an_ordered_operator_inverts_the_branch() {
+        let body = optimized_function(
+            "fn pick(x: int, y: int) -> int { if not (x < y) { 1 } else { 2 } }",
+            "pick",
+        );
+        assert!(
+            !body.contains("std::not") && !body.contains("false"),
+            "{body}"
+        );
+        assert!(body.contains("lt_int"), "{body}");
+        assert_eq!(stored_constant(&body, &then_target(&body)), "2", "{body}");
+    }
+
+    #[test]
+    fn branch_read_preserves_timing_and_other_uses_of_the_comparison() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        for shared in [false, true] {
+            let mut builder = FunctionBuilder::new("read_timing".into(), Default::default());
+            let entry = builder.add_block();
+            let yes = builder.add_block();
+            let no = builder.add_block();
+            let flag = builder
+                .append_operation(entry, Operation::alloca(span, bool_type()))
+                .unwrap();
+            let other = builder
+                .append_operation(entry, Operation::alloca(span, bool_type()))
+                .unwrap();
+            let truth = builder.add_constant(bool_type(), LiteralValue::new_native(true), &env);
+            builder.append_operation(
+                entry,
+                Operation::store(span, mir::Value::Constant(truth), flag.clone()),
+            );
+            let comparison = builder
+                .append_operation(
+                    entry,
+                    Operation::compare_eq(
+                        span,
+                        flag.clone(),
+                        mir::Value::Pattern(b(LiteralValue::new_native(false))),
+                    ),
+                )
+                .unwrap();
+            // An intervening write must not change which value the branch reads.
+            let falsity = builder.add_constant(bool_type(), LiteralValue::new_native(false), &env);
+            builder.append_operation(
+                entry,
+                Operation::store(span, mir::Value::Constant(falsity), flag),
+            );
+            if shared {
+                builder.append_operation(entry, Operation::store(span, comparison.clone(), other));
+            }
+            builder.set_terminator(entry, Terminator::cond_br(span, comparison, yes, no));
+            builder.set_terminator(yes, Terminator::ret(span));
+            builder.set_terminator(no, Terminator::ret(span));
+            let source = builder.finish(env);
+            let rewritten = forward_boolean_negations(&source);
+            if shared {
+                assert!(
+                    rewritten.is_none(),
+                    "other uses still need the negated value"
+                );
+            } else {
+                let rewritten = rewritten.unwrap();
+                assert!(matches!(
+                    rewritten.block(entry).operations()[3].kind,
+                    OperationKind::Load
+                ));
+                assert!(matches!(
+                    rewritten.block(entry).operations()[4].kind,
+                    OperationKind::Store
+                ));
+                let TerminatorKind::CondBr {
+                    then_target,
+                    else_target,
+                    ..
+                } = rewritten.block(entry).terminator().kind
+                else {
+                    panic!("expected branch")
+                };
+                assert_eq!((then_target, else_target), (no, yes));
+            }
+        }
     }
 
     /// A cell written on two paths carries a value neither store alone explains, and forwarding

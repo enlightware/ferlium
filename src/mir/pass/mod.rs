@@ -601,8 +601,9 @@ mod tests {
     /// surviving one. Merging first compares them while they still differ by a register name.
     #[test]
     fn arms_restoring_duplicate_stack_markers_are_merged() {
-        let module =
-            optimized("fn f(a: int, b: int) -> int { if a >= 0 and a < b { 1 } else { 2 } }");
+        let module = optimized(
+            "fn f(a: int, b: int) -> int { if (match cmp(a, 0) { Less => false, _ => true }) and (match cmp(a, b) { Less => true, _ => false }) { 1 } else { 2 } }",
+        );
         let body = body_of(&module, "f")
             .split("\nfn ")
             .next()
@@ -617,6 +618,15 @@ mod tests {
             4,
             "entry, the second comparison, and one block per outcome:\n{body}"
         );
+    }
+
+    #[test]
+    fn ordered_operators_merge_short_circuit_stack_markers() {
+        let module =
+            optimized("fn f(a: int, b: int) -> int { if a >= 0 and a < b { 1 } else { 2 } }");
+        let body = body_of(&module, "f").split("\nfn ").next().unwrap();
+        assert!(!body.contains("\n    br "), "{body}");
+        assert_eq!(body.matches("\n  b").count(), 4, "{body}");
     }
 
     /// Splicing a straight-line callee splits the call site's block and joins the pieces with

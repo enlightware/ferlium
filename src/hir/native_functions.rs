@@ -46,6 +46,13 @@
 //! `from_rust_never` accepts `Result<Never, SourceFailureKind>` for source-level `never`,
 //! using [`crate::types::never::Never`].
 //!
+//! Native entries must not re-enter the current Ferlium execution, including through
+//! thread-local or global state. Typed adapters expose arguments and result storage,
+//! never the current executor or a guest-call capability. Starting an independent
+//! execution is outside that execution's call graph and uses its own sandbox limits.
+//! HIR recursion analysis relies on this contract. Interpreter-only host callbacks
+//! are not native entries and do not receive this exemption.
+//!
 //! The entry carries no callback state. Stateful captures and erased function pointers are rejected:
 //! ```compile_fail
 //! use ferlium::hir::native_functions::NativeFnN;

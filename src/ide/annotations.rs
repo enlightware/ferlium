@@ -650,10 +650,10 @@ fn should_hide_arg_name_hint(
     static PATHS_TO_HIDE: LazyLock<FxHashSet<&'static str>> = LazyLock::new(|| {
         [
             "std::ne",
-            "std::le",
-            "std::lt",
-            "std::ge",
-            "std::gt",
+            "std::Ord::le",
+            "std::Ord::lt",
+            "std::Ord::ge",
+            "std::Ord::gt",
             "std::not",
             "std::Value::eq",
             "std::Num::neg",

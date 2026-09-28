@@ -91,11 +91,17 @@ pub(crate) enum KnownCallee {
     IntFromInt,
     /// `Ord<int>::cmp(left, right)` — `Less`, `Equal` or `Greater`.
     ///
-    /// Before wrapper inlining, a source-level `<` uses this call and a semantic tag test.
+    /// An explicit `cmp` followed by a semantic tag test supplies an operand relation.
     /// After inlining, `IntCmpCode` supplies the same operand relation through native codes.
     IntCmp,
     /// The native integer comparison, returning -1, 0, or 1 rather than an Ordering variant.
     IntCmpCode,
+    /// Native ordered predicates and their concrete `Ord` wrappers.
+    IntLt,
+    IntLe,
+    IntGt,
+    IntGe,
+
     /// `ordering_from_code(code)` — `Less` for -1, `Equal` for 0, `Greater` otherwise.
     /// Preserves an established operand relation when comparison wrappers are partially inlined.
     OrderingFromCode,
@@ -113,6 +119,12 @@ pub(crate) enum KnownCallee {
     FloatCmp,
     /// The native finite-float comparison, returning -1, 0, or 1.
     FloatCmpCode,
+    /// Native ordered predicates and their concrete `Ord` wrappers.
+    FloatLt,
+    FloatLe,
+    FloatGt,
+    FloatGe,
+
     /// `not(value)` — the logical negation of a boolean.
     ///
     /// MIR has no negation of its own, but `comp_eq value false` computes exactly this, which is
@@ -176,6 +188,10 @@ impl KnownCallee {
                 | Self::IntFromInt
                 | Self::IntCmp
                 | Self::IntCmpCode
+                | Self::IntLt
+                | Self::IntLe
+                | Self::IntGt
+                | Self::IntGe
                 | Self::OrderingFromCode
                 | Self::FloatAdd
                 | Self::FloatSub
@@ -183,6 +199,10 @@ impl KnownCallee {
                 | Self::FloatNeg
                 | Self::FloatCmp
                 | Self::FloatCmpCode
+                | Self::FloatLt
+                | Self::FloatLe
+                | Self::FloatGt
+                | Self::FloatGe
                 | Self::BoolNot
         )
     }
@@ -312,6 +332,46 @@ impl KnownCallees {
             (
                 resolver.method(ORD_TRAIT_NAME, float_type(), "cmp"),
                 KnownCallee::FloatCmp,
+            ),
+            (resolver.function("lt_int"), KnownCallee::IntLt),
+            (
+                resolver.method(ORD_TRAIT_NAME, int_type(), "lt"),
+                KnownCallee::IntLt,
+            ),
+            (resolver.function("le_int"), KnownCallee::IntLe),
+            (
+                resolver.method(ORD_TRAIT_NAME, int_type(), "le"),
+                KnownCallee::IntLe,
+            ),
+            (resolver.function("gt_int"), KnownCallee::IntGt),
+            (
+                resolver.method(ORD_TRAIT_NAME, int_type(), "gt"),
+                KnownCallee::IntGt,
+            ),
+            (resolver.function("ge_int"), KnownCallee::IntGe),
+            (
+                resolver.method(ORD_TRAIT_NAME, int_type(), "ge"),
+                KnownCallee::IntGe,
+            ),
+            (resolver.function("lt_float"), KnownCallee::FloatLt),
+            (
+                resolver.method(ORD_TRAIT_NAME, float_type(), "lt"),
+                KnownCallee::FloatLt,
+            ),
+            (resolver.function("le_float"), KnownCallee::FloatLe),
+            (
+                resolver.method(ORD_TRAIT_NAME, float_type(), "le"),
+                KnownCallee::FloatLe,
+            ),
+            (resolver.function("gt_float"), KnownCallee::FloatGt),
+            (
+                resolver.method(ORD_TRAIT_NAME, float_type(), "gt"),
+                KnownCallee::FloatGt,
+            ),
+            (resolver.function("ge_float"), KnownCallee::FloatGe),
+            (
+                resolver.method(ORD_TRAIT_NAME, float_type(), "ge"),
+                KnownCallee::FloatGe,
             ),
             (resolver.function("not"), KnownCallee::BoolNot),
             (resolver.function("array_len"), KnownCallee::ArrayLen),
@@ -653,7 +713,7 @@ mod tests {
         let session = CompilerSession::new();
         assert_eq!(
             known_callees(&session).by_id.len(),
-            30,
+            46,
             "two known callees resolved to the same function id"
         );
     }

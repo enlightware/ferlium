@@ -618,7 +618,9 @@ mod tests {
             "the common tail must be retained once:\n{body}"
         );
         assert!(
-            !body.contains("compare_int_code"),
+            !body.contains("compare_int_code")
+                && !body.contains("gt_int")
+                && !body.contains("Ord<std::int>::gt"),
             "proven-call DCE must collect the dead predicate:\n{body}"
         );
     }

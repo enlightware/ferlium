@@ -8,7 +8,7 @@ use ustr::Ustr;
 
 use super::{
     emit_subscripts::attach_subscript_member,
-    trait_method_calls::{collect_method_calls, guard_recursive_methods},
+    trait_method_calls::{CallbackFreeFunctions, collect_method_calls, guard_recursive_methods},
 };
 use crate::{
     FxHashMap, FxHashSet, Location, Modules,
@@ -1679,6 +1679,7 @@ where
 
         // Recursion is a property of the selected method set: a default may call
         // an override that calls it back. Guard those cycles before elaboration.
+        let mut callback_free = CallbackFreeFunctions::default();
         let method_calls = ast_functions()
             .zip(&local_fns)
             .enumerate()
@@ -1701,6 +1702,8 @@ where
                             trait_def.methods.len(),
                             trait_def.default_methods.iter().any(Option::is_some),
                             &mut calls,
+                            &mut callback_free,
+                            ModuleEnv::new(output, others),
                         );
                     }
                     calls
@@ -2133,6 +2136,7 @@ where
             }
         }
 
+        let mut callback_free = CallbackFreeFunctions::default();
         for (input, id) in ast_functions().zip(&local_fns) {
             if let Some((trait_id, index)) = input.trait_default {
                 let input_tys = (0..output.trait_def(trait_id).input_type_count())
@@ -2149,6 +2153,8 @@ where
                         output.trait_def(trait_id).methods.len(),
                         true,
                         &mut calls,
+                        &mut callback_free,
+                        ModuleEnv::new(output, others),
                     );
                 }
                 output.traits[trait_id.index.as_index()].default_methods[index.as_index()]

@@ -2729,10 +2729,13 @@ mod tests {
             }
         }
 
+        // Raw-MIR census: 180 before Ord predicates, 76 afterwards. The entire
+        // difference is 19 lt + 41 le + 22 gt + 22 ge sites; all other counts agree.
+        // This census does not filter on call-depth guards or inlining eligibility.
         assert!(
-            specialized > 100,
+            specialized > 50,
             "specialized only {specialized} std call sites; the population should be in the \
-             hundreds, so this is a lowering or harvesting regression rather than a small library"
+             dozens even with concrete Ord predicates, so this is a lowering or harvesting regression"
         );
     }
 

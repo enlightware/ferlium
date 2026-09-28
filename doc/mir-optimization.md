@@ -245,9 +245,14 @@ may guarantee a finite set of result codes; a variant type likewise guarantees i
 These facts support branch simplification for any producer, including third-party host functions,
 without implying purity, termination, or ordering laws. Stronger numeric reasoning uses the known
 semantics of exact standard-library functions. Comparison wrappers may therefore inline normally:
-integer relational reasoning understands both semantic `Ordering` results and their native codes,
-including the standard conversion between them when it remains a call. Partial inlining must not
-discard an established comparison relation merely because an optimization budget runs out.
+integer relational reasoning understands native Boolean predicates, semantic `Ordering` results
+and their native codes, including the standard conversion between them when it remains a call.
+Partial inlining must not discard an established comparison relation merely because an optimization
+budget runs out.
+
+Ordered operators dispatch to `Ord` methods. Standard `int` and `float` comparisons lower directly
+to native predicates; explicit `cmp` calls remain eligible for comparison-code fusion. These
+optimizations rely on known standard-library semantics, never on assumptions about user overrides.
 
 Finite domains are flow facts, not new types or runtime representations. Every producer of these
 facts must include all possible runtime outcomes: an over-approximation costs precision, but an
@@ -632,12 +637,14 @@ stored the pattern it compares against.
 
 An arm may also store a computed boolean: it cannot pick an edge itself, so it ends in a `condbr`
 on the value it stored, which is the join's read and branch run on that arm alone.
+A call producing the boolean follows the same rule, preserving its execution count, effects and
+cleanup order.
 
 The proof is a linear use and predecessor census and deliberately narrower than general jump
-threading. The slot must be a local boolean `alloca`; its only uses must be one boolean store
-per incoming predecessor and the final read; every predecessor must jump unconditionally to the
-join; and the join may contain only `stack_restore`s besides that read. Other operations, additional
-uses, unknown stores and self-edges all refuse the rewrite.
+threading. The slot must be a local boolean `alloca`; its only uses must be a boolean store or call
+result per incoming predecessor and the final read; every predecessor must jump unconditionally
+to the join; and the join may contain only `stack_restore`s besides that read. Other operations,
+additional uses, unknown stores and self-edges all refuse the rewrite.
 
 The same pass forwards a concrete `TrivialCopy` variant when every whole-place definition stores a
 statically tagged shell and its sole tag read feeds `switch_variant`. Each constructor path jumps
@@ -691,6 +698,9 @@ literal sound without asking a type question. The walk keeps the last *materiali
 passed, since a condition must be one; it therefore stops short of a negation whose operand is a
 place, such as the `not` of a short-circuit `and`, which would need its own proof that the place is
 unwritten between the two sites.
+
+A Boolean comparison used only to branch can instead read the Boolean and select the branch's
+polarity. This also covers native predicate results held in storage, preserving the read's timing.
 
 ## String construction and accumulation rewrites
 

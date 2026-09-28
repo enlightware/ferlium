@@ -22,7 +22,7 @@ use crate::{
         NativeOutFnN,
     },
     hir::value::{LiteralValue, NativeDisplay, Value},
-    module::Module,
+    module::{Module, Visibility},
     std::{
         core_traits_names::{
             BITS_TRAIT_NAME, CAST_TRAIT_NAME, DEFAULT_TRAIT_NAME, DIV_TRAIT_NAME,
@@ -486,6 +486,20 @@ fn modulo(lhs: isize, rhs: isize) -> Result<isize, SourceFailureKind> {
 }
 
 pub fn add_to_module(to: &mut Module) {
+    macro_rules! add_predicate {
+        ($name:literal, $ty:ty, $op:tt) => {
+            to.add_function_with_visibility(
+                ustr($name),
+                NativeFnNN::from_rust(|left: $ty, right: $ty| left $op right).description(
+                    ["left", "right"],
+                    "Internal comparison predicate.",
+                    no_effects(),
+                ),
+                Visibility::Module,
+            );
+        };
+    }
+
     let value_trait_id = to.expect_std_trait_id_in_current_module(VALUE_TRAIT_NAME);
     let inspect_trait_id = to.expect_std_trait_id_in_current_module(INSPECT_TRAIT_NAME);
     let num_trait_id = to.expect_std_trait_id_in_current_module(NUM_TRAIT_NAME);
@@ -557,6 +571,10 @@ pub fn add_to_module(to: &mut Module) {
             b(NativeFnNN::new(test_bit)) as Function,
         ],
     );
+    add_predicate!("lt_int", Int, <);
+    add_predicate!("le_int", Int, <=);
+    add_predicate!("gt_int", Int, >);
+    add_predicate!("ge_int", Int, >=);
     to.add_function_with_visibility(
         ustr("compare_int_code"),
         NativeFnNN::from_rust_ordering_code(compare::<Int>).description(
@@ -564,7 +582,7 @@ pub fn add_to_module(to: &mut Module) {
             "Internal comparison code.",
             no_effects(),
         ),
-        crate::module::Visibility::Module,
+        Visibility::Module,
     );
     to.add_native_concrete_impl(
         default_trait_id,
@@ -646,6 +664,10 @@ pub fn add_to_module(to: &mut Module) {
             b(NativeFnN::new(isize_to_float)) as Function,
         ],
     );
+    add_predicate!("lt_float", Float, <);
+    add_predicate!("le_float", Float, <=);
+    add_predicate!("gt_float", Float, >);
+    add_predicate!("ge_float", Float, >=);
     to.add_function_with_visibility(
         ustr("compare_float_code"),
         NativeFnNN::from_rust_ordering_code(compare::<Float>).description(
@@ -653,7 +675,7 @@ pub fn add_to_module(to: &mut Module) {
             "Internal comparison code.",
             no_effects(),
         ),
-        crate::module::Visibility::Module,
+        Visibility::Module,
     );
     to.add_native_concrete_impl(
         div_trait_id,

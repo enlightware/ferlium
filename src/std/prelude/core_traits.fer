@@ -8,6 +8,26 @@ pub type Ordering = Less | Equal | Greater;
 pub trait Ord<Self> {
     /// Returns an `Ordering` between `left` and `right`.
     fn cmp(left: Self, right: Self) -> Ordering;
+
+    /// Tests whether `left` is less than `right`.
+    fn lt(left: Self, right: Self) -> bool {
+        match cmp(left, right) { Less => true, _ => false }
+    }
+
+    /// Tests whether `left` is less than or equal to `right`.
+    fn le(left: Self, right: Self) -> bool {
+        match cmp(left, right) { Greater => false, _ => true }
+    }
+
+    /// Tests whether `left` is greater than `right`.
+    fn gt(left: Self, right: Self) -> bool {
+        match cmp(left, right) { Greater => true, _ => false }
+    }
+
+    /// Tests whether `left` is greater than or equal to `right`.
+    fn ge(left: Self, right: Self) -> bool {
+        match cmp(left, right) { Less => false, _ => true }
+    }
 }
 
 /// A numeric type supporting basic arithmetic operations.

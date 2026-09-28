@@ -47,6 +47,10 @@ Both default bodies and written impl methods can call sibling methods.
 Such calls use the same implementation, including its overrides.
 This also works in generic impls and in impls whose types are inferred without a `for` header.
 
+For example, `Ord` provides `lt`, `le`, `gt` and `ge` with defaults based on `cmp`.
+The operators `<`, `<=`, `>` and `>=` call those methods, including any overrides.
+An override should agree with `cmp`; the compiler does not check that agreement.
+
 Associated constants do not have defaults.
 
 ## Generic impls

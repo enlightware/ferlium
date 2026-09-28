@@ -1140,6 +1140,27 @@ fn partial_call_outcome(
         })));
     }
 
+    // Float excludes NaN, so reflexive comparisons obey the same laws as integers.
+    if same_argument(0, 1) {
+        let predicate = match known {
+            KnownCallee::IntLt
+            | KnownCallee::IntGt
+            | KnownCallee::FloatLt
+            | KnownCallee::FloatGt => Some(false),
+            KnownCallee::IntLe
+            | KnownCallee::IntGe
+            | KnownCallee::FloatLe
+            | KnownCallee::FloatGe => Some(true),
+            _ => None,
+        };
+        if let Some(value) = predicate {
+            return Some(CallRewrite::Reification(Reification::Constant(Constant {
+                ty: ty.ret(),
+                representation: LiteralValue::new_native(value),
+            })));
+        }
+    }
+
     match known {
         KnownCallee::IntAdd if int_is(0, 0) => copy(1),
         KnownCallee::IntAdd if int_is(1, 0) => copy(0),

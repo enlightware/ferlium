@@ -1514,11 +1514,19 @@ fn wasm_intrinsic(session: &CompilerSession, operation: &Operation) -> Option<Kn
             | KnownCallee::IntNeg
             | KnownCallee::IntFromInt
             | KnownCallee::IntCmpCode
+            | KnownCallee::IntLt
+            | KnownCallee::IntLe
+            | KnownCallee::IntGt
+            | KnownCallee::IntGe
             | KnownCallee::FloatAdd
             | KnownCallee::FloatSub
             | KnownCallee::FloatMul
             | KnownCallee::FloatNeg
             | KnownCallee::FloatCmpCode
+            | KnownCallee::FloatLt
+            | KnownCallee::FloatLe
+            | KnownCallee::FloatGt
+            | KnownCallee::FloatGe
             | KnownCallee::BoolNot
     )
     .then_some(known)

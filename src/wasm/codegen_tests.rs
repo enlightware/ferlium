@@ -1220,7 +1220,7 @@ fn wasm_codegen_known_float_calls_select_saturating_instructions() {
 }
 
 #[wasm_bindgen_test]
-fn wasm_codegen_comparison_codes_select_predicates() {
+fn wasm_codegen_ordered_comparisons_select_predicates() {
     for (expression, left, right, expected, equality) in [
         ("x < y", 2, 3, true, false),
         ("x < y", 3, 3, false, false),
@@ -1245,7 +1245,10 @@ fn wasm_codegen_comparison_codes_select_predicates() {
         );
         let code = CompiledProgram::compile(&session, entry).unwrap();
         let ordered = wasm_operator_count(code.bytes(), |op| {
-            matches!(op, Operator::I32LtS | Operator::I32GtS)
+            matches!(
+                op,
+                Operator::I32LtS | Operator::I32LeS | Operator::I32GtS | Operator::I32GeS
+            )
         });
         assert_eq!(ordered, usize::from(!equality), "{expression}");
         assert_eq!(
@@ -1274,6 +1277,11 @@ fn wasm_codegen_comparison_codes_select_predicates() {
         ("x > y", 3.0, 3.0, false, false),
         ("x >= y", 2.0, 3.0, false, false),
         ("x >= y", 3.0, 3.0, true, false),
+        ("x < y", -0.0, 0.0, false, false),
+        ("x <= y", -0.0, 0.0, true, false),
+        ("x > y", 0.0, -0.0, false, false),
+        ("x >= y", 0.0, -0.0, true, false),
+        ("x < y", -f64::MAX, f64::MAX, true, false),
         (
             "match cmp(x, y) { Equal => true, _ => false }",
             -0.0,
@@ -1289,7 +1297,10 @@ fn wasm_codegen_comparison_codes_select_predicates() {
         );
         let code = CompiledProgram::compile(&session, entry).unwrap();
         let ordered = wasm_operator_count(code.bytes(), |op| {
-            matches!(op, Operator::F64Lt | Operator::F64Gt)
+            matches!(
+                op,
+                Operator::F64Lt | Operator::F64Le | Operator::F64Gt | Operator::F64Ge
+            )
         });
         assert_eq!(ordered, usize::from(!equality), "{expression}");
         assert_eq!(

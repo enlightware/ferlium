@@ -1542,6 +1542,7 @@ fn trait_default_recursive_dispatch_obeys_call_depth_limit() {
     let mut session = TestSession::new();
     for source in [
         "trait Loop<Self> { fn cycle(x: Self) -> int { cycle(x) } } impl Loop for int {} cycle(1)",
+        "trait Loop<Self> { fn cycle(x: Self) -> int; fn other(x: Self) -> int { 0 } } fn callback(x: int) -> int { cycle(x) } fn bridge(f: (int) -> int, x: int) -> int { f(x) } impl Loop for int { fn cycle(x: int) -> int { bridge(callback, x) } } cycle(1)",
         "trait Loop<Self> { fn cycle(x: Self) -> int { callback() } } fn callback() -> int { cycle(1) } impl Loop for int {} cycle(1)",
         "trait Parent<Self> { fn parent(x: Self) -> int; } trait Child<Self>: Parent<Self> { fn child(x: Self) -> int { parent(x) } } impl Parent for int { fn parent(x: int) -> int { child(x) } } impl Child for int {} child(1)",
         "trait Other<Self> { fn other(x: Self) -> int; } trait Loop<Self> where Self: Other { fn cycle(x: Self) -> int { other_helper(x) } } fn other_helper<T>(x: T) -> int where T: Other { other(x) } impl Other for int { fn other(x: int) -> int { cycle(x) } } impl Loop for int {} cycle(1)",

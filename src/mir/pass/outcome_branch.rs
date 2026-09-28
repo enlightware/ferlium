@@ -798,8 +798,8 @@ mod tests {
     fn integer_and_float_comparison_branches_use_one_code_test() {
         let mut session = CompilerSession::new();
         session.set_mir_optimization(MirOptimization::Enabled);
-        let source = "fn int_le(a: int, b: int) -> int { if a <= b { 7 } else { 9 } }
-            fn float_le(a: float, b: float) -> int { if a <= b { 7 } else { 9 } }
+        let source = "fn int_le(a: int, b: int) -> int { if (match cmp(a, b) { Greater => false, _ => true }) { 7 } else { 9 } }
+            fn float_le(a: float, b: float) -> int { if (match cmp(a, b) { Greater => false, _ => true }) { 7 } else { 9 } }
             fn main() { (int_le(2, 1), int_le(1, 1), float_le(-0.0, 0.0), float_le(2.0, 1.0)) }";
         let mir = session.emit_mir("std_chains", source);
         for name in ["int_le", "float_le"] {
@@ -1071,14 +1071,14 @@ mod tests {
                 .next()
                 .unwrap();
             assert!(!body.contains("condbr "), "{body}");
-            // This bracket reclaims the native comparison's real result storage.
-            assert_eq!(body.matches("stack_save").count(), 1, "{body}");
-            assert_eq!(body.matches("stack_restore").count(), 1, "{body}");
+            // A native predicate writes the caller's result directly.
+            assert_eq!(body.matches("stack_save").count(), 0, "{body}");
+            assert_eq!(body.matches("stack_restore").count(), 0, "{body}");
             assert_eq!(
                 body.lines()
                     .filter(|line| line.trim_start().starts_with("store "))
                     .count(),
-                1,
+                0,
                 "{body}"
             );
         }

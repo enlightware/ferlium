@@ -160,8 +160,10 @@ functional dependency.
 
 Recursion depends on the selected overrides, not just the default's body. Default-bearing traits
 currently use a conservative method dependency analysis alongside the static call graph, which can
-retain guards on acyclic methods. This is not a complete analysis of indirect recursion throughout
-the language; unifying the graphs is tracked in
+retain guards on acyclic methods. Native entries cannot re-enter the current execution; calls to
+them and script helpers proven to have no callbacks do not introduce possible recursion edges.
+This is not a complete analysis of indirect recursion throughout the language; unifying the graphs
+is tracked in
 [#186](https://github.com/enlightware/ferlium/issues/186). Declared parameter generality is currently
 checked after inference; rigid checking for more precise diagnostics is tracked in
 [#185](https://github.com/enlightware/ferlium/issues/185).
