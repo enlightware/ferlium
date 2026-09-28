@@ -694,12 +694,12 @@ whose every other use is a direct read, and whose write dominates the read being
 other use, including a call argument or a terminator operand, disqualifies it entirely. A literal
 flag is not this pass's shape but `branch_forward`'s, proved there against the arms that store it.
 
-Every value the walk reaches is a boolean by construction — a walk starts at a `condbr` condition or
-at a scrutinee compared against a boolean pattern — which is what makes flipping a comparison's
-literal sound without asking a type question. The walk keeps the last *materialized* value it
-passed, since a condition must be one; it therefore stops short of a negation whose operand is a
-place, such as the `not` of a short-circuit `and`, which would need its own proof that the place is
-unwritten between the two sites.
+Every value the walk reaches must have type `bool`. A boolean pattern does not establish that the
+scrutinee itself is a `bool`: a generic value may have a boolean representation. The pass checks
+the type before stepping through a comparison or replacing one with a load. The walk keeps the
+last *materialized* boolean it passed, since a branch condition must be materialized; it therefore
+stops short of a negation whose operand is a place, such as the `not` of a short-circuit `and`,
+which would need its own proof that the place is unwritten between the two sites.
 
 A Boolean comparison used only to branch can instead read the Boolean and select the branch's
 polarity. This also covers native predicate results held in storage, preserving the read's timing.

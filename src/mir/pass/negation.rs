@@ -45,10 +45,10 @@
 //! restriction — a literal flag is [`branch_forward`](super::branch_forward)'s shape, proved there
 //! against the arms that store it.
 //!
-//! **Every value the walk reaches is a boolean**, which is what makes flipping a comparison's
-//! literal sound rather than a type question. It holds by construction: a walk starts at a
-//! `condbr` condition or at a `comp_eq` scrutinee compared against a boolean pattern, and each step
-//! either reads such a comparison's scrutinee or a cell that one of those reads.
+//! **Every value the walk reaches has type `bool`**, which makes flipping a comparison's literal
+//! sound. A boolean pattern alone does not prove the scrutinee is a `bool`: a generic value can
+//! have a boolean representation. Check the operand's type before stepping through a comparison
+//! or replacing one with a load.
 //!
 //! The walk terminates because each step moves to a strictly earlier definition: a register's
 //! operand is defined before it, and a cell's store is proved to dominate the read.
@@ -65,10 +65,12 @@ use crate::{
         self, BlockId, Function, Operation, OperationKind,
         dominance::Dominance,
         edit::FunctionEdit,
+        role::{MirType, ValueRoles},
         terminator::{Terminator, TerminatorKind},
         value::ValueId,
     },
     module::id::Id,
+    std::logic::bool_type,
 };
 
 /// A boolean value, and whether reaching it passed through an odd number of negations.
@@ -116,6 +118,9 @@ pub(crate) fn forward_boolean_negations(func: &Function) -> Option<Function> {
             let Some(pattern) = bool_operand(func, pattern) else {
                 continue;
             };
+            if !resolver.is_boolean(scrutinee) {
+                continue;
+            }
             let site = OperationSite {
                 block,
                 index: OperationIndex::from_index(index),
@@ -145,6 +150,7 @@ pub(crate) fn forward_boolean_negations(func: &Function) -> Option<Function> {
                 if operation.kind == OperationKind::CompareEqual
                     && as_register(&operation.operands[0])
                         .is_some_and(|id| resolver.allocas.contains(&id))
+                    && resolver.is_boolean(&operation.operands[0])
                     && let Some(pattern) = bool_operand(func, &operation.operands[1])
                     && use_counts
                         .get_or_init(|| register_use_counts(func))
@@ -242,6 +248,7 @@ fn may_forward(func: &Function) -> bool {
 /// The body's definitions and forwardable cells, and the dominance the cell proof needs.
 struct Resolver<'a> {
     func: &'a Function,
+    roles: OnceCell<ValueRoles>,
     definitions: FxHashMap<ValueId, OperationSite>,
     /// The local storage of the body, which is what a walk may have to look through.
     allocas: FxHashSet<ValueId>,
@@ -280,6 +287,7 @@ impl<'a> Resolver<'a> {
         }
         Self {
             func,
+            roles: OnceCell::new(),
             definitions,
             allocas,
             cells: OnceCell::new(),
@@ -362,8 +370,17 @@ impl<'a> Resolver<'a> {
             matches!(
                 self.operation(*site).kind,
                 OperationKind::Load | OperationKind::CompareEqual
-            )
+            ) && self.is_boolean(&mir::Value::Register(value))
         })
+    }
+
+    fn is_boolean(&self, value: &mir::Value) -> bool {
+        self.roles
+            .get_or_init(|| ValueRoles::derive(self.func))
+            .get(value, self.func.constants())
+            .is_some_and(|role| {
+                matches!(role.inner_type(), Some(MirType::Lowered(ty)) if *ty == bool_type())
+            })
     }
 
     /// One step back: from a boolean to what computed it.
@@ -372,12 +389,14 @@ impl<'a> Resolver<'a> {
         let operation = self.operation(site);
         match operation.kind {
             // A load reads a cell; the cell proof says what the cell holds.
-            OperationKind::Load => Some(Source {
-                value: self.read(&operation.operands[0], site)?,
-                negated: from.negated,
-            }),
+            OperationKind::Load if self.is_boolean(&mir::Value::Register(from.value)) => {
+                Some(Source {
+                    value: self.read(&operation.operands[0], site)?,
+                    negated: from.negated,
+                })
+            }
             // A comparison against a boolean *is* a negation, or an identity.
-            OperationKind::CompareEqual => {
+            OperationKind::CompareEqual if self.is_boolean(&operation.operands[0]) => {
                 let pattern = bool_operand(self.func, &operation.operands[1])?;
                 Some(Source {
                     value: self.read(&operation.operands[0], site)?,
@@ -633,6 +652,16 @@ mod tests {
         );
         assert!(body.contains("lt_int"), "{body}");
         assert_eq!(stored_constant(&body, &then_target(&body)), "2", "{body}");
+    }
+
+    #[test]
+    fn generic_boolean_representation_keeps_its_comparison() {
+        let body = optimized_function("fn pick(f) -> int { if f() { 1 } else { 2 } }", "pick");
+        assert!(
+            body.contains("comp_eq"),
+            "a generic predicate result cannot be loaded as a boolean:\n{body}"
+        );
+        assert!(!body.contains("= load"), "{body}");
     }
 
     #[test]
