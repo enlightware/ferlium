@@ -21,6 +21,12 @@
 //! fuel, call depth, environment cells — live with the engine that spends them, in
 //! [`crate::mir::const_eval`].
 
+/// Blocks, operations and distinct callees inspected when proving a guarded call graph acyclic.
+pub const CALL_DEPTH_PROOF_WORK: usize = 4096;
+
+/// Maximum host recursion while proving a call graph acyclic.
+pub const CALL_DEPTH_PROOF_DEPTH: usize = 64;
+
 /// How many fold/inline rounds a single function may go through.
 ///
 /// Folding and inlining feed each other — inlining a generic callee lets folding resolve its

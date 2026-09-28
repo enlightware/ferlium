@@ -471,7 +471,8 @@ when the call site is on a cleanup path and the callee has error flow of its own
 there would shift its failure states by one level, and when it is on a failure path. The
 annotation remains on the source HIR definition; the inliner resolves a MIR callee identity back to that definition, and specializations
 inherit the policy of their original function. Conservative call-depth checks on unresolved calls
-do not prevent inlining; they are preserved unless the resulting body cannot call script code.
+do not prevent inlining. Redundant checks at the same frame depth and checks whose reachable
+calls are proven acyclic can be removed; unresolved callbacks retain protection.
 
 **Cost is what the backend emits.** Frame bookkeeping (static slots, stack marks, static field
 offsets) lowers to no instruction, so it is free. A failure path — code that can only end in a call
@@ -996,6 +997,7 @@ change: the optimization report cites the inlining limits by name.
 
 | budget | bounds |
 |---|---|
+| `CALL_DEPTH_PROOF_WORK`, `CALL_DEPTH_PROOF_DEPTH` | work and traversal depth per call-depth proof |
 | `MAX_ROUNDS` | the driver's outer loop |
 | `INLINE_CALLEE_COST` | the largest hot cost of a callee inlining will copy |
 | `INLINE_FUNCTION_GROWTH` | cost growth beyond what a function had *before* optimization |

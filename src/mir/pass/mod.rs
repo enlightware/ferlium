@@ -573,8 +573,8 @@ pub(crate) fn optimize_function(
         repeated = true;
     }
     let source = current.as_ref().unwrap_or(function);
-    if let Some(leaf) = call_depth::remove_leaf_checks(source, env) {
-        current = Some(leaf);
+    if let Some(simplified) = call_depth::simplify_checks(source, env, callees) {
+        current = Some(simplified);
     }
     // Final artifact verification covers unchanged functions too, so cloning is the identity here.
     match current {

@@ -148,9 +148,9 @@ fn derive(
 /// Runtime-dispatched ownership and scoped accessors remain unknown.
 pub(super) fn operation_calls_only(
     operation: &Operation,
-    callee_returns: &impl Fn(FunctionId) -> bool,
+    mut callee_returns: impl FnMut(FunctionId) -> bool,
 ) -> bool {
-    let direct = |operand: Option<&Value>| matches!(operand, Some(Value::Function(callee)) if callee_returns(*callee));
+    let mut direct = |operand: Option<&Value>| matches!(operand, Some(Value::Function(callee)) if callee_returns(*callee));
     match &operation.kind {
         OperationKind::Call { .. } => direct(operation.operands.first()),
         OperationKind::Clone { .. } => direct(operation.operands.get(2)),
