@@ -240,6 +240,7 @@ impl UnifiedTypeInference {
         let derived = self.remaining_ty_constraints.clone();
         for constraint in derived {
             let PubTypeConstraint::HaveTrait {
+                origin: _,
                 trait_id,
                 input_tys,
                 output_tys,
@@ -400,13 +401,25 @@ impl UnifiedTypeInference {
             })
             .unwrap_or_else(|| vec![ty]);
         for evidence_ty in evidence_tys {
-            let constraint = PubTypeConstraint::new_have_trait(
+            let mut constraint = PubTypeConstraint::new_have_trait(
                 value_trait_id,
                 vec![evidence_ty],
                 vec![],
                 vec![],
                 span,
             );
+            constraint.set_origin(self.evidence_uses.fresh_origin());
+            if let Some(owner) = self.evidence_uses.active_owner() {
+                self.evidence_uses.register(constraint.origin(), owner);
+            }
+            if let Some(existing) = self
+                .remaining_ty_constraints
+                .iter()
+                .find(|c| **c == constraint)
+            {
+                self.evidence_uses
+                    .merge(existing.origin(), constraint.origin());
+            }
             if !self.remaining_ty_constraints.contains(&constraint) {
                 self.remaining_ty_constraints.push(constraint);
             }

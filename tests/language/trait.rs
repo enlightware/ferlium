@@ -5,7 +5,8 @@ use test_log::test;
 
 use ferlium::{
     compiler::error::{
-        CompilationErrorImpl, InvalidTraitAssociatedConstImplKind, InvalidTraitDefinitionKind,
+        CompilationErrorImpl, InvalidDefaultMethodKind, InvalidTraitAssociatedConstImplKind,
+        InvalidTraitDefinitionKind,
     },
     format::FormatWith,
     hir::{
@@ -868,7 +869,7 @@ fn parent_trait_constraints_are_not_trait_use_entailment() {
         .constraints
         .iter()
         .filter_map(|constraint| {
-            constraint.as_have_trait().map(|(trait_id, _, _, _, _)| {
+            constraint.as_have_trait().map(|(_, trait_id, _, _, _, _)| {
                 module
                     .try_trait_name(*trait_id)
                     .expect("constraint trait should be defined")
@@ -1267,5 +1268,704 @@ fn invalid_trait_constraint_order_reports_structured_errors() {
             );
         }
         other => panic!("expected InvalidTraitDefinition, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_default_concrete_and_headerless() {
+    for header in ["impl Size for int", "impl Size"] {
+        let mut session = TestSession::new();
+        let code = format!(
+            r#"
+            trait Size<Self> {{
+                fn size(x: Self) -> int;
+                fn double(x: Self) -> int {{ size(x) * 2 }}
+            }}
+            {header} {{ fn size(x: int) -> int {{ x }} }}
+            double(21)
+        "#
+        );
+        assert_val_eq!(session.run(&code), int(42));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_default_generic_and_sibling_calls() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+        trait Size<Self> {
+            fn size(x: Self) -> int;
+            fn double(x: Self) -> int { size(x) * 2 }
+            fn quadruple(x: Self) -> int;
+        }
+        impl<T> Size for [T] where T: Value {
+            fn size(x: [T]) -> int { len(x) }
+            fn quadruple(x: [T]) -> int { double(x) * 2 }
+        }
+        quadruple([1, 2, 3])
+    "#}),
+        int(12)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_default_override_through_generic_caller() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+        trait Size<Self> {
+            fn size(x: Self) -> int;
+            fn double(x: Self) -> int { size(x) * 2 }
+        }
+        impl Size for int {
+            fn size(x: int) -> int { x }
+            fn double(x: int) -> int { x * 3 }
+        }
+        fn use_size<T>(x: T) -> int where T: Size { double(x) }
+        use_size(14)
+    "#}),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_default_resolves_private_helpers_in_defining_module() {
+    let mut session = TestSession::new();
+    session
+        .try_compile_module(
+            "base",
+            indoc! {r#"
+        fn twice(x: int) -> int { x * 2 }
+        pub trait Size<Self> {
+            fn size(x: Self) -> int;
+            fn double(x: Self) -> int { twice(size(x)) }
+        }
+    "#},
+        )
+        .unwrap();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+        use base::Size;
+        struct Counter(int)
+        fn twice(x: int) -> int { 999 }
+        impl Size for Counter { fn size(x: Counter) -> int { x.0 } }
+        Size::double(Counter(21))
+    "#}),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_default_cross_module_blanket_dictionary() {
+    let mut session = TestSession::new();
+    session
+        .try_compile_module(
+            "base",
+            indoc! {r#"
+        pub trait Size<Self> {
+            fn size(x: Self) -> int;
+            fn double(x: Self) -> int { size(x) * 2 }
+        }
+        impl<T> Size for [T] where T: Value {
+            fn size(x: [T]) -> int { len(x) }
+        }
+    "#},
+        )
+        .unwrap();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+        use base::Size;
+        fn via_dictionary<T>(x: T) -> int where T: Size { Size::double(x) }
+        via_dictionary([1, 2, 3])
+    "#}),
+        int(6)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_default_checked_without_an_impl() {
+    let mut session = TestSession::new();
+    for (source, expected_reason) in [
+        (
+            "trait Bad<Self> { fn bad(x: Self) -> int { x + 1 } }",
+            InvalidDefaultMethodKind::SpecializedTypeParameter,
+        ),
+        (
+            "trait Bad<Self> { fn bad(x: Self) -> Self { -x } }",
+            InvalidDefaultMethodKind::UndeclaredConstraint,
+        ),
+        (
+            "trait Bad<Self |-> ! E> { fn bad(x: Self) ! E { effects::write() } }",
+            InvalidDefaultMethodKind::RestrictedEffectParameter,
+        ),
+    ] {
+        let error = session.fail_compilation(source).into_inner();
+        let CompilationErrorImpl::InvalidTraitDefinition {
+            trait_name,
+            kind:
+                InvalidTraitDefinitionKind::InvalidDefaultMethod {
+                    method_name,
+                    reason,
+                },
+            span,
+        } = error
+        else {
+            panic!("unexpected diagnostic: {error:?}")
+        };
+        assert_eq!(trait_name, ustr("Bad"));
+        assert_eq!(method_name, ustr("bad"));
+        assert_eq!(reason, expected_reason);
+        assert_eq!(
+            span.as_range(),
+            source.find("fn bad").unwrap()..source.len() - 2
+        );
+    }
+    let source = "trait Bad<Self> { fn bad(x: Self) { effects::write() } }";
+    let error = session.fail_compilation(source).into_inner();
+    let CompilationErrorImpl::TraitMethodEffectMismatch {
+        method_name, span, ..
+    } = error
+    else {
+        panic!("unexpected diagnostic: {error:?}")
+    };
+    assert_eq!(method_name, ustr("bad"));
+    assert_eq!(
+        span.as_range(),
+        source.find("fn bad").unwrap()..source.len() - 2
+    );
+
+    let source = "trait Bad<Self> { fn bad(x: Self) -> bool { 1 } }";
+    let error = session.fail_compilation(source).into_inner();
+    let CompilationErrorImpl::TraitImplNotFound {
+        trait_ref, fn_span, ..
+    } = error
+    else {
+        panic!("unexpected diagnostic: {error:?}")
+    };
+    assert_eq!(trait_ref, "Num");
+    assert_eq!(&source[fn_span.as_range()], "1");
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_default_parent_constraint_and_mutable_argument() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+        trait Step<Self>: Num<Self>, Value<Self> {
+            fn step(x: &mut Self) { x = -x; }
+        }
+        impl Step for int {}
+        let mut x = -42;
+        step(x);
+        x
+    "#}),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_default_output_type_and_effect() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+        trait Get<Self |-> Item ! E> {
+            fn get(x: Self) -> Item ! E;
+            fn again(x: Self) -> Item ! E { get(x) }
+        }
+        impl Get for <Self = int |-> Item = int ! E = fallible> {
+            fn get(x: int) -> int { assert(x > 0); x }
+        }
+        again(42)
+    "#}),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_default_missing_required_method() {
+    let mut session = TestSession::new();
+    let error = session.fail_compilation(indoc! {r#"
+        trait Size<Self> {
+            fn size(x: Self) -> int;
+            fn double(x: Self) -> int { size(x) * 2 }
+        }
+        impl Size for int {}
+    "#});
+    assert!(
+        matches!(error.into_inner(), CompilationErrorImpl::TraitMethodImplsMissing { missings, .. } if missings == [ustr("size")])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_default_l2_module_functions_still_cannot_use_local_blanket_impls() {
+    let mut session = TestSession::new();
+    let source = indoc! {r#"
+        trait Size<Self> {
+            fn size(x: Self) -> int;
+            fn double(x: Self) -> int { size(x) * 2 }
+        }
+        impl<T> Size for [T] where T: Value {
+            fn size(x: [T]) -> int { len(x) }
+        }
+        fn local_use(x: [int]) -> int { double(x) }
+    "#};
+    let error = session.fail_compilation(source).into_inner();
+    let CompilationErrorImpl::TraitImplNotFound {
+        trait_ref, fn_span, ..
+    } = error
+    else {
+        panic!("unexpected diagnostic: {error:?}")
+    };
+    assert_eq!(trait_ref, "Size");
+    assert_eq!(&source[fn_span.as_range()], "double");
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_default_recursive_dispatch_obeys_call_depth_limit() {
+    use ferlium::{
+        ExecutionTarget,
+        compiler::error::{RuntimeErrorKind, SandboxViolationKind},
+        execution::ReferenceInterpreterLimits,
+    };
+    let mut session = TestSession::new();
+    for source in [
+        "trait Loop<Self> { fn cycle(x: Self) -> int { cycle(x) } } impl Loop for int {} cycle(1)",
+        "trait Loop<Self> { fn cycle(x: Self) -> int { callback() } } fn callback() -> int { cycle(1) } impl Loop for int {} cycle(1)",
+        "trait Parent<Self> { fn parent(x: Self) -> int; } trait Child<Self>: Parent<Self> { fn child(x: Self) -> int { parent(x) } } impl Parent for int { fn parent(x: int) -> int { child(x) } } impl Child for int {} child(1)",
+        "trait Other<Self> { fn other(x: Self) -> int; } trait Loop<Self> where Self: Other { fn cycle(x: Self) -> int { other_helper(x) } } fn other_helper<T>(x: T) -> int where T: Other { other(x) } impl Other for int { fn other(x: int) -> int { cycle(x) } } impl Loop for int {} cycle(1)",
+        "trait Loop<Self> { fn a(x: Self) -> int { b(x) } fn b(x: Self) -> int; } impl Loop for int { fn b(x: int) -> int { a(x) } } a(1)",
+        "trait Loop<Self> { fn a(x: Self) -> int; fn b(x: Self) -> int; } impl<T> Loop for [T] where T: Value { fn a(x: [T]) -> int { b(x) } fn b(x: [T]) -> int { a(x) } } a([1])",
+    ] {
+        let output = session.compile(source);
+        let entry = output.expr.unwrap();
+        for target in ExecutionTarget::REFERENCE {
+            let error = session
+                .session_mut()
+                .run_entry_with_limits(
+                    target,
+                    output.module_id,
+                    entry,
+                    vec![],
+                    ReferenceInterpreterLimits::default()
+                        .with_call_depth_limit(8)
+                        .with_fuel_limit(Some(200)),
+                )
+                .expect_err("recursive trait calls must be bounded");
+            assert_eq!(
+                error.kind(),
+                RuntimeErrorKind::SandboxViolation(SandboxViolationKind::CallDepthLimitExceeded {
+                    limit: 8
+                })
+            );
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_default_effect_polymorphic_blanket_impl() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+        trait Execute<Self |-> ! E> {
+            fn execute(x: Self) -> int ! E;
+            fn again(x: Self) -> int ! E { execute(x) }
+        }
+        struct Action<! F> { f: () -> int ! F }
+        impl<! F> Execute for <Self = Action<! F> |-> ! E = F> {
+            fn execute(x: Action<! F>) -> int { x.f() }
+        }
+        again(Action { f: || 21 }) + again(Action { f: || { assert(true); 21 } })
+    "#}),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_default_effect_parameter_only_in_evidence() {
+    let mut session = TestSession::new();
+    session
+        .try_compile_module(
+            "base",
+            indoc! {r#"
+        pub trait Source<Self |-> ! E> {
+            fn get(x: Self) -> int ! E;
+            fn plain(x: Self) -> int;
+        }
+        pub trait Adapter<Self |-> ! E> where Self: Source<! E = E> {
+            fn adapted(x: Self) -> int ! E;
+            fn tag(x: Self) -> int { plain(x) }
+        }
+        impl<T ! F> Adapter for <Self = T |-> ! E = F>
+        where T: Source<! E = F> {
+            fn adapted(x: T) -> int { get(x) }
+        }
+        impl Source for <Self = int |-> ! E = fallible> {
+            fn get(x: int) -> int { assert(x > 0); x }
+            fn plain(x: int) -> int { x }
+        }
+    "#},
+        )
+        .unwrap();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+        use base::*;
+        fn call(x: int) -> int { adapted(x) + tag(x) }
+        call(21)
+    "#}),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_default_first_class_method_uses_override_and_associated_const() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+        trait Measure<Self> {
+            const FACTOR: int;
+            fn measure(x: Self) -> int { 1 }
+            fn scaled(x: Self) -> int { measure(x) * Measure::<Self>::FACTOR }
+        }
+        impl Measure for int {
+            const FACTOR = 2;
+            fn measure(x: int) -> int { x }
+        }
+        let f = Measure::scaled;
+        f(21)
+    "#}),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_default_unbound_parent_effect() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+        trait Source<Self |-> ! E> {
+            fn get(x: Self) -> int ! E;
+            fn plain(x: Self) -> int;
+        }
+        trait Tagged<Self>: Source<Self> {
+            fn tag(x: Self) -> int { plain(x) }
+        }
+        impl Source for <Self = int |-> ! E = fallible> {
+            fn get(x: int) -> int { assert(x > 0); x }
+            fn plain(x: int) -> int { x }
+        }
+        impl Tagged for int {}
+        tag(42)
+    "#}),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_default_requires_declared_value_constraint() {
+    let mut session = TestSession::new();
+    let source = "trait Replace<Self> { fn replace(x: &mut Self, y: Self) { x = y; } }";
+    let error = session.fail_compilation(source).into_inner();
+    let CompilationErrorImpl::InvalidTraitDefinition {
+        kind:
+            InvalidTraitDefinitionKind::InvalidDefaultMethod {
+                reason: InvalidDefaultMethodKind::UndeclaredConstraint,
+                ..
+            },
+        span,
+        ..
+    } = error
+    else {
+        panic!("unexpected diagnostic: {error:?}")
+    };
+    assert_eq!(
+        span.as_range(),
+        source.find("fn replace").unwrap()..source.len() - 2
+    );
+    assert_val_eq!(
+        session.run(indoc! {r#"
+        trait Replace<Self>: Value<Self> { fn replace(x: &mut Self, y: Self) { x = y; } }
+        impl Replace for int {}
+        let mut x = 0;
+        replace(x, 42);
+        x
+    "#}),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_default_ancestor_effects_are_independent() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+        trait Source<Self |-> ! E> {
+            fn get(x: Self) -> int ! E;
+            fn plain(x: Self) -> int;
+        }
+        trait Other<Self |-> ! E> {
+            fn set(x: Self) ! E;
+            fn other_plain(x: Self) -> int;
+        }
+        trait Parent<Self>: Source<Self> { fn parent(x: Self); }
+        trait Tagged<Self>: Parent<Self> where Self: Other {
+            fn tag(x: Self) -> int { plain(x) + other_plain(x) }
+        }
+        impl Source for <Self = int |-> ! E = fallible> {
+            fn get(x: int) -> int { assert(x > 0); x }
+            fn plain(x: int) -> int { x }
+        }
+        impl Other for <Self = int |-> ! E = write> {
+            fn set(x: int) { effects::write() }
+            fn other_plain(x: int) -> int { x }
+        }
+        impl Parent for int { fn parent(x: int) {} }
+        impl Tagged for int {}
+        tag(21)
+    "#}),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_default_leaf_methods_keep_their_dictionary_abi() {
+    use ferlium::{
+        module::{ConcreteTraitImplKey, id::Id},
+        types::type_scheme::PubTypeConstraint,
+    };
+    let mut session = TestSession::new();
+    for (header, ty_name, argument_ty, body, argument) in [
+        ("impl Measure for int", "int", "int", "x", "21"),
+        (
+            "impl<T> Measure for [T] where T: Value",
+            "[int]",
+            "[T]",
+            "len(x)",
+            "[1, 2, 3]",
+        ),
+    ] {
+        let code = format!(
+            r#"
+            trait Measure<Self> {{
+                fn leaf(x: Self) -> int;
+                fn doubled(x: Self) -> int {{ leaf(x) * 2 }}
+            }}
+            {header} {{ fn leaf(x: {argument_ty}) -> int {{ {body} }} }}
+            doubled({argument})
+        "#
+        );
+        let ty = session.resolve_defined_type(ty_name).unwrap();
+        let output = session.compile(&code);
+        let module = session.session().expect_fresh_module(output.module_id);
+        let trait_id = module.get_trait_id_str("Measure").unwrap();
+        let impl_id = module
+            .get_concrete_impl_by_key(&ConcreteTraitImplKey::new(trait_id, vec![ty]))
+            .unwrap();
+        let implementation = module.get_impl_data(*impl_id).unwrap();
+        let leaf = TraitDictionaryEntryIndex::from_index(0);
+        let doubled = TraitDictionaryEntryIndex::from_index(1);
+        assert!(
+            !implementation
+                .dictionary_value
+                .entry_uses_self_dictionary(leaf)
+        );
+        assert!(
+            implementation
+                .dictionary_value
+                .entry_uses_self_dictionary(doubled)
+        );
+        let leaf_function = module
+            .get_function_by_id(implementation.methods[0])
+            .unwrap();
+        assert!(!leaf_function.definition.ty_scheme.constraints.iter().any(|constraint| {
+            matches!(constraint, PubTypeConstraint::HaveTrait { trait_id: id, .. } if *id == trait_id)
+        }));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_default_given_owners_survive_constraint_deduplication() {
+    use ferlium::module::{ConcreteTraitImplKey, id::Id};
+    let mut session = TestSession::new();
+    let source = indoc! {r#"
+        trait Size<Self> {
+            fn size(x: Self) -> int;
+            fn first(x: Self) -> int;
+            fn second(x: Self) -> int;
+        }
+        impl<T> Size for [T] where T: Value {
+            fn size(x: [T]) -> int { len(x) }
+            fn first(x: [T]) -> int { size(x) }
+            fn second(x: [T]) -> int { let f = || size(x); f() }
+        }
+        first([1]) + second([1, 2])
+    "#};
+    let output = session.compile(source);
+    let ty = session.resolve_defined_type("[int]").unwrap();
+    let module = session.session().expect_fresh_module(output.module_id);
+    let trait_id = module.get_trait_id_str("Size").unwrap();
+    let impl_id = module
+        .get_concrete_impl_by_key(&ConcreteTraitImplKey::new(trait_id, vec![ty]))
+        .unwrap();
+    let dictionary = &module.get_impl_data(*impl_id).unwrap().dictionary_value;
+    assert!(!dictionary.entry_uses_self_dictionary(TraitDictionaryEntryIndex::from_index(0)));
+    assert!(dictionary.entry_uses_self_dictionary(TraitDictionaryEntryIndex::from_index(1)));
+    assert!(dictionary.entry_uses_self_dictionary(TraitDictionaryEntryIndex::from_index(2)));
+    assert_val_eq!(session.run(source), int(3));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_default_given_used_by_generic_operator() {
+    let mut session = TestSession::new();
+    assert_val_eq!(session.run(indoc! {r#"
+        struct Wrapped<T> { value: T }
+        impl<T> Num for Wrapped<T> where T: Num, T: Value {
+            fn add(left: Wrapped<T>, right: Wrapped<T>) -> Wrapped<T> { left - (-right) }
+            fn sub(left: Wrapped<T>, right: Wrapped<T>) -> Wrapped<T> { Wrapped { value: left.value - right.value } }
+            fn mul(left: Wrapped<T>, right: Wrapped<T>) -> Wrapped<T> { Wrapped { value: left.value * right.value } }
+            fn neg(x: Wrapped<T>) -> Wrapped<T> { Wrapped { value: -x.value } }
+            fn abs(x: Wrapped<T>) -> Wrapped<T> { Wrapped { value: abs(x.value) } }
+            fn signum(x: Wrapped<T>) -> Wrapped<T> { Wrapped { value: signum(x.value) } }
+            fn from_int(x: int) -> Wrapped<T> { Wrapped { value: from_int(x) } }
+        }
+        (Wrapped { value: 21 } + Wrapped { value: 21 }).value
+    "#}), int(42));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_default_given_used_by_generic_for_loop() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+        struct Bag<T> { data: [T], nested: bool }
+        impl<T> Seq for <Self = Bag<T> |-> Item = T, Iter = ArrayIterator<T>> where T: Value {
+            fn iter(bag: Bag<T>) -> ArrayIterator<T> {
+                if bag.nested {
+                    let inner = Bag { data: bag.data, nested: false };
+                    for item in inner { };
+                };
+                iter(bag.data)
+            }
+        }
+        let mut sum = 0;
+        let bag = Bag { data: [21, 21], nested: true };
+        for item in bag { sum += item; };
+        sum
+    "#}),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_default_diamond_shares_ancestor_evidence() {
+    use ferlium::types::type_scheme::PubTypeConstraint;
+    let mut session = TestSession::new();
+    let source = indoc! {r#"
+        trait D<Self |-> ! E> { fn get(x: Self) -> int; fn act(x: Self) ! E; }
+        trait B<Self>: D<Self> { fn b(x: Self); }
+        trait C<Self>: D<Self> { fn c(x: Self); }
+        trait A<Self>: B<Self>, C<Self> { fn answer(x: Self) -> int { get(x) } }
+        impl D for <Self = int |-> ! E = write> {
+            fn get(x: int) -> int { x }
+            fn act(x: int) { effects::write() }
+        }
+        impl B for int { fn b(x: int) {} }
+        impl C for int { fn c(x: int) {} }
+        impl A for int {}
+        answer(42)
+    "#};
+    let output = session.compile(source);
+    let module = session.session().expect_fresh_module(output.module_id);
+    let ancestor = module.get_trait_id_str("D").unwrap();
+    let default = module.get_trait_str("A").unwrap().default_methods[0]
+        .as_ref()
+        .unwrap();
+    let function = module
+        .get_function_by_id(default.function.function)
+        .unwrap();
+    assert_eq!(function.definition.ty_scheme.constraints.iter().filter(|constraint| {
+        matches!(constraint, PubTypeConstraint::HaveTrait { trait_id, .. } if *trait_id == ancestor)
+    }).count(), 1);
+    assert_val_eq!(session.run(source), int(42));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_default_multi_input_givens() {
+    for implementation in [
+        "impl Pair for <int, string> { fn pair(a: int, b: string) -> int { a } }",
+        "impl Pair { fn pair(a: int, b: string) -> int { a } }",
+        "impl<T> Pair for <int, [T]> where T: Value { fn pair(a: int, b: [T]) -> int { a } }",
+    ] {
+        let argument = if implementation.contains("impl<T>") {
+            "[1]"
+        } else {
+            "\"b\""
+        };
+        let mut session = TestSession::new();
+        assert_val_eq!(session.run(&format!(
+            "trait Pair<A, B> {{ fn pair(a: A, b: B) -> int; fn twice(a: A, b: B) -> int {{ pair(a, b) * 2 }} }} {implementation} twice(21, {argument})"
+        )), int(42));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_default_reversed_same_trait_given() {
+    for methods in [
+        "Convert<A, B>, Convert<B, A>",
+        "Convert<B, A>, Convert<A, B>",
+    ] {
+        let mut session = TestSession::new();
+        assert_val_eq!(
+            session.run(&format!(
+                r#"
+            trait Convert<A, B> {{ fn to(a: A) -> B; }}
+            trait Round<A, B> where {methods}, A: Value, B: Value {{ fn round_trip(a: A, b: B) -> A {{ let intermediate: B = to(a); to(intermediate) }} }}
+            impl Convert for <int, string> {{ fn to(a: int) -> string {{ "answer" }} }}
+            impl Convert for <string, int> {{ fn to(a: string) -> int {{ 42 }} }}
+            impl Round for <int, string> {{}}
+            let result: int = round_trip(1, "");
+            result
+        "#
+            )),
+            int(42)
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_default_headerless_body_determines_self() {
+    for methods in [
+        "fn base(x) { x + 1 } fn sibling(x) { base(x) }",
+        "fn sibling(x) { base(x) } fn base(x) { x + 1 }",
+    ] {
+        let mut session = TestSession::new();
+        assert_val_eq!(session.run(&format!(
+            "trait Size<Self> {{ fn base(x: Self) -> int; fn sibling(x: Self) -> int; fn defaulted(x: Self) -> int {{ sibling(x) }} }} impl Size {{ {methods} }} defaulted(41)"
+        )), int(42));
     }
 }

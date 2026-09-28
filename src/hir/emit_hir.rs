@@ -1,7 +1,7 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-use std::iter::once;
+use std::{borrow::Cow, iter::once};
 
 use crate::{
     FxHashMap, FxHashSet, Location, Modules,
@@ -9,7 +9,8 @@ use crate::{
     hir::emit_associated_consts::{
         SourceAssociatedConstImpl, associated_const_getter, associated_const_values_for_source_impl,
     },
-    module::Uses,
+    module::{TraitId, Uses},
+    types::r#trait::TraitMethodIndex,
 };
 
 pub(super) fn add_source_associated_const_getters(
@@ -71,7 +72,7 @@ use crate::{
         ModuleFunction, ModuleId, Path as ModulePath,
         PendingGeneratedStructuralProjectionSubscripts, PendingModuleFunction, ProjectionKey,
         SubscriptMemberFunctionKind, TraitImpl, UModuleFunction, Visibility, YieldProvenance,
-        build_dictionary_value, id::Id,
+        build_capturing_dictionary_value, build_dictionary_value, dictionary_capture_plan, id::Id,
     },
     std::{
         STD_MODULE_ID,
@@ -679,7 +680,10 @@ pub(crate) struct ModuleEmissionError {
 }
 
 enum ModuleImplementationEmission<'a> {
-    Function(&'a ast::DModuleFunction),
+    Function {
+        function: &'a ast::DModuleFunction,
+        trait_default: Option<(TraitId, TraitMethodIndex)>,
+    },
     SubscriptMember {
         subscript: &'a ast::DSubscriptDefinition,
         function: B<ast::DModuleFunction>,
@@ -691,7 +695,14 @@ enum ModuleImplementationEmission<'a> {
 impl<'a> ModuleImplementationEmission<'a> {
     fn input(&'a self) -> EmitFunctionInput<'a> {
         match self {
-            ModuleImplementationEmission::Function(function) => EmitFunctionInput::normal(function),
+            ModuleImplementationEmission::Function {
+                function,
+                trait_default,
+            } => {
+                let mut input = EmitFunctionInput::normal(function);
+                input.trait_default = *trait_default;
+                input
+            }
             ModuleImplementationEmission::SubscriptMember {
                 subscript,
                 function,
@@ -700,6 +711,8 @@ impl<'a> ModuleImplementationEmission<'a> {
             } => EmitFunctionInput {
                 function,
                 kind: *kind,
+                trait_default: None,
+                forward_default: None,
                 subscript: Some(subscript),
                 subscript_attachments: attachments,
             },
@@ -708,7 +721,7 @@ impl<'a> ModuleImplementationEmission<'a> {
 
     fn function(&self) -> &ast::DModuleFunction {
         match self {
-            ModuleImplementationEmission::Function(function) => function,
+            ModuleImplementationEmission::Function { function, .. } => function,
             ModuleImplementationEmission::SubscriptMember { function, .. } => function,
         }
     }
@@ -830,12 +843,16 @@ fn module_implementation_emissions<'a>(
     desugared_arena: &ast::DExprArena,
     subscript_ids: &[LocalSubscriptId],
     scc: &ast::ModuleImplementationScc,
+    trait_defaults: &FxHashMap<FunctionAstIndex, (TraitId, TraitMethodIndex)>,
 ) -> Vec<ModuleImplementationEmission<'a>> {
     scc.implementations
         .iter()
         .map(|implementation| match *implementation {
             ast::ModuleImplementationAstIndex::Function(index) => {
-                ModuleImplementationEmission::Function(&source.functions[index.as_index()])
+                ModuleImplementationEmission::Function {
+                    function: &source.functions[index.as_index()],
+                    trait_default: trait_defaults.get(&index).copied(),
+                }
             }
             ast::ModuleImplementationAstIndex::SubscriptMember { subscript, member } => {
                 let subscript_def = &source.subscripts[subscript.as_index()];
@@ -945,7 +962,7 @@ fn emit_module_contents(
     validate_name_uniqueness(&source)?;
 
     // First desugar the module.
-    let (source, desugared_arena, sorted_sccs) =
+    let (source, mut desugared_arena, sorted_sccs, trait_defaults) =
         source.desugar(output, others, parsed_arena, capabilities)?;
 
     // This gate applies only to explicit source impls, never compiler-derived ownership glue.
@@ -1125,8 +1142,13 @@ fn emit_module_contents(
         // Keep the existing deterministic intra-SCC order used as a compatibility workaround for
         // effect tracking. Mixed function/subscript-member SCCs are intentionally included here.
         scc.implementations.sort();
-        let emissions =
-            module_implementation_emissions(&source, &desugared_arena, &subscript_ids, &scc);
+        let emissions = module_implementation_emissions(
+            &source,
+            &desugared_arena,
+            &subscript_ids,
+            &scc,
+            &trait_defaults,
+        );
         let recursive_function_names = if scc.recursive {
             emissions
                 .iter()
@@ -1185,21 +1207,47 @@ fn emit_module_contents(
             }));
         }
 
-        // Collect references to functions in the impl, in the order of the trait methods.
+        // Written methods and forwarding instances share the same signature and evidence
+        // checking path. Only the default's call is emitted here; its body was checked once.
         let mut missings = vec![];
-        let functions: Vec<_> = trait_def
-            .methods
-            .iter()
-            .filter_map(|(name, _)| {
-                imp.functions
-                    .iter()
-                    .find(|func| func.name.0 == *name)
-                    .or_else(|| {
-                        missings.push(*name);
-                        None
-                    })
-            })
-            .collect();
+        let mut functions = Vec::with_capacity(trait_def.methods.len());
+        let mut defaults = Vec::with_capacity(trait_def.methods.len());
+        for (index, (name, definition)) in trait_def.methods.iter().enumerate() {
+            if let Some(function) = imp
+                .functions
+                .iter()
+                .find(|function| function.name.0 == *name)
+            {
+                functions.push(Cow::Borrowed(function));
+                defaults.push(None);
+            } else if let Some(default) = &trait_def.default_methods[index] {
+                let body = desugared_arena.alloc(DExpr::new(ExprKind::Block(vec![]), imp.span));
+                functions.push(Cow::Owned(DModuleFunction::new(
+                    Visibility::Module,
+                    (*name, imp.span),
+                    GenericParams::default(),
+                    definition
+                        .arg_names
+                        .iter()
+                        .map(|name| DModuleFunctionArg {
+                            name: (*name, imp.span),
+                            ty: None,
+                            mut_binding: false,
+                        })
+                        .collect(),
+                    imp.span,
+                    None,
+                    vec![],
+                    vec![],
+                    body,
+                    imp.span,
+                    None,
+                )));
+                defaults.push(Some(default.function));
+            } else {
+                missings.push(*name);
+            }
+        }
         if !missings.is_empty() {
             return Err(internal_compilation_error!(TraitMethodImplsMissing {
                 trait_ref: trait_id,
@@ -1207,10 +1255,13 @@ fn emit_module_contents(
                 missings,
             }));
         }
-
-        // Emit the functions.
-        debug_assert_eq!(functions.len(), trait_def.methods.len());
-        let functions = || functions.iter().copied().map(EmitFunctionInput::normal);
+        let functions = || {
+            functions.iter().zip(&defaults).map(|(function, default)| {
+                let mut input = EmitFunctionInput::normal(function);
+                input.forward_default = *default;
+                input
+            })
+        };
         let trait_ctx = EmitTraitCtx {
             trait_id,
             trait_def,
@@ -1261,6 +1312,16 @@ fn emit_module_contents(
                 output.computer_dictionary_ty(&emit_output.functions, associated_const_tys);
             let impl_data = output.impls.data.get_mut(stub_data.id.as_index()).unwrap();
             assert_eq!(new_dictionary_ty, impl_data.dictionary_ty);
+            let requirements = emit_output.method_requirements;
+            let (captures, mut mappings) =
+                dictionary_capture_plan(trait_id, &emit_output.input_tys, &requirements);
+            mappings.extend((0..impl_data.associated_const_getters.len()).map(|_| vec![]));
+            impl_data.dictionary_value = build_capturing_dictionary_value(
+                &emit_output.functions,
+                &impl_data.associated_const_getters,
+                captures,
+                mappings,
+            );
             stub_data.id
         } else {
             check_trait_impl(

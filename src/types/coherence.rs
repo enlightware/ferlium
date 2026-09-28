@@ -415,7 +415,7 @@ fn constraints_may_be_satisfiable(
 
     let constraint = pending.pop().unwrap();
     let constraint = ty_inf.substitute_in_constraint(&constraint);
-    let (trait_id, input_tys, output_tys, output_effs, _span) = constraint
+    let (_, trait_id, input_tys, output_tys, output_effs, _span) = constraint
         .into_have_trait()
         .expect("Non trait constraint in blanket impl overlap check");
     if input_tys.iter().all(Type::is_constant) && output_tys.iter().all(Type::is_constant) {

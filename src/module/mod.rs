@@ -1903,8 +1903,16 @@ impl Module {
         }
         let dictionary_ty =
             self.computer_dictionary_ty(&emit_output.functions, associated_const_tys);
-        let dictionary_value =
-            build_dictionary_value(&emit_output.functions, &associated_const_getters);
+        let entry_requirements = emit_output.method_requirements;
+        let (captures, mut mappings) =
+            dictionary_capture_plan(trait_id, &emit_output.input_tys, &entry_requirements);
+        mappings.extend((0..associated_const_getters.len()).map(|_| vec![]));
+        let dictionary_value = build_capturing_dictionary_value(
+            &emit_output.functions,
+            &associated_const_getters,
+            captures,
+            mappings,
+        );
         let imp = TraitImpl::new(
             trait_id,
             emit_output.output_tys,

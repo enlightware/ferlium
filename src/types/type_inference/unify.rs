@@ -1,7 +1,11 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-use std::borrow::Cow;
+use std::{
+    borrow::Cow,
+    mem,
+    ops::{Deref, DerefMut},
+};
 
 use ena::unify::{InPlace, InPlaceUnificationTable, Snapshot};
 use ustr::Ustr;
@@ -9,6 +13,7 @@ use ustr::Ustr;
 use super::{
     constraints::{EffectConstraint, MutConstraint, TypeConstraint},
     effect_solver::{EffectSolver, EffectSolverSnapshot},
+    evidence_uses::{EvidenceUses, GivenId},
     expr::TypeInference,
 };
 use crate::{
@@ -19,7 +24,7 @@ use crate::{
     },
     hir::NodeArena,
     internal_compilation_error,
-    module::TraitId,
+    module::{LocalFunctionId, TraitId},
     parser::location::Location,
     std::{
         core_traits_names::{FROM_ITERATOR_TRAIT_NAME, REPR_TRAIT_NAME, VALUE_TRAIT_NAME},
@@ -35,7 +40,7 @@ use crate::{
             TyVarKey, Type, TypeInstSubst, TypeKind, TypeVar,
         },
         type_like::TypeLike,
-        type_scheme::PubTypeConstraint,
+        type_scheme::{ConstraintOrigin, PubTypeConstraint},
     },
 };
 
@@ -46,7 +51,15 @@ pub enum SubOrSameType {
     SameTypeWithSubEffects,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum GivenMatch {
+    Resolved,
+    Deferred,
+    Absent,
+}
+
 pub(crate) struct UnifiedTypeInferenceSnapshot {
+    evidence_uses: EvidenceUses,
     ty_unification_table: Snapshot<InPlace<TyVarKey>>,
     mut_unification_table: Snapshot<InPlace<MutVarKey>>,
     effects: EffectSolverSnapshot,
@@ -56,11 +69,41 @@ pub(crate) struct UnifiedTypeInferenceSnapshot {
 /// The type inference after unification, with only public constraints remaining
 #[derive(Default, Debug)]
 pub struct UnifiedTypeInference {
+    pub(super) given_constraints: Vec<PubTypeConstraint>,
+    pub(super) evidence_uses: EvidenceUses,
     pub(super) ty_unification_table: InPlaceUnificationTable<TyVarKey>,
     /// Remaining constraints that cannot be solved, will be part of the resulting type scheme
     pub(super) remaining_ty_constraints: Vec<PubTypeConstraint>,
     pub(super) mut_unification_table: InPlaceUnificationTable<MutVarKey>,
     pub(super) effects: EffectSolver,
+}
+
+/// Lexical owner for deferred obligations. Restores the enclosing owner on every
+/// exit, including early returns and unwinding.
+pub(crate) struct ConstraintOwnerScope<'a> {
+    inference: &'a mut UnifiedTypeInference,
+    previous: Option<LocalFunctionId>,
+}
+
+impl Deref for ConstraintOwnerScope<'_> {
+    type Target = UnifiedTypeInference;
+    fn deref(&self) -> &Self::Target {
+        self.inference
+    }
+}
+
+impl DerefMut for ConstraintOwnerScope<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.inference
+    }
+}
+
+impl Drop for ConstraintOwnerScope<'_> {
+    fn drop(&mut self) {
+        self.inference
+            .evidence_uses
+            .replace_active_owner(self.previous);
+    }
 }
 
 /// Canonical constraints and same-family indexes for one unification pass.
@@ -88,16 +131,80 @@ impl ConstraintPassAggregation<'_> {
     }
 }
 
-fn deduplicate_constraints_in_place(constraints: &mut Vec<PubTypeConstraint>) {
-    let mut seen = FxHashSet::default();
-    constraints.retain(|constraint| seen.insert(constraint.clone()));
-}
-
 fn constraints_equal_as_sets(left: &[PubTypeConstraint], right: &[PubTypeConstraint]) -> bool {
     left.iter().collect::<FxHashSet<_>>() == right.iter().collect::<FxHashSet<_>>()
 }
 
 impl UnifiedTypeInference {
+    pub(crate) fn given_used_by(&self, owner: LocalFunctionId, given: GivenId) -> bool {
+        self.evidence_uses.used_by(owner, given)
+    }
+
+    pub(crate) fn constraint_owner_scope(
+        &mut self,
+        owner: LocalFunctionId,
+    ) -> ConstraintOwnerScope<'_> {
+        let previous = self.evidence_uses.replace_active_owner(Some(owner));
+        ConstraintOwnerScope {
+            inference: self,
+            previous,
+        }
+    }
+
+    fn deduplicate_constraints_in_place(&mut self, constraints: &mut Vec<PubTypeConstraint>) {
+        let mut seen = FxHashMap::<PubTypeConstraint, ConstraintOrigin>::default();
+        constraints.retain(|constraint| {
+            if let Some(origin) = seen.get(constraint) {
+                if origin.index().is_some() || constraint.origin().index().is_some() {
+                    self.evidence_uses.merge(*origin, constraint.origin());
+                }
+                false
+            } else {
+                seen.insert(constraint.clone(), constraint.origin());
+                true
+            }
+        });
+    }
+
+    /// Apply functional-dependency equalities before publishing a checked contract.
+    /// A diamond may reach the same trait/input pair with distinct fresh outputs.
+    pub(crate) fn coalesce_constraint_outputs(
+        &mut self,
+        constraints: &mut Vec<PubTypeConstraint>,
+    ) -> Result<(), InternalCompilationError> {
+        loop {
+            let before = constraints.clone();
+            self.aggregate_constraints_for_pass(constraints.iter())?;
+            self.substitute_in_constraints_in_place(constraints);
+            self.deduplicate_constraints_in_place(constraints);
+            if *constraints == before {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Reconcile the supplied evidence after signature equalities are known and
+    /// before solving body obligations. Preserve every slot for stable GivenIds;
+    /// unlike published schemes, this list must not be deduplicated.
+    fn normalize_given_outputs(&mut self) -> Result<(), InternalCompilationError> {
+        let mut givens = mem::take(&mut self.given_constraints);
+        let result = (|| {
+            if givens.len() > 1 {
+                loop {
+                    let before = givens.clone();
+                    self.aggregate_constraints_for_pass(givens.iter())?;
+                    self.substitute_in_constraints_in_place(&mut givens);
+                    if givens == before {
+                        break;
+                    }
+                }
+            }
+            Ok(())
+        })();
+        self.given_constraints = givens;
+        result
+    }
+
     pub fn new_with_ty_vars(count: u32) -> Self {
         let mut unified_ty_inf = Self::default();
         unified_ty_inf.add_ty_vars(count);
@@ -157,6 +264,7 @@ impl UnifiedTypeInference {
 
     pub(crate) fn snapshot(&mut self) -> UnifiedTypeInferenceSnapshot {
         UnifiedTypeInferenceSnapshot {
+            evidence_uses: self.evidence_uses.clone(),
             ty_unification_table: self.ty_unification_table.snapshot(),
             mut_unification_table: self.mut_unification_table.snapshot(),
             effects: self.effects.snapshot(),
@@ -165,6 +273,7 @@ impl UnifiedTypeInference {
     }
 
     pub(crate) fn rollback_to(&mut self, snapshot: UnifiedTypeInferenceSnapshot) {
+        self.evidence_uses = snapshot.evidence_uses;
         self.ty_unification_table
             .rollback_to(snapshot.ty_unification_table);
         self.mut_unification_table
@@ -180,6 +289,8 @@ impl UnifiedTypeInference {
         arena: &mut NodeArena,
     ) -> Result<Self, InternalCompilationError> {
         let TypeInference {
+            given_constraints,
+            evidence_uses,
             ty_unification_table,
             ty_constraints,
             mut_unification_table,
@@ -190,6 +301,8 @@ impl UnifiedTypeInference {
         } = ty_inf;
         let effect_constraints = effects.drain_constraints();
         let mut unified_ty_inf = UnifiedTypeInference {
+            given_constraints,
+            evidence_uses,
             ty_unification_table,
             remaining_ty_constraints: vec![],
             mut_unification_table,
@@ -297,9 +410,7 @@ impl UnifiedTypeInference {
                         } else {
                             &mut remaining_constraints
                         };
-                    if !destination.contains(&cst) {
-                        destination.push(cst);
-                    }
+                    destination.push(cst);
                 }
             }
         }
@@ -321,6 +432,8 @@ impl UnifiedTypeInference {
                 )?,
             }
         }
+
+        unified_ty_inf.normalize_given_outputs()?;
 
         // Then, solve type coverage constraints
         for (span, ty, values) in ty_coverage_constraints {
@@ -347,7 +460,7 @@ impl UnifiedTypeInference {
         // Then, solve other constraints.
         if !remaining_constraints.is_empty() {
             unified_ty_inf.substitute_in_constraints_in_place(&mut remaining_constraints);
-            deduplicate_constraints_in_place(&mut remaining_constraints);
+            unified_ty_inf.deduplicate_constraints_in_place(&mut remaining_constraints);
 
             loop {
                 // Loop as long as we make progress.
@@ -371,7 +484,7 @@ impl UnifiedTypeInference {
                     arena,
                 )?;
                 unified_ty_inf.substitute_in_constraints_in_place(&mut new_constraints);
-                deduplicate_constraints_in_place(&mut new_constraints);
+                unified_ty_inf.deduplicate_constraints_in_place(&mut new_constraints);
                 remaining_constraints = new_constraints;
 
                 // Break if no progress was made
@@ -395,7 +508,7 @@ impl UnifiedTypeInference {
                 !type_has_static_layout(*payload_ty, payload_span.use_site, trait_solver)
             });
             remaining_constraints.extend(variant_layout_constraints);
-            deduplicate_constraints_in_place(&mut remaining_constraints);
+            unified_ty_inf.deduplicate_constraints_in_place(&mut remaining_constraints);
         }
 
         // Create minimalist types for orphan variant constraints.
@@ -1101,6 +1214,75 @@ impl UnifiedTypeInference {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn match_given(
+        &mut self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        output_tys: &[Type],
+        output_effs: &[EffType],
+        span: Location,
+        origin: ConstraintOrigin,
+    ) -> Result<GivenMatch, InternalCompilationError> {
+        // Equal trait/input applications denote the same evidence. Reconcile every
+        // matching given's outputs, rather than letting list order select a contract.
+        let mut matches = Vec::new();
+        let mut potential_inputs = Vec::new();
+        for index in 0..self.given_constraints.len() {
+            let given = self.substitute_in_constraint(&self.given_constraints[index].clone());
+            let PubTypeConstraint::HaveTrait {
+                trait_id: given_trait,
+                input_tys: given_inputs,
+                output_tys: given_outputs,
+                output_effs: given_effects,
+                ..
+            } = given
+            else {
+                continue;
+            };
+            if given_trait != trait_id {
+                continue;
+            }
+            debug_assert_eq!(given_inputs.len(), input_tys.len());
+            debug_assert_eq!(given_outputs.len(), output_tys.len());
+            debug_assert_eq!(given_effects.len(), output_effs.len());
+            if given_inputs == input_tys {
+                matches.push((GivenId(index), given_outputs, given_effects));
+            } else {
+                potential_inputs.push(given_inputs);
+            }
+        }
+        if !matches.is_empty() {
+            for (given, given_outputs, given_effects) in matches {
+                for (actual, expected) in output_tys.iter().zip(&given_outputs) {
+                    self.unify_same_type_with_sub_effects(*actual, span, *expected, span)?;
+                }
+                for (actual, expected) in output_effs.iter().zip(&given_effects) {
+                    self.resolve_trait_output_effect(actual, expected, span)?;
+                }
+                self.evidence_uses.record(origin, given);
+            }
+            return Ok(GivenMatch::Resolved);
+        }
+        for given_inputs in potential_inputs {
+            // Probe compatibility without learning input equalities from evidence.
+            // In particular Convert<A, ?b> must not force ?b to a given's B.
+            let snapshot = self.snapshot();
+            let compatible = input_tys
+                .iter()
+                .zip(&given_inputs)
+                .all(|(actual, expected)| {
+                    self.unify_same_type_with_sub_effects(*actual, span, *expected, span)
+                        .is_ok()
+                });
+            self.rollback_to(snapshot);
+            if compatible {
+                return Ok(GivenMatch::Deferred);
+            }
+        }
+        Ok(GivenMatch::Absent)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn unify_have_trait(
         &mut self,
         trait_id: TraitId,
@@ -1108,6 +1290,7 @@ impl UnifiedTypeInference {
         output_tys: &[Type],
         output_effs: &[EffType],
         span: Location,
+        origin: ConstraintOrigin,
         assumptions: ConstraintAssumptions<'_>,
         is_ty_adt: impl Fn(Type) -> bool,
         trait_solver: &mut TraitSolver<'_>,
@@ -1116,6 +1299,26 @@ impl UnifiedTypeInference {
         let mut input_tys = self.normalize_types(input_tys);
         let mut output_tys = self.normalize_types(output_tys);
         let mut output_effs = self.substitute_in_effect_types(output_effs);
+        match self.match_given(
+            trait_id,
+            &input_tys,
+            &output_tys,
+            &output_effs,
+            span,
+            origin,
+        )? {
+            GivenMatch::Resolved => return Ok(None),
+            GivenMatch::Deferred => {
+                return Ok(Some(PubTypeConstraint::new_have_trait(
+                    trait_id,
+                    input_tys,
+                    output_tys,
+                    output_effs,
+                    span,
+                )));
+            }
+            GivenMatch::Absent => {}
+        }
         let repr_trait_id = trait_solver.std_trait_id(REPR_TRAIT_NAME);
 
         // Look for the special case of a Repr trait constraint where the target
@@ -1278,6 +1481,7 @@ impl UnifiedTypeInference {
             use PubTypeConstraint::*;
             match constraint {
                 TupleAtIndexIs {
+                    origin: _,
                     tuple_ty,
                     tuple_span,
                     index,
@@ -1322,6 +1526,7 @@ impl UnifiedTypeInference {
                     aggregation.constraints.push(Cow::Borrowed(constraint));
                 }
                 ProjectionSubscriptIs {
+                    origin: _,
                     requirement,
                     receiver_span,
                     field,
@@ -1371,6 +1576,7 @@ impl UnifiedTypeInference {
                         projection_indices.insert(key, aggregation.constraints.len());
                         aggregation.constraints.push(Cow::Owned(
                             PubTypeConstraint::ProjectionSubscriptIs {
+                                origin: constraint.origin(),
                                 requirement: *requirement,
                                 receiver_span: receiver_span.clone(),
                                 field: *field,
@@ -1392,6 +1598,10 @@ impl UnifiedTypeInference {
                     };
                     let existing_receiver_span = existing_receiver_span.use_site;
                     let existing_field_span = existing_field_span.use_site;
+                    self.evidence_uses.merge(
+                        aggregation.constraints[existing_index].origin(),
+                        constraint.origin(),
+                    );
                     let existing_subscript_ty = existing_subscript_ty.clone();
                     self.unify_projection_subscript_signature(
                         &existing_subscript_ty,
@@ -1421,6 +1631,7 @@ impl UnifiedTypeInference {
                     );
                 }
                 TypeHasVariant {
+                    origin: _,
                     variant_ty,
                     variant_span,
                     tag,
@@ -1596,7 +1807,29 @@ impl UnifiedTypeInference {
         trait_solver: &mut TraitSolver<'_>,
         arena: &mut NodeArena,
     ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
+        let mut result = self.unify_pub_constraint_inner(
+            constraint,
+            assumptions,
+            is_ty_adt,
+            trait_solver,
+            arena,
+        )?;
+        if let Some(constraint_out) = &mut result {
+            constraint_out.set_origin(constraint.origin());
+        }
+        Ok(result)
+    }
+
+    fn unify_pub_constraint_inner(
+        &mut self,
+        constraint: &PubTypeConstraint,
+        assumptions: ConstraintAssumptions<'_>,
+        is_ty_adt: impl Fn(Type) -> bool,
+        trait_solver: &mut TraitSolver<'_>,
+        arena: &mut NodeArena,
+    ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
         if let PubTypeConstraint::VariantPayloadLayout {
+            origin: _,
             variant_ty,
             tag,
             payload_ty,
@@ -1608,6 +1841,7 @@ impl UnifiedTypeInference {
                 return Ok(None);
             }
             return Ok(Some(PubTypeConstraint::VariantPayloadLayout {
+                origin: Default::default(),
                 variant_ty: self.normalize_type(*variant_ty),
                 tag: *tag,
                 payload_ty,
@@ -1615,6 +1849,7 @@ impl UnifiedTypeInference {
             }));
         }
         if let PubTypeConstraint::HaveTrait {
+            origin: _,
             trait_id,
             input_tys,
             output_tys,
@@ -1628,6 +1863,7 @@ impl UnifiedTypeInference {
                 output_tys,
                 output_effs,
                 span.use_site,
+                constraint.origin(),
                 assumptions,
                 is_ty_adt,
                 trait_solver,
@@ -1635,6 +1871,7 @@ impl UnifiedTypeInference {
             );
         }
         if let PubTypeConstraint::ProjectionSubscriptIs {
+            origin: _,
             requirement,
             receiver_span,
             field,
@@ -1647,6 +1884,7 @@ impl UnifiedTypeInference {
             let receiver_ty = subscript_ty.receiver_ty();
             if matches!(&*receiver_ty.data(), TypeKind::Variable(_)) {
                 return Ok(Some(PubTypeConstraint::ProjectionSubscriptIs {
+                    origin: Default::default(),
                     requirement: *requirement,
                     receiver_span: receiver_span.clone(),
                     field: *field,
@@ -1694,6 +1932,7 @@ impl UnifiedTypeInference {
         use PubTypeConstraint::*;
         match constraint {
             TupleAtIndexIs {
+                origin: _,
                 tuple_ty,
                 tuple_span,
                 index,
@@ -1707,6 +1946,7 @@ impl UnifiedTypeInference {
                 *element_ty,
             ),
             TypeHasVariant {
+                origin: _,
                 variant_ty,
                 variant_span,
                 tag,
@@ -1720,6 +1960,7 @@ impl UnifiedTypeInference {
                 payload_span.use_site,
             ),
             ProjectionSubscriptIs {
+                origin: _,
                 requirement,
                 receiver_span,
                 field,
@@ -1731,6 +1972,7 @@ impl UnifiedTypeInference {
                 let receiver_ty = subscript_ty.receiver_ty();
                 if matches!(&*receiver_ty.data(), TypeKind::Variable(_)) {
                     Ok(Some(PubTypeConstraint::ProjectionSubscriptIs {
+                        origin: Default::default(),
                         requirement: *requirement,
                         receiver_span: receiver_span.clone(),
                         field: *field,
@@ -2047,5 +2289,206 @@ fn constraint_solve_specificity(constraint: &PubTypeConstraint) -> u8 {
             0
         }
         _ => 1,
+    }
+}
+
+#[cfg(test)]
+mod given_tests {
+    use super::*;
+    use crate::module::{LocalTraitId, ModuleId, id::Id};
+
+    fn trait_id() -> TraitId {
+        TraitId::new(ModuleId::new(0), LocalTraitId::new(0))
+    }
+
+    fn given(inputs: Vec<Type>, outputs: Vec<Type>) -> PubTypeConstraint {
+        PubTypeConstraint::new_have_trait(
+            trait_id(),
+            inputs,
+            outputs,
+            vec![],
+            Location::new_synthesized(),
+        )
+    }
+
+    #[test]
+    fn installed_givens_reconcile_transitive_outputs_without_changing_ids() {
+        let mut inference = UnifiedTypeInference::new_with_ty_vars(2);
+        let first = Type::variable_id(0);
+        let second = Type::variable_id(1);
+        let boolean = Type::primitive::<bool>();
+        // The first equality makes the final pair's inputs equal on a later pass.
+        inference.given_constraints = vec![
+            given(vec![Type::unit()], vec![first]),
+            given(vec![Type::unit()], vec![boolean]),
+            given(vec![first], vec![second]),
+            given(vec![boolean], vec![Type::unit()]),
+        ];
+        inference.normalize_given_outputs().unwrap();
+        assert_eq!(inference.substitute_in_type(first), boolean);
+        assert_eq!(inference.substitute_in_type(second), Type::unit());
+        assert_eq!(inference.given_constraints.len(), 4);
+        assert_eq!(
+            inference.given_constraints[0],
+            given(vec![Type::unit()], vec![boolean])
+        );
+        assert_eq!(
+            inference.given_constraints[2],
+            given(vec![boolean], vec![Type::unit()])
+        );
+    }
+
+    #[test]
+    fn installed_givens_reject_conflicting_unused_outputs() {
+        let mut inference = UnifiedTypeInference {
+            given_constraints: vec![
+                given(vec![Type::unit()], vec![Type::unit()]),
+                given(vec![Type::unit()], vec![Type::primitive::<bool>()]),
+            ],
+            ..Default::default()
+        };
+        assert!(inference.normalize_given_outputs().is_err());
+        assert_eq!(inference.given_constraints.len(), 2);
+    }
+
+    #[test]
+    fn possible_given_defers_without_binding_independent_inputs() {
+        let mut inference = UnifiedTypeInference::new_with_ty_vars(2);
+        let unknown = Type::variable_id(0);
+        let declared = Type::variable_id(1);
+        inference
+            .given_constraints
+            .push(given(vec![Type::unit(), declared], vec![]));
+        assert_eq!(
+            inference
+                .match_given(
+                    trait_id(),
+                    &[Type::unit(), unknown],
+                    &[],
+                    &[],
+                    Location::new_synthesized(),
+                    Default::default()
+                )
+                .unwrap(),
+            GivenMatch::Deferred
+        );
+        assert_eq!(inference.substitute_in_type(unknown), unknown);
+        assert_eq!(inference.substitute_in_type(declared), declared);
+        assert!(!inference.given_used_by(LocalFunctionId::from_index(0), GivenId(0)));
+        inference
+            .unify_same_type_with_sub_effects(
+                unknown,
+                Location::new_synthesized(),
+                declared,
+                Location::new_synthesized(),
+            )
+            .unwrap();
+        let inputs = inference.normalize_types(&[Type::unit(), unknown]);
+        assert_eq!(
+            inference
+                .match_given(
+                    trait_id(),
+                    &inputs,
+                    &[],
+                    &[],
+                    Location::new_synthesized(),
+                    Default::default()
+                )
+                .unwrap(),
+            GivenMatch::Resolved
+        );
+    }
+
+    #[test]
+    fn duplicate_givens_reconcile_every_output_in_both_orders() {
+        for reverse in [false, true] {
+            let mut inference = UnifiedTypeInference::new_with_ty_vars(2);
+            let output = Type::variable_id(0);
+            let query_output = Type::variable_id(1);
+            inference.given_constraints = vec![
+                given(vec![Type::unit()], vec![output]),
+                given(vec![Type::unit()], vec![Type::primitive::<bool>()]),
+            ];
+            if reverse {
+                inference.given_constraints.reverse();
+            }
+            assert_eq!(
+                inference
+                    .match_given(
+                        trait_id(),
+                        &[Type::unit()],
+                        &[query_output],
+                        &[],
+                        Location::new_synthesized(),
+                        Default::default()
+                    )
+                    .unwrap(),
+                GivenMatch::Resolved
+            );
+            assert_eq!(
+                inference.substitute_in_type(output),
+                Type::primitive::<bool>()
+            );
+            assert_eq!(
+                inference.substitute_in_type(query_output),
+                Type::primitive::<bool>()
+            );
+        }
+    }
+
+    #[test]
+    fn incompatible_duplicate_givens_are_rejected_in_both_orders() {
+        for reverse in [false, true] {
+            let mut inference = UnifiedTypeInference::new_with_ty_vars(1);
+            inference.given_constraints = vec![
+                given(vec![Type::unit()], vec![Type::unit()]),
+                given(vec![Type::unit()], vec![Type::primitive::<bool>()]),
+            ];
+            if reverse {
+                inference.given_constraints.reverse();
+            }
+            assert!(
+                inference
+                    .match_given(
+                        trait_id(),
+                        &[Type::unit()],
+                        &[Type::variable_id(0)],
+                        &[],
+                        Location::new_synthesized(),
+                        Default::default()
+                    )
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn exact_given_use_is_attributed_to_its_identity() {
+        let mut inference = UnifiedTypeInference {
+            given_constraints: vec![
+                given(vec![Type::unit()], vec![]),
+                given(vec![Type::primitive::<bool>()], vec![]),
+            ],
+            ..Default::default()
+        };
+        inference.evidence_uses.enable();
+        let origin = inference.evidence_uses.fresh_origin();
+        let owner = LocalFunctionId::from_index(0);
+        inference.evidence_uses.register(origin, owner);
+        assert_eq!(
+            inference
+                .match_given(
+                    trait_id(),
+                    &[Type::primitive::<bool>()],
+                    &[],
+                    &[],
+                    Location::new_synthesized(),
+                    origin
+                )
+                .unwrap(),
+            GivenMatch::Resolved
+        );
+        assert!(inference.given_used_by(owner, GivenId(1)));
+        assert!(!inference.given_used_by(owner, GivenId(0)));
     }
 }

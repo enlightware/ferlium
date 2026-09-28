@@ -10,7 +10,7 @@ use crate::{
     Location,
     module::id::Id,
     types::{
-        r#trait::{Trait, TraitAssociatedConst, TraitImplPolicy, TraitSpans},
+        r#trait::{Trait, TraitAssociatedConst, TraitDefaultMethod, TraitImplPolicy, TraitSpans},
         r#type::{
             Type, TypeAliasEntry, TypeDef, TypeDefProductDocs, TypeDefShapeDocs, TypeDefSlot,
             TypeDefVariantDocs,
@@ -91,6 +91,7 @@ pub(crate) struct SnapshotTrait {
     parent_constraints: Vec<SnapshotConstraint>,
     constraints: Vec<SnapshotConstraint>,
     methods: Vec<(String, SnapshotCallableDefinition)>,
+    default_methods: Vec<Option<TraitDefaultMethod>>,
     associated_consts: Vec<SnapshotTraitAssociatedConst>,
     impl_policy: TraitImplPolicy,
     spans: Option<TraitSpans>,
@@ -332,6 +333,7 @@ impl SnapshotTrait {
                     })
                 })
                 .collect::<Result<_, SnapshotError>>()?,
+            default_methods: value.default_methods.clone(),
             impl_policy: value.impl_policy,
             spans: value.spans.clone(),
         })
@@ -388,6 +390,7 @@ impl SnapshotTrait {
                 })
                 .collect::<Result<_, SnapshotError>>()?,
             derivers: Vec::new(),
+            default_methods: self.default_methods.clone(),
             impl_policy: self.impl_policy,
             spans: self.spans.clone(),
         })
@@ -400,6 +403,38 @@ mod tests {
     use crate::{
         CompilerSession, compiler::snapshot::NativeTypeCatalog, types::r#type::BareNativeTypeB,
     };
+
+    #[test]
+    fn trait_default_metadata_round_trips() {
+        let mut session = CompilerSession::new();
+        let output = session.compile(
+            "trait Size<Self> { fn size(x: Self) -> int; fn double(x: Self) -> int { size(x) * 2 } }",
+            "defaults", crate::module::Path::single_str("defaults"),
+        ).unwrap();
+        let module = session.expect_fresh_module(output.module_id);
+        let expected = module.get_trait_str("Size").unwrap();
+        let catalog = NativeTypeCatalog::std();
+        let native_name = |native: &BareNativeTypeB| catalog.canonical_name(native);
+        let mut graph = SnapshotTypeGraphBuilder::new(&native_name);
+        let snapshot = SnapshotTrait::capture(expected, &mut graph).unwrap();
+        let types = graph
+            .finish()
+            .unwrap()
+            .materialize(&|name| catalog.resolve(name))
+            .unwrap();
+        let restored = snapshot.materialize(&types).unwrap();
+        assert_eq!(restored.default_methods, expected.default_methods);
+        assert!(restored.default_methods[0].is_none());
+        assert_eq!(
+            restored.default_methods[1]
+                .as_ref()
+                .unwrap()
+                .method_calls
+                .len(),
+            // Multiplication uses other trait evidence, which may call back.
+            2
+        );
+    }
 
     #[test]
     fn std_aliases_type_defs_and_source_traits_round_trip() {

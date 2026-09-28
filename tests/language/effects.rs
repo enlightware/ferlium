@@ -338,7 +338,7 @@ fn trait_output_effects_are_quantified_in_generic_functions() {
         .constraints
         .iter()
         .find_map(|constraint| {
-            let (_, _, _, output_effs, _) = constraint.as_have_trait()?;
+            let (_, _, _, _, output_effs, _) = constraint.as_have_trait()?;
             (!output_effs.is_empty()).then(|| output_effs.clone())
         })
         .expect("expected a trait constraint with output effects");

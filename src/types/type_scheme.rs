@@ -5,6 +5,7 @@ use std::{
     borrow::Borrow,
     collections::BTreeMap,
     hash::{Hash, Hasher},
+    num::NonZeroUsize,
 };
 
 use enum_as_inner::EnumAsInner;
@@ -73,12 +74,29 @@ impl ProjectionRequirementKind {
     }
 }
 
+/// Identity of an obligation within one inference context. Diagnostic locations
+/// are deliberately independent of this identity. Published schemes and snapshots
+/// carry no origin; entering inference assigns a fresh one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct ConstraintOrigin(Option<NonZeroUsize>);
+
+impl ConstraintOrigin {
+    pub(crate) fn new(index: usize) -> Self {
+        Self(NonZeroUsize::new(index + 1))
+    }
+
+    pub(crate) fn index(self) -> Option<usize> {
+        self.0.map(|index| index.get() - 1)
+    }
+}
+
 /// A constraint that can be part of a type scheme.
 /// This corresponds to a solved constraint in HM(X).
 #[derive(Debug, Clone, Eq, EnumAsInner)]
 pub enum PubTypeConstraint {
     /// Tuple projection constraint: tuple_ty.index = element_ty
     TupleAtIndexIs {
+        origin: ConstraintOrigin,
         tuple_ty: Type,
         tuple_span: InstantiableLocation,
         index: usize,
@@ -90,6 +108,7 @@ pub enum PubTypeConstraint {
     /// The receiver type is the first argument of `subscript_ty`; it is not
     /// stored separately because the evidence is the subscript value itself.
     ProjectionSubscriptIs {
+        origin: ConstraintOrigin,
         requirement: ProjectionRequirementKind,
         receiver_span: InstantiableLocation,
         field: Ustr,
@@ -98,6 +117,7 @@ pub enum PubTypeConstraint {
     },
     /// Variant for type: variant_ty ⊇ tag(payload_ty)
     TypeHasVariant {
+        origin: ConstraintOrigin,
         variant_ty: Type,
         variant_span: InstantiableLocation,
         tag: Ustr,
@@ -110,6 +130,7 @@ pub enum PubTypeConstraint {
     /// inference. Keeping it separate also avoids enlarging every ordinary `HaveTrait` constraint
     /// with case-provenance storage.
     VariantPayloadLayout {
+        origin: ConstraintOrigin,
         variant_ty: Type,
         tag: Ustr,
         payload_ty: Type,
@@ -117,6 +138,7 @@ pub enum PubTypeConstraint {
     },
     /// Types have trait
     HaveTrait {
+        origin: ConstraintOrigin,
         trait_id: TraitId,
         input_tys: Vec<Type>,
         /// The known output types of the trait application. This list is full
@@ -130,6 +152,26 @@ pub enum PubTypeConstraint {
 }
 
 impl PubTypeConstraint {
+    pub(crate) fn origin(&self) -> ConstraintOrigin {
+        match self {
+            Self::TupleAtIndexIs { origin, .. }
+            | Self::ProjectionSubscriptIs { origin, .. }
+            | Self::TypeHasVariant { origin, .. }
+            | Self::VariantPayloadLayout { origin, .. }
+            | Self::HaveTrait { origin, .. } => *origin,
+        }
+    }
+
+    pub(crate) fn set_origin(&mut self, value: ConstraintOrigin) {
+        match self {
+            Self::TupleAtIndexIs { origin, .. }
+            | Self::ProjectionSubscriptIs { origin, .. }
+            | Self::TypeHasVariant { origin, .. }
+            | Self::VariantPayloadLayout { origin, .. }
+            | Self::HaveTrait { origin, .. } => *origin = value,
+        }
+    }
+
     /// Return the canonical dictionary key represented by this constraint before filtering marker
     /// traits or compiler-provided evidence. Variant layout provenance deliberately maps to the
     /// ordinary `Value<payload_ty>` key used by the physical ABI.
@@ -177,6 +219,7 @@ impl PubTypeConstraint {
                 output_effs.clone(),
             )),
             Self::TupleAtIndexIs {
+                origin: _,
                 tuple_ty,
                 tuple_span,
                 index,
@@ -201,6 +244,7 @@ impl PubTypeConstraint {
         element_ty: Type,
     ) -> Self {
         Self::TupleAtIndexIs {
+            origin: ConstraintOrigin::default(),
             tuple_ty,
             tuple_span: InstantiableLocation::new(tuple_span),
             index,
@@ -219,6 +263,7 @@ impl PubTypeConstraint {
         let member =
             SubscriptMemberType::new(no_effects(), SubscriptResultConvention::AddressorPlace);
         Self::ProjectionSubscriptIs {
+            origin: ConstraintOrigin::default(),
             requirement: ProjectionRequirementKind::Structural,
             receiver_span: InstantiableLocation::new(receiver_span),
             field,
@@ -240,6 +285,7 @@ impl PubTypeConstraint {
         subscript_ty: SubscriptType,
     ) -> Self {
         Self::ProjectionSubscriptIs {
+            origin: ConstraintOrigin::default(),
             requirement,
             receiver_span: InstantiableLocation::new(receiver_span),
             field,
@@ -256,6 +302,7 @@ impl PubTypeConstraint {
         payload_span: Location,
     ) -> Self {
         Self::TypeHasVariant {
+            origin: ConstraintOrigin::default(),
             variant_ty,
             variant_span: InstantiableLocation::new(variant_span),
             tag,
@@ -272,6 +319,7 @@ impl PubTypeConstraint {
         span: Location,
     ) -> Self {
         Self::HaveTrait {
+            origin: ConstraintOrigin::default(),
             trait_id,
             input_tys,
             output_tys,
@@ -287,6 +335,7 @@ impl PubTypeConstraint {
         payload_span: Location,
     ) -> Self {
         Self::VariantPayloadLayout {
+            origin: ConstraintOrigin::default(),
             variant_ty,
             tag,
             payload_ty,
@@ -468,12 +517,14 @@ impl TypeLike for PubTypeConstraint {
         use PubTypeConstraint::*;
         match self {
             TupleAtIndexIs {
+                origin,
                 tuple_ty,
                 tuple_span,
                 index,
                 index_span,
                 element_ty,
             } => TupleAtIndexIs {
+                origin: *origin,
                 tuple_ty: tuple_ty.map(f),
                 tuple_span: tuple_span.clone(),
                 index: *index,
@@ -481,12 +532,14 @@ impl TypeLike for PubTypeConstraint {
                 element_ty: element_ty.map(f),
             },
             ProjectionSubscriptIs {
+                origin,
                 requirement,
                 receiver_span,
                 field,
                 field_span,
                 subscript_ty,
             } => ProjectionSubscriptIs {
+                origin: *origin,
                 requirement: *requirement,
                 receiver_span: receiver_span.clone(),
                 field: *field,
@@ -494,12 +547,14 @@ impl TypeLike for PubTypeConstraint {
                 subscript_ty: subscript_ty.map(f),
             },
             TypeHasVariant {
+                origin,
                 variant_ty,
                 variant_span,
                 tag,
                 payload_ty,
                 payload_span,
             } => TypeHasVariant {
+                origin: *origin,
                 variant_ty: variant_ty.map(f),
                 variant_span: variant_span.clone(),
                 tag: *tag,
@@ -507,23 +562,27 @@ impl TypeLike for PubTypeConstraint {
                 payload_span: payload_span.clone(),
             },
             VariantPayloadLayout {
+                origin,
                 variant_ty,
                 tag,
                 payload_ty,
                 payload_span,
             } => VariantPayloadLayout {
+                origin: *origin,
                 variant_ty: variant_ty.map(f),
                 tag: *tag,
                 payload_ty: payload_ty.map(f),
                 payload_span: payload_span.clone(),
             },
             HaveTrait {
+                origin,
                 trait_id,
                 input_tys,
                 output_tys,
                 output_effs,
                 span,
             } => HaveTrait {
+                origin: *origin,
                 trait_id: *trait_id,
                 input_tys: input_tys.iter().map(|ty| ty.map(f)).collect(),
                 output_tys: output_tys.iter().map(|ty| ty.map(f)).collect(),

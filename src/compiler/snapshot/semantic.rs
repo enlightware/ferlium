@@ -166,6 +166,7 @@ impl SnapshotConstraint {
     ) -> Result<Self, SnapshotError> {
         Ok(match constraint {
             PubTypeConstraint::TupleAtIndexIs {
+                origin: _,
                 tuple_ty,
                 tuple_span,
                 index,
@@ -179,6 +180,7 @@ impl SnapshotConstraint {
                 element_ty: graph.capture(*element_ty)?,
             },
             PubTypeConstraint::ProjectionSubscriptIs {
+                origin: _,
                 requirement,
                 receiver_span,
                 field,
@@ -192,6 +194,7 @@ impl SnapshotConstraint {
                 subscript_ty: graph.capture_subscript_type(subscript_ty)?,
             },
             PubTypeConstraint::TypeHasVariant {
+                origin: _,
                 variant_ty,
                 variant_span,
                 tag,
@@ -205,6 +208,7 @@ impl SnapshotConstraint {
                 payload_span: payload_span.clone(),
             },
             PubTypeConstraint::VariantPayloadLayout {
+                origin: _,
                 variant_ty,
                 tag,
                 payload_ty,
@@ -216,6 +220,7 @@ impl SnapshotConstraint {
                 payload_span: payload_span.clone(),
             },
             PubTypeConstraint::HaveTrait {
+                origin: _,
                 trait_id,
                 input_tys,
                 output_tys,
@@ -246,6 +251,7 @@ impl SnapshotConstraint {
                 index_span,
                 element_ty,
             } => PubTypeConstraint::TupleAtIndexIs {
+                origin: Default::default(),
                 tuple_ty: ty(types, *tuple_ty)?,
                 tuple_span: tuple_span.clone(),
                 index: *index,
@@ -259,6 +265,7 @@ impl SnapshotConstraint {
                 field_span,
                 subscript_ty,
             } => PubTypeConstraint::ProjectionSubscriptIs {
+                origin: Default::default(),
                 requirement: *requirement,
                 receiver_span: receiver_span.clone(),
                 field: field.as_str().into(),
@@ -272,6 +279,7 @@ impl SnapshotConstraint {
                 payload_ty,
                 payload_span,
             } => PubTypeConstraint::TypeHasVariant {
+                origin: Default::default(),
                 variant_ty: ty(types, *variant_ty)?,
                 variant_span: variant_span.clone(),
                 tag: tag.as_str().into(),
@@ -284,6 +292,7 @@ impl SnapshotConstraint {
                 payload_ty,
                 payload_span,
             } => PubTypeConstraint::VariantPayloadLayout {
+                origin: Default::default(),
                 variant_ty: ty(types, *variant_ty)?,
                 tag: tag.as_str().into(),
                 payload_ty: ty(types, *payload_ty)?,
@@ -296,6 +305,7 @@ impl SnapshotConstraint {
                 output_effs,
                 span,
             } => PubTypeConstraint::HaveTrait {
+                origin: Default::default(),
                 trait_id: *trait_id,
                 input_tys: input_tys
                     .iter()

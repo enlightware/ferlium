@@ -111,8 +111,23 @@ pub(super) fn display_annotations(
         }
     }
 
+    // Trait default signatures are already declared in the trait. Their bodies still
+    // receive local annotations above, but their hidden function contract is not source syntax.
+    let default_functions = module
+        .trait_iter()
+        .flat_map(|(_, trait_def)| {
+            trait_def
+                .default_methods
+                .iter()
+                .flatten()
+                .map(|default| default.function.function.as_index())
+        })
+        .collect::<FxHashSet<_>>();
     // Function signatures.
-    for function in module.iter_functions() {
+    for (index, function) in module.iter_functions().enumerate() {
+        if default_functions.contains(&index) {
+            continue;
+        }
         let spans = match &function.spans {
             Some(spans) => spans,
             None => continue,

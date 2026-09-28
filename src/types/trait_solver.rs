@@ -28,12 +28,12 @@ use crate::{
     internal_compilation_error,
     module::{
         self, BlanketImpls, BlanketTraitImpls, ConcreteTraitImplKey, CurrentTypeItems, Def,
-        DefKind, DefTable, FunctionId, LocalDecl, LocalDeclId, LocalFunctionId, LocalImplId,
-        LocalTraitId, Module, ModuleEnv, ModuleFunction, ModuleId, PendingFunctionBody,
-        PendingFunctionCollector, PendingModuleFunction, ProjectionKey, QualifiedNameEnv,
-        ResolvedValueLayout, TraitDictionary, TraitId, TraitImpl, TraitImplId, TraitImpls,
-        TypeDefId, Visibility, build_capturing_dictionary_value, build_dictionary_value,
-        dictionary_capture_plan, id::Id, unique_generated_name,
+        DefKind, DefTable, DictionaryEntryRequirements, FunctionId, LocalDecl, LocalDeclId,
+        LocalFunctionId, LocalImplId, LocalTraitId, Module, ModuleEnv, ModuleFunction, ModuleId,
+        PendingFunctionBody, PendingFunctionCollector, PendingModuleFunction, ProjectionKey,
+        QualifiedNameEnv, ResolvedValueLayout, TraitDictionary, TraitId, TraitImpl, TraitImplId,
+        TraitImpls, TypeDefId, Visibility, build_capturing_dictionary_value,
+        build_dictionary_value, dictionary_capture_plan, id::Id, unique_generated_name,
     },
     std::{
         STD_MODULE_ID,
@@ -49,7 +49,7 @@ use crate::{
     types::{
         effects::{EffType, Effect, EffectVar},
         mutability::{MutType, MutVar},
-        r#trait::{Trait, TraitAssociatedConstIndex, TraitMethodIndex},
+        r#trait::{Trait, TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex},
         r#type::{CallImplType, SubscriptType, Type, TypeDef, TypeKind, TypeVar},
         type_inference::{substitution::InstSubst, unify::UnifiedTypeInference},
         type_like::{TypeLike, instantiate_types},
@@ -58,6 +58,37 @@ use crate::{
         type_scheme::{PubTypeConstraint, TypeScheme},
     },
 };
+
+/// Evidence for the generic call and the canonical hidden arguments of its thunk.
+/// Keeping these together prevents materialization and capture planning from
+/// disagreeing about the callable entry's ABI.
+struct BlanketMethodRequirements {
+    callee: Vec<DictionaryReq>,
+    entry: DictionaryEntryRequirements,
+}
+
+/// Materialized constants have capture-free literal getters; only method thunks
+/// contribute evidence requirements to a blanket implementation's dictionary.
+fn blanket_dictionary(
+    trait_id: TraitId,
+    input_tys: &[Type],
+    methods: &[LocalFunctionId],
+    associated_const_getters: &[LocalFunctionId],
+    requirements: &[BlanketMethodRequirements],
+) -> TraitDictionary {
+    let (capture_schema, mut entry_capture_mappings) = dictionary_capture_plan(
+        trait_id,
+        input_tys,
+        requirements.iter().map(|requirements| &requirements.entry),
+    );
+    entry_capture_mappings.extend((0..associated_const_getters.len()).map(|_| Vec::new()));
+    build_capturing_dictionary_value(
+        methods,
+        associated_const_getters,
+        capture_schema,
+        entry_capture_mappings,
+    )
+}
 
 /// Trait solving is performed by this structure, mutating it by caching intermediate results.
 #[allow(clippy::too_many_arguments)]
@@ -1771,7 +1802,7 @@ impl<'a> TraitSolver<'a> {
             }
 
             let substituted_assumption = ty_inf.substitute_in_constraint(assumption);
-            let Some((ass_trait_id, ass_input_tys, ass_output_tys, ass_output_effs, _)) =
+            let Some((_, ass_trait_id, ass_input_tys, ass_output_tys, ass_output_effs, _)) =
                 substituted_assumption.as_have_trait()
             else {
                 return false;
@@ -1925,6 +1956,7 @@ impl<'a> TraitSolver<'a> {
                 // solved constraints may have refined the type variables it uses.
                 let substituted_constraint = ty_inf.substitute_in_constraint(constraint);
                 let Some((
+                    _,
                     trait_id,
                     constraint_inputs,
                     constraint_outputs,
@@ -2091,6 +2123,7 @@ impl<'a> TraitSolver<'a> {
                             let substituted_constraint =
                                 ty_inf.substitute_in_constraint(&constraint);
                             let Some((
+                                _,
                                 trait_id,
                                 constraint_inputs,
                                 constraint_outputs,
@@ -2396,6 +2429,32 @@ impl<'a> TraitSolver<'a> {
         }
     }
 
+    fn blanket_method_requirements(
+        &self,
+        dictionary: &TraitDictionary,
+        method_count: usize,
+        prerequisites: &[DictionaryReq],
+        self_requirement: DictionaryReq,
+    ) -> Vec<BlanketMethodRequirements> {
+        (0..method_count)
+            .map(|index| {
+                let mut requirements = prerequisites.to_vec();
+                if dictionary
+                    .entry_uses_self_dictionary(TraitDictionaryEntryIndex::from_index(index))
+                    && !requirements.contains(&self_requirement)
+                {
+                    requirements.push(self_requirement.clone());
+                }
+                BlanketMethodRequirements {
+                    entry: DictionaryEntryRequirements::canonical(&requirements, |id| {
+                        self.trait_def(id)
+                    }),
+                    callee: requirements,
+                }
+            })
+            .collect()
+    }
+
     fn blanket_method_inst_data(
         generic_definition: &CallableDefinition,
         concrete_definition: &CallableDefinition,
@@ -2516,31 +2575,39 @@ impl<'a> TraitSolver<'a> {
         definition
     }
 
-    fn canonical_entry_requirements(&self, requirements: &[DictionaryReq]) -> Vec<DictionaryReq> {
-        let mut canonical = Vec::with_capacity(requirements.len());
-        for requirement in requirements {
-            if let DictionaryReq::TraitImpl {
-                trait_id,
-                input_tys,
-                output_tys,
-                ..
-            } = requirement
-            {
-                let trait_def = self.trait_def(*trait_id);
-                if !trait_def.has_runtime_dictionary_entries()
-                    || is_value_trait_for_function_type(*trait_id, trait_def, input_tys, output_tys)
-                    || is_function_surface_only_value_trait_application(
-                        *trait_id, trait_def, input_tys, output_tys,
-                    )
-                {
-                    continue;
-                }
-            }
-            if !canonical.contains(requirement) {
-                canonical.push(requirement.clone());
-            }
-        }
-        canonical
+    #[allow(clippy::too_many_arguments)]
+    fn materialize_blanket_method_thunk(
+        &mut self,
+        function: LocalFunctionId,
+        source_module: Option<ModuleId>,
+        generic_definition: &CallableDefinition,
+        definition: &CallableDefinition,
+        type_var_count: u32,
+        instantiation: &InstSubst,
+        requirements: &BlanketMethodRequirements,
+        span: Location,
+    ) -> Result<PendingModuleFunction, InternalCompilationError> {
+        let function = self.function_id(
+            source_module.unwrap_or(self.current_type_items.module.id),
+            function,
+        );
+        let inst_data = Self::blanket_method_inst_data(
+            generic_definition,
+            definition,
+            type_var_count,
+            instantiation,
+            requirements.callee.clone(),
+            span,
+        )?;
+        let (body, locals) =
+            self.blanket_method_thunk_code_entry(function, definition, &[], inst_data, span)?;
+        Ok(PendingModuleFunction::from_body(
+            Self::dictionary_entry_definition(definition, requirements.entry.as_slice(), span),
+            body,
+            definition.arg_names.len(),
+            None,
+            locals,
+        ))
     }
 
     fn blanket_method_thunk_code_entry(
@@ -2803,6 +2870,7 @@ impl<'a> TraitSolver<'a> {
         let dictionary_ty = TraitImpls::dictionary_ty(method_tys, associated_const_tys);
         let entry_requirements = repeat_n(requirements, methods.len())
             .chain(getter_requirements)
+            .map(DictionaryEntryRequirements::from_callable)
             .collect::<Vec<_>>();
         let (capture_schema, entry_capture_mappings) =
             dictionary_capture_plan(trait_id, &canonical_input_tys, &entry_requirements);
@@ -3323,8 +3391,6 @@ impl<'a> TraitSolver<'a> {
                         &mut runtime_requirements,
                         &defaulted_output_effect_vars,
                     );
-                    let entry_requirements =
-                        self.canonical_entry_requirements(&runtime_requirements);
                     if !self.validate_runtime_requirements(
                         &resolved_runtime_requirements,
                         fn_span,
@@ -3342,6 +3408,20 @@ impl<'a> TraitSolver<'a> {
                         &self.impls
                     };
                     let imp = &impls.data[impl_id.as_index()];
+                    // Self evidence belongs to method execution, not to blanket selection.
+                    // The selected dictionary supplies it through the existing entry mapping.
+                    let method_requirements = self.blanket_method_requirements(
+                        &imp.dictionary_value,
+                        imp.methods.len(),
+                        &runtime_requirements,
+                        DictionaryReq::new_trait_impl(
+                            trait_id,
+                            input_tys.to_vec(),
+                            output_tys.clone(),
+                            output_effs.clone(),
+                        ),
+                    );
+
                     let associated_const_values = {
                         let trait_def =
                             trait_def_from_parts(self.current_type_items, self.others, trait_id);
@@ -3375,48 +3455,26 @@ impl<'a> TraitSolver<'a> {
                         .zip(definitions)
                         .enumerate()
                     {
+                        let requirements = &method_requirements[method_index];
                         let method_index = TraitMethodIndex::from_index(method_index);
                         // Build the concrete function type and hash its signature.
                         let fn_ty = Type::function_type(def.ty_scheme.ty.clone());
 
                         // Is the generic function from another module, or do we need to pass constraint dictionaries?
-                        let id = if runtime_requirements.is_empty() && imp_module_id.is_none() {
+                        let id = if requirements.callee.is_empty() && imp_module_id.is_none() {
                             // No, so we can just use the generic function as is.
                             *fn_id
                         } else {
-                            // Yes, get the function id for doing the call to the generic function.
-                            let function_id = match imp_module_id {
-                                Some(module_id) => self.function_id(module_id, *fn_id),
-                                None => self.function_id(self.current_type_items.module.id, *fn_id),
-                            };
-                            let inst_data = Self::blanket_method_inst_data(
+                            let function = self.materialize_blanket_method_thunk(
+                                *fn_id,
+                                imp_module_id,
                                 &generic_def,
                                 &def,
                                 imp_ty_var_count,
                                 &blanket_instantiation,
-                                runtime_requirements.clone(),
+                                requirements,
                                 fn_span,
                             )?;
-
-                            let (body, locals) = self.blanket_method_thunk_code_entry(
-                                function_id,
-                                &def,
-                                &[],
-                                inst_data,
-                                fn_span,
-                            )?;
-                            let runtime_arg_count = def.arg_names.len();
-                            let function = PendingModuleFunction::from_body(
-                                Self::dictionary_entry_definition(
-                                    &def,
-                                    &entry_requirements,
-                                    fn_span,
-                                ),
-                                body,
-                                runtime_arg_count,
-                                None,
-                                locals,
-                            );
                             let name = Ustr::from(&format!(
                                 "{}-thunk",
                                 self.qualified_name_env().disambiguated_impl_method_name(
@@ -3467,18 +3525,12 @@ impl<'a> TraitSolver<'a> {
                             |index| associated_const_names[index],
                         );
                     let dictionary_ty = TraitImpls::dictionary_ty(tys, associated_const_tys);
-                    let method_requirements = vec![entry_requirements.clone(); methods.len()];
-                    let (capture_schema, mut entry_capture_mappings) =
-                        dictionary_capture_plan(trait_id, input_tys, &method_requirements);
-                    // These getters were generated immediately above from materialized literals;
-                    // their schemes have no hidden evidence parameters.
-                    entry_capture_mappings
-                        .extend((0..associated_const_getters.len()).map(|_| Vec::new()));
-                    let dictionary_value = build_capturing_dictionary_value(
+                    let dictionary_value = blanket_dictionary(
+                        trait_id,
+                        input_tys,
                         &methods,
                         &associated_const_getters,
-                        capture_schema,
-                        entry_capture_mappings,
+                        &method_requirements,
                     );
                     let imp = TraitImpl::new(
                         trait_id,
@@ -3522,21 +3574,21 @@ impl<'a> TraitSolver<'a> {
 
                 // Value blanket impls may be recursive, so reserve the concrete impl before
                 // materializing any deferred constraint dictionaries.
-                let (imp_associated_const_values, gen_functions) =
-                    if let Some(module_id) = imp_module_id {
-                        let imp = &self
-                            .others
-                            .get(module_id)
-                            .unwrap()
-                            .module()
-                            .unwrap()
-                            .impls
-                            .data[impl_id.as_index()];
-                        (imp.associated_const_values.clone(), imp.methods.clone())
-                    } else {
-                        let imp = &self.impls.data[impl_id.as_index()];
-                        (imp.associated_const_values.clone(), imp.methods.clone())
-                    };
+                let imp = if let Some(module_id) = imp_module_id {
+                    &self
+                        .others
+                        .get(module_id)
+                        .unwrap()
+                        .module()
+                        .unwrap()
+                        .impls
+                        .data[impl_id.as_index()]
+                } else {
+                    &self.impls.data[impl_id.as_index()]
+                };
+                let imp_associated_const_values = imp.associated_const_values.clone();
+                let gen_functions = imp.methods.clone();
+                let source_dictionary = imp.dictionary_value.clone();
                 let associated_const_values = {
                     let trait_def =
                         trait_def_from_parts(self.current_type_items, self.others, trait_id);
@@ -3568,7 +3620,17 @@ impl<'a> TraitSolver<'a> {
                     &mut runtime_requirements,
                     &defaulted_output_effect_vars,
                 );
-                let entry_requirements = self.canonical_entry_requirements(&runtime_requirements);
+                let method_requirements = self.blanket_method_requirements(
+                    &source_dictionary,
+                    gen_functions.len(),
+                    &runtime_requirements,
+                    DictionaryReq::new_trait_impl(
+                        trait_id,
+                        input_tys.to_vec(),
+                        output_tys.clone(),
+                        output_effs.clone(),
+                    ),
+                );
                 if !self.validate_runtime_requirements(
                     &resolved_runtime_requirements,
                     fn_span,
@@ -3587,61 +3649,39 @@ impl<'a> TraitSolver<'a> {
                 let generic_definitions =
                     trait_def_from_parts(self.current_type_items, self.others, trait_id)
                         .instantiate_for_tys(imp_input_tys, &imp_output_tys, &imp_output_effs);
-                let code_entries = gen_functions
+                let functions = gen_functions
                     .iter()
                     .zip(generic_definitions)
                     .zip(definitions)
-                    .map(|((fn_id, generic_def), def)| {
-                        let function_id = match imp_module_id {
-                            Some(module_id) => self.function_id(module_id, *fn_id),
-                            None => self.function_id(self.current_type_items.module.id, *fn_id),
-                        };
-                        let inst_data = Self::blanket_method_inst_data(
+                    .zip(&method_requirements)
+                    .map(|(((fn_id, generic_def), def), requirements)| {
+                        self.materialize_blanket_method_thunk(
+                            *fn_id,
+                            imp_module_id,
                             &generic_def,
                             &def,
                             imp_ty_var_count,
                             &blanket_instantiation,
-                            runtime_requirements.clone(),
-                            fn_span,
-                        )?;
-
-                        self.blanket_method_thunk_code_entry(
-                            function_id,
-                            &def,
-                            &[],
-                            inst_data,
+                            requirements,
                             fn_span,
                         )
                     })
                     .collect::<Result<Vec<_>, InternalCompilationError>>()?;
-
-                self.replace_concrete_impl_code_entries(
-                    local_impl_id,
-                    trait_id,
-                    input_tys,
-                    &output_tys,
-                    &output_effs,
-                    &entry_requirements,
-                    code_entries,
-                );
                 let methods = self.impls.data[local_impl_id.as_index()].methods.clone();
+                assert_eq!(methods.len(), functions.len());
+                for (id, function) in methods.iter().copied().zip(functions) {
+                    self.fn_collector.replace(id, function);
+                }
                 let associated_const_getters = self.impls.data[local_impl_id.as_index()]
                     .associated_const_getters
                     .clone();
-                let method_requirements = vec![entry_requirements.clone(); methods.len()];
-                let (capture_schema, mut entry_capture_mappings) =
-                    dictionary_capture_plan(trait_id, input_tys, &method_requirements);
-                // Materialized associated constants use the capture-free literal getters bundled
-                // with this concrete implementation.
-                entry_capture_mappings
-                    .extend((0..associated_const_getters.len()).map(|_| Vec::new()));
-                self.impls.data[local_impl_id.as_index()].dictionary_value =
-                    build_capturing_dictionary_value(
-                        &methods,
-                        &associated_const_getters,
-                        capture_schema,
-                        entry_capture_mappings,
-                    );
+                self.impls.data[local_impl_id.as_index()].dictionary_value = blanket_dictionary(
+                    trait_id,
+                    input_tys,
+                    &methods,
+                    &associated_const_getters,
+                    &method_requirements,
+                );
 
                 if imp_module_id.is_some() {
                     self.private_impl_scope.pop();

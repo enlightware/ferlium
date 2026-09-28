@@ -654,3 +654,26 @@ fn match_on_place_scrutinee_adds_no_value_obligation() {
         "a place scrutinee must not acquire a `Value` obligation, got: {annotations}"
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_default_body_has_annotations_without_hidden_signature_hints() {
+    let source = indoc! {r#"
+        trait Size<Self> {
+            fn size(x: Self) -> int;
+            fn double(x: Self) -> int { let n = size(x); n * 2 }
+        }
+        impl Size for int { fn size(x: int) -> int { x } }
+        double(21)
+    "#};
+    let mut compiler = compile_source(source);
+    let annotated = annotated_source(source, compiler.get_annotations());
+    assert!(annotated.contains("n: int"), "{annotated}");
+    assert!(
+        !compiler
+            .list_module_fn_names()
+            .iter()
+            .any(|name| name.contains("#default"))
+    );
+    assert!(!annotation_hints(&mut compiler).contains("Self: Size"));
+}

@@ -42,7 +42,11 @@ impl UnifiedTypeInference {
 
     /// Extract the remaining constraints from self.
     pub fn take_constraints(&mut self) -> Vec<PubTypeConstraint> {
-        mem::take(&mut self.remaining_ty_constraints)
+        let mut constraints = mem::take(&mut self.remaining_ty_constraints);
+        for constraint in &mut constraints {
+            constraint.set_origin(Default::default());
+        }
+        constraints
     }
 
     pub(super) fn normalize_type(&mut self, ty: Type) -> Type {

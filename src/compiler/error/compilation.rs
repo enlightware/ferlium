@@ -239,8 +239,33 @@ impl InvalidTraitConstraintKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidDefaultMethodKind {
+    SpecializedTypeParameter,
+    RestrictedEffectParameter,
+    UndeclaredConstraint,
+}
+
+impl InvalidDefaultMethodKind {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::SpecializedTypeParameter => {
+                "the body specializes or identifies declared type parameters"
+            }
+            Self::RestrictedEffectParameter => "the body restricts declared effect parameters",
+            Self::UndeclaredConstraint => {
+                "the body requires constraints not provided by the declaration"
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InvalidTraitDefinitionKind {
+    InvalidDefaultMethod {
+        method_name: Ustr,
+        reason: InvalidDefaultMethodKind,
+    },
     MissingInputTypes,
     DuplicateItem {
         name: Ustr,
@@ -262,6 +287,13 @@ impl InvalidTraitDefinitionKind {
     pub fn message(&self, trait_name: Ustr) -> String {
         use InvalidTraitDefinitionKind::*;
         match self {
+            InvalidDefaultMethod {
+                method_name,
+                reason,
+            } => format!(
+                "Default method `{trait_name}::{method_name}` does not satisfy its declaration: {}",
+                reason.message()
+            ),
             MissingInputTypes => {
                 format!("Trait `{trait_name}` must have at least one input type parameter")
             }

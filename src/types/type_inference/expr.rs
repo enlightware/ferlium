@@ -43,11 +43,11 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        DeferredLocalStorage, FunctionId, LocalAssignmentMode, LocalDecl, LocalDeclId, ModuleEnv,
-        ModuleFunctionSpans, PendingFunctionBody, PendingLocalClone, PendingLocalDrop,
-        PendingModuleFunction, PendingTakeLocalValueMode, ProjectionIndex, ProjectionKey,
-        ResolvedLocalDrop, SubscriptId, SubscriptMember, SubscriptMemberKind, TraitId, TypeDefId,
-        TypeDefLookupResult, YieldProvenance, id::Id,
+        DeferredLocalStorage, FunctionId, LocalAssignmentMode, LocalDecl, LocalDeclId,
+        LocalFunctionId, ModuleEnv, ModuleFunctionSpans, PendingFunctionBody, PendingLocalClone,
+        PendingLocalDrop, PendingModuleFunction, PendingTakeLocalValueMode, ProjectionIndex,
+        ProjectionKey, ResolvedLocalDrop, SubscriptId, SubscriptMember, SubscriptMemberKind,
+        TraitId, TypeDefId, TypeDefLookupResult, YieldProvenance, id::Id,
     },
     parser::location::Location,
     std::{
@@ -94,6 +94,7 @@ fn split_inferred_trait_associated_const_path(path: &ast::Path) -> Option<(ast::
 use super::{
     constraints::{MutConstraint, TypeConstraint},
     effect_solver::EffectSolver,
+    evidence_uses::{EvidenceUses, GivenId},
     unify::UnifiedTypeInference,
 };
 
@@ -138,6 +139,9 @@ fn loop_control_error(
 /// The type inference status, containing the unification table and the constraints
 #[derive(Default, Debug)]
 pub struct TypeInference {
+    /// Evidence supplied by the enclosing checked declaration, not obligations to select an impl.
+    pub(super) given_constraints: Vec<PubTypeConstraint>,
+    pub(super) evidence_uses: EvidenceUses,
     pub(super) ty_unification_table: InPlaceUnificationTable<TyVarKey>,
     pub(super) ty_constraints: Vec<TypeConstraint>,
     pub(super) mut_unification_table: InPlaceUnificationTable<MutVarKey>,
@@ -371,7 +375,7 @@ impl TypeInference {
             let mut constraint = constraint.map(&mut mapper);
             constraint.instantiate_location(span);
             let parent = constraint.as_have_trait().map(
-                |(trait_id, input_tys, output_tys, output_effs, _)| {
+                |(_, trait_id, input_tys, output_tys, output_effs, _)| {
                     (
                         *trait_id,
                         input_tys.to_vec(),
@@ -504,7 +508,31 @@ impl TypeInference {
             .collect()
     }
 
-    pub fn add_pub_constraint(&mut self, pub_constraint: PubTypeConstraint) {
+    pub(crate) fn add_given_constraint(&mut self, constraint: PubTypeConstraint) -> GivenId {
+        self.evidence_uses.enable();
+        let id = GivenId(self.given_constraints.len());
+        self.given_constraints.push(constraint);
+        id
+    }
+
+    pub(crate) fn constraint_scope_start(&self) -> usize {
+        self.ty_constraints.len()
+    }
+
+    pub(crate) fn own_constraints_since(&mut self, start: usize, owner: LocalFunctionId) {
+        for constraint in &mut self.ty_constraints[start..] {
+            if let TypeConstraint::Pub(constraint) = constraint {
+                if constraint.origin().index().is_none() {
+                    constraint.set_origin(self.evidence_uses.fresh_origin());
+                }
+                self.evidence_uses.register(constraint.origin(), owner);
+            }
+        }
+    }
+
+    pub fn add_pub_constraint(&mut self, mut pub_constraint: PubTypeConstraint) {
+        // A scheme obligation becomes a new inference obligation at each use.
+        pub_constraint.set_origin(self.evidence_uses.fresh_origin());
         self.ty_constraints
             .push(TypeConstraint::Pub(pub_constraint));
     }

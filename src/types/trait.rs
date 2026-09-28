@@ -18,15 +18,15 @@ use crate::{
         NodeArena,
         function::{CallableDefinition, FunctionDisplayContext},
     },
-    module::{ModuleEnv, TraitId, TraitImplId, id::Id},
+    module::{FunctionId, ModuleEnv, TraitId, TraitImplId, id::Id},
     types::{
         effects::{EffType, EffectVar, EffectsInstSubst},
         trait_solver::TraitSolver,
         r#type::{FnType, Type, TypeInstSubst, TypeVar},
-        type_inference::substitution::InstSubst,
+        type_inference::{substitution::InstSubst, unify::UnifiedTypeInference},
         type_like::TypeLike,
         type_mapper::BitmapInstantiationMapper,
-        type_scheme::PubTypeConstraint,
+        type_scheme::{PubTypeConstraint, TypeScheme},
         type_scheme_display::{TypeConstraintRenderStyle, format_pub_type_constraint_with_style},
         type_visitor::TyVarsCollector,
     },
@@ -107,6 +107,19 @@ impl TraitAssociatedConst {
     }
 }
 
+/// A checked default body and a conservative summary for impl recursion analysis.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraitDefaultMethod {
+    pub function: FunctionId,
+    /// Trait slots this body may call, directly or through a callback. These are
+    /// method indices rather than function IDs: each impl can override the target.
+    /// Emission combines this summary with the impl's written methods to guard
+    /// recursive components. Unknown callbacks conservatively include every slot;
+    /// this summary does not determine the default's dictionary parameters.
+    pub method_calls: Vec<TraitMethodIndex>,
+}
+
 /// A trait, equivalent to a multi-parameter type class in Haskell, with output types.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +148,8 @@ pub struct Trait {
     pub constraints: Vec<PubTypeConstraint>,
     /// The methods provided by the trait.
     pub methods: Vec<(Ustr, CallableDefinition)>,
+    /// Compiled default bodies, in method order. Native traits have no defaults.
+    pub default_methods: Vec<Option<TraitDefaultMethod>>,
     /// Compiler-defined associated consts provided by implementations.
     pub associated_consts: Vec<TraitAssociatedConst>,
     /// The trait derivers
@@ -167,6 +182,97 @@ impl TraitValidationError {
 }
 
 impl Trait {
+    /// The evidence available while checking a default body. Parent constraints are
+    /// explicit hidden arguments, just as they are for ordinary generic functions.
+    pub(crate) fn default_method_scheme(
+        &self,
+        trait_id: TraitId,
+        index: TraitMethodIndex,
+        env: ModuleEnv<'_>,
+        span: Location,
+    ) -> Result<TypeScheme<FnType>, InternalCompilationError> {
+        fn expand(
+            constraint: PubTypeConstraint,
+            env: ModuleEnv<'_>,
+            constraints: &mut Vec<PubTypeConstraint>,
+            next_type: &mut u32,
+            next_effect: &mut u32,
+        ) {
+            if constraints.contains(&constraint) {
+                return;
+            }
+            constraints.push(constraint.clone());
+            if let PubTypeConstraint::HaveTrait {
+                trait_id,
+                input_tys,
+                output_tys,
+                output_effs,
+                ..
+            } = constraint
+            {
+                let def = env.trait_def(trait_id);
+                let mut subst = def.param_subst_for(&input_tys, &output_tys, &output_effs);
+                // Each declaration owns the variables omitted from its named parameters.
+                // Rename those before expansion, so ancestors cannot reuse local indices.
+                for parent in def.parent_constraints.iter().chain(&def.constraints) {
+                    for var in parent.inner_ty_vars() {
+                        subst.0.entry(var).or_insert_with(|| {
+                            let fresh = Type::variable_id(*next_type);
+                            *next_type += 1;
+                            fresh
+                        });
+                    }
+                    for var in parent.inner_effect_vars().into_iter().sorted() {
+                        subst.1.entry(var).or_insert_with(|| {
+                            let fresh = EffType::single_variable_id(*next_effect);
+                            *next_effect += 1;
+                            fresh
+                        });
+                    }
+                }
+                for parent in def.parent_constraints.iter().chain(&def.constraints) {
+                    expand(
+                        parent.instantiate_simple(&subst),
+                        env,
+                        constraints,
+                        next_type,
+                        next_effect,
+                    );
+                }
+            }
+        }
+        let inputs = (0..self.input_type_count())
+            .map(Type::variable_id)
+            .collect();
+        let outputs = (self.input_type_count()..self.input_type_count() + self.output_type_count())
+            .map(Type::variable_id)
+            .collect();
+        let effects = (0..self.output_effect_count())
+            .map(EffType::single_variable_id)
+            .collect();
+        let mut constraints = Vec::new();
+        let mut next_type = self.input_type_count() + self.output_type_count();
+        let mut next_effect = self.output_effect_count();
+        expand(
+            PubTypeConstraint::new_have_trait(trait_id, inputs, outputs, effects, span),
+            env,
+            &mut constraints,
+            &mut next_type,
+            &mut next_effect,
+        );
+        // Use the same functional-dependency unification as ordinary inference:
+        // do not silently choose one branch when explicit outputs disagree.
+        let mut inference = UnifiedTypeInference::new_with_ty_vars(next_type);
+        for _ in 0..next_effect {
+            inference.fresh_effect_var();
+        }
+        inference.coalesce_constraint_outputs(&mut constraints)?;
+        Ok(TypeScheme::new_infer_quantifiers_with_constraints(
+            inference.substitute_in_fn_type(&self.method(index).1.ty_scheme.ty),
+            constraints,
+        ))
+    }
+
     pub fn from_trait_data(trait_data: Trait) -> Result<Self, TraitValidationError> {
         if trait_data.input_type_names.is_empty() {
             return Err(TraitValidationError::Invalid {
@@ -194,7 +300,7 @@ impl Trait {
             .into()
             .into_iter()
             .map(|(name, def)| (ustr(name), def))
-            .collect();
+            .collect::<Vec<_>>();
         let trait_data = Trait {
             name: ustr(name),
             doc: Some(doc.to_string()),
@@ -203,6 +309,7 @@ impl Trait {
             output_effect_names: Vec::new(),
             parent_constraints: Vec::new(),
             constraints: Vec::new(),
+            default_methods: vec![None; methods.len()],
             methods,
             associated_consts: Vec::new(),
             derivers: Vec::new(),
@@ -245,7 +352,7 @@ impl Trait {
             .into()
             .into_iter()
             .map(|(name, def)| (ustr(name), def))
-            .collect();
+            .collect::<Vec<_>>();
         let trait_data = Trait {
             name: ustr(name),
             doc: Some(doc.to_string()),
@@ -254,6 +361,7 @@ impl Trait {
             output_effect_names: Vec::new(),
             parent_constraints: Vec::new(),
             constraints: constraints.into(),
+            default_methods: vec![None; methods.len()],
             methods,
             associated_consts: Vec::new(),
             derivers: Vec::new(),
@@ -455,7 +563,7 @@ impl Trait {
             .map(EffectVar::new)
             .collect();
         for constraint in &self.constraints {
-            if let Some((_, _, _, output_effs, _)) = constraint.as_have_trait() {
+            if let Some((_, _, _, _, output_effs, _)) = constraint.as_have_trait() {
                 for eff in output_effs {
                     eff.fill_with_inner_effect_vars(&mut allowed_effect_vars);
                 }
@@ -520,7 +628,7 @@ impl Trait {
             let mut quantifiers: FxHashSet<_> =
                 method.ty_scheme.ty_quantifiers.iter().copied().collect();
             for (i, constraint) in self.constraints.iter().enumerate() {
-                let (_, input_tys, output_tys, _, _) = constraint
+                let (_, _, input_tys, output_tys, _, _) = constraint
                     .as_have_trait()
                     .expect("Only HaveTrait constraints are supported in traits.");
                 if !input_tys
@@ -751,14 +859,18 @@ impl FormatWith<ModuleEnv<'_>> for Trait {
             .collect::<Vec<_>>();
         let method_display_context = FunctionDisplayContext::new(env, &method_effect_params);
         let mut first = true;
-        for (name, def) in &self.methods {
+        for (index, (name, def)) in self.methods.iter().enumerate() {
             if first {
                 first = false;
             } else {
                 writeln!(f)?;
             }
             def.fmt_with_name_and_display_context(f, *name, "    ", &method_display_context)?;
-            write!(f, ";")?;
+            if self.default_methods[index].is_some() {
+                write!(f, " {{ … }}")?;
+            } else {
+                write!(f, ";")?;
+            }
         }
         writeln!(f, "\n}}")?;
         Ok(())

@@ -17,6 +17,7 @@ pub mod interpreter;
 pub(crate) mod r#match;
 mod native_addressors;
 pub mod native_functions;
+mod trait_method_calls;
 pub mod value;
 pub(crate) mod value_dispatch;
 

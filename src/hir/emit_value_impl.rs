@@ -20,9 +20,10 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        LocalFunctionId, Module, ModuleEnv, PendingGeneratedStructuralProjectionSubscripts,
-        PendingModuleFunction, QualifiedNameEnv, TraitId, TypeDefId, Visibility,
-        build_capturing_dictionary_value, dictionary_capture_plan, id::Id,
+        DictionaryEntryRequirements, LocalFunctionId, Module, ModuleEnv,
+        PendingGeneratedStructuralProjectionSubscripts, PendingModuleFunction, QualifiedNameEnv,
+        TraitId, TypeDefId, Visibility, build_capturing_dictionary_value, dictionary_capture_plan,
+        id::Id,
     },
     std::{
         core_traits_names::VALUE_TRAIT_NAME,
@@ -527,6 +528,7 @@ pub(super) fn emit_auto_value_impls(
                     .extra_parameters(ModuleEnv::new(output, others))
                     .requirements
             })
+            .map(DictionaryEntryRequirements::from_callable)
             .collect::<Vec<_>>();
         let (capture_schema, entry_capture_mappings) =
             dictionary_capture_plan(value_trait_id, &[input_ty], &entry_requirements);
@@ -545,6 +547,7 @@ pub(super) fn emit_auto_value_impls(
                 ty_var_count,
                 eff_var_count,
                 constraints,
+                method_requirements: entry_requirements[..function_ids.len()].to_vec(),
                 functions: function_ids,
             },
             associated_const_values,

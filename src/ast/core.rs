@@ -102,7 +102,7 @@ pub trait Phase: Sized {
     type MutType: Debug + Clone + FormatInFnArg;
     type LetTyAscriptionComplete: Debug + Clone;
     type WhereClause: Debug + Clone + for<'a> FormatWith<ModuleEnv<'a>>;
-    type TraitInModule: Debug + Clone;
+    type TraitInModule: Debug + Clone + VisitExpr<Self>;
     type FunctionSccs: Debug + Clone;
     type TypeAliasInModule: Debug + Clone + for<'a> FormatWith<ModuleEnv<'a>>;
     type TypeDefInModule: Debug + Clone;

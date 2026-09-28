@@ -26,7 +26,10 @@ use crate::{
         unique_generated_name,
     },
     parser::location::Location,
-    std::value::is_value_trait,
+    std::value::{
+        is_function_surface_only_value_trait_application, is_value_trait,
+        is_value_trait_for_function_type,
+    },
     types::{
         effects::{EffType, EffectVar, format_effect_binding_value},
         r#trait::{Trait, TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex},
@@ -206,21 +209,72 @@ pub enum DictionaryEntryEvidence {
     SelfDictionary,
 }
 
+/// Ordered hidden dictionary arguments of one callable dictionary entry.
+/// This is the entry ABI, distinct from the dictionary's shared capture schema:
+/// an argument may map to a capture or to the enclosing dictionary itself.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct DictionaryEntryRequirements(Vec<DictionaryReq>);
+
+impl DictionaryEntryRequirements {
+    /// Requirements already computed from a callable's extra parameters.
+    pub(crate) fn from_callable(requirements: Vec<DictionaryReq>) -> Self {
+        Self(requirements)
+    }
+
+    /// Erase compile-time-only evidence and deduplicate while preserving ABI order.
+    pub(crate) fn canonical<'a>(
+        requirements: &[DictionaryReq],
+        trait_def: impl Fn(TraitId) -> &'a Trait,
+    ) -> Self {
+        let mut canonical = Vec::with_capacity(requirements.len());
+        for requirement in requirements {
+            if let DictionaryReq::TraitImpl {
+                trait_id,
+                input_tys,
+                output_tys,
+                ..
+            } = requirement
+            {
+                let definition = trait_def(*trait_id);
+                if !definition.has_runtime_dictionary_entries()
+                    || is_value_trait_for_function_type(
+                        *trait_id, definition, input_tys, output_tys,
+                    )
+                    || is_function_surface_only_value_trait_application(
+                        *trait_id, definition, input_tys, output_tys,
+                    )
+                {
+                    continue;
+                }
+            }
+            if !canonical.contains(requirement) {
+                canonical.push(requirement.clone());
+            }
+        }
+        Self(canonical)
+    }
+
+    pub(crate) fn as_slice(&self) -> &[DictionaryReq] {
+        &self.0
+    }
+}
+
 /// Build one closed dictionary's canonical capture schema and per-entry mappings.
 ///
 /// A requirement for the dictionary being defined maps to `SelfDictionary`; all other evidence is
 /// deduplicated in first-use order across entries. Methods and associated-constant getters use the
 /// same planner so an executable getter is not a special dictionary representation.
-pub(crate) fn dictionary_capture_plan(
+pub(crate) fn dictionary_capture_plan<'a>(
     trait_id: TraitId,
     input_tys: &[Type],
-    entry_requirements: &[Vec<DictionaryReq>],
+    entry_requirements: impl IntoIterator<Item = &'a DictionaryEntryRequirements>,
 ) -> (Vec<DictionaryReq>, Vec<Vec<DictionaryEntryEvidence>>) {
     let mut schema = Vec::new();
     let mappings = entry_requirements
-        .iter()
+        .into_iter()
         .map(|requirements| {
             requirements
+                .as_slice()
                 .iter()
                 .map(|requirement| match requirement {
                     DictionaryReq::TraitImpl {
@@ -304,6 +358,11 @@ impl TraitDictionary {
 
     pub fn entry(&self, index: TraitDictionaryEntryIndex) -> TraitDictionaryEntry {
         TraitDictionaryEntry::Function(self.functions[index.as_index()])
+    }
+
+    pub fn entry_uses_self_dictionary(&self, index: TraitDictionaryEntryIndex) -> bool {
+        self.entry_capture_mapping(index)
+            .contains(&DictionaryEntryEvidence::SelfDictionary)
     }
 
     pub fn entry_capture_mapping(
@@ -590,10 +649,17 @@ impl TraitImpls {
         // Recover the definitions from the trait by instantiating the trait method definitions with the given types.
         let definitions = trait_def.instantiate_for_tys(&input_tys, &output_tys, &output_effs);
 
+        // Native registration has no source body inference/default-instantiation phase.
+        let functions = functions.into();
+        assert_eq!(
+            functions.len(),
+            definitions.len(),
+            "native impls must supply every trait method"
+        );
         // Combine them into module functions.
         let functions: Vec<_> = definitions
             .into_iter()
-            .zip(functions.into())
+            .zip(functions)
             .map(|(def, (function, locals))| {
                 ModuleFunction::new_without_debug_info(def, function, None, locals)
             })
@@ -833,10 +899,17 @@ impl TraitImpls {
         let definitions =
             trait_def.instantiate_for_tys(&sub_key.input_tys, &output_tys, &output_effs);
 
+        // Native registration has no source body inference/default-instantiation phase.
+        let functions = functions.into();
+        assert_eq!(
+            functions.len(),
+            definitions.len(),
+            "native impls must supply every trait method"
+        );
         // Combine them into module functions.
         let functions: Vec<_> = definitions
             .into_iter()
-            .zip(functions.into())
+            .zip(functions)
             .map(|(def, (function, locals))| {
                 ModuleFunction::new_without_debug_info(def, function, None, locals)
             })

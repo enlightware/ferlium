@@ -21,6 +21,34 @@ This is the compact form of an impl header.
 It works well for traits that conceptually operate on one main type.
 You can think of it as sugar for an explicit binding such as `impl SizedSeq for <Self = Counter> { ... }`.
 
+## Default methods
+
+A trait method can provide a body. Implementations may omit that method to use the default, or supply their own body to override it:
+
+```ferlium
+trait Measure<Self> {
+    fn measure(value: Self) -> int;
+    fn doubled(value: Self) -> int { measure(value) * 2 }
+}
+
+impl Measure for int {
+    fn measure(value: int) -> int { value }
+}
+
+doubled(21) // 42
+```
+
+Default bodies are checked once, where the trait is declared, even if there are no implementations.
+A default must work for every type and effect parameter in its signature, using the trait's own methods and its declared parent and `where` constraints.
+It cannot silently add requirements on implementations.
+Names in a default resolve in the trait's module, including private helpers.
+
+Both default bodies and written impl methods can call sibling methods.
+Such calls use the same implementation, including its overrides.
+This also works in generic impls and in impls whose types are inferred without a `for` header.
+
+Associated constants do not have defaults.
+
 ## Generic impls
 
 Impls can introduce their own generic parameters with Rust-like binder syntax:
@@ -38,6 +66,9 @@ impl<T> SizedSeq for Bag<T> {
 Here the impl says: for every `T`, `Bag<T>` is a sized sequence.
 The same binder syntax also works for more involved generic impls, including iterator-like types.
 The next sections show those richer impl headers.
+
+Currently, module functions cannot use a generic impl declared in the same module.
+The module's trailing expression and callers in other modules can use it.
 
 ## Impl-level `where` clauses
 

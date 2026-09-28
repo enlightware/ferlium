@@ -141,8 +141,10 @@ impl FormatWith<ModuleEnv<'_>> for TraitMethodArg {
 pub struct TraitMethod {
     pub name: UstrSpan,
     pub args: Vec<TraitMethodArg>,
+    pub args_span: Location,
     pub ret_ty: Option<PTypeSpan>,
     pub effects: PFnEffects,
+    pub body: Option<ExprId<Parsed>>,
     pub span: Location,
     pub doc: Option<String>,
 }
@@ -488,8 +490,21 @@ impl<P: Phase> Default for Module<P> {
     }
 }
 
+impl VisitExpr<Parsed> for TraitDefinition {
+    fn visit<V: ExprVisitor<Parsed>>(&self, visitor: &mut V, arena: &ExprArena<Parsed>) {
+        for method in &self.methods {
+            if let Some(body) = method.body {
+                arena[body].visit(visitor, arena);
+            }
+        }
+    }
+}
+
 impl<P: Phase> VisitExpr<P> for Module<P> {
     fn visit<V: ExprVisitor<P>>(&self, visitor: &mut V, arena: &ExprArena<P>) {
+        for trait_def in &self.traits {
+            trait_def.visit(visitor, arena);
+        }
         for ModuleFunction { body, .. } in self.functions.iter() {
             arena[*body].visit(visitor, arena);
         }
@@ -517,6 +532,7 @@ fn fmt_trait_method(
     f: &mut fmt::Formatter<'_>,
     env: &ModuleEnv<'_>,
     method: &TraitMethod,
+    arena: &ExprArena<Parsed>,
     doc_prefix: &str,
 ) -> fmt::Result {
     if let Some(doc) = &method.doc {
@@ -536,7 +552,12 @@ fn fmt_trait_method(
         write!(f, " ! ")?;
         format_effect_binding_value(effects, f)?;
     }
-    writeln!(f, ";")
+    if let Some(body) = method.body {
+        writeln!(f)?;
+        arena[body].format_ind(f, env, arena, 2)
+    } else {
+        writeln!(f, ";")
+    }
 }
 
 fn fmt_module_function<P: Phase>(
@@ -752,7 +773,7 @@ impl<'a> FormatWith<ModuleEnv<'_>> for ModuleDisplay<'a, Parsed> {
                 }
                 writeln!(f, " {{")?;
                 for method in &trait_def.methods {
-                    fmt_trait_method(f, env, method, "    ")?;
+                    fmt_trait_method(f, env, method, arena, "    ")?;
                 }
                 writeln!(f, "  }}")?;
             }

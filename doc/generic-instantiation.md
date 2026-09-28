@@ -130,3 +130,38 @@ bindings. Inference-only output queries populate neither cache. When final HIR a
 runtime dictionary, applications with no requested outputs can share through the
 unconstrained-application cache; materializations carrying explicit output bindings remain
 independent.
+
+## Trait defaults and enclosing-impl evidence
+
+A default method is checked and compiled once in the trait's module, even if no impl uses it.
+Its contract is its declared signature together with the enclosing trait, parent and `where`
+constraints. The body must preserve the generality of the declared types and effects and cannot
+impose additional requirements on implementations. Names resolve in the trait's module.
+
+An omitted method gets a forwarding function in its dictionary slot. The forwarder instantiates
+the checked default and supplies the implementation's own dictionary, so sibling calls use that
+implementation's overrides. Written methods use the same enclosing-impl evidence. This works for
+concrete, header-less and generic impls without requiring the impl to be globally selectable while
+its methods are checked.
+
+Self evidence is a body assumption, not an implementation prerequisite. An impl's parent and
+`where` obligations are checked independently; its own dictionary cannot justify those obligations.
+At runtime, self evidence comes from the selected dictionary itself, without a cyclic heap
+allocation. Evidence requirements belong to individual methods: using a default does not add a
+hidden parameter to unrelated leaf methods. Inference tracks which methods use which assumptions,
+conservatively retaining evidence when a generated obligation's owner is unknown.
+
+Supplied assumptions (givens) take precedence over ordinary impl lookup when their trait and input
+types match exactly. Equal trait/input applications must agree on their output types and effects;
+list order cannot choose between them. If unresolved inputs could still match a given, the solver
+defers the obligation before ordinary lookup. It must not bind independent input parameters merely
+to select evidence. Genuinely ambiguous applications still require a type annotation or a declared
+functional dependency.
+
+Recursion depends on the selected overrides, not just the default's body. Default-bearing traits
+currently use a conservative method dependency analysis alongside the static call graph, which can
+retain guards on acyclic methods. This is not a complete analysis of indirect recursion throughout
+the language; unifying the graphs is tracked in
+[#186](https://github.com/enlightware/ferlium/issues/186). Declared parameter generality is currently
+checked after inference; rigid checking for more precise diagnostics is tracked in
+[#185](https://github.com/enlightware/ferlium/issues/185).

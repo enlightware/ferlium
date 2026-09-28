@@ -318,15 +318,22 @@ SubscriptMember: SubscriptMember<crate::ast::Parsed> = {
 }
 
 TraitMethod: TraitMethod = {
-    <doc:DOC_COMMENT*> <l:@L> "fn" <name:Sp<UIdentifier>> "(" <args:TraitMethodArgs> ")" <ret:SpFnRet<"">?> <effects:FnEffectsAnnotation?> ";" <r:@R> =>
+    <doc:DOC_COMMENT*> <l:@L> "fn" <name:Sp<UIdentifier>> <al:@L> "(" <args:TraitMethodArgs> ")" <ret:SpFnRet<"">?> <effects:FnEffectsAnnotation?> <ar:@R> <body:TraitMethodBody> <r:@R> =>
         TraitMethod {
             name,
             args,
+            args_span: span(al, ar, source_id),
             ret_ty: ret,
             effects: effects.map(|(effects, _)| effects).unwrap_or(PFnEffects::ImplicitPure),
+            body,
             span: span(l, r, source_id),
             doc: parse_doc_comments(doc),
         },
+}
+
+TraitMethodBody: Option<PExprId> = {
+    ";" => None,
+    <body:Es<Block>> => Some(body),
 }
 
 TraitAssociatedConstDecl: TraitAssociatedConstDecl<crate::ast::Parsed> = {

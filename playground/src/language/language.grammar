@@ -117,7 +117,7 @@ SubscriptMember {
 }
 
 TraitMethod {
-    kw<'fn'> Identifier '(' traitMethodArgs ')' fnRet? fnEffects? ';'
+    kw<'fn'> Identifier '(' traitMethodArgs ')' fnRet? fnEffects? (';' | Block)
 }
 
 TraitAssociatedConst {

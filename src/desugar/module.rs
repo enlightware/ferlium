@@ -3,18 +3,19 @@
 
 use super::{expr::desugar, *};
 use crate::{
+    ast::FunctionAstIndex,
     compiler::error::{InvalidRecursiveTypeKind, InvalidTraitDefinitionKind},
     desugar::types::{
         RecursiveAliasRef, RecursiveTypeBuilder, desugar_type_constraints_with_next_effect_var,
         extend_generic_eff_params, extend_generic_ty_params,
     },
     hir::function::CallableDefinition,
-    module::Visibility,
+    module::{TraitId, Visibility, id::Id},
     types::{
         effects::EffectVar,
         r#trait::{
-            Trait, TraitAssociatedConst, TraitImplPolicy, TraitMethodSpans, TraitSpans,
-            TraitValidationError,
+            Trait, TraitAssociatedConst, TraitImplPolicy, TraitMethodIndex, TraitMethodSpans,
+            TraitSpans, TraitValidationError,
         },
     },
 };
@@ -892,22 +893,28 @@ enum DesugaredNamedType {
     Def((Ustr, Visibility), HirTypeDef),
 }
 
+pub(crate) type TraitDefaults = FxHashMap<FunctionAstIndex, (TraitId, TraitMethodIndex)>;
+
 impl PModule {
     /// Desugars a parsed module and resolve its types and write them into output.
     /// Returns a desugared AST, the desugared expression arena, and a list of
-    /// strongly connected components of its function dependency graph, sorted topologically.
+    /// strongly connected components of its function dependency graph, sorted topologically,
+    /// and the trait method identities of generated default functions.
     pub fn desugar(
         self,
         output: &mut Module,
         others: &Modules,
         parsed_arena: &PExprArena,
         capabilities: CompilationCapabilities,
-    ) -> Result<(DModule, DExprArena, ModuleImplementationSccs), InternalCompilationError> {
+    ) -> Result<
+        (DModule, DExprArena, ModuleImplementationSccs, TraitDefaults),
+        InternalCompilationError,
+    > {
         // Flatten uses from self and check for conflicts with local definitions.
         let local_names = self.own_symbols().collect();
         let PModule {
             traits,
-            functions,
+            mut functions,
             subscripts,
             impls,
             type_aliases,
@@ -922,10 +929,56 @@ impl PModule {
         let mut modules_used = type_graph.desugar(output, others, capabilities)?;
         let mut env = ModuleEnv::new(output, others).with_capabilities(capabilities);
 
+        let mut defaults = TraitDefaults::default();
         for trait_def in traits {
             let visibility = trait_def.visibility;
-            output
+            let generic_params = ast::GenericParams::new(
+                trait_def
+                    .input_type_names
+                    .iter()
+                    .chain(&trait_def.output_type_names)
+                    .copied()
+                    .collect(),
+                trait_def.output_effect_names.clone(),
+            );
+            let default_functions = trait_def
+                .methods
+                .iter()
+                .enumerate()
+                .filter_map(|(index, method)| {
+                    let body = method.body?;
+                    let name = ustr(&format!("@{}::{}#default", trait_def.name.0, method.name.0));
+                    let function = PModuleFunction::new(
+                        visibility,
+                        (name, method.name.1),
+                        generic_params.clone(),
+                        method
+                            .args
+                            .iter()
+                            .map(|arg| PModuleFunctionArg {
+                                name: arg.name,
+                                ty: Some((arg.ty.mut_ty, arg.ty.ty.0.clone(), arg.ty.span)),
+                                mut_binding: false,
+                            })
+                            .collect(),
+                        method.args_span,
+                        method.ret_ty.clone(),
+                        vec![],
+                        vec![],
+                        body,
+                        method.span,
+                        method.doc.clone(),
+                    );
+                    Some((TraitMethodIndex::from_index(index), function))
+                })
+                .collect::<Vec<_>>();
+            let id = output
                 .add_trait_with_visibility(trait_def.desugar(&env, &mut modules_used)?, visibility);
+            let trait_id = TraitId::new(output.module_id(), id);
+            for (index, function) in default_functions {
+                defaults.insert(FunctionAstIndex::new(functions.len()), (trait_id, index));
+                functions.push(function);
+            }
             env = ModuleEnv::new(output, others).with_capabilities(capabilities);
         }
 
@@ -997,7 +1050,7 @@ impl PModule {
             type_defs: vec![],
             uses,
         };
-        Ok((module, desugared_arena, sorted_sccs))
+        Ok((module, desugared_arena, sorted_sccs, defaults))
     }
 }
 
@@ -1190,6 +1243,7 @@ impl ast::TraitDefinition {
             output_effect_names,
             parent_constraints,
             constraints,
+            default_methods: vec![None; methods.len()],
             methods,
             associated_consts,
             derivers: vec![],
