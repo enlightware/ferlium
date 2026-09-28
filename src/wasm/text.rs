@@ -319,8 +319,7 @@ mod tests {
                 text.text
             );
         }
-        // None of the source functions contains a loop needing fuel.
-        for unused in ["fuel", "fuel_enabled"] {
+        for unused in ["call_depth", "call_depth_limit", "fuel", "fuel_enabled"] {
             assert!(!text.text.contains(&format!("(global ${unused}")));
         }
         assert!(!text.source_map.is_empty());
