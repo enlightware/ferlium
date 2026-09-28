@@ -425,15 +425,7 @@ mod tests {
         let restored = snapshot.materialize(&types).unwrap();
         assert_eq!(restored.default_methods, expected.default_methods);
         assert!(restored.default_methods[0].is_none());
-        assert_eq!(
-            restored.default_methods[1]
-                .as_ref()
-                .unwrap()
-                .method_calls
-                .len(),
-            // Multiplication uses other trait evidence, which may call back.
-            2
-        );
+        assert!(restored.default_methods[1].is_some());
     }
 
     #[test]

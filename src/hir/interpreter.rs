@@ -3558,6 +3558,7 @@ mod tests {
         let accessor_function = ModuleFunction::new_elaborated(
             function_definition(accessor_fn_ty.clone(), ["log"]),
             b(ScriptFunction {
+                recursive: false,
                 entry_node_id: accessor_entry,
                 yield_node_id: Some(yield_scratch),
                 runtime_arg_count: 1,
@@ -3712,6 +3713,7 @@ mod tests {
         let accessor_function = ModuleFunction::new_elaborated(
             function_definition(accessor_fn_ty, ["log"]),
             b(ScriptFunction {
+                recursive: false,
                 entry_node_id: accessor_entry,
                 yield_node_id: Some(yield_scratch),
                 runtime_arg_count: 1,
@@ -3838,6 +3840,7 @@ mod tests {
         let accessor_function = ModuleFunction::new_elaborated(
             function_definition(accessor_fn_ty, []),
             b(ScriptFunction {
+                recursive: false,
                 entry_node_id: accessor_entry,
                 yield_node_id: Some(yield_scratch),
                 runtime_arg_count: 0,

@@ -649,21 +649,18 @@ impl TraitImpls {
         // Recover the definitions from the trait by instantiating the trait method definitions with the given types.
         let definitions = trait_def.instantiate_for_tys(&input_tys, &output_tys, &output_effs);
 
-        // Native registration has no source body inference/default-instantiation phase.
-        let functions = functions.into();
-        assert_eq!(
-            functions.len(),
-            definitions.len(),
-            "native impls must supply every trait method"
+        let functions = complete_native_methods(
+            trait_id,
+            trait_def,
+            &input_tys,
+            &output_tys,
+            &output_effs,
+            definitions,
+            functions.into(),
+            &[],
+            &[],
+            hir_arena,
         );
-        // Combine them into module functions.
-        let functions: Vec<_> = definitions
-            .into_iter()
-            .zip(functions)
-            .map(|(def, (function, locals))| {
-                ModuleFunction::new_without_debug_info(def, function, None, locals)
-            })
-            .collect();
 
         // Add the impl, collecting new functions.
         self.add_concrete(
@@ -724,6 +721,10 @@ impl TraitImpls {
                 )
                 .into()
         };
+        let self_entries = functions.iter().map(|function| function.evidence_bindings.iter().any(|binding| {
+            matches!(&binding.requirement, DictionaryReq::TraitImpl { trait_id: id, input_tys: inputs, .. }
+                if *id == trait_id && inputs == &input_tys)
+        })).collect::<Vec<_>>();
         let (methods, method_tys) = Self::bundle_module_functions(functions, fn_collector, namer);
 
         // Build and insert the implementation.
@@ -754,7 +755,8 @@ impl TraitImpls {
             },
         );
         let dictionary_type = Self::dictionary_ty(method_tys, associated_const_tys);
-        let dictionary_value = build_dictionary_value(&methods, &associated_const_getters);
+        let dictionary_value =
+            dictionary_with_default_entries(&methods, &associated_const_getters, &self_entries);
         let imp = TraitImpl::new(
             trait_id,
             output_tys,
@@ -883,6 +885,7 @@ impl TraitImpls {
         trait_id: TraitId,
         trait_def: &Trait,
         sub_key: BlanketTraitImplSubKey,
+        default_prerequisites: &[DictionaryReq],
         output_tys: impl Into<Vec<Type>>,
         output_effs: impl Into<Vec<EffType>>,
         associated_const_values: impl Into<Vec<LiteralValue>>,
@@ -899,21 +902,18 @@ impl TraitImpls {
         let definitions =
             trait_def.instantiate_for_tys(&sub_key.input_tys, &output_tys, &output_effs);
 
-        // Native registration has no source body inference/default-instantiation phase.
-        let functions = functions.into();
-        assert_eq!(
-            functions.len(),
-            definitions.len(),
-            "native impls must supply every trait method"
+        let functions = complete_native_methods(
+            trait_id,
+            trait_def,
+            &sub_key.input_tys,
+            &output_tys,
+            &output_effs,
+            definitions,
+            functions.into(),
+            &sub_key.constraints,
+            default_prerequisites,
+            hir_arena,
         );
-        // Combine them into module functions.
-        let functions: Vec<_> = definitions
-            .into_iter()
-            .zip(functions)
-            .map(|(def, (function, locals))| {
-                ModuleFunction::new_without_debug_info(def, function, None, locals)
-            })
-            .collect();
 
         // Add the impl, collecting new functions.
         self.add_blanket(
@@ -982,6 +982,10 @@ impl TraitImpls {
                 )
                 .into()
         };
+        let self_entries = functions.iter().map(|function| function.evidence_bindings.iter().any(|binding| {
+            matches!(&binding.requirement, DictionaryReq::TraitImpl { trait_id: id, input_tys: inputs, .. }
+                if *id == trait_id && inputs == &sub_key.input_tys)
+        })).collect::<Vec<_>>();
         let (methods, method_tys) = Self::bundle_module_functions(functions, fn_collector, namer);
 
         // Build and insert the implementation.
@@ -1012,7 +1016,8 @@ impl TraitImpls {
             },
         );
         let dictionary_type = Self::dictionary_ty(method_tys, associated_const_tys);
-        let dictionary_value = build_dictionary_value(&methods, &associated_const_getters);
+        let dictionary_value =
+            dictionary_with_default_entries(&methods, &associated_const_getters, &self_entries);
         let imp = TraitImpl::new(
             trait_id,
             output_tys,
@@ -1497,4 +1502,73 @@ fn format_impl_fn(
         function.fmt_code_ind(f, env, 2, 1)?;
     }
     Ok(())
+}
+
+/// Positional native registrations may omit trailing defaulted methods.
+#[allow(clippy::too_many_arguments)]
+fn complete_native_methods(
+    trait_id: TraitId,
+    trait_def: &Trait,
+    input_tys: &[Type],
+    output_tys: &[Type],
+    output_effs: &[EffType],
+    definitions: Vec<CallableDefinition>,
+    functions: Vec<(Function, Vec<LocalDecl>)>,
+    prerequisites: &[PubTypeConstraint],
+    runtime_prerequisites: &[DictionaryReq],
+    arena: &mut ENodeArena,
+) -> Vec<ModuleFunction> {
+    assert!(
+        functions.len() <= definitions.len(),
+        "too many native impl methods"
+    );
+    let mut supplied = functions.into_iter();
+    definitions
+        .into_iter()
+        .enumerate()
+        .map(|(index, mut definition)| {
+            if let Some((function, locals)) = supplied.next() {
+                return ModuleFunction::new_without_debug_info(definition, function, None, locals);
+            }
+            let default = trait_def.default_methods[index]
+                .as_ref()
+                .expect("missing required native impl method");
+            // Native defaults currently use their enclosing trait evidence. Source defaults with
+            // additional contracts need a registration path that resolves those contracts too.
+            assert!(trait_def.parent_constraints.is_empty() && trait_def.constraints.is_empty());
+            definition.ty_scheme.constraints = prerequisites.to_vec();
+            crate::hir::trait_defaults::native_default_call(
+                default.function,
+                definition,
+                DictionaryReq::new_trait_impl(
+                    trait_id,
+                    input_tys.to_vec(),
+                    output_tys.to_vec(),
+                    output_effs.to_vec(),
+                ),
+                runtime_prerequisites.to_vec(),
+                trait_def.get_dictionary_type_for_tys(input_tys, output_tys, output_effs),
+                arena,
+            )
+        })
+        .collect()
+}
+
+pub(crate) fn dictionary_with_default_entries(
+    methods: &[LocalFunctionId],
+    getters: &[LocalFunctionId],
+    self_entries: &[bool],
+) -> TraitDictionary {
+    let mappings = self_entries
+        .iter()
+        .map(|uses_self| {
+            if *uses_self {
+                vec![DictionaryEntryEvidence::SelfDictionary]
+            } else {
+                vec![]
+            }
+        })
+        .chain(getters.iter().map(|_| vec![]))
+        .collect();
+    build_capturing_dictionary_value(methods, getters, vec![], mappings)
 }

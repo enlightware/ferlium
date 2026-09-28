@@ -107,17 +107,11 @@ impl TraitAssociatedConst {
     }
 }
 
-/// A checked default body and a conservative summary for impl recursion analysis.
+/// A default body checked once in its defining module.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraitDefaultMethod {
     pub function: FunctionId,
-    /// Trait slots this body may call, directly or through a callback. These are
-    /// method indices rather than function IDs: each impl can override the target.
-    /// Emission combines this summary with the impl's written methods to guard
-    /// recursive components. Unknown callbacks conservatively include every slot;
-    /// this summary does not determine the default's dictionary parameters.
-    pub method_calls: Vec<TraitMethodIndex>,
 }
 
 /// A trait, equivalent to a multi-parameter type class in Haskell, with output types.

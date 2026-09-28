@@ -21,11 +21,6 @@ impl Ord {
     fn cmp(left: string, right: string) -> Ordering { ordering_from_code(compare_string_code(left, right)) }
 }
 
-/// Returns `true` if `left` is NOT equal to `right`, otherwise `false`.
-pub fn ne(left, right) {
-	not eq(left, right)
-}
-
 /// Returns the minimum of two values.
 pub fn min(left, right) {
 	match cmp(left, right) {

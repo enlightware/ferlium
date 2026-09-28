@@ -6,10 +6,7 @@ use itertools::Itertools;
 use log::log_enabled;
 use ustr::Ustr;
 
-use super::{
-    emit_subscripts::attach_subscript_member,
-    trait_method_calls::{CallbackFreeFunctions, collect_method_calls, guard_recursive_methods},
-};
+use super::emit_subscripts::attach_subscript_member;
 use crate::{
     FxHashMap, FxHashSet, Location, Modules,
     ast::{self, DExprArena, DModuleFunctionArg},
@@ -23,7 +20,6 @@ use crate::{
         },
         lints::report_needless_returns_in_tail,
     },
-    containers::{SVec2, b},
     format::FormatWith,
     hir::{
         self, NodeArena,
@@ -335,38 +331,6 @@ fn yield_path_is_block_structured(
             .any(|child| yield_path_is_block_structured(arena, *child, yield_node_id)),
         _ => false,
     }
-}
-
-fn wrap_body_with_call_depth_check_if_recursive(
-    ty_inf: &mut TypeInference,
-    arena: &mut NodeArena,
-    body_id: hir::NodeId,
-    recursive_function_ids: &FxHashSet<FunctionId>,
-    return_ty: Type,
-    check_span: Location,
-    block_span: Location,
-) -> hir::NodeId {
-    if !node_references_any_function(arena, body_id, recursive_function_ids) {
-        return body_id;
-    }
-
-    let check_id = arena.alloc(hir::Node::new(
-        hir::NodeKind::CheckCallDepth,
-        Type::unit(),
-        EffType::empty(),
-        check_span,
-    ));
-    let body_effects = arena[body_id].effects.clone();
-    let effects = ty_inf.make_dependent_effect([&arena[check_id].effects, &body_effects]);
-    arena.alloc(hir::Node::new(
-        hir::NodeKind::Block(b(hir::Block {
-            body: b(SVec2::from_vec(vec![check_id, body_id])),
-            cleanup: Vec::new(),
-        })),
-        return_ty,
-        effects,
-        block_span,
-    ))
 }
 
 fn map_annotation_type(ty_inf: &mut TypeInference, ty: Type, annotation_subst: &InstSubst) -> Type {
@@ -1051,7 +1015,6 @@ where
             output.traits[trait_id.index.as_index()].default_methods[index.as_index()] =
                 Some(TraitDefaultMethod {
                     function: FunctionId::new(output.module_id(), id),
-                    method_calls: Vec::new(),
                 });
             output.name_function_with_visibility(id, name.0, *visibility);
         }
@@ -1147,7 +1110,7 @@ where
                 kind.requires_mutable_yield(),
             ));
         }
-        let mut fn_node_id = if let Some(default_id) = input.forward_default {
+        let fn_node_id = if let Some(default_id) = input.forward_default {
             let default = &module_env
                 .module_by_id(default_id.module)
                 .unwrap()
@@ -1251,15 +1214,6 @@ where
                 span: fn_arena[yield_node_id].span,
             }));
         }
-        fn_node_id = wrap_body_with_call_depth_check_if_recursive(
-            &mut ty_inf,
-            &mut fn_arena,
-            fn_node_id,
-            &recursive_function_ids,
-            descr.definition.ty_scheme.ty.ret,
-            function.name.1,
-            expected_span,
-        );
         lambda_functions.drain(..).for_each(|function| {
             let lambda_id =
                 add_pending_function_anonymous(output, &mut pending_functions, function);
@@ -1676,44 +1630,6 @@ where
                 .into();
             output.name_function(*id, name);
         }
-
-        // Recursion is a property of the selected method set: a default may call
-        // an override that calls it back. Guard those cycles before elaboration.
-        let mut callback_free = CallbackFreeFunctions::default();
-        let method_calls = ast_functions()
-            .zip(&local_fns)
-            .enumerate()
-            .map(|(index, (input, id))| {
-                if input.forward_default.is_some() {
-                    trait_def.default_methods[index]
-                        .as_ref()
-                        .unwrap()
-                        .method_calls
-                        .clone()
-                } else {
-                    let mut calls = FxHashSet::default();
-                    for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
-                        let pending = &pending_functions[&function_id];
-                        collect_method_calls(
-                            &pending.code.arena,
-                            pending.code.entry_node_id,
-                            trait_id,
-                            &trait_output.input_tys,
-                            trait_def.methods.len(),
-                            trait_def.default_methods.iter().any(Option::is_some),
-                            &mut calls,
-                            &mut callback_free,
-                            ModuleEnv::new(output, others),
-                        );
-                    }
-                    calls
-                        .into_iter()
-                        .sorted_by_key(|index| index.as_index())
-                        .collect()
-                }
-            })
-            .collect::<Vec<_>>();
-        guard_recursive_methods(&method_calls, &local_fns, &mut pending_functions);
 
         // Sixth pass, run the borrow checker and elaborate into the final HIR arena.
         let method_dicts = local_fns
@@ -2133,37 +2049,6 @@ where
                     projection_key.is_some(),
                     &definition,
                 );
-            }
-        }
-
-        let mut callback_free = CallbackFreeFunctions::default();
-        for (input, id) in ast_functions().zip(&local_fns) {
-            if let Some((trait_id, index)) = input.trait_default {
-                let input_tys = (0..output.trait_def(trait_id).input_type_count())
-                    .map(Type::variable_id)
-                    .collect::<Vec<_>>();
-                let mut calls = FxHashSet::default();
-                for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
-                    let pending = &pending_functions[&function_id];
-                    collect_method_calls(
-                        &pending.code.arena,
-                        pending.code.entry_node_id,
-                        trait_id,
-                        &input_tys,
-                        output.trait_def(trait_id).methods.len(),
-                        true,
-                        &mut calls,
-                        &mut callback_free,
-                        ModuleEnv::new(output, others),
-                    );
-                }
-                output.traits[trait_id.index.as_index()].default_methods[index.as_index()]
-                    .as_mut()
-                    .unwrap()
-                    .method_calls = calls
-                    .into_iter()
-                    .sorted_by_key(|index| index.as_index())
-                    .collect();
             }
         }
 

@@ -548,6 +548,9 @@ impl Callable for VoidFunction {
 /// A function holding user-defined code.
 #[derive(Debug, Clone, new)]
 pub struct ScriptFunction {
+    /// Membership in a known call-graph cycle, independently of conservative guards.
+    #[new(default)]
+    pub recursive: bool,
     /// Entry node for normal function execution.
     pub entry_node_id: ENodeId,
     /// Suspension node for yielded-once functions, if the body yields a place.

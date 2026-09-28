@@ -3768,3 +3768,53 @@ fn custom_variant_drop_requires_a_completed_payload() {
         }
     }
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn value_ne_default_covers_native_and_derived_values() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+        fn different<T>(left: T, right: T) -> bool where T: Value { left != right }
+        enum List { Nil, Cons(int, List) }
+        struct Boxed<T>(T)
+        let f = |x| x + 1;
+        different(1, 2) and not different(2, 2)
+            and different("a", "b") and not different("same", "same")
+            and different([1, 2], [1, 3]) and not different([1], [1])
+            and different(Boxed((1, "a")), Boxed((2, "a")))
+            and not different(Boxed((1, "a")), Boxed((1, "a")))
+            and different(List::Cons(1, List::Nil), List::Cons(2, List::Nil))
+            and not different(List::Cons(1, List::Nil), List::Cons(1, List::Nil))
+            and different(f, f) and std::Value::ne(1.0, 2.0)
+    "#
+        ),
+        bool_value(true)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn value_ne_default_uses_custom_eq_and_override_takes_precedence() {
+    for override_ne in ["", "fn ne(left: Probe, right: Probe) -> bool { false }"] {
+        let mut session = TestSession::new();
+        session.allow_unsafe();
+        let source = format!(
+            r#"
+            struct Probe(int)
+            impl Value for Probe {{
+                fn eq(left: Probe, right: Probe) -> bool {{ abs(left.0) == abs(right.0) }}
+                fn to_string(value: Probe) -> string {{ to_string(value.0) }}
+                fn hash(value: Probe, state: &mut hasher) {{ hash(abs(value.0), state) }}
+                fn clone(source: Probe) -> Probe {{ Probe(source.0) }}
+                fn drop(target: &mut Probe) {{}}
+                {override_ne}
+            }}
+            fn different<T>(left: T, right: T) -> bool where T: Value {{ left != right }}
+            not different(Probe(1), Probe(-1)) and different(Probe(1), Probe(2))
+        "#
+        );
+        assert_val_eq!(session.run(&source), bool_value(override_ne.is_empty()));
+    }
+}

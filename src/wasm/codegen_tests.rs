@@ -1370,6 +1370,82 @@ fn wasm_codegen_materializes_escaping_comparison_codes() {
 }
 
 #[wasm_bindgen_test]
+fn wasm_codegen_value_ne_defaults_and_overrides() {
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        for override_ne in ["", "fn ne(a: Probe, b: Probe) -> bool { false }"] {
+            let mut session = CompilerSession::new();
+            session.set_allow_unsafe(true);
+            session.set_mir_optimization(optimization);
+            session.set_physical_mir_optimization(optimization);
+            let entry = compile(
+                &mut session,
+                &format!(
+                    r#"
+                struct Derived(int)
+                struct Probe(int)
+                impl Value for Probe {{
+                    fn eq(a: Probe, b: Probe) -> bool {{ a.0 == b.0 }}
+                    fn to_string(p: Probe) -> string {{ "Probe" }}
+                    fn hash(p: Probe, h: &mut hasher) {{ hash(p.0, h) }}
+                    fn clone(p: Probe) -> Probe {{ Probe(p.0) }}
+                    fn drop(p: &mut Probe) {{}}
+                    {override_ne}
+                }}
+                fn different<T>(a: T, b: T) -> bool where T: Value {{ a != b }}
+                fn compute(x: int) -> bool {{
+                    different(x, 7) and different(Derived(x), Derived(7))
+                        and different([x], [7]) and different(Probe(x), Probe(7))
+                }}
+            "#
+                ),
+            );
+            let code = CompiledProgram::compile(&session, entry).unwrap();
+            let mut instance = code.instantiate::<(isize,), bool>().unwrap();
+            assert!(!instance.run((7,), WasmLimits::default()).unwrap());
+            assert_eq!(
+                instance.run((8,), WasmLimits::default()).unwrap(),
+                override_ne.is_empty()
+            );
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_trait_callbacks_obey_call_depth_limits() {
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        for default in ["", "fn other(x: Self) -> int { 0 }"] {
+            let mut session = CompilerSession::new();
+            session.set_mir_optimization(optimization);
+            session.set_physical_mir_optimization(optimization);
+            let entry = compile(
+                &mut session,
+                &format!(
+                    r#"
+                trait Loop<Self> {{ fn cycle(x: Self) -> int; {default} }}
+                fn callback(x: int) -> int {{ cycle(x) }}
+                fn bridge(f: (int) -> int, x: int) -> int {{ f(x) }}
+                impl Loop for int {{ fn cycle(x: int) -> int {{ bridge(callback, x) }} }}
+                fn compute(x: int) -> int {{ cycle(x) }}
+            "#
+                ),
+            );
+            let code = CompiledProgram::compile(&session, entry).unwrap();
+            let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+            let limits = WasmLimits {
+                execution: WasmLimits::default().execution.with_call_depth_limit(8),
+                ..WasmLimits::default()
+            };
+            assert!(matches!(
+                instance.run((1,), limits).unwrap_err().kind(),
+                RuntimeErrorKind::SandboxViolation(
+                    SandboxViolationKind::CallDepthLimitExceeded { .. }
+                )
+            ));
+        }
+    }
+}
+
+#[wasm_bindgen_test]
 fn wasm_codegen_limits_and_rejection() {
     let mut session = CompilerSession::new();
     let entry = compile(

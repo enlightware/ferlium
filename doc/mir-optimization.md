@@ -465,12 +465,13 @@ the body is bracketed with `stack_save`/`stack_restore` since the callee's `allo
 caller's frame.
 
 Refused when: the callee is not statically known, has no body, uses an unsupported result convention,
-is **generic** — meaning any parameter type is not constant — is recursive (its `check_call_depth` is
-the local evidence), carries `#[inline(never)]`, contains a scoped accessor, or is over budget. Also
+is **generic** — meaning any parameter type is not constant — belongs to a known call-graph cycle,
+carries `#[inline(never)]`, contains a scoped accessor, or is over budget. Also
 when the call site is on a cleanup path and the callee has error flow of its own, since copying it
 there would shift its failure states by one level, and when it is on a failure path. The
 annotation remains on the source HIR definition; the inliner resolves a MIR callee identity back to that definition, and specializations
-inherit the policy of their original function.
+inherit the policy of their original function. Conservative call-depth checks on unresolved calls
+do not prevent inlining; they are preserved unless the resulting body cannot call script code.
 
 **Cost is what the backend emits.** Frame bookkeeping (static slots, stack marks, static field
 offsets) lowers to no instruction, so it is free. A failure path — code that can only end in a call

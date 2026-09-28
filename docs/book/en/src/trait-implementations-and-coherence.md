@@ -51,6 +51,10 @@ For example, `Ord` provides `lt`, `le`, `gt` and `ge` with defaults based on `cm
 The operators `<`, `<=`, `>` and `>=` call those methods, including any overrides.
 An override should agree with `cmp`; the compiler does not check that agreement.
 
+`Value` provides `ne` with the default `not eq(left, right)`. The `!=` operator calls
+this method, including any override. Native and automatically derived implementations inherit
+the default too. An override should remain the complement of `eq`; the compiler does not check this law.
+
 Associated constants do not have defaults.
 
 ## Generic impls

@@ -65,6 +65,7 @@ pub(crate) const VALUE_TO_STRING_METHOD_INDEX: TraitMethodIndex = TraitMethodInd
 pub(crate) const VALUE_HASH_METHOD_INDEX: TraitMethodIndex = TraitMethodIndex::new(2);
 pub(crate) const VALUE_CLONE_METHOD_INDEX: TraitMethodIndex = TraitMethodIndex::new(3);
 pub(crate) const VALUE_DROP_METHOD_INDEX: TraitMethodIndex = TraitMethodIndex::new(4);
+pub(crate) const VALUE_NE_METHOD_INDEX: TraitMethodIndex = TraitMethodIndex::new(5);
 pub(crate) const VALUE_SIZE_ASSOC_CONST_INDEX: TraitAssociatedConstIndex =
     TraitAssociatedConstIndex::new(0);
 pub(crate) const VALUE_ALIGN_ASSOC_CONST_INDEX: TraitAssociatedConstIndex =
@@ -1596,12 +1597,13 @@ pub(crate) fn generated_value_layout_getter(
     ))
 }
 
-const FUNCTION_VALUE_METHOD_NAMES: [&str; 5] = [
+const FUNCTION_VALUE_METHOD_NAMES: [&str; 6] = [
     "$_ferlium_function_value_eq",
     "$_ferlium_function_value_to_string",
     "$_ferlium_function_value_hash",
     "$_ferlium_function_value_clone",
     "$_ferlium_function_value_drop",
+    "$_ferlium_function_value_ne",
 ];
 
 pub(crate) fn function_value_method_name(method_index: TraitMethodIndex) -> ustr::Ustr {
@@ -1759,7 +1761,7 @@ pub(crate) fn function_value_method_function(
     let ty = Type::variable_id(0);
     let unit_ty = Type::unit();
     let (definition, root, locals) = match method_index {
-        VALUE_EQ_METHOD_INDEX => {
+        VALUE_EQ_METHOD_INDEX | VALUE_NE_METHOD_INDEX => {
             let fn_ty = FnType::new_by_val([ty, ty], bool_type(), EffType::empty());
             let definition = Def::new_infer_quantifiers(
                 fn_ty,
@@ -1767,7 +1769,12 @@ pub(crate) fn function_value_method_function(
                 "Compiler-generated function Value equality.",
             );
             let locals = vec![local("left", ty), local("right", ty)];
-            let root = alloc_synth_node(&mut arena, native(false), bool_type());
+            // Function equality is always false, so its default inequality specializes to true.
+            let root = alloc_synth_node(
+                &mut arena,
+                native(method_index == VALUE_NE_METHOD_INDEX),
+                bool_type(),
+            );
             (definition, root, locals)
         }
         VALUE_TO_STRING_METHOD_INDEX => {
@@ -3320,7 +3327,7 @@ pub fn value_trait() -> Trait {
             (
                 "eq",
                 Def::new_infer_quantifiers(
-                    binary_fn_ty,
+                    binary_fn_ty.clone(),
                     ["left", "right"],
                     "Returns whether `left` equals `right`.",
                 ),
@@ -3355,6 +3362,14 @@ pub fn value_trait() -> Trait {
                     drop_ty,
                     ["target"],
                     "Compiler-owned method that ends `target`'s ownership in place without an observable language-level effect.",
+                ),
+            ),
+            (
+                "ne",
+                Def::new_infer_quantifiers(
+                    binary_fn_ty,
+                    ["left", "right"],
+                    "Returns whether `left` differs from `right`. Defaults to `not eq(left, right)`.",
                 ),
             ),
         ],
@@ -3393,6 +3408,7 @@ pub fn add_to_module(to: &mut Module) {
     let value_trait_id = to.add_trait(value_trait());
     let value_trait_id = TraitId::new(to.module_id(), value_trait_id);
     debug_assert_eq!(to.trait_def(value_trait_id).name, VALUE_TRAIT_NAME);
+    crate::hir::trait_defaults::register_value_ne(to, value_trait_id);
     let inspect_trait_id = to.add_trait(inspect_trait());
     let inspect_trait_id = TraitId::new(to.module_id(), inspect_trait_id);
     debug_assert_eq!(to.trait_def(inspect_trait_id).name, INSPECT_TRAIT_NAME);

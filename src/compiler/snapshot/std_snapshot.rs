@@ -294,6 +294,17 @@ mod tests {
             .zip(expected.functions.iter())
             .enumerate()
         {
+            let script_state = |function: &crate::module::ModuleFunction| {
+                function
+                    .code
+                    .as_script()
+                    .map(|script| (script.entry_node_id, script.yield_node_id, script.recursive))
+            };
+            assert_eq!(
+                script_state(restored),
+                script_state(expected),
+                "function {index} loses its executable entry or recursion classification on restore"
+            );
             assert_eq!(
                 format!("{:?}", restored.definition),
                 format!("{:?}", expected.definition),

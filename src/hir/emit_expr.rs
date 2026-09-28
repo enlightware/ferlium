@@ -520,6 +520,7 @@ pub(crate) fn emit_expr_entry_with_capabilities(
     capabilities: CompilationCapabilities,
     warnings: &mut Vec<CompilationWarning>,
 ) -> Result<LocalFunctionId, InternalCompilationError> {
+    let first_function = module.function_count();
     let pending = emit_expr_with_options(
         source,
         parsed_arena,
@@ -532,7 +533,9 @@ pub(crate) fn emit_expr_entry_with_capabilities(
         },
         warnings,
     )?;
-    Ok(pending.into_entry_with_runtime_args(module, 0))
+    let entry = pending.into_entry_with_runtime_args(module, 0);
+    super::recursion::guard_functions_from(module, others, first_function);
+    Ok(entry)
 }
 
 /// Emit an expression with privileged access to one foreign module's private trait impls.
@@ -547,6 +550,7 @@ pub(crate) fn emit_expr_entry_with_private_impls(
 ) -> Result<LocalFunctionId, InternalCompilationError> {
     let runtime_arg_count = locals.len();
     let mut warnings = Vec::new();
+    let first_function = module.function_count();
     let pending = emit_expr_with_options(
         source,
         parsed_arena,
@@ -559,7 +563,9 @@ pub(crate) fn emit_expr_entry_with_private_impls(
         },
         &mut warnings,
     )?;
-    Ok(pending.into_entry_with_runtime_args(module, runtime_arg_count))
+    let entry = pending.into_entry_with_runtime_args(module, runtime_arg_count);
+    super::recursion::guard_functions_from(module, others, first_function);
+    Ok(entry)
 }
 
 fn emit_expr_with_options(

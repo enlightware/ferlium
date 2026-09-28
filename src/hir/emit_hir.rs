@@ -942,7 +942,10 @@ pub(crate) fn emit_module_with_capabilities(
         capabilities,
         warnings,
     ) {
-        Ok(()) => Ok(output),
+        Ok(()) => {
+            super::recursion::guard_module(&mut output, others);
+            Ok(output)
+        }
         Err(error) => Err(Box::new(ModuleEmissionError {
             error,
             module: output,

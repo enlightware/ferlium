@@ -687,6 +687,7 @@ impl PendingModuleFunction {
         let mut function = ModuleFunction::new_elaborated(
             self.definition,
             b(ScriptFunction {
+                recursive: false,
                 entry_node_id: elaborated.root,
                 yield_node_id: self.code.yield_node_id.map(|node| elaborated.remap[&node]),
                 runtime_arg_count: self.code.runtime_arg_count,

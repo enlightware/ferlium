@@ -295,19 +295,24 @@ fn final_effect_rows_share_one_concrete_and_one_generic_iterator_artifact_family
         .iter()
         .filter(|line| !line.contains("int ! ()>"))
         .collect::<Vec<_>>();
+    let value_entry_count = CompilerSession::new()
+        .std_module()
+        .get_trait_str("Value")
+        .unwrap()
+        .runtime_dictionary_entry_count();
     assert_eq!(
         concrete_value.len(),
-        7,
+        value_entry_count,
         "expected one closed Value family:\n{value:#?}"
     );
     assert_eq!(
         generic_value.len(),
-        7,
+        value_entry_count,
         "expected one canonical generic Value helper family:\n{value:#?}"
     );
     assert_eq!(
         value.len(),
-        14,
+        2 * value_entry_count,
         "unexpected additional Value family:\n{value:#?}"
     );
     assert_eq!(

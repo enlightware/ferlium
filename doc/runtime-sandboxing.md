@@ -59,7 +59,10 @@ Every directed CFG cycle in untrusted MIR must cross a fuel check. Equivalently,
 fuel checks must leave an acyclic graph. This is stronger than requiring one check in every
 syntactically recognized natural loop: it also covers irreducible cycles and cycles created or
 reshaped by optimization. Passes may move or duplicate checks only while preserving this invariant.
-Recursive execution is bounded separately by call-depth checks.
+Recursive execution is bounded separately by call-depth checks. Recursion analysis covers static
+calls, trait dispatch and implicit ownership calls. Unresolved callbacks are guarded conservatively,
+regardless of whether a trait declares defaults. Inlining must preserve these checks unless it proves
+that the resulting body cannot call script code.
 
 A detected violation must be reported as a sandbox violation, poison only the affected execution
 domain, preserve memory safety and isolation, and use bounded host-controlled reclamation and

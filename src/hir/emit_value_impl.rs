@@ -92,7 +92,7 @@ pub(crate) fn generic_value_methods_for_type(
         .into_iter()
         .map(|ty| PubTypeConstraint::new_have_trait(trait_id, vec![ty], vec![], vec![], span))
         .collect::<Vec<_>>();
-    let Some(code_entries) =
+    let Some(mut code_entries) =
         derive_generic_value_code_entries(trait_id, input_tys, span, arena, solver)?
     else {
         return Err(internal_compilation_error!(TraitImplNotFound {
@@ -132,6 +132,17 @@ pub(crate) fn generic_value_methods_for_type(
             .collect::<Vec<_>>();
         (definitions, method_names)
     };
+    let supplied_count = crate::hir::trait_defaults::complete_pending_methods(
+        solver.trait_def(trait_id),
+        &definitions,
+        crate::hir::dictionary::DictionaryReq::new_trait_impl(
+            trait_id,
+            input_tys.to_vec(),
+            vec![],
+            vec![],
+        ),
+        &mut code_entries,
+    );
     let mut methods = Vec::with_capacity(code_entries.len());
     for (method_index, (mut definition, (body, locals))) in
         definitions.into_iter().zip(code_entries).enumerate()
@@ -146,9 +157,19 @@ pub(crate) fn generic_value_methods_for_type(
             continue;
         }
 
+        let mut method_constraints = constraints.clone();
+        if method_index >= supplied_count {
+            method_constraints.push(PubTypeConstraint::new_have_trait(
+                trait_id,
+                input_tys.to_vec(),
+                vec![],
+                vec![],
+                span,
+            ));
+        }
         definition.ty_scheme = TypeScheme::new_infer_quantifiers_with_constraints(
             definition.ty_scheme.ty.clone(),
-            constraints.clone(),
+            method_constraints,
         );
         let runtime_arg_count = definition.arg_names.len();
         let function =
@@ -378,7 +399,7 @@ pub(super) fn emit_auto_value_impls(
             type_def_span,
         )?;
 
-        let Some(code_entries) = ({
+        let Some(mut code_entries) = ({
             let mut solver = trait_solver_from_module!(output, others);
             let code_entries = derive_generic_value_code_entries(
                 value_trait_id,
@@ -422,7 +443,17 @@ pub(super) fn emit_auto_value_impls(
                 .collect::<Vec<_>>();
             (definitions, method_names)
         };
-        let dicts = extra_parameters_from_constraints(&constraints, ModuleEnv::new(output, others));
+        let supplied_count = crate::hir::trait_defaults::complete_pending_methods(
+            ModuleEnv::new(output, others).trait_def(value_trait_id),
+            &definitions,
+            crate::hir::dictionary::DictionaryReq::new_trait_impl(
+                value_trait_id,
+                vec![input_ty],
+                vec![],
+                vec![],
+            ),
+            &mut code_entries,
+        );
         let mut function_ids = Vec::with_capacity(code_entries.len());
 
         for (method_index, (definition, (body, locals))) in
@@ -435,6 +466,23 @@ pub(super) fn emit_auto_value_impls(
             // `eff_var_count`: effects occurring only in constraints do not belong to either.
             definition.ty_scheme.eff_quantifiers = definition.ty_scheme.ty.input_effect_vars();
             definition.ty_scheme.constraints = constraints.clone();
+            if method_index.as_index() >= supplied_count {
+                definition
+                    .ty_scheme
+                    .constraints
+                    .push(PubTypeConstraint::new_have_trait(
+                        value_trait_id,
+                        vec![input_ty],
+                        vec![],
+                        vec![],
+                        type_def_span,
+                    ));
+            }
+            let dicts = extra_parameters_from_constraints(
+                &definition.ty_scheme.constraints,
+                ModuleEnv::new(output, others),
+            );
+
             let runtime_arg_count = definition.arg_names.len();
             let function =
                 PendingModuleFunction::from_body(definition, body, runtime_arg_count, None, locals);

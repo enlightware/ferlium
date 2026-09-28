@@ -1,12 +1,7 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    borrow::Cow,
-    iter::{repeat, repeat_n},
-    mem,
-    rc::Rc,
-};
+use std::{borrow::Cow, iter::repeat, mem, rc::Rc};
 
 use ustr::Ustr;
 
@@ -2411,10 +2406,21 @@ impl<'a> TraitSolver<'a> {
         let trait_def = trait_def_from_parts(self.current_type_items, self.others, trait_id);
         let definitions = trait_def.instantiate_for_tys(input_types, output_types, output_effs);
 
-        for ((method_id, definition), (body, locals)) in methods
-            .into_iter()
-            .zip(definitions)
-            .zip(code_entries.into())
+        let mut code_entries = code_entries.into();
+        crate::hir::trait_defaults::complete_pending_methods(
+            trait_def,
+            &definitions,
+            DictionaryReq::new_trait_impl(
+                trait_id,
+                input_types.to_vec(),
+                output_types.to_vec(),
+                output_effs.to_vec(),
+            ),
+            &mut code_entries,
+        );
+
+        for ((method_id, definition), (body, locals)) in
+            methods.into_iter().zip(definitions).zip(code_entries)
         {
             let runtime_arg_count = definition.arg_names.len();
             let definition = Self::dictionary_entry_definition(
@@ -2868,9 +2874,26 @@ impl<'a> TraitSolver<'a> {
                 (Vec::new(), getters, getter_requirements)
             };
         let dictionary_ty = TraitImpls::dictionary_ty(method_tys, associated_const_tys);
-        let entry_requirements = repeat_n(requirements, methods.len())
+        let entry_requirements = (0..methods.len())
+            .map(|index| {
+                let mut entry = requirements.clone();
+                // Function-value methods supply their own ne body and need no self evidence.
+                if self.trait_def(trait_id).default_methods[index].is_some()
+                    && !canonical_input_tys[0].is_function()
+                {
+                    entry.push(DictionaryReq::new_trait_impl(
+                        trait_id,
+                        canonical_input_tys.clone(),
+                        vec![],
+                        vec![],
+                    ));
+                }
+                entry
+            })
             .chain(getter_requirements)
-            .map(DictionaryEntryRequirements::from_callable)
+            .map(|requirements| {
+                DictionaryEntryRequirements::canonical(&requirements, |id| self.trait_def(id))
+            })
             .collect::<Vec<_>>();
         let (capture_schema, entry_capture_mappings) =
             dictionary_capture_plan(trait_id, &canonical_input_tys, &entry_requirements);

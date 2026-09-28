@@ -1534,14 +1534,10 @@ fn trait_default_l2_module_functions_still_cannot_use_local_blanket_impls() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn trait_default_recursive_dispatch_obeys_call_depth_limit() {
-    use ferlium::{
-        ExecutionTarget,
-        compiler::error::{RuntimeErrorKind, SandboxViolationKind},
-        execution::ReferenceInterpreterLimits,
-    };
     let mut session = TestSession::new();
     for source in [
         "trait Loop<Self> { fn cycle(x: Self) -> int { cycle(x) } } impl Loop for int {} cycle(1)",
+        "trait Loop<Self> { fn cycle(x: Self) -> int; } fn callback(x: int) -> int { cycle(x) } fn bridge(f: (int) -> int, x: int) -> int { f(x) } impl Loop for int { fn cycle(x: int) -> int { bridge(callback, x) } } cycle(1)",
         "trait Loop<Self> { fn cycle(x: Self) -> int; fn other(x: Self) -> int { 0 } } fn callback(x: int) -> int { cycle(x) } fn bridge(f: (int) -> int, x: int) -> int { f(x) } impl Loop for int { fn cycle(x: int) -> int { bridge(callback, x) } } cycle(1)",
         "trait Loop<Self> { fn cycle(x: Self) -> int { callback() } } fn callback() -> int { cycle(1) } impl Loop for int {} cycle(1)",
         "trait Parent<Self> { fn parent(x: Self) -> int; } trait Child<Self>: Parent<Self> { fn child(x: Self) -> int { parent(x) } } impl Parent for int { fn parent(x: int) -> int { child(x) } } impl Child for int {} child(1)",
@@ -1549,9 +1545,22 @@ fn trait_default_recursive_dispatch_obeys_call_depth_limit() {
         "trait Loop<Self> { fn a(x: Self) -> int { b(x) } fn b(x: Self) -> int; } impl Loop for int { fn b(x: int) -> int { a(x) } } a(1)",
         "trait Loop<Self> { fn a(x: Self) -> int; fn b(x: Self) -> int; } impl<T> Loop for [T] where T: Value { fn a(x: [T]) -> int { b(x) } fn b(x: [T]) -> int { a(x) } } a([1])",
     ] {
-        let output = session.compile(source);
-        let entry = output.expr.unwrap();
-        for target in ExecutionTarget::REFERENCE {
+        assert_recursion_is_bounded(&mut session, source);
+    }
+}
+
+fn assert_recursion_is_bounded(session: &mut TestSession, source: &str) {
+    use ferlium::{
+        ExecutionTarget, MirOptimization,
+        compiler::error::{RuntimeErrorKind, SandboxViolationKind},
+        execution::ReferenceInterpreterLimits,
+    };
+
+    let output = session.compile(source);
+    let entry = output.expr.unwrap();
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        session.session_mut().set_mir_optimization(optimization);
+        for target in ExecutionTarget::ALL {
             let error = session
                 .session_mut()
                 .run_entry_with_limits(
@@ -1571,6 +1580,84 @@ fn trait_default_recursive_dispatch_obeys_call_depth_limit() {
                 })
             );
         }
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursion_through_imported_evidence_is_bounded() {
+    let mut session = TestSession::new();
+    session
+        .try_compile_module(
+            "base",
+            r#"
+        pub trait Loop<Self> {
+            fn cycle(x: Self) -> int;
+            fn again(x: Self) -> int { cycle(x) }
+        }
+        pub fn invoke<T>(x: T) -> int where T: Loop { again(x) }
+    "#,
+        )
+        .unwrap();
+    assert_recursion_is_bounded(
+        &mut session,
+        r#"
+        use base::Loop;
+        struct Item(int)
+        impl Loop for Item {
+            fn cycle(x: Item) -> int { base::invoke(x) }
+        }
+        cycle(Item(0))
+    "#,
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursion_through_value_ne_default_is_bounded() {
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    assert_recursion_is_bounded(
+        &mut session,
+        r#"
+        struct Probe(int)
+        impl Value for Probe {
+            fn eq(a: Probe, b: Probe) -> bool { not (a != b) }
+            fn to_string(p: Probe) -> string { "Probe" }
+            fn hash(p: Probe, h: &mut hasher) {}
+            fn clone(p: Probe) -> Probe { Probe(p.0) }
+            fn drop(p: &mut Probe) {}
+        }
+        Probe(1) == Probe(2)
+    "#,
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursion_through_ownership_operations_is_bounded() {
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    for (clone, drop, entry) in [
+        ("copy(x)", "()", "copy(Probe(1))"),
+        ("Probe(x.0)", "make_temporary()", "make_temporary()"),
+    ] {
+        let source = format!(
+            r#"
+            struct Probe(int)
+            fn copy<T>(x: T) -> T where T: Value {{ x }}
+            fn make_temporary() {{ let temporary = Probe(0); () }}
+            impl Value for Probe {{
+                fn eq(x: Probe, y: Probe) -> bool {{ x.0 == y.0 }}
+                fn to_string(x: Probe) -> string {{ "Probe" }}
+                fn hash(x: Probe, state: &mut hasher) {{}}
+                fn clone(x: Probe) -> Probe {{ {clone} }}
+                fn drop(x: &mut Probe) {{ {drop} }}
+            }}
+            {entry}
+        "#
+        );
+        assert_recursion_is_bounded(&mut session, &source);
     }
 }
 

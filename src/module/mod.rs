@@ -64,7 +64,7 @@ use crate::{
             TypeDefSlot, TypeDisplayEnv, TypeKind, TypeVar,
         },
         type_like::TypeLike,
-        type_scheme::{PubTypeConstraint, TypeScheme},
+        type_scheme::{PubTypeConstraint, TypeScheme, extra_parameters_from_constraints},
     },
 };
 
@@ -1664,11 +1664,18 @@ impl Module {
             .collect();
         let mut fn_collector = FunctionCollector::new(self.functions.len());
         let modules = Modules::new();
+        let default_prerequisites = if trait_def.default_methods.iter().any(Option::is_some) {
+            extra_parameters_from_constraints(&sub_key.constraints, ModuleEnv::new(self, &modules))
+                .requirements
+        } else {
+            Vec::new()
+        };
         let qualified_name_env = qualified_name_env_from_module_fields!(self, &modules);
         self.impls.add_blanket_raw(
             trait_id,
             trait_def,
             sub_key,
+            &default_prerequisites,
             output_tys,
             output_effs,
             associated_const_values,
@@ -1855,11 +1862,18 @@ impl Module {
         // Add the impl, collecting new functions
         let mut fn_collector = FunctionCollector::new(self.functions.len());
         let modules = Modules::new();
+        let default_prerequisites = if trait_def.default_methods.iter().any(Option::is_some) {
+            extra_parameters_from_constraints(&sub_key.constraints, ModuleEnv::new(self, &modules))
+                .requirements
+        } else {
+            Vec::new()
+        };
         let qualified_name_env = qualified_name_env_from_module_fields!(self, &modules);
         self.impls.add_blanket_raw(
             trait_id,
             trait_def,
             sub_key,
+            &default_prerequisites,
             output_tys,
             [],
             associated_const_values,

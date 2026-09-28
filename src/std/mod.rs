@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    Location,
+    Location, Modules,
+    hir::recursion::guard_module,
     module::{self, Module, ModuleId},
     parser::location::SourceTable,
 };
@@ -74,15 +75,21 @@ pub(crate) fn build_std(loader: &mut impl StdSourceLoader) -> Module {
     hash::add_to_module(&mut module);
     empty::add_to_module(&mut module);
     flow::add_to_module(&mut module);
+    // Source checkpoints append functions; they do not record edits to Rust registrations.
+    // Guard those registrations on both the compiling and restoring paths before each checkpoint.
+    let others = Modules::new();
+    guard_module(&mut module, &others);
     module = loader.declare_traits(module);
     // mem::add_to_module(&mut module);
     logic::add_to_module(&mut module);
     math::add_to_module(&mut module);
     buffer::add_to_module(&mut module);
     string::add_to_module(&mut module);
+    guard_module(&mut module, &others);
     module = loader.add_core(module);
     data_value::set_data_value_type_def(data_value::find_data_value_type_def(&module));
     serde::add_to_module(&mut module);
+    guard_module(&mut module, &others);
     loader.add_serialization(module)
 }
 

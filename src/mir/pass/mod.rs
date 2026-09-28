@@ -59,6 +59,7 @@ pub(crate) mod relations;
 pub mod report;
 pub(crate) mod share_specializations;
 pub(crate) use crate::mir::site;
+mod call_depth;
 pub(crate) mod specialization_table;
 pub(crate) mod stack_region;
 mod stage;
@@ -570,6 +571,10 @@ pub(crate) fn optimize_function(
             break;
         }
         repeated = true;
+    }
+    let source = current.as_ref().unwrap_or(function);
+    if let Some(leaf) = call_depth::remove_leaf_checks(source, env) {
+        current = Some(leaf);
     }
     // Final artifact verification covers unchanged functions too, so cloning is the identity here.
     match current {

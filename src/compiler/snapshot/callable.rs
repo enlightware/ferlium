@@ -71,6 +71,7 @@ impl NativeCallableCatalog {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SnapshotFunctionBody {
     Script {
+        recursive: bool,
         entry: u32,
         yield_entry: Option<u32>,
         runtime_argument_count: usize,
@@ -94,6 +95,7 @@ impl SnapshotFunctionBody {
                     .as_script()
                     .ok_or(SnapshotError::CallableOriginMismatch)?;
                 Self::Script {
+                    recursive: script.recursive,
                     entry: script.entry_node_id.into_raw().into_u32(),
                     yield_entry: script.yield_node_id.map(|id| id.into_raw().into_u32()),
                     runtime_argument_count: script.runtime_arg_count,
@@ -138,11 +140,13 @@ impl SnapshotFunctionBody {
         };
         Ok(match self {
             Self::Script {
+                recursive,
                 entry,
                 yield_entry,
                 runtime_argument_count,
             } => (
                 b(ScriptFunction {
+                    recursive: *recursive,
                     entry_node_id: node(*entry)?,
                     yield_node_id: yield_entry.map(node).transpose()?,
                     runtime_arg_count: *runtime_argument_count,

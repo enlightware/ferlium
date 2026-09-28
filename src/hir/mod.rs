@@ -17,7 +17,8 @@ pub mod interpreter;
 pub(crate) mod r#match;
 mod native_addressors;
 pub mod native_functions;
-mod trait_method_calls;
+pub(crate) mod recursion;
+pub(crate) mod trait_defaults;
 pub mod value;
 pub(crate) mod value_dispatch;
 
@@ -989,8 +990,8 @@ pub enum NodeKind<P: HirPhase = Unelaborated> {
     Continue(Continue),
 }
 
-impl NodeKind {
-    pub fn child_node_ids(&self) -> SVec4<NodeId> {
+impl<P: HirPhase> NodeKind<P> {
+    pub fn child_node_ids(&self) -> SVec4<NodeId<P>> {
         use NodeKind::*;
         use smallvec::smallvec;
         match self {
@@ -1011,7 +1012,7 @@ impl NodeKind {
             | Continue(_) => smallvec![],
             GetDictionary(dictionary) => dictionary.captures.iter().copied().collect(),
             BuildClosure(bc) => {
-                let mut v: SVec4<NodeId> = smallvec![bc.function];
+                let mut v: SVec4<NodeId<P>> = smallvec![bc.function];
                 v.extend_from_slice(&bc.dictionary_captures);
                 v.extend_from_slice(&bc.captures);
                 if let Some(dict) = bc.captures_value_dictionary {
@@ -1020,17 +1021,17 @@ impl NodeKind {
                 v
             }
             BuildSubscriptValue(build) => {
-                let mut v: SVec4<NodeId> = smallvec![build.subscript];
+                let mut v: SVec4<NodeId<P>> = smallvec![build.subscript];
                 v.extend_from_slice(&build.evidence_captures);
                 v
             }
             FunctionApply(app) => {
-                let mut v: SVec4<NodeId> = smallvec![app.function];
+                let mut v: SVec4<NodeId<P>> = smallvec![app.function];
                 v.extend(app.arguments.iter().map(|arg| arg.value));
                 v
             }
             SubscriptApply(app) => {
-                let mut v: SVec4<NodeId> = smallvec![app.subscript];
+                let mut v: SVec4<NodeId<P>> = smallvec![app.subscript];
                 v.extend(app.arguments.iter().map(|arg| arg.value));
                 v
             }
@@ -1048,11 +1049,11 @@ impl NodeKind {
                 .collect(),
             GetDictionaryFunction(node) => smallvec![node.dictionary],
             CallDictionaryFunction(node) => {
-                let mut v: SVec4<NodeId> = smallvec![node.dictionary];
+                let mut v: SVec4<NodeId<P>> = smallvec![node.dictionary];
                 v.extend(node.arguments.iter().map(|arg| arg.value));
                 v
             }
-            TraitMethodApply(app) => app.arguments.iter().map(|arg| arg.value).collect(),
+            TraitMethodApply(app) => app.child_node_ids(),
             StoreLocal(store) => smallvec![store.value],
             Return(node) | Yield(node) => smallvec![*node],
             WithYielded(node) => smallvec![node.accessor, node.body],
@@ -1062,12 +1063,12 @@ impl NodeKind {
             Block(block) => block.body.iter().copied().collect(),
             Tuple(nodes) | Record(nodes) | Array(nodes) => nodes.iter().copied().collect(),
             Assign(a) => smallvec![a.place, a.value],
-            PendingAssignment(plan) => plan.children(),
+            PendingAssignment(plan) => plan.child_node_ids(),
             Project(node) => smallvec![node.value],
-            FieldAccess(node) => smallvec![node.value],
+            FieldAccess(node) => node.child_node_ids(),
             Variant(node) => smallvec![node.payload],
             Case(case) => {
-                let mut v: SVec4<NodeId> = SVec4::with_capacity(2 + case.alternatives.len());
+                let mut v: SVec4<NodeId<P>> = SVec4::with_capacity(2 + case.alternatives.len());
                 v.push(case.value);
                 v.extend(case.alternatives.iter().map(|(_, n)| *n));
                 v.push(case.default);
@@ -1091,6 +1092,10 @@ pub struct Node<P: HirPhase = Unelaborated> {
 }
 
 pub trait HirPayload<P: HirPhase>: fmt::Debug + Clone {
+    fn child_node_ids(&self) -> SVec4<NodeId<P>> {
+        SVec4::new()
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn format_ind(
         &self,
@@ -1129,6 +1134,10 @@ impl<P: HirPhase> HirPayload<P> for Never {
 }
 
 impl HirPayload<Unelaborated> for B<PendingAssignment> {
+    fn child_node_ids(&self) -> SVec4<UNodeId> {
+        self.children()
+    }
+
     fn format_ind(
         &self,
         arena: &UNodeArena,
@@ -1175,6 +1184,10 @@ fn format_call_argument<P: HirPhase>(
 }
 
 impl<P: HirPhase> HirPayload<P> for FieldAccess<P> {
+    fn child_node_ids(&self) -> SVec4<NodeId<P>> {
+        smallvec::smallvec![self.value]
+    }
+
     fn format_ind(
         &self,
         arena: &NodeArena<P>,
@@ -1196,6 +1209,10 @@ impl<P: HirPhase> HirPayload<P> for FieldAccess<P> {
 }
 
 impl<P: HirPhase> HirPayload<P> for B<TraitMethodApplication<P>> {
+    fn child_node_ids(&self) -> SVec4<NodeId<P>> {
+        self.arguments.iter().map(|arg| arg.value).collect()
+    }
+
     fn format_ind(
         &self,
         arena: &NodeArena<P>,

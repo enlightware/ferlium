@@ -623,6 +623,14 @@ mod tests {
             implementation
                 .methods
                 .iter()
+                // Copy native bodies only; the new module inherits script defaults itself.
+                .filter(|id| {
+                    std.get_function_by_id(**id)
+                        .unwrap()
+                        .code
+                        .native_entry()
+                        .is_some()
+                })
                 .map(|id| std.get_function_by_id(*id).unwrap().code.clone())
                 .collect::<Vec<_>>(),
         );

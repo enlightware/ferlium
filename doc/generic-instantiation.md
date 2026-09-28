@@ -144,6 +144,11 @@ implementation's overrides. Written methods use the same enclosing-impl evidence
 concrete, header-less and generic impls without requiring the impl to be globally selectable while
 its methods are checked.
 
+Compiler-defined `Value` has a Rust-built HIR default for `ne`, available before source std is
+compiled. Native and derived implementations complete omitted defaulted slots with calls to the
+same default; explicit implementations take precedence. Existing required methods retain their
+calling conventions, while forwarding entries receive the evidence they need.
+
 Self evidence is a body assumption, not an implementation prerequisite. An impl's parent and
 `where` obligations are checked independently; its own dictionary cannot justify those obligations.
 At runtime, self evidence comes from the selected dictionary itself, without a cyclic heap
@@ -158,12 +163,9 @@ defers the obligation before ordinary lookup. It must not bind independent input
 to select evidence. Genuinely ambiguous applications still require a type annotation or a declared
 functional dependency.
 
-Recursion depends on the selected overrides, not just the default's body. Default-bearing traits
-currently use a conservative method dependency analysis alongside the static call graph, which can
-retain guards on acyclic methods. Native entries cannot re-enter the current execution; calls to
-them and script helpers proven to have no callbacks do not introduce possible recursion edges.
-This is not a complete analysis of indirect recursion throughout the language; unifying the graphs
-is tracked in
-[#186](https://github.com/enlightware/ferlium/issues/186). Declared parameter generality is currently
+Recursion analysis includes dictionary calls and implicit clone/drop operations as well as static
+calls. Known call cycles and unresolved dispatch require call-depth guards. A conservative guard
+alone does not prevent inlining; its check must survive the rewrite. Native entries cannot re-enter
+the current execution. Declared parameter generality is currently
 checked after inference; rigid checking for more precise diagnostics is tracked in
 [#185](https://github.com/enlightware/ferlium/issues/185).

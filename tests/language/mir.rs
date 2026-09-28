@@ -1710,11 +1710,12 @@ fn generic_apply() {
     // There is a dynamic stack allocation due to the conversion of the int 2 to A.
     assert_eq_sans_flake!(
         session.emit_mir("fn f(x) { x * 2 }"),
-        r#"fn f(%p0: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p1: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), () -> int, () -> int), %p2: @arg let A, %p3: @ret A):
+        r#"fn f(%p0: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p1: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), (A, A) -> bool, () -> int, () -> int), %p2: @arg let A, %p3: @ret A):
   @c0: int = 2
   @c1: () = ()
   b0:
     %r0: place A = alloca A using %p1
+    check_call_depth
     %r1: place ((A, A) -> A) = dict_entry 2 from %p0
     %r2: place ((int) -> A) = dict_entry 6 from %p0
     %r3: place int = alloca int
@@ -1735,6 +1736,7 @@ fn dynamic_apply() {
         session.emit_mir("fn apply_fn(f, x: int) { f(x) }"),
         r#"fn apply_fn(%p0: @arg let (int) -> A ! e₀, %p1: @arg let int, %p2: @ret A):
   b0:
+    check_call_depth
     invoke call %p0(%p1, %p2) -> b1 error b2
   b1:
     ret
@@ -1805,6 +1807,7 @@ fn value_capturing_closure() {
         r#"fn $_ferlium_function_value_drop(%p0: @arg &mut A, %p1: @ret ()):
   @c0: () = ()
   b0:
+    check_call_depth
     drop_closure_env %p0
     store @c0 to %p1
     ret
@@ -1820,6 +1823,7 @@ fn capture(%p0: @ret int):
   b0:
     %r0: place int = alloca int
     %r1: place (() -> int) = alloca () -> int
+    check_call_depth
     %r2: place int = alloca int
     store @c0 to %r2
     call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %r0)
@@ -1886,6 +1890,11 @@ fn std::Value<(std::int,)>::hash#impl:58218263(%p0: @arg let (int,), %p1: @arg &
     store @c1 to %p2
     ret
 
+fn std::Value<(std::int,)>::ne#impl:f3a9fd5c(%p0: @extra (((int,), (int,)) -> bool, ((int,)) -> string, ((int,), &mut hasher) -> (), ((int,)) -> (int,), (&mut (int,)) -> (), ((int,), (int,)) -> bool, () -> int, () -> int), %p1: @arg let (int,), %p2: @arg let (int,), %p3: @ret bool):
+  b0:
+    call std::@Value::ne#default(%p0, %p1, %p2, %p3)
+    ret
+
 fn std::Value<(std::int,)>::to_string#impl:30b07f9c(%p0: @arg let (int,), %p1: @ret string):
   @c0: StaticStr = "("
   @c1: () = ()
@@ -1925,6 +1934,7 @@ fn generic_two_same_type_params() {
         session.emit_mir("fn f(x, y) { x + y }"),
         r#"fn f(%p0: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p1: @arg let A, %p2: @arg let A, %p3: @ret A):
   b0:
+    check_call_depth
     %r0: place ((A, A) -> A) = dict_entry 0 from %p0
     call %r0(%p1, %p2, %p3)
     ret
@@ -1942,6 +1952,7 @@ fn generic_higher_order_function_param() {
         session.emit_mir("fn apply(f: (A) -> A, x) { f(x) }"),
         r#"fn apply(%p0: @arg let (A) -> A ! e₀, %p1: @arg let A, %p2: @ret A):
   b0:
+    check_call_depth
     invoke call %p0(%p1, %p2) -> b1 error b2
   b1:
     ret
@@ -1959,10 +1970,11 @@ fn generic_multiple_ops_reuse_witness() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn f(x) { x * x + x }"),
-        r#"fn f(%p0: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p1: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), () -> int, () -> int), %p2: @arg let A, %p3: @ret A):
+        r#"fn f(%p0: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p1: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), (A, A) -> bool, () -> int, () -> int), %p2: @arg let A, %p3: @ret A):
   @c0: () = ()
   b0:
     %r0: place A = alloca A using %p1
+    check_call_depth
     %r1: place ((A, A) -> A) = dict_entry 0 from %p0
     %r2: place ((A, A) -> A) = dict_entry 2 from %p0
     call %r2(%p2, %p2, %r0)
@@ -1981,8 +1993,9 @@ fn generic_comparison() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn f(x, y) { x == y }"),
-        r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), () -> int, () -> int), %p1: @arg let A, %p2: @arg let A, %p3: @ret bool):
+        r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), (A, A) -> bool, () -> int, () -> int), %p1: @arg let A, %p2: @arg let A, %p3: @ret bool):
   b0:
+    check_call_depth
     %r0: place ((A, A) -> bool) = dict_entry 0 from %p0
     call %r0(%p1, %p2, %p3)
     ret
@@ -2135,6 +2148,11 @@ fn std::Value<<test>::A>::hash#impl:2d1a24bf(%p0: @arg let A, %p1: @arg &mut has
     store @c2 to %p2
     ret
 
+fn std::Value<<test>::A>::ne#impl:8939a6d8(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), (A, A) -> bool, () -> int, () -> int), %p1: @arg let A, %p2: @arg let A, %p3: @ret bool):
+  b0:
+    call std::@Value::ne#default(%p0, %p1, %p2, %p3)
+    ret
+
 fn std::Value<<test>::A>::to_string#impl:78412598(%p0: @arg let A, %p1: @ret string):
   @c0: StaticStr = "A { "
   @c1: () = ()
@@ -2261,6 +2279,11 @@ fn std::Value<<test>::Wrapper>::hash#impl:65f26de7(%p0: @arg let Wrapper, %p1: @
     %r3: place () = alloca ()
     call <test>::std::Value<<test>::A>::hash#impl:2d1a24bf(%r2, %p1, %r3)
     store @c2 to %p2
+    ret
+
+fn std::Value<<test>::Wrapper>::ne#impl:eb6b5990(%p0: @extra ((Wrapper, Wrapper) -> bool, (Wrapper) -> string, (Wrapper, &mut hasher) -> (), (Wrapper) -> Wrapper, (&mut Wrapper) -> (), (Wrapper, Wrapper) -> bool, () -> int, () -> int), %p1: @arg let Wrapper, %p2: @arg let Wrapper, %p3: @ret bool):
+  b0:
+    call std::@Value::ne#default(%p0, %p1, %p2, %p3)
     ret
 
 fn std::Value<<test>::Wrapper>::to_string#impl:7f6f6750(%p0: @arg let Wrapper, %p1: @ret string):
@@ -2396,6 +2419,11 @@ fn std::Value<<test>::Probe>::hash#impl:d7e4d34a(%p0: @arg let Probe, %p1: @arg 
     call std::Value<std::int>::hash#impl:bdc2934a(%r0, %p1, %p2)
     ret
 
+fn std::Value<<test>::Probe>::ne#impl:1ce4c351(%p0: @extra ((Probe, Probe) -> bool, (Probe) -> string, (Probe, &mut hasher) -> (), (Probe) -> Probe, (&mut Probe) -> (), (Probe, Probe) -> bool, () -> int, () -> int), %p1: @arg let Probe, %p2: @arg let Probe, %p3: @ret bool):
+  b0:
+    call std::@Value::ne#default(%p0, %p1, %p2, %p3)
+    ret
+
 fn std::Value<<test>::Probe>::to_string#impl:367ced11(%p0: @arg let Probe, %p1: @ret string):
   @c0: int = 0
   b0:
@@ -2413,8 +2441,9 @@ fn clone_value_generic_return() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn f<T>(x: T) -> T { x }"),
-        r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), () -> int, () -> int), %p1: @arg let A, %p2: @ret A):
+        r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), (A, A) -> bool, () -> int, () -> int), %p1: @arg let A, %p2: @ret A):
   b0:
+    check_call_depth
     %r0: place ((A) -> A) = dict_entry 3 from %p0
     clone A %p1 to %p2 via %r0
     ret
@@ -2429,9 +2458,10 @@ fn clone_value_generic_branch() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn f<T>(x: T) -> T { if true { x } else { x } }"),
-        r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), () -> int, () -> int), %p1: @arg let A, %p2: @ret A):
+        r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), (A, A) -> bool, () -> int, () -> int), %p1: @arg let A, %p2: @ret A):
   @c0: bool = true
   b0:
+    check_call_depth
     br b1
   b1:
     %r0: bool = comp_eq @c0 true
@@ -2535,10 +2565,11 @@ fn store_local_generic_clone_dictionary() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn g<T>(x: &mut T) {} fn f<T>(x: T) { let mut y = x; g(y); }"),
-        r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), () -> int, () -> int), %p1: @arg let A, %p2: @ret ()):
+        r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), (A, A) -> bool, () -> int, () -> int), %p1: @arg let A, %p2: @ret ()):
   @c0: () = ()
   b0:
     %r0: place A = alloca A using %p0
+    check_call_depth
     %r1: place ((A) -> A) = dict_entry 3 from %p0
     clone A %p1 to %r0 via %r1
     %r2: place () = alloca ()
@@ -2728,9 +2759,10 @@ fn reassign_generic() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn set<A>(a: &mut A, b: A) { a = b }"),
-        r#"fn set(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), () -> int, () -> int), %p1: @arg &mut A, %p2: @arg let A, %p3: @ret ()):
+        r#"fn set(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), (A, A) -> bool, () -> int, () -> int), %p1: @arg &mut A, %p2: @arg let A, %p3: @ret ()):
   @c0: () = ()
   b0:
+    check_call_depth
     %r0: place A = alloca A using %p0
     %r1: place ((A) -> A) = dict_entry 3 from %p0
     clone A %p2 to %r0 via %r1

@@ -225,7 +225,12 @@ fn set_impl_origins(to: &mut Module, trait_id: TraitId, primitives: &[BufferPrim
         .find(|(key, _)| key.input_tys == [buffer_type(Type::variable_id(0))])
         .expect("the Buffer implementation was just registered");
     let methods = to.get_impl_data(impl_id).unwrap().methods.clone();
-    assert_eq!(methods.len(), primitives.len());
+    assert!(methods.len() >= primitives.len());
+    assert!(
+        to.trait_def(trait_id).default_methods[primitives.len()..]
+            .iter()
+            .all(Option::is_some)
+    );
     for (method, &primitive) in methods.into_iter().zip(primitives) {
         to.get_function_by_id_mut(method).unwrap().origin =
             CallableOrigin::BufferPrimitive(primitive);

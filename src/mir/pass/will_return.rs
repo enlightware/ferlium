@@ -117,13 +117,13 @@ fn derive(
         if basic
             .operations()
             .iter()
-            .any(|operation| !operation_returns(operation, &callee_returns))
+            .any(|operation| !operation_calls_only(operation, &callee_returns))
         {
             return WillReturn::Unknown;
         }
         match &basic.terminator().kind {
             TerminatorKind::Invoke { operation, .. } => {
-                if !operation_returns(operation, &callee_returns) {
+                if !operation_calls_only(operation, &callee_returns) {
                     return WillReturn::Unknown;
                 }
             }
@@ -144,8 +144,12 @@ fn derive(
     WillReturn::Proven
 }
 
-/// Whether an operation is intrinsically finite or invokes only a proved callee.
-fn operation_returns(operation: &Operation, callee_returns: &impl Fn(FunctionId) -> bool) -> bool {
+/// Whether an operation invokes only callees accepted by the predicate.
+/// Runtime-dispatched ownership and scoped accessors remain unknown.
+pub(super) fn operation_calls_only(
+    operation: &Operation,
+    callee_returns: &impl Fn(FunctionId) -> bool,
+) -> bool {
     let direct = |operand: Option<&Value>| matches!(operand, Some(Value::Function(callee)) if callee_returns(*callee));
     match &operation.kind {
         OperationKind::Call { .. } => direct(operation.operands.first()),

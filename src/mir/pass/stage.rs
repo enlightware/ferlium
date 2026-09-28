@@ -58,6 +58,14 @@ impl<'a> OptimizationStage<'a> {
         }
     }
 
+    pub(crate) fn is_recursive(self, callee: FunctionId, env: ModuleEnv<'_>) -> bool {
+        let original = self.original(callee);
+        env.module_by_id(original.module)
+            .and_then(|module| module.get_function_by_id(original.function))
+            .and_then(|function| function.code.as_script())
+            .is_some_and(|script| script.recursive)
+    }
+
     pub(crate) fn inline_never(self, callee: FunctionId, env: ModuleEnv<'_>) -> bool {
         let original = self.original(callee);
         let module = match self {

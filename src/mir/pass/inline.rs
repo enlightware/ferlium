@@ -122,7 +122,7 @@ pub(crate) enum NotInlinable {
     /// copying them without substituting the call site's instantiation would reinterpret them.
     /// Specialization is what would lift this.
     Generic,
-    /// The callee is recursive, which its call-depth guard is the local evidence of.
+    /// The callee belongs to a known call-graph cycle.
     Recursive,
     /// The source function explicitly forbids inlining.
     InlineNever,
@@ -286,6 +286,10 @@ fn plan_inlinings<'a>(
             }
             if stage.inline_never(callee, env) {
                 refuse(NotInlinable::InlineNever);
+                continue;
+            }
+            if stage.is_recursive(callee, env) {
+                refuse(NotInlinable::Recursive);
                 continue;
             }
             if !stage.permits_inlining(callee) {
@@ -566,9 +570,9 @@ fn cleanup_blocks(func: &Function) -> FxHashSet<BlockId> {
 /// infallible `project` while its `end_project` takes its fallibility from the projection and stays
 /// an `invoke`, which the verifier rejects.
 ///
-/// A recursive callee carries a call-depth guard, so the presence of `check_call_depth` *is* the
-/// recursion test — a local check on the callee, which is also what bounds inlining. Scoped
-/// accessors are excluded wholesale: a `yield` suspends into a driver that resumes it, which the
+/// Recursion classification is checked separately through the source call graph. A conservative
+/// guard on unresolved dispatch does not prevent inlining: the splice preserves that check.
+/// Scoped accessors remain excluded: a `yield` suspends into a driver that resumes it, which the
 /// caller's frame does not stand in for.
 fn check_inlinable(
     body: &Function,
@@ -589,13 +593,6 @@ fn check_inlinable(
             })
         {
             return Err(NotInlinable::UnsupportedShape);
-        }
-        if block
-            .operations()
-            .iter()
-            .any(|operation| matches!(operation.kind, OperationKind::CheckCallDepth))
-        {
-            return Err(NotInlinable::Recursive);
         }
     }
 
