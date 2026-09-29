@@ -31,9 +31,16 @@ fn array_signed_index_to_offset(index: int, len: int) -> int {
 fn array_resolve_index(index: int, len: int) -> int {
 	let resolved = array_signed_index_to_offset(index, len);
 	if resolved < 0 or resolved >= len {
-		panic(f"Array access out of bounds: index {index} for length {len}");
+		array_index_out_of_bounds(index, len);
 	};
 	resolved
+}
+
+// Kept out of line: every inlined access carries the check, and the message is built only on
+// failure.
+#[inline(never)]
+fn array_index_out_of_bounds(index: int, len: int) {
+	panic(f"Array access out of bounds: index {index} for length {len}")
 }
 
 fn array_physical_index<A>(array: [A], index: int) -> int {

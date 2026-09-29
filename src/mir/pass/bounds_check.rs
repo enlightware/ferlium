@@ -12,12 +12,11 @@
 //! in the negative case. In either shape, the panic is the only reason the call can fail, so its
 //! `invoke` becomes straight-line code and its error edge dies with it.
 //!
-//! An inlined check is a branch into a diverging `panic`; a branch whose edge the analysis proves
-//! dead becomes a jump, and so does any other branch it decides.
+//! An inlined check is a branch into the diverging `array_index_out_of_bounds`; a branch whose edge
+//! the analysis proves dead becomes a jump, and so does any other branch it decides.
 //!
-//! What goes away is more than one call. The error edge strands its cleanup block, the panic
-//! message's `alloca`s become dead, and `dce` collects all of it. That is the same population the
-//! plan's cold-path `alloca` item was about.
+//! What goes away is more than one call. The error edge strands its cleanup block, and `dce`
+//! collects it.
 //!
 //! **The proof comes from [`relations`](super::relations), and nothing here weakens it.** This pass
 //! asks whether either `0 <= index < len` or `index < 0` and `0 <= len + index < len` follows from
@@ -537,7 +536,7 @@ mod tests {
         );
         let body = body_of(&module, "total");
         assert_eq!(
-            body.matches("call std::panic(").count(),
+            body.matches("call std::array_index_out_of_bounds(").count(),
             1,
             "the seed remains checked, but the loop access must use what it proved:\n{body}"
         );
