@@ -1712,13 +1712,18 @@ fn wasm_codegen_structured_control_flow_and_local_storage() {
         ] {
             let entry = compile(&mut session, source);
             let code = CompiledProgram::compile(&session, entry).unwrap();
-            // The entry is emitted first; exclude setup's reads of the host invocation state.
+            // The entry is emitted first, after the shared failure function of a module with
+            // runtime globals; exclude setup's reads of the host invocation state.
+            let has_globals = Parser::new(0)
+                .parse_all(code.bytes())
+                .any(|payload| matches!(payload.unwrap(), Payload::GlobalSection(_)));
             let body = Parser::new(0)
                 .parse_all(code.bytes())
-                .find_map(|payload| match payload.unwrap() {
+                .filter_map(|payload| match payload.unwrap() {
                     Payload::CodeSectionEntry(body) => Some(body),
                     _ => None,
                 })
+                .nth(usize::from(has_globals))
                 .unwrap();
             let mut dispatches = 0;
             let mut direct_edges = 0;

@@ -139,6 +139,7 @@ pub(super) fn member_adapter(
     mut_member: bool,
     direct: &CallAbi,
     target_index: WasmFunctionId,
+    fail: WasmFunctionId,
 ) -> Result<WasmFunction, String> {
     let member = definition
         .member(mut_member)
@@ -162,7 +163,7 @@ pub(super) fn member_adapter(
         }
         YieldProvenance::AddressorPlace => {
             if direct.fallible {
-                enter_frame(&mut code, frame, 8);
+                enter_frame(&mut code, fail, frame, 8);
                 code.instruction(&I::LocalGet(frame.as_u32()));
             }
             code.instruction(&I::Call(target_index.as_u32()));

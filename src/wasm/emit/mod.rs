@@ -296,6 +296,7 @@ impl FunctionTypes {
 /// Reserve dynamic frame storage without wrapping alignment or extent arithmetic.
 fn allocate_frame(
     code: &mut impl Instructions,
+    fail: WasmFunctionId,
     size: WasmLocalId,
     align: WasmLocalId,
     base: WasmLocalId,
@@ -343,7 +344,7 @@ fn allocate_frame(
     code.instruction(&I::I64ExtendI32U);
     code.instruction(&I::I64GtU);
     code.instruction(&I::If(BlockType::Empty));
-    emit_failure(code, FailureCode::StackCapacity);
+    emit_failure(code, fail, FailureCode::StackCapacity);
     code.instruction(&I::End);
     // stack_pointer = end.
     code.instruction(&I::LocalGet(end.as_u32()));
@@ -891,7 +892,11 @@ fn emit_with_export_kind(
             EntityType::Function(index.as_u32()),
         );
     }
-    let mut direct_index = imports.functions().len();
+    // The shared failure function comes first, so every emitter knows its index from the imports.
+    // A module without runtime globals has no invocation state, hence no check that could fail.
+    let emit_failure_function = runtime_globals.count != 0;
+    let mut direct_index =
+        imports.failure_function().as_index() + usize::from(emit_failure_function);
     let mut resume_indices = FxHashMap::default();
     let callees: FxHashMap<_, _> = bodies
         .iter()
@@ -928,8 +933,7 @@ fn emit_with_export_kind(
             )
         })
         .collect();
-    let direct_count = direct_index - imports.functions().len();
-    let adapter_base = WasmFunctionId::from_index(imports.functions().len() + direct_count);
+    let adapter_base = WasmFunctionId::from_index(direct_index);
     for &(target, captures) in &callables.entries {
         let abi = callees[&program.direct_entry(target)].1;
         callables
@@ -1050,7 +1054,13 @@ fn emit_with_export_kind(
     let mut strings = StringLiterals::default();
     let mut names = WasmNames::new(session, imports);
     let mut source_map = Vec::new();
-    let mut body_index = 0;
+    if emit_failure_function {
+        names.push("<fail>".into());
+        functions.function(types.intern([ValType::I32], []).as_u32());
+        code.function(&failure_function());
+    }
+    // Code-section entries, the source map's body numbering; the failure function is the first.
+    let mut body_index = usize::from(emit_failure_function);
     for (id, body, signature, selections) in &bodies {
         names.push(format!(
             "{}::{}",
@@ -1201,7 +1211,12 @@ fn emit_with_export_kind(
         ));
         functions.function(subscript_entries.signatures_by_arity[&arity].as_u32());
         code.function(&subscript::member_adapter(
-            program, definition, mut_member, abi, index,
+            program,
+            definition,
+            mut_member,
+            abi,
+            index,
+            imports.failure_function(),
         )?);
     }
     if let Some(methods) = callable_entries.value_methods {
@@ -1267,7 +1282,12 @@ fn emit_with_export_kind(
                         )
                         .as_u32(),
                 );
-                code.function(&entry_wrapper(*index, signature, *result));
+                code.function(&entry_wrapper(
+                    *index,
+                    imports.failure_function(),
+                    signature,
+                    *result,
+                ));
                 exports.export(&export.name, ExportKind::Func, next_index.as_u32());
                 next_index = WasmFunctionId::from_index(next_index.as_index() + 1);
             }
@@ -1277,7 +1297,11 @@ fn emit_with_export_kind(
             HostExportKind::Boxed { .. } => {
                 names.push(format!("<boxed host entry {}>", export.name));
                 functions.function(types.intern([ValType::I32], []).as_u32());
-                code.function(&boxed_entry_wrapper(*index, signature)?);
+                code.function(&boxed_entry_wrapper(
+                    *index,
+                    imports.failure_function(),
+                    signature,
+                )?);
                 exports.export(&export.name, ExportKind::Func, next_index.as_u32());
                 next_index = WasmFunctionId::from_index(next_index.as_index() + 1);
             }
@@ -1421,9 +1445,30 @@ fn layout_witness(op: &Operation) -> Option<&Value> {
     }
 }
 
-fn emit_failure(code: &mut impl Instructions, failure: FailureCode) {
-    check_context(code);
-    store_failure_and_trap(code, failure);
+/// Records `failure` and traps, through the module's shared failure function.
+fn emit_failure(code: &mut impl Instructions, fail: WasmFunctionId, failure: FailureCode) {
+    code.instruction(&I::I32Const(failure as i32));
+    code.instruction(&I::Call(fail.as_u32()));
+    code.instruction(&I::Unreachable);
+}
+
+/// The shared failure function: records its failure code parameter and traps.
+///
+/// Every check branches here only when it fails, so one copy per module serves them all.
+fn failure_function() -> WasmFunction {
+    let mut code = WasmFunction::new([]);
+    // A host can reach an exported entry without installing an invocation. Trap without touching
+    // low linear memory when there is no diagnostic destination.
+    check_context(&mut code);
+    code.instruction(&I::GlobalGet(Global::Context as u32));
+    code.instruction(&I::LocalGet(0));
+    code.instruction(&I::I32Store(MemArg {
+        offset: offset_of!(InvocationState, failure) as u64,
+        ..memarg(2)
+    }));
+    code.instruction(&I::Unreachable);
+    code.instruction(&I::End);
+    code
 }
 
 fn check_context(code: &mut impl Instructions) {
@@ -1433,16 +1478,6 @@ fn check_context(code: &mut impl Instructions) {
     code.instruction(&I::If(BlockType::Empty));
     code.instruction(&I::Unreachable);
     code.instruction(&I::End);
-}
-
-fn store_failure_and_trap(code: &mut impl Instructions, failure: FailureCode) {
-    code.instruction(&I::GlobalGet(Global::Context as u32));
-    code.instruction(&I::I32Const(failure as i32));
-    code.instruction(&I::I32Store(MemArg {
-        offset: offset_of!(InvocationState, failure) as u64,
-        ..memarg(2)
-    }));
-    code.instruction(&I::Unreachable);
 }
 
 fn context_pointer(code: &mut impl Instructions, offset: usize) {
@@ -1469,7 +1504,7 @@ fn frame_bytes(size: u32) -> Result<u32, String> {
 ///
 /// Every emitted callee or trampoline that may leave dynamic storage above its entry frontier must
 /// pair this with [`leave_frame`]. Ordinary calls are consequently frontier-neutral to callers.
-fn enter_frame(code: &mut impl Instructions, frame: WasmLocalId, size: u32) {
+fn enter_frame(code: &mut impl Instructions, fail: WasmFunctionId, frame: WasmLocalId, size: u32) {
     code.instruction(&I::GlobalGet(Global::Stack as u32));
     code.instruction(&I::LocalSet(frame.as_u32()));
     if size == 0 {
@@ -1482,7 +1517,7 @@ fn enter_frame(code: &mut impl Instructions, frame: WasmLocalId, size: u32) {
     code.instruction(&I::I32Const(size as i32));
     code.instruction(&I::I32LtU);
     code.instruction(&I::If(BlockType::Empty));
-    emit_failure(code, FailureCode::StackCapacity);
+    emit_failure(code, fail, FailureCode::StackCapacity);
     code.instruction(&I::End);
     frame_address(code, frame, size);
     code.instruction(&I::GlobalSet(Global::Stack as u32));

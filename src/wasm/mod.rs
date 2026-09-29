@@ -198,6 +198,12 @@ impl Imports {
         Ok(index)
     }
 
+    /// The Wasm module's shared failure function, the first function it defines. Only a Wasm
+    /// module with runtime globals has one, as only such a module has checks that can fail.
+    pub(super) fn failure_function(&self) -> WasmFunctionId {
+        WasmFunctionId::from_index(self.functions.len())
+    }
+
     pub(super) fn function_index(&self, name: &str) -> WasmFunctionId {
         WasmFunctionId::from_index(
             self.functions

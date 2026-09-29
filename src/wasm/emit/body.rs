@@ -1114,6 +1114,7 @@ impl<'a, 's> Body<'a, 's> {
         let helpers = self.helper_locals();
         allocate_frame(
             &mut self.code,
+            self.imports.failure_function(),
             helpers.dynamic_size,
             helpers.dynamic_align,
             helpers.dynamic_base,
@@ -1691,9 +1692,7 @@ impl<'a, 's> Body<'a, 's> {
     }
 
     fn fail(&mut self, code: FailureCode) {
-        // A host can reach the exported entry without installing an invocation. Trap without
-        // touching low linear memory when there is no diagnostic destination.
-        emit_failure(&mut self.code, code);
+        emit_failure(&mut self.code, self.imports.failure_function(), code);
     }
 
     pub(super) fn address(&mut self, value: &Value) -> Result<(), String> {
@@ -1889,7 +1888,12 @@ impl<'a, 's> Body<'a, 's> {
         if let Some(frame) = self.frame
             && !matches!(self.mode, BodyMode::ProjectionResume)
         {
-            enter_frame(&mut self.code, frame, self.frame_size);
+            enter_frame(
+                &mut self.code,
+                self.imports.failure_function(),
+                frame,
+                self.frame_size,
+            );
         }
         if !matches!(self.mode, BodyMode::ProjectionResume) {
             if self.track_depth {

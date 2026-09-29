@@ -370,7 +370,14 @@ pub(super) fn adapter(
             offset_of!(Environment, values_align),
         );
         code.instruction(&I::LocalSet(align.as_u32()));
-        allocate_frame(&mut code, size, align, temporary, end);
+        allocate_frame(
+            &mut code,
+            imports.failure_function(),
+            size,
+            align,
+            temporary,
+            end,
+        );
         code.instruction(&I::Drop);
         dictionary(&mut code, environment);
         values(&mut code, environment);
@@ -397,6 +404,7 @@ pub(super) fn adapter(
     if let Some(optional) = &optional {
         enter_frame(
             &mut code,
+            imports.failure_function(),
             optional_frame,
             frame_bytes(optional.payload_size)?,
         );

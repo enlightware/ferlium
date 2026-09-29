@@ -29,8 +29,8 @@ use crate::{
 };
 
 use super::{
-    ScalarType, check_context, context_pointer, enter_frame, frame_address, frame_bytes,
-    leave_frame, memarg, store_failure_and_trap,
+    ScalarType, check_context, context_pointer, emit_failure, enter_frame, frame_address,
+    frame_bytes, leave_frame, memarg,
 };
 
 /// Bridge the declaration-fixed dictionary ABI to the implementation's direct ABI.
@@ -106,7 +106,7 @@ pub(super) fn dictionary_adapter(
     let scratch = WasmLocalId::from_index(abi.parameter_count() + 1);
     let mut code = WasmFunction::new([(if frame_size == 0 { 0 } else { 2 }, ValType::I32)]);
     if frame_size != 0 {
-        enter_frame(&mut code, frame, frame_size);
+        enter_frame(&mut code, imports.failure_function(), frame, frame_size);
         for (i, offset) in spills.iter().enumerate() {
             if let Some(offset) = offset {
                 code.instruction(&I::LocalGet(frame.as_u32()));
@@ -286,6 +286,7 @@ impl NativeOptionalResultAdapter {
 
 pub(super) fn entry_wrapper(
     index: WasmFunctionId,
+    fail: WasmFunctionId,
     signature: &CallAbi,
     result: ScalarType,
 ) -> WasmFunction {
@@ -294,7 +295,7 @@ pub(super) fn entry_wrapper(
     let mut code = WasmFunction::new([(1, ValType::I32)]);
     check_context(&mut code);
     // The scalar host result needs at most eight aligned bytes, reserved before the callee.
-    enter_frame(&mut code, frame, 8);
+    enter_frame(&mut code, fail, frame, 8);
     context_pointer(&mut code, offset_of!(InvocationState, native_failure));
     for i in 0..signature.parameters.len() {
         code.instruction(&I::LocalGet(WasmLocalId::from_index(i).as_u32()));
@@ -305,7 +306,7 @@ pub(super) fn entry_wrapper(
     code.instruction(&I::Call(index.as_u32()));
     leave_frame(&mut code, frame);
     code.instruction(&I::If(BlockType::Empty));
-    store_failure_and_trap(&mut code, FailureCode::Source);
+    emit_failure(&mut code, fail, FailureCode::Source);
     code.instruction(&I::End);
     if !result.is_unit() {
         code.instruction(&I::LocalGet(frame.as_u32()));
@@ -318,6 +319,7 @@ pub(super) fn entry_wrapper(
 /// Normalize a no-argument expression entry to one caller-provided result pointer.
 pub(super) fn boxed_entry_wrapper(
     index: WasmFunctionId,
+    fail: WasmFunctionId,
     signature: &CallAbi,
 ) -> Result<WasmFunction, String> {
     if !signature.parameters.is_empty() {
@@ -340,7 +342,7 @@ pub(super) fn boxed_entry_wrapper(
     code.instruction(&I::Call(index.as_u32()));
     if signature.fallible {
         code.instruction(&I::If(BlockType::Empty));
-        store_failure_and_trap(&mut code, FailureCode::Source);
+        emit_failure(&mut code, fail, FailureCode::Source);
         code.instruction(&I::End);
     } else if let ResultKind::Direct(ty) = signature.result {
         // The temporary boxed harness always reserves at least one aligned Wasm word, even when
