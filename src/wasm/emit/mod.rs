@@ -8,6 +8,7 @@ mod body;
 mod callable;
 mod control_flow;
 mod expressions;
+mod peephole;
 mod stack;
 mod subscript;
 mod suspension;
@@ -15,6 +16,7 @@ mod suspension;
 use self::{
     adapters::{boxed_entry_wrapper, dictionary_adapter, entry_wrapper},
     body::{Body, BodyMode},
+    peephole::Instructions,
 };
 
 use std::{iter, mem::offset_of, ops::Range};
@@ -137,7 +139,7 @@ impl ScalarType {
         self.as_non_unit_native().map_or(ValType::I32, scalar_type)
     }
 
-    fn load(self, code: &mut WasmFunction) {
+    fn load(self, code: &mut impl Instructions) {
         let instruction = match self.as_non_unit_native() {
             None => {
                 code.instruction(&I::Drop);
@@ -150,7 +152,7 @@ impl ScalarType {
         code.instruction(&instruction);
     }
 
-    fn store(self, code: &mut WasmFunction) {
+    fn store(self, code: &mut impl Instructions) {
         let instruction = match self.as_non_unit_native() {
             None => {
                 code.instruction(&I::Drop);
@@ -288,7 +290,7 @@ impl FunctionTypes {
 
 /// Reserve dynamic frame storage without wrapping alignment or extent arithmetic.
 fn allocate_frame(
-    code: &mut WasmFunction,
+    code: &mut impl Instructions,
     size: WasmLocalId,
     align: WasmLocalId,
     base: WasmLocalId,
@@ -356,7 +358,7 @@ fn value_transport(ty: Type) -> ParameterTransport {
 }
 
 /// Replace a dictionary pointer with its image-relative entry table's absolute address.
-fn dictionary_table(code: &mut WasmFunction, evidence_base: WasmLocalId) {
+fn dictionary_table(code: &mut impl Instructions, evidence_base: WasmLocalId) {
     code.instruction(&I::I32Load(memarg(2)));
     code.instruction(&I::I32Const(2));
     code.instruction(&I::I32Shl);
@@ -1414,12 +1416,12 @@ fn layout_witness(op: &Operation) -> Option<&Value> {
     }
 }
 
-fn emit_failure(code: &mut WasmFunction, failure: FailureCode) {
+fn emit_failure(code: &mut impl Instructions, failure: FailureCode) {
     check_context(code);
     store_failure_and_trap(code, failure);
 }
 
-fn check_context(code: &mut WasmFunction) {
+fn check_context(code: &mut impl Instructions) {
     // An exported entry can be reached without an invocation; never write through a null context.
     code.instruction(&I::GlobalGet(Global::Context as u32));
     code.instruction(&I::I32Eqz);
@@ -1428,7 +1430,7 @@ fn check_context(code: &mut WasmFunction) {
     code.instruction(&I::End);
 }
 
-fn store_failure_and_trap(code: &mut WasmFunction, failure: FailureCode) {
+fn store_failure_and_trap(code: &mut impl Instructions, failure: FailureCode) {
     code.instruction(&I::GlobalGet(Global::Context as u32));
     code.instruction(&I::I32Const(failure as i32));
     code.instruction(&I::I32Store(MemArg {
@@ -1438,7 +1440,7 @@ fn store_failure_and_trap(code: &mut WasmFunction, failure: FailureCode) {
     code.instruction(&I::Unreachable);
 }
 
-fn context_pointer(code: &mut WasmFunction, offset: usize) {
+fn context_pointer(code: &mut impl Instructions, offset: usize) {
     code.instruction(&I::GlobalGet(Global::Context as u32));
     code.instruction(&I::I32Load(MemArg {
         offset: offset as u64,
@@ -1446,10 +1448,12 @@ fn context_pointer(code: &mut WasmFunction, offset: usize) {
     }));
 }
 
-fn frame_address(code: &mut WasmFunction, frame: WasmLocalId, offset: u32) {
+fn frame_address(code: &mut impl Instructions, frame: WasmLocalId, offset: u32) {
     code.instruction(&I::LocalGet(frame.as_u32()));
-    code.instruction(&I::I32Const(offset as i32));
-    code.instruction(&I::I32Add);
+    if offset != 0 {
+        code.instruction(&I::I32Const(offset as i32));
+        code.instruction(&I::I32Add);
+    }
 }
 
 fn frame_bytes(size: u32) -> Result<u32, String> {
@@ -1460,7 +1464,7 @@ fn frame_bytes(size: u32) -> Result<u32, String> {
 ///
 /// Every emitted callee or trampoline that may leave dynamic storage above its entry frontier must
 /// pair this with [`leave_frame`]. Ordinary calls are consequently frontier-neutral to callers.
-fn enter_frame(code: &mut WasmFunction, frame: WasmLocalId, size: u32) {
+fn enter_frame(code: &mut impl Instructions, frame: WasmLocalId, size: u32) {
     code.instruction(&I::GlobalGet(Global::Stack as u32));
     code.instruction(&I::LocalSet(frame.as_u32()));
     if size == 0 {
@@ -1479,7 +1483,7 @@ fn enter_frame(code: &mut WasmFunction, frame: WasmLocalId, size: u32) {
     code.instruction(&I::GlobalSet(Global::Stack as u32));
 }
 
-fn leave_frame(code: &mut WasmFunction, frame: WasmLocalId) {
+fn leave_frame(code: &mut impl Instructions, frame: WasmLocalId) {
     code.instruction(&I::LocalGet(frame.as_u32()));
     code.instruction(&I::GlobalSet(Global::Stack as u32));
 }
@@ -1584,7 +1588,7 @@ fn setup(runtime_globals: RuntimeGlobals) -> WasmFunction {
     code
 }
 
-fn load_invocation_state(code: &mut WasmFunction, global: u32, offset: usize) {
+fn load_invocation_state(code: &mut impl Instructions, global: u32, offset: usize) {
     code.instruction(&I::LocalGet(0));
     code.instruction(&I::If(BlockType::Result(ValType::I32)));
     code.instruction(&I::LocalGet(0));

@@ -33,7 +33,7 @@ use crate::{
 use super::{
     Global, ScalarType, adapters::NativeOptionalResultAdapter, allocate_frame, body::Body,
     context_pointer, dictionary_table, enter_frame, frame_address, frame_bytes, leave_frame,
-    memarg, operations,
+    memarg, operations, peephole::Instructions,
 };
 
 /// Construction schema; every materialization of a given target has the same leading parameters.
@@ -199,7 +199,7 @@ pub(super) fn selected_adapter(
     Ok(code)
 }
 
-fn field(code: &mut WasmFunction, base: WasmLocalId, offset: usize) {
+fn field(code: &mut impl Instructions, base: WasmLocalId, offset: usize) {
     code.instruction(&I::LocalGet(base.as_u32()));
     code.instruction(&I::I32Load(MemArg {
         offset: offset as u64,
@@ -207,13 +207,13 @@ fn field(code: &mut WasmFunction, base: WasmLocalId, offset: usize) {
     }));
 }
 
-fn values(code: &mut WasmFunction, environment: WasmLocalId) {
+fn values(code: &mut impl Instructions, environment: WasmLocalId) {
     code.instruction(&I::LocalGet(environment.as_u32()));
     field(code, environment, offset_of!(Environment, values_offset));
     code.instruction(&I::I32Add);
 }
 
-fn dictionary(code: &mut WasmFunction, environment: WasmLocalId) {
+fn dictionary(code: &mut impl Instructions, environment: WasmLocalId) {
     frame_address(
         code,
         environment,
@@ -223,7 +223,7 @@ fn dictionary(code: &mut WasmFunction, environment: WasmLocalId) {
 
 /// Read an entry slot from the capture tuple's Value dictionary.
 fn value_entry(
-    code: &mut WasmFunction,
+    code: &mut impl Instructions,
     environment: WasmLocalId,
     base: WasmLocalId,
     entry: TraitDictionaryEntryIndex,

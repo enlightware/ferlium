@@ -1886,7 +1886,7 @@ fn assert_stackified_add_mul(operations: &[Operator<'_>]) {
 fn wasm_codegen_bounds_deep_scalar_expression_emission() {
     let expression = |depth| {
         (0..depth).fold("x".to_owned(), |expression, _| {
-            format!("({expression} + 1)")
+            format!("({expression} - 1)")
         })
     };
     let mut session = CompilerSession::new();
@@ -1896,14 +1896,15 @@ fn wasm_codegen_bounds_deep_scalar_expression_emission() {
             "#[inline(never)] fn at_limit(x: int) -> int {{ {} }}
              #[inline(never)] fn over_limit(x: int) -> int {{ {} }}
              fn compute(x: int) -> int {{ at_limit(x) + over_limit(x) }}",
-            // Each source addition becomes an alternating place writer and scalar load in
-            // physical MIR, so 64 additions exercise approximately 128 producer hops.
+            // Each source subtraction becomes an alternating place writer and scalar load in
+            // physical MIR, so 64 subtractions exercise approximately 128 producer hops. Emission
+            // would fold a chain of constant additions.
             expression(64),
             expression(66),
         ),
     );
     let code = CompiledProgram::compile(&session, entry).unwrap();
-    let maximum_stackified_adds = Parser::new(0)
+    let maximum_stackified_subs = Parser::new(0)
         .parse_all(code.bytes())
         .filter_map(|payload| match payload.unwrap() {
             Payload::CodeSectionEntry(body) => Some(
@@ -1926,7 +1927,7 @@ fn wasm_codegen_bounds_deep_scalar_expression_emission() {
                 .map(|segment| {
                     segment
                         .iter()
-                        .filter(|operation| matches!(operation, Operator::I32Add))
+                        .filter(|operation| matches!(operation, Operator::I32Sub))
                         .count()
                 })
                 .collect::<Vec<_>>()
@@ -1934,12 +1935,12 @@ fn wasm_codegen_bounds_deep_scalar_expression_emission() {
         .max()
         .unwrap();
     assert!(
-        maximum_stackified_adds >= 64,
+        maximum_stackified_subs >= 64,
         "the expression at the depth limit must actually be emitted as one operand-stack chain"
     );
 
     let mut instance = code.instantiate::<(isize,), isize>().unwrap();
-    assert_eq!(instance.run((12,), WasmLimits::default()).unwrap(), 154);
+    assert_eq!(instance.run((12,), WasmLimits::default()).unwrap(), -106);
 }
 
 #[wasm_bindgen_test]

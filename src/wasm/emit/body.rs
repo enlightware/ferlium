@@ -57,7 +57,9 @@ use super::{
         Analysis as ExpressionAnalysis, Plan as ExpressionPlan, Source as ExpressionSource,
     },
     frame_address, frame_bytes, is_elided_stack_operation, layout_witness, leave_frame, memarg,
-    operations, scalar, stack, subscript,
+    operations,
+    peephole::Code,
+    scalar, stack, subscript,
     suspension::Crossing,
 };
 
@@ -248,7 +250,7 @@ pub(super) struct Body<'a, 's> {
     no_op_stack_markers: FxHashSet<ValueId>,
     /// The blocks emitted so far, indexed by block.
     emitted: Vec<bool>,
-    pub(super) code: WasmFunction,
+    pub(super) code: Code,
     source_map: BodySourceMap,
 }
 
@@ -364,7 +366,7 @@ impl<'a, 's> Body<'a, 's> {
             expressions,
             no_op_stack_markers,
             emitted: vec![false; body.blocks().count()],
-            code: WasmFunction::new([]),
+            code: Code::new(WasmFunction::new([])),
             source_map: Vec::new(),
         };
         if matches!(mode, BodyMode::ProjectionResume) {
@@ -724,7 +726,7 @@ impl<'a, 's> Body<'a, 's> {
             // callers may then safely regard calls as frontier-transparent.
             this.frame = Some(this.local(ValType::I32));
         }
-        this.code = WasmFunction::new(this.locals.iter().map(|ty| (1, *ty)));
+        this.code = Code::new(WasmFunction::new(this.locals.iter().map(|ty| (1, *ty))));
         Ok(this)
     }
 
@@ -776,7 +778,7 @@ impl<'a, 's> Body<'a, 's> {
         self.scratch_address(payload);
         self.i(I::LocalSet(helpers.dynamic_size.as_u32()));
         adapter.emit(
-            &mut self.code,
+            self.code.function(),
             helpers.dynamic_base,
             helpers.dynamic_size,
             helpers.scratch,
@@ -1950,7 +1952,7 @@ impl<'a, 's> Body<'a, 's> {
         );
         self.i(I::End);
         Ok(EmittedBody {
-            function: self.code,
+            function: self.code.finish(),
             source_map: self.source_map,
         })
     }

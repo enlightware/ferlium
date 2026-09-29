@@ -352,7 +352,7 @@ mod tests {
     #[wasm_bindgen_test]
     fn scalar_equality_selects_core_instructions() {
         let source = "fn i(x: int, y: int) -> bool { x == y }\n\
-            fn f(x: float, y: float) -> bool { x != y }\n\
+            fn f(x: float, y: float) -> bool { x == y }\n\
             fn b(x: bool, y: bool) -> bool { x == y }";
         let mut session = CompilerSession::new();
         let module = session
@@ -364,6 +364,40 @@ mod tests {
             assert!(text.contains(instruction), "{instruction}:\n{text}");
         }
         assert!(!text.contains("::eq#"), "{text}");
+    }
+
+    #[wasm_bindgen_test]
+    fn negated_and_zero_comparisons_select_one_instruction() {
+        let cases = [
+            ("fn f(x: int, y: int) -> bool { x != y }", "i32.ne"),
+            ("fn f(x: int) -> bool { x == 0 }", "i32.eqz"),
+            ("fn f(x: float, y: float) -> bool { not (x > y) }", "f64.le"),
+            (
+                "fn f(x: int, y: int) -> int { if x != y { 1 } else { 2 } }",
+                "i32.ne",
+            ),
+            (
+                "fn f(x: int) -> int { if x == 0 { 1 } else { 2 } }",
+                "local.get 0\n    if",
+            ),
+        ];
+        for (source, expected) in cases {
+            let mut session = CompilerSession::new();
+            let module = session
+                .compile(source, "wasm_text", Path::single_str("wasm_text"))
+                .unwrap()
+                .module_id;
+            let text = module_text(&session, module).unwrap().text;
+            let body = text
+                .split("(func $wasm_text::f ")
+                .nth(1)
+                .and_then(|rest| rest.split("\n  (func ").next())
+                .unwrap();
+            assert!(body.contains(expected), "{source}:\n{body}");
+            for pattern in ["i32.const 0", "i32.eqz\n    i32.eqz", "i32.eqz\n    if"] {
+                assert!(!body.contains(pattern), "{source}:\n{body}");
+            }
+        }
     }
 
     #[wasm_bindgen_test]
