@@ -1113,7 +1113,10 @@ fn partial_call_outcome(
             KnownCallee::IntLe
             | KnownCallee::IntGe
             | KnownCallee::FloatLe
-            | KnownCallee::FloatGe => Some(true),
+            | KnownCallee::FloatGe
+            | KnownCallee::IntEq
+            | KnownCallee::FloatEq
+            | KnownCallee::BoolEq => Some(true),
             _ => None,
         };
         if let Some(value) = predicate {

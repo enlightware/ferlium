@@ -1503,6 +1503,8 @@ impl<'a, 's> Body<'a, 's> {
             | KnownCallee::IntLe
             | KnownCallee::IntGt
             | KnownCallee::IntGe
+            | KnownCallee::IntEq
+            | KnownCallee::BoolEq
             | KnownCallee::FloatAdd
             | KnownCallee::FloatSub
             | KnownCallee::FloatMul
@@ -1510,7 +1512,8 @@ impl<'a, 's> Body<'a, 's> {
             | KnownCallee::FloatLt
             | KnownCallee::FloatLe
             | KnownCallee::FloatGt
-            | KnownCallee::FloatGe => 2,
+            | KnownCallee::FloatGe
+            | KnownCallee::FloatEq => 2,
             KnownCallee::IntNeg
             | KnownCallee::IntFromInt
             | KnownCallee::FloatNeg
@@ -1567,7 +1570,12 @@ impl<'a, 's> Body<'a, 's> {
                     _ => unreachable!(),
                 });
             }
-            KnownCallee::IntLt | KnownCallee::IntLe | KnownCallee::IntGt | KnownCallee::IntGe => {
+            KnownCallee::IntLt
+            | KnownCallee::IntLe
+            | KnownCallee::IntGt
+            | KnownCallee::IntGe
+            | KnownCallee::IntEq
+            | KnownCallee::BoolEq => {
                 self.read(inputs[0])?;
                 self.read(inputs[1])?;
                 self.i(match intrinsic {
@@ -1575,13 +1583,15 @@ impl<'a, 's> Body<'a, 's> {
                     KnownCallee::IntLe => I::I32LeS,
                     KnownCallee::IntGt => I::I32GtS,
                     KnownCallee::IntGe => I::I32GeS,
+                    KnownCallee::IntEq | KnownCallee::BoolEq => I::I32Eq,
                     _ => unreachable!(),
                 });
             }
             KnownCallee::FloatLt
             | KnownCallee::FloatLe
             | KnownCallee::FloatGt
-            | KnownCallee::FloatGe => {
+            | KnownCallee::FloatGe
+            | KnownCallee::FloatEq => {
                 self.read(inputs[0])?;
                 self.read(inputs[1])?;
                 self.i(match intrinsic {
@@ -1589,6 +1599,7 @@ impl<'a, 's> Body<'a, 's> {
                     KnownCallee::FloatLe => I::F64Le,
                     KnownCallee::FloatGt => I::F64Gt,
                     KnownCallee::FloatGe => I::F64Ge,
+                    KnownCallee::FloatEq => I::F64Eq,
                     _ => unreachable!(),
                 });
             }

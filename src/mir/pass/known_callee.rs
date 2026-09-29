@@ -47,7 +47,10 @@ use crate::{
     primitive::BufferPrimitive,
     std::{
         STD_MODULE_ID,
-        core_traits_names::{BITS_TRAIT_NAME, ITERATOR_TRAIT_NAME, NUM_TRAIT_NAME, ORD_TRAIT_NAME},
+        core_traits_names::{
+            BITS_TRAIT_NAME, ITERATOR_TRAIT_NAME, NUM_TRAIT_NAME, ORD_TRAIT_NAME, VALUE_TRAIT_NAME,
+        },
+        logic::bool_type,
         math::{float_type, int_type},
     },
     types::{
@@ -101,6 +104,7 @@ pub(crate) enum KnownCallee {
     IntLe,
     IntGt,
     IntGe,
+    IntEq,
 
     /// `ordering_from_code(code)` — `Less` for -1, `Equal` for 0, `Greater` otherwise.
     /// Preserves an established operand relation when comparison wrappers are partially inlined.
@@ -124,12 +128,14 @@ pub(crate) enum KnownCallee {
     FloatLe,
     FloatGt,
     FloatGe,
+    FloatEq,
 
     /// `not(value)` — the logical negation of a boolean.
     ///
     /// MIR has no negation of its own, but `comp_eq value false` computes exactly this, which is
     /// what makes the call removable rather than merely understood.
     BoolNot,
+    BoolEq,
     /// `array_len(array)` — the array's element count, which is its `len` field.
     ArrayLen,
     /// `array_resolve_index(index, len)` — `index` when `0 <= index < len`, `len + index` when
@@ -192,6 +198,7 @@ impl KnownCallee {
                 | Self::IntLe
                 | Self::IntGt
                 | Self::IntGe
+                | Self::IntEq
                 | Self::OrderingFromCode
                 | Self::FloatAdd
                 | Self::FloatSub
@@ -203,7 +210,9 @@ impl KnownCallee {
                 | Self::FloatLe
                 | Self::FloatGt
                 | Self::FloatGe
+                | Self::FloatEq
                 | Self::BoolNot
+                | Self::BoolEq
         )
     }
 }
@@ -353,6 +362,14 @@ impl KnownCallees {
                 resolver.method(ORD_TRAIT_NAME, int_type(), "ge"),
                 KnownCallee::IntGe,
             ),
+            (
+                resolver.method(VALUE_TRAIT_NAME, int_type(), "eq"),
+                KnownCallee::IntEq,
+            ),
+            (
+                resolver.method(VALUE_TRAIT_NAME, float_type(), "eq"),
+                KnownCallee::FloatEq,
+            ),
             (resolver.function("lt_float"), KnownCallee::FloatLt),
             (
                 resolver.method(ORD_TRAIT_NAME, float_type(), "lt"),
@@ -374,6 +391,10 @@ impl KnownCallees {
                 KnownCallee::FloatGe,
             ),
             (resolver.function("not"), KnownCallee::BoolNot),
+            (
+                resolver.method(VALUE_TRAIT_NAME, bool_type(), "eq"),
+                KnownCallee::BoolEq,
+            ),
             (resolver.function("array_len"), KnownCallee::ArrayLen),
             (
                 resolver.function("array_resolve_index"),
@@ -713,7 +734,7 @@ mod tests {
         let session = CompilerSession::new();
         assert_eq!(
             known_callees(&session).by_id.len(),
-            46,
+            49,
             "two known callees resolved to the same function id"
         );
     }

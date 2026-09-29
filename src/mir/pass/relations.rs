@@ -2380,6 +2380,12 @@ fn result_fact(
             &affine(0, interner)?,
         )
         .map(Fact::Truth),
+        KnownCallee::IntEq => Predicate::between(
+            &affine(0, interner)?,
+            Comparison::Equal,
+            &affine(1, interner)?,
+        )
+        .map(Fact::Truth),
         KnownCallee::IntCmp => Some(Fact::Ordering {
             left: affine(0, interner)?,
             right: affine(1, interner)?,

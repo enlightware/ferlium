@@ -1518,6 +1518,7 @@ fn wasm_intrinsic(session: &CompilerSession, operation: &Operation) -> Option<Kn
             | KnownCallee::IntLe
             | KnownCallee::IntGt
             | KnownCallee::IntGe
+            | KnownCallee::IntEq
             | KnownCallee::FloatAdd
             | KnownCallee::FloatSub
             | KnownCallee::FloatMul
@@ -1527,7 +1528,9 @@ fn wasm_intrinsic(session: &CompilerSession, operation: &Operation) -> Option<Kn
             | KnownCallee::FloatLe
             | KnownCallee::FloatGt
             | KnownCallee::FloatGe
+            | KnownCallee::FloatEq
             | KnownCallee::BoolNot
+            | KnownCallee::BoolEq
     )
     .then_some(known)
 }

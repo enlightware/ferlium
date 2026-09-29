@@ -350,6 +350,23 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    fn scalar_equality_selects_core_instructions() {
+        let source = "fn i(x: int, y: int) -> bool { x == y }\n\
+            fn f(x: float, y: float) -> bool { x != y }\n\
+            fn b(x: bool, y: bool) -> bool { x == y }";
+        let mut session = CompilerSession::new();
+        let module = session
+            .compile(source, "wasm_text", Path::single_str("wasm_text"))
+            .unwrap()
+            .module_id;
+        let text = module_text(&session, module).unwrap().text;
+        for instruction in ["i32.eq", "f64.eq"] {
+            assert!(text.contains(instruction), "{instruction}:\n{text}");
+        }
+        assert!(!text.contains("::eq#"), "{text}");
+    }
+
+    #[wasm_bindgen_test]
     fn source_map_ranges_are_ordered_through_nested_branch_arms() {
         let source = "fn compute(x: int, y: int) -> int { \
             if x > 0 { if y > 0 { x * 5 } else { x * 7 } } else { x * 11 } }";
