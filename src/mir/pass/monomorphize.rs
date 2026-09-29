@@ -35,7 +35,7 @@
 #![allow(dead_code)]
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     hash::{Hash, Hasher},
     mem,
 };
@@ -44,7 +44,7 @@ use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use ustr::{Ustr, ustr};
 
 use super::{
-    budget, cost,
+    OptimizationStats, budget, cost,
     site::{OperationIndex, OperationSite},
     stage::SemanticCallees,
 };
@@ -252,6 +252,39 @@ pub(super) fn structurally_identical(
         })
 }
 
+/// Where a specialization's optimization stands.
+///
+/// A specialization is a callee found while optimizing its caller. Like a declared callee, it is
+/// optimized before its callers read it whenever its inputs allow: created from a final body — a
+/// dependency's or a finished component's — it is optimized as soon as a caller is about to read
+/// it, and callers then read the optimized body. Its result must not depend on when it was
+/// computed, so it is kept only if every body its optimization read was final too: a dependency's,
+/// a finished one, the raw body of a specialization that will never be optimized ahead, or an
+/// optimized one. Reading anything else — a declared function still being optimized, reached
+/// through a dictionary, or a specialization being optimized, which is a cycle discovered while
+/// optimizing — leaves the specialization to the worklist, as a recursive component reads its own
+/// members raw.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Progress {
+    /// Created from a body that was not final; read raw, optimized by the worklist.
+    Deferred,
+    /// Created from a final body; to be optimized before a caller reads it.
+    Ready,
+    /// Being optimized ahead of the worklist.
+    Optimizing,
+    /// Optimized ahead of the worklist; callers read the optimized body.
+    Optimized,
+    /// Its optimization ahead of the worklist read a body that was not final, so it was
+    /// discarded; read raw, optimized by the worklist.
+    Unsettled,
+}
+
+/// What [`Specializations::begin_ahead`] saved of an enclosing optimization ahead of the worklist.
+pub(crate) struct AheadFrame {
+    ahead: Option<LocalFunctionId>,
+    read_unsettled: bool,
+}
+
 /// How one call site instantiates a generic callee: both halves of the instantiation, together.
 ///
 /// This is the specialization cache's key, and pairing the two here is the same discipline
@@ -286,12 +319,13 @@ pub(crate) struct Specializations {
     /// depends on the order within a recursive component, which reads its own members raw.
     finished: Vec<Option<Function>>,
     created: Vec<Specialization>,
-    /// Each specialization as it was created, before the worklist optimized it.
+    /// Each specialization as it was created, before it was optimized.
     ///
     /// This is a specialization's *raw* stage, and it exists for the same reason the raw stage does:
     /// a pass that consults a callee's body must get the same answer whatever order functions are
     /// optimized in. `created` is mutated in place as the worklist reaches each entry, so reading it
-    /// would make an inlining decision depend on whether that had happened yet.
+    /// would make an inlining decision depend on whether that had happened yet; only a body
+    /// optimized ahead of the worklist is read from it (see [`Progress`]).
     raw: Vec<Function>,
     cache: FxHashMap<SpecializationKey, LocalFunctionId>,
     /// Digests of the residual bodies already created, so that keys whose distinctions vanish under
@@ -317,6 +351,17 @@ pub(crate) struct Specializations {
     /// Interior mutability because the inliner's planner holds this by shared reference, and a memo
     /// that changes no answer is exactly what that is for.
     substituted: RefCell<FxHashMap<(FunctionId, Instantiation), Function>>,
+    /// Where each specialization stands, aligned with `created`.
+    progress: Vec<Progress>,
+    /// How many specializations are [`Progress::Ready`], so a caller with none to optimize pays
+    /// no scan.
+    ready: usize,
+    /// The specialization being optimized ahead of the worklist, if any.
+    ahead: Option<LocalFunctionId>,
+    /// Whether that optimization has read a body that is not final yet; see [`Progress`].
+    read_unsettled: Cell<bool>,
+    /// What the specializations optimized ahead of the worklist and kept counted.
+    kept_ahead_stats: OptimizationStats,
     /// Where the module's HIR-declared functions end; specializations are numbered from here.
     first_index: usize,
     /// Fixed from the module's declared MIR-body population before any output is generated.
@@ -336,6 +381,11 @@ impl Specializations {
             structures: FxHashMap::default(),
             rejected: FxHashSet::default(),
             substituted: RefCell::new(FxHashMap::default()),
+            progress: Vec::new(),
+            ready: 0,
+            ahead: None,
+            read_unsettled: Cell::new(false),
+            kept_ahead_stats: OptimizationStats::default(),
             first_index: function_count,
             limit: budget::specialization_limit(declared_body_count),
         }
@@ -408,12 +458,95 @@ impl Specializations {
         Some(&self.created.get(id.as_index() - self.first_index)?.body)
     }
 
-    /// The body of a specialization as it was created, before the worklist optimized it.
+    /// The body of a specialization that a pass consulting it as a callee reads.
     ///
-    /// This is what a pass consulting a callee reads, so that its decision does not depend on
-    /// optimization order, as a recursive component reads its own members raw.
-    pub(crate) fn raw_body(&self, id: LocalFunctionId) -> Option<&Function> {
-        self.raw.get(id.as_index().checked_sub(self.first_index)?)
+    /// Optimized once it was optimized ahead of the worklist, and raw otherwise, so that a
+    /// decision never depends on how far the worklist has got. Reading a raw body that will later
+    /// be optimized ahead, or one being optimized, is recorded against the specialization being
+    /// optimized ahead, whose result then depends on when it was computed.
+    pub(crate) fn callee_body(&self, id: LocalFunctionId) -> Option<&Function> {
+        let index = id.as_index().checked_sub(self.first_index)?;
+        match self.progress.get(index)? {
+            Progress::Optimized => return Some(&self.created[index].body),
+            Progress::Deferred => {}
+            // Its own body, which a recursive specialization reads to refuse inlining itself, is
+            // the same raw body whenever it is read.
+            Progress::Optimizing if self.ahead == Some(id) => {}
+            Progress::Ready | Progress::Optimizing | Progress::Unsettled => self.note_unsettled(),
+        }
+        self.raw.get(index)
+    }
+
+    /// Records that the specialization being optimized ahead, if any, read a body that is not
+    /// final yet.
+    pub(crate) fn note_unsettled(&self) {
+        self.read_unsettled.set(true);
+    }
+
+    /// Whether the specialization being optimized ahead of the worklist has read a body that is
+    /// not final, so that its result will be discarded.
+    pub(crate) fn abandons_ahead(&self) -> bool {
+        self.ahead.is_some() && self.read_unsettled.get()
+    }
+
+    /// Whether some specialization waits to be optimized before its first caller reads it.
+    pub(crate) fn has_ready(&self) -> bool {
+        self.ready > 0
+    }
+
+    /// Whether `id` is a specialization waiting to be optimized before its first caller reads it.
+    pub(crate) fn is_ready(&self, id: FunctionId) -> bool {
+        self.is_specialization(id)
+            && self.progress.get(id.function.as_index() - self.first_index)
+                == Some(&Progress::Ready)
+    }
+
+    /// Starts optimizing the ready specialization `id` ahead of the worklist, returning its raw
+    /// body and what [`Self::end_ahead`] restores.
+    pub(crate) fn begin_ahead(&mut self, id: LocalFunctionId) -> (Function, AheadFrame) {
+        let index = id.as_index() - self.first_index;
+        debug_assert_eq!(self.progress[index], Progress::Ready);
+        self.progress[index] = Progress::Optimizing;
+        self.ready -= 1;
+        let frame = AheadFrame {
+            ahead: self.ahead.replace(id),
+            read_unsettled: self.read_unsettled.replace(false),
+        };
+        (self.raw[index].clone(), frame)
+    }
+
+    /// Ends optimizing `id` ahead of the worklist, which counted `stats`. The result is kept only
+    /// when every body the optimization read was final, and returns whether it was.
+    pub(crate) fn end_ahead(
+        &mut self,
+        id: LocalFunctionId,
+        optimized: Function,
+        frame: AheadFrame,
+        stats: OptimizationStats,
+    ) -> bool {
+        let index = id.as_index() - self.first_index;
+        let settled = !self.read_unsettled.get();
+        if settled {
+            self.created[index].body = optimized;
+            self.progress[index] = Progress::Optimized;
+            self.kept_ahead_stats.add(stats);
+        } else {
+            self.progress[index] = Progress::Unsettled;
+        }
+        self.ahead = frame.ahead;
+        self.read_unsettled.set(frame.read_unsettled);
+        settled
+    }
+
+    /// What the specializations optimized ahead of the worklist and kept counted; the worklist
+    /// counts the others.
+    pub(crate) fn kept_ahead_stats(&self) -> OptimizationStats {
+        self.kept_ahead_stats
+    }
+
+    /// Whether the worklist still has to optimize `id`.
+    pub(crate) fn needs_worklist(&self, id: LocalFunctionId) -> bool {
+        self.progress[id.as_index() - self.first_index] != Progress::Optimized
     }
 
     /// Replaces the body of a specialization this table created, after optimizing it.
@@ -423,8 +556,18 @@ impl Specializations {
     }
 
     /// A specialization already admitted for `key`, so another call site needs no scan or budget.
+    ///
+    /// Never a deferred specialization of a callee now finished: [`Self::finish`] drops the keys
+    /// of the callees it publishes, so a later call site creates one from the optimized body.
     pub(crate) fn cached(&self, key: &SpecializationKey) -> Option<LocalFunctionId> {
-        self.cache.get(key).copied()
+        let id = self.cache.get(key).copied()?;
+        debug_assert!(
+            !(self.progress[id.as_index() - self.first_index] == Progress::Deferred
+                && (key.callee.module != self.module
+                    || self.finished_body(key.callee.function).is_some())),
+            "a cached key names a deferred specialization of a finished callee"
+        );
+        Some(id)
     }
 
     /// Whether the admission scan already found no specialization payoff for `key`.
@@ -465,8 +608,12 @@ impl Specializations {
         };
         let specialized = specialize(body, scheme, &key, own, env);
 
+        // Final exactly when the body read to create it was: a dependency's or a finished one.
+        let from_final =
+            key.callee.module != self.module || self.finished_body(key.callee.function).is_some();
         let digest = structure_digest(&specialized, key.callee, &self_reference(own));
-        if let Some(existing) = self.identical_to(&specialized, key.callee, own, digest) {
+        if let Some(existing) = self.identical_to(&specialized, key.callee, own, digest, from_final)
+        {
             self.cache.insert(key, existing);
             return existing;
         }
@@ -481,6 +628,12 @@ impl Specializations {
         specialized.set_name(name);
         let specialized = specialized.finish(env);
         self.raw.push(specialized.clone());
+        self.progress.push(if from_final {
+            self.ready += 1;
+            Progress::Ready
+        } else {
+            Progress::Deferred
+        });
         self.created.push(Specialization {
             original: key.callee,
             name,
@@ -497,6 +650,9 @@ impl Specializations {
     /// that fails to match is simply not shared with: the entry it occupies stays put, costing the
     /// colliding pair their sharing and nothing else.
     ///
+    /// A copy of a final body is not shared with a deferred one, which callers read raw until the
+    /// worklist reaches it: they would price it at its raw size instead of its optimized one.
+    ///
     /// Compared against the *raw* stage, the body as created — `created` is rewritten in place as
     /// the worklist reaches each entry, so comparing against it would make sharing depend on how far
     /// optimization had got.
@@ -506,10 +662,13 @@ impl Specializations {
         original: FunctionId,
         own: FunctionId,
         digest: u64,
+        from_final: bool,
     ) -> Option<LocalFunctionId> {
         let candidate = *self.structures.get(&digest)?;
         let index = candidate.as_index().checked_sub(self.first_index)?;
-        if self.created.get(index)?.original != original {
+        if self.created.get(index)?.original != original
+            || (from_final && self.progress[index] == Progress::Deferred)
+        {
             return None;
         }
         let candidate_own = FunctionId {
@@ -1358,6 +1517,12 @@ fn specialization_for(
     // which its optimized bodies call, have no HIR record and are refused just below.
     if specializations.is_specialization(*callee) {
         return None;
+    }
+    // Which specialization a key names depends on whether its callee's component is finished.
+    if callee.module == specializations.module()
+        && specializations.finished_body(callee.function).is_none()
+    {
+        specializations.note_unsettled();
     }
     // The callee's own module, which need not be the one being optimized: a user module calling a
     // generic `std` helper is the case that matters, since otherwise every std generic stays generic
@@ -2588,6 +2753,83 @@ mod tests {
         assert_eq!(specializations.len(), 1);
     }
 
+    /// A specialization created from a final body is read optimized once it was optimized ahead of
+    /// the worklist, unless that optimization read a body that is not final yet; one created from
+    /// a raw body waits for the worklist.
+    #[test]
+    fn a_specialization_is_read_optimized_only_when_everything_it_read_was_final() {
+        let mut session = CompilerSession::new();
+        let module_id = compile(
+            &mut session,
+            "fn identity(value: int) -> int { value }\n\
+             fn twice(value: int) -> int { value + value }\n\
+             fn unfinished(value: int) -> int { value - 1 }",
+        );
+        let (ids, function_count, schemes) = {
+            let module = session.expect_fresh_module(module_id);
+            let ids = ["identity", "twice", "unfinished"].map(|name| {
+                module
+                    .get_local_function_id(ustr(name))
+                    .expect("the function was just compiled")
+            });
+            let schemes = ids.map(|id| {
+                module
+                    .get_function_by_id(id)
+                    .expect("the function was just compiled")
+                    .definition
+                    .ty_scheme
+                    .clone()
+            });
+            (ids, module.function_count(), schemes)
+        };
+        session.prepare_execution_target(ExecutionTarget::Mir, module_id);
+        let bodies =
+            ["identity", "twice", "unfinished"].map(|name| body(&session, module_id, name).clone());
+        let key = |index: usize| SpecializationKey {
+            callee: FunctionId::new(module_id, ids[index]),
+            instantiation: Instantiation {
+                ty_args: Vec::new(),
+                eff_args: Vec::new(),
+            },
+            dictionaries: Vec::new(),
+        };
+        let env = session.module_env();
+        let mut specializations = Specializations::new(module_id, function_count, 3);
+        let from_raw = specializations.get_or_create(key(2), &schemes[2], &bodies[2], env);
+        specializations.finish(vec![
+            (ids[0], bodies[0].clone()),
+            (ids[1], bodies[1].clone()),
+        ]);
+        let settled = specializations.get_or_create(key(0), &schemes[0], &bodies[0], env);
+        let unsettled = specializations.get_or_create(key(1), &schemes[1], &bodies[1], env);
+        let spec = |id| FunctionId::new(module_id, id);
+        assert!(!specializations.is_ready(spec(from_raw)));
+        assert!(specializations.needs_worklist(from_raw));
+
+        // Stands in for the optimized body, which the table does not look into.
+        let marker = bodies[2].clone();
+        let marker_name = marker.name;
+        let (_, frame) = specializations.begin_ahead(settled);
+        assert!(specializations.end_ahead(settled, marker.clone(), frame, Default::default()));
+        assert!(!specializations.needs_worklist(settled));
+        assert_eq!(
+            specializations.callee_body(settled).map(|body| body.name),
+            Some(marker.name)
+        );
+
+        let (_, frame) = specializations.begin_ahead(unsettled);
+        SemanticCallees::new(&session, Some(&specializations))
+            .body(FunctionId::new(module_id, ids[2]))
+            .expect("an unfinished function is read raw");
+        assert!(specializations.abandons_ahead());
+        assert!(!specializations.end_ahead(unsettled, marker, frame, Default::default()));
+        assert!(specializations.needs_worklist(unsettled));
+        assert_ne!(
+            specializations.callee_body(unsettled).map(|body| body.name),
+            Some(marker_name)
+        );
+    }
+
     /// A recursive call records no instantiation — inference types a call within the defining group
     /// monomorphically rather than instantiating the scheme — so nothing else can redirect it. Left
     /// alone a specialization recurses into the generic original, and for a recursive algorithm
@@ -2627,13 +2869,14 @@ mod tests {
         let mut session = CompilerSession::new();
         session.set_mir_optimization(MirOptimization::Enabled);
         // Compiling at all is the assertion: every specialized body goes through `verify_function`,
-        // which is what rejected this before `demote_infallible_invokes` existed. The arms are
-        // padded past `INLINE_CALLEE_COST` so the copy survives into the final artifact and is
-        // verified in its own right — inlined into its only caller, it would be pruned as
-        // unreachable and only the splice would be checked.
+        // which is what rejected this before `demote_infallible_invokes` existed. `ho` is never
+        // inlined so the copy survives into the final artifact and is verified in its own right —
+        // inlined into its only caller, it would be pruned as unreachable and only the splice
+        // would be checked.
         let module = session.emit_mir(
             "spec",
-            "fn ho(f, x) { match f(x) { 1 => 10, 2 => 20, 3 => 30, 4 => 40, 5 => 50, \
+            "#[inline(never)]\n\
+             fn ho(f, x) { match f(x) { 1 => 10, 2 => 20, 3 => 30, 4 => 40, 5 => 50, \
              6 => 60, 7 => 70, 8 => 80, _ => 90 } }\n\
              fn use_it(n: int) -> int { ho(|z| z, n) }",
         );

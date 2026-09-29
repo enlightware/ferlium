@@ -83,9 +83,10 @@ impl<'a> OptimizationStage<'a> {
 /// Callee identities, bodies and facts for semantic optimization; each module answers for its own.
 ///
 /// The module being optimized resolves through the table under construction: a declared function
-/// is read optimized once its call-graph component is finished and raw before, a specialization as
-/// it was created. A dependency is optimized before its dependents and immutable, so it resolves
-/// through its optimized artifact, as it does without a table.
+/// is read optimized once its call-graph component is finished and raw before, a specialization
+/// optimized once it was optimized ahead of the worklist and as it was created before (see
+/// `monomorphize::Progress`). A dependency is optimized before its dependents and immutable, so it
+/// resolves through its optimized artifact, as it does without a table.
 #[derive(Clone, Copy)]
 pub(crate) struct SemanticCallees<'a> {
     session: &'a CompilerSession,
@@ -135,12 +136,13 @@ impl<'a> SemanticCallees<'a> {
     pub(crate) fn body(self, callee: FunctionId) -> Option<&'a Function> {
         let stage = match self.specializations {
             Some(specializations) if specializations.is_specialization(callee) => {
-                return specializations.raw_body(callee.function);
+                return specializations.callee_body(callee.function);
             }
             Some(specializations) if callee.module == specializations.module() => {
                 if let Some(body) = specializations.finished_body(callee.function) {
                     return Some(body);
                 }
+                specializations.note_unsettled();
                 MirOptimization::Disabled
             }
             _ => MirOptimization::Enabled,

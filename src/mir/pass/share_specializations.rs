@@ -150,21 +150,22 @@ mod tests {
     use super::*;
     use crate::{CompilerSession, MirOptimization, module::Path};
 
-    /// The adapter workload is the one that shows this at all: closure-carrying adapter structs are
-    /// where the copies that converge under optimization come from, and a module without them
-    /// leaves the pass with nothing to do — see measurement lesson 8 in the plan.
+    /// Checked on a module that keeps several specializations of one original. Closure-carrying
+    /// adapter structs are where copies that converge under optimization come from (see measurement
+    /// lesson 8 in the plan), but `iter_pipeline`'s are all inlined and pruned once specializations
+    /// are optimized before their callers read them; `linalg` keeps its element accessors at
+    /// several types.
     #[test]
     fn no_two_optimized_specializations_of_one_original_are_identical() {
         let mut session = CompilerSession::new();
         session.set_mir_optimization(MirOptimization::Enabled);
+        // `linalg` uses named subscripts.
+        session.set_allow_experimental(true);
         // Builds and installs the optimized stage, which is the only way to ask for it.
-        session.emit_mir(
-            "iter_pipeline",
-            include_str!("../../../tests/modules/iter_pipeline.fer"),
-        );
+        session.emit_mir("linalg", include_str!("../../../tests/modules/linalg.fer"));
         let (module_id, _) = session
             .modules()
-            .get_by_path(&Path::single_str("iter_pipeline"))
+            .get_by_path(&Path::single_str("linalg"))
             .expect("the module was just compiled");
         let optimized = session
             .mir_artifacts_for(module_id, MirOptimization::Enabled)

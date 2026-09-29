@@ -12,6 +12,7 @@
 //! A failure path, which ends in a call that [diverges](Operation::diverges), runs at most once: a
 //! callee is judged by its [`hot_cost`], but grows its caller by its whole [`cost`].
 
+use super::budget::{INLINE_FUNCTION_GROWTH, INLINE_LOOP_GROWTH};
 use crate::{
     graph,
     mir::{BlockId, Function, Operation, OperationKind, terminator::TerminatorKind},
@@ -122,9 +123,109 @@ pub(crate) fn hot_blocks(func: &Function) -> Vec<bool> {
     hot
 }
 
+/// What a function cost before optimization started, which its growth budgets are measured from.
+///
+/// Measured once, before any round: against the current size, each round would grant the budgets
+/// afresh, and they would only bound growth per round.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GrowthBase {
+    total: usize,
+    outside_loops: usize,
+}
+
+impl GrowthBase {
+    pub(crate) fn of(func: &Function) -> Self {
+        let cyclic = cyclic_blocks(func);
+        Self {
+            total: cost(func),
+            outside_loops: cost_outside_loops(func, &cyclic),
+        }
+    }
+}
+
+/// A function's cost as one pass plans rewrites, reserved against its growth budgets.
+///
+/// Two budgets, because a site in a loop runs once per iteration: the whole function may grow by
+/// [`INLINE_LOOP_GROWTH`], and its code outside loops by [`INLINE_FUNCTION_GROWTH`]. They are
+/// measured apart, so what loops take cannot starve the code around them: charging all growth to
+/// one total would let a loop that inlines a large body in the first round refuse the sites before
+/// it, while the same growth reached through smaller bodies over several rounds would not. A
+/// function without loops grows by [`INLINE_FUNCTION_GROWTH`].
+pub(crate) struct Growth {
+    base: GrowthBase,
+    cyclic: Vec<bool>,
+    total: usize,
+    outside_loops: usize,
+}
+
+impl Growth {
+    pub(crate) fn new(base: GrowthBase, func: &Function) -> Self {
+        let cyclic = cyclic_blocks(func);
+        Self {
+            base,
+            total: cost(func),
+            outside_loops: cost_outside_loops(func, &cyclic),
+            cyclic,
+        }
+    }
+
+    /// A function of `total` cost, `outside_loops` of it outside loops, that has not grown yet.
+    #[cfg(test)]
+    fn unchanged(total: usize, outside_loops: usize, cyclic: Vec<bool>) -> Self {
+        Self {
+            base: GrowthBase {
+                total,
+                outside_loops,
+            },
+            cyclic,
+            total,
+            outside_loops,
+        }
+    }
+
+    /// Whether `block` lies in a loop.
+    pub(crate) fn in_loop(&self, block: BlockId) -> bool {
+        self.cyclic[block.as_index()]
+    }
+
+    /// Reserves replacing operations costing `removed` in `block` by ones costing `added`, unless
+    /// that grows the function beyond a budget.
+    ///
+    /// A rewrite that does not grow the function is always accepted: the function is within its
+    /// budgets already, and a rewrite exposed by growth elsewhere must not be refused for it.
+    pub(crate) fn reserve(&mut self, block: BlockId, removed: usize, added: usize) -> bool {
+        let in_loop = self.in_loop(block);
+        let total = self.total.saturating_sub(removed).saturating_add(added);
+        let outside_loops = if in_loop {
+            self.outside_loops
+        } else {
+            self.outside_loops
+                .saturating_sub(removed)
+                .saturating_add(added)
+        };
+        if added > removed
+            && (total > self.base.total + INLINE_LOOP_GROWTH
+                || outside_loops > self.base.outside_loops + INLINE_FUNCTION_GROWTH)
+        {
+            return false;
+        }
+        self.total = total;
+        self.outside_loops = outside_loops;
+        true
+    }
+}
+
+/// The cost of the blocks outside every loop.
+fn cost_outside_loops(func: &Function, cyclic: &[bool]) -> usize {
+    func.blocks()
+        .filter(|block| !cyclic[block.as_index()])
+        .map(|block| block_cost(func, block))
+        .sum()
+}
+
 /// The blocks that lie on a cycle of the control-flow graph, by block index: a call there runs once
 /// per iteration.
-pub(crate) fn cyclic_blocks(func: &Function) -> Vec<bool> {
+fn cyclic_blocks(func: &Function) -> Vec<bool> {
     struct Block(Vec<usize>);
     impl graph::Node for Block {
         type Index = usize;
@@ -159,14 +260,50 @@ pub(crate) fn cyclic_blocks(func: &Function) -> Vec<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::cost;
+    use super::{Growth, cost};
     use crate::{
         CompilerSession, ExecutionTarget,
         compiler::MirOptimization,
-        mir::pass::budget::INLINE_LOOP_GROWTH,
+        mir::{
+            BlockId,
+            pass::budget::{INLINE_FUNCTION_GROWTH, INLINE_LOOP_GROWTH},
+        },
         module::{LocalFunctionId, ModuleId, Path, id::Id},
         std::STD_MODULE_ID,
     };
+
+    const OUTSIDE: BlockId = BlockId::new(0);
+    const IN_LOOP: BlockId = BlockId::new(1);
+
+    #[test]
+    fn code_outside_loops_grows_by_the_function_growth_budget() {
+        let mut growth = Growth::unchanged(10, 10, vec![false]);
+        for _ in 0..64 {
+            assert!(growth.reserve(OUTSIDE, 1, 3));
+        }
+        assert!(!growth.reserve(OUTSIDE, 1, 3));
+    }
+
+    /// What a loop takes cannot starve the code around it, whichever round inlines it.
+    #[test]
+    fn growth_in_loops_leaves_the_code_outside_them_its_budget() {
+        let mut growth = Growth::unchanged(20, 10, vec![false, true]);
+        assert!(growth.reserve(IN_LOOP, 1, INLINE_LOOP_GROWTH - INLINE_FUNCTION_GROWTH + 1));
+        assert!(growth.reserve(OUTSIDE, 1, INLINE_FUNCTION_GROWTH + 1));
+        assert!(!growth.reserve(OUTSIDE, 1, 2));
+        // The whole function is at its budget now.
+        assert!(!growth.reserve(IN_LOOP, 1, 2));
+    }
+
+    /// A rewrite exposed by growth elsewhere must go through when it does not grow the function.
+    #[test]
+    fn a_rewrite_that_does_not_grow_is_accepted_beyond_the_budgets() {
+        let mut growth = Growth::unchanged(10, 10, vec![false, true]);
+        assert!(growth.reserve(IN_LOOP, 1, INLINE_LOOP_GROWTH + 1));
+        assert!(!growth.reserve(OUTSIDE, 1, 2));
+        assert!(growth.reserve(OUTSIDE, 1, 1));
+        assert!(growth.reserve(IN_LOOP, 2, 1));
+    }
 
     const CORPUS: &[(&str, &str)] = include!("../../../tests/harness/mir_corpus.rs");
 

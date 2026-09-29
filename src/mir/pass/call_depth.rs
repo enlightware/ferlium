@@ -9,7 +9,7 @@ use crate::{
         BlockId, Function, OperationKind, dominance::Dominance, edit::FunctionEdit,
         terminator::TerminatorKind,
     },
-    module::{FunctionId, ModuleEnv, id::Id},
+    module::{CallableOrigin, FunctionId, ModuleEnv, id::Id},
 };
 
 use super::{SemanticCallees, budget, will_return::operation_calls_only};
@@ -76,12 +76,23 @@ impl AcyclicCalls<'_> {
         }
         self.remaining -= 1;
         self.known.insert(id, false);
-        let native = self
+        // Native entries cannot re-enter the execution; storage primitives and structural field
+        // addressors only compute addresses and move bytes, never calling element operations.
+        let leaf = self
             .env
             .module_by_id(id.module)
             .and_then(|module| module.get_function_by_id(id.function))
-            .is_some_and(|function| function.code.native_entry().is_some());
-        let proven = native
+            .is_some_and(|function| {
+                function.code.native_entry().is_some()
+                    || match function.origin {
+                        CallableOrigin::BufferPrimitive(primitive) => primitive.is_storage(),
+                        CallableOrigin::StructuralFieldAddressor { .. } => true,
+                        CallableOrigin::Script
+                        | CallableOrigin::Native { .. }
+                        | CallableOrigin::Transient => false,
+                    }
+            });
+        let proven = leaf
             || self
                 .callees
                 .body(id)

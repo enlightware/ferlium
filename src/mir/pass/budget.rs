@@ -43,26 +43,32 @@ pub const MAX_ROUNDS: usize = 4;
 /// method bodies. A cap that a routine edit can cross would make the speedup fragile, which is the
 /// stability requirement that a user who annotates a hot path must not lose the optimization to
 /// an unrelated edit.
-pub const INLINE_CALLEE_COST: usize = 32;
+///
+/// Callees are judged at their final size, the body inlining copies, so the cap must admit what the
+/// small callees above cost once their own callees are inlined: a function touching two array
+/// elements, each access checked and resolved in its ring buffer, costs about 47.
+pub const INLINE_CALLEE_COST: usize = 48;
 
-/// How much inlining may grow one function's [`cost`](super::cost) beyond the cost it had *before*
-/// optimization started.
+/// How much inlining may grow the [`cost`](super::cost) of one function's code outside loops beyond
+/// what that code cost *before* optimization started.
 ///
 /// Bounds the whole of optimization rather than each site or each round: a function full of small
 /// calls would otherwise inline all of them, and measuring against the current size would let each
 /// round grant the budget afresh. Together with the callee cap this is what bounds code growth, and
 /// it is public because a budget change is a user-visible change — the optimization report cites
-/// these by name.
+/// these by name. For a function without loops, this bounds its whole growth.
 pub const INLINE_FUNCTION_GROWTH: usize = 128;
 
-/// How much inlining may grow one function's [`cost`](super::cost) beyond the cost it had *before*
-/// optimization started, counting only call sites inside a loop.
+/// How much inlining may grow one function's whole [`cost`](super::cost) beyond the cost it had
+/// *before* optimization started.
 ///
-/// A site in a loop runs once per iteration, so it pays far more than a straight-line one: on the
-/// runtime corpus, granting the larger allowance to all sites instead would add more than twice the
-/// compile time for the same execution gain. Loop sites spend it first, and other sites stop at
-/// [`INLINE_FUNCTION_GROWTH`], so a function without loops grows as before. Constructive folds
-/// reserve their growth against the same budget as an inlined call at the same place.
+/// Only sites in loops can reach it, since the code outside loops stops at
+/// [`INLINE_FUNCTION_GROWTH`]. A site in a loop runs once per iteration, so it pays far more than a
+/// straight-line one: on the runtime corpus, granting the larger allowance to all sites instead
+/// would add more than twice the compile time for the same execution gain. The two are measured
+/// apart, so that what loops take cannot starve the code around them (see
+/// [`Growth`](super::cost::Growth)). Constructive folds reserve their growth against the same
+/// budgets as an inlined call at the same place.
 pub const INLINE_LOOP_GROWTH: usize = 256;
 
 /// Largest owned string result one compile-time evaluation may embed as a constructive recipe.

@@ -765,7 +765,9 @@ mod tests {
         session.set_physical_mir_optimization(MirOptimization::Disabled);
         let module = session
             .compile(
-                "fn identity(x: int) -> int { x } fn compute(x: int) -> int { let f = identity; f(x) }",
+                // Assigned twice, so the function value keeps its cell and its destructor.
+                "fn identity(x: int) -> int { x } \
+                 fn compute(x: int) -> int { let mut f = identity; if x > 0 { f = identity }; f(x) }",
                 "selected",
                 Path::single_str("selected"),
             )

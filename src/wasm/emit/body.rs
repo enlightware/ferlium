@@ -385,10 +385,15 @@ impl<'a, 's> Body<'a, 's> {
         if dispatched {
             this.pc = Some(this.local(ValType::I32));
         }
-        // Constants remain immediate unless an indirect argument or pointer use needs storage.
+        // Constants remain immediate unless an indirect argument or pointer use needs storage. A
+        // constant that is only ever stored initializes each destination from its literal instead,
+        // so it needs no slot initialized on every entry, typically a failure message.
+        let only_stored = constants_only_stored(body);
         for (index, constant) in body.constants().iter().enumerate() {
             let value = Value::Constant(ConstantId::from_index(index));
-            if this.analysis.is_addressed(&value) || ScalarType::of(constant.ty).is_err() {
+            if !only_stored[index]
+                && (this.analysis.is_addressed(&value) || ScalarType::of(constant.ty).is_err())
+            {
                 this.slot(value, this.size(&MirType::Lowered(constant.ty))?)?;
             }
         }
@@ -2720,6 +2725,11 @@ impl<'a, 's> Body<'a, 's> {
                     self.prepare_store(&args[1])?;
                     self.value(&args[0])?;
                     self.finish_store(&args[1], ty);
+                } else if let Value::Constant(id) = &args[0]
+                    && !self.storage.contains_key(&args[0])
+                {
+                    let constant = self.body.constant(*id);
+                    self.initialize_literal(&args[1], constant.ty, &constant.representation, 0)?;
                 } else {
                     self.address(&args[1])?;
                     self.value(&args[0])?;
@@ -2971,6 +2981,39 @@ impl<'a, 's> Body<'a, 's> {
         });
         Ok(())
     }
+}
+
+/// Which constants are only ever the value a `store` writes.
+fn constants_only_stored(body: &Function) -> Vec<bool> {
+    let mut only_stored = vec![true; body.constants().len()];
+    for block in body.blocks() {
+        let block = body.block(block);
+        let operations = block.operations().iter().flat_map(|operation| {
+            operation
+                .operands
+                .iter()
+                .enumerate()
+                .map(move |(position, operand)| {
+                    (
+                        operand,
+                        operation.kind == OperationKind::Store && position == 0,
+                    )
+                })
+        });
+        let terminator = block
+            .terminator()
+            .operands()
+            .iter()
+            .map(|operand| (operand, false));
+        for (operand, stored) in operations.chain(terminator) {
+            if let Value::Constant(id) = operand
+                && !stored
+            {
+                only_stored[id.as_index()] = false;
+            }
+        }
+    }
+    only_stored
 }
 
 fn needs_helper_locals(

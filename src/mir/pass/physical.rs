@@ -51,7 +51,7 @@ pub(crate) fn optimize(
         .iter()
         .map(|body| {
             body.as_ref().map(|body| {
-                let original_size = cost::cost(body);
+                let growth_base = cost::GrowthBase::of(body);
                 let mut current = body.clone();
                 for _ in 0..budget::MAX_ROUNDS {
                     let mut changed = false;
@@ -65,7 +65,7 @@ pub(crate) fn optimize(
                     }
                     if let Some(folded) = fold::fold_function(
                         &current,
-                        original_size,
+                        growth_base,
                         env,
                         stage,
                         fold::KnownCallSemantics::new(known, &|callee| {
@@ -88,7 +88,7 @@ pub(crate) fn optimize(
                     apply!(copy_forward::forward_redundant_storage(
                         &current, env, stage
                     ));
-                    apply!(inline::inline_function(&current, original_size, env, stage));
+                    apply!(inline::inline_function(&current, growth_base, env, stage));
                     apply!(branch_forward::forward_boolean_branches(&current));
                     apply!(peephole::materialize_boolean_results(&current));
                     apply!(dead_store::remove_overwritten_trivial_copy_stores(

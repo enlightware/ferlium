@@ -949,6 +949,26 @@ mod tests {
             .unwrap()
     }
 
+    /// Every inlined frame is restored, before the dispatch or on each redirected path.
+    fn assert_every_frame_is_restored(body: &str) {
+        let saves: Vec<&str> = body
+            .lines()
+            .filter(|line| line.ends_with("= stack_save"))
+            .filter_map(|line| line.split(':').next())
+            .map(str::trim)
+            .collect();
+        assert!(
+            !saves.is_empty(),
+            "the test needs an inlined frame:\n{body}"
+        );
+        for save in saves {
+            assert!(
+                body.contains(&format!("stack_restore {save}\n")),
+                "the frame saved in {save} must be restored:\n{body}"
+            );
+        }
+    }
+
     /// An integer comparison used only for control flow directly tests its native code.
     /// Inlining and cleanup must retain that branch and restore the inlined frame on both paths
     /// without materializing an intermediate boolean.
@@ -968,10 +988,7 @@ mod tests {
             !body.contains("alloca bool"),
             "control-only comparison needs no boolean storage:\n{body}"
         );
-        assert!(
-            body.matches("stack_restore").count() >= 2,
-            "both redirected paths must still restore the inlined frame:\n{body}"
-        );
+        assert_every_frame_is_restored(body);
     }
 
     /// A short-circuit `or` over two integer comparisons needs only their two code tests.
@@ -997,10 +1014,7 @@ mod tests {
             2,
             "each native code is tested once, without a boolean retest:\n{body}"
         );
-        assert!(
-            body.matches("stack_restore").count() >= 3,
-            "every redirected arm must still restore the frames it passed:\n{body}"
-        );
+        assert_every_frame_is_restored(body);
     }
 
     /// Native predicates return into places. Their result may be the last operand

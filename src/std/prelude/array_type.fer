@@ -87,9 +87,15 @@ fn array_with_capacity<A>(capacity: int) -> [A] {
 
 fn array_ensure_capacity<A>(array: &mut [A], len: int)
 {
-	if array.capacity >= len {
-		return ();
-	};
+	if array.capacity < len {
+		array_grow(array, len)
+	}
+}
+
+// Kept out of line: callers inline the capacity check, and growth runs rarely.
+#[inline(never)]
+fn array_grow<A>(array: &mut [A], len: int)
+{
 	let new_capacity = if array.capacity <= 0 {
 		1
 	} else {

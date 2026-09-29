@@ -26,7 +26,9 @@ use std::{cmp::Reverse, fmt};
 
 use ustr::Ustr;
 
-use super::{fold, inline, inline::NotInlinable, string_accumulate::StringFunctions};
+use super::{
+    cost::GrowthBase, fold, inline, inline::NotInlinable, string_accumulate::StringFunctions,
+};
 use crate::{
     Location, MirOptimization,
     compiler::{CompilerSession, MirArtifacts, Specialization},
@@ -261,7 +263,7 @@ pub(crate) fn build(
         let plan = fold::plan_folds(
             optimized_body,
             fold::FoldResources::new(
-                raw_body.operation_count(),
+                GrowthBase::of(raw_body),
                 env,
                 module_id,
                 &string_materializer,

@@ -23,6 +23,8 @@
 //! so there is no alias through which either place can change. Allocating the source first also
 //! proves it outlives the destination across every `stack_restore`.
 
+use std::cell::OnceCell;
+
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{
@@ -304,6 +306,7 @@ pub(crate) fn forward_redundant_storage(
             }
         }
     }
+    let private = OnceCell::new();
     for start in 0..forwarded_initializations.len() {
         if consumed.contains(&start) || blocked.contains(&start) {
             continue;
@@ -320,6 +323,7 @@ pub(crate) fn forward_redundant_storage(
                 func,
                 &operation_definitions,
                 &mut storage_cache,
+                &private,
                 env,
                 stage,
             ) {
@@ -501,12 +505,14 @@ fn operation_at(func: &Function, site: OperationSite) -> &Operation {
     &func.block(site.block).operations()[site.index.as_index()]
 }
 
+#[allow(clippy::too_many_arguments)]
 fn can_retarget_initialization(
     producer: &Operation,
     destination: &mir::Value,
     func: &Function,
     definitions: &FxHashMap<ValueId, &Operation>,
     storage_cache: &mut FxHashMap<ValueId, OperandStorage>,
+    private: &OnceCell<FxHashSet<ValueId>>,
     env: ModuleEnv<'_>,
     stage: OptimizationStage<'_>,
 ) -> bool {
@@ -539,7 +545,14 @@ fn can_retarget_initialization(
         .enumerate()
         .filter(|(index, _)| *index != destination_index)
         .all(|(_, input)| {
-            operands_are_disjoint(input, destination, func, definitions, storage_cache)
+            operands_are_disjoint(
+                input,
+                destination,
+                func,
+                definitions,
+                storage_cache,
+                private,
+            )
         })
 }
 
@@ -572,7 +585,13 @@ fn operands_are_disjoint(
     func: &Function,
     definitions: &FxHashMap<ValueId, &Operation>,
     storage_cache: &mut FxHashMap<ValueId, OperandStorage>,
+    private: &OnceCell<FxHashSet<ValueId>>,
 ) -> bool {
+    let is_private = |place: &PlaceIdentity| {
+        matches!(place.root, PlaceRoot::Result(root) if private
+            .get_or_init(|| private_allocas(func, definitions))
+            .contains(&root))
+    };
     match (
         operand_storage(first, func, definitions, storage_cache),
         operand_storage(second, func, definitions, storage_cache),
@@ -588,8 +607,106 @@ fn operands_are_disjoint(
                 .zip(&second.fields)
                 .any(|(first, second)| first != second)
         }
-        (OperandStorage::Unknown, _) | (_, OperandStorage::Unknown) => false,
+        // No pointer this function obtains can reach a local whose address never escapes.
+        (OperandStorage::Place(place), OperandStorage::Unknown)
+        | (OperandStorage::Unknown, OperandStorage::Place(place)) => is_private(&place),
+        (OperandStorage::Unknown, OperandStorage::Unknown) => false,
     }
+}
+
+/// The local `alloca`s whose address never escapes: every use of them, or of a field projected
+/// from them, reads or writes the place itself, or passes it to a call returning a value.
+///
+/// A pointer the function loads, or an accessor returns, can only point into such a local if its
+/// address was stored as a value or handed to a place-returning call, which both disqualify it.
+fn private_allocas(
+    func: &Function,
+    definitions: &FxHashMap<ValueId, &Operation>,
+) -> FxHashSet<ValueId> {
+    // The local each field projection is rooted in.
+    fn root(
+        id: ValueId,
+        definitions: &FxHashMap<ValueId, &Operation>,
+        roots: &mut FxHashMap<ValueId, Option<ValueId>>,
+    ) -> Option<ValueId> {
+        if let Some(root) = roots.get(&id) {
+            return *root;
+        }
+        let found = match definitions
+            .get(&id)
+            .map(|operation| (&operation.kind, *operation))
+        {
+            Some((OperationKind::Alloca { .. } | OperationKind::AllocaPlace { .. }, _)) => Some(id),
+            Some((OperationKind::Subfield { .. }, operation)) => match &operation.operands[0] {
+                mir::Value::Register(base) => root(*base, definitions, roots),
+                _ => None,
+            },
+            _ => None,
+        };
+        roots.insert(id, found);
+        found
+    }
+
+    let mut roots = FxHashMap::default();
+    let mut locals = FxHashSet::default();
+    let mut escaped = FxHashSet::default();
+    for block in func.blocks() {
+        let basic_block = func.block(block);
+        let invoked = match &basic_block.terminator().kind {
+            TerminatorKind::Invoke { operation, .. } => Some(operation),
+            _ => None,
+        };
+        for operation in basic_block.operations().iter().chain(invoked) {
+            for (position, operand) in operation.operands.iter().enumerate() {
+                let mir::Value::Register(id) = operand else {
+                    continue;
+                };
+                let Some(local) = root(*id, definitions, &mut roots) else {
+                    continue;
+                };
+                locals.insert(local);
+                let in_place = match (&operation.kind, position) {
+                    (OperationKind::Subfield { .. }, 0)
+                    | (
+                        OperationKind::Load
+                        | OperationKind::CompareEqual
+                        | OperationKind::ExtractTag
+                        | OperationKind::ExtractPayloadIndirection
+                        | OperationKind::IsInitialized
+                        | OperationKind::Clear
+                        | OperationKind::Drop { .. }
+                        | OperationKind::DropInitialized { .. },
+                        0,
+                    )
+                    | (OperationKind::Store, 1)
+                    | (
+                        OperationKind::Memcpy
+                        | OperationKind::Move
+                        | OperationKind::Replace
+                        | OperationKind::MoveBytes { .. }
+                        | OperationKind::Clone { .. },
+                        0 | 1,
+                    ) => true,
+                    (OperationKind::Call { ty, .. }, 1..) => !ty.result_convention.returns_borrow(),
+                    _ => false,
+                };
+                if !in_place {
+                    escaped.insert(local);
+                }
+            }
+        }
+        if !matches!(basic_block.terminator().kind, TerminatorKind::Invoke { .. }) {
+            for operand in basic_block.terminator().operands() {
+                if let mir::Value::Register(id) = operand
+                    && let Some(local) = root(*id, definitions, &mut roots)
+                {
+                    escaped.insert(local);
+                }
+            }
+        }
+    }
+    locals.retain(|local| !escaped.contains(local));
+    locals
 }
 
 fn operand_storage(

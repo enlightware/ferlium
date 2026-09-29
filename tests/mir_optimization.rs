@@ -56,6 +56,28 @@ fn constant_arithmetic_folds_away() {
     );
 }
 
+/// A non-capturing closure bound to a local is a bare function in a single-store cell: the call
+/// through it becomes direct, is inlined, and the body keeps no call-depth check.
+#[test]
+fn a_local_non_capturing_closure_is_called_directly() {
+    let optimized = emit(
+        "closure",
+        "fn apply(x: int) -> int { let f = |y| y + 1; f(x) }",
+        MirOptimization::Enabled,
+    );
+    let apply = optimized
+        .split("fn apply")
+        .nth(1)
+        .expect("the module defines apply")
+        .split("\nfn ")
+        .next()
+        .expect("apply has a body");
+    assert!(
+        !apply.contains("lambda") && !apply.contains("check_call_depth"),
+        "the closure must be inlined and the check proved unnecessary:\n{apply}"
+    );
+}
+
 /// An owned string cannot enter the constant pool, but its immutable contents can. Folding a
 /// formatter therefore leaves the terminal `StaticStr` -> fresh `string` construction rather than
 /// the formatter call itself.

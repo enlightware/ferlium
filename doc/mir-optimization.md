@@ -84,8 +84,14 @@ finished callee optimized and any other body of the module raw, so members of a 
 read each other raw and no decision depends on the order within one. A dependency is optimized
 before its dependents and immutable, so its bodies are always read optimized. This is LLVM's CGSCC
 order, also followed by GCC and rustc: each callee is simplified once, arrives at its final size for
-the inline budget, and its callers' passes must accept their own output. A specialization is read as
-it was created, before the worklist optimized it.
+the inline budget, and its callers' passes must accept their own output.
+
+**A specialization is optimized before its callers read it, when its inputs are final.** One
+created from a final body (a dependency's or a finished component's) is optimized as soon as a
+caller is about to read it, and callers read the optimized body. The result is kept only if every
+body that optimization read was final too, so it does not depend on when it was computed; otherwise
+it is abandoned and the worklist optimizes it once every declared body is finished. Until then,
+callers read it as created (`monomorphize::Progress`).
 
 **Each module answers for the callees it owns.** `SemanticCallees` (`mir::pass::stage`) resolves a
 callee to its source function and reads its summaries. The module being optimized resolves through
@@ -472,18 +478,25 @@ there would shift its failure states by one level, and when it is on a failure p
 annotation remains on the source HIR definition; the inliner resolves a MIR callee identity back to that definition, and specializations
 inherit the policy of their original function. Conservative call-depth checks on unresolved calls
 do not prevent inlining. Redundant checks at the same frame depth and checks whose reachable
-calls are proven acyclic can be removed; unresolved callbacks retain protection.
+calls are proven acyclic can be removed; unresolved callbacks retain protection. Native entries,
+buffer storage primitives and structural field addressors cannot re-enter script code, so the proof
+treats them as leaves.
 
 **Cost is what the backend emits.** Frame bookkeeping (static slots, stack marks, static field
 offsets) lowers to no instruction, so it is free. A failure path — code that can only end in a call
 returning `never`, such as `panic` — runs at most once: a callee is judged by the cost of its other
 paths, and a call on a failure path is not inlined. Growth still counts everything copied.
 
-**The growth budget is spent by priority.** Each round first collects every site that passes the
+**A callee is judged at its final size**, the body inlining copies, so `INLINE_CALLEE_COST` is set
+for what small callees cost once their own callees are inlined. A generic callee is still judged at
+its generic cost, an upper bound of its concrete one.
+
+**The growth budgets are spent by priority.** Each round first collects every site that passes the
 other checks, then admits sites in a loop before the others and cheaper callees before larger ones,
-with position breaking ties. A site in a loop runs once per iteration, so it may grow the function
-up to `INLINE_LOOP_GROWTH`, the others up to `INLINE_FUNCTION_GROWTH`. In block order, a large callee
-early in a function would refuse the smaller or hotter sites after it.
+with position breaking ties. In block order, a large callee early in a function would refuse the
+smaller or hotter sites after it. A site in a loop runs once per iteration, so the whole function may
+grow by `INLINE_LOOP_GROWTH`, and its code outside loops by `INLINE_FUNCTION_GROWTH`. Measured apart
+(`cost::Growth`), what loops take cannot starve the code around them.
 
 A dictionary parameter is *not* itself a reason to refuse: splicing binds `@extra` parameters like
 any other, and a genuinely generic body is already refused for its non-constant parameter types. What
@@ -591,27 +604,28 @@ collapsed in one traversal rather than requiring another optimization round.
 
 Retargeting must not make a producer overwrite storage it also reads. A small place-identity model
 tracks allocation/parameter roots and constant `subfield` paths, proving different roots and sibling
-fields disjoint while rejecting opaque `project` provenance. Calls and clones receive one additional
-exception: a resolved native with a `TrivialCopy` result computes its owned HIR result before the MIR
-bridge stores it, so its result may safely reuse an input place. This permits arithmetic writeback
+fields disjoint while rejecting opaque `project` provenance. A place of unknown provenance, such as
+a loaded pointer, is disjoint from a local whose address never escapes: it is only read or written
+in place or passed to calls returning a value. Calls and clones receive one additional exception:
+a resolved native with a `TrivialCopy` result computes its owned HIR result before the MIR bridge
+stores it, so its result may safely reuse an input place. This permits arithmetic writeback
 such as `call add(%x, %y, %x)` without weakening the fresh-result contract for script calls.
 
 Its cheap structural scan runs each optimization round before the inliner prices the body, and once
 more before final DCE. The linear whole-function use census runs only when that scan finds a viable
 candidate, and tracks only participating allocations.
 
-## Register forwarding through cells
+## Forwarding through single-assignment cells
 
 MIR has no φ: a value meeting a join, or leaving an inlined callee through its `@ret`, travels
-through a cell, so its reader sees `store %v to %cell; …; %x = load %cell`. `mir::pass::store_forward`
-rewrites such reads to `%v` when `%cell` is a local `TrivialCopy` `alloca` whose only write is that
-store, whose every other use is a `load` or a `comp_eq` scrutinee, and whose store dominates the
-read. `%v` must hold a materialized value: a stored place register is bridged to a pointer by the
-store, which the register itself is not. Registers are defined once, so that dominance also proves
-`%v` still holds the stored value. A forwarded load stored into another cell resolves to the root
-register.
-A cell whose every read was forwarded is removed with its store and loads; being `TrivialCopy`, it
-holds no drop obligation.
+through a cell, so its reader sees `store %v to %cell; …; %x = load %cell`; inlining also leaves
+copies between cells. `mir::pass::store_forward` treats a local `TrivialCopy` cell written exactly
+once, and otherwise only loaded, compared or copied from, as a value, like rustc's `SsaLocals`. A
+read its write dominates sees what the write stored: a materialized register, a constant, or, for a
+copy from another such cell whose write dominates the copy, what that cell holds. A copy from a
+`let` parameter reads the parameter in place. A cell holding a non-capturing closure's function is
+one too: calls through it become direct, and its drop, which releases nothing, goes. A cell whose
+every read was forwarded is removed with its write.
 
 It is a canonicalizer: every later pass may assume a value is tested where it is computed, not
 where a rewrite parked it. It therefore runs in each round next to storage forwarding and after the
@@ -620,8 +634,8 @@ the body shrinks because each of the three produces shapes another reads: negati
 diamond that branch forwarding dissolves, which leaves a single-store cell. Boolean flow runs after
 boolean materialization, so the analyses that read branch conditions, such as bounds-check
 elimination, see its canonical form, and again in each final cleanup sweep, where outcome
-simplification stores computed predicates. Structural gates restrict type queries to allocations receiving a
-register store that the use census keeps.
+simplification stores computed predicates. Structural gates restrict type queries to the cells the
+use census keeps.
 
 ## Local branch forwarding
 
@@ -917,7 +931,9 @@ body, and a body spliced directly inside another's bracket takes its mark at the
 
 The analysis is a forward fixpoint over the set of markers known equal to the frontier, intersected
 at joins, cleared by anything that may leave frame storage. It shares that predicate with `dce` so
-the two cannot disagree about what grows a frame.
+the two cannot disagree about what grows a frame. A `yield` clears it too: the physical interpreter
+resumes on the same frontier, but a backend retaining suspension frames, such as Wasm, resumes on
+its own and cannot restore a mark taken before the suspension.
 
 One sweep is idempotent: a restore is redundant when the frontier holds any marker equal to its own
 after this sweep's substitutions, since substituted markers are equal integers. Rewrites in the
@@ -1000,8 +1016,8 @@ change: the optimization report cites the inlining limits by name.
 | `CALL_DEPTH_PROOF_WORK`, `CALL_DEPTH_PROOF_DEPTH` | work and traversal depth per call-depth proof |
 | `MAX_ROUNDS` | the driver's outer loop |
 | `INLINE_CALLEE_COST` | the largest hot cost of a callee inlining will copy |
-| `INLINE_FUNCTION_GROWTH` | cost growth beyond what a function had *before* optimization |
-| `INLINE_LOOP_GROWTH` | the same growth, for call sites in a loop |
+| `INLINE_FUNCTION_GROWTH` | growth of the code outside loops, from *before* optimization |
+| `INLINE_LOOP_GROWTH` | growth of the whole function |
 | `REIFIED_STRING_BYTES` | immutable text embedded by one constructive string result |
 | `specialization_limit` | specializations per module, against the cascade |
 | `owned_argument_variant_limit` | ownership-taking ABI variants per module |
@@ -1009,14 +1025,13 @@ change: the optimization report cites the inlining limits by name.
 Inlining budgets are per function; generated-variant budgets are per module to cap call-graph
 cascades. Constructive folds reserve their added setup operations against the same budgets as an
 inlined call at the same place before being planned, so the bound covers folding as well as
-inlining; a fold that does not grow the function is always accepted, so that a function which loop
-inlining took past `INLINE_FUNCTION_GROWTH` still folds what inlining exposed. The
-specialization population is measured before optimization; the owned-variant source
-population is the declared bodies plus completed specializations entering that final pass. Neither
-kind of generated output enlarges its own allowance. For each generated-variant budget, the fixed
-number is a minimum total allowance and the scaled number replaces it once larger; the two are not
-added together. Growth is measured against the pre-optimization size, or each round would grant it
-afresh.
+inlining; a fold that does not grow the function is always accepted, so that a function at a
+budget still folds what inlining exposed. The specialization population is measured before
+optimization; the owned-variant source population is the declared bodies plus completed
+specializations entering that final pass. Neither kind of generated output enlarges its own
+allowance. For each generated-variant budget, the fixed number is a minimum total allowance and
+the scaled number replaces it once larger; the two are not added together. Growth is measured
+against the pre-optimization size, or each round would grant it afresh.
 
 ## The optimization report
 

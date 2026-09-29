@@ -319,8 +319,20 @@ mod tests {
                 text.text
             );
         }
-        for unused in ["call_depth", "call_depth_limit", "fuel", "fuel_enabled"] {
+        // No source function contains a loop needing fuel.
+        for unused in ["fuel", "fuel_enabled"] {
             assert!(!text.text.contains(&format!("(global ${unused}")));
+        }
+        // The closure in `apply` is called directly and inlined, so no source function needs a
+        // call-depth check. The closure type's generated drop still keeps one: dropping a closure
+        // runs the drops of whatever it captured, which may be other closures.
+        for function in text.text.split("(func ").skip(1) {
+            if !function.starts_with("$wasm_text::")
+                || function.starts_with("$wasm_text::$_ferlium_function_value_drop")
+            {
+                continue;
+            }
+            assert!(!function.contains("$call_depth"), "{function}");
         }
         assert!(!text.source_map.is_empty());
         for entry in &text.source_map {

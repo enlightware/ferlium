@@ -44,7 +44,9 @@ use std::borrow::Cow;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{
-    OptimizationStage, SemanticCallees, Specializations, budget, cost, monomorphize,
+    OptimizationStage, SemanticCallees, Specializations, budget,
+    cost::{self, Growth, GrowthBase},
+    monomorphize,
     site::OperationIndex,
 };
 use crate::{
@@ -97,8 +99,10 @@ struct Inlining<'a> {
 
 /// A site that passed every check but the growth budget, which is spent once all are known.
 struct Candidate<'a> {
+    block: BlockId,
     in_loop: bool,
-    growth: usize,
+    /// The callee's whole cost, which replaces the call's.
+    cost: usize,
     span: Location,
     inlining: Inlining<'a>,
 }
@@ -135,8 +139,8 @@ pub(crate) enum NotInlinable {
     ColdCallSite,
     /// The callee's [hot cost](cost::hot_cost) exceeds [`budget::INLINE_CALLEE_COST`].
     CalleeTooLarge,
-    /// Inlining here would exceed [`budget::INLINE_FUNCTION_GROWTH`] for this caller, or
-    /// [`budget::INLINE_LOOP_GROWTH`] for a site in a loop.
+    /// Inlining here would grow this caller beyond [`budget::INLINE_LOOP_GROWTH`], or, for a site
+    /// outside loops, its code outside loops beyond [`budget::INLINE_FUNCTION_GROWTH`].
     GrowthBudgetExhausted,
 }
 
@@ -172,11 +176,11 @@ pub(crate) struct Refusal {
 /// Inlines what can be inlined in `func`, returning a rewritten function if anything was.
 pub(crate) fn inline_function(
     func: &Function,
-    original_size: usize,
+    base: GrowthBase,
     env: ModuleEnv<'_>,
     stage: OptimizationStage<'_>,
 ) -> Option<Function> {
-    let sites = plan_inlinings(func, original_size, env, stage, &mut None);
+    let sites = plan_inlinings(func, base, env, stage, &mut None);
     if sites.is_empty() {
         return None;
     }
@@ -202,29 +206,28 @@ pub(crate) fn inline_function(
 
 /// Chooses the call sites to inline.
 ///
-/// `original_size` is the function's [`cost`](cost::cost) before *any* round ran, so the growth
-/// budget bounds the whole of optimization rather than each round — otherwise a function could grow
-/// by the budget again on every round, and the cap would only bound growth per round.
+/// `base` is the function's [`cost`](cost::cost) before *any* round ran, so the growth budgets
+/// bound the whole of optimization rather than each round — otherwise a function could grow by the
+/// budgets again on every round, and the caps would only bound growth per round.
 ///
-/// The growth budget is spent by priority rather than in block order: sites in a loop first, since
-/// they run once per iteration, then the cheapest, with position breaking ties. Loop sites may grow
-/// the function up to [`budget::INLINE_LOOP_GROWTH`], other sites up to
-/// [`budget::INLINE_FUNCTION_GROWTH`]. Spent in block order, a large callee early in a function
-/// would refuse the smaller or hotter sites after it.
+/// The growth budgets are spent by priority rather than in block order: sites in a loop first,
+/// since they run once per iteration, then the cheapest, with position breaking ties. The whole
+/// function may grow by [`budget::INLINE_LOOP_GROWTH`], its code outside loops by
+/// [`budget::INLINE_FUNCTION_GROWTH`] (see [`Growth`]). Spent in block order, a large callee early
+/// in a function would refuse the smaller or hotter sites after it.
 ///
 /// `refusals`, when present, collects why each call site was left alone — the optimization report
 /// runs this over an already-optimized body precisely so its answers cannot drift from the pass's.
 fn plan_inlinings<'a>(
     func: &Function,
-    original_size: usize,
+    base: GrowthBase,
     env: ModuleEnv<'_>,
     stage: OptimizationStage<'a>,
     refusals: &mut Option<&mut Vec<Refusal>>,
 ) -> Vec<Inlining<'a>> {
-    let mut size = cost::cost(func);
+    let mut growth = Growth::new(base, func);
     let cleanup = cleanup_blocks(func);
     let hot = cost::hot_blocks(func);
-    let in_loop = cost::cyclic_blocks(func);
     let mut admissible = Vec::new();
 
     for block in func.blocks() {
@@ -333,10 +336,10 @@ fn plan_inlinings<'a>(
             };
             // The callee's operations arrive and the call goes, whether an operation or an
             // `invoke`. The stack marks around the splice are free.
-            let growth = cost::cost(&body).saturating_sub(1);
             admissible.push(Candidate {
-                in_loop: in_loop[block.as_index()],
-                growth,
+                block,
+                in_loop: growth.in_loop(block),
+                cost: cost::cost(&body),
                 span: operation.span,
                 inlining: Inlining { site, callee, body },
             });
@@ -346,17 +349,13 @@ fn plan_inlinings<'a>(
     let mut order: Vec<usize> = (0..admissible.len()).collect();
     order.sort_by_key(|&index| {
         let candidate = &admissible[index];
-        (!candidate.in_loop, candidate.growth, index)
+        (!candidate.in_loop, candidate.cost, index)
     });
     let mut admitted = vec![false; admissible.len()];
     for index in order {
         let candidate = &admissible[index];
-        let allowance = if candidate.in_loop {
-            budget::INLINE_LOOP_GROWTH
-        } else {
-            budget::INLINE_FUNCTION_GROWTH
-        };
-        if size + candidate.growth > original_size + allowance {
+        // The call itself costs one.
+        if !growth.reserve(candidate.block, 1, candidate.cost) {
             if let Some(refusals) = refusals.as_mut() {
                 refusals.push(Refusal {
                     site: candidate.span,
@@ -366,7 +365,6 @@ fn plan_inlinings<'a>(
             }
             continue;
         }
-        size += candidate.growth;
         admitted[index] = true;
     }
     // Back in position order, which reversed is the order they can be spliced in.
@@ -388,7 +386,7 @@ pub(crate) fn refusals_of(
     // round would inline this site, not what the budget was when optimization started.
     plan_inlinings(
         func,
-        cost::cost(func),
+        GrowthBase::of(func),
         env,
         OptimizationStage::Semantic(SemanticCallees::new(session, None)),
         &mut Some(&mut refusals),

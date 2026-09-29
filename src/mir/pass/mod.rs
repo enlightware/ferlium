@@ -73,8 +73,8 @@ pub(crate) use stage::{OptimizationStage, SemanticCallees};
 
 use crate::{
     compiler::CompilerSession,
-    mir::Function,
-    module::{FunctionId, ModuleEnv, ModuleId},
+    mir::{self, Function, OperationKind, terminator::TerminatorKind},
+    module::{FunctionId, LocalFunctionId, ModuleEnv, ModuleId},
 };
 
 /// Aggregate facts about rewrites whose results cannot be reconstructed from final MIR.
@@ -85,6 +85,12 @@ use crate::{
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct OptimizationStats {
     pub(crate) bounds_checks_removed: usize,
+}
+
+impl OptimizationStats {
+    pub(crate) fn add(&mut self, other: OptimizationStats) {
+        self.bounds_checks_removed += other.bounds_checks_removed;
+    }
 }
 
 /// Standard-library identities resolved once for every body optimized in one module.
@@ -199,6 +205,63 @@ fn cleanup_dead_representation_chains(
     }
 }
 
+/// The specializations `function` calls that wait to be optimized before a caller reads them, in
+/// the order of their first call.
+fn ready_callees(function: &Function, specializations: &Specializations) -> Vec<LocalFunctionId> {
+    let mut ready = Vec::new();
+    for block in function.blocks() {
+        let block = function.block(block);
+        for operation in block
+            .operations()
+            .iter()
+            .chain(match &block.terminator().kind {
+                TerminatorKind::Invoke { operation, .. } => Some(operation),
+                _ => None,
+            })
+        {
+            if matches!(operation.kind, OperationKind::Call { .. })
+                && let Some(mir::Value::Function(callee)) = operation.operands.first()
+                && specializations.is_ready(*callee)
+                && !ready.contains(&callee.function)
+            {
+                ready.push(callee.function);
+            }
+        }
+    }
+    ready
+}
+
+/// Optimizes the ready specialization `id` before the worklist reaches it, keeping the result only
+/// when it read nothing that is not final yet; see `monomorphize::Progress`.
+pub(crate) fn optimize_specialization_ahead(
+    id: LocalFunctionId,
+    env: ModuleEnv<'_>,
+    session: &CompilerSession,
+    module_id: ModuleId,
+    specializations: &mut Specializations,
+    context: &OptimizationContext,
+) {
+    // A specialization optimized for an earlier callee in the list may have made this one ready
+    // no longer.
+    if !specializations.is_ready(FunctionId::new(module_id, id)) {
+        return;
+    }
+    let (body, frame) = specializations.begin_ahead(id);
+    // Counted apart from the caller's rewrites: a kept result stays kept even when the caller's
+    // own optimization ahead is discarded, and a discarded one is counted by the worklist.
+    let mut stats = OptimizationStats::default();
+    let optimized = optimize_function(
+        &body,
+        env,
+        session,
+        module_id,
+        specializations,
+        context,
+        &mut stats,
+    );
+    specializations.end_ahead(id, optimized, frame, stats);
+}
+
 /// Optimizes one function, returning the body to install.
 ///
 /// Each round rewrites an immutable function into a new one, so a pass never reads an analysis that
@@ -214,7 +277,7 @@ pub(crate) fn optimize_function(
     context: &OptimizationContext,
     stats: &mut OptimizationStats,
 ) -> Function {
-    let original_size = cost::cost(function);
+    let growth_base = cost::GrowthBase::of(function);
     let mut current: Option<Function> = None;
     let mut rounds_exhausted = true;
     let mut inlined_any = false;
@@ -228,7 +291,7 @@ pub(crate) fn optimize_function(
         let callees = SemanticCallees::new(session, Some(specializations));
         if let Some(folded) = fold::fold_function(
             source,
-            original_size,
+            growth_base,
             env,
             OptimizationStage::Semantic(callees),
             fold::KnownCallSemantics::new(context.known_callees, &callees.original_of()),
@@ -247,6 +310,26 @@ pub(crate) fn optimize_function(
         {
             current = Some(specialized);
             changed = true;
+        }
+        // A specialization is a callee found while optimizing. Like a declared callee, it is
+        // optimized before the inliner reads it, whenever its inputs are final.
+        if specializations.has_ready() {
+            let source = current.as_ref().unwrap_or(function);
+            for id in ready_callees(source, specializations) {
+                optimize_specialization_ahead(
+                    id,
+                    env,
+                    session,
+                    module_id,
+                    specializations,
+                    context,
+                );
+            }
+        }
+        // Optimizing a specialization ahead of the worklist is discarded once it reads a body that
+        // is not final, so stop paying for it; see `monomorphize::Progress`.
+        if specializations.abandons_ahead() {
+            return function.clone();
         }
         // Calls are merged before inlining so one body is copied per distinct computation, rather
         // than copying duplicates and trying to rediscover the whole computation afterwards.
@@ -302,13 +385,16 @@ pub(crate) fn optimize_function(
         let source = current.as_ref().unwrap_or(function);
         if let Some(inlined) = inline::inline_function(
             source,
-            original_size,
+            growth_base,
             env,
             OptimizationStage::Semantic(callees),
         ) {
             current = Some(inlined);
             changed = true;
             inlined_any = true;
+        }
+        if specializations.abandons_ahead() {
+            return function.clone();
         }
         if !changed {
             rounds_exhausted = false;

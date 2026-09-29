@@ -823,10 +823,12 @@ mod tests {
         // Its raw MIR is nevertheless an acyclic call DAG and proves `will_return`.
         let module = optimized(
             "fn large_sum(x: int) -> int {\n\
-                 x + x + x + x + x + x + x + x + x + x +\n\
-                 x + x + x + x + x + x + x + x + x + x +\n\
-                 x + x + x + x + x + x + x + x + x + x +\n\
-                 x + x + x + x + x + x + x + x + x + x\n\
+                 let a = x + x + x + x + x + x + x + x + x + x;\n\
+                 let b = a + x + x + x + x + x + x + x + x + x + x;\n\
+                 let c = b + x + x + x + x + x + x + x + x + x + x;\n\
+                 let d = c + x + x + x + x + x + x + x + x + x + x;\n\
+                 let e = d + x + x + x + x + x + x + x + x + x + x;\n\
+                 e + x + x + x + x + x + x + x + x + x + x\n\
              }\n\
              fn script_callee(x: int, n: int) {\n\
                  let mut total = 0;\n\

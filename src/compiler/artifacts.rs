@@ -443,10 +443,16 @@ impl MirArtifacts {
         }
 
         // Drain the worklist, with every declared body finished. A specialization created while
-        // optimizing one is appended past the end, so this walk reaches it too.
+        // optimizing one is appended past the end, so this walk reaches it too. One created from a
+        // final body was usually optimized already, before its first caller read it.
         let mut next = 0;
         while next < specializations.len() {
             let id = LocalFunctionId::from_index(raw.functions.len() + next);
+            // Already optimized before its first caller read it.
+            if !specializations.needs_worklist(id) {
+                next += 1;
+                continue;
+            }
             let body = specializations
                 .body(id)
                 .expect("a specialization just created has a body")
@@ -463,6 +469,7 @@ impl MirArtifacts {
             specializations.set_body(id, optimized);
             next += 1;
         }
+        optimization_stats.add(specializations.kept_ahead_stats());
         let mut functions = specializations.take_finished();
 
         // Share the copies that became identical only under optimization. Creation-time sharing
