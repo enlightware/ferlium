@@ -153,14 +153,19 @@ impl ScalarType {
     }
 
     fn store(self, code: &mut impl Instructions) {
+        self.store_at(code, 0);
+    }
+
+    /// Stores at a static offset above the address below the value.
+    fn store_at(self, code: &mut impl Instructions, offset: u32) {
         let instruction = match self.as_non_unit_native() {
             None => {
                 code.instruction(&I::Drop);
                 I::Drop
             }
-            Some(NativeScalar::Bool) => I::I32Store8(memarg(0)),
-            Some(NativeScalar::Int) => I::I32Store(memarg(2)),
-            Some(NativeScalar::Float) => I::F64Store(memarg(3)),
+            Some(NativeScalar::Bool) => I::I32Store8(memarg_at(0, offset)),
+            Some(NativeScalar::Int) => I::I32Store(memarg_at(2, offset)),
+            Some(NativeScalar::Float) => I::F64Store(memarg_at(3, offset)),
         };
         code.instruction(&instruction);
     }
@@ -1713,8 +1718,12 @@ fn scalar(ty: &MirType) -> Result<ScalarType, String> {
 }
 
 fn memarg(align: u32) -> MemArg {
+    memarg_at(align, 0)
+}
+
+fn memarg_at(align: u32, offset: u32) -> MemArg {
     MemArg {
-        offset: 0,
+        offset: offset.into(),
         align,
         memory_index: 0,
     }

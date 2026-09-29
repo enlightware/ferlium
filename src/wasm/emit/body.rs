@@ -57,7 +57,7 @@ use super::{
         Analysis as ExpressionAnalysis, Plan as ExpressionPlan, Source as ExpressionSource,
     },
     frame_address, frame_bytes, is_elided_stack_operation, layout_witness, leave_frame, memarg,
-    operations,
+    memarg_at, operations,
     peephole::Code,
     scalar, stack, subscript,
     suspension::Crossing,
@@ -96,32 +96,20 @@ fn wasm_value_size(ty: ValType) -> u32 {
 
 fn local_load(ty: ValType, offset: u32) -> I<'static> {
     match ty {
-        ValType::I32 => I::I32Load(MemArg {
-            offset: offset.into(),
-            ..memarg(2)
-        }),
-        ValType::I64 => I::I64Load(MemArg {
-            offset: offset.into(),
-            ..memarg(3)
-        }),
-        ValType::F32 => I::F32Load(MemArg {
-            offset: offset.into(),
-            ..memarg(2)
-        }),
-        ValType::F64 => I::F64Load(MemArg {
-            offset: offset.into(),
-            ..memarg(3)
-        }),
+        ValType::I32 => I::I32Load(memarg_at(2, offset)),
+        ValType::I64 => I::I64Load(memarg_at(3, offset)),
+        ValType::F32 => I::F32Load(memarg_at(2, offset)),
+        ValType::F64 => I::F64Load(memarg_at(3, offset)),
         _ => unreachable!("the Wasm32 backend emits only numeric locals"),
     }
 }
 
-fn local_store(ty: ValType) -> I<'static> {
+fn local_store(ty: ValType, offset: u32) -> I<'static> {
     match ty {
-        ValType::I32 => I::I32Store(memarg(2)),
-        ValType::I64 => I::I64Store(memarg(3)),
-        ValType::F32 => I::F32Store(memarg(2)),
-        ValType::F64 => I::F64Store(memarg(3)),
+        ValType::I32 => I::I32Store(memarg_at(2, offset)),
+        ValType::I64 => I::I64Store(memarg_at(3, offset)),
+        ValType::F32 => I::F32Store(memarg_at(2, offset)),
+        ValType::F64 => I::F64Store(memarg_at(3, offset)),
         _ => unreachable!("the Wasm32 backend emits only numeric locals"),
     }
 }
@@ -806,10 +794,18 @@ impl<'a, 's> Body<'a, 's> {
         );
     }
 
+    /// Pushes the frame pointer and returns `offset`, for the next access to take as its own.
+    fn frame_base(&mut self, offset: u32) -> u32 {
+        self.i(I::LocalGet(
+            self.frame.expect("reserved frame storage").as_u32(),
+        ));
+        offset
+    }
+
     fn store_local_in_frame(&mut self, local: WasmLocalId, offset: u32, ty: ValType) {
-        self.frame_address(offset);
+        let offset = self.frame_base(offset);
         self.i(I::LocalGet(local.as_u32()));
-        self.i(local_store(ty));
+        self.i(local_store(ty, offset));
     }
 
     fn load_local_from_frame(&mut self, local: WasmLocalId, offset: u32, ty: ValType) {
@@ -949,9 +945,9 @@ impl<'a, 's> Body<'a, 's> {
         self.i(I::If(BlockType::Empty));
         self.fail(FailureCode::Invariant);
         self.i(I::End);
-        self.address(output)?;
+        let offset = self.address_base(output)?;
         self.i(I::LocalGet(helpers.dynamic_base.as_u32()));
-        self.i(I::I32Store(memarg(2)));
+        self.i(I::I32Store(memarg_at(2, offset)));
         self.i(I::LocalGet(helpers.dynamic_size.as_u32()));
         self.call_status(invoked, true);
         Ok(())
@@ -1004,14 +1000,14 @@ impl<'a, 's> Body<'a, 's> {
         }
         self.suspension = Some(layout);
         // A caller that does not know the accessor resumes it through this slot.
-        self.frame_address(RESUME_SLOT_OFFSET);
+        let offset = self.frame_base(RESUME_SLOT_OFFSET);
         self.i(I::I32Const(resume.as_u32() as i32));
-        self.i(I::I32Store(memarg(2)));
+        self.i(I::I32Store(memarg_at(2, offset)));
         // The caller may allocate above this retained frame before resuming it. Completion
         // reclaims the frame only if the frontier is still this one when it resumes.
-        self.frame_address(SUSPENDED_STACK_END_OFFSET);
+        let offset = self.frame_base(SUSPENDED_STACK_END_OFFSET);
         self.i(I::GlobalGet(Global::Stack as u32));
-        self.i(I::I32Store(memarg(2)));
+        self.i(I::I32Store(memarg_at(2, offset)));
         self.i(I::I32Const(0));
         self.i(I::LocalGet(self.frame.unwrap().as_u32()));
         self.address(yielded)?;
@@ -1313,11 +1309,9 @@ impl<'a, 's> Body<'a, 's> {
                 )?;
             }
         } else {
-            self.address(destination)?;
-            self.i(I::I32Const(offset as i32));
-            self.i(I::I32Add);
+            let base = self.address_base(destination)?;
             self.literal(literal)?;
-            self.store(ScalarType::of(ty)?);
+            ScalarType::of(ty)?.store_at(&mut self.code, base + offset);
         }
         Ok(())
     }
@@ -1465,9 +1459,11 @@ impl<'a, 's> Body<'a, 's> {
         } else {
             None
         };
-        if direct_result.is_some() {
-            self.prepare_store(output.unwrap())?;
-        }
+        let result_offset = if direct_result.is_some() {
+            self.prepare_store(output.unwrap())?
+        } else {
+            0
+        };
         if abi.fallible {
             self.context_pointer(offset_of!(InvocationState, native_failure));
         }
@@ -1483,7 +1479,7 @@ impl<'a, 's> Body<'a, 's> {
             self.finish_optional(output.ok_or("missing optional output")?, payload)?;
         }
         if let Some(ty) = direct_result {
-            self.finish_store(output.unwrap(), ty);
+            self.finish_store(output.unwrap(), ty, result_offset);
         }
         self.call_status(invoked, abi.fallible);
         Ok(())
@@ -1527,7 +1523,7 @@ impl<'a, 's> Body<'a, 's> {
         }
         let output = output.ok_or("wasm intrinsic result storage")?;
         let ty = self.pointee(output)?;
-        self.prepare_store(output)?;
+        let offset = self.prepare_store(output)?;
         match intrinsic {
             KnownCallee::IntNeg => {
                 self.i(I::I32Const(0));
@@ -1628,7 +1624,7 @@ impl<'a, 's> Body<'a, 's> {
             }
             _ => unreachable!("wasm_intrinsic filters unsupported known callees"),
         }
-        self.finish_store(output, ty);
+        self.finish_store(output, ty, offset);
         self.call_status(invoked, false);
         Ok(())
     }
@@ -1686,6 +1682,17 @@ impl<'a, 's> Body<'a, 's> {
             None => self.value(value)?,
         }
         Ok(())
+    }
+
+    /// Pushes the base of a place's address and returns the static offset that completes it,
+    /// for the access that follows to take as its own. A frame slot never wraps the address
+    /// space, as its frame was checked against the stack end.
+    pub(super) fn address_base(&mut self, value: &Value) -> Result<u32, String> {
+        if let Some(&Storage::Stack(offset)) = self.storage.get(value) {
+            return Ok(self.frame_base(offset));
+        }
+        self.address(value)?;
+        Ok(0)
     }
 
     pub(super) fn value(&mut self, value: &Value) -> Result<(), String> {
@@ -1828,30 +1835,27 @@ impl<'a, 's> Body<'a, 's> {
     }
 
     // A memory store needs its address below the value; a local store needs only the value.
-    fn prepare_store(&mut self, destination: &Value) -> Result<(), String> {
-        if !matches!(
+    // It returns the static offset that `finish_store` takes.
+    fn prepare_store(&mut self, destination: &Value) -> Result<u32, String> {
+        if matches!(
             self.storage.get(destination),
             Some(Storage::Local(_) | Storage::Expression)
         ) {
-            self.address(destination)?;
+            return Ok(0);
         }
-        Ok(())
+        self.address_base(destination)
     }
 
-    fn finish_store(&mut self, destination: &Value, ty: ScalarType) {
+    fn finish_store(&mut self, destination: &Value, ty: ScalarType, offset: u32) {
         match self.storage.get(destination) {
             Some(Storage::Local(local)) => self.i(I::LocalSet(local.as_u32())),
             Some(Storage::Expression) => (),
-            Some(Storage::Stack(_)) | None => self.store(ty),
+            Some(Storage::Stack(_)) | None => ty.store_at(&mut self.code, offset),
         }
     }
 
     fn load(&mut self, ty: ScalarType) {
         ty.load(&mut self.code);
-    }
-
-    fn store(&mut self, ty: ScalarType) {
-        ty.store(&mut self.code);
     }
 
     pub(super) fn emit(mut self) -> Result<EmittedBody, String> {
@@ -1872,9 +1876,9 @@ impl<'a, 's> Body<'a, 's> {
                 self.i(I::GlobalSet(depth.depth));
             }
             for index in 0..self.owned_evidence.len() {
-                self.address(&Value::Register(self.owned_evidence[index]))?;
+                let offset = self.address_base(&Value::Register(self.owned_evidence[index]))?;
                 self.i(I::I64Const(0));
-                self.i(I::I64Store(memarg(2)));
+                self.i(I::I64Store(memarg_at(2, offset)));
             }
             for (index, constant) in self.body.constants().iter().enumerate() {
                 let value = Value::Constant(ConstantId::from_index(index));
@@ -1887,9 +1891,10 @@ impl<'a, 's> Body<'a, 's> {
                 if matches!(transport, ParameterTransport::Direct(_))
                     && matches!(self.storage.get(&value), Some(Storage::Stack(_)))
                 {
-                    self.address(&value)?;
+                    let offset = self.address_base(&value)?;
                     self.i(I::LocalGet(self.input_local(index).as_u32()));
-                    self.store(ScalarType::of(self.body.parameters()[index].ty)?);
+                    ScalarType::of(self.body.parameters()[index].ty)?
+                        .store_at(&mut self.code, offset);
                 }
             }
         } else {
@@ -2428,21 +2433,21 @@ impl<'a, 's> Body<'a, 's> {
                     .clone
                     .ok_or("missing callable environment clone entry")?;
                 let result = Value::Register(op.result_id().unwrap());
-                self.address(&result)?;
+                let offset = self.address_base(&result)?;
                 self.address(&args[0])?;
                 self.i(I::I32Load(memarg(2)));
-                self.i(I::I32Store(memarg(2)));
-                self.address(&result)?;
+                self.i(I::I32Store(memarg_at(2, offset)));
+                let offset = self.address_base(&result)?;
                 self.address(&args[0])?;
                 self.i(I::I32Load(MemArg {
                     offset: ENVIRONMENT_OFFSET,
                     ..memarg(2)
                 }));
                 self.i(I::Call(clone.as_u32()));
-                self.i(I::I32Store(MemArg {
-                    offset: ENVIRONMENT_OFFSET,
-                    ..memarg(2)
-                }));
+                self.i(I::I32Store(memarg_at(
+                    2,
+                    offset + ENVIRONMENT_OFFSET as u32,
+                )));
                 return Ok(());
             }
             CloneSubscriptEnv { .. } => {
@@ -2451,21 +2456,21 @@ impl<'a, 's> Body<'a, 's> {
                     .clone
                     .ok_or("missing callable environment clone entry")?;
                 let result = Value::Register(op.result_id().unwrap());
-                self.address(&result)?;
+                let offset = self.address_base(&result)?;
                 self.address(&args[0])?;
                 self.i(I::I32Load(memarg(2)));
-                self.i(I::I32Store(memarg(2)));
-                self.address(&result)?;
+                self.i(I::I32Store(memarg_at(2, offset)));
+                let offset = self.address_base(&result)?;
                 self.address(&args[0])?;
                 self.i(I::I32Load(MemArg {
                     offset: ENVIRONMENT_OFFSET,
                     ..memarg(2)
                 }));
                 self.i(I::Call(clone.as_u32()));
-                self.i(I::I32Store(MemArg {
-                    offset: ENVIRONMENT_OFFSET,
-                    ..memarg(2)
-                }));
+                self.i(I::I32Store(memarg_at(
+                    2,
+                    offset + ENVIRONMENT_OFFSET as u32,
+                )));
                 return Ok(());
             }
             DropClosureEnv | DropSubscriptEnv => {
@@ -2479,9 +2484,9 @@ impl<'a, 's> Body<'a, 's> {
                     ..memarg(2)
                 }));
                 // Detach ownership before guest destruction; poisoning must never retry it.
-                self.address(&args[0])?;
+                let offset = self.address_base(&args[0])?;
                 self.i(I::I64Const(0));
-                self.i(I::I64Store(memarg(2)));
+                self.i(I::I64Store(memarg_at(2, offset)));
                 self.i(I::Call(drop.as_u32()));
             }
             BuildSubscriptEvidence { .. } => {
@@ -2507,18 +2512,25 @@ impl<'a, 's> Body<'a, 's> {
                 self.release_evidence(&result)?;
                 let capture_offset = self.capture_slots[&id];
                 for field in &fields[..inherited] {
-                    self.frame_address(capture_offset + field.offset as u32);
-                    self.value(&args[0])?;
-                    self.i(I::I32Load(MemArg {
-                        offset: ENVIRONMENT_OFFSET,
-                        ..memarg(2)
-                    }));
-                    self.i(I::I32Const(field.offset as i32));
-                    self.i(I::I32Add);
+                    let offset = capture_offset + field.offset as u32;
                     if field.is_storage_flag {
-                        self.i(I::I32Load8U(memarg(0)));
-                        self.i(I::I32Store8(memarg(0)));
+                        let offset = self.frame_base(offset);
+                        self.value(&args[0])?;
+                        self.i(I::I32Load(MemArg {
+                            offset: ENVIRONMENT_OFFSET,
+                            ..memarg(2)
+                        }));
+                        self.i(I::I32Load8U(memarg_at(0, field.offset as u32)));
+                        self.i(I::I32Store8(memarg_at(0, offset)));
                     } else {
+                        self.frame_address(offset);
+                        self.value(&args[0])?;
+                        self.i(I::I32Load(MemArg {
+                            offset: ENVIRONMENT_OFFSET,
+                            ..memarg(2)
+                        }));
+                        self.i(I::I32Const(field.offset as i32));
+                        self.i(I::I32Add);
                         self.i(I::I32Const(size_of::<DictionaryReference>() as i32));
                         self.i(I::MemoryCopy {
                             src_mem: 0,
@@ -2527,11 +2539,12 @@ impl<'a, 's> Body<'a, 's> {
                     }
                 }
                 for (field, argument) in fields[inherited..].iter().zip(&args[1..]) {
-                    self.frame_address(capture_offset + field.offset as u32);
                     if field.is_storage_flag {
+                        let offset = self.frame_base(capture_offset + field.offset as u32);
                         self.read(argument)?;
-                        self.i(I::I32Store8(memarg(0)));
+                        self.i(I::I32Store8(memarg_at(0, offset)));
                     } else {
+                        self.frame_address(capture_offset + field.offset as u32);
                         self.value(argument)?;
                         self.i(I::I32Const(size_of::<DictionaryReference>() as i32));
                         self.i(I::MemoryCopy {
@@ -2556,11 +2569,11 @@ impl<'a, 's> Body<'a, 's> {
             }
             BuildSubscript { .. } => {
                 let result = Value::Register(op.result_id().unwrap());
-                self.address(&result)?;
+                let offset = self.address_base(&result)?;
                 self.value(&args[0])?;
                 self.i(I::I32Load(memarg(2)));
-                self.i(I::I32Store(memarg(2)));
-                self.address(&result)?;
+                self.i(I::I32Store(memarg_at(2, offset)));
+                let offset = self.address_base(&result)?;
                 self.context_pointer(offset_of!(InvocationState, evidence));
                 self.value(&args[0])?;
                 self.i(I::Call(
@@ -2568,10 +2581,10 @@ impl<'a, 's> Body<'a, 's> {
                         .function_index("materialize_subscript_environment")
                         .as_u32(),
                 ));
-                self.i(I::I32Store(MemArg {
-                    offset: ENVIRONMENT_OFFSET,
-                    ..memarg(2)
-                }));
+                self.i(I::I32Store(memarg_at(
+                    2,
+                    offset + ENVIRONMENT_OFFSET as u32,
+                )));
                 return Ok(());
             }
             BorrowSubscriptMember { .. } => return Ok(()),
@@ -2596,13 +2609,15 @@ impl<'a, 's> Body<'a, 's> {
                 self.i(I::Call(self.imports.function_index("alloc").as_u32()));
                 self.i(I::LocalSet(helpers.scratch.as_u32()));
                 for (index, value) in elements.iter().enumerate() {
+                    // The allocation holds every element, so no offset wraps the address space.
+                    let offset = index as u32 * element.size;
                     self.i(I::LocalGet(helpers.scratch.as_u32()));
-                    self.i(I::I32Const((index as u32 * element.size) as i32));
-                    self.i(I::I32Add);
                     if let Ok(ty) = ScalarType::of(*element_ty) {
                         self.read(value)?;
-                        self.store(ty);
+                        ty.store_at(&mut self.code, offset);
                     } else {
+                        self.i(I::I32Const(offset as i32));
+                        self.i(I::I32Add);
                         self.address(value)?;
                         self.i(I::I32Const(element.size as i32));
                         self.i(I::MemoryCopy {
@@ -2613,7 +2628,7 @@ impl<'a, 's> Body<'a, 's> {
                 }
                 // The compiler-known array fields are normalized as capacity, data, len, start.
                 for index in 0..4 {
-                    self.address(destination)?;
+                    let base = self.address_base(destination)?;
                     if index == 1 {
                         self.i(I::LocalGet(helpers.scratch.as_u32()));
                     } else {
@@ -2623,13 +2638,10 @@ impl<'a, 's> Body<'a, 's> {
                             elements.len() as i32
                         }));
                     }
-                    self.i(I::I32Store(MemArg {
-                        offset: layout
-                            .static_field_offset(ProjectionIndex::from_index(index))
-                            .ok_or("open array field offset")?
-                            as u64,
-                        ..memarg(2)
-                    }));
+                    let field = layout
+                        .static_field_offset(ProjectionIndex::from_index(index))
+                        .ok_or("open array field offset")? as u32;
+                    self.i(I::I32Store(memarg_at(2, base + field)));
                 }
             }
             BuildDictionary { definition, .. } => {
@@ -2643,11 +2655,12 @@ impl<'a, 's> Body<'a, 's> {
                     .fields;
                 let capture_offset = self.capture_slots[&op.result_id().unwrap()];
                 for (field, argument) in fields.iter().zip(args) {
-                    self.frame_address(capture_offset + field.offset as u32);
                     if field.is_storage_flag {
+                        let offset = self.frame_base(capture_offset + field.offset as u32);
                         self.read(argument)?;
-                        self.i(I::I32Store8(memarg(0)));
+                        self.i(I::I32Store8(memarg_at(0, offset)));
                     } else {
+                        self.frame_address(capture_offset + field.offset as u32);
                         self.value(argument)?;
                         self.i(I::I32Const(size_of::<DictionaryReference>() as i32));
                         self.i(I::MemoryCopy {
@@ -2720,24 +2733,24 @@ impl<'a, 's> Body<'a, 's> {
                 // a place operand as read() would. The MIR verifier checks this operand contract.
                 if matches!(&args[0], Value::Register(id) if self.callable_values.contains(id) || self.subscript_values.contains(id))
                 {
-                    self.address(&args[1])?;
+                    let offset = self.address_base(&args[1])?;
                     self.address(&args[0])?;
                     self.i(I::I64Load(memarg(2)));
-                    self.i(I::I64Store(memarg(2)));
+                    self.i(I::I64Store(memarg_at(2, offset)));
                     return Ok(());
                 }
                 if matches!(&args[0], Value::Register(id) if self.variant_shells.contains(id)) {
-                    self.address(&args[1])?;
+                    let offset = self.address_base(&args[1])?;
                     self.address(&args[0])?;
                     self.i(I::I32Load(memarg(2)));
-                    self.i(I::I32Store(memarg(2)));
+                    self.i(I::I32Store(memarg_at(2, offset)));
                     return Ok(());
                 }
                 let ty = self.pointee_type(&args[1])?;
                 if let Ok(ty) = scalar(&ty) {
-                    self.prepare_store(&args[1])?;
+                    let offset = self.prepare_store(&args[1])?;
                     self.value(&args[0])?;
-                    self.finish_store(&args[1], ty);
+                    self.finish_store(&args[1], ty, offset);
                 } else if let Value::Constant(id) = &args[0]
                     && !self.storage.contains_key(&args[0])
                 {
@@ -2759,9 +2772,9 @@ impl<'a, 's> Body<'a, 's> {
                     self.dynamic_layout(witness)?;
                 }
                 if let Ok(ty) = scalar(&ty) {
-                    self.prepare_store(&args[1])?;
+                    let offset = self.prepare_store(&args[1])?;
                     self.read(&args[0])?;
-                    self.finish_store(&args[1], ty);
+                    self.finish_store(&args[1], ty, offset);
                 } else {
                     self.address(&args[1])?;
                     self.address(&args[0])?;
@@ -2845,7 +2858,7 @@ impl<'a, 's> Body<'a, 's> {
                 self.i(I::GlobalSet(Global::Stack as u32));
             }
             Variant { tag, storage, .. } => {
-                self.address(&Value::Register(op.result_id().unwrap()))?;
+                let offset = self.address_base(&Value::Register(op.result_id().unwrap()))?;
                 if let Some(storage) = storage {
                     self.i(I::I32Const(
                         storage.encode_tag_id(self.session.variant_tag_id(*tag)) as i32,
@@ -2857,7 +2870,7 @@ impl<'a, 's> Body<'a, 's> {
                     self.i(I::I32Const(self.session.variant_tag_id(*tag) as i32));
                     self.i(I::I32Or);
                 }
-                self.i(I::I32Store(memarg(2)));
+                self.i(I::I32Store(memarg_at(2, offset)));
                 // A shell initializes only the tag; physical MIR constructs its payload in place.
                 return Ok(());
             }
@@ -2957,9 +2970,9 @@ impl<'a, 's> Body<'a, 's> {
                 let role = self.roles.get(&value, self.body.constants()).unwrap();
                 if let ValueRole::Materialized(ty) = &*role {
                     let ty = scalar(ty)?;
-                    self.address(&value)?;
+                    let offset = self.address_base(&value)?;
                     self.i(I::LocalGet(self.registers[&id].as_u32()));
-                    self.store(ty);
+                    ty.store_at(&mut self.code, offset);
                 }
             }
         }

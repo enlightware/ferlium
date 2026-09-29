@@ -33,7 +33,7 @@ use crate::{
 use super::{
     Global, ScalarType, adapters::NativeOptionalResultAdapter, allocate_frame, body::Body,
     context_pointer, dictionary_table, enter_frame, frame_address, frame_bytes, leave_frame,
-    memarg, operations, peephole::Instructions,
+    memarg, memarg_at, operations, peephole::Instructions,
 };
 
 /// Construction schema; every materialization of a given target has the same leading parameters.
@@ -520,17 +520,17 @@ impl Body<'_, '_> {
         self.i(I::Call(
             self.imports.function_index("retain_evidence").as_u32(),
         ));
-        self.address(destination)?;
+        let offset = self.address_base(destination)?;
         self.i(I::I32Const(
             self.callable_entries.selected[&entry].as_u32() as i32
         ));
-        self.i(I::I32Store(memarg(2)));
-        self.address(destination)?;
+        self.i(I::I32Store(memarg_at(2, offset)));
+        let offset = self.address_base(destination)?;
         self.i(I::LocalGet(scratch.as_u32()));
-        self.i(I::I32Store(MemArg {
-            offset: ENVIRONMENT_OFFSET,
-            ..memarg(2)
-        }));
+        self.i(I::I32Store(memarg_at(
+            2,
+            offset + ENVIRONMENT_OFFSET as u32,
+        )));
         Ok(())
     }
 
@@ -613,18 +613,18 @@ impl Body<'_, '_> {
             "closure value captures require a Value dictionary"
         );
         let result = Value::Register(op.result_id().unwrap());
-        self.address(&result)?;
+        let offset = self.address_base(&result)?;
         self.i(I::I32Const(
             self.callable_entries.slots[&function].as_u32() as i32
         ));
-        self.i(I::I32Store(memarg(2)));
+        self.i(I::I32Store(memarg_at(2, offset)));
         if hidden == 0 && captures.is_empty() {
-            self.address(&result)?;
+            let offset = self.address_base(&result)?;
             self.i(I::I32Const(0));
-            self.i(I::I32Store(MemArg {
-                offset: ENVIRONMENT_OFFSET,
-                ..memarg(2)
-            }));
+            self.i(I::I32Store(memarg_at(
+                2,
+                offset + ENVIRONMENT_OFFSET as u32,
+            )));
             return Ok(());
         }
         let helpers = self.helper_locals();
@@ -645,12 +645,12 @@ impl Body<'_, '_> {
                 .as_u32(),
         ));
         self.i(I::LocalSet(environment.as_u32()));
-        self.address(&result)?;
+        let offset = self.address_base(&result)?;
         self.i(I::LocalGet(environment.as_u32()));
-        self.i(I::I32Store(MemArg {
-            offset: ENVIRONMENT_OFFSET,
-            ..memarg(2)
-        }));
+        self.i(I::I32Store(memarg_at(
+            2,
+            offset + ENVIRONMENT_OFFSET as u32,
+        )));
         for index in 0..hidden + usize::from(has_env_dict) {
             let (offset, value) = if index == hidden {
                 (
@@ -660,7 +660,6 @@ impl Body<'_, '_> {
             } else {
                 (Environment::hidden_offset(index), &op.operands[index])
             };
-            frame_address(&mut self.code, environment, offset);
             if matches!(
                 self.roles.get(value, self.body.constants()).as_deref(),
                 Some(ValueRole::VariantPayloadStorage)
@@ -668,9 +667,11 @@ impl Body<'_, '_> {
                 Some(ValueRole::Materialized(MirType::Lowered(ty))) if *ty == bool_type())
                 || matches!(value, Value::Parameter(id) if self.body.parameters()[id.as_index()].ty == bool_type())
             {
+                self.i(I::LocalGet(environment.as_u32()));
                 self.read(value)?;
-                self.i(I::I32Store8(memarg(0)));
+                self.i(I::I32Store8(memarg_at(0, offset)));
             } else {
+                frame_address(&mut self.code, environment, offset);
                 self.value(value)?;
                 self.i(I::I32Const(size_of::<DictionaryReference>() as i32));
                 self.i(I::MemoryCopy {

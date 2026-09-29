@@ -109,9 +109,9 @@ pub(super) fn dictionary_adapter(
         enter_frame(&mut code, frame, frame_size);
         for (i, offset) in spills.iter().enumerate() {
             if let Some(offset) = offset {
-                frame_address(&mut code, frame, *offset);
+                code.instruction(&I::LocalGet(frame.as_u32()));
                 code.instruction(&I::LocalGet(abi.input_local(i + 1).as_u32()));
-                ScalarType::of(input_types[captures.len() + i])?.store(&mut code);
+                ScalarType::of(input_types[captures.len() + i])?.store_at(&mut code, *offset);
             }
         }
     }
