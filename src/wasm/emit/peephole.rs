@@ -25,8 +25,8 @@ impl Instructions for Code {
 
 /// A function body under construction that holds back its last few instructions, so that a
 /// negated comparison becomes the complementary one, a comparison with zero a zero test, a set
-/// read back a tee, constant additions one or none, and a constant address offset part of its
-/// load.
+/// read back a tee, constant additions one or none, a constant address offset part of its load,
+/// and a small constant-size copy a load and a store.
 ///
 /// Held instructions are written out before any other access, so bytes already written never
 /// change: byte offsets taken for the source map stay valid. The exception is a trailing
@@ -150,6 +150,23 @@ impl Code {
                 self.function();
                 return true;
             }
+            // A small constant-size copy is one load and one store. The load reads every byte
+            // before the store writes, so overlapping ranges copy alike, and each traps where the
+            // copy would, before writing anything.
+            (
+                [.., I::I32Const(size)],
+                I::MemoryCopy {
+                    src_mem: 0,
+                    dst_mem: 0,
+                },
+            ) => {
+                if let Some((load, store)) = small_copy(*size) {
+                    self.held.pop();
+                    self.instruction(&load);
+                    self.instruction(&store);
+                    return true;
+                }
+            }
             // A branch tests for non-zero, which a double negation preserves.
             ([.., I::I32Eqz, I::I32Eqz], I::If(_) | I::BrIf(_)) => {
                 self.held.truncate(self.held.len() - 2);
@@ -239,6 +256,24 @@ fn offset_load(load: &I<'_>, offset: u32) -> Option<I<'static>> {
     })
 }
 
+/// The load and store moving `size` bytes at once, if one scalar has that size.
+///
+/// The addresses' alignment is unknown here, so the access claims none; it only hints.
+fn small_copy(size: i32) -> Option<(I<'static>, I<'static>)> {
+    let memarg = MemArg {
+        offset: 0,
+        align: 0,
+        memory_index: 0,
+    };
+    Some(match size {
+        1 => (I::I32Load8U(memarg), I::I32Store8(memarg)),
+        2 => (I::I32Load16U(memarg), I::I32Store16(memarg)),
+        4 => (I::I32Load(memarg), I::I32Store(memarg)),
+        8 => (I::I64Load(memarg), I::I64Store(memarg)),
+        _ => return None,
+    })
+}
+
 /// The encoded length of `value` as an unsigned LEB128 integer.
 fn leb128_length(value: u32) -> usize {
     (32 - value.leading_zeros() as usize).max(1).div_ceil(7)
@@ -289,6 +324,35 @@ mod tests {
             &[I::I32Eqz, I::I32Eqz, I::Drop],
             &[I::I32Eqz, I::I32Eqz, I::Drop],
         );
+    }
+
+    #[wasm_bindgen_test]
+    fn small_copies_become_a_load_and_a_store() {
+        let copy = I::MemoryCopy {
+            src_mem: 0,
+            dst_mem: 0,
+        };
+        let unaligned = MemArg {
+            offset: 0,
+            align: 0,
+            memory_index: 0,
+        };
+        assert_rewrites(
+            &[I::I32Const(8), copy.clone()],
+            &[I::I64Load(unaligned), I::I64Store(unaligned)],
+        );
+        // The source's constant offset moves into the load.
+        assert_rewrites(
+            &[I::I32Const(12), I::I32Add, I::I32Const(4), copy.clone()],
+            &[
+                I::I32Load(MemArg {
+                    offset: 12,
+                    ..unaligned
+                }),
+                I::I32Store(unaligned),
+            ],
+        );
+        assert_rewrites(&[I::I32Const(16), copy.clone()], &[I::I32Const(16), copy]);
     }
 
     #[wasm_bindgen_test]
