@@ -105,8 +105,12 @@ pub(crate) fn remove_redundant_stack_markers(func: &Function) -> Option<Function
     let roles = ValueRoles::derive(func);
     let invalidates = |operation: &Operation| may_leave_frame_storage(operation, func, &roles);
     // In the physical interpreter, yielding transfers control without changing the frame-storage
-    // frontier. Backends with retained suspension frames supply their own terminator predicate.
-    let entry_states = analyze(func, &invalidates, &|_| false);
+    // frontier, but a backend retaining suspension frames resumes on a frontier of its own, and
+    // cannot restore a mark taken before the suspension. MIR serves both, so no marker is known
+    // equal across a yield.
+    let entry_states = analyze(func, &invalidates, &|kind| {
+        matches!(kind, TerminatorKind::Yield { .. })
+    });
 
     // A redundant save's marker is replaced by one already holding the same frontier. The
     // substitution is justified where it is *decided* — the two markers are equal integers there —
@@ -359,6 +363,40 @@ mod tests {
                 |_| false,
             )
             .contains(&marker)
+        );
+    }
+
+    /// A backend retaining suspension frames resumes on a frontier of its own, so a mark taken after
+    /// a `yield` must not defer to one taken before it, even with no allocation in between.
+    #[test]
+    fn a_mark_after_a_yield_is_not_merged_into_one_before_it() {
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new("suspended".into(), Default::default());
+        let entry = builder.add_block();
+        let resume = builder.add_block();
+        let place = builder
+            .append_operation(entry, Operation::alloca(span, crate::std::math::int_type()))
+            .unwrap();
+        let before = builder
+            .append_operation(entry, Operation::stack_save(span))
+            .unwrap();
+        builder.set_terminator(entry, Terminator::r#yield(span, place, resume));
+        let after = builder
+            .append_operation(resume, Operation::stack_save(span))
+            .unwrap();
+        builder.append_operation(resume, Operation::stack_restore(span, before));
+        builder.append_operation(resume, Operation::stack_restore(span, after));
+        builder.set_terminator(resume, Terminator::ret(span));
+        let function = builder.finish_unverified();
+
+        let simplified = remove_redundant_stack_markers(&function).unwrap_or(function);
+        assert!(
+            simplified
+                .block(resume)
+                .operations()
+                .iter()
+                .any(|operation| matches!(operation.kind, OperationKind::StackSave)),
+            "the resumed region must keep its own mark"
         );
     }
 
