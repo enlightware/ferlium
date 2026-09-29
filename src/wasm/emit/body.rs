@@ -202,6 +202,9 @@ pub(super) struct Body<'a, 's> {
     owned_evidence: Vec<ValueId>,
     capture_slots: FxHashMap<ValueId, u32>,
     variant_shells: FxHashSet<ValueId>,
+    /// Shells with a constant tag word whose only use stores them: the store writes the word
+    /// directly, so the shell needs no slot.
+    stored_variants: FxHashMap<ValueId, i32>,
     layout_slot: Option<u32>,
     helpers: Option<HelperLocals>,
     evidence_base: Option<WasmLocalId>,
@@ -320,6 +323,7 @@ impl<'a, 's> Body<'a, 's> {
             owned_evidence: Vec::new(),
             capture_slots: FxHashMap::default(),
             variant_shells: FxHashSet::default(),
+            stored_variants: FxHashMap::default(),
             layout_slot: None,
             helpers: None,
             evidence_base: None,
@@ -549,6 +553,15 @@ impl<'a, 's> Body<'a, 's> {
                                 size_of::<DictionaryReference>() as u32,
                             )?;
                             this.owned_evidence.push(id);
+                            continue;
+                        }
+                        OperationKind::Variant {
+                            tag,
+                            storage: Some(storage),
+                            ..
+                        } if this.only_stored(id) => {
+                            let word = storage.encode_tag_id(this.session.variant_tag_id(tag));
+                            this.stored_variants.insert(id, word as i32);
                             continue;
                         }
                         OperationKind::Variant { .. } => {
@@ -1641,6 +1654,20 @@ impl<'a, 's> Body<'a, 's> {
             BodyMode::ProjectionResume => WasmLocalId::from_index(RESUME_PARAMETER_COUNT + index),
             _ => self.signature.input_local(index),
         }
+    }
+
+    /// Whether register `id` is read only as the value of one `store`.
+    fn only_stored(&self, id: ValueId) -> bool {
+        self.analysis.sole_use(id).is_some_and(|source| {
+            self.body
+                .block(source.block)
+                .operations()
+                .get(source.operation_id().as_index())
+                .is_some_and(|operation| {
+                    operation.kind == OperationKind::Store
+                        && operation.operands[0] == Value::Register(id)
+                })
+        })
     }
 
     fn slot(&mut self, value: Value, size: u32) -> Result<(), String> {
@@ -2739,6 +2766,14 @@ impl<'a, 's> Body<'a, 's> {
                     self.i(I::I64Store(memarg_at(2, offset)));
                     return Ok(());
                 }
+                if let Value::Register(id) = &args[0]
+                    && let Some(&word) = self.stored_variants.get(id)
+                {
+                    let offset = self.address_base(&args[1])?;
+                    self.i(I::I32Const(word));
+                    self.i(I::I32Store(memarg_at(2, offset)));
+                    return Ok(());
+                }
                 if matches!(&args[0], Value::Register(id) if self.variant_shells.contains(id)) {
                     let offset = self.address_base(&args[1])?;
                     self.address(&args[0])?;
@@ -2856,6 +2891,10 @@ impl<'a, 's> Body<'a, 's> {
                 // Nesting was checked: this reclaims no open continuation or caller storage.
                 self.value(&args[0])?;
                 self.i(I::GlobalSet(Global::Stack as u32));
+            }
+            Variant { .. } if self.stored_variants.contains_key(&op.result_id().unwrap()) => {
+                // Written by its store.
+                return Ok(());
             }
             Variant { tag, storage, .. } => {
                 let offset = self.address_base(&Value::Register(op.result_id().unwrap()))?;

@@ -94,6 +94,7 @@ pub(super) struct Analysis {
     addressed: Vec<bool>,
     intrinsics: Vec<Option<KnownCallee>>,
     comparison_fusions: Vec<Option<KnownCallee>>,
+    value_uses: Vec<Uses>,
 }
 
 impl Analysis {
@@ -132,6 +133,7 @@ impl Analysis {
             addressed: inputs.addressed,
             intrinsics: inputs.intrinsics,
             comparison_fusions,
+            value_uses: inputs.value_uses,
         };
         (analysis, plan)
     }
@@ -155,6 +157,14 @@ impl Analysis {
             self.operation_bases[source.block.as_index()].as_index()
                 + source.operation_id().as_index(),
         )
+    }
+
+    /// The only operation or terminator reading register `id`, if exactly one does and emission
+    /// cannot skip it.
+    pub(super) fn sole_use(&self, id: ValueId) -> Option<Source> {
+        self.value_uses
+            .get(id.as_index())
+            .and_then(|uses| uses.one())
     }
 
     pub(super) fn comparison_fusion(&self, id: ValueId) -> Option<KnownCallee> {
