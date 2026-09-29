@@ -10,7 +10,7 @@ use crate::{
         ValueId,
         pass::known_callee::KnownCallee,
         physical::program::ResolvedPhysicalProgram,
-        role::{ValueRole, ValueRoles},
+        role::{MirType, ValueRole, ValueRoles},
         site::OperationIndex,
         terminator::TerminatorKind,
     },
@@ -810,6 +810,10 @@ fn observes_address(
         | OperationKind::MoveBytes { .. }
         | OperationKind::CompareEqual => false,
         OperationKind::Store if index == 1 => false,
+        // Scalar elements are read by value; the destination is the last operand.
+        OperationKind::BuildArray { element_ty } if index + 1 < operation.operands.len() => {
+            scalar(&MirType::Lowered(*element_ty)).is_err()
+        }
         OperationKind::Store => roles
             .get(&operation.operands[index], body.constants())
             .is_some_and(|role| role.is_place_operand()),
