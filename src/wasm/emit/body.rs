@@ -60,12 +60,14 @@ use super::{
     },
     frame_address, frame_bytes, is_elided_stack_operation, layout_witness, leave_frame, memarg,
     memarg_at, operations,
-    peephole::Code,
+    peephole::{Code, Spans},
     scalar, stack, subscript,
     suspension::Crossing,
 };
 
-/// Code ranges generated for MIR operations and terminators, with their source spans.
+/// Code ranges generated for MIR operations and terminators, with their source spans. Ranges are
+/// ordered, and either disjoint or identical: code doing the work of several operations has one
+/// entry per span.
 pub(super) type BodySourceMap = Vec<(Range<usize>, Location)>;
 
 #[derive(Clone, Copy)]
@@ -248,7 +250,10 @@ pub(super) struct Body<'a, 's> {
     /// The local an unchecked `raw_float_to_float` holds its operand in, for its fallback.
     float_conversion_local: Option<WasmLocalId>,
     pub(super) code: Code,
-    source_map: BodySourceMap,
+    /// Whether to map the code back to its source.
+    source_map: bool,
+    /// The spans of the code emitted before each open source region, innermost last.
+    sources: Vec<Spans>,
 }
 
 impl<'a, 's> Body<'a, 's> {
@@ -277,6 +282,7 @@ impl<'a, 's> Body<'a, 's> {
         mode: BodyMode,
         runtime_globals: RuntimeGlobals,
         track_depth: bool,
+        source_map: bool,
     ) -> Result<Self, String> {
         stack::check_nesting(body)?;
         let constructed_subscripts = constructed_subscript_definitions(body);
@@ -368,7 +374,8 @@ impl<'a, 's> Body<'a, 's> {
             no_op_stack_markers,
             emitted: vec![false; body.blocks().count()],
             code: Code::new(WasmFunction::new([])),
-            source_map: Vec::new(),
+            source_map,
+            sources: Vec::new(),
         };
         if matches!(mode, BodyMode::ProjectionResume) {
             // The parameters other than the failure destination become locals, in their order.
@@ -799,7 +806,7 @@ impl<'a, 's> Body<'a, 's> {
         self.scratch_address(payload);
         self.i(I::LocalSet(helpers.dynamic_size.as_u32()));
         adapter.emit(
-            self.code.function(),
+            &mut self.code,
             helpers.dynamic_base,
             helpers.dynamic_size,
             helpers.scratch,
@@ -1845,12 +1852,7 @@ impl<'a, 's> Body<'a, 's> {
         match value {
             Value::Register(id) => {
                 if let Some(source) = self.expressions.take_value(*id) {
-                    let body = self.body;
-                    self.operation(
-                        source,
-                        &body.block(source.block).operations()[source.operation_id().as_index()],
-                    )?;
-                    return Ok(());
+                    return self.stackified(source);
                 }
                 let local = self
                     .registers
@@ -1944,11 +1946,7 @@ impl<'a, 's> Body<'a, 's> {
                     .expressions
                     .take_place(value)
                     .ok_or("stackified scalar place read more than once")?;
-                let body = self.body;
-                self.operation(
-                    source,
-                    &body.block(source.block).operations()[source.operation_id().as_index()],
-                )?;
+                self.stackified(source)?;
             }
             Some(Storage::Stack(_)) | None => {
                 self.address(value)?;
@@ -2078,16 +2076,12 @@ impl<'a, 's> Body<'a, 's> {
                 .is_fully_emitted(|block| self.emitted[block.as_index()]),
             "every stackified scalar expression and place is consumed"
         );
-        debug_assert!(
-            self.source_map
-                .windows(2)
-                .all(|pair| pair[0].0.end <= pair[1].0.start),
-            "source regions are ordered and disjoint, as source lookup bisects them"
-        );
+        debug_assert!(self.sources.is_empty(), "every source region is closed");
         self.i(I::End);
+        let (function, source_map) = self.code.finish();
         Ok(EmittedBody {
-            function: self.code.finish(),
-            source_map: self.source_map,
+            function,
+            source_map,
         })
     }
 
@@ -2142,7 +2136,6 @@ impl<'a, 's> Body<'a, 's> {
         self.emit_operations(block_id)?;
         let body = self.body;
         let terminator = body.block(block_id).terminator();
-        let mut start = self.code.byte_len();
         let targets = distinct_targets(&terminator.kind);
         let untested = continuation
             .or_else(|| targets.iter().copied().find(|target| Some(*target) == next))
@@ -2158,6 +2151,7 @@ impl<'a, 's> Body<'a, 's> {
                 normal,
                 error,
             } => {
+                self.open_source(operation.span);
                 let source =
                     ExpressionSource::from_index(block_id, body.block(block_id).operations().len());
                 self.call_operation(operation, true, source)?;
@@ -2169,66 +2163,59 @@ impl<'a, 's> Body<'a, 's> {
                     self.i(I::If(BlockType::Empty));
                     self.labels.push(Label::If);
                     self.capture_failure();
-                    self.enter(*error, nested, operation.span, &mut start)?;
+                    self.enter(*error, nested)?;
                     self.labels.pop();
                     self.i(I::End);
                 } else {
                     self.i(I::I32Eqz);
-                    self.enter_if(*normal, nested, operation.span, &mut start)?;
+                    self.enter_if(*normal, nested)?;
                     self.capture_failure();
                 }
-                self.record_source(start, operation.span);
+                self.close_source();
             }
             TerminatorKind::Goto { .. }
             | TerminatorKind::CondBr { .. }
             | TerminatorKind::SwitchVariant { .. } => {
+                self.open_source(terminator.span);
                 for &target in &targets {
                     if Some(target) != untested {
-                        self.arm_condition(block_id, target, &mut start)?;
-                        self.enter_if(target, nested, terminator.span, &mut start)?;
+                        self.arm_condition(block_id, target)?;
+                        self.enter_if(target, nested)?;
                     }
                 }
-                self.record_source(start, terminator.span);
+                self.close_source();
             }
             TerminatorKind::Yield { place, .. } => {
+                self.open_source(terminator.span);
                 self.suspend(place)?;
-                self.record_source(start, terminator.span);
+                self.close_source();
                 return Ok(());
             }
             TerminatorKind::Return
             | TerminatorKind::PropagateError
             | TerminatorKind::FailureDuringCleanup
             | TerminatorKind::InvariantFailure { .. } => {
+                self.open_source(terminator.span);
                 self.exit(block_id)?;
-                self.record_source(start, terminator.span);
+                self.close_source();
                 return Ok(());
             }
         }
         let untested = untested.expect("a terminator with targets has an untested one");
         if Some(untested) != continuation && Some(untested) != next {
-            let start = self.code.byte_len();
+            self.open_source(terminator.span);
             self.i(I::Br(self.label_depth(untested)));
-            self.record_source(start, terminator.span);
+            self.close_source();
         }
         Ok(())
     }
 
     /// Enters `target` when the condition on the operand stack holds.
-    ///
-    /// The terminator's code since `start` maps to `span`. A nested arm splits it, so that source
-    /// ranges stay ordered and disjoint: the code before the arm is recorded, and `start` resumes
-    /// after it.
-    fn enter_if(
-        &mut self,
-        target: BlockId,
-        nested: &[(BlockId, Vec<Item>)],
-        span: Location,
-        start: &mut usize,
-    ) -> Result<(), String> {
+    fn enter_if(&mut self, target: BlockId, nested: &[(BlockId, Vec<Item>)]) -> Result<(), String> {
         if nested.iter().any(|(block, _)| *block == target) {
             self.i(I::If(BlockType::Empty));
             self.labels.push(Label::If);
-            self.enter(target, nested, span, start)?;
+            self.enter(target, nested)?;
             self.labels.pop();
             self.i(I::End);
         } else {
@@ -2237,19 +2224,14 @@ impl<'a, 's> Body<'a, 's> {
         Ok(())
     }
 
-    /// Enters `target` from inside an arm whose end must not be reached; see
-    /// [`enter_if`](Self::enter_if) for `span` and `start`.
-    fn enter(
-        &mut self,
-        target: BlockId,
-        nested: &[(BlockId, Vec<Item>)],
-        span: Location,
-        start: &mut usize,
-    ) -> Result<(), String> {
+    /// Enters `target` from inside an arm whose end must not be reached.
+    ///
+    /// A nested arm is not the terminator's code: it has the sources of its own blocks.
+    fn enter(&mut self, target: BlockId, nested: &[(BlockId, Vec<Item>)]) -> Result<(), String> {
         if let Some((_, items)) = nested.iter().find(|(block, _)| *block == target) {
-            self.record_source(*start, span);
+            self.open_source(Location::new_synthesized());
             self.emit_items(items, None)?;
-            *start = self.code.byte_len();
+            self.close_source();
             Ok(())
         } else {
             self.i(I::Br(self.label_depth(target)));
@@ -2267,12 +2249,7 @@ impl<'a, 's> Body<'a, 's> {
     }
 
     /// Pushes whether the terminator of `block_id` selects `target`.
-    fn arm_condition(
-        &mut self,
-        block_id: BlockId,
-        target: BlockId,
-        start: &mut usize,
-    ) -> Result<(), String> {
+    fn arm_condition(&mut self, block_id: BlockId, target: BlockId) -> Result<(), String> {
         let body = self.body;
         match &body.block(block_id).terminator().kind {
             TerminatorKind::CondBr {
@@ -2293,11 +2270,9 @@ impl<'a, 's> Body<'a, 's> {
                 if let Some(intrinsic) = self.analysis.comparison_switch(body.block(block_id)) {
                     let operations = body.block(block_id).operations();
                     let call = &operations[operations.len() - 2];
-                    self.record_source(*start, body.block(block_id).terminator().span);
-                    let comparison_start = self.code.byte_len();
+                    self.open_source(call.span);
                     self.comparison_switch_predicate(intrinsic, call, cases, *default, target)?;
-                    self.record_source(comparison_start, call.span);
-                    *start = self.code.byte_len();
+                    self.close_source();
                     return Ok(());
                 }
                 // The default arm is selected by no case reaching another target.
@@ -2404,14 +2379,14 @@ impl<'a, 's> Body<'a, 's> {
                     .result_id()
                     .and_then(|result| self.analysis.comparison_fusion(result))
             {
-                let start = self.code.byte_len();
+                self.open_source(operation.span);
                 self.comparison_predicate(intrinsic, operation, test)?;
                 self.finish_operation_result(test)?;
-                self.record_source(start, operation.span);
+                self.close_source();
                 index += 3;
                 continue;
             }
-            let start = self.code.byte_len();
+            self.open_source(operation.span);
             self.operation(ExpressionSource::from_index(block_id, index), operation)
                 .map_err(|e| {
                     format!(
@@ -2420,7 +2395,7 @@ impl<'a, 's> Body<'a, 's> {
                         block_id.as_u32()
                     )
                 })?;
-            self.record_source(start, operation.span);
+            self.close_source();
             index += 1;
         }
         Ok(())
@@ -2435,28 +2410,28 @@ impl<'a, 's> Body<'a, 's> {
     ) -> Result<(), String> {
         self.emit_operations(block_id)?;
         let block = self.body.block(block_id);
-        let mut start = self.code.byte_len();
         let span = match &block.terminator().kind {
             TerminatorKind::Invoke { operation, .. } => operation.span,
             _ => block.terminator().span,
         };
+        self.open_source(span);
         if let Some((then_target, else_target)) = conditional_targets(&block.terminator().kind) {
             if then_target == else_target {
                 self.dispatch_branch(then_target, depth, next, 0);
             } else if Some(then_target) == next {
-                self.arm_condition(block_id, else_target, &mut start)?;
+                self.arm_condition(block_id, else_target)?;
                 self.dispatch_branch_if(else_target, depth);
             } else if Some(else_target) == next {
-                self.arm_condition(block_id, then_target, &mut start)?;
+                self.arm_condition(block_id, then_target)?;
                 self.dispatch_branch_if(then_target, depth);
             } else {
                 self.i(I::I32Const(then_target.as_u32() as i32));
                 self.i(I::I32Const(else_target.as_u32() as i32));
-                self.arm_condition(block_id, then_target, &mut start)?;
+                self.arm_condition(block_id, then_target)?;
                 self.i(I::Select);
                 self.dispatch(depth, 0);
             }
-            self.record_source(start, span);
+            self.close_source();
             return Ok(());
         }
         match &block.terminator().kind {
@@ -2530,15 +2505,35 @@ impl<'a, 's> Body<'a, 's> {
             | TerminatorKind::FailureDuringCleanup
             | TerminatorKind::InvariantFailure { .. } => self.exit(block_id)?,
         }
-        self.record_source(start, span);
+        self.close_source();
         Ok(())
     }
 
-    fn record_source(&mut self, start: usize, span: Location) {
-        let end = self.code.byte_len();
-        if start < end && !span.is_synthesized() {
-            self.source_map.push((start..end, span));
-        }
+    /// Opens the source region of the code emitted until [`close_source`](Self::close_source).
+    ///
+    /// Regions nest, and the code of the inner one belongs to it only: the enclosing region pauses
+    /// until the inner one closes. A synthesized `span` gives its code no source, as does emission
+    /// without source map.
+    fn open_source(&mut self, span: Location) {
+        self.sources.push(self.code.spans());
+        self.code
+            .set_source((self.source_map && !span.is_synthesized()).then_some(span));
+    }
+
+    fn close_source(&mut self) {
+        let enclosing = self.sources.pop().expect("an open source region closes");
+        self.code.set_spans(enclosing);
+    }
+
+    /// Emits the stackified operation at `source` where its value is read, in its own source
+    /// region.
+    fn stackified(&mut self, source: ExpressionSource) -> Result<(), String> {
+        let body = self.body;
+        let operation = &body.block(source.block).operations()[source.operation_id().as_index()];
+        self.open_source(operation.span);
+        self.operation(source, operation)?;
+        self.close_source();
+        Ok(())
     }
 
     /// Continues the dispatcher loop, `depth + nested` labels up, at the block on the stack.

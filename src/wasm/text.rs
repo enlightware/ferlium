@@ -14,7 +14,7 @@ use wasmparser::{Parser, Payload};
 use wasmprinter::{Config, Print};
 
 use crate::{
-    CompilerSession, Location,
+    CompilerSession,
     emit_mir::{MirText, TextSourceMapEntry},
     eval::RuntimeError,
     module::{
@@ -37,7 +37,7 @@ pub(crate) fn module_text(
     session: &CompilerSession,
     module_id: ModuleId,
 ) -> Result<MirText, RuntimeError> {
-    let Some(emitted) = emit_module(session, module_id)? else {
+    let Some(emitted) = emit_module(session, module_id, true)? else {
         return Ok(MirText {
             text: String::new(),
             source_map: Vec::new(),
@@ -56,6 +56,7 @@ pub(crate) fn module_text(
 fn emit_module(
     session: &CompilerSession,
     module_id: ModuleId,
+    with_source_map: bool,
 ) -> Result<Option<Emitted>, RuntimeError> {
     let program = session.prepare_physical_program(module_id)?;
     let artifacts = program
@@ -74,9 +75,13 @@ fn emit_module(
         .collect::<Vec<_>>();
     let mut imports = Imports::new()
         .map_err(|error| RuntimeError::Backend(format!("Wasm imports: {error:?}")))?;
-    emit::emit(&program, &roots, &exports, &mut imports, session)
-        .map(Some)
-        .map_err(RuntimeError::Backend)
+    if with_source_map {
+        emit::emit_with_source_map(&program, &roots, &exports, &mut imports, session)
+    } else {
+        emit::emit(&program, &roots, &exports, &mut imports, session)
+    }
+    .map(Some)
+    .map_err(RuntimeError::Backend)
 }
 
 /// Describe the host-owned data that the module reads through the invocation context, as
@@ -196,8 +201,9 @@ fn source_exports<'a>(
     })
 }
 
-/// Print a module, linking each instruction line to the source of the code containing it.
-/// Consecutive lines of the same source region form a single link.
+/// Print a module, linking each instruction line to the source of the code containing it, once per
+/// source when that code does the work of several operations. Consecutive lines of the same source
+/// region form a single link.
 fn print(bytes: &[u8], source_map: &[CodeSourceMapEntry]) -> Result<MirText, String> {
     let mut printer = LinePrinter::default();
     Config::new()
@@ -206,21 +212,38 @@ fn print(bytes: &[u8], source_map: &[CodeSourceMapEntry]) -> Result<MirText, Str
     let bodies = code_bodies(bytes)?;
     let text = printer.text;
     let mut links: Vec<TextSourceMapEntry> = Vec::new();
+    // The links of the last linked line, which a following line of the same source extends.
+    let mut open: Vec<usize> = Vec::new();
     for (start, offset) in printer.lines {
-        let Some(span) = offset.and_then(|offset| span_at(&bodies, source_map, offset as usize))
-        else {
+        let Some(offset) = offset else {
             continue;
         };
+        let entries = entries_at(&bodies, source_map, offset as usize);
+        if entries.is_empty() {
+            continue;
+        }
         let line = &text[start..];
         let line = &line[..line.find('\n').unwrap_or(line.len())];
         let from = start + line.len() - line.trim_start().len();
         let to = start + line.trim_end().len();
-        match links.last_mut() {
-            Some(last) if last.span == span && text[last.to..from].trim().is_empty() => {
-                last.to = to;
+        let mut current: Vec<usize> = Vec::new();
+        for entry in entries {
+            let span = entry.span;
+            if current.iter().any(|&index| links[index].span == span) {
+                continue;
             }
-            _ => links.push(TextSourceMapEntry { from, to, span }),
+            let extended = open.iter().copied().find(|&index| {
+                links[index].span == span && text[links[index].to..from].trim().is_empty()
+            });
+            if let Some(index) = extended {
+                links[index].to = to;
+                current.push(index);
+            } else {
+                current.push(links.len());
+                links.push(TextSourceMapEntry { from, to, span });
+            }
         }
+        open = current;
     }
     Ok(MirText {
         text,
@@ -240,21 +263,27 @@ fn code_bodies(bytes: &[u8]) -> Result<Vec<Range<usize>>, String> {
     Ok(bodies)
 }
 
-/// The source region of the code at a module byte offset, if any.
-fn span_at(
+/// The source-map entries whose code contains a module byte offset.
+fn entries_at<'m>(
     bodies: &[Range<usize>],
-    source_map: &[CodeSourceMapEntry],
+    source_map: &'m [CodeSourceMapEntry],
     offset: usize,
-) -> Option<Location> {
+) -> &'m [CodeSourceMapEntry] {
     let body = bodies.partition_point(|range| range.end <= offset);
-    let range = bodies.get(body)?;
-    let offset = offset.checked_sub(range.start)?;
-    // Entries are ordered by body, then by their disjoint byte ranges.
-    let index = source_map.partition_point(|entry| (entry.body, entry.bytes.end) <= (body, offset));
-    source_map
-        .get(index)
-        .filter(|entry| entry.body == body && entry.bytes.contains(&offset))
-        .map(|entry| entry.span)
+    let Some(offset) = bodies
+        .get(body)
+        .and_then(|range| offset.checked_sub(range.start))
+    else {
+        return &[];
+    };
+    // Entries are ordered by body, then by their byte ranges, which are disjoint or identical: those
+    // containing the offset are consecutive.
+    let first = source_map.partition_point(|entry| (entry.body, entry.bytes.end) <= (body, offset));
+    let count = source_map[first..]
+        .iter()
+        .take_while(|entry| entry.body == body && entry.bytes.start <= offset)
+        .count();
+    &source_map[first..first + count]
 }
 
 /// Collects the printed text and the binary offset, if any, at which each line starts.
@@ -281,7 +310,7 @@ mod tests {
 
     use crate::{CompilerSession, Path};
 
-    use super::{emit_module, module_text};
+    use super::{CodeSourceMapEntry, MirText, emit_module, module_text};
 
     const SOURCE: &str = "fn helper(x: int) -> int { x * 3 }\n\
         fn compute(x: int) -> int { if x > 0 { helper(x) } else { 1 } }\n\
@@ -400,6 +429,96 @@ mod tests {
         }
     }
 
+    /// Source lookup bisects the entries, so in each body they must be ordered, and their ranges
+    /// disjoint or identical.
+    fn assert_source_map_ordered(source_map: &[CodeSourceMapEntry]) {
+        for pair in source_map.windows(2) {
+            assert!(
+                pair[0].body < pair[1].body
+                    || (pair[0].body == pair[1].body
+                        && (pair[0].bytes.end <= pair[1].bytes.start
+                            || pair[0].bytes == pair[1].bytes)),
+                "{pair:?}"
+            );
+        }
+    }
+
+    /// The source texts linked to the Wasm text at `offset`.
+    fn linked_sources(session: &CompilerSession, text: &MirText, offset: usize) -> Vec<String> {
+        text.source_map
+            .iter()
+            .filter(|entry| entry.from <= offset && offset < entry.to)
+            .map(|entry| {
+                let source = session
+                    .source_table()
+                    .get_source_text(entry.span.source_id())
+                    .unwrap();
+                source[entry.span.as_range()].to_string()
+            })
+            .collect()
+    }
+
+    #[wasm_bindgen_test]
+    fn the_source_map_does_not_change_the_code() {
+        let mut session = CompilerSession::new();
+        let module = session
+            .compile(SOURCE, "wasm_text", Path::single_str("wasm_text"))
+            .unwrap()
+            .module_id;
+        let mapped = emit_module(&session, module, true).unwrap().unwrap();
+        let unmapped = emit_module(&session, module, false).unwrap().unwrap();
+        assert!(!mapped.source_map.is_empty());
+        assert!(unmapped.source_map.is_empty());
+        assert_eq!(mapped.bytes, unmapped.bytes);
+    }
+
+    #[wasm_bindgen_test]
+    fn stackified_operations_link_to_their_own_source() {
+        let source = "fn f(x: int, c: int) -> int { let t = x * 3; t + c }";
+        let mut session = CompilerSession::new();
+        let module = session
+            .compile(source, "wasm_text", Path::single_str("wasm_text"))
+            .unwrap()
+            .module_id;
+        let emitted = emit_module(&session, module, true).unwrap().unwrap();
+        assert_source_map_ordered(&emitted.source_map);
+        let text = module_text(&session, module).unwrap();
+        let body = text.text.find("(func $wasm_text::f").unwrap();
+        for (instruction, expected) in [("i32.mul", "x * 3"), ("i32.add", "t + c")] {
+            let offset = body + text.text[body..].find(instruction).unwrap();
+            assert_eq!(
+                linked_sources(&session, &text, offset),
+                [expected],
+                "{instruction}:\n{}",
+                text.text
+            );
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn a_fused_tee_links_to_both_the_set_and_the_get() {
+        let source = "fn f(x: int) -> int { let y = x * 3; if y > 5 { y } else { 1 } }";
+        let mut session = CompilerSession::new();
+        let module = session
+            .compile(source, "wasm_text", Path::single_str("wasm_text"))
+            .unwrap()
+            .module_id;
+        let emitted = emit_module(&session, module, true).unwrap().unwrap();
+        assert_source_map_ordered(&emitted.source_map);
+        let text = module_text(&session, module).unwrap();
+        let tee = text
+            .text
+            .find("local.tee")
+            .expect("a set read back is a tee");
+        let linked = linked_sources(&session, &text, tee);
+        assert!(linked.len() >= 2, "{linked:?}\n{}", text.text);
+        assert!(
+            linked.iter().any(|linked| linked == "x * 3"),
+            "{linked:?}\n{}",
+            text.text
+        );
+    }
+
     #[wasm_bindgen_test]
     fn source_map_ranges_are_ordered_through_nested_branch_arms() {
         let source = "fn compute(x: int, y: int) -> int { \
@@ -409,15 +528,8 @@ mod tests {
             .compile(source, "wasm_text", Path::single_str("wasm_text"))
             .unwrap()
             .module_id;
-        let emitted = emit_module(&session, module).unwrap().unwrap();
-        // Source lookup bisects the entries, so they must be ordered and disjoint in each body.
-        for pair in emitted.source_map.windows(2) {
-            assert!(
-                pair[0].body < pair[1].body
-                    || (pair[0].body == pair[1].body && pair[0].bytes.end <= pair[1].bytes.start),
-                "{pair:?}"
-            );
-        }
+        let emitted = emit_module(&session, module, true).unwrap().unwrap();
+        assert_source_map_ordered(&emitted.source_map);
     }
 
     #[wasm_bindgen_test]
@@ -431,14 +543,8 @@ mod tests {
             .compile(source, "wasm_text", Path::single_str("wasm_text"))
             .unwrap()
             .module_id;
-        let emitted = emit_module(&session, module).unwrap().unwrap();
-        for pair in emitted.source_map.windows(2) {
-            assert!(
-                pair[0].body < pair[1].body
-                    || (pair[0].body == pair[1].body && pair[0].bytes.end <= pair[1].bytes.start),
-                "{pair:?}"
-            );
-        }
+        let emitted = emit_module(&session, module, true).unwrap().unwrap();
+        assert_source_map_ordered(&emitted.source_map);
         let text = module_text(&session, module).unwrap();
         // Inlining retains the native call's definition span inside the std `cmp` body.
         let call = "compare_int(left, right)";

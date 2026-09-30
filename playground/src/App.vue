@@ -37,7 +37,7 @@ let isRestoring = false;
 // overwrite the saved panic message.
 let isReloading = false;
 const ir = ref<IrText>();
-const sourceSelection = ref<SourceRange>();
+const sourceSelection = ref<Array<SourceRange>>();
 const irTitle = computed(() => defined(executionModes.find(mode => mode.value === executionMode.value)).label);
 // The pane follows the selected execution mode, not the availability of its content: a transiently
 // broken source while typing must not make the layout jump.
@@ -64,12 +64,12 @@ function updateIr(newIr: IrText | undefined) {
 	ir.value = newIr;
 }
 
-function updateSourceSelection(range: SourceRange) {
-	sourceSelection.value = range;
+function updateSourceSelection(ranges: Array<SourceRange>) {
+	sourceSelection.value = ranges;
 }
 
-function selectSource(range: SourceRange) {
-	defined(editor.value).selectRange(range);
+function selectSource(ranges: Array<SourceRange>) {
+	defined(editor.value).selectRanges(ranges);
 }
 
 function startResize(event: PointerEvent) {

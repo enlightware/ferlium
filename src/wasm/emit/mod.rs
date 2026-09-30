@@ -472,7 +472,7 @@ pub(super) struct Emitted {
     /// Number of subscripts described in the evidence image.
     #[cfg_attr(not(feature = "wasm-text"), allow(dead_code))]
     pub subscript_count: usize,
-    /// Source regions of the code generated for MIR operations and terminators.
+    /// Source regions of the code generated for MIR operations and terminators, if requested.
     #[cfg_attr(not(feature = "wasm-text"), allow(dead_code))]
     pub source_map: Vec<CodeSourceMapEntry>,
 }
@@ -494,7 +494,9 @@ pub(super) enum HostExportKind {
     },
 }
 
-/// The code generated for one MIR operation or terminator.
+/// The code generated for one MIR operation or terminator. Within a body, entries are ordered and
+/// their ranges disjoint or identical: code doing the work of several operations has one entry per
+/// span.
 #[cfg_attr(not(feature = "wasm-text"), allow(dead_code))]
 #[derive(Clone, Debug)]
 pub(super) struct CodeSourceMapEntry {
@@ -604,11 +606,38 @@ pub(super) fn emit(
         exports,
         imports,
         session,
-        |program, function| {
-            let (parameters, result) = host_signature(program, function)?;
-            Ok(HostExportKind::Scalar { parameters, result })
-        },
+        false,
+        scalar_export_kind,
     )
+}
+
+/// [`emit`], also mapping the code back to its source. The map costs compile time, so only views
+/// of the code ask for it.
+#[cfg_attr(not(feature = "wasm-text"), allow(dead_code))]
+pub(super) fn emit_with_source_map(
+    program: &ResolvedPhysicalProgram<'_>,
+    roots: &[FunctionId],
+    exports: &[(FunctionId, String)],
+    imports: &mut Imports,
+    session: &CompilerSession,
+) -> Result<Emitted, String> {
+    emit_with_export_kind(
+        program,
+        roots,
+        exports,
+        imports,
+        session,
+        true,
+        scalar_export_kind,
+    )
+}
+
+fn scalar_export_kind(
+    program: &ResolvedPhysicalProgram<'_>,
+    function: FunctionId,
+) -> Result<HostExportKind, String> {
+    let (parameters, result) = host_signature(program, function)?;
+    Ok(HostExportKind::Scalar { parameters, result })
 }
 
 /// Emit no-argument roots through the temporary boxed differential-testing boundary.
@@ -625,6 +654,7 @@ pub(super) fn emit_boxed(
         exports,
         imports,
         session,
+        false,
         |program, function| {
             let body = program
                 .function(function)
@@ -667,6 +697,7 @@ fn emit_with_export_kind(
     exports: &[(FunctionId, String)],
     imports: &mut Imports,
     session: &CompilerSession,
+    with_source_map: bool,
     export_kind: impl Fn(&ResolvedPhysicalProgram<'_>, FunctionId) -> Result<HostExportKind, String>,
 ) -> Result<Emitted, String> {
     let host_exports = exports
@@ -1130,6 +1161,7 @@ fn emit_with_export_kind(
             mode,
             runtime_globals,
             depth_tracked.contains(id),
+            with_source_map,
         )
         .and_then(Body::emit)
         .map_err(|reason| diagnostic(*id, body, &reason))?;
@@ -1169,6 +1201,7 @@ fn emit_with_export_kind(
                 BodyMode::ProjectionResume,
                 runtime_globals,
                 depth_tracked.contains(id),
+                with_source_map,
             )
             .and_then(Body::emit)
             .map_err(|reason| diagnostic(*id, body, &reason))?;

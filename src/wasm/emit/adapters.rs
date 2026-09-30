@@ -30,7 +30,7 @@ use crate::{
 
 use super::{
     ScalarType, check_context, context_pointer, emit_failure, enter_frame, frame_address,
-    frame_bytes, leave_frame, memarg,
+    frame_bytes, leave_frame, memarg, peephole::Instructions,
 };
 
 /// Bridge the declaration-fixed dictionary ABI to the implementation's direct ABI.
@@ -242,7 +242,7 @@ impl NativeOptionalResultAdapter {
 
     pub(super) fn emit(
         &self,
-        code: &mut WasmFunction,
+        code: &mut impl Instructions,
         output: WasmLocalId,
         payload: WasmLocalId,
         scratch: WasmLocalId,

@@ -11,13 +11,14 @@ const props = defineProps<{
 	/** The rendered IR, or `undefined` when the current source has none to show. */
 	ir?: IrText,
 	title: string,
-	sourceSelection?: SourceRange,
+	/** The selected source ranges, several with multiple selections. */
+	sourceSelection?: Array<SourceRange>,
 	/** The syntax of the rendered IR. */
 	language?: "mir" | "wasm",
 }>();
 
 const emit = defineEmits<{
-	sourceSelected: [range: SourceRange],
+	sourceSelected: [ranges: Array<SourceRange>],
 }>();
 
 const viewer = ref<HTMLElement>();
@@ -68,7 +69,7 @@ function refreshHighlights() {
 	const decorations = selection === undefined
 		? []
 		: sourceMap()
-			.filter(entry => rangesOverlap(selection, sourceRange(entry)))
+			.filter(entry => selection.some(range => rangesOverlap(range, sourceRange(entry))))
 			.map(entry => Decoration.mark({ class: "cm-source-linked" }).range(entry.from, entry.to));
 	view.value.dispatch({ effects: setHighlights.of(Decoration.set(decorations, true)) });
 }
@@ -86,10 +87,18 @@ function processUpdate(update: ViewUpdate) {
 	if (!update.selectionSet) {
 		return;
 	}
+	// Code may do the work of several source expressions, with one entry for each.
 	const selection = update.state.selection.main;
-	const entry = sourceMap().find(entry => rangesOverlap(selection, entry));
-	if (entry !== undefined) {
-		emit("sourceSelected", sourceRange(entry));
+	const ranges: Array<SourceRange> = [];
+	for (const entry of sourceMap()) {
+		const range = sourceRange(entry);
+		if (rangesOverlap(selection, entry)
+			&& !ranges.some(other => other.from === range.from && other.to === range.to)) {
+			ranges.push(range);
+		}
+	}
+	if (ranges.length > 0) {
+		emit("sourceSelected", ranges);
 	}
 }
 

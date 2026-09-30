@@ -3,7 +3,12 @@
 
 //! Local rewrites of adjacent instructions while a function body is emitted.
 
+use std::ops::Range;
+
+use smallvec::SmallVec;
 use wasm_encoder::{Function as WasmFunction, Instruction as I, MemArg};
+
+use crate::Location;
 
 /// Where emitted instructions go: straight into a function, or through [`Code`]'s rewrites.
 pub(super) trait Instructions {
@@ -23,18 +28,34 @@ impl Instructions for Code {
     }
 }
 
+/// A set of source spans, those whose work an instruction does: several when a rewrite merged
+/// instructions emitted for different ones. It indexes the sets of a [`Code`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct Spans(u32);
+
+impl Spans {
+    /// No span: code without source.
+    const NONE: Self = Self(0);
+}
+
 /// A function body under construction that holds back its last few instructions, so that a
 /// negated comparison becomes the complementary one, a comparison with zero a zero test, a set
 /// read back a tee, constant additions one or none, a constant address offset part of its load,
 /// and a small constant-size copy a load and a store.
 ///
-/// Held instructions are written out before any other access, so bytes already written never
-/// change: byte offsets taken for the source map stay valid. The exception is a trailing
-/// `local.set`, counted as written, as it can only become a `local.tee` of the same length. Only a
-/// branch sees what is held, and nothing is held across it.
+/// Each instruction carries the spans of the code being emitted when it arrived, and a rewrite
+/// gives its result the spans of all the instructions it replaced. The source map is recorded as
+/// instructions are written, so it follows the rewrites. Only a branch sees what is held, and
+/// nothing is held across it.
 pub(super) struct Code {
     function: WasmFunction,
-    held: Vec<I<'static>>,
+    held: Vec<(I<'static>, Spans)>,
+    /// The spans of the code being emitted.
+    spans: Spans,
+    /// The span sets that [`Spans`] index, the first one empty.
+    span_sets: Vec<SmallVec<[Location; 1]>>,
+    /// Written byte ranges with the spans whose work they do, ordered and disjoint.
+    source_map: Vec<(Range<usize>, Spans)>,
 }
 
 impl Code {
@@ -42,138 +63,231 @@ impl Code {
         Self {
             function,
             held: Vec::new(),
+            spans: Spans::NONE,
+            span_sets: vec![SmallVec::new()],
+            source_map: Vec::new(),
         }
     }
 
-    /// The function with every held instruction written.
-    pub(super) fn function(&mut self) -> &mut WasmFunction {
-        for instruction in self.held.drain(..) {
-            self.function.instruction(&instruction);
-        }
-        &mut self.function
+    /// The spans of the code being emitted.
+    pub(super) fn spans(&self) -> Spans {
+        self.spans
     }
 
-    /// The length of the code so far, counting a trailing held `local.set`, which may still become
-    /// a `local.tee` of the same length, so that a source region may end on it.
-    pub(super) fn byte_len(&mut self) -> usize {
-        let Some(&I::LocalSet(local)) = self.held.last() else {
-            return self.function().byte_len();
+    /// Sets the spans of the code emitted from now on to earlier ones.
+    pub(super) fn set_spans(&mut self, spans: Spans) {
+        self.spans = spans;
+    }
+
+    /// Sets the span of the code emitted from now on, if it has one.
+    pub(super) fn set_source(&mut self, source: Option<Location>) {
+        self.spans = match source {
+            // Adjacent code of one span then shares its set, and so its range.
+            Some(span) if self.span_sets.last().is_some_and(|last| last[..] == [span]) => {
+                Spans(self.span_sets.len() as u32 - 1)
+            }
+            Some(span) => self.span_set(SmallVec::from_elem(span, 1)),
+            None => Spans::NONE,
         };
-        let set = self.held.pop().expect("a held instruction is last");
-        let length = self.function().byte_len();
-        self.held.push(set);
-        length + 1 + leb128_length(local)
     }
 
-    pub(super) fn finish(mut self) -> WasmFunction {
-        self.function();
-        self.function
+    fn span_set(&mut self, set: SmallVec<[Location; 1]>) -> Spans {
+        let spans = Spans(u32::try_from(self.span_sets.len()).expect("span sets fit in u32"));
+        self.span_sets.push(set);
+        spans
+    }
+
+    /// The function and its source map, with one entry per span of each written range.
+    pub(super) fn finish(mut self) -> (WasmFunction, Vec<(Range<usize>, Location)>) {
+        self.flush();
+        let span_sets = &self.span_sets;
+        let source_map = self
+            .source_map
+            .iter()
+            .flat_map(|(range, spans)| {
+                span_sets[spans.0 as usize]
+                    .iter()
+                    .map(move |span| (range.clone(), *span))
+            })
+            .collect();
+        (self.function, source_map)
     }
 
     /// Inlined, so that a call site's known instruction selects its path and encoding statically.
     #[inline(always)]
     pub(super) fn instruction(&mut self, instruction: &I<'_>) {
+        self.instruction_from(instruction, self.spans);
+    }
+
+    #[inline(always)]
+    fn instruction_from(&mut self, instruction: &I<'_>, spans: Spans) {
         if let Some(instruction) = holdable(instruction) {
-            self.hold(instruction);
-        } else if self.held.is_empty() || !self.release(instruction) {
-            self.function.instruction(instruction);
+            self.hold(instruction, spans);
+        } else if self.held.is_empty() || !self.release(instruction, spans) {
+            self.write(instruction, spans);
+        }
+    }
+
+    #[inline(always)]
+    fn write(&mut self, instruction: &I<'_>, spans: Spans) {
+        let start = self.function.byte_len();
+        self.function.instruction(instruction);
+        if spans != Spans::NONE {
+            self.record(start, spans);
+        }
+    }
+
+    fn record(&mut self, start: usize, spans: Spans) {
+        let end = self.function.byte_len();
+        match self.source_map.last_mut() {
+            Some((range, last)) if range.end == start && *last == spans => range.end = end,
+            _ => self.source_map.push((start..end, spans)),
+        }
+    }
+
+    /// Writes every held instruction.
+    fn flush(&mut self) {
+        let mut held = std::mem::take(&mut self.held);
+        for (instruction, spans) in held.drain(..) {
+            self.write(&instruction, spans);
+        }
+        self.held = held;
+    }
+
+    /// Removes the last `count` held instructions, returning the union of their spans and `spans`.
+    fn merge(&mut self, count: usize, spans: Spans) -> Spans {
+        let start = self.held.len() - count;
+        let mut merged = Spans::NONE;
+        let mut union = None::<SmallVec<[Location; 1]>>;
+        let held = self.held[start..].iter().map(|(_, spans)| *spans);
+        for held in held.chain([spans]).collect::<SmallVec<[Spans; 4]>>() {
+            if held == merged || held == Spans::NONE {
+                continue;
+            }
+            if merged == Spans::NONE {
+                merged = held;
+                continue;
+            }
+            let set = union.get_or_insert_with(|| self.span_sets[merged.0 as usize].clone());
+            for span in &self.span_sets[held.0 as usize] {
+                if !set.contains(span) {
+                    set.push(*span);
+                }
+            }
+        }
+        self.held.truncate(start);
+        match union {
+            Some(set) => self.span_set(set),
+            None => merged,
         }
     }
 
     #[inline(never)]
-    fn hold(&mut self, instruction: I<'static>) {
-        self.held.push(instruction);
+    fn hold(&mut self, instruction: I<'static>, spans: Spans) {
+        self.held.push((instruction, spans));
         loop {
             match self.held.as_slice() {
                 // `x == 0` is `x.eqz`.
-                [.., I::I32Const(0), I::I32Eq] => {
-                    self.held.truncate(self.held.len() - 2);
-                    self.held.push(I::I32Eqz);
+                [.., (I::I32Const(0), _), (I::I32Eq, _)] => {
+                    let spans = self.merge(2, Spans::NONE);
+                    self.held.push((I::I32Eqz, spans));
                 }
                 // A comparison yields 0 or 1, so its negation is the complementary comparison.
-                [.., comparison, I::I32Eqz] => {
+                [.., (comparison, _), (I::I32Eqz, _)] => {
                     let Some(complement) = complement(comparison) else {
                         break;
                     };
-                    self.held.truncate(self.held.len() - 2);
-                    self.held.push(complement);
+                    let spans = self.merge(2, Spans::NONE);
+                    self.held.push((complement, spans));
                 }
                 _ => break,
             }
         }
         if self.held.len() > 3 {
-            let first = self.held.remove(0);
-            self.function.instruction(&first);
+            let (first, spans) = self.held.remove(0);
+            self.write(&first, spans);
         }
     }
 
     /// Writes the held instructions before `next`, or absorbs `next` into them, returning whether
     /// it did.
     #[inline(never)]
-    fn release(&mut self, next: &I<'_>) -> bool {
+    fn release(&mut self, next: &I<'_>, spans: Spans) -> bool {
         match (self.held.as_slice(), next) {
             // Adding zero changes nothing; the rest stays held.
-            ([.., I::I32Const(0)], I::I32Add) => {
+            ([.., (I::I32Const(0), _)], I::I32Add) => {
                 self.held.pop();
                 return true;
             }
             // Constant additions combine, as both wrap.
-            ([.., I::I32Const(first), I::I32Add, I::I32Const(second)], I::I32Add) => {
+            (
+                [
+                    ..,
+                    (I::I32Const(first), _),
+                    (I::I32Add, _),
+                    (I::I32Const(second), _),
+                ],
+                I::I32Add,
+            ) => {
                 let sum = first.wrapping_add(*second);
-                self.held.truncate(self.held.len() - 3);
+                let spans = self.merge(3, spans);
                 if sum != 0 {
-                    self.held.extend([I::I32Const(sum), I::I32Add]);
+                    self.held
+                        .extend([(I::I32Const(sum), spans), (I::I32Add, spans)]);
                 }
                 return true;
             }
             // A constant address offset may move into a load's static offset.
-            ([.., I::I32Const(offset), I::I32Add], _) if *offset > 0 => {
+            ([.., (I::I32Const(offset), _), (I::I32Add, _)], _) if *offset > 0 => {
                 if let Some(load) = offset_load(next, *offset as u32) {
-                    self.held.truncate(self.held.len() - 2);
-                    self.function();
-                    self.function.instruction(&load);
+                    let spans = self.merge(2, spans);
+                    self.flush();
+                    self.write(&load, spans);
                     return true;
                 }
             }
-            ([.., I::I32Const(offset)], I::I32Add) if *offset > 0 => {
-                self.held.push(I::I32Add);
+            ([.., (I::I32Const(offset), _)], I::I32Add) if *offset > 0 => {
+                self.held.push((I::I32Add, spans));
                 if self.held.len() > 3 {
-                    let first = self.held.remove(0);
-                    self.function.instruction(&first);
+                    let (first, spans) = self.held.remove(0);
+                    self.write(&first, spans);
                 }
                 return true;
             }
-            ([.., I::LocalSet(set)], I::LocalGet(get)) if set == get => {
+            ([.., (I::LocalSet(set), _)], I::LocalGet(get)) if set == get => {
                 let local = *get;
-                self.held.pop();
-                self.held.push(I::LocalTee(local));
-                self.function();
+                let spans = self.merge(1, spans);
+                self.held.push((I::LocalTee(local), spans));
+                self.flush();
                 return true;
             }
             // A small constant-size copy is one load and one store. The load reads every byte
             // before the store writes, so overlapping ranges copy alike, and each traps where the
             // copy would, before writing anything.
             (
-                [.., I::I32Const(size)],
+                [.., (I::I32Const(size), _)],
                 I::MemoryCopy {
                     src_mem: 0,
                     dst_mem: 0,
                 },
             ) => {
                 if let Some((load, store)) = small_copy(*size) {
-                    self.held.pop();
-                    self.instruction(&load);
-                    self.instruction(&store);
+                    let spans = self.merge(1, spans);
+                    self.instruction_from(&load, spans);
+                    self.instruction_from(&store, spans);
                     return true;
                 }
             }
             // A branch tests for non-zero, which a double negation preserves.
-            ([.., I::I32Eqz, I::I32Eqz], I::If(_) | I::BrIf(_)) => {
-                self.held.truncate(self.held.len() - 2);
+            ([.., (I::I32Eqz, _), (I::I32Eqz, _)], I::If(_) | I::BrIf(_)) => {
+                let spans = self.merge(2, spans);
+                self.flush();
+                self.write(next, spans);
+                return true;
             }
             _ => {}
         }
-        self.function();
+        self.flush();
         false
     }
 }
@@ -274,17 +388,13 @@ fn small_copy(size: i32) -> Option<(I<'static>, I<'static>)> {
     })
 }
 
-/// The encoded length of `value` as an unsigned LEB128 integer.
-fn leb128_length(value: u32) -> usize {
-    (32 - value.leading_zeros() as usize).max(1).div_ceil(7)
-}
-
 #[cfg(test)]
 mod tests {
     use wasm_bindgen_test::wasm_bindgen_test;
     use wasm_encoder::BlockType;
 
     use super::*;
+    use crate::SourceId;
 
     fn memarg(offset: u64) -> MemArg {
         MemArg {
@@ -304,7 +414,7 @@ mod tests {
             function.instruction(instruction);
         }
         assert_eq!(
-            code.finish().into_raw_body(),
+            code.finish().0.into_raw_body(),
             function.into_raw_body(),
             "{input:?} must become {expected:?}"
         );
@@ -365,12 +475,45 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn a_held_set_counts_towards_the_length_it_keeps_as_a_tee() {
-        let mut code = Code::new(WasmFunction::new([]));
-        code.instruction(&I::LocalSet(200));
-        let length = code.byte_len();
-        code.instruction(&I::LocalGet(200));
-        assert_eq!(code.byte_len(), length);
+    fn rewrites_keep_the_sources_of_what_they_merge() {
+        let span = |start| Location::new(start, start + 1, SourceId::new(1));
+        let sources = |input: &[(Option<Location>, I<'_>)]| {
+            let mut code = Code::new(WasmFunction::new([]));
+            for (source, instruction) in input {
+                code.set_source(*source);
+                code.instruction(instruction);
+            }
+            code.finish()
+                .1
+                .into_iter()
+                .map(|(_, span)| span)
+                .collect::<Vec<_>>()
+        };
+        let (a, b) = (span(1), span(2));
+        // A set read back by other code: the tee does the work of both.
+        assert_eq!(
+            sources(&[(Some(a), I::LocalSet(3)), (Some(b), I::LocalGet(3))]),
+            [a, b]
+        );
+        // A comparison negated by other code, and a comparison with zero.
+        assert_eq!(
+            sources(&[(Some(a), I::I32LtS), (Some(b), I::I32Eqz)]),
+            [a, b]
+        );
+        assert_eq!(
+            sources(&[(Some(a), I::I32Const(0)), (Some(b), I::I32Eq)]),
+            [a, b]
+        );
+        // Code without a source contributes none, and adjacent code of one source is one range.
+        assert_eq!(
+            sources(&[
+                (Some(a), I::LocalGet(0)),
+                (Some(a), I::LocalGet(1)),
+                (None, I::Drop),
+                (Some(b), I::LocalSet(2)),
+            ]),
+            [a, b]
+        );
     }
 
     #[wasm_bindgen_test]

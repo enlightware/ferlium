@@ -57,7 +57,7 @@ pub(crate) struct MirText {
     pub(crate) source_map: Vec<TextSourceMapEntry>,
 }
 
-/// A source link for one range of a rendered compiler artifact.
+/// A source link for one range of a rendered compiler artifact. Several links may share a range.
 ///
 /// The offsets are `usize` while formatting because they index a Rust `String`; web-facing
 /// consumers convert them to `u32` at their API boundary.

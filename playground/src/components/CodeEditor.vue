@@ -5,6 +5,7 @@ import { DiagnosticSeverity, PlaygroundCompiler as Compiler, ErrorData } from ".
 import type { ExecutionMode, IrText, SourceRange } from "../types";
 
 import { EditorView, keymap, ViewUpdate, scrollPastEnd } from "@codemirror/view";
+import { EditorSelection } from "@codemirror/state";
 import { indentWithTab } from "@codemirror/commands";
 import { indentUnit } from "@codemirror/language";
 import { linter, lintGutter, type Diagnostic } from "@codemirror/lint";
@@ -34,7 +35,7 @@ const emit = defineEmits<{
 	runCode: [],
 	setRunAvailability: [status: boolean],
 	irChanged: [ir: IrText | undefined],
-	sourceSelection: [range: SourceRange],
+	sourceSelection: [ranges: Array<SourceRange>],
 }>();
 
 const myKeymap = keymap.of([
@@ -102,8 +103,8 @@ function processUpdate(update: ViewUpdate) {
 	const text = update.state.doc.toString();
 	const view = update.view;
 	if (update.selectionSet) {
-		const selection = update.state.selection.main;
-		emit("sourceSelection", { from: selection.from, to: selection.to });
+		const ranges = update.state.selection.ranges.map(range => ({ from: range.from, to: range.to }));
+		emit("sourceSelection", ranges);
 	}
 	if (update.docChanged) {
 		const report = skipCompilation ? undefined : compiler.compile(text);
@@ -206,9 +207,13 @@ const runCode = (executionMode: ExecutionMode = props.executionMode) => {
 	}
 }
 
-const selectRange = (range: SourceRange) => {
+/** Selects `ranges`, several when the selected IR does the work of several source expressions. */
+const selectRanges = (ranges: Array<SourceRange>) => {
+	if (ranges.length === 0) {
+		return;
+	}
 	view.value?.dispatch({
-		selection: { anchor: range.from, head: range.to },
+		selection: EditorSelection.create(ranges.map(range => EditorSelection.range(range.from, range.to))),
 		scrollIntoView: true,
 	});
 };
@@ -217,7 +222,7 @@ defineExpose({
 	setText,
 	getText,
 	runCode,
-	selectRange,
+	selectRanges,
 });
 
 
