@@ -74,6 +74,10 @@ These correspond to the Wasm value types on Wasm targets, and to register-passab
 
 A value uses a scalar slot only when target ABI lowering assigns it a scalar representation.
 Primitive integers, floats, booleans, and pointers have such representations.
+A concrete closed variant whose every case has unit payload also has a scalar representation:
+its canonical `u32` tag, passed as `i32` on Wasm. This includes aliases and named variants.
+The tag remains 32 bits under both ABI-32 and ABI-64, independently of the width of `int`.
+Generic variants and variants with any non-unit payload remain indirect.
 An aggregate does not acquire a scalar representation merely because its byte size is at most 8; tuples, records, and named product types are passed indirectly under this ABI.
 
 Aggregate coercion or flattening requires an explicit ABI extension defining padding, packing, and
@@ -624,9 +628,20 @@ optional and fallible payloads. Native implementations must preserve language se
 panicking on valid Ferlium inputs.
 
 Native entries must not embed session-local variant tags. They return transport-level values, such
-as scalar comparison codes, from which the caller constructs Ferlium variants.
-An ordering code is exactly `-1`, `0`, or `1` for Rust `Less`, `Equal`, or `Greater`. This value
-domain does not itself assert ordering laws or effects.
+as enum case indexes, from which the caller constructs Ferlium variants.
+
+## Native payload-free variant results
+
+A typed Rust enum result can declare an ordered list of unique symbolic cases, each with unit
+payload. Its C entry returns a `u32` index into that list, which is validated and mapped to the
+session's tag identity. Neither Rust enum layouts nor session-local tag numbers cross this entry.
+An invalid index is a runtime invariant violation. This protocol is infallible; fallible enum
+results require a separate status/output contract.
+
+`NativeVariantResult` declares the cases. For Rust `Ordering`, this protocol assigns indexes
+`0`, `1` and `2` to `Less`, `Equal` and `Greater`, respectively. These transport indexes differ
+from [Rust's enum discriminants](https://doc.rust-lang.org/std/cmp/enum.Ordering.html)
+(`-1`, `0` and `1`). Returning `Ordering` does not assert comparison laws or effects.
 
 ## Native optional results
 

@@ -12,8 +12,7 @@ use super::{
 use crate::{
     compiler::{CompilerSession, MirArtifacts},
     hir::native_functions::{
-        NativeFailureConvention, NativeLayout, NativeParameter, NativeResult,
-        NativeResultKnowledge, NativeScalar,
+        NativeFailureConvention, NativeLayout, NativeParameter, NativeResult, NativeScalar,
     },
     mir::physical::{BackendReadyMirArtifacts, prepare_physical_mir},
     module::{
@@ -188,6 +187,9 @@ impl NativeBindings {
                     .collect::<Result<_, SnapshotError>>()?;
                 let result = match signature.result {
                     NativeResult::Unit => ResultTransport::Unit,
+                    NativeResult::Variant { cases, .. } => ResultTransport::Variant(
+                        cases.iter().map(|case| (*case).to_owned()).collect(),
+                    ),
                     NativeResult::Never => ResultTransport::Never,
                     NativeResult::Scalar(value, scalar) => {
                         ResultTransport::Scalar(layout(value)?, scalar)
@@ -212,7 +214,6 @@ impl NativeBindings {
                         failure: signature.failure,
                         parameters,
                         result,
-                        knowledge: entry.result_knowledge(),
                     },
                 ))
             })
@@ -257,7 +258,6 @@ struct Signature {
     failure: NativeFailureConvention,
     parameters: Vec<Parameter>,
     result: ResultTransport,
-    knowledge: NativeResultKnowledge,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -282,6 +282,7 @@ enum ResultTransport {
         root: u32,
         mutable: bool,
     },
+    Variant(Vec<String>),
 }
 
 #[cfg(test)]

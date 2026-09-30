@@ -6,13 +6,13 @@
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction as I, MemArg, ValType};
 
 use crate::{
-    FxHashMap,
+    CompilerSession, FxHashMap,
     hir::native_functions::NativeResult,
     mir::{
         Value,
         physical::{PhysicalSubscriptDefinition, program::ResolvedPhysicalProgram},
     },
-    module::{FunctionId, YieldProvenance, id::Id},
+    module::{FunctionId, ModuleEnv, YieldProvenance, id::Id},
     types::r#type::Type,
     wasm::{
         abi::{CallAbi, Parameter as ParameterTransport, WasmFunctionId, WasmLocalId, WasmTypeId},
@@ -113,6 +113,7 @@ fn call_inputs(
     definition: &PhysicalSubscriptDefinition,
     target: FunctionId,
     direct: &CallAbi,
+    env: ModuleEnv<'_>,
 ) -> Result<(), String> {
     let captures = definition.capture_schema().len();
     let types = target_types(program, target)?;
@@ -126,7 +127,7 @@ fn call_inputs(
             code.instruction(&I::LocalGet((3 + index - captures) as u32));
         }
         if matches!(transport, ParameterTransport::Direct(_)) {
-            ScalarType::of(types[index])?.load(code);
+            ScalarType::in_env(types[index], &env)?.load(code);
         }
     }
     Ok(())
@@ -140,6 +141,7 @@ pub(super) fn member_adapter(
     direct: &CallAbi,
     target_index: WasmFunctionId,
     fail: WasmFunctionId,
+    session: &CompilerSession,
 ) -> Result<WasmFunction, String> {
     let member = definition
         .member(mut_member)
@@ -154,7 +156,16 @@ pub(super) fn member_adapter(
     if direct.fallible {
         code.instruction(&I::LocalGet(0));
     }
-    call_inputs(&mut code, program, definition, target, direct)?;
+    call_inputs(
+        &mut code,
+        program,
+        definition,
+        target,
+        direct,
+        session
+            .modules()
+            .env_for(session.expect_fresh_module(target.module)),
+    )?;
     match member.provenance() {
         YieldProvenance::YieldedOnce => {
             debug_assert!(direct.fallible && direct.output());

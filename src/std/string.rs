@@ -23,6 +23,7 @@ use crate::{
         NativeFallibleFnMN, NativeFallibleOutFnN, NativeFallibleOutFnR, NativeFallibleOutFnRR,
         NativeFnMR, NativeFnR, NativeFnRM, NativeFnRR, NativeOptionalFnM, NativeOptionalFnR,
         NativeOutFn0, NativeOutFnR, NativeOutFnRNN, NativeOutFnRR, NativeOutFnRRR,
+        NativeVariantFnRR,
     },
     hir::value::{NativeDisplay, NativeValueType, Value},
     module::{Module, ModuleFunction, Visibility},
@@ -884,10 +885,10 @@ pub fn add_to_module(to: &mut Module) {
         )) as Function],
     );
     to.add_function_with_visibility(
-        ustr("compare_string_code"),
-        NativeFnRR::from_rust_ordering_code(compare_string).description(
+        ustr("compare_string"),
+        NativeVariantFnRR::from_rust(compare_string).description(
             ["left", "right"],
-            "Internal comparison code.",
+            "Internal semantic comparison.",
             no_effects(),
         ),
         crate::module::Visibility::Module,

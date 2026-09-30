@@ -628,15 +628,22 @@ mod tests {
             !body.contains("false"),
             "the negation itself must disappear:\n{body}"
         );
-        let ordering = register_defining(&body, "comp_eq %r");
-        assert!(
-            body.contains(&format!("condbr {ordering},")),
-            "the branch must test the ordering comparison directly:\n{body}"
-        );
+        let tag = register_defining(&body, "extract_tag");
+        let switch = body
+            .lines()
+            .find(|line| line.contains(&format!("switch_variant {tag}")))
+            .unwrap();
+        let less = switch
+            .split("Less => ")
+            .nth(1)
+            .unwrap()
+            .split(']')
+            .next()
+            .unwrap();
         assert_eq!(
-            stored_constant(&body, &then_target(&body)),
+            stored_constant(&body, less),
             "2",
-            "`x < y` holding must now take the arm the source spelled second:\n{body}"
+            "the negated Less branch must select the second source arm:\n{body}"
         );
     }
 

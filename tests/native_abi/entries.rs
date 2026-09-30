@@ -39,6 +39,15 @@ pub extern "C" fn probe_boolean(value: bool) -> bool {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn probe_variant(left: isize, right: isize) -> u32 {
+    match left.cmp(&right) {
+        std::cmp::Ordering::Less => 0,
+        std::cmp::Ordering::Equal => 1,
+        std::cmp::Ordering::Greater => 2,
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn probe_unit() {}
 
 /// # Safety

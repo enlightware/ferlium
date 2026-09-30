@@ -421,6 +421,41 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    fn fused_comparison_switch_preserves_the_call_source_span() {
+        let source = "fn compute(x: int, y: int) -> int { \
+            let z = if (match cmp(x + 1, y * 2) { Less => true, _ => false }) { \
+                if x > 0 { x * 5 } else { x * 7 } \
+            } else { if y > 0 { y * 11 } else { y * 13 } }; z + 1 }";
+        let mut session = CompilerSession::new();
+        let module = session
+            .compile(source, "wasm_text", Path::single_str("wasm_text"))
+            .unwrap()
+            .module_id;
+        let emitted = emit_module(&session, module).unwrap().unwrap();
+        for pair in emitted.source_map.windows(2) {
+            assert!(
+                pair[0].body < pair[1].body
+                    || (pair[0].body == pair[1].body && pair[0].bytes.end <= pair[1].bytes.start),
+                "{pair:?}"
+            );
+        }
+        let text = module_text(&session, module).unwrap();
+        // Inlining retains the native call's definition span inside the std `cmp` body.
+        let call = "compare_int(left, right)";
+        assert!(
+            text.source_map.iter().any(|entry| {
+                session
+                    .source_table()
+                    .get_source_text(entry.span.source_id())
+                    .is_some_and(|source| source[entry.span.as_range()] == *call)
+                    && text.text[entry.from..entry.to].contains("i32.lt_s")
+            }),
+            "{}",
+            text.text
+        );
+    }
+
+    #[wasm_bindgen_test]
     fn module_text_lists_host_data() {
         let mut session = CompilerSession::new();
         let module = session

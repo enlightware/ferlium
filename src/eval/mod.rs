@@ -388,6 +388,13 @@ impl<'a> EvalCtx<'a> {
             ExecutionState::Poisoned(PoisonReason::FailureDuringCleanup(failure)) => Err(
                 RuntimeError::FailureDuringCleanup(Box::new(failure.clone())),
             ),
+            ExecutionState::Poisoned(PoisonReason::InvalidNativeVariantCase {
+                index,
+                case_count,
+            }) => Err(RuntimeError::InvalidNativeVariantCase {
+                index: *index,
+                case_count: *case_count,
+            }),
         }
     }
 
@@ -402,6 +409,12 @@ impl<'a> EvalCtx<'a> {
     pub(crate) fn record_poisoning_error(&mut self, error: RuntimeError) -> RuntimeError {
         self.execution_state = ExecutionState::Poisoned(match &error {
             RuntimeError::Backend(_) => unreachable!("backend errors precede guest execution"),
+            RuntimeError::InvalidNativeVariantCase { index, case_count } => {
+                PoisonReason::InvalidNativeVariantCase {
+                    index: *index,
+                    case_count: *case_count,
+                }
+            }
             RuntimeError::SandboxViolation(violation) => {
                 PoisonReason::SandboxViolation(violation.clone())
             }
@@ -574,6 +587,8 @@ impl FormatWith<(&SourceTable, ModuleRegistry<'_>)> for BacktraceFrame {
 pub enum RuntimeError {
     /// Backend preparation, unsupported execution contract, or checked-storage failure.
     Backend(String),
+    /// A native enum result returned an index outside its declared case list.
+    InvalidNativeVariantCase { index: u32, case_count: usize },
     /// A failure declared by the source-level `Fallible` effect.
     SourceFailure(SourceFailure),
     /// A host-enforced limit violation. Guest cleanup must not run after this point.
@@ -616,6 +631,7 @@ pub struct FailureDuringCleanup {
 pub enum PoisonReason {
     SandboxViolation(SandboxViolation),
     FailureDuringCleanup(FailureDuringCleanup),
+    InvalidNativeVariantCase { index: u32, case_count: usize },
 }
 
 impl FailureDuringCleanup {
@@ -734,7 +750,7 @@ impl RuntimeError {
 
     pub fn with_frame(self, function_id: FunctionId, location: Location) -> Self {
         match self {
-            Self::Backend(_) => self,
+            Self::Backend(_) | Self::InvalidNativeVariantCase { .. } => self,
             Self::SourceFailure(failure) => {
                 Self::SourceFailure(failure.with_frame(function_id, location))
             }
@@ -753,13 +769,17 @@ impl RuntimeError {
     pub fn source_failure(&self) -> Option<&SourceFailure> {
         match self {
             Self::SourceFailure(failure) => Some(failure),
-            Self::Backend(_) | Self::SandboxViolation(_) | Self::FailureDuringCleanup(_) => None,
+            Self::Backend(_)
+            | Self::InvalidNativeVariantCase { .. }
+            | Self::SandboxViolation(_)
+            | Self::FailureDuringCleanup(_) => None,
         }
     }
 
     pub fn kind(&self) -> RuntimeErrorKind {
         match self {
             Self::Backend(_) => RuntimeErrorKind::Backend,
+            Self::InvalidNativeVariantCase { .. } => RuntimeErrorKind::InvalidNativeVariantCase,
             Self::SourceFailure(failure) => RuntimeErrorKind::SourceFailure(failure.kind()),
             Self::SandboxViolation(violation) => {
                 RuntimeErrorKind::SandboxViolation(violation.kind())
@@ -771,20 +791,26 @@ impl RuntimeError {
     pub fn sandbox_violation(&self) -> Option<&SandboxViolation> {
         match self {
             Self::SandboxViolation(violation) => Some(violation),
-            Self::Backend(_) | Self::SourceFailure(_) | Self::FailureDuringCleanup(_) => None,
+            Self::Backend(_)
+            | Self::InvalidNativeVariantCase { .. }
+            | Self::SourceFailure(_)
+            | Self::FailureDuringCleanup(_) => None,
         }
     }
 
     pub fn failure_during_cleanup(&self) -> Option<&FailureDuringCleanup> {
         match self {
             Self::FailureDuringCleanup(failure) => Some(failure),
-            Self::Backend(_) | Self::SourceFailure(_) | Self::SandboxViolation(_) => None,
+            Self::Backend(_)
+            | Self::InvalidNativeVariantCase { .. }
+            | Self::SourceFailure(_)
+            | Self::SandboxViolation(_) => None,
         }
     }
 
     pub fn location(&self) -> Option<Location> {
         match self {
-            Self::Backend(_) => None,
+            Self::Backend(_) | Self::InvalidNativeVariantCase { .. } => None,
             Self::SourceFailure(failure) => failure.location(),
             Self::SandboxViolation(violation) => violation.location(),
             Self::FailureDuringCleanup(failure) => failure.initial.location(),
@@ -793,7 +819,7 @@ impl RuntimeError {
 
     pub fn backtrace(&self) -> &[BacktraceFrame] {
         match self {
-            Self::Backend(_) => &[],
+            Self::Backend(_) | Self::InvalidNativeVariantCase { .. } => &[],
             Self::SourceFailure(failure) => failure.backtrace(),
             Self::SandboxViolation(violation) => violation.backtrace(),
             Self::FailureDuringCleanup(failure) => failure.initial.backtrace(),
@@ -804,7 +830,9 @@ impl RuntimeError {
     pub fn is_poisoning(&self) -> bool {
         matches!(
             self,
-            Self::SandboxViolation(_) | Self::FailureDuringCleanup(_)
+            Self::SandboxViolation(_)
+                | Self::FailureDuringCleanup(_)
+                | Self::InvalidNativeVariantCase { .. }
         )
     }
 
@@ -831,6 +859,12 @@ impl FormatWith<(&SourceTable, &Modules)> for RuntimeError {
     ) -> std::fmt::Result {
         match self {
             Self::Backend(message) => write!(f, "Execution backend error: {message}")?,
+            Self::InvalidNativeVariantCase { index, case_count } => {
+                write!(
+                    f,
+                    "Native variant case index {index} is outside its {case_count} declared cases"
+                )?;
+            }
             Self::SourceFailure(failure) => failure.fmt_with(f, data)?,
             Self::SandboxViolation(violation) => violation.fmt_with(f, data)?,
             Self::FailureDuringCleanup(failure) => {

@@ -12,7 +12,7 @@ enabled by Ferlium source.
 
 ## Runtime outcomes
 
-Once guest execution starts, there are three outcomes besides successful return:
+Once guest execution starts, there are four outcomes besides successful return:
 
 1. A **source failure** is declared by the `Fallible` effect. It follows semantic cleanup and uses
    the status-bearing function ABI. If cleanup succeeds, the executor remains reusable.
@@ -22,11 +22,12 @@ Once guest execution starts, there are three outcomes besides successful return:
 3. A **failure during cleanup** means a second source failure was raised while propagating an
    earlier source failure. Both causes are retained, the execution domain is poisoned, and guest
    cleanup stops.
+4. A **native contract violation** means a host entry returned an invalid transport value, such
+   as an enum case index outside its declared list. It stops guest execution and cleanup and
+   cannot be caught by Ferlium code.
 
-The Rust representation makes these cases distinct through `RuntimeError::SourceFailure`,
-`RuntimeError::SandboxViolation`, and `RuntimeError::FailureDuringCleanup`. A poisoned interpreter
-rejects re-entry. `CompilerSession` owns immutable compiler artifacts rather than an executor
-generation, so the REPL, IDE, and other interactive hosts recover by reporting the violation and
+A poisoned interpreter rejects re-entry. `CompilerSession` owns immutable compiler artifacts
+rather than an executor generation, so the REPL, IDE, and other interactive hosts recover by reporting the violation and
 creating a fresh executor for the next evaluation.
 
 `RuntimeError::Backend` is separate from these guest outcomes: it reports backend preparation,

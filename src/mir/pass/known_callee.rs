@@ -95,10 +95,7 @@ pub(crate) enum KnownCallee {
     /// `Ord<int>::cmp(left, right)` — `Less`, `Equal` or `Greater`.
     ///
     /// An explicit `cmp` followed by a semantic tag test supplies an operand relation.
-    /// After inlining, `IntCmpCode` supplies the same operand relation through native codes.
     IntCmp,
-    /// The native integer comparison, returning -1, 0, or 1 rather than an Ordering variant.
-    IntCmpCode,
     /// Native ordered predicates and their concrete `Ord` wrappers.
     IntLt,
     IntLe,
@@ -106,9 +103,6 @@ pub(crate) enum KnownCallee {
     IntGe,
     IntEq,
 
-    /// `ordering_from_code(code)` — `Less` for -1, `Equal` for 0, `Greater` otherwise.
-    /// Preserves an established operand relation when comparison wrappers are partially inlined.
-    OrderingFromCode,
     /// `Num<float>::add(left, right)` — finite, saturating `left + right`.
     FloatAdd,
     /// `Num<float>::sub(left, right)` — finite, saturating `left - right`.
@@ -121,8 +115,6 @@ pub(crate) enum KnownCallee {
     ///
     /// Ferlium floats are finite and ordered, rather than IEEE values admitting NaN and infinity.
     FloatCmp,
-    /// The native finite-float comparison, returning -1, 0, or 1.
-    FloatCmpCode,
     /// Native ordered predicates and their concrete `Ord` wrappers.
     FloatLt,
     FloatLe,
@@ -193,19 +185,16 @@ impl KnownCallee {
                 | Self::IntNeg
                 | Self::IntFromInt
                 | Self::IntCmp
-                | Self::IntCmpCode
                 | Self::IntLt
                 | Self::IntLe
                 | Self::IntGt
                 | Self::IntGe
                 | Self::IntEq
-                | Self::OrderingFromCode
                 | Self::FloatAdd
                 | Self::FloatSub
                 | Self::FloatMul
                 | Self::FloatNeg
                 | Self::FloatCmp
-                | Self::FloatCmpCode
                 | Self::FloatLt
                 | Self::FloatLe
                 | Self::FloatGt
@@ -310,18 +299,8 @@ impl KnownCallees {
                 KnownCallee::IntFromInt,
             ),
             (int_cmp, KnownCallee::IntCmp),
-            (
-                resolver.function("ordering_from_code"),
-                KnownCallee::OrderingFromCode,
-            ),
-            (
-                resolver.function("compare_int_code"),
-                KnownCallee::IntCmpCode,
-            ),
-            (
-                resolver.function("compare_float_code"),
-                KnownCallee::FloatCmpCode,
-            ),
+            (resolver.function("compare_int"), KnownCallee::IntCmp),
+            (resolver.function("compare_float"), KnownCallee::FloatCmp),
             (
                 resolver.method(NUM_TRAIT_NAME, float_type(), "add"),
                 KnownCallee::FloatAdd,
@@ -734,7 +713,7 @@ mod tests {
         let session = CompilerSession::new();
         assert_eq!(
             known_callees(&session).by_id.len(),
-            49,
+            48,
             "two known callees resolved to the same function id"
         );
     }

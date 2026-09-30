@@ -20,7 +20,7 @@ use crate::{
         core_traits_names::VALUE_TRAIT_NAME,
         value::{
             VALUE_ALIGN_ASSOC_CONST_INDEX, VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX,
-            VALUE_SIZE_ASSOC_CONST_INDEX,
+            VALUE_SIZE_ASSOC_CONST_INDEX, is_tag_scalar,
         },
     },
     types::{
@@ -228,17 +228,15 @@ impl NativeRequirements {
         Ok(requirements)
     }
 
-    /// Match against the same process-local runtime, including code identity and optimizer result
-    /// guarantees. Equal sizes alone must never authorize linking to another Rust build.
+    /// Match against the same process-local runtime, including code identity and transport.
+    /// Equal sizes alone must never authorize linking to another Rust build.
     pub(super) fn validate_runtime(
         &self,
         env: ModuleEnv<'_>,
     ) -> Result<(), NativeRequirementError> {
         for (&id, expected) in &self.entries {
             let actual = checked_entry(id, env)?;
-            if actual.address() != expected.address()
-                || actual.signature() != expected.signature()
-                || actual.result_knowledge() != expected.result_knowledge()
+            if actual.address() != expected.address() || actual.signature() != expected.signature()
             {
                 return Err(NativeRequirementError::RuntimeEntryMismatch(id));
             }
@@ -262,7 +260,7 @@ fn result_layout(result: NativeResult) -> Option<NativeLayout> {
         | NativeResult::Optional {
             payload: layout, ..
         } => Some(layout),
-        NativeResult::Unit | NativeResult::Never => None,
+        NativeResult::Unit | NativeResult::Never | NativeResult::Variant { .. } => None,
     }
 }
 
@@ -285,6 +283,14 @@ fn checked_entry(
             function: id,
             error,
         })?;
+    if let NativeResult::Variant { ty, .. } = entry.signature().result
+        && !is_tag_scalar(ty, &env)
+    {
+        return Err(NativeRequirementError::InvalidEntry {
+            function: id,
+            error: NativeContractError::ResultTransport,
+        });
+    }
     Ok(entry.clone())
 }
 

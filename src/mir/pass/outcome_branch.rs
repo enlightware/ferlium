@@ -496,7 +496,10 @@ mod tests {
     use super::{super::dce::remove_dead_trivial_results, *};
     use crate::{
         CompilerSession, ExecutionTarget, Location, MirOptimization, Path,
-        hir::{function::ArgConvention, native_functions::NativeFnNN},
+        hir::{
+            function::ArgConvention,
+            native_functions::{NativeFnNN, NativeVariantFnNN},
+        },
         mir::{Operation, ParameterKind, builder::FunctionBuilder},
         module::Module,
         std::{logic::bool_type, ordering::ordering_type},
@@ -726,7 +729,7 @@ mod tests {
         let mut host = Module::new(session.modules().next_id(), path.clone());
         host.add_function(
             "compare".into(),
-            NativeFnNN::from_rust_ordering_code(|a: isize, b: isize| b.cmp(&a)).description(
+            NativeVariantFnNN::from_rust(|a: isize, b: isize| b.cmp(&a)).description(
                 ["a", "b"],
                 "Reversed host ordering",
                 no_effects(),
@@ -742,13 +745,13 @@ mod tests {
         );
         session.register_module(path, host);
         let source = "fn classify(a: int, b: int) -> int {
-            match host::compare(a, b) { -1 => 7, 0 => 7, _ => 9 }
+            match host::compare(a, b) { Less => 7, Equal => 7, _ => 9 }
         }
         fn ordinary(a: int, b: int) -> bool {
             match host::ordinary(a, b) { -1 => true, 0 => true, _ => false }
         }
         fn predicate(a: int, b: int) -> bool {
-            match host::compare(a, b) { -1 => true, 0 => true, _ => false }
+            match host::compare(a, b) { Less => true, Equal => true, _ => false }
         }
         fn main() { (classify(9, 2), classify(2, 9), classify(3, 3), ordinary(1, 9), predicate(9, 2), predicate(2, 9), predicate(3, 3)) }";
         let module = session
@@ -768,7 +771,7 @@ mod tests {
             .split("\nfn ")
             .next()
             .unwrap();
-        assert_eq!(body.matches("comp_eq ").count(), 1, "{body}");
+        assert_eq!(body.matches("switch_variant ").count(), 1, "{body}");
         assert_eq!(body.matches("call host::compare(").count(), 1, "{body}");
         let body = mir
             .split("fn ordinary(")
@@ -795,7 +798,7 @@ mod tests {
     }
 
     #[test]
-    fn integer_and_float_comparison_branches_use_one_code_test() {
+    fn integer_and_float_comparison_branches_use_one_tag_test() {
         let mut session = CompilerSession::new();
         session.set_mir_optimization(MirOptimization::Enabled);
         let source = "fn int_le(a: int, b: int) -> int { if (match cmp(a, b) { Greater => false, _ => true }) { 7 } else { 9 } }
@@ -810,8 +813,8 @@ mod tests {
                 .split("\nfn ")
                 .next()
                 .unwrap();
-            assert_eq!(body.matches("comp_eq ").count(), 1, "{body}");
-            assert_eq!(body.matches("condbr ").count(), 1, "{body}");
+            assert_eq!(body.matches("extract_tag ").count(), 1, "{body}");
+            assert_eq!(body.matches("switch_variant ").count(), 1, "{body}");
         }
         let optimized = session.eval_mir("optimized_std_chains", source);
         session.set_mir_optimization(MirOptimization::Disabled);

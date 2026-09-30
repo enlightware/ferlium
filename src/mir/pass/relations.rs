@@ -598,8 +598,6 @@ pub(crate) enum Fact {
     /// predicates because which of them is asked for is decided later, by the tag a `comp_eq`
     /// tests.
     Ordering { left: Affine, right: Affine },
-    /// The same integer relation encoded by the native result codes, not semantic variant tags.
-    OrderingCode { left: Affine, right: Affine },
     /// The symbol is a boolean, true exactly when this holds.
     Truth(Predicate),
     /// The symbol is a boolean whose truth *implies* these, without the converse.
@@ -2390,23 +2388,6 @@ fn result_fact(
             left: affine(0, interner)?,
             right: affine(1, interner)?,
         }),
-        KnownCallee::IntCmpCode => Some(Fact::OrderingCode {
-            left: affine(0, interner)?,
-            right: affine(1, interner)?,
-        }),
-        KnownCallee::OrderingFromCode => {
-            let place = tracked_place(state, operand(0)?, escaped, interner)?;
-            let symbol = state.symbol_of(place, interner);
-            // Only transport a relation already proved for this value. A host native's finite
-            // result-domain guarantee alone supplies no comparison laws about its operands.
-            let Fact::OrderingCode { left, right } = state.fact(symbol)? else {
-                return None;
-            };
-            Some(Fact::Ordering {
-                left: *left,
-                right: *right,
-            })
-        }
         // `array_len` *is* the field read, and saying so is what lets a bound and a check agree.
         // They reach the length by different routes — a specialized body reads `a.len` directly to
         // build a range and calls `array_len` inside the loop for the same quantity — and an opaque
@@ -2561,15 +2542,6 @@ fn comparison_fact(
     let mir::Value::Pattern(pattern) = &operation.operands[1] else {
         return None;
     };
-    if let Fact::OrderingCode { left, right } = &scrutinee {
-        let predicate = match *pattern.as_primitive_ty::<Int>()? {
-            -1 => Predicate::between(left, Comparison::Less, right)?,
-            0 => Predicate::between(left, Comparison::Equal, right)?,
-            1 => Predicate::between(right, Comparison::Less, left)?,
-            _ => return None,
-        };
-        return Some(Fact::Truth(predicate));
-    }
     let tag = pattern.as_variant_tag()?;
     variant_case_fact(&scrutinee, *tag)
 }
@@ -2874,10 +2846,9 @@ mod tests {
     }
 
     /// A callee read raw, as within a recursive component, still reaches its branch as
-    /// `compare_int_code` followed by `ordering_from_code`. The ordering must carry the relation
-    /// the code proved.
+    /// a native `compare_int`. Its semantic ordering must carry the operand relation.
     #[test]
-    fn an_ordering_built_from_a_comparison_code_keeps_its_relation() {
+    fn a_native_comparison_keeps_its_operand_relation() {
         use ustr::ustr;
 
         use crate::{
@@ -2909,26 +2880,19 @@ mod tests {
         let entry = builder.add_block();
         let less = builder.add_block();
         let other = builder.add_block();
-        let code = builder
-            .append_operation(entry, Operation::alloca(span, int_type()))
-            .unwrap();
-        builder.append_operation(
-            entry,
-            std_call(
-                "compare_int_code",
-                vec![
-                    mir::Value::Parameter(left),
-                    mir::Value::Parameter(right),
-                    code.clone(),
-                ],
-            ),
-        );
         let ordering = builder
             .append_operation(entry, Operation::alloca(span, ordering_type()))
             .unwrap();
         builder.append_operation(
             entry,
-            std_call("ordering_from_code", vec![code, ordering.clone()]),
+            std_call(
+                "compare_int",
+                vec![
+                    mir::Value::Parameter(left),
+                    mir::Value::Parameter(right),
+                    ordering.clone(),
+                ],
+            ),
         );
         let tag = builder
             .append_operation(entry, Operation::extract_tag(span, ordering))

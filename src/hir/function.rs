@@ -12,7 +12,7 @@ use derive_new::new;
 use dyn_clone::DynClone;
 use ustr::Ustr;
 
-use super::native_functions::{NativeEntry, NativeResultKnowledge};
+use super::native_functions::NativeEntry;
 use crate::{
     Location,
     ast::{Attribute, MetaItem, UstrSpan},
@@ -81,8 +81,6 @@ pub struct CallableDefinition {
     /// addressors have both properties derived from their MIR body; a native has no body to
     /// inspect, so it must assert them explicitly.
     pub repeatable_addressor: bool,
-    /// Adapter-derived result domain; it does not imply effects or laws about the arguments.
-    pub(crate) native_result_knowledge: NativeResultKnowledge,
     pub generic_params: Vec<UstrSpan>,
     pub generic_effect_params: Vec<UstrSpan>,
     pub arg_names: Vec<Ustr>,
@@ -91,12 +89,6 @@ pub struct CallableDefinition {
 }
 
 impl CallableDefinition {
-    /// Values guaranteed by a native adapter on normal return. Third-party hosts obtain this
-    /// metadata through typed constructors such as `from_rust_ordering_code`.
-    pub fn native_result_knowledge(&self) -> NativeResultKnowledge {
-        self.native_result_knowledge
-    }
-
     /// Whether this source function carries the optimizer-control attribute `#[inline(never)]`.
     ///
     /// The syntax is validated while functions are emitted. Keeping the query on the retained HIR
@@ -118,7 +110,6 @@ impl CallableDefinition {
             result_convention: CallResultConvention::Value,
             result_rooted_in: None,
             repeatable_addressor: false,
-            native_result_knowledge: NativeResultKnowledge::Unknown,
             generic_params: vec![],
             generic_effect_params: vec![],
             arg_names,
@@ -138,7 +129,6 @@ impl CallableDefinition {
             result_convention: CallResultConvention::Value,
             result_rooted_in: None,
             repeatable_addressor: false,
-            native_result_knowledge: NativeResultKnowledge::Unknown,
             generic_params,
             generic_effect_params: vec![],
             arg_names,
@@ -160,7 +150,6 @@ impl CallableDefinition {
             result_convention: CallResultConvention::Value,
             result_rooted_in: None,
             repeatable_addressor: false,
-            native_result_knowledge: NativeResultKnowledge::Unknown,
             generic_params,
             generic_effect_params,
             arg_names,
@@ -180,7 +169,6 @@ impl CallableDefinition {
             result_convention: CallResultConvention::Value,
             result_rooted_in: None,
             repeatable_addressor: false,
-            native_result_knowledge: NativeResultKnowledge::Unknown,
             generic_params: vec![],
             generic_effect_params: vec![],
             arg_names,
@@ -204,7 +192,6 @@ impl CallableDefinition {
             result_convention: CallResultConvention::Value,
             result_rooted_in: None,
             repeatable_addressor: false,
-            native_result_knowledge: NativeResultKnowledge::Unknown,
             generic_params: vec![],
             generic_effect_params: vec![],
             arg_names,
@@ -377,7 +364,6 @@ impl TypeLike for CallableDefinition {
             result_convention: self.result_convention,
             result_rooted_in: self.result_rooted_in,
             repeatable_addressor: self.repeatable_addressor,
-            native_result_knowledge: self.native_result_knowledge,
             generic_params: self.generic_params.clone(),
             generic_effect_params: self.generic_effect_params.clone(),
             arg_names: self.arg_names.clone(),

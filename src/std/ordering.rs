@@ -18,7 +18,7 @@ pub fn ordering_type() -> Type {
     ]))
 }
 
-/// Rust body; the typed adapter encodes its result without exposing enums or Ferlium tags.
+/// Rust body; the typed variant adapter maps its result to symbolic Ferlium cases.
 pub(crate) fn compare<T: Ord>(lhs: T, rhs: T) -> std::cmp::Ordering {
     lhs.cmp(&rhs)
 }

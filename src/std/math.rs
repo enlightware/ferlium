@@ -19,7 +19,7 @@ use crate::{
     hir::function::Function,
     hir::native_functions::{
         NativeFallibleOutFnN, NativeFallibleOutFnNN, NativeFn0, NativeFnN, NativeFnNM, NativeFnNN,
-        NativeOutFnN,
+        NativeOutFnN, NativeVariantFnNN,
     },
     hir::value::{LiteralValue, NativeDisplay, Value},
     module::{Module, Visibility},
@@ -576,10 +576,10 @@ pub fn add_to_module(to: &mut Module) {
     add_predicate!("gt_int", Int, >);
     add_predicate!("ge_int", Int, >=);
     to.add_function_with_visibility(
-        ustr("compare_int_code"),
-        NativeFnNN::from_rust_ordering_code(compare::<Int>).description(
+        ustr("compare_int"),
+        NativeVariantFnNN::from_rust(compare::<Int>).description(
             ["left", "right"],
-            "Internal comparison code.",
+            "Internal semantic comparison.",
             no_effects(),
         ),
         Visibility::Module,
@@ -669,10 +669,10 @@ pub fn add_to_module(to: &mut Module) {
     add_predicate!("gt_float", Float, >);
     add_predicate!("ge_float", Float, >=);
     to.add_function_with_visibility(
-        ustr("compare_float_code"),
-        NativeFnNN::from_rust_ordering_code(compare::<Float>).description(
+        ustr("compare_float"),
+        NativeVariantFnNN::from_rust(compare::<Float>).description(
             ["left", "right"],
-            "Internal comparison code.",
+            "Internal semantic comparison.",
             no_effects(),
         ),
         Visibility::Module,

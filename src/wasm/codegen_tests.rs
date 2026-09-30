@@ -14,6 +14,7 @@ use crate::{
         MirOptimization,
         error::{RuntimeErrorKind, SandboxViolationKind, SourceFailureKind},
     },
+    eval::RuntimeError,
     execution::ReferenceInterpreterLimits,
     hir::{
         function::Function,
@@ -76,6 +77,163 @@ fn compile_raw(session: &CompilerSession, entry: FunctionId) -> CompiledProgram 
     with_raw_program(session, entry, |program| {
         CompiledProgram::from_physical(session, program, entry).unwrap()
     })
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_tag_scalars_cross_direct_calls_without_memory() {
+    let mut session = CompilerSession::new();
+    let entry = compile(
+        &mut session,
+        "enum Signal { Stop, Wait, Go }
+         #[inline(never)] fn choose(x: int) -> Signal {
+             if x < 0 { Signal::Stop } else if x == 0 { Signal::Wait } else { Signal::Go }
+         }
+         #[inline(never)] fn consume(x: Signal) -> int {
+             match x { Stop => -1, Wait => 0, Go => 1 }
+         }
+         pub fn compute(x: int) -> int { consume(choose(x)) }",
+    );
+    let code = CompiledProgram::compile(&session, entry).unwrap();
+    let operators = exported_function_operators(code.bytes(), ENTRY_EXPORT);
+    assert!(
+        !operators.iter().any(|op| matches!(
+            op,
+            Operator::I32Load { .. } | Operator::I32Store { .. } | Operator::MemoryCopy { .. }
+        )),
+        "tag transport needs no memory: {operators:?}"
+    );
+    let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+    for (x, expected) in [(-9, -1), (0, 0), (8, 1)] {
+        assert_eq!(instance.run((x,), WasmLimits::default()).unwrap(), expected);
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_tag_scalars_keep_mutable_generic_and_callable_contracts() {
+    for source in [
+        "#[inline(never)] fn replace(x: &mut Ordering, y: Ordering) { x = y; }
+         fn compute(x: int) -> int { let mut v = Less; replace(v, if x == 0 { Equal } else { Greater }); match v { Equal => 0, _ => 1 } }",
+        "#[inline(never)] fn identity<T>(x: T) -> T { x }
+         fn compute(x: int) -> int { let v: Ordering = identity(if x == 0 { Equal } else { Greater }); match v { Equal => 0, _ => 1 } }",
+        "#[inline(never)] fn apply(f: (Ordering) -> Ordering, x: Ordering) -> Ordering { f(x) }
+         fn compute(x: int) -> int { let v = apply(|v| v, if x == 0 { Equal } else { Greater }); match v { Equal => 0, _ => 1 } }",
+        "#[inline(never)] fn choose(x: int) -> Ordering { let v = idiv(1, x); if v == 1 { Equal } else { Greater } }
+         fn compute(x: int) -> int { match choose(x) { Equal => 0, _ => 1 } }",
+    ] {
+        let mut session = CompilerSession::new();
+        let entry = compile(&mut session, source);
+        let code = compile_raw(&session, entry);
+        let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+        if source.contains("idiv") {
+            assert!(instance.run((0,), WasmLimits::default()).is_err());
+            assert_eq!(instance.run((1,), WasmLimits::default()).unwrap(), 0);
+            assert_eq!(instance.run((2,), WasmLimits::default()).unwrap(), 1);
+        } else {
+            assert_eq!(instance.run((0,), WasmLimits::default()).unwrap(), 0);
+            assert_eq!(instance.run((2,), WasmLimits::default()).unwrap(), 1);
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_native_variant_results_resolve_session_tags() {
+    use crate::hir::native_functions::NativeVariantFnNN;
+
+    let mut session = CompilerSession::new();
+    // Deliberately give semantic tags different identities from native case indexes.
+    for tag in ["Unrelated", "Greater", "Less", "Equal"] {
+        session.variant_tag_id(ustr(tag));
+    }
+    let path = Path::single_str("host_variant");
+    let mut host = Module::new(session.modules().next_id(), path.clone());
+    host.add_function(
+        ustr("compare"),
+        NativeVariantFnNN::from_rust(|left: isize, right: isize| right.cmp(&left)).description(
+            ["left", "right"],
+            "Reversed comparison",
+            no_effects(),
+        ),
+    );
+    session.register_module(path, host);
+    for expression in [
+        "host_variant::compare(x, y)",
+        "{ let f = host_variant::compare; f(x, y) }",
+    ] {
+        let entry = compile(
+            &mut session,
+            &format!(
+                "pub fn compute(x: int, y: int) -> int {{ match {expression} {{ Less => -1, Equal => 0, Greater => 1 }} }}",
+            ),
+        );
+        let code = compile_raw(&session, entry);
+        let mut instance = code.instantiate::<(isize, isize), isize>().unwrap();
+        for (left, right, expected) in [(2, 9, 1), (9, 2, -1), (7, 7, 0)] {
+            assert_eq!(
+                instance.run((left, right), WasmLimits::default()).unwrap(),
+                expected
+            );
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_native_variant_adapter_rejects_invalid_cases() {
+    use crate::hir::native_functions::{NativeVariantFn0, NativeVariantFnN, NativeVariantResult};
+
+    struct InvalidCase(u32);
+    impl NativeVariantResult for InvalidCase {
+        const CASES: &'static [&'static str] = &["First", "Second"];
+        fn case(self) -> u32 {
+            self.0
+        }
+    }
+    let mut session = CompilerSession::new();
+    let path = Path::single_str("invalid_variant");
+    let mut host = Module::new(session.modules().next_id(), path.clone());
+    host.add_function(
+        ustr("past_end"),
+        NativeVariantFnN::from_rust(|_: isize| InvalidCase(2)).description(
+            ["input"],
+            "Invalid case",
+            no_effects(),
+        ),
+    );
+    host.add_function(
+        ustr("overflow"),
+        NativeVariantFnN::from_rust(|_: isize| InvalidCase(u32::MAX)).description(
+            ["input"],
+            "Unsigned invalid case",
+            no_effects(),
+        ),
+    );
+    host.add_function(
+        ustr("constant"),
+        NativeVariantFn0::from_rust(|| InvalidCase(2)).description(
+            [],
+            "Invalid constant case",
+            no_effects(),
+        ),
+    );
+    session.register_module(path, host);
+    for (name, index) in [("past_end", 2), ("overflow", u32::MAX), ("constant", 2)] {
+        let argument = if name == "constant" { "" } else { "x" };
+        let entry = compile(
+            &mut session,
+            &format!(
+                "fn compute(x: int) -> int {{ match invalid_variant::{name}({argument}) {{ First => 1, Second => 2 }} }}"
+            ),
+        );
+        let code = compile_raw(&session, entry);
+        let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+        let error = instance.run((1,), WasmLimits::default()).unwrap_err();
+        assert!(error.is_poisoning(), "{error:?}");
+        assert!(
+            matches!(error, RuntimeError::InvalidNativeVariantCase {
+            index: actual, case_count: 2,
+        } if actual == index),
+            "{name}: {error:?}"
+        );
+    }
 }
 
 pub(super) fn with_raw_program<T>(
@@ -1325,7 +1483,118 @@ fn wasm_codegen_ordered_comparisons_select_predicates() {
 }
 
 #[wasm_bindgen_test]
-fn wasm_codegen_materializes_escaping_comparison_codes() {
+fn wasm_codegen_comparison_switches_use_one_predicate() {
+    for ty in ["int", "float"] {
+        for (case, positive) in [
+            ("Less", true),
+            ("Less", false),
+            ("Equal", true),
+            ("Equal", false),
+            ("Greater", true),
+            ("Greater", false),
+        ] {
+            let mut session = CompilerSession::new();
+            let entry = compile(
+                &mut session,
+                &format!(
+                    "fn compute(x: {ty}, y: {ty}) -> int {{ if (match cmp(x, y) {{ {case} => {positive}, _ => {} }}) {{ 7 }} else {{ 9 }} }}",
+                    !positive,
+                ),
+            );
+            let code = CompiledProgram::compile(&session, entry).unwrap();
+            let operators = exported_function_operators(code.bytes(), ENTRY_EXPORT);
+            let predicates = operators
+                .iter()
+                .filter(|op| {
+                    matches!(
+                        op,
+                        Operator::I32LtS
+                            | Operator::I32LeS
+                            | Operator::I32GtS
+                            | Operator::I32GeS
+                            | Operator::I32Eq
+                            | Operator::I32Ne
+                            | Operator::F64Lt
+                            | Operator::F64Le
+                            | Operator::F64Gt
+                            | Operator::F64Ge
+                            | Operator::F64Eq
+                            | Operator::F64Ne
+                    )
+                })
+                .count();
+            assert_eq!(predicates, 1, "{ty} {case} {positive}: {operators:?}");
+            assert!(
+                !operators.iter().any(|op| matches!(op, Operator::Select)),
+                "{operators:?}"
+            );
+            for (left, right, actual) in [(-3, 2, "Less"), (2, 2, "Equal"), (3, -2, "Greater")] {
+                let expected = if (actual == case) == positive { 7 } else { 9 };
+                let result = if ty == "int" {
+                    code.instantiate::<(isize, isize), isize>()
+                        .unwrap()
+                        .run((left, right), WasmLimits::default())
+                        .unwrap()
+                } else {
+                    code.instantiate::<(Float, Float), isize>()
+                        .unwrap()
+                        .run(
+                            (
+                                Float::new(left as f64).unwrap(),
+                                Float::new(right as f64).unwrap(),
+                            ),
+                            WasmLimits::default(),
+                        )
+                        .unwrap()
+                };
+                assert_eq!(result, expected, "{ty} {case} {positive} {left} {right}");
+            }
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_comparison_switch_nested_arms_join() {
+    let mut session = CompilerSession::new();
+    let entry = compile(
+        &mut session,
+        "fn compute(x: int, y: int) -> int { \
+            let z = if (match cmp(x + 1, y * 2) { Less => true, _ => false }) { \
+                if x > 0 { x * 5 } else { x * 7 } \
+            } else { if y > 0 { y * 11 } else { y * 13 } }; z + 1 }",
+    );
+    let code = CompiledProgram::compile(&session, entry).unwrap();
+    let operators = exported_function_operators(code.bytes(), ENTRY_EXPORT);
+    assert_eq!(
+        operators
+            .iter()
+            .filter(|op| matches!(op, Operator::I32LtS))
+            .count(),
+        1,
+        "{operators:?}"
+    );
+    assert!(
+        !operators.iter().any(|op| matches!(op, Operator::Select)),
+        "{operators:?}"
+    );
+    let mut instance = code.instantiate::<(isize, isize), isize>().unwrap();
+    for (x, y) in [(1, 2), (-3, 2), (7, 2), (2, -3), (-2, -3)] {
+        let expected = if x + 1 < y * 2 {
+            if x > 0 { x * 5 } else { x * 7 }
+        } else if y > 0 {
+            y * 11
+        } else {
+            y * 13
+        } + 1;
+        assert_eq!(
+            instance.run((x, y), WasmLimits::default()).unwrap(),
+            expected
+        );
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_materializes_escaping_ordering_tags() {
     for ty in ["int", "float"] {
         let mut session = CompilerSession::new();
         let entry = compile(
@@ -1343,7 +1612,7 @@ fn wasm_codegen_materializes_escaping_comparison_codes() {
                 Operator::Call { .. } | Operator::CallIndirect { .. }
             )),
             0,
-            "escaping {ty} comparison code should not call native glue"
+            "escaping {ty} ordering tag should not call native glue"
         );
         if ty == "int" {
             let mut instance = code.instantiate::<(isize, isize), isize>().unwrap();

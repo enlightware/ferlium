@@ -949,29 +949,8 @@ mod tests {
             .unwrap()
     }
 
-    /// Every inlined frame is restored, before the dispatch or on each redirected path.
-    fn assert_every_frame_is_restored(body: &str) {
-        let saves: Vec<&str> = body
-            .lines()
-            .filter(|line| line.ends_with("= stack_save"))
-            .filter_map(|line| line.split(':').next())
-            .map(str::trim)
-            .collect();
-        assert!(
-            !saves.is_empty(),
-            "the test needs an inlined frame:\n{body}"
-        );
-        for save in saves {
-            assert!(
-                body.contains(&format!("stack_restore {save}\n")),
-                "the frame saved in {save} must be restored:\n{body}"
-            );
-        }
-    }
-
-    /// An integer comparison used only for control flow directly tests its native code.
-    /// Inlining and cleanup must retain that branch and restore the inlined frame on both paths
-    /// without materializing an intermediate boolean.
+    /// An integer comparison used only for control flow dispatches on its semantic tag.
+    /// Cleanup must retain that branch without materializing an intermediate boolean.
     #[test]
     fn an_integer_comparison_needs_no_materialized_boolean() {
         let module = optimized(
@@ -980,7 +959,7 @@ mod tests {
         let body = body_of(&module, "choose");
 
         assert_eq!(
-            body.matches("condbr").count(),
+            body.matches("condbr").count() + body.matches("switch_variant").count(),
             1,
             "the ordering must dispatch exactly once:\n{body}"
         );
@@ -988,10 +967,9 @@ mod tests {
             !body.contains("alloca bool"),
             "control-only comparison needs no boolean storage:\n{body}"
         );
-        assert_every_frame_is_restored(body);
     }
 
-    /// A short-circuit `or` over two integer comparisons needs only their two code tests.
+    /// A short-circuit `or` over two integer comparisons needs only their two tag tests.
     /// The composed boolean remains control flow rather than becoming a stored flag.
     #[test]
     fn short_circuit_integer_comparisons_need_no_materialized_boolean() {
@@ -1001,7 +979,7 @@ mod tests {
         let body = body_of(&module, "f");
 
         assert_eq!(
-            body.matches("condbr").count(),
+            body.matches("condbr").count() + body.matches("switch_variant").count(),
             2,
             "only the two ordering dispatches must remain:\n{body}"
         );
@@ -1010,11 +988,10 @@ mod tests {
             "the flag holding the `or` result must be removed by DCE:\n{body}"
         );
         assert_eq!(
-            body.matches("comp_eq").count(),
+            body.matches("extract_tag").count(),
             2,
-            "each native code is tested once, without a boolean retest:\n{body}"
+            "each native ordering is tested once, without a boolean retest:\n{body}"
         );
-        assert_every_frame_is_restored(body);
     }
 
     /// Native predicates return into places. Their result may be the last operand

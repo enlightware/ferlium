@@ -7,6 +7,8 @@ use std::{mem::offset_of, ops::Range};
 
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction as I, MemArg, ValType};
 
+use ustr::{Ustr, ustr};
+
 use crate::{
     CompilerSession, FxHashMap, FxHashSet, Location,
     hir::{
@@ -298,6 +300,7 @@ impl<'a, 's> Body<'a, 's> {
             callees,
             program,
             session,
+            env,
             returns_direct_result(mode, signature) && forwarded_result.is_none(),
             &no_op_stack_markers,
         );
@@ -386,7 +389,8 @@ impl<'a, 's> Body<'a, 's> {
         for (index, constant) in body.constants().iter().enumerate() {
             let value = Value::Constant(ConstantId::from_index(index));
             if !only_stored[index]
-                && (this.analysis.is_addressed(&value) || ScalarType::of(constant.ty).is_err())
+                && (this.analysis.is_addressed(&value)
+                    || ScalarType::in_env(constant.ty, &this.env).is_err())
             {
                 this.slot(value, this.size(&MirType::Lowered(constant.ty))?)?;
             }
@@ -585,7 +589,7 @@ impl<'a, 's> Body<'a, 's> {
                         if this.expressions.has_place(&value) {
                             this.storage.insert(value, Storage::Expression);
                         } else if !this.analysis.is_addressed(&value)
-                            && let Ok(ty) = scalar(&ty)
+                            && let Ok(ty) = scalar(&ty, &this.env)
                         {
                             let local = this.local(ty.wasm());
                             this.storage.insert(value, Storage::Local(local));
@@ -606,7 +610,7 @@ impl<'a, 's> Body<'a, 's> {
                         .unwrap()
                         .into_owned();
                     if let ValueRole::Materialized(MirType::Lowered(ty)) = &role
-                        && let Ok(ty) = ScalarType::of(*ty)
+                        && let Ok(ty) = ScalarType::in_env(*ty, &this.env)
                         && this.analysis.is_addressed(&Value::Register(id))
                     {
                         this.slot(Value::Register(id), ty.size())?;
@@ -615,7 +619,7 @@ impl<'a, 's> Body<'a, 's> {
                         ValueRole::Place(_) | ValueRole::StackMarker | ValueRole::VariantTag => {
                             ValType::I32
                         }
-                        ValueRole::Materialized(ty) => match scalar(ty) {
+                        ValueRole::Materialized(ty) => match scalar(ty, &this.env) {
                             Ok(ty) => ty.wasm(),
                             Err(_) => {
                                 let size = this.size(ty).map_err(|error| {
@@ -1325,7 +1329,7 @@ impl<'a, 's> Body<'a, 's> {
         } else {
             let base = self.address_base(destination)?;
             self.literal(literal)?;
-            ScalarType::of(ty)?.store_at(&mut self.code, base + offset);
+            ScalarType::in_env(ty, &self.env)?.store_at(&mut self.code, base + offset);
         }
         Ok(())
     }
@@ -1394,7 +1398,7 @@ impl<'a, 's> Body<'a, 's> {
         // type is an unresolved parameter constrained to that literal type.
         let scalar = literal
             .native_type()
-            .map(ScalarType::of)
+            .map(|ty| ScalarType::in_env(ty, &self.env))
             .transpose()?
             .ok_or("expected scalar pattern")?;
         if scalar.is_unit() {
@@ -1510,7 +1514,7 @@ impl<'a, 's> Body<'a, 's> {
             KnownCallee::IntAdd
             | KnownCallee::IntSub
             | KnownCallee::IntMul
-            | KnownCallee::IntCmpCode
+            | KnownCallee::IntCmp
             | KnownCallee::IntLt
             | KnownCallee::IntLe
             | KnownCallee::IntGt
@@ -1520,7 +1524,7 @@ impl<'a, 's> Body<'a, 's> {
             | KnownCallee::FloatAdd
             | KnownCallee::FloatSub
             | KnownCallee::FloatMul
-            | KnownCallee::FloatCmpCode
+            | KnownCallee::FloatCmp
             | KnownCallee::FloatLt
             | KnownCallee::FloatLe
             | KnownCallee::FloatGt
@@ -1615,26 +1619,32 @@ impl<'a, 's> Body<'a, 's> {
                     _ => unreachable!(),
                 });
             }
-            KnownCallee::IntCmpCode | KnownCallee::FloatCmpCode => {
-                // Preserve the comparison code when it escapes the usual predicate idiom. Wasm
-                // comparisons yield 0 or 1, so `(left > right) - (left < right)` is exactly the
-                // native -1/0/1 convention. The common single-predicate use is fused earlier and
-                // does not materialize this code at all.
+            KnownCallee::IntCmp | KnownCallee::FloatCmp => {
+                // Select the semantic session-local tag. Both arguments are read twice;
+                // expression planning keeps them in locals unless a predicate is fused.
+                self.i(I::I32Const(self.session.variant_tag_id(ustr("Less")) as i32));
+                self.i(I::I32Const(
+                    self.session.variant_tag_id(ustr("Greater")) as i32
+                ));
+                self.i(I::I32Const(
+                    self.session.variant_tag_id(ustr("Equal")) as i32
+                ));
                 self.read(inputs[0])?;
                 self.read(inputs[1])?;
                 self.i(match intrinsic {
-                    KnownCallee::IntCmpCode => I::I32GtS,
-                    KnownCallee::FloatCmpCode => I::F64Gt,
+                    KnownCallee::IntCmp => I::I32GtS,
+                    KnownCallee::FloatCmp => I::F64Gt,
                     _ => unreachable!(),
                 });
+                self.i(I::Select);
                 self.read(inputs[0])?;
                 self.read(inputs[1])?;
                 self.i(match intrinsic {
-                    KnownCallee::IntCmpCode => I::I32LtS,
-                    KnownCallee::FloatCmpCode => I::F64Lt,
+                    KnownCallee::IntCmp => I::I32LtS,
+                    KnownCallee::FloatCmp => I::F64Lt,
                     _ => unreachable!(),
                 });
-                self.i(I::I32Sub);
+                self.i(I::Select);
             }
             _ => unreachable!("wasm_intrinsic filters unsupported known callees"),
         }
@@ -1739,11 +1749,19 @@ impl<'a, 's> Body<'a, 's> {
             self.i(I::I32Add);
             return Ok(());
         }
+        if matches!(value, Value::Register(id) if self.variant_shells.contains(id))
+            && self.roles.get(value, self.body.constants()).is_some_and(
+                |r| matches!(&*r, ValueRole::Materialized(ty) if scalar(ty, &self.env).is_ok_and(ScalarType::is_tag)),
+            )
+        {
+            self.address(value)?;
+            self.i(I::I32Load(memarg(2)));
+            return Ok(());
+        }
         if self.storage.contains_key(value)
-            && !self
-                .roles
-                .get(value, self.body.constants())
-                .is_some_and(|r| matches!(&*r, ValueRole::Materialized(ty) if scalar(ty).is_ok()))
+            && !self.roles.get(value, self.body.constants()).is_some_and(
+                |r| matches!(&*r, ValueRole::Materialized(ty) if scalar(ty, &self.env).is_ok()),
+            )
         {
             return self.address(value);
         }
@@ -1803,6 +1821,7 @@ impl<'a, 's> Body<'a, 's> {
                 .get(value, self.body.constants())
                 .and_then(|r| r.place_pointee_type())
                 .ok_or("expected scalar place")?,
+            &self.env,
         )
     }
 
@@ -1825,14 +1844,14 @@ impl<'a, 's> Body<'a, 's> {
             return Ok(ScalarType::pointer());
         }
         if let Some(pointee) = role.place_pointee_type() {
-            let ty = scalar(&pointee)?;
+            let ty = scalar(&pointee, &self.env)?;
             self.load_place(value, ty)?;
             Ok(ty)
         } else {
             let ValueRole::Materialized(ty) = &*role else {
                 return Err("expected scalar value".into());
             };
-            let ty = scalar(ty)?;
+            let ty = scalar(ty, &self.env)?;
             self.value(value)?;
             Ok(ty)
         }
@@ -1924,7 +1943,7 @@ impl<'a, 's> Body<'a, 's> {
                 {
                     let offset = self.address_base(&value)?;
                     self.i(I::LocalGet(self.input_local(index).as_u32()));
-                    ScalarType::of(self.body.parameters()[index].ty)?
+                    ScalarType::in_env(self.body.parameters()[index].ty, &self.env)?
                         .store_at(&mut self.code, offset);
                 }
             }
@@ -2086,7 +2105,7 @@ impl<'a, 's> Body<'a, 's> {
             | TerminatorKind::SwitchVariant { .. } => {
                 for &target in &targets {
                     if Some(target) != untested {
-                        self.arm_condition(block_id, target)?;
+                        self.arm_condition(block_id, target, &mut start)?;
                         self.enter_if(target, nested, terminator.span, &mut start)?;
                     }
                 }
@@ -2169,7 +2188,12 @@ impl<'a, 's> Body<'a, 's> {
     }
 
     /// Pushes whether the terminator of `block_id` selects `target`.
-    fn arm_condition(&mut self, block_id: BlockId, target: BlockId) -> Result<(), String> {
+    fn arm_condition(
+        &mut self,
+        block_id: BlockId,
+        target: BlockId,
+        start: &mut usize,
+    ) -> Result<(), String> {
         let body = self.body;
         match &body.block(block_id).terminator().kind {
             TerminatorKind::CondBr {
@@ -2187,6 +2211,16 @@ impl<'a, 's> Body<'a, 's> {
                 cases,
                 default,
             } => {
+                if let Some(intrinsic) = self.analysis.comparison_switch(body.block(block_id)) {
+                    let operations = body.block(block_id).operations();
+                    let call = &operations[operations.len() - 2];
+                    self.record_source(*start, body.block(block_id).terminator().span);
+                    let comparison_start = self.code.byte_len();
+                    self.comparison_switch_predicate(intrinsic, call, cases, *default, target)?;
+                    self.record_source(comparison_start, call.span);
+                    *start = self.code.byte_len();
+                    return Ok(());
+                }
                 // The default arm is selected by no case reaching another target.
                 let (selected, compare, combine) = if target == *default {
                     (
@@ -2277,7 +2311,16 @@ impl<'a, 's> Body<'a, 's> {
                 index += 1;
                 continue;
             }
-            if let Some(test) = operations.get(index + 1)
+            if index + 2 == operations.len()
+                && self
+                    .analysis
+                    .comparison_switch(self.body.block(block_id))
+                    .is_some()
+            {
+                // The two-target switch emits its comparison directly at the terminator.
+                break;
+            }
+            if let Some(test) = operations.get(index + 2)
                 && let Some(intrinsic) = test
                     .result_id()
                     .and_then(|result| self.analysis.comparison_fusion(result))
@@ -2286,7 +2329,7 @@ impl<'a, 's> Body<'a, 's> {
                 self.comparison_predicate(intrinsic, operation, test)?;
                 self.finish_operation_result(test)?;
                 self.record_source(start, operation.span);
-                index += 2;
+                index += 3;
                 continue;
             }
             let start = self.code.byte_len();
@@ -2313,7 +2356,7 @@ impl<'a, 's> Body<'a, 's> {
     ) -> Result<(), String> {
         self.emit_operations(block_id)?;
         let block = self.body.block(block_id);
-        let start = self.code.byte_len();
+        let mut start = self.code.byte_len();
         let span = match &block.terminator().kind {
             TerminatorKind::Invoke { operation, .. } => operation.span,
             _ => block.terminator().span,
@@ -2322,15 +2365,15 @@ impl<'a, 's> Body<'a, 's> {
             if then_target == else_target {
                 self.dispatch_branch(then_target, depth, next, 0);
             } else if Some(then_target) == next {
-                self.arm_condition(block_id, else_target)?;
+                self.arm_condition(block_id, else_target, &mut start)?;
                 self.dispatch_branch_if(else_target, depth);
             } else if Some(else_target) == next {
-                self.arm_condition(block_id, then_target)?;
+                self.arm_condition(block_id, then_target, &mut start)?;
                 self.dispatch_branch_if(then_target, depth);
             } else {
                 self.i(I::I32Const(then_target.as_u32() as i32));
                 self.i(I::I32Const(else_target.as_u32() as i32));
-                self.arm_condition(block_id, then_target)?;
+                self.arm_condition(block_id, then_target, &mut start)?;
                 self.i(I::Select);
                 self.dispatch(depth, 0);
             }
@@ -2643,7 +2686,7 @@ impl<'a, 's> Body<'a, 's> {
                     // The allocation holds every element, so no offset wraps the address space.
                     let offset = index as u32 * element.size;
                     self.i(I::LocalGet(helpers.scratch.as_u32()));
-                    if let Ok(ty) = ScalarType::of(*element_ty) {
+                    if let Ok(ty) = ScalarType::in_env(*element_ty, &self.env) {
                         self.read(value)?;
                         ty.store_at(&mut self.code, offset);
                     } else {
@@ -2746,7 +2789,7 @@ impl<'a, 's> Body<'a, 's> {
             }
             Load => {
                 let ty = self.pointee_type(&args[0])?;
-                if let Ok(scalar) = scalar(&ty) {
+                if let Ok(scalar) = scalar(&ty, &self.env) {
                     self.load_place(&args[0], scalar)?;
                 } else {
                     self.address(&Value::Register(op.result_id().unwrap()))?;
@@ -2773,9 +2816,14 @@ impl<'a, 's> Body<'a, 's> {
                 if let Value::Register(id) = &args[0]
                     && let Some(&word) = self.stored_variants.get(id)
                 {
-                    let offset = self.address_base(&args[1])?;
+                    let offset = self.prepare_store(&args[1])?;
                     self.i(I::I32Const(word));
-                    self.i(I::I32Store(memarg_at(2, offset)));
+                    // Every variant shell begins with a canonical u32 tag, even when its
+                    // destination also reserves payload bytes.
+                    let tag = self
+                        .pointee(&args[1])
+                        .unwrap_or(ScalarType::native(NativeScalar::Int));
+                    self.finish_store(&args[1], tag, offset);
                     return Ok(());
                 }
                 if matches!(&args[0], Value::Register(id) if self.variant_shells.contains(id)) {
@@ -2786,7 +2834,7 @@ impl<'a, 's> Body<'a, 's> {
                     return Ok(());
                 }
                 let ty = self.pointee_type(&args[1])?;
-                if let Ok(ty) = scalar(&ty) {
+                if let Ok(ty) = scalar(&ty, &self.env) {
                     let offset = self.prepare_store(&args[1])?;
                     self.value(&args[0])?;
                     self.finish_store(&args[1], ty, offset);
@@ -2810,7 +2858,7 @@ impl<'a, 's> Body<'a, 's> {
                 if let Some(witness) = layout_witness(op) {
                     self.dynamic_layout(witness)?;
                 }
-                if let Ok(ty) = scalar(&ty) {
+                if let Ok(ty) = scalar(&ty, &self.env) {
                     let offset = self.prepare_store(&args[1])?;
                     self.read(&args[0])?;
                     self.finish_store(&args[1], ty, offset);
@@ -2918,9 +2966,17 @@ impl<'a, 's> Body<'a, 's> {
                 return Ok(());
             }
             ExtractTag | ExtractPayloadIndirection => {
-                self.address(&args[0])?;
-                self.i(I::I32Load(memarg(2)));
-                if matches!(op.kind, ExtractTag) {
+                let ty = self.pointee_type(&args[0])?;
+                let tag_scalar = scalar(&ty, &self.env).is_ok_and(ScalarType::is_tag);
+                if tag_scalar {
+                    self.read(&args[0])?;
+                } else {
+                    self.address(&args[0])?;
+                    self.i(I::I32Load(memarg(2)));
+                }
+                if tag_scalar && matches!(op.kind, ExtractTag) {
+                    // Every case is inline: the representation bit is statically clear.
+                } else if matches!(op.kind, ExtractTag) {
                     self.i(I::I32Const(!VariantPayloadStorage::INDIRECT_TAG_BIT as i32));
                     self.i(I::I32And);
                 } else {
@@ -2942,7 +2998,7 @@ impl<'a, 's> Body<'a, 's> {
                     .get(&args[0], self.body.constants())
                     .and_then(|role| role.place_pointee_type())
                 {
-                    if ScalarType::of(ty).is_ok() {
+                    if ScalarType::in_env(ty, &self.env).is_ok() {
                         let ty = self.read(&args[0])?;
                         self.value(&args[1])?;
                         self.i(ty.equal());
@@ -3012,7 +3068,7 @@ impl<'a, 's> Body<'a, 's> {
             if self.storage.contains_key(&value) {
                 let role = self.roles.get(&value, self.body.constants()).unwrap();
                 if let ValueRole::Materialized(ty) = &*role {
-                    let ty = scalar(ty)?;
+                    let ty = scalar(ty, &self.env)?;
                     let offset = self.address_base(&value)?;
                     self.i(I::LocalGet(self.registers[&id].as_u32()));
                     ty.store_at(&mut self.code, offset);
@@ -3022,33 +3078,81 @@ impl<'a, 's> Body<'a, 's> {
         Ok(())
     }
 
+    fn comparison_switch_predicate(
+        &mut self,
+        intrinsic: KnownCallee,
+        call: &Operation,
+        cases: &[(Ustr, BlockId)],
+        default: BlockId,
+        target: BlockId,
+    ) -> Result<(), String> {
+        // Every two-way partition of finite Ordering is a single ordered predicate.
+        let mask =
+            ["Less", "Equal", "Greater"]
+                .into_iter()
+                .enumerate()
+                .fold(0, |mask, (bit, tag)| {
+                    let arm = cases
+                        .iter()
+                        .find(|(case, _)| case.as_str() == tag)
+                        .map_or(default, |(_, arm)| *arm);
+                    mask | (u8::from(arm == target) << bit)
+                });
+        self.emit_comparison_predicate(intrinsic, call, mask)
+    }
+
+    fn emit_comparison_predicate(
+        &mut self,
+        intrinsic: KnownCallee,
+        call: &Operation,
+        mask: u8,
+    ) -> Result<(), String> {
+        let [_, left, right, _] = &*call.operands else {
+            return Err("comparison call operands".into());
+        };
+        if mask == 0 || mask == 7 {
+            self.i(I::I32Const(i32::from(mask == 7)));
+            return Ok(());
+        }
+        self.read(left)?;
+        self.read(right)?;
+        self.i(match (intrinsic, mask) {
+            (KnownCallee::IntCmp, 1) => I::I32LtS,
+            (KnownCallee::IntCmp, 2) => I::I32Eq,
+            (KnownCallee::IntCmp, 3) => I::I32LeS,
+            (KnownCallee::IntCmp, 4) => I::I32GtS,
+            (KnownCallee::IntCmp, 5) => I::I32Ne,
+            (KnownCallee::IntCmp, 6) => I::I32GeS,
+            (KnownCallee::FloatCmp, 1) => I::F64Lt,
+            (KnownCallee::FloatCmp, 2) => I::F64Eq,
+            (KnownCallee::FloatCmp, 3) => I::F64Le,
+            (KnownCallee::FloatCmp, 4) => I::F64Gt,
+            (KnownCallee::FloatCmp, 5) => I::F64Ne,
+            (KnownCallee::FloatCmp, 6) => I::F64Ge,
+            _ => unreachable!("checked comparison intrinsic and nonconstant case mask"),
+        });
+        Ok(())
+    }
+
     fn comparison_predicate(
         &mut self,
         intrinsic: KnownCallee,
         call: &Operation,
         test: &Operation,
     ) -> Result<(), String> {
-        let [_, left, right, _] = &*call.operands else {
-            return Err("comparison-code call operands".into());
-        };
         let Value::Pattern(pattern) = &test.operands[1] else {
-            return Err("comparison-code pattern".into());
+            return Err("comparison pattern".into());
         };
-        let code = *pattern
-            .as_primitive_ty::<isize>()
-            .ok_or("comparison-code integer pattern")?;
-        self.read(left)?;
-        self.read(right)?;
-        self.i(match (intrinsic, code) {
-            (KnownCallee::IntCmpCode, -1) => I::I32LtS,
-            (KnownCallee::IntCmpCode, 0) => I::I32Eq,
-            (KnownCallee::IntCmpCode, 1) => I::I32GtS,
-            (KnownCallee::FloatCmpCode, -1) => I::F64Lt,
-            (KnownCallee::FloatCmpCode, 0) => I::F64Eq,
-            (KnownCallee::FloatCmpCode, 1) => I::F64Gt,
-            _ => return Err("comparison-code pattern outside -1/0/1".into()),
-        });
-        Ok(())
+        let tag = pattern
+            .as_variant_tag()
+            .ok_or("comparison variant pattern")?;
+        let mask = match tag.as_str() {
+            "Less" => 1,
+            "Equal" => 2,
+            "Greater" => 4,
+            _ => return Err("comparison pattern outside Ordering".into()),
+        };
+        self.emit_comparison_predicate(intrinsic, call, mask)
     }
 }
 

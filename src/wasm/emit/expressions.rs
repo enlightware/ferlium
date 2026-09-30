@@ -14,11 +14,11 @@ use crate::{
         site::OperationIndex,
         terminator::TerminatorKind,
     },
-    module::{FunctionId, id::Id},
+    module::{FunctionId, ModuleEnv, id::Id},
     wasm::abi::{CallAbi, Parameter as ParameterTransport, WasmFunctionId},
 };
 
-use super::{is_elided_stack_operation, scalar, wasm_intrinsic};
+use super::{control_flow::conditional_targets, is_elided_stack_operation, scalar, wasm_intrinsic};
 
 const MAX_EXPRESSION_DEPTH: usize = 128;
 
@@ -86,6 +86,14 @@ impl OperationLayout {
     }
 }
 
+/// The tag extraction and predicate are emitted together with their comparison call.
+#[derive(Clone, Copy)]
+enum ComparisonFusion {
+    Test(KnownCallee),
+    Switch(KnownCallee),
+    Tag,
+}
+
 /// Dense facts shared by scalar storage assignment and expression-tree emission.
 pub(super) struct Analysis {
     parameter_count: usize,
@@ -93,17 +101,19 @@ pub(super) struct Analysis {
     operation_bases: Vec<FlatOperationId>,
     addressed: Vec<bool>,
     intrinsics: Vec<Option<KnownCallee>>,
-    comparison_fusions: Vec<Option<KnownCallee>>,
+    comparison_fusions: Vec<Option<ComparisonFusion>>,
     value_uses: Vec<Uses>,
 }
 
 impl Analysis {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn of(
         body: &Function,
         roles: &ValueRoles,
         callees: &FxHashMap<FunctionId, (WasmFunctionId, &CallAbi)>,
         program: &ResolvedPhysicalProgram<'_>,
         session: &CompilerSession,
+        env: ModuleEnv<'_>,
         returns_direct_place: bool,
         no_op_stack_markers: &FxHashSet<ValueId>,
     ) -> (Self, Plan) {
@@ -114,6 +124,7 @@ impl Analysis {
             callees,
             program,
             session,
+            env,
             returns_direct_place,
             &layout,
         );
@@ -125,6 +136,7 @@ impl Analysis {
             &comparison_fusions,
             &layout,
             no_op_stack_markers,
+            env,
         );
         let analysis = Self {
             parameter_count: body.parameters().len(),
@@ -172,6 +184,18 @@ impl Analysis {
             .get(id.as_index())
             .copied()
             .flatten()
+            .and_then(|fusion| match fusion {
+                ComparisonFusion::Test(intrinsic) => Some(intrinsic),
+                ComparisonFusion::Tag | ComparisonFusion::Switch(_) => None,
+            })
+    }
+
+    pub(super) fn comparison_switch(&self, block: &BasicBlock) -> Option<KnownCallee> {
+        let tag = block.operations().last()?.result_id()?;
+        match self.comparison_fusions[tag.as_index()]? {
+            ComparisonFusion::Switch(intrinsic) => Some(intrinsic),
+            _ => None,
+        }
     }
 }
 
@@ -190,9 +214,10 @@ impl Plan {
         body: &Function,
         roles: &ValueRoles,
         inputs: &Inputs,
-        comparison_fusions: &[Option<KnownCallee>],
+        comparison_fusions: &[Option<ComparisonFusion>],
         layout: &OperationLayout,
         no_op_stack_markers: &FxHashSet<ValueId>,
+        env: ModuleEnv<'_>,
     ) -> Self {
         let parameter_count = body.parameters().len();
         let value_count = roles.register_count();
@@ -222,7 +247,7 @@ impl Plan {
                 .get(&Value::Register(id), body.constants())
                 .is_some_and(|role| {
                     matches!(&*role, ValueRole::VariantTag)
-                        || matches!(&*role, ValueRole::Materialized(ty) if scalar(ty).is_ok())
+                        || matches!(&*role, ValueRole::Materialized(ty) if scalar(ty, &env).is_ok())
                 });
             if !scalar_result {
                 continue;
@@ -249,7 +274,7 @@ impl Plan {
                 || !roles
                     .get(&value, body.constants())
                     .and_then(|role| role.place_pointee_type())
-                    .is_some_and(|ty| scalar(&ty).is_ok())
+                    .is_some_and(|ty| scalar(&ty, &env).is_ok())
             {
                 continue;
             }
@@ -283,7 +308,7 @@ impl Plan {
                     OperationKind::Call { .. } => inputs
                         .intrinsic(layout, write.source)
                         .is_some_and(|callee| {
-                            !matches!(callee, KnownCallee::IntCmpCode | KnownCallee::FloatCmpCode)
+                            !matches!(callee, KnownCallee::IntCmp | KnownCallee::FloatCmp)
                         }),
                     _ => false,
                 };
@@ -384,13 +409,13 @@ impl Plan {
                 }
                 if matches!(
                     inputs.intrinsic(layout, root_source),
-                    Some(KnownCallee::IntCmpCode | KnownCallee::FloatCmpCode)
+                    Some(KnownCallee::IntCmp | KnownCallee::FloatCmp)
                 ) && !fused_comparison_call(
                     block,
                     root_source.operation_id(),
                     comparison_fusions,
                 ) {
-                    // Materializing a comparison code reads both inputs twice. Keep its arguments
+                    // Materializing an ordering tag reads both inputs twice. Keep its arguments
                     // in locals; adjacent predicate fusion has its own single-read path.
                     continue;
                 }
@@ -606,12 +631,14 @@ impl Inputs {
         self.intrinsics[layout.index(source).as_index()]
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn of(
         body: &Function,
         roles: &ValueRoles,
         callees: &FxHashMap<FunctionId, (WasmFunctionId, &CallAbi)>,
         program: &ResolvedPhysicalProgram<'_>,
         session: &CompilerSession,
+        env: ModuleEnv<'_>,
         returns_direct_place: bool,
         layout: &OperationLayout,
     ) -> Self {
@@ -629,7 +656,7 @@ impl Inputs {
             }
         }
 
-        let mut scan = OperandScan::new(body, roles, parameter_count, value_count);
+        let mut scan = OperandScan::new(body, roles, parameter_count, value_count, env);
         let mut intrinsics = vec![None; layout.operation_count];
         for block_id in body.blocks() {
             let block = body.block(block_id);
@@ -703,6 +730,7 @@ impl Inputs {
 }
 
 struct OperandScan<'a> {
+    env: ModuleEnv<'a>,
     body: &'a Function,
     roles: &'a ValueRoles,
     parameter_count: usize,
@@ -718,8 +746,10 @@ impl<'a> OperandScan<'a> {
         roles: &'a ValueRoles,
         parameter_count: usize,
         register_count: usize,
+        env: ModuleEnv<'a>,
     ) -> Self {
         Self {
+            env,
             body,
             roles,
             parameter_count,
@@ -742,7 +772,9 @@ impl<'a> OperandScan<'a> {
             if is_elidable_operand(operation, index) {
                 self.elidable_operand(operand);
             }
-            if observes_address(operation, index, intrinsic, call_abi, self.roles, self.body) {
+            if observes_address(
+                operation, index, intrinsic, call_abi, self.roles, self.body, self.env,
+            ) {
                 self.mark_addressed(operand);
             }
         }
@@ -801,8 +833,13 @@ fn observes_address(
     call_abi: Option<&CallAbi>,
     roles: &ValueRoles,
     body: &Function,
+    env: ModuleEnv<'_>,
 ) -> bool {
     match &operation.kind {
+        OperationKind::ExtractTag | OperationKind::ExtractPayloadIndirection => roles
+            .get(&operation.operands[index], body.constants())
+            .and_then(|role| role.place_pointee_type())
+            .is_none_or(|ty| scalar(&ty, &env).is_err()),
         OperationKind::Load
         | OperationKind::Clear
         | OperationKind::Memcpy
@@ -812,7 +849,7 @@ fn observes_address(
         OperationKind::Store if index == 1 => false,
         // Scalar elements are read by value; the destination is the last operand.
         OperationKind::BuildArray { element_ty } if index + 1 < operation.operands.len() => {
-            scalar(&MirType::Lowered(*element_ty)).is_err()
+            scalar(&MirType::Lowered(*element_ty), &env).is_err()
         }
         OperationKind::Store => roles
             .get(&operation.operands[index], body.constants())
@@ -912,31 +949,49 @@ fn stackifiable_consumer(body: &Function, source: Source) -> bool {
 fn fused_comparison_call(
     block: &BasicBlock,
     operation: OperationIndex,
-    comparison_fusions: &[Option<KnownCallee>],
+    comparison_fusions: &[Option<ComparisonFusion>],
 ) -> bool {
-    block
-        .operations()
-        .get(operation.as_index() + 1)
+    let operations = block.operations();
+    let offset = operation.as_index();
+    operations
+        .get(offset + 2)
         .and_then(Operation::result_id)
-        .is_some_and(|id| comparison_fusions[id.as_index()].is_some())
+        .is_some_and(|id| {
+            matches!(
+                comparison_fusions[id.as_index()],
+                Some(ComparisonFusion::Test(_))
+            )
+        })
+        || (offset + 2 == operations.len()
+            && operations
+                .get(offset + 1)
+                .and_then(Operation::result_id)
+                .is_some_and(|id| {
+                    matches!(
+                        comparison_fusions[id.as_index()],
+                        Some(ComparisonFusion::Switch(_))
+                    )
+                }))
 }
 
-/// Finds comparison-code calls whose fresh, unaliased output is tested immediately.
+/// Finds comparison calls whose fresh, unaliased output is tested immediately.
 ///
 /// Adjacency keeps the comparison inputs live until the test is emitted. Requiring a fresh
 /// `Alloca` output and exactly the call plus test uses permits omission of the materialized
-/// comparison code without leaving observable stale memory behind.
+/// ordering tag without leaving observable stale memory behind.
 fn comparison_fusions(
     body: &Function,
     layout: &OperationLayout,
     inputs: &Inputs,
-) -> Vec<Option<KnownCallee>> {
+) -> Vec<Option<ComparisonFusion>> {
     let mut fused = vec![None; inputs.value_uses.len()];
     for block_id in body.blocks() {
         let operations = body.block(block_id).operations();
         for (index, pair) in operations.windows(2).enumerate() {
-            let [call, test] = pair else { unreachable!() };
-            let Some(intrinsic @ (KnownCallee::IntCmpCode | KnownCallee::FloatCmpCode)) =
+            let [call, extract] = pair else {
+                unreachable!()
+            };
+            let Some(intrinsic @ (KnownCallee::IntCmp | KnownCallee::FloatCmp)) =
                 inputs.intrinsics[layout.index(Source::from_index(block_id, index)).as_index()]
             else {
                 continue;
@@ -945,9 +1000,8 @@ fn comparison_fusions(
                 continue;
             };
             if !ty.result_convention.has_result_place()
-                || !matches!(test.kind, OperationKind::CompareEqual)
+                || !matches!(extract.kind, OperationKind::ExtractTag)
                 || call.operands.len() != 4
-                || test.operands.len() != 2
             {
                 continue;
             }
@@ -955,7 +1009,7 @@ fn comparison_fusions(
             let Value::Register(output_id) = output else {
                 continue;
             };
-            let Value::Pattern(pattern) = &test.operands[1] else {
+            let Some(tag_id) = extract.result_id() else {
                 continue;
             };
             let fresh_output = inputs.definitions[output_id.as_index()].is_some_and(|source| {
@@ -964,15 +1018,55 @@ fn comparison_fusions(
                     OperationKind::Alloca { .. }
                 )
             });
-            if test.operands[0] != *output
+            if extract.operands[0] != *output
+                || inputs.value_uses[tag_id.as_index()].one().is_none()
                 || !inputs.value_uses[output_id.as_index()].is_two()
                 || !fresh_output
-                || !matches!(pattern.as_primitive_ty::<isize>(), Some(-1..=1))
             {
                 continue;
             }
-            if let Some(result) = test.result_id() {
-                fused[result.as_index()] = Some(intrinsic);
+            if let Some(test) = operations.get(index + 2) {
+                if !matches!(test.kind, OperationKind::CompareEqual)
+                    || test.operands.len() != 2
+                    || test.operands[0] != Value::Register(tag_id)
+                {
+                    continue;
+                }
+                let Value::Pattern(pattern) = &test.operands[1] else {
+                    continue;
+                };
+                if !pattern
+                    .as_variant_tag()
+                    .is_some_and(|tag| matches!(tag.as_str(), "Less" | "Equal" | "Greater"))
+                {
+                    continue;
+                }
+                if let Some(result) = test.result_id() {
+                    fused[result.as_index()] = Some(ComparisonFusion::Test(intrinsic));
+                    fused[tag_id.as_index()] = Some(ComparisonFusion::Tag);
+                }
+            } else {
+                let terminator = &body.block(block_id).terminator().kind;
+                let TerminatorKind::SwitchVariant {
+                    tag,
+                    cases,
+                    default,
+                } = terminator
+                else {
+                    continue;
+                };
+                let targets = ["Less", "Equal", "Greater"].map(|tag| {
+                    cases
+                        .iter()
+                        .find(|(case, _)| case.as_str() == tag)
+                        .map_or(*default, |(_, target)| *target)
+                });
+                if *tag == Value::Register(tag_id)
+                    && targets.iter().any(|target| *target != targets[0])
+                    && conditional_targets(terminator).is_some_and(|(yes, no)| yes != no)
+                {
+                    fused[tag_id.as_index()] = Some(ComparisonFusion::Switch(intrinsic));
+                }
             }
         }
     }

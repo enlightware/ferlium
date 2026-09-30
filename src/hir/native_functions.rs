@@ -26,12 +26,12 @@
 //! let _ = NativeFnNN::from_rust(<bool as std::ops::BitAnd>::bitand);
 //! let _ = NativeOutFnR::from_rust(String::trim);
 //! ```
-//! `from_rust_ordering_code` accepts a Rust `Ordering` result and returns an `int` code
-//! (-1, 0, or 1). Its description carries that result-domain guarantee for optimization,
-//! including in third-party host modules. It does not assert any ordering laws or effects:
+//! `NativeVariantFn0..3` accept payload-free Rust enum results implementing `NativeVariantResult`.
+//! Its u32 C result selects a symbolic case; compiled adapters resolve the session-local tag.
+//! Rust `Ordering` implements this protocol. No ordering laws or effects are inferred:
 //! ```
-//! use ferlium::hir::native_functions::NativeFnNN;
-//! let _ = NativeFnNN::from_rust_ordering_code(|a: isize, b: isize| a.cmp(&b));
+//! use ferlium::hir::native_functions::NativeVariantFnNN;
+//! let _ = NativeVariantFnNN::from_rust(|a: isize, b: isize| a.cmp(&b));
 //! ```
 //! Output, fallible, and optional families adapt ordinary `T`, `Result<T, SourceFailureKind>`,
 //! and `Option<T>` results to their C protocols. All bodies execute inside the C boundary and
@@ -102,7 +102,7 @@ use crate::{
         effects::{EffType, Effect, PrimitiveEffect},
         mutability::MutType,
         never::Never,
-        r#type::{CallResultConvention, FnType, Type},
+        r#type::{CallResultConvention, FnType, Type, variant_type},
         type_like::TypeLike,
         type_scheme::TypeScheme,
     },
@@ -271,6 +271,12 @@ pub enum NativeResult {
         payload: NativeLayout,
         ty: Type,
     },
+    /// A u32 case index; generated glue maps these symbolic names to session-local tags.
+    /// Every case has unit payload. This is not a Rust enum's memory representation.
+    Variant {
+        ty: Type,
+        cases: &'static [&'static str],
+    },
 }
 
 impl NativeResult {
@@ -278,7 +284,7 @@ impl NativeResult {
         match self {
             Self::Unit => Type::primitive::<()>(),
             Self::Never => Type::never(),
-            Self::Optional { ty, .. } => ty,
+            Self::Optional { ty, .. } | Self::Variant { ty, .. } => ty,
             Self::Addressor { pointee, .. } => pointee.ty,
             Self::Scalar(layout, _) | Self::Output(layout) => layout.ty,
         }
@@ -404,6 +410,21 @@ impl NativeSignature {
                 return Err(NativeContractError::ArgumentTransport { index });
             }
         }
+        if let NativeResult::Variant {
+            ty: result_ty,
+            cases,
+        } = self.result
+        {
+            if cases.is_empty()
+                || result_ty != native_variant_type(cases)
+                || cases
+                    .iter()
+                    .enumerate()
+                    .any(|(i, case)| cases[..i].contains(case))
+            {
+                return Err(NativeContractError::ResultTransport);
+            }
+        }
         if self.result.ty() != ty.ret {
             return Err(NativeContractError::ResultType);
         }
@@ -413,7 +434,9 @@ impl NativeSignature {
             || (self.failure == NativeFailureConvention::StatusWithState
                 && matches!(
                     self.result,
-                    NativeResult::Scalar(..) | NativeResult::Optional { .. }
+                    NativeResult::Scalar(..)
+                        | NativeResult::Optional { .. }
+                        | NativeResult::Variant { .. }
                 ))
             || (self.failure == NativeFailureConvention::Infallible
                 && self.result == NativeResult::Never)
@@ -424,24 +447,11 @@ impl NativeSignature {
     }
 }
 
-/// Guaranteed values of a native result on normal return, independent of ABI transport.
-///
-/// This does not assert purity, termination, or any ordering laws relating the arguments.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum NativeResultKnowledge {
-    #[default]
-    Unknown,
-    /// Exactly -1, 0, or 1, encoding Rust's Less, Equal, or Greater respectively.
-    OrderingCode,
-}
-
 /// Address and contract of the existing callable's entry, not a second function identity.
 #[derive(Clone, Debug)]
 pub struct NativeEntry {
     address: *const (),
     signature: NativeSignature,
-    result_knowledge: NativeResultKnowledge,
     physical: Option<PhysicalInvoke>,
     /// Typed move-out glue for the boxed host boundary, not a guest clone operation.
     host_output: Option<unsafe fn(*mut u8) -> Value>,
@@ -454,6 +464,8 @@ pub(crate) enum NativeCallOutcome {
     Initialized,
     /// An optional result has no payload; output storage remains absent.
     Absent,
+    /// The native enum protocol returned a case index, not initialized Ferlium bytes.
+    Case(u32),
 }
 
 type PhysicalInvoke = unsafe fn(
@@ -472,16 +484,11 @@ impl NativeEntry {
         Self {
             address,
             signature,
-            result_knowledge: NativeResultKnowledge::Unknown,
             physical: None,
             host_output: None,
         }
     }
 
-    /// Result knowledge guaranteed by the typed adapter, not a claim about its operands.
-    pub fn result_knowledge(&self) -> NativeResultKnowledge {
-        self.result_knowledge
-    }
     /// The entry's code pointer in the matching runtime, including a table pointer on Wasm.
     pub fn address(&self) -> *const () {
         self.address
@@ -698,6 +705,28 @@ pub trait NativeDirectResult: sealed::Result + 'static {
     fn boxed(self) -> Value;
 }
 
+/// Typed Rust results for the payload-free variant protocol. The case index must select one of
+/// `CASES`; adapters validate it before constructing a Ferlium value.
+pub trait NativeVariantResult: 'static {
+    const CASES: &'static [&'static str];
+    fn case(self) -> u32;
+}
+
+impl NativeVariantResult for std::cmp::Ordering {
+    const CASES: &'static [&'static str] = &["Less", "Equal", "Greater"];
+    fn case(self) -> u32 {
+        match self {
+            Self::Less => 0,
+            Self::Equal => 1,
+            Self::Greater => 2,
+        }
+    }
+}
+
+fn native_variant_type(cases: &[&str]) -> Type {
+    variant_type(cases.iter().map(|tag| (*tag, Type::unit())))
+}
+
 macro_rules! scalar_result {
     ($rust:ty, $native:ty, $kind:ident, $convert:expr) => {
         impl sealed::Result for $rust {}
@@ -877,22 +906,65 @@ unsafe fn stateless_rust_function<F: Copy>() -> F {
 }
 
 macro_rules! entries {
-    ($direct:ident, $output:ident $(, $arg:ident : $value:ident : $index:tt)*) => {
-        pub struct $direct<$($arg: NativeArgument,)* R: NativeDirectResult>(for<'a> extern "C" fn($($arg::Borrowed<'a>),*) -> R);
-        impl<$($arg: NativeArgument,)*> $direct<$($arg,)* isize> {
-            /// Adapt a Rust `Ordering` result to an integer code (-1, 0, or 1).
-            ///
-            /// The entry records this finite result domain for optimization. No ordering laws,
-            /// purity, or termination are inferred from the Rust result type.
-            pub fn from_rust_ordering_code<F>(function: F) -> NativeCallable<Self>
-            where F: for<'a> Fn($($arg::Borrowed<'a>),*) -> std::cmp::Ordering + Copy + 'static {
-                let mut callable = Self::from_rust(move |$($value: $arg::Borrowed<'_>),*| {
-                    function($($value),*) as isize
-                });
-                callable.entry.result_knowledge = NativeResultKnowledge::OrderingCode;
-                callable
+    ($direct:ident, $output:ident, $variant:ident $(, $arg:ident : $value:ident : $index:tt)*) => {
+        /// A stateless Rust enum result transported as a u32 case index at the C boundary.
+        pub struct $variant<$($arg: NativeArgument,)* R: NativeVariantResult>(
+            for<'a> extern "C" fn($($arg::Borrowed<'a>),*) -> u32,
+            PhantomData<R>,
+        );
+        impl<$($arg: NativeArgument,)* R: NativeVariantResult> Clone for $variant<$($arg,)* R> {
+            fn clone(&self) -> Self { Self(self.0, PhantomData) }
+        }
+        impl<$($arg: NativeArgument,)* R: NativeVariantResult> $variant<$($arg,)* R> {
+            pub fn from_rust<F>(function: F) -> NativeCallable<Self>
+            where F: for<'a> Fn($($arg::Borrowed<'a>),*) -> R + Copy + 'static {
+                check_stateless_rust_function(function);
+                assert!(!R::CASES.is_empty(), "native variant requires an inhabited result");
+                for (index, case) in R::CASES.iter().enumerate() {
+                    assert!(!R::CASES[..index].contains(case), "duplicate native variant case");
+                }
+                #[allow(clippy::extra_unused_lifetimes)]
+                extern "C" fn entry<'a, $($arg: NativeArgument,)* R: NativeVariantResult, F>($($value: $arg::Borrowed<'a>),*) -> u32
+                where F: for<'b> Fn($($arg::Borrowed<'b>),*) -> R + Copy + 'static {
+                    // SAFETY: registration checked a live stateless F.
+                    let function = unsafe { stateless_rust_function::<F>() };
+                    function($($value),*).case()
+                }
+                NativeCallable::new(Self(entry::<$($arg,)* R, F>, PhantomData))
             }
         }
+        impl<$($arg: NativeArgument,)* R: NativeVariantResult> sealed::Entry for $variant<$($arg,)* R> {}
+        impl<$($arg: NativeArgument,)* R: NativeVariantResult> EntryFunction for $variant<$($arg,)* R> {
+            fn entry(&self) -> NativeEntry {
+                #[allow(unused_variables)]
+                unsafe fn invoke<$($arg: NativeArgument),*>(address: *const (), inputs: &[*mut u8], _output: *mut u8, _failure: &mut NativeFailureState) -> Result<NativeCallOutcome, RuntimeError> {
+                    // SAFETY: paired with this exact C entry; the executor checked the arguments.
+                    let case = unsafe {
+                        let function: for<'a> extern "C" fn($($arg::Borrowed<'a>),*) -> u32 = std::mem::transmute(address);
+                        function($($arg::borrow_physical(inputs[$index])),*)
+                    };
+                    Ok(NativeCallOutcome::Case(case))
+                }
+                NativeEntry::new(self.0 as *const (), NativeSignature {
+                    failure: NativeFailureConvention::Infallible,
+                    parameters: vec![$($arg::parameter()),*],
+                    result: NativeResult::Variant { ty: native_variant_type(R::CASES), cases: R::CASES },
+                }).with_physical(invoke::<$($arg),*>)
+            }
+            #[allow(unused_variables)]
+            fn invoke(&self, args: &[ValOrMut], ctx: &mut EvalCtx) -> EvalResult {
+                $(let mut $value = $arg::extract(&args[$index], ctx).map_err(RuntimeError::new_native)?;)*
+                // SAFETY: extracted arguments remain live and their accesses are disjoint.
+                let case = (self.0)($(unsafe { $arg::borrow(&mut $value) }),*);
+                let tag = R::CASES.get(case as usize).ok_or(RuntimeError::InvalidNativeVariantCase {
+                    index: case,
+                    case_count: R::CASES.len(),
+                })?;
+                Ok(Value::unit_variant(ustr(tag)))
+            }
+        }
+
+        pub struct $direct<$($arg: NativeArgument,)* R: NativeDirectResult>(for<'a> extern "C" fn($($arg::Borrowed<'a>),*) -> R);
         impl<$($arg: NativeArgument,)* R: NativeDirectResult> Clone for $direct<$($arg,)* R> {
             fn clone(&self) -> Self { Self(self.0) }
         }
@@ -1006,10 +1078,10 @@ macro_rules! entries {
     };
 }
 
-entries!(NativeFn0, NativeOutFn0);
-entries!(NativeFn1, NativeOutFn1, A: a: 0);
-entries!(NativeFn2, NativeOutFn2, A: a: 0, B: b: 1);
-entries!(NativeFn3, NativeOutFn3, A: a: 0, B: b: 1, C: c: 2);
+entries!(NativeFn0, NativeOutFn0, NativeVariantFn0);
+entries!(NativeFn1, NativeOutFn1, NativeVariantFn1, A: a: 0);
+entries!(NativeFn2, NativeOutFn2, NativeVariantFn2, A: a: 0, B: b: 1);
+entries!(NativeFn3, NativeOutFn3, NativeVariantFn3, A: a: 0, B: b: 1, C: c: 2);
 
 macro_rules! fallible_entries {
     ($unit:ident, $output:ident $(, $arg:ident : $value:ident : $index:tt)*) => {
@@ -1184,6 +1256,8 @@ macro_rules! input_aliases {
         paste::paste! {
             pub type [<NativeFn $($code)*>]<$($ty,)* R> =
                 [<NativeFn $arity>]<$($marker<$ty>,)* R>;
+            pub type [<NativeVariantFn $($code)*>]<$($ty,)* R> =
+                [<NativeVariantFn $arity>]<$($marker<$ty>,)* R>;
             pub type [<NativeOutFn $($code)*>]<$($ty,)* O> =
                 [<NativeOutFn $arity>]<$($marker<$ty>,)* O>;
             pub type [<NativeFallibleFn $($code)*>]<$($ty),*> =
@@ -1463,7 +1537,6 @@ macro_rules! native_optional_entry {
 mod tests {
     use std::{
         cell::Cell,
-        cmp::Ordering,
         convert,
         hint::black_box,
         ops::{BitAnd, BitXor},
@@ -1548,51 +1621,39 @@ mod tests {
     }
 
     #[test]
-    fn native_ordering_codes_share_the_typed_c_entry_and_description() {
-        #[derive(Debug)]
-        struct HostU32(u32);
-        impl NativeValueType for HostU32 {}
-        fn compare(a: &HostU32, b: &HostU32) -> Ordering {
-            a.0.cmp(&b.0)
-        }
-        let native = NativeFnRR::from_rust_ordering_code(compare);
-        assert_eq!(
-            native.entry.result_knowledge(),
-            NativeResultKnowledge::OrderingCode
-        );
+    fn native_variant_results_share_the_typed_c_entry_and_description() {
+        let native = NativeVariantFnNN::from_rust(|a: isize, b: isize| a.cmp(&b));
         assert_eq!(
             native.entry.signature().result,
-            NativeResult::Scalar(NativeLayout::of::<isize>(), NativeScalar::Int)
+            NativeResult::Variant {
+                ty: crate::std::ordering::ordering_type(),
+                cases: &["Less", "Equal", "Greater"],
+            }
         );
         let session = CompilerSession::new_empty_for_tests();
         let mut ctx = EvalCtx::new(ModuleId::from_index(0), &session);
-        for (a, b, expected) in [(0, u32::MAX, -1), (17, 17, 0), (u32::MAX, 0, 1)] {
-            // The same typed C function is callable directly, without interpreter boxing.
-            assert_eq!((native.function.0)(&HostU32(a), &HostU32(b)), expected);
+        for (a, b, case, tag) in [
+            (0, 1, 0, "Less"),
+            (17, 17, 1, "Equal"),
+            (1, 0, 2, "Greater"),
+        ] {
+            assert_eq!((native.function.0)(a, b), case);
             let value = native
                 .call(
                     vec![
-                        ValOrMut::Val(Value::native(HostU32(a))),
-                        ValOrMut::Val(Value::native(HostU32(b))),
+                        ValOrMut::Val(Value::native(a)),
+                        ValOrMut::Val(Value::native(b)),
                     ],
                     &mut ctx,
                 )
-                .unwrap()
-                .into_primitive_ty::<isize>()
                 .unwrap();
-            assert_eq!(value, expected);
+            assert_eq!(value.variant_tag(), Some(ustr(tag)));
+            value.discard_storage();
         }
         let description = native.description(["left", "right"], "Host comparison", no_effects());
         assert_eq!(
-            description.definition.native_result_knowledge(),
-            NativeResultKnowledge::OrderingCode
-        );
-        assert_eq!(description.definition.ty_scheme.ty.ret, int_type());
-        let ordinary =
-            NativeFn0::from_rust(|| 0isize).description([], "Ordinary integer", no_effects());
-        assert_eq!(
-            ordinary.definition.native_result_knowledge(),
-            NativeResultKnowledge::Unknown
+            description.definition.ty_scheme.ty.ret,
+            crate::std::ordering::ordering_type()
         );
     }
 

@@ -14,6 +14,7 @@ EXPECTED = {
     "probe_scalars": ("i32 i64 f32 f64 i32 i32", "f64"),
     "probe_integer": ("i64", "i64"),
     "probe_boolean": ("i32", "i32"),
+    "probe_variant": ("i32 i32", "i32"),
     "probe_unit": ("", ""),
     "probe_member_ref": ("i32", "i32"),
     "probe_member_mut": ("i32", "i32"),

@@ -1071,10 +1071,7 @@ fn partial_call_outcome(
     };
     let zero = || {
         let representation = match known {
-            KnownCallee::IntSub
-            | KnownCallee::IntMul
-            | KnownCallee::IntCmpCode
-            | KnownCallee::FloatCmpCode => LiteralValue::new_native(0isize),
+            KnownCallee::IntSub | KnownCallee::IntMul => LiteralValue::new_native(0isize),
             KnownCallee::FloatSub | KnownCallee::FloatMul => {
                 LiteralValue::new_native(Float::new(0.0).expect("zero is a finite float"))
             }
@@ -1135,8 +1132,9 @@ fn partial_call_outcome(
         KnownCallee::IntMul if int_is(0, 0) || int_is(1, 0) => zero(),
         KnownCallee::IntMul if int_is(0, 1) => copy(1),
         KnownCallee::IntMul if int_is(1, 1) => copy(0),
-        KnownCallee::IntCmp if same_argument(0, 1) => Some(CallRewrite::EqualOrdering),
-        KnownCallee::IntCmpCode | KnownCallee::FloatCmpCode if same_argument(0, 1) => zero(),
+        KnownCallee::IntCmp | KnownCallee::FloatCmp if same_argument(0, 1) => {
+            Some(CallRewrite::EqualOrdering)
+        }
         // The two rewrites below name their whole argument rather than a literal one, so both step
         // aside for a *known* argument: evaluating the call outright produces a constant, which is
         // better than copying the cell that held it or comparing it at run time.

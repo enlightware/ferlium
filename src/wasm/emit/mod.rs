@@ -30,7 +30,10 @@ use wasm_encoder::{
 
 use crate::{
     CompilerSession, FxHashMap, FxHashSet, Location, MirOptimization,
-    hir::{function::ArgConvention, native_functions::NativeScalar},
+    hir::{
+        function::ArgConvention,
+        native_functions::{NativeResult, NativeScalar},
+    },
     mir::{
         BasicBlock, Function, Operation, OperationKind, ParameterKind, Value, ValueId,
         pass::known_callee::KnownCallee,
@@ -45,15 +48,15 @@ use crate::{
         math::{float_type, int_type},
         string::StaticStr,
         value::{
-            VALUE_ALIGN_ASSOC_CONST_INDEX, VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX,
-            VALUE_SIZE_ASSOC_CONST_INDEX,
+            TypeLayoutEnv, VALUE_ALIGN_ASSOC_CONST_INDEX, VALUE_CLONE_METHOD_INDEX,
+            VALUE_DROP_METHOD_INDEX, VALUE_SIZE_ASSOC_CONST_INDEX, is_tag_scalar,
         },
     },
     types::{
         effects::{EffType, Effect, PrimitiveEffect},
         mutability::MutType,
         r#trait::TraitDictionaryEntryIndex,
-        r#type::{CallResultConvention, FnType, Type, TypeKind},
+        r#type::{CallResultConvention, FnType, Type},
     },
 };
 
@@ -61,7 +64,7 @@ use super::{
     IMPORT_MODULE, Imports, MEMORY_IMPORT,
     abi::{
         CallAbi, DispatchTableSlotId, Parameter as ParameterTransport, ResultKind, WasmFunctionId,
-        WasmLocalId, WasmTypeId, scalar_type,
+        WasmLocalId, WasmTypeId,
     },
     evidence::{self, DictionaryDescriptor, ReachableEvidence},
     execution::{FailureCode, InvocationState},
@@ -96,11 +99,22 @@ fn is_elided_stack_operation(
 pub(super) struct ScalarType(Type);
 
 impl ScalarType {
+    /// Primitive host bindings do not require a module environment.
     pub(super) fn of(ty: Type) -> Result<Self, String> {
         [Type::unit(), bool_type(), int_type(), float_type()]
             .contains(&ty)
             .then_some(Self(ty))
             .ok_or_else(|| format!("unsupported Wasm storage type {ty:?}"))
+    }
+
+    pub(super) fn in_env(ty: Type, env: &impl TypeLayoutEnv) -> Result<Self, String> {
+        Self::of(ty).or_else(|error| {
+            if is_tag_scalar(ty, env) {
+                Ok(Self(ty))
+            } else {
+                Err(error)
+            }
+        })
     }
 
     fn unit() -> Self {
@@ -119,35 +133,29 @@ impl ScalarType {
         self.0 == Type::unit()
     }
 
-    /// Unit has no native scalar transport.
-    fn as_non_unit_native(self) -> Option<NativeScalar> {
-        if self.is_unit() {
-            None
-        } else if self.0 == bool_type() {
-            Some(NativeScalar::Bool)
-        } else if self.0 == int_type() {
-            Some(NativeScalar::Int)
-        } else if self.0 == float_type() {
-            Some(NativeScalar::Float)
-        } else {
-            unreachable!("checked scalar type")
-        }
+    fn is_tag(self) -> bool {
+        // Construction already proved that every non-primitive scalar is a closed unit variant.
+        ![Type::unit(), bool_type(), int_type(), float_type()].contains(&self.0)
     }
 
     fn wasm(self) -> ValType {
-        // Internal unit placeholder, never a direct ABI argument or result.
-        self.as_non_unit_native().map_or(ValType::I32, scalar_type)
+        if self.0 == float_type() {
+            ValType::F64
+        } else {
+            ValType::I32
+        }
     }
 
     fn load(self, code: &mut impl Instructions) {
-        let instruction = match self.as_non_unit_native() {
-            None => {
-                code.instruction(&I::Drop);
-                I::I32Const(0)
-            }
-            Some(NativeScalar::Bool) => I::I32Load8U(memarg(0)),
-            Some(NativeScalar::Int) => I::I32Load(memarg(2)),
-            Some(NativeScalar::Float) => I::F64Load(memarg(3)),
+        let instruction = if self.is_unit() {
+            code.instruction(&I::Drop);
+            I::I32Const(0)
+        } else if self.0 == bool_type() {
+            I::I32Load8U(memarg(0))
+        } else if self.0 == float_type() {
+            I::F64Load(memarg(3))
+        } else {
+            I::I32Load(memarg(2))
         };
         code.instruction(&instruction);
     }
@@ -158,36 +166,41 @@ impl ScalarType {
 
     /// Stores at a static offset above the address below the value.
     fn store_at(self, code: &mut impl Instructions, offset: u32) {
-        let instruction = match self.as_non_unit_native() {
-            None => {
-                code.instruction(&I::Drop);
-                I::Drop
-            }
-            Some(NativeScalar::Bool) => I::I32Store8(memarg_at(0, offset)),
-            Some(NativeScalar::Int) => I::I32Store(memarg_at(2, offset)),
-            Some(NativeScalar::Float) => I::F64Store(memarg_at(3, offset)),
+        let instruction = if self.is_unit() {
+            code.instruction(&I::Drop);
+            I::Drop
+        } else if self.0 == bool_type() {
+            I::I32Store8(memarg_at(0, offset))
+        } else if self.0 == float_type() {
+            I::F64Store(memarg_at(3, offset))
+        } else {
+            I::I32Store(memarg_at(2, offset))
         };
         code.instruction(&instruction);
     }
 
     fn equal(self) -> I<'static> {
-        match self.as_non_unit_native() {
-            None | Some(NativeScalar::Bool | NativeScalar::Int) => I::I32Eq,
-            Some(NativeScalar::Float) => I::F64Eq,
+        if self.0 == float_type() {
+            I::F64Eq
+        } else {
+            I::I32Eq
         }
     }
 
     fn pointer() -> Self {
-        // The wasm32 profile uses the same machine representation for pointers and native int.
         Self::native(NativeScalar::Int)
     }
 
     fn size(self) -> u32 {
-        let data = self.0.data();
-        let TypeKind::Native(native) = &*data else {
-            unreachable!("checked scalar types are native")
-        };
-        native.bare_ty.value_size() as u32
+        if self.is_unit() {
+            0
+        } else if self.0 == bool_type() {
+            1
+        } else if self.0 == float_type() {
+            8
+        } else {
+            4
+        }
     }
 }
 
@@ -354,12 +367,12 @@ fn allocate_frame(
     code.instruction(&I::LocalGet(base.as_u32()));
 }
 
-fn value_transport(ty: Type) -> ParameterTransport {
-    ScalarType::of(ty)
+fn value_transport(ty: Type, env: &impl TypeLayoutEnv) -> ParameterTransport {
+    ScalarType::in_env(ty, env)
         .ok()
-        .and_then(ScalarType::as_non_unit_native)
+        .filter(|scalar| !scalar.is_unit())
         .map_or(ParameterTransport::Indirect, |scalar| {
-            ParameterTransport::Direct(scalar_type(scalar))
+            ParameterTransport::Direct(scalar.wasm())
         })
 }
 
@@ -382,7 +395,7 @@ fn dictionary_table(code: &mut impl Instructions, evidence_base: WasmLocalId) {
     code.instruction(&I::I32Add);
 }
 
-fn script_abi(body: &Function) -> Result<CallAbi, String> {
+fn script_abi(body: &Function, env: ModuleEnv<'_>) -> Result<CallAbi, String> {
     // Physical verification requires a unique trailing Return for Value, none for NoValue.
     // Thus MIR input indices also index abi.parameters; only the failure pointer shifts locals.
     let yielded = body.result_convention() == CallResultConvention::YIELDED_ONCE;
@@ -402,7 +415,7 @@ fn script_abi(body: &Function) -> Result<CallAbi, String> {
             ParameterKind::Return => result = Some(parameter.ty),
             ParameterKind::Parameter(mode) => {
                 parameters.push(if mode == ArgConvention::Let {
-                    value_transport(parameter.ty)
+                    value_transport(parameter.ty, &env)
                 } else {
                     ParameterTransport::Indirect
                 });
@@ -420,9 +433,8 @@ fn script_abi(body: &Function) -> Result<CallAbi, String> {
         }
         None => ResultKind::Unit,
         Some(ty) if ty == Type::unit() || ty == Type::never() => ResultKind::Unit,
-        Some(ty) => {
-            ScalarType::of(ty).map_or(ResultKind::Output, |ty| ResultKind::Direct(ty.wasm()))
-        }
+        Some(ty) => ScalarType::in_env(ty, &env)
+            .map_or(ResultKind::Output, |ty| ResultKind::Direct(ty.wasm())),
     };
     let fallible = yielded
         || body.blocks().any(|id| {
@@ -506,7 +518,7 @@ fn dictionary_abi(
                 if arg.mut_ty != MutType::constant() {
                     ParameterTransport::Indirect
                 } else {
-                    value_transport(arg.ty)
+                    value_transport(arg.ty, &env)
                 }
             }))
             .collect(),
@@ -724,7 +736,13 @@ fn emit_with_export_kind(
             natives.insert(id, (index, abi));
             continue;
         };
-        let signature = script_abi(body).map_err(|reason| diagnostic(id, body, &reason))?;
+        let signature = script_abi(
+            body,
+            session
+                .modules()
+                .env_for(session.expect_fresh_module(id.module)),
+        )
+        .map_err(|reason| diagnostic(id, body, &reason))?;
         let selections = callable::selections(body);
         let constructed_subscripts = constructed_subscript_definitions(body);
         for block in body.blocks() {
@@ -856,7 +874,18 @@ fn emit_with_export_kind(
                 .any(|operation| matches!(operation.kind, OperationKind::CheckFuel))
         })
     });
-    let needs_base = !adapters.is_empty()
+    let needs_base = natives.iter().any(|(id, _)| {
+        matches!(
+            program
+                .module(id.module)
+                .unwrap()
+                .native_entry(*id)
+                .unwrap()
+                .signature()
+                .result,
+            NativeResult::Variant { .. }
+        )
+    }) || !adapters.is_empty()
         || !callables.entries.is_empty()
         || !callables.selected.is_empty()
         || needs_callable_glue
@@ -897,8 +926,23 @@ fn emit_with_export_kind(
     let emit_failure_function = runtime_globals.count != 0;
     let mut direct_index =
         imports.failure_function().as_index() + usize::from(emit_failure_function);
+    let mut native_variants = natives
+        .iter()
+        .filter_map(|(&id, (index, abi))| {
+            let NativeResult::Variant { cases, .. } = program
+                .module(id.module)?
+                .native_entry(id)?
+                .signature()
+                .result
+            else {
+                return None;
+            };
+            Some((id, *index, abi, cases))
+        })
+        .collect::<Vec<_>>();
+    native_variants.sort_by_key(|(id, ..)| (id.module.as_index(), id.function.as_index()));
     let mut resume_indices = FxHashMap::default();
-    let callees: FxHashMap<_, _> = bodies
+    let mut callees: FxHashMap<_, _> = bodies
         .iter()
         .map(|(id, body, sig, _)| {
             let start = WasmFunctionId::from_index(direct_index);
@@ -915,6 +959,10 @@ fn emit_with_export_kind(
                 .map(|(&id, (index, abi))| (id, (*index, abi))),
         )
         .collect();
+    for &(id, _, abi, _) in &native_variants {
+        callees.insert(id, (WasmFunctionId::from_index(direct_index), abi));
+        direct_index += 1;
+    }
     let mut functions = FunctionSection::new();
     let mut code = CodeSection::new();
     let mut entry_abis = FxHashMap::default();
@@ -1154,6 +1202,18 @@ fn emit_with_export_kind(
             body_index += 1;
         }
     }
+    for &(id, raw, abi, cases) in &native_variants {
+        names.push(format!("<native variant adapter {id:?}>"));
+        functions.function(types.intern(abi.params(), abi.results()).as_u32());
+        code.function(&adapters::native_variant_adapter(
+            raw,
+            abi,
+            cases,
+            session,
+            imports.failure_function(),
+        )?);
+        body_index += 1;
+    }
     for &(id, entry) in &adapters {
         let definition = program.dictionary(id).unwrap();
         let (ty, abi) = &entry_abis[&(definition.trait_id(), entry)];
@@ -1217,6 +1277,7 @@ fn emit_with_export_kind(
             abi,
             index,
             imports.failure_function(),
+            session,
         )?);
     }
     if let Some(methods) = callable_entries.value_methods {
@@ -1557,7 +1618,7 @@ fn wasm_intrinsic(session: &CompilerSession, operation: &Operation) -> Option<Kn
             | KnownCallee::IntMul
             | KnownCallee::IntNeg
             | KnownCallee::IntFromInt
-            | KnownCallee::IntCmpCode
+            | KnownCallee::IntCmp
             | KnownCallee::IntLt
             | KnownCallee::IntLe
             | KnownCallee::IntGt
@@ -1567,7 +1628,7 @@ fn wasm_intrinsic(session: &CompilerSession, operation: &Operation) -> Option<Kn
             | KnownCallee::FloatSub
             | KnownCallee::FloatMul
             | KnownCallee::FloatNeg
-            | KnownCallee::FloatCmpCode
+            | KnownCallee::FloatCmp
             | KnownCallee::FloatLt
             | KnownCallee::FloatLe
             | KnownCallee::FloatGt
@@ -1745,10 +1806,10 @@ impl StringLiterals {
     }
 }
 
-fn scalar(ty: &MirType) -> Result<ScalarType, String> {
+fn scalar(ty: &MirType, env: &impl TypeLayoutEnv) -> Result<ScalarType, String> {
     match ty {
         MirType::Pointer(_) => Ok(ScalarType::pointer()),
-        MirType::Lowered(ty) => ScalarType::of(*ty),
+        MirType::Lowered(ty) => ScalarType::in_env(*ty, env),
     }
 }
 

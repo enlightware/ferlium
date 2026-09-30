@@ -177,8 +177,11 @@ pub(super) fn selected_adapter(
     for (index, transport) in target.parameters[1..].iter().enumerate() {
         code.instruction(&I::LocalGet(abi.input_local(index + 1).as_u32()));
         if matches!(transport, ParameterTransport::Direct(_)) {
-            ScalarType::of(declaration.methods[entry.1.as_index()].1.ty_scheme.ty.args[index].ty)?
-                .load(&mut code);
+            ScalarType::in_env(
+                declaration.methods[entry.1.as_index()].1.ty_scheme.ty.args[index].ty,
+                &env,
+            )?
+            .load(&mut code);
         }
     }
     code.instruction(&I::LocalGet(abi.output_local().as_u32()));
@@ -314,6 +317,9 @@ pub(super) fn adapter(
     session: &CompilerSession,
 ) -> Result<WasmFunction, String> {
     let target = program.direct_entry(target);
+    let env = session
+        .modules()
+        .env_for(session.expect_fresh_module(target.module));
     let (index, direct) = callees[&target];
     let native = program
         .module(target.module)
@@ -392,9 +398,6 @@ pub(super) fn adapter(
         let NativeResult::Optional { payload, .. } = native.unwrap().signature().result else {
             unreachable!()
         };
-        let env = session
-            .modules()
-            .env_for(session.expect_fresh_module(target.module));
         Some(NativeOptionalResultAdapter::new(
             result_ty, payload.ty, env, session,
         )?)
@@ -430,7 +433,7 @@ pub(super) fn adapter(
             code.instruction(&I::LocalGet(abi.input_local(i - leading + 1).as_u32()));
         }
         if matches!(transport, ParameterTransport::Direct(_)) {
-            ScalarType::of(ty)?.load(&mut code);
+            ScalarType::in_env(ty, &env)?.load(&mut code);
         }
     }
     if direct.output() {
@@ -457,7 +460,7 @@ pub(super) fn adapter(
             );
             leave_frame(&mut code, optional_frame);
         } else if matches!(direct.result, ResultKind::Direct(_)) {
-            ScalarType::of(result_ty)?.store(&mut code);
+            ScalarType::in_env(result_ty, &env)?.store(&mut code);
         }
     }
     if captures.values != 0 {

@@ -69,6 +69,7 @@ impl Display for SandboxViolationKind {
 pub enum RuntimeErrorKind {
     /// The selected backend could not prepare or execute the artifact; not a source effect.
     Backend,
+    InvalidNativeVariantCase,
     SourceFailure(SourceFailureKind),
     SandboxViolation(SandboxViolationKind),
     FailureDuringCleanup,
@@ -78,6 +79,7 @@ impl Display for RuntimeErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Backend => f.write_str("Execution backend error"),
+            Self::InvalidNativeVariantCase => f.write_str("Invalid native variant case index"),
             Self::SourceFailure(kind) => kind.fmt(f),
             Self::SandboxViolation(kind) => kind.fmt(f),
             Self::FailureDuringCleanup => {

@@ -8,7 +8,7 @@ use super::{
 use crate::{
     Location,
     ast::{Attribute, MetaItem},
-    hir::{function::CallableDefinition, native_functions::NativeResultKnowledge},
+    hir::function::CallableDefinition,
     module::{TraitId, id::Id},
     parser::location::InstantiableLocation,
     types::{
@@ -89,7 +89,6 @@ pub(crate) struct SnapshotCallableDefinition {
     pub(crate) result_convention: CallResultConvention,
     pub(crate) result_rooted_in: Option<u32>,
     pub(crate) repeatable_addressor: bool,
-    pub(crate) native_result_knowledge: NativeResultKnowledge,
     pub(crate) generic_params: Vec<(String, Location)>,
     pub(crate) generic_effect_params: Vec<(String, Location)>,
     pub(crate) arg_names: Vec<String>,
@@ -352,7 +351,6 @@ impl SnapshotCallableDefinition {
             result_convention: definition.result_convention,
             result_rooted_in: definition.result_rooted_in,
             repeatable_addressor: definition.repeatable_addressor,
-            native_result_knowledge: definition.native_result_knowledge(),
             generic_params: definition
                 .generic_params
                 .iter()
@@ -393,7 +391,6 @@ impl SnapshotCallableDefinition {
             result_convention: self.result_convention,
             result_rooted_in: self.result_rooted_in,
             repeatable_addressor: self.repeatable_addressor,
-            native_result_knowledge: self.native_result_knowledge,
             generic_params: self
                 .generic_params
                 .iter()
@@ -521,10 +518,6 @@ mod tests {
         for (function, definition) in functions.into_iter().zip(definitions) {
             let restored = definition.materialize(&types).unwrap();
             assert_eq!(restored.signature(), function.definition.signature());
-            assert_eq!(
-                restored.native_result_knowledge(),
-                function.definition.native_result_knowledge()
-            );
             assert_eq!(
                 restored.result_rooted_in,
                 function.definition.result_rooted_in

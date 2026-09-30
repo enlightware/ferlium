@@ -64,7 +64,9 @@ impl CallAbi {
         if (fallible
             && matches!(
                 signature.result,
-                NativeResult::Scalar(..) | NativeResult::Optional { .. }
+                NativeResult::Scalar(..)
+                    | NativeResult::Optional { .. }
+                    | NativeResult::Variant { .. }
             ))
             || (!fallible && signature.result == NativeResult::Never)
         {
@@ -84,7 +86,9 @@ impl CallAbi {
             result: match signature.result {
                 NativeResult::Unit | NativeResult::Never => ResultKind::Unit,
                 NativeResult::Scalar(_, scalar) => ResultKind::Direct(scalar_type(scalar)),
-                NativeResult::Addressor { .. } => ResultKind::Direct(ValType::I32),
+                NativeResult::Addressor { .. } | NativeResult::Variant { .. } => {
+                    ResultKind::Direct(ValType::I32)
+                }
                 NativeResult::Output(_) => ResultKind::Output,
                 NativeResult::Optional { .. } => ResultKind::Optional,
             },

@@ -29,7 +29,7 @@ use crate::{
 };
 
 use super::{
-    ScalarType, check_context, context_pointer, emit_failure, enter_frame, frame_address,
+    Global, ScalarType, check_context, context_pointer, emit_failure, enter_frame, frame_address,
     frame_bytes, leave_frame, memarg,
 };
 
@@ -111,7 +111,8 @@ pub(super) fn dictionary_adapter(
             if let Some(offset) = offset {
                 code.instruction(&I::LocalGet(frame.as_u32()));
                 code.instruction(&I::LocalGet(abi.input_local(i + 1).as_u32()));
-                ScalarType::of(input_types[captures.len() + i])?.store_at(&mut code, *offset);
+                ScalarType::in_env(input_types[captures.len() + i], &env)?
+                    .store_at(&mut code, *offset);
             }
         }
     }
@@ -147,7 +148,7 @@ pub(super) fn dictionary_adapter(
         code.instruction(&I::LocalGet(abi.input_local(i + 1).as_u32()));
         if let (ParameterTransport::Indirect, ParameterTransport::Direct(_)) = (*canonical, actual)
         {
-            ScalarType::of(input_types[captures.len() + i])?.load(&mut code);
+            ScalarType::in_env(input_types[captures.len() + i], &env)?.load(&mut code);
         }
     }
     if direct.output() {
@@ -178,7 +179,7 @@ pub(super) fn dictionary_adapter(
         }
     } else {
         if matches!(direct.result, ResultKind::Direct(_)) {
-            ScalarType::of(result_ty)?.store(&mut code);
+            ScalarType::in_env(result_ty, &env)?.store(&mut code);
         }
         if abi.fallible {
             code.instruction(&I::I32Const(0));
@@ -352,6 +353,56 @@ pub(super) fn boxed_entry_wrapper(
             ValType::F64 => I::F64Store(memarg(3)),
             _ => return Err("unsupported boxed Wasm direct result".into()),
         });
+    }
+    code.instruction(&I::End);
+    Ok(code)
+}
+
+/// Bridge a Rust u32 case code to the language's canonical scalar tag representation.
+pub(super) fn native_variant_adapter(
+    raw: WasmFunctionId,
+    abi: &CallAbi,
+    cases: &[&str],
+    session: &CompilerSession,
+    fail: WasmFunctionId,
+) -> Result<WasmFunction, String> {
+    if abi.fallible || abi.output() || cases.is_empty() {
+        return Err("invalid native variant transport".into());
+    }
+    let case = abi.parameter_count() as u32;
+    let mut code = WasmFunction::new([(1, ValType::I32)]);
+    for index in 0..abi.parameter_count() {
+        code.instruction(&I::LocalGet(index as u32));
+    }
+    code.instruction(&I::Call(raw.as_u32()));
+    code.instruction(&I::LocalTee(case));
+    code.instruction(&I::I32Const(cases.len() as i32));
+    code.instruction(&I::I32GeU);
+    code.instruction(&I::If(BlockType::Empty));
+    check_context(&mut code);
+    code.instruction(&I::GlobalGet(Global::Context as u32));
+    code.instruction(&I::LocalGet(case));
+    code.instruction(&I::I32Store(MemArg {
+        offset: offset_of!(InvocationState, native_variant_case) as u64,
+        ..memarg(2)
+    }));
+    code.instruction(&I::GlobalGet(Global::Context as u32));
+    code.instruction(&I::I32Const(cases.len() as i32));
+    code.instruction(&I::I32Store(MemArg {
+        offset: offset_of!(InvocationState, native_variant_case_count) as u64,
+        ..memarg(2)
+    }));
+    emit_failure(&mut code, fail, FailureCode::InvalidNativeVariantCase);
+    code.instruction(&I::End);
+    code.instruction(&I::I32Const(
+        session.variant_tag_id(ustr(cases[cases.len() - 1])) as i32,
+    ));
+    for (index, tag) in cases[..cases.len() - 1].iter().enumerate().rev() {
+        code.instruction(&I::I32Const(session.variant_tag_id(ustr(tag)) as i32));
+        code.instruction(&I::LocalGet(case));
+        code.instruction(&I::I32Const(index as i32));
+        code.instruction(&I::I32Ne);
+        code.instruction(&I::Select);
     }
     code.instruction(&I::End);
     Ok(code)

@@ -135,6 +135,8 @@ pub(super) struct InvocationState {
     pub strings: *const StaticStr,
     pub native_failure: *mut NativeFailureState,
     pub evidence: *const u32,
+    pub native_variant_case: u32,
+    pub native_variant_case_count: u32,
 }
 
 /// Out-of-band diagnostics written by generated code before trapping; zero means no failure.
@@ -146,6 +148,7 @@ pub(super) enum FailureCode {
     StackCapacity,
     Invariant,
     Source,
+    InvalidNativeVariantCase,
 }
 
 /// Export name of the function a compiled program runs.
@@ -467,6 +470,8 @@ impl RuntimeInstance {
             fuel: limits.execution.fuel_limit.unwrap_or(0) as u32,
             fuel_enabled: u32::from(limits.execution.fuel_limit.is_some()),
             failure: 0,
+            native_variant_case: 0,
+            native_variant_case_count: 0,
             strings: self.strings.as_ptr(),
             evidence: self.evidence.as_ptr(),
             // SAFETY: diagnostics_ptr points to the live invocation-owned diagnostics above.
@@ -499,6 +504,12 @@ impl RuntimeInstance {
                 ),
                 Some(FailureCode::Invariant) => {
                     RuntimeError::Backend("Wasm MIR invariant failure".into())
+                }
+                Some(FailureCode::InvalidNativeVariantCase) => {
+                    RuntimeError::InvalidNativeVariantCase {
+                        index: state.native_variant_case,
+                        case_count: state.native_variant_case_count as usize,
+                    }
                 }
                 Some(FailureCode::Source) => {
                     return diagnostics.finish(None).expect("source failure diagnostic");

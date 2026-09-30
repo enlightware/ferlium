@@ -38,7 +38,6 @@ use crate::{
     define_id_type, graph,
     hir::{
         function::{ArgConvention, arg_conventions_for_args},
-        native_functions::NativeResultKnowledge,
         value::LiteralValue,
     },
     mir::{
@@ -755,32 +754,6 @@ fn entry_state(
     state
 }
 
-/// Metadata is resolved from the actual module function, not a list of std identities.
-fn native_result_fact(callee: &mir::Value, env: ModuleEnv<'_>) -> Fact {
-    let mir::Value::Function(callee) = callee else {
-        return Fact::Unknown;
-    };
-    let knowledge = env
-        .module_by_id(callee.module)
-        .and_then(|module| module.get_function_by_id(callee.function))
-        .and_then(|function| {
-            // Descriptions can be cloned or replaced by host code. Only trust a guarantee
-            // still backed by the actual typed entry, not metadata copied from another callable.
-            let declared = function.definition.native_result_knowledge();
-            if declared == NativeResultKnowledge::Unknown {
-                // The common case needs no virtual entry lookup to confirm absence of a proof.
-                return None;
-            }
-            (function.code.native_entry()?.result_knowledge() == declared).then_some(declared)
-        });
-    match knowledge {
-        Some(NativeResultKnowledge::OrderingCode) => {
-            Fact::from_outcomes([Outcome::Int(-1), Outcome::Int(0), Outcome::Int(1)])
-        }
-        _ => Fact::Unknown,
-    }
-}
-
 // --- Dataflow solver ---
 
 /// Runs the analysis to fixpoint over `func`.
@@ -1132,10 +1105,7 @@ fn transfer(
                 && let Some(place) = place_of(result)
                 && tracked(place)
             {
-                let fact = match native_result_fact(&operation.operands[0], env) {
-                    Fact::Unknown => type_fact(ty.ret(), env),
-                    fact => fact,
-                };
+                let fact = type_fact(ty.ret(), env);
                 state.set_place(place, fact, register_places);
             }
         }
@@ -1529,7 +1499,10 @@ mod tests {
         CompilerSession, ExecutionTarget, Location,
         compiler::MirOptimization,
         containers::b,
-        hir::{native_functions::NativeFnNN, value::VariantPayloadStorage},
+        hir::{
+            native_functions::{NativeFnNN, NativeVariantFnNN},
+            value::VariantPayloadStorage,
+        },
         mir::{Operation, builder::FunctionBuilder, terminator::Terminator},
         module::{LocalFunctionId, Module, ModuleId, Path},
         std::{logic::bool_type, math::int_type},
@@ -2297,7 +2270,7 @@ mod tests {
         // Deliberately not a std identity, and ordered in the opposite direction.
         let compare = host.add_function(
             ustr("compare"),
-            NativeFnNN::from_rust_ordering_code(|a: isize, b: isize| b.cmp(&a)).description(
+            NativeVariantFnNN::from_rust(|a: isize, b: isize| b.cmp(&a)).description(
                 ["a", "b"],
                 "Host comparison",
                 no_effects(),
@@ -2311,17 +2284,9 @@ mod tests {
                 no_effects(),
             ),
         );
-        let mut copied_description = NativeFnNN::from_rust(isize::wrapping_sub).description(
-            ["a", "b"],
-            "Copied description",
-            no_effects(),
-        );
-        copied_description.definition =
-            host.get_function_by_id(compare).unwrap().definition.clone();
-        host.add_function(ustr("copied_description"), copied_description);
         host.add_function(
             ustr("not_reflexive"),
-            NativeFnNN::from_rust_ordering_code(|_: isize, _: isize| Ordering::Less).description(
+            NativeVariantFnNN::from_rust(|_: isize, _: isize| Ordering::Less).description(
                 ["a", "b"],
                 "No ordering laws",
                 no_effects(),
@@ -2357,43 +2322,6 @@ mod tests {
     }
 
     #[test]
-    fn host_ordering_metadata_eliminates_impossible_code_cases() {
-        let mut session = host_session();
-        let body = optimized(
-            &mut session,
-            "fn classify(a: int, b: int) -> int {
-            match host_ordering::compare(a, b) { -1 => 10, 0 => 20, 1 => 30, _ => 987654 }
-        }",
-        );
-        assert!(
-            body.contains("call host_ordering::compare"),
-            "the opaque call remains:\n{body}"
-        );
-        assert!(
-            !body.contains("987654"),
-            "only the impossible result arm disappears:\n{body}"
-        );
-
-        let body = optimized(
-            &mut session,
-            "fn classify(a: int, b: int) -> int {
-            match host_ordering::ordinary(a, b) { -1 => 10, 0 => 20, 1 => 30, _ => 987654 }
-        }",
-        );
-        assert!(
-            body.contains("987654"),
-            "ordinary integer results remain unrestricted:\n{body}"
-        );
-        let body = optimized(&mut session, "fn classify(a: int, b: int) -> int {
-            match host_ordering::copied_description(a, b) { -1 => 10, 0 => 20, 1 => 30, _ => 987654 }
-        }");
-        assert!(
-            body.contains("987654"),
-            "a copied description cannot confer the adapter's guarantee:\n{body}"
-        );
-    }
-
-    #[test]
     fn semantic_ordering_outcomes_do_not_depend_on_the_producer() {
         let mut session = host_session();
         let body = optimized(
@@ -2411,12 +2339,9 @@ mod tests {
     #[test]
     fn host_ordering_wrappers_inline_without_assuming_ordering_laws() {
         let mut session = host_session();
-        let source = "fn ordering(code: int) -> Ordering {
-            match code { -1 => Less, 0 => Equal, _ => Greater }
-        }
-        fn compare(a: int, b: int) -> Ordering { ordering(host_ordering::compare(a, b)) }
+        let source = "fn compare(a: int, b: int) -> Ordering { host_ordering::compare(a, b) }
         fn below(a: int, b: int) -> bool { match compare(a, b) { Less => true, _ => false } }
-        fn reflexive(a: int) -> Ordering { ordering(host_ordering::not_reflexive(a, a)) }
+        fn reflexive(a: int) -> Ordering { host_ordering::not_reflexive(a, a) }
         fn main() { (below(9, 2), below(2, 9), below(3, 3), reflexive(5)) }";
         let body = optimized(&mut session, source);
         let below = body
@@ -2428,8 +2353,8 @@ mod tests {
             .unwrap();
         assert!(below.contains("call host_ordering::compare"), "{below}");
         assert!(
-            !below.contains("extract_tag") && !below.contains("variant "),
-            "no temporary Ordering is needed:\n{below}"
+            !below.contains("variant "),
+            "the semantic native result requires no variant construction:\n{below}"
         );
         let optimized = session.eval_mir("run_optimized_outcomes", source);
         session.set_mir_optimization(MirOptimization::Disabled);

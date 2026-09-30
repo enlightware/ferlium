@@ -638,6 +638,16 @@ pub(crate) fn structural_variant(
     }
 }
 
+/// A closed variant whose complete representation is just its canonical u32 tag.
+/// Unit payloads have no storage or ownership obligations; larger aggregates never become
+/// scalars merely because their layout happens to fit in a machine register.
+pub(crate) fn is_tag_scalar(ty: Type, env: &impl TypeLayoutEnv) -> bool {
+    ty.is_constant()
+        && structural_variant(ty, env).is_some_and(|(_, cases)| {
+            !cases.is_empty() && cases.iter().all(|(_, payload)| *payload == Type::unit())
+        })
+}
+
 /// Return the storage mode shared by occurrences of `payload_ty` in `variant_ty`.
 ///
 /// Storage is a function of the structural variant and payload type, so the case tag does not
@@ -3418,6 +3428,27 @@ pub fn add_to_module(to: &mut Module) {
 mod tests {
     use super::*;
     use crate::CompilerSession;
+
+    #[test]
+    fn tag_scalars_resolve_named_variants_without_classifying_small_products() {
+        let mut session = CompilerSession::new();
+        let module = session
+            .compile(
+                "enum Signal { Stop, Go } enum WithPayload { Empty, Item(bool) } struct Small(bool)",
+                "tag_scalars",
+                crate::Path::single_str("tag_scalars"),
+            )
+            .unwrap()
+            .module_id;
+        let module = session.expect_fresh_module(module);
+        let env = ModuleEnv::new(module, session.raw_modules());
+        let named = |name| Type::named(module.get_type_def_id(ustr(name)).unwrap(), []);
+        assert!(is_tag_scalar(named("Signal"), &env));
+        assert!(is_tag_scalar(crate::std::ordering::ordering_type(), &env));
+        assert!(!is_tag_scalar(named("WithPayload"), &env));
+        assert!(!is_tag_scalar(named("Small"), &env));
+        assert!(!is_tag_scalar(Type::variable_id(0), &env));
+    }
 
     #[test]
     fn variant_layout_uses_a_u32_tag_and_case_specific_payload_offsets() {
