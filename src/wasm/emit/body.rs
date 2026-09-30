@@ -1758,6 +1758,13 @@ impl<'a, 's> Body<'a, 's> {
             self.i(I::I32Load(memarg(2)));
             return Ok(());
         }
+        // A variant whose only use is a store has no local; a forwarded direct result reads it here.
+        if let Value::Register(id) = value
+            && let Some(&word) = self.stored_variants.get(id)
+        {
+            self.i(I::I32Const(word));
+            return Ok(());
+        }
         if self.storage.contains_key(value)
             && !self.roles.get(value, self.body.constants()).is_some_and(
                 |r| matches!(&*r, ValueRole::Materialized(ty) if scalar(ty, &self.env).is_ok()),

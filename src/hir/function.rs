@@ -10,7 +10,7 @@ use std::{
 
 use derive_new::new;
 use dyn_clone::DynClone;
-use ustr::Ustr;
+use ustr::{Ustr, ustr};
 
 use super::native_functions::NativeEntry;
 use crate::{
@@ -206,6 +206,17 @@ impl CallableDefinition {
 
     pub fn returns_place(&self) -> bool {
         self.return_convention().returns_place()
+    }
+
+    /// Mark a generated definition as `#[inline(never)]`, as the source attribute would.
+    pub(crate) fn with_inline_never(mut self) -> Self {
+        let span = Location::new_synthesized();
+        self.attributes.push(Attribute {
+            path: (ustr("inline"), span),
+            items: vec![MetaItem::Flag((ustr("never"), span))],
+            span,
+        });
+        self
     }
 
     pub fn with_result_convention(mut self, result_convention: CallResultConvention) -> Self {

@@ -2255,10 +2255,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         }
         let output = output.place()?;
         let addressor = matches!(signature.result, NativeResult::Addressor { .. });
-        if matches!(
-            signature.result,
-            NativeResult::Optional { .. } | NativeResult::Variant { .. }
-        ) {
+        if matches!(signature.result, NativeResult::Optional { .. }) {
             self.memory
                 .prepare_type(signature.result.ty(), &self.env(id))?;
         }
@@ -2386,26 +2383,9 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     true
                 }
                 NativeCallOutcome::Absent => false,
-                NativeCallOutcome::Case(_) => {
-                    return Err(invalid("optional entry returned a variant case"));
-                }
             };
             self.memory.finish_optional(output, payload, present)?;
             self.memory.restore(marker);
-        } else if let NativeResult::Variant { ty, cases } = signature.result {
-            let NativeCallOutcome::Case(index) = outcome else {
-                return Err(invalid("native variant did not return a case"));
-            };
-            let tag = cases
-                .get(index as usize)
-                .ok_or(RuntimeError::InvalidNativeVariantCase {
-                    index,
-                    case_count: cases.len(),
-                })?;
-            let value = self
-                .memory
-                .shell(ty, (*tag).into(), VariantPayloadStorage::Inline)?;
-            self.memory.write_value(output, &value)?;
         } else {
             if outcome != NativeCallOutcome::Initialized {
                 return Err(invalid("native result did not initialize its output"));
@@ -2429,30 +2409,66 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn native_variant_results_agree_across_reference_targets() {
         use crate::{
-            ExecutionTarget, Path, hir::native_functions::NativeVariantFnNN, module::Module,
+            ExecutionTarget, Path,
+            hir::native_functions::{NativeVariantFnM, NativeVariantFnNN},
+            module::{Module, Visibility},
         };
         use ustr::ustr;
+
+        // Discriminants deliberately differ from case positions.
+        enum Step {
+            Down = -5,
+            Stay = 0,
+            Up = 9,
+        }
+        crate::native_variant_result!(Step { Down, Stay, Up });
 
         let mut session = CompilerSession::new();
         let path = Path::single_str("native_variant");
         let mut host = Module::new(session.modules().next_id(), path.clone());
-        host.add_function(
-            ustr("compare"),
-            NativeVariantFnNN::from_rust(|left: isize, right: isize| right.cmp(&left)).description(
-                ["left", "right"],
-                "Reversed comparison",
-                Default::default(),
-            ),
-        );
+        NativeVariantFnNN::from_rust(|left: isize, right: isize| right.cmp(&left))
+            .description(["left", "right"], "Reversed comparison", Default::default())
+            .add_to(&mut host, ustr("compare"), Visibility::Public);
+        NativeVariantFnM::from_rust(|counter: &mut isize| {
+            *counter += 1;
+            match *counter % 3 {
+                0 => Step::Stay,
+                1 => Step::Up,
+                _ => Step::Down,
+            }
+        })
+        .description(["counter"], "Mutating step", Default::default())
+        .add_to(&mut host, ustr("advance"), Visibility::Public);
         session.register_module(path, host);
         let module = session
             .compile(
-                "pub fn compute(x: int) -> Ordering { native_variant::compare(x, 0) }",
+                "pub fn compute(x: int) -> Ordering { native_variant::compare(x, 0) }
+                 pub fn step(x: int) -> int {
+                     let mut c = x;
+                     let s = native_variant::advance(c);
+                     c * 10 + match s { Down => -1, Stay => 0, Up => 1 }
+                 }",
                 "variant_targets",
                 Path::single_str("variant_targets"),
             )
             .unwrap()
             .module_id;
+        let step = session
+            .expect_fresh_module(module)
+            .get_local_function_id(ustr("step"))
+            .unwrap();
+        for target in ExecutionTarget::ALL {
+            for (input, expected) in [(2isize, 30isize), (3, 41), (4, 49)] {
+                let value = session
+                    .run_entry(target, module, step, vec![Value::native(input)])
+                    .unwrap();
+                assert_eq!(
+                    value.into_primitive_ty::<isize>(),
+                    Some(expected),
+                    "{target:?}"
+                );
+            }
+        }
         let entry = session
             .expect_fresh_module(module)
             .get_local_function_id(ustr("compute"))
@@ -2464,81 +2480,6 @@ mod tests {
                     .unwrap();
                 assert_eq!(value.variant_tag(), Some(ustr(expected)), "{target:?}");
                 value.discard_storage();
-            }
-        }
-    }
-
-    #[test]
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    fn native_variant_invalid_cases_agree_across_reference_targets() {
-        use crate::{
-            ExecutionTarget, Path,
-            hir::native_functions::{NativeVariantFn0, NativeVariantFnN, NativeVariantResult},
-            module::Module,
-        };
-        use ustr::ustr;
-
-        struct Case(u32);
-        impl NativeVariantResult for Case {
-            const CASES: &'static [&'static str] = &["First", "Second"];
-            fn case(self) -> u32 {
-                self.0
-            }
-        }
-        let mut session = CompilerSession::new();
-        let path = Path::single_str("native_variant");
-        let mut host = Module::new(session.modules().next_id(), path.clone());
-        host.add_function(
-            ustr("dynamic"),
-            NativeVariantFnN::from_rust(|index: isize| Case(index as u32)).description(
-                ["index"],
-                "Unchecked case index",
-                Default::default(),
-            ),
-        );
-        host.add_function(
-            ustr("constant"),
-            NativeVariantFn0::from_rust(|| Case(2)).description(
-                [],
-                "Invalid constant case",
-                Default::default(),
-            ),
-        );
-        session.register_module(path, host);
-        let module = session
-            .compile(
-                "pub fn dynamic(index: int) -> int { \
-                    match native_variant::dynamic(index) { First => 1, Second => 2 } \
-                } pub fn constant() -> int { \
-                    match native_variant::constant() { First => 1, Second => 2 } \
-                }",
-                "variant_targets",
-                Path::single_str("variant_targets"),
-            )
-            .unwrap()
-            .module_id;
-        for (name, inputs) in [("dynamic", vec![2isize, -1]), ("constant", vec![2])] {
-            let entry = session
-                .expect_fresh_module(module)
-                .get_local_function_id(ustr(name))
-                .unwrap();
-            for target in ExecutionTarget::ALL {
-                for &input in &inputs {
-                    let arguments = if name == "dynamic" {
-                        vec![Value::native(input)]
-                    } else {
-                        vec![]
-                    };
-                    let error = session
-                        .run_entry(target, module, entry, arguments)
-                        .unwrap_err();
-                    assert!(
-                        matches!(error, RuntimeError::InvalidNativeVariantCase {
-                        index, case_count: 2,
-                    } if index == input as u32),
-                        "{target:?} {error:?}"
-                    );
-                }
             }
         }
     }

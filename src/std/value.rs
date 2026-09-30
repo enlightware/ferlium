@@ -641,6 +641,7 @@ pub(crate) fn structural_variant(
 /// A closed variant whose complete representation is just its canonical u32 tag.
 /// Unit payloads have no storage or ownership obligations; larger aggregates never become
 /// scalars merely because their layout happens to fit in a machine register.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(crate) fn is_tag_scalar(ty: Type, env: &impl TypeLayoutEnv) -> bool {
     ty.is_constant()
         && structural_variant(ty, env).is_some_and(|(_, cases)| {

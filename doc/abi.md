@@ -628,20 +628,16 @@ optional and fallible payloads. Native implementations must preserve language se
 panicking on valid Ferlium inputs.
 
 Native entries must not embed session-local variant tags. They return transport-level values, such
-as enum case indexes, from which the caller constructs Ferlium variants.
+as enum discriminants, from which Ferlium code constructs variants.
 
 ## Native payload-free variant results
 
-A typed Rust enum result can declare an ordered list of unique symbolic cases, each with unit
-payload. Its C entry returns a `u32` index into that list, which is validated and mapped to the
-session's tag identity. Neither Rust enum layouts nor session-local tag numbers cross this entry.
-An invalid index is a runtime invariant violation. This protocol is infallible; fallible enum
-results require a separate status/output contract.
-
-`NativeVariantResult` declares the cases. For Rust `Ordering`, this protocol assigns indexes
-`0`, `1` and `2` to `Less`, `Equal` and `Greater`, respectively. These transport indexes differ
-from [Rust's enum discriminants](https://doc.rust-lang.org/std/cmp/enum.Ordering.html)
-(`-1`, `0` and `1`). Returning `Ordering` does not assert comparison laws or effects.
+A fieldless Rust enum result is declared with `native_variant_result!`, which pairs each case name
+with its Rust discriminant and rejects, at Rust compile time, missing, repeated, or data-carrying
+cases and discriminants outside `i32`. Its C entry is an ordinary infallible scalar entry returning
+the discriminant as `int`; no Rust enum layout or session-local tag crosses it. Generated Ferlium
+code maps the discriminant to the corresponding unit variant, with the last case as the default: a
+discriminant outside the declared cases violates the native contract and yields the last case.
 
 ## Native optional results
 

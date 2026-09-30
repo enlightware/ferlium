@@ -242,7 +242,7 @@ their externally visible identity. Generated helpers are ordinary entries in the
 `BackendReadyMirArtifacts` contains a verified physical function table and its supporting catalogs.
 Concrete closed variants with only unit payloads use a scalar `u32` tag at direct call boundaries;
 their places and construction remain explicit in MIR. Generic and uniform callable interfaces keep
-their pointer contracts. Native variant results map declared case indexes to session tags.
+their pointer contracts.
 
 Semantic and physical stages use the same MIR structures, and shared operations retain their
 meaning. Partially lowered bodies are not valid input to physical executors.

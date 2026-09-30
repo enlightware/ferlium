@@ -575,15 +575,15 @@ pub fn add_to_module(to: &mut Module) {
     add_predicate!("le_int", Int, <=);
     add_predicate!("gt_int", Int, >);
     add_predicate!("ge_int", Int, >=);
-    to.add_function_with_visibility(
-        ustr("compare_int"),
-        NativeVariantFnNN::from_rust(compare::<Int>).description(
+    // Backends lower this identity directly, so calls keep it rather than inlining its body.
+    NativeVariantFnNN::from_rust(compare::<Int>)
+        .description(
             ["left", "right"],
             "Internal semantic comparison.",
             no_effects(),
-        ),
-        Visibility::Module,
-    );
+        )
+        .inline_never()
+        .add_to(to, ustr("compare_int"), Visibility::Module);
     to.add_native_concrete_impl(
         default_trait_id,
         [int_type()],
@@ -668,15 +668,15 @@ pub fn add_to_module(to: &mut Module) {
     add_predicate!("le_float", Float, <=);
     add_predicate!("gt_float", Float, >);
     add_predicate!("ge_float", Float, >=);
-    to.add_function_with_visibility(
-        ustr("compare_float"),
-        NativeVariantFnNN::from_rust(compare::<Float>).description(
+    // Backends lower this identity directly, so calls keep it rather than inlining its body.
+    NativeVariantFnNN::from_rust(compare::<Float>)
+        .description(
             ["left", "right"],
             "Internal semantic comparison.",
             no_effects(),
-        ),
-        Visibility::Module,
-    );
+        )
+        .inline_never()
+        .add_to(to, ustr("compare_float"), Visibility::Module);
     to.add_native_concrete_impl(
         div_trait_id,
         [float_type()],

@@ -501,7 +501,7 @@ mod tests {
             native_functions::{NativeFnNN, NativeVariantFnNN},
         },
         mir::{Operation, ParameterKind, builder::FunctionBuilder},
-        module::Module,
+        module::{Module, Visibility},
         std::{logic::bool_type, ordering::ordering_type},
         types::effects::no_effects,
     };
@@ -727,14 +727,9 @@ mod tests {
         session.set_mir_optimization(MirOptimization::Enabled);
         let path = Path::single_str("host");
         let mut host = Module::new(session.modules().next_id(), path.clone());
-        host.add_function(
-            "compare".into(),
-            NativeVariantFnNN::from_rust(|a: isize, b: isize| b.cmp(&a)).description(
-                ["a", "b"],
-                "Reversed host ordering",
-                no_effects(),
-            ),
-        );
+        NativeVariantFnNN::from_rust(|a: isize, b: isize| b.cmp(&a))
+            .description(["a", "b"], "Reversed host ordering", no_effects())
+            .add_to(&mut host, "compare".into(), Visibility::Public);
         host.add_function(
             "ordinary".into(),
             NativeFnNN::from_rust(isize::wrapping_sub).description(
@@ -771,8 +766,14 @@ mod tests {
             .split("\nfn ")
             .next()
             .unwrap();
-        assert_eq!(body.matches("switch_variant ").count(), 1, "{body}");
-        assert_eq!(body.matches("call host::compare(").count(), 1, "{body}");
+        // The generated body folds into the caller: the discriminant is compared directly.
+        assert!(!body.contains("variant "), "{body}");
+        assert_eq!(
+            body.matches("call host::compare$discriminant(").count(),
+            1,
+            "{body}"
+        );
+        assert_eq!(body.matches("comp_eq ").count(), 2, "{body}");
         let body = mir
             .split("fn ordinary(")
             .nth(1)
@@ -788,8 +789,13 @@ mod tests {
             .split("\nfn ")
             .next()
             .unwrap();
-        assert!(!body.contains("condbr "), "{body}");
-        assert_eq!(body.matches("call host::compare(").count(), 1, "{body}");
+        assert!(!body.contains("variant "), "{body}");
+        assert_eq!(
+            body.matches("call host::compare$discriminant(").count(),
+            1,
+            "{body}"
+        );
+        assert_eq!(body.matches("comp_eq ").count(), 2, "{body}");
         let optimized = session.eval_mir("optimized_chains", source);
         session.set_mir_optimization(MirOptimization::Disabled);
         let raw = session.eval_mir("raw_chains", source);

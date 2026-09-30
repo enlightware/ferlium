@@ -17,6 +17,7 @@ pub mod interpreter;
 pub(crate) mod r#match;
 mod native_addressors;
 pub mod native_functions;
+mod native_variants;
 pub(crate) mod recursion;
 pub(crate) mod trait_defaults;
 pub mod value;

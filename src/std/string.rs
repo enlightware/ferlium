@@ -884,15 +884,17 @@ pub fn add_to_module(to: &mut Module) {
             string_split_iterator_to_string,
         )) as Function],
     );
-    to.add_function_with_visibility(
-        ustr("compare_string"),
-        NativeVariantFnRR::from_rust(compare_string).description(
+    NativeVariantFnRR::from_rust(compare_string)
+        .description(
             ["left", "right"],
             "Internal semantic comparison.",
             no_effects(),
-        ),
-        crate::module::Visibility::Module,
-    );
+        )
+        .add_to(
+            to,
+            ustr("compare_string"),
+            crate::module::Visibility::Module,
+        );
     to.add_native_concrete_impl(
         default_trait_id,
         [string_type()],

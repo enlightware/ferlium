@@ -14,7 +14,6 @@ use crate::{
         MirOptimization,
         error::{RuntimeErrorKind, SandboxViolationKind, SourceFailureKind},
     },
-    eval::RuntimeError,
     execution::ReferenceInterpreterLimits,
     hir::{
         function::Function,
@@ -31,7 +30,7 @@ use crate::{
         },
         terminator::TerminatorKind,
     },
-    module::{FunctionId, LocalFunctionId, Module, Path, id::Id},
+    module::{FunctionId, LocalFunctionId, Module, Path, Visibility, id::Id},
     std::{math::Float, option::option_type, string::String},
     types::{
         effects::{PrimitiveEffect, effect, no_effects},
@@ -140,20 +139,15 @@ fn wasm_codegen_native_variant_results_resolve_session_tags() {
     use crate::hir::native_functions::NativeVariantFnNN;
 
     let mut session = CompilerSession::new();
-    // Deliberately give semantic tags different identities from native case indexes.
+    // Deliberately give semantic tags different identities from Rust discriminants.
     for tag in ["Unrelated", "Greater", "Less", "Equal"] {
         session.variant_tag_id(ustr(tag));
     }
     let path = Path::single_str("host_variant");
     let mut host = Module::new(session.modules().next_id(), path.clone());
-    host.add_function(
-        ustr("compare"),
-        NativeVariantFnNN::from_rust(|left: isize, right: isize| right.cmp(&left)).description(
-            ["left", "right"],
-            "Reversed comparison",
-            no_effects(),
-        ),
-    );
+    NativeVariantFnNN::from_rust(|left: isize, right: isize| right.cmp(&left))
+        .description(["left", "right"], "Reversed comparison", no_effects())
+        .add_to(&mut host, ustr("compare"), Visibility::Public);
     session.register_module(path, host);
     for expression in [
         "host_variant::compare(x, y)",
@@ -177,62 +171,73 @@ fn wasm_codegen_native_variant_results_resolve_session_tags() {
 }
 
 #[wasm_bindgen_test]
-fn wasm_codegen_native_variant_adapter_rejects_invalid_cases() {
-    use crate::hir::native_functions::{NativeVariantFn0, NativeVariantFnN, NativeVariantResult};
+fn wasm_codegen_native_variant_results_fold_into_discriminant_tests() {
+    use crate::hir::native_functions::NativeVariantFnNN;
 
-    struct InvalidCase(u32);
-    impl NativeVariantResult for InvalidCase {
-        const CASES: &'static [&'static str] = &["First", "Second"];
-        fn case(self) -> u32 {
-            self.0
-        }
-    }
     let mut session = CompilerSession::new();
-    let path = Path::single_str("invalid_variant");
+    let path = Path::single_str("host_variant");
     let mut host = Module::new(session.modules().next_id(), path.clone());
-    host.add_function(
-        ustr("past_end"),
-        NativeVariantFnN::from_rust(|_: isize| InvalidCase(2)).description(
-            ["input"],
-            "Invalid case",
-            no_effects(),
-        ),
-    );
-    host.add_function(
-        ustr("overflow"),
-        NativeVariantFnN::from_rust(|_: isize| InvalidCase(u32::MAX)).description(
-            ["input"],
-            "Unsigned invalid case",
-            no_effects(),
-        ),
-    );
-    host.add_function(
-        ustr("constant"),
-        NativeVariantFn0::from_rust(|| InvalidCase(2)).description(
-            [],
-            "Invalid constant case",
-            no_effects(),
-        ),
-    );
+    NativeVariantFnNN::from_rust(|left: isize, right: isize| left.cmp(&right))
+        .description(["left", "right"], "Comparison", no_effects())
+        .add_to(&mut host, ustr("compare"), Visibility::Public);
     session.register_module(path, host);
-    for (name, index) in [("past_end", 2), ("overflow", u32::MAX), ("constant", 2)] {
-        let argument = if name == "constant" { "" } else { "x" };
+    let entry = compile(
+        &mut session,
+        "pub fn compute(x: int, y: int) -> int { match host_variant::compare(x, y) { Less => 10, _ => 20 } }",
+    );
+    let code = CompiledProgram::compile(&session, entry).unwrap();
+    let operators = exported_function_operators(code.bytes(), ENTRY_EXPORT);
+    // The call returns Rust's discriminant, which the caller tests directly: no tag is built.
+    assert!(
+        operators
+            .windows(2)
+            .any(|pair| matches!(pair, [Operator::I32Const { value: -1 }, Operator::I32Eq])),
+        "{operators:?}"
+    );
+    assert!(
+        !operators.iter().any(|op| matches!(op, Operator::Select)),
+        "{operators:?}"
+    );
+    let mut instance = code.instantiate::<(isize, isize), isize>().unwrap();
+    for (left, right, expected) in [(2, 9, 10), (9, 2, 20), (7, 7, 20)] {
+        assert_eq!(
+            instance.run((left, right), WasmLimits::default()).unwrap(),
+            expected
+        );
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_single_case_native_variants_return_their_tag() {
+    use crate::hir::native_functions::NativeVariantFnN;
+
+    enum Ready {
+        Ready,
+    }
+    crate::native_variant_result!(Ready { Ready });
+    let mut session = CompilerSession::new();
+    let path = Path::single_str("host_ready");
+    let mut host = Module::new(session.modules().next_id(), path.clone());
+    // The decoder has no alternatives, so its whole body is a stored unit variant.
+    NativeVariantFnN::from_rust(|_: isize| Ready::Ready)
+        .description(["input"], "Single case", no_effects())
+        .add_to(&mut host, ustr("ready"), Visibility::Public);
+    session.register_module(path, host);
+    for expression in [
+        "host_ready::ready(x)",
+        "{ let f = host_ready::ready; f(x) }",
+    ] {
         let entry = compile(
             &mut session,
-            &format!(
-                "fn compute(x: int) -> int {{ match invalid_variant::{name}({argument}) {{ First => 1, Second => 2 }} }}"
-            ),
+            &format!("pub fn compute(x: int) -> int {{ match {expression} {{ Ready => x + 1 }} }}"),
         );
-        let code = compile_raw(&session, entry);
-        let mut instance = code.instantiate::<(isize,), isize>().unwrap();
-        let error = instance.run((1,), WasmLimits::default()).unwrap_err();
-        assert!(error.is_poisoning(), "{error:?}");
-        assert!(
-            matches!(error, RuntimeError::InvalidNativeVariantCase {
-            index: actual, case_count: 2,
-        } if actual == index),
-            "{name}: {error:?}"
-        );
+        for code in [
+            CompiledProgram::compile(&session, entry).unwrap(),
+            compile_raw(&session, entry),
+        ] {
+            let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+            assert_eq!(instance.run((4,), WasmLimits::default()).unwrap(), 5);
+        }
     }
 }
 

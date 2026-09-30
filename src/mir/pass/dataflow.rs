@@ -1504,7 +1504,7 @@ mod tests {
             value::VariantPayloadStorage,
         },
         mir::{Operation, builder::FunctionBuilder, terminator::Terminator},
-        module::{LocalFunctionId, Module, ModuleId, Path},
+        module::{LocalFunctionId, Module, ModuleId, Path, Visibility},
         std::{logic::bool_type, math::int_type},
         types::{effects::no_effects, r#type::Type},
         ustr,
@@ -2268,14 +2268,9 @@ mod tests {
         let path = Path::single_str("host_ordering");
         let mut host = Module::new(session.modules().next_id(), path.clone());
         // Deliberately not a std identity, and ordered in the opposite direction.
-        let compare = host.add_function(
-            ustr("compare"),
-            NativeVariantFnNN::from_rust(|a: isize, b: isize| b.cmp(&a)).description(
-                ["a", "b"],
-                "Host comparison",
-                no_effects(),
-            ),
-        );
+        let compare = NativeVariantFnNN::from_rust(|a: isize, b: isize| b.cmp(&a))
+            .description(["a", "b"], "Host comparison", no_effects())
+            .add_to(&mut host, ustr("compare"), Visibility::Public);
         host.add_function(
             ustr("ordinary"),
             NativeFnNN::from_rust(isize::wrapping_sub).description(
@@ -2284,14 +2279,9 @@ mod tests {
                 no_effects(),
             ),
         );
-        host.add_function(
-            ustr("not_reflexive"),
-            NativeVariantFnNN::from_rust(|_: isize, _: isize| Ordering::Less).description(
-                ["a", "b"],
-                "No ordering laws",
-                no_effects(),
-            ),
-        );
+        NativeVariantFnNN::from_rust(|_: isize, _: isize| Ordering::Less)
+            .description(["a", "b"], "No ordering laws", no_effects())
+            .add_to(&mut host, ustr("not_reflexive"), Visibility::Public);
         let id = session.register_module(path, host);
         assert!(
             session

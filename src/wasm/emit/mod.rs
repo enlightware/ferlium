@@ -30,10 +30,7 @@ use wasm_encoder::{
 
 use crate::{
     CompilerSession, FxHashMap, FxHashSet, Location, MirOptimization,
-    hir::{
-        function::ArgConvention,
-        native_functions::{NativeResult, NativeScalar},
-    },
+    hir::{function::ArgConvention, native_functions::NativeScalar},
     mir::{
         BasicBlock, Function, Operation, OperationKind, ParameterKind, Value, ValueId,
         pass::known_callee::KnownCallee,
@@ -874,18 +871,7 @@ fn emit_with_export_kind(
                 .any(|operation| matches!(operation.kind, OperationKind::CheckFuel))
         })
     });
-    let needs_base = natives.iter().any(|(id, _)| {
-        matches!(
-            program
-                .module(id.module)
-                .unwrap()
-                .native_entry(*id)
-                .unwrap()
-                .signature()
-                .result,
-            NativeResult::Variant { .. }
-        )
-    }) || !adapters.is_empty()
+    let needs_base = !adapters.is_empty()
         || !callables.entries.is_empty()
         || !callables.selected.is_empty()
         || needs_callable_glue
@@ -926,23 +912,8 @@ fn emit_with_export_kind(
     let emit_failure_function = runtime_globals.count != 0;
     let mut direct_index =
         imports.failure_function().as_index() + usize::from(emit_failure_function);
-    let mut native_variants = natives
-        .iter()
-        .filter_map(|(&id, (index, abi))| {
-            let NativeResult::Variant { cases, .. } = program
-                .module(id.module)?
-                .native_entry(id)?
-                .signature()
-                .result
-            else {
-                return None;
-            };
-            Some((id, *index, abi, cases))
-        })
-        .collect::<Vec<_>>();
-    native_variants.sort_by_key(|(id, ..)| (id.module.as_index(), id.function.as_index()));
     let mut resume_indices = FxHashMap::default();
-    let mut callees: FxHashMap<_, _> = bodies
+    let callees: FxHashMap<_, _> = bodies
         .iter()
         .map(|(id, body, sig, _)| {
             let start = WasmFunctionId::from_index(direct_index);
@@ -959,10 +930,6 @@ fn emit_with_export_kind(
                 .map(|(&id, (index, abi))| (id, (*index, abi))),
         )
         .collect();
-    for &(id, _, abi, _) in &native_variants {
-        callees.insert(id, (WasmFunctionId::from_index(direct_index), abi));
-        direct_index += 1;
-    }
     let mut functions = FunctionSection::new();
     let mut code = CodeSection::new();
     let mut entry_abis = FxHashMap::default();
@@ -1201,18 +1168,6 @@ fn emit_with_export_kind(
             }));
             body_index += 1;
         }
-    }
-    for &(id, raw, abi, cases) in &native_variants {
-        names.push(format!("<native variant adapter {id:?}>"));
-        functions.function(types.intern(abi.params(), abi.results()).as_u32());
-        code.function(&adapters::native_variant_adapter(
-            raw,
-            abi,
-            cases,
-            session,
-            imports.failure_function(),
-        )?);
-        body_index += 1;
     }
     for &(id, entry) in &adapters {
         let definition = program.dictionary(id).unwrap();

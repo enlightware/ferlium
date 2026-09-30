@@ -20,7 +20,7 @@ use crate::{
         core_traits_names::VALUE_TRAIT_NAME,
         value::{
             VALUE_ALIGN_ASSOC_CONST_INDEX, VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX,
-            VALUE_SIZE_ASSOC_CONST_INDEX, is_tag_scalar,
+            VALUE_SIZE_ASSOC_CONST_INDEX,
         },
     },
     types::{
@@ -260,7 +260,7 @@ fn result_layout(result: NativeResult) -> Option<NativeLayout> {
         | NativeResult::Optional {
             payload: layout, ..
         } => Some(layout),
-        NativeResult::Unit | NativeResult::Never | NativeResult::Variant { .. } => None,
+        NativeResult::Unit | NativeResult::Never => None,
     }
 }
 
@@ -283,14 +283,6 @@ fn checked_entry(
             function: id,
             error,
         })?;
-    if let NativeResult::Variant { ty, .. } = entry.signature().result
-        && !is_tag_scalar(ty, &env)
-    {
-        return Err(NativeRequirementError::InvalidEntry {
-            function: id,
-            error: NativeContractError::ResultTransport,
-        });
-    }
     Ok(entry.clone())
 }
 

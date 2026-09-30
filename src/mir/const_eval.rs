@@ -317,9 +317,7 @@ impl<'a> ConstEvaluator<'a> {
 fn classify(error: RuntimeError) -> NotFoldable {
     match error {
         RuntimeError::Backend(_) => unreachable!("const evaluation uses the boxed interpreter"),
-        RuntimeError::InvalidNativeVariantCase { .. } | RuntimeError::SourceFailure(_) => {
-            NotFoldable::Failed
-        }
+        RuntimeError::SourceFailure(_) => NotFoldable::Failed,
         RuntimeError::SandboxViolation(_) | RuntimeError::FailureDuringCleanup(_) => {
             NotFoldable::BudgetExceeded
         }
