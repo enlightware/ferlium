@@ -965,7 +965,7 @@ fn wasm_codegen_shared_helper_source_maps_preserve_origins_and_split_boundaries(
         span,
         inlined_at,
     };
-    let merged = emit::merge_helper_source_maps(vec![
+    let merged = emit::merge_function_source_maps(vec![
         entry(2..6, first, vec![]),
         entry(2..4, second, vec![caller]),
         entry(4..6, second, vec![caller]),
@@ -1060,8 +1060,17 @@ fn wasm_codegen_generated_helpers_and_adapters_are_shared() {
             .any(|name| name.name.starts_with("<dictionary adapter Value::")),
         "unshared adapters must retain descriptive method names"
     );
+    assert!(
+        names
+            .iter()
+            .any(|name| name.name.starts_with("<shared function ")
+                && name.name.contains("SizedSeq")
+                && name.name.contains("::len#impl:")
+                && name.name.contains("-thunk")),
+        "array length thunks should share: {names:?}"
+    );
     let mut keys = FxHashSet::default();
-    let mut helpers = 0;
+    let mut non_adapters = 0;
     let mut adapters = 0;
     let mut buffer_drops = 0;
     for name in names {
@@ -1095,9 +1104,7 @@ fn wasm_codegen_generated_helpers_and_adapters_are_shared() {
                 name.name
             );
         }
-        if name.name.starts_with("<shared generated helper ")
-            || name.name.starts_with("<shared dictionary adapter ")
-        {
+        if name.name.starts_with("<shared function ") {
             assert!(
                 name.name.contains('×'),
                 "shared group size missing: {}",
@@ -1109,8 +1116,9 @@ fn wasm_codegen_generated_helpers_and_adapters_are_shared() {
                 "duplicate {}",
                 name.name
             );
-            if name.name.starts_with("<shared generated helper ") {
-                helpers += 1;
+            // Classify by the displayed representative; mixed groups count only once.
+            if !name.name.contains("dictionary adapter ") {
+                non_adapters += 1;
             } else {
                 adapters += 1;
             }
@@ -1121,8 +1129,8 @@ fn wasm_codegen_generated_helpers_and_adapters_are_shared() {
         "fixture must include a generated buffer drop"
     );
     assert!(
-        helpers >= 2 && adapters >= 2,
-        "fixture must exercise both sharing stages: {helpers} helper groups, {adapters} adapters"
+        non_adapters >= 2 && adapters >= 2,
+        "fixture must exercise both representative kinds: {non_adapters} non-adapter groups, {adapters} adapter groups"
     );
     assert!(
         table_functions.len() > table_functions.iter().collect::<FxHashSet<_>>().len(),
@@ -2677,4 +2685,196 @@ fn wasm_codegen_inactive_entry_does_not_write_memory() {
     // Deliberately bypass the Rust binding to exercise the generated entry's inactive guard.
     assert!(entry.call1(&JsValue::UNDEFINED, &1.into()).is_err());
     assert_eq!(bytes.slice(0, 64).to_vec(), before);
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_sharing_relocates_calls_and_debug_ranges() {
+    use wasm_encoder::{
+        CodeSection, ConstExpr, ElementSection, Elements, ExportKind, ExportSection, Function,
+        FunctionSection, GlobalSection, GlobalType, Instruction as I, Module, RefType,
+        TableSection, TableType, TypeSection, ValType,
+    };
+
+    let mut types = TypeSection::new();
+    types.ty().function([], [ValType::I32]);
+    types.ty().function([], [ValType::F64]);
+    let mut functions = FunctionSection::new();
+    let mut code = CodeSection::new();
+    for _ in 0..130 {
+        functions.function(0);
+        let mut body = Function::new([]);
+        body.instruction(&I::I32Const(7)).instruction(&I::End);
+        code.function(&body);
+    }
+    for target in [129, 0] {
+        functions.function(0);
+        let mut body = Function::new([]);
+        body.instruction(&I::Call(target)).instruction(&I::End);
+        code.function(&body);
+    }
+    for zero in [0.0_f64, -0.0] {
+        functions.function(1);
+        let mut body = Function::new([]);
+        body.instruction(&I::F64Const(zero.into()))
+            .instruction(&I::End);
+        code.function(&body);
+    }
+    let mut exports = ExportSection::new();
+    exports.export("a", ExportKind::Func, 130);
+    exports.export("b", ExportKind::Func, 131);
+    let mut tables = TableSection::new();
+    tables.table(TableType {
+        element_type: RefType::FUNCREF,
+        table64: false,
+        minimum: 2,
+        maximum: None,
+        shared: false,
+    });
+    let mut elements = ElementSection::new();
+    elements.active(
+        None,
+        &ConstExpr::i32_const(0),
+        Elements::Functions(vec![130, 131].into()),
+    );
+    let mut globals = GlobalSection::new();
+    globals.global(
+        GlobalType {
+            val_type: ValType::Ref(RefType::FUNCREF),
+            mutable: false,
+            shared: false,
+        },
+        &ConstExpr::ref_func(130),
+    );
+    let mut module = Module::new();
+    module
+        .section(&types)
+        .section(&functions)
+        .section(&tables)
+        .section(&globals)
+        .section(&exports)
+        .section(&elements)
+        .section(&code);
+    let bytes = module.finish();
+    let source = Location::new_synthesized().source_id();
+    let sources = [(130, 1..4), (131, 1..3)]
+        .into_iter()
+        .enumerate()
+        .map(|(origin, (body, bytes))| emit::CodeSourceMapEntry {
+            body,
+            bytes,
+            span: Location::new(origin as u32, origin as u32 + 1, source),
+            inlined_at: vec![],
+        })
+        .collect();
+    let (shared, sources) = emit::share_functions(bytes.clone(), sources).unwrap();
+    assert_eq!(shared, emit::share_functions(bytes, vec![]).unwrap().0);
+    WebAssembly::Module::new(&Uint8Array::from(shared.as_slice())).unwrap();
+    let mut targets = Vec::new();
+    let mut table_targets = Vec::new();
+    let mut global_target = None;
+    let mut bodies = 0;
+    let mut zeros = Vec::new();
+    for payload in Parser::new(0).parse_all(&shared) {
+        match payload.unwrap() {
+            Payload::ExportSection(section) => {
+                targets.extend(section.into_iter().map(|e| e.unwrap().index))
+            }
+            Payload::GlobalSection(section) => {
+                for global in section {
+                    let mut reader = global.unwrap().init_expr.get_operators_reader();
+                    if let Operator::RefFunc { function_index } = reader.read().unwrap() {
+                        global_target = Some(function_index);
+                    }
+                }
+            }
+            Payload::ElementSection(section) => {
+                for element in section {
+                    if let wasmparser::ElementItems::Functions(functions) = element.unwrap().items {
+                        table_targets.extend(functions.into_iter().map(Result::unwrap));
+                    }
+                }
+            }
+            Payload::CodeSectionEntry(body) => {
+                bodies += 1;
+                for operator in body.get_operators_reader().unwrap() {
+                    if let Operator::F64Const { value } = operator.unwrap() {
+                        zeros.push(value.bits());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(bodies, 4, "leaf and caller duplicates should each share");
+    assert_eq!(targets[0], targets[1]);
+    assert_eq!(global_target, Some(targets[0]));
+    assert_eq!(
+        table_targets, targets,
+        "table slots must keep their order and follow function aliases"
+    );
+    assert_eq!(zeros, [0.0_f64.to_bits(), (-0.0_f64).to_bits()]);
+    assert_eq!(sources.len(), 2);
+    assert!(
+        sources
+            .iter()
+            .all(|entry| entry.body == targets[0] as usize && entry.bytes == (1..3))
+    );
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_sharing_stabilizes_recursive_components() {
+    use wasm_encoder::{
+        CodeSection, ExportKind, ExportSection, Function, FunctionSection, Instruction as I,
+        Module, TypeSection, ValType,
+    };
+
+    let mut types = TypeSection::new();
+    types.ty().function([], [ValType::I32]);
+    let mut functions = FunctionSection::new();
+    let mut code = CodeSection::new();
+    for targets in [
+        vec![2],
+        vec![2],
+        vec![0, 1],
+        vec![2],
+        vec![0, 1],
+        vec![5],
+        vec![6],
+    ] {
+        functions.function(0);
+        let mut body = Function::new([]);
+        for &target in &targets {
+            body.instruction(&I::Call(target));
+        }
+        if targets.len() == 2 {
+            body.instruction(&I::I32Add);
+        }
+        body.instruction(&I::End);
+        code.function(&body);
+    }
+    let mut exports = ExportSection::new();
+    for index in 0..7 {
+        exports.export(&format!("f{index}"), ExportKind::Func, index);
+    }
+    let mut module = Module::new();
+    module
+        .section(&types)
+        .section(&functions)
+        .section(&exports)
+        .section(&code);
+    let (shared, _) = emit::share_functions(module.finish(), vec![]).unwrap();
+    WebAssembly::Module::new(&Uint8Array::from(shared.as_slice())).unwrap();
+    let mut targets = Vec::new();
+    for payload in Parser::new(0).parse_all(&shared) {
+        if let Payload::ExportSection(section) = payload.unwrap() {
+            targets.extend(section.into_iter().map(|e| e.unwrap().index));
+        }
+    }
+    assert_eq!(targets[0], targets[1]);
+    assert_eq!(targets[0], targets[3]);
+    assert_eq!(targets[2], targets[4]);
+    assert_ne!(
+        targets[5], targets[6],
+        "different self references require a stronger equivalence proof"
+    );
 }

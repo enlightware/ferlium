@@ -19,21 +19,26 @@ semantic function identities, calling-contract metadata and dictionary slots.
 Equivalence requires the complete Wasm signature and exact encoded body, including local
 declarations. Matching signatures or similar instruction shapes alone cannot establish equivalent
 behavior. Exact comparison avoids a separate semantic-equivalence analysis and preserves details
-such as the sign of floating-point zero. Current sharing is restricted to eligible generated
-helpers and dictionary adapters.
+such as the sign of floating-point zero. Sharing runs once all Wasm bodies have been emitted,
+covering ordinary functions, generated helpers, thunks and adapters with the same rule.
 
-Helpers are shared before dictionary adapters. Canonical helper indices can make adapters
-identical even when they originally called different functions. This ordering captures that
-opportunity without iterative deduplication or rewriting already encoded call indices. Eligible
-direct helpers do not depend on other defined-function indices, so their encoding remains valid
-when the function table is compacted.
+Function references are compared using canonical callee identities, so sharing a callee can also
+make its callers identical. Dependencies are processed before callers; recursive components use
+local folding rounds. Distinct recursive graphs are not assumed equivalent merely because their
+shapes look alike. This keeps the proof based on exact implementations rather than introducing
+semantic or graph-equivalence analysis.
+
+Function indices are compacted only after sharing has settled. Calls, exports and function-table
+entries follow the remapping, while dictionary and callable table slots retain their identities.
+Source ranges also follow any changes in encoded index width. Debug sections that depend on final
+code offsets must be generated after this stage.
 
 ## Keep source origins separate from implementation equality
 
 Names and source locations describe an implementation's origins; they do not determine its
-behavior. Including them in equality would prevent otherwise valid sharing. Shared generated
-implementations therefore identify a canonical representative and the number of shared origins
-in their generated names; unshared adapters retain their descriptive names. Source maps combine
+behavior. Including them in equality would prevent otherwise valid sharing. Shared
+implementations name the first original function in emission order and the number of shared
+origins; unshared adapters retain their descriptive names. Source maps combine
 the original locations and inline chains. Different region boundaries are split so lookup still
 sees disjoint or identical byte ranges.
 
