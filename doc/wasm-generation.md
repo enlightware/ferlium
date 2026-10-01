@@ -1,5 +1,14 @@
 # Wasm generation: design decisions
 
+## Borrow immutable literal handles only at known readers
+
+The invocation's static-string table belongs to the instance and stays valid across native calls.
+Literal handles passed only to the declared string materialization and literal-append helpers can
+therefore be borrowed directly from that table. This includes temporary places initialized once
+from a literal and read only within the same block. Other uses keep private copies:
+neither an indirect call nor a derived address proves that a handle will remain read-only.
+This borrows the immutable handle, while materialized strings still have owned mutable storage.
+
 ## Share implementations after lowering
 
 Distinct typed functions can have identical Wasm implementations. Layout queries are one example:

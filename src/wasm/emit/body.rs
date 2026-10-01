@@ -30,9 +30,13 @@ use crate::{
     },
     module::{FunctionId, ModuleEnv, ProjectionIndex, TraitId, id::Id},
     std::{
+        STD_MODULE_ID,
         logic::bool_type,
         math::{Float, RawFloat},
-        string::StaticStr,
+        string::{
+            STRING_FROM_STATIC_FUNCTION_NAME, STRING_PUSH_STATIC_STR_FUNCTION_NAME, StaticStr,
+            static_str_type,
+        },
         value::{product_layout_spec, value_layout_for_type},
     },
     types::{
@@ -65,6 +69,9 @@ use super::{
     scalar, stack, subscript,
     suspension::Crossing,
 };
+
+// The backend currently assumes the compiler and generated Wasm share a wasm32 runtime layout.
+const _: () = assert!(size_of::<StaticStr>() == 4);
 
 /// Code ranges generated for MIR operations and terminators, with their source spans. Ranges are
 /// ordered, and either disjoint or identical: code doing the work of several operations has one
@@ -222,6 +229,7 @@ pub(super) struct Body<'a, 's> {
     session: &'a CompilerSession,
     registers: FxHashMap<ValueId, WasmLocalId>,
     storage: FxHashMap<Value, Storage>,
+    borrowed_static_strings: FxHashMap<Value, usize>,
     locals: Vec<ValType>,
     mode: BodyMode,
     /// The block where execution starts: the resume block for a resume body.
@@ -350,6 +358,7 @@ impl<'a, 's> Body<'a, 's> {
             roles,
             registers: FxHashMap::default(),
             storage: FxHashMap::default(),
+            borrowed_static_strings: FxHashMap::default(),
             locals: Vec::new(),
             mode,
             entry,
@@ -410,8 +419,28 @@ impl<'a, 's> Body<'a, 's> {
         // constant that is only ever stored initializes each destination from its literal instead,
         // so it needs no slot initialized on every entry, typically a failure message.
         let only_stored = constants_only_stored(body);
+        let (borrowed_strings, borrowed_places) = borrowed_static_strings(body, env);
+        for (id, constant) in borrowed_places {
+            let text = body
+                .constant(constant)
+                .representation
+                .as_primitive_ty::<StaticStr>()
+                .unwrap();
+            let reference = this.strings.intern(*text);
+            this.borrowed_static_strings
+                .insert(Value::Register(id), reference);
+        }
         for (index, constant) in body.constants().iter().enumerate() {
             let value = Value::Constant(ConstantId::from_index(index));
+            if !only_stored[index] && borrowed_strings[index] {
+                let text = constant
+                    .representation
+                    .as_primitive_ty::<StaticStr>()
+                    .unwrap();
+                let reference = this.strings.intern(*text);
+                this.borrowed_static_strings.insert(value, reference);
+                continue;
+            }
             if !only_stored[index]
                 && (this.analysis.is_addressed(&value)
                     || ScalarType::in_env(constant.ty, &this.env).is_err())
@@ -476,6 +505,12 @@ impl<'a, 's> Body<'a, 's> {
                     this.reserve_scratch(payload)?;
                 }
                 if let Some(id) = operation.result_id() {
+                    if this
+                        .borrowed_static_strings
+                        .contains_key(&Value::Register(id))
+                    {
+                        continue;
+                    }
                     if this.expressions.has_pending_value(id) {
                         continue;
                     }
@@ -1325,17 +1360,14 @@ impl<'a, 's> Body<'a, 's> {
         }
         if let Some(text) = literal.as_primitive_ty::<StaticStr>() {
             let index = self.strings.intern(*text);
-            self.address(destination)?;
-            self.i(I::I32Const(offset as i32));
-            self.i(I::I32Add);
+            let base = self.address_base(destination)?;
             self.context_pointer(offset_of!(InvocationState, strings));
-            self.i(I::I32Const((index * size_of::<StaticStr>()) as i32));
-            self.i(I::I32Add);
-            self.i(I::I32Const(size_of::<StaticStr>() as i32));
-            self.i(I::MemoryCopy {
-                src_mem: 0,
-                dst_mem: 0,
-            });
+            // Load the immutable handle before storing it in the destination.
+            self.i(I::I32Load(memarg_at(
+                2,
+                (index * size_of::<StaticStr>()) as u32,
+            )));
+            self.i(I::I32Store(memarg_at(2, base + offset)));
         } else if let LiteralValue::Tuple(fields) = literal {
             let layout = product_layout_spec(ty, Location::new_synthesized(), &self.env)
                 .ok_or("expected product constant")?;
@@ -1784,6 +1816,12 @@ impl<'a, 's> Body<'a, 's> {
     }
 
     pub(super) fn address(&mut self, value: &Value) -> Result<(), String> {
+        if let Some(&index) = self.borrowed_static_strings.get(value) {
+            self.context_pointer(offset_of!(InvocationState, strings));
+            self.i(I::I32Const((index * size_of::<StaticStr>()) as i32));
+            self.i(I::I32Add);
+            return Ok(());
+        }
         match self.storage.get(value) {
             Some(Storage::Stack(offset)) => {
                 let offset = *offset;
@@ -2858,6 +2896,9 @@ impl<'a, 's> Body<'a, 's> {
             }
             Alloca { .. } | AllocaPlace { .. } => {
                 let value = Value::Register(op.result_id().unwrap());
+                if self.borrowed_static_strings.contains_key(&value) {
+                    return Ok(());
+                }
                 if !self.storage.contains_key(&value) {
                     return Err("dynamic storage".into());
                 }
@@ -2880,6 +2921,9 @@ impl<'a, 's> Body<'a, 's> {
                 }
             }
             Store => {
+                if self.borrowed_static_strings.contains_key(&args[1]) {
+                    return Ok(());
+                }
                 // Store takes a materialized value, including a pointer; it must not dereference
                 // a place operand as read() would. The MIR verifier checks this operand contract.
                 if matches!(&args[0], Value::Register(id) if self.callable_values.contains(id) || self.subscript_values.contains(id))
@@ -3264,6 +3308,119 @@ fn constants_only_stored(body: &Function) -> Vec<bool> {
         }
     }
     only_stored
+}
+
+/// Borrow StaticStr constants and their single-initialization places at declared std readers.
+/// Other uses retain private storage: an indirect call or derived alias could write through it.
+/// The instance owns the immutable table for the whole invocation, including native calls.
+fn borrowed_static_strings(
+    body: &Function,
+    env: ModuleEnv<'_>,
+) -> (Vec<bool>, FxHashMap<ValueId, ConstantId>) {
+    let mut borrowed: Vec<_> = body
+        .constants()
+        .iter()
+        .map(|constant| {
+            constant
+                .representation
+                .as_primitive_ty::<StaticStr>()
+                .is_some()
+        })
+        .collect();
+    if !borrowed.iter().any(|&borrowed| borrowed) {
+        return (borrowed, FxHashMap::default());
+    }
+    // Record all candidates before checking uses, so cross-block uses cannot be missed.
+    let mut places = FxHashMap::default();
+    for block in body.blocks() {
+        for operation in body.block(block).operations() {
+            if matches!(operation.kind, OperationKind::Alloca { ty } if ty == static_str_type())
+                && operation.operands.is_empty()
+            {
+                places.insert(operation.result_id().unwrap(), (block, None, true));
+            }
+        }
+    }
+    let named = |name| {
+        env.module_by_id(STD_MODULE_ID)
+            .and_then(|module| module.get_local_function_id(ustr(name)))
+            .map(|function| FunctionId::new(STD_MODULE_ID, function))
+    };
+    // Call operands start with the callee: from_static reads its first input, while
+    // push_static_str reads its second input, after the mutable destination string.
+    let readers = [
+        (named(STRING_FROM_STATIC_FUNCTION_NAME), 1),
+        (named(STRING_PUSH_STATIC_STR_FUNCTION_NAME), 2),
+    ];
+    for block_id in body.blocks() {
+        let block = body.block(block_id);
+        let invoked = match &block.terminator().kind {
+            TerminatorKind::Invoke { operation, .. } => Some(operation),
+            _ => None,
+        };
+        for operation in block.operations().iter().chain(invoked) {
+            for (position, operand) in operation.operands.iter().enumerate() {
+                let read_only = operation.kind == OperationKind::Clear
+                    || matches!(operation.kind, OperationKind::Call { .. })
+                        && readers.iter().any(|&(reader, input)| {
+                            position == input
+                                && reader.is_some_and(|reader| {
+                                    operation.operands.first() == Some(&Value::Function(reader))
+                                })
+                        });
+                if let Value::Constant(id) = operand {
+                    borrowed[id.as_index()] &=
+                        read_only || operation.kind == OperationKind::Store && position == 0;
+                }
+                if let Value::Register(id) = operand
+                    && let Some((block, initializer, valid)) = places.get_mut(id)
+                {
+                    if operation.kind == OperationKind::Clear {
+                        continue;
+                    }
+                    if operation.kind == OperationKind::Store
+                        && position == 1
+                        && *block == block_id
+                        && initializer.is_none()
+                        && let Value::Constant(constant) = operation.operands[0]
+                        && body
+                            .constant(constant)
+                            .representation
+                            .as_primitive_ty::<StaticStr>()
+                            .is_some()
+                    {
+                        *initializer = Some(constant);
+                    } else {
+                        *valid &= read_only && *block == block_id && initializer.is_some();
+                    }
+                }
+            }
+        }
+        if invoked.is_none() {
+            for operand in block.terminator().operands() {
+                if let Value::Constant(id) = operand {
+                    borrowed[id.as_index()] = false;
+                }
+                if let Value::Register(id) = operand
+                    && let Some((_, _, valid)) = places.get_mut(id)
+                {
+                    *valid = false;
+                }
+            }
+        }
+    }
+    (
+        borrowed,
+        places
+            .into_iter()
+            .filter_map(|(id, (_, initializer, valid))| {
+                valid
+                    .then_some(initializer)
+                    .flatten()
+                    .map(|constant| (id, constant))
+            })
+            .collect(),
+    )
 }
 
 /// The `raw_float_to_float` calls whose operand is known to be finite where they execute.

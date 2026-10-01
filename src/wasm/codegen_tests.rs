@@ -2344,6 +2344,45 @@ fn wasm_codegen_omits_noop_stack_markers_in_loops() {
 }
 
 #[wasm_bindgen_test]
+fn wasm_codegen_borrows_static_string_handles_across_native_calls() {
+    let mut session = CompilerSession::new();
+    let entry = compile(
+        &mut session,
+        "fn compute(x: int) -> int { string_len(f\"left{x}éright\") }",
+    );
+    let code = CompiledProgram::compile(&session, entry).unwrap();
+    let mut table_reads = 0;
+    let operations = exported_function_operators(code.bytes(), ENTRY_EXPORT);
+    for (index, operation) in operations.iter().enumerate() {
+        if matches!(operation, Operator::I32Load { memarg }
+            if memarg.offset == offset_of!(InvocationState, strings) as u64)
+        {
+            table_reads += 1;
+            assert!(
+                !operations[index + 1..]
+                    .iter()
+                    .take(3)
+                    .any(|operation| matches!(operation, Operator::I32Load { .. })),
+                "read-only literal handles must be borrowed, rather than loaded for a frame copy: {:?}",
+                &operations[index.saturating_sub(1)..(index + 7).min(operations.len())]
+            );
+        }
+    }
+    assert!(
+        table_reads >= 2,
+        "fixture must use multiple static literal segments"
+    );
+    let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+    // Repeat calls with different allocations; table references remain valid throughout each.
+    for (input, expected) in [(7, 11), (-123, 14), (0, 11)] {
+        assert_eq!(
+            instance.run((input,), WasmLimits::default()).unwrap(),
+            expected
+        );
+    }
+}
+
+#[wasm_bindgen_test]
 fn wasm_codegen_stackifies_single_use_scalar_expressions() {
     let mut session = CompilerSession::new();
     let entry = compile(
