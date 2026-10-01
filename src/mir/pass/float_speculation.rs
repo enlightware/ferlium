@@ -59,10 +59,9 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
-    Location,
     mir::{
-        self, BlockId, Function, Operation, OperationKind, ValueId, edit::FunctionEdit,
-        terminator::Terminator,
+        self, BlockId, DebugLocation, Function, Operation, OperationKind, ValueId,
+        edit::FunctionEdit, terminator::Terminator,
     },
     module::{FunctionId, ModuleEnv},
     std::{
@@ -307,7 +306,7 @@ fn needs_snapshots(
 fn fresh_cell(
     edit: &mut FunctionEdit,
     cells: &mut Vec<Operation>,
-    span: Location,
+    span: DebugLocation,
     ty: Type,
 ) -> mir::Value {
     let mut alloca = Operation::alloca(span, ty);
@@ -322,7 +321,7 @@ fn call_into_fresh(
     edit: &mut FunctionEdit,
     cells: &mut Vec<Operation>,
     operations: &mut Vec<Operation>,
-    span: Location,
+    span: DebugLocation,
     known: &KnownCallees,
     callee: KnownCallee,
     arguments: impl IntoIterator<Item = mir::Value>,

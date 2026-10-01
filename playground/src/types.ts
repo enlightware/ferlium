@@ -52,6 +52,9 @@ export interface IrText {
 export interface SourceMapEntry extends SourceRange {
 	source_from: number;
 	source_to: number;
+	/** 0 when the source range is that of the code itself, `n` when it is the `n`th call site,
+	 * from the innermost outward, that the code was inlined through. */
+	inline_depth: number;
 }
 
 /** Whether two editor ranges intersect, treating a cursor as a point in the other range. */

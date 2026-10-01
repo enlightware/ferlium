@@ -756,11 +756,11 @@ impl<'a> Interpreter<'a> {
         match &operation.kind {
             OperationKind::Alloca { ty } => {
                 let init = self.shaped_uninitialized_value(*ty);
-                let place = self.alloc_cell(init, span)?;
+                let place = self.alloc_cell(init, span.location)?;
                 Self::bind(slots, def.unwrap(), Binding::Place(place));
             }
             OperationKind::AllocaPlace { .. } => {
-                let place = self.alloc_cell(Value::uninit(), span)?;
+                let place = self.alloc_cell(Value::uninit(), span.location)?;
                 Self::bind(slots, def.unwrap(), Binding::Place(place));
             }
             OperationKind::RuntimeAlloc { .. }
@@ -777,7 +777,13 @@ impl<'a> Interpreter<'a> {
                 panic!("byte-address operations require the physical MIR interpreter")
             }
             OperationKind::DictEntry { entry_index, .. } => {
-                self.exec_dict_entry(slots, &operation.operands, def.unwrap(), *entry_index, span)?;
+                self.exec_dict_entry(
+                    slots,
+                    &operation.operands,
+                    def.unwrap(),
+                    *entry_index,
+                    span.location,
+                )?;
             }
             OperationKind::BuildDictionary { definition, .. } => {
                 let captures = operation
@@ -800,7 +806,7 @@ impl<'a> Interpreter<'a> {
                     &operation.operands,
                     def.unwrap(),
                     *mut_member,
-                    span,
+                    span.location,
                 )?;
             }
             OperationKind::BuildSubscriptEvidence { .. } => {
@@ -845,7 +851,7 @@ impl<'a> Interpreter<'a> {
                 let destination = self.place_operand(slots, &operation.operands[1]);
                 destination
                     .replace_from_owned_slot(&mut self.ctx, &replacement)
-                    .map_err(|error| RuntimeError::new(error, Some(span)))?;
+                    .map_err(|error| RuntimeError::new(error, Some(span.location)))?;
             }
             OperationKind::MoveBytes { .. } => {
                 panic!("move_bytes requires the physical MIR interpreter")
@@ -883,22 +889,28 @@ impl<'a> Interpreter<'a> {
                 self.exec_extract_tag(slots, &operation.operands, def.unwrap());
             }
             OperationKind::Call { .. } => {
-                self.exec_call(slots, &operation.operands, span)?;
+                self.exec_call(slots, &operation.operands, span.location)?;
             }
             OperationKind::Project { yielded, .. } => {
                 // Enter a scoped subscript: run the accessor to its `yield`, bind the exposed place
                 // (and the suspended frame) to this register, and continue with the body.
-                self.exec_project(slots, &operation.operands, def.unwrap(), *yielded, span)?;
+                self.exec_project(
+                    slots,
+                    &operation.operands,
+                    def.unwrap(),
+                    *yielded,
+                    span.location,
+                )?;
             }
             OperationKind::EndProject => self.exec_end_project(slots, &operation.operands)?,
             OperationKind::Drop { .. } => {
-                self.exec_drop(slots, &operation.operands, span)?;
+                self.exec_drop(slots, &operation.operands, span.location)?;
             }
             OperationKind::DropInitialized { .. } => {
                 unreachable!("drop_initialized belongs to physical MIR")
             }
             OperationKind::Clone { .. } => {
-                self.exec_clone(slots, &operation.operands, span)?;
+                self.exec_clone(slots, &operation.operands, span.location)?;
             }
             OperationKind::StackSave => {
                 let marker = self.ctx.environment.len();
@@ -909,10 +921,10 @@ impl<'a> Interpreter<'a> {
                 self.restore_stack(marker);
             }
             OperationKind::CheckCallDepth => {
-                self.ctx.check_call_depth(span)?;
+                self.ctx.check_call_depth(span.location)?;
             }
             OperationKind::CheckFuel => {
-                self.ctx.check_fuel(span)?;
+                self.ctx.check_fuel(span.location)?;
             }
             OperationKind::BuildClosure {
                 function,
@@ -930,11 +942,12 @@ impl<'a> Interpreter<'a> {
                 Self::bind(slots, def.unwrap(), Binding::Value(closure));
             }
             OperationKind::CloneClosureEnv { .. } => {
-                let cloned = self.exec_clone_closure_env(slots, &operation.operands[0], span)?;
+                let cloned =
+                    self.exec_clone_closure_env(slots, &operation.operands[0], span.location)?;
                 Self::bind(slots, def.unwrap(), Binding::Value(cloned));
             }
             OperationKind::DropClosureEnv => {
-                self.exec_drop_closure_env(slots, &operation.operands[0], span)?;
+                self.exec_drop_closure_env(slots, &operation.operands[0], span.location)?;
             }
         }
         Ok(())

@@ -15,7 +15,7 @@ mod suspension;
 
 use self::{
     adapters::{boxed_entry_wrapper, dictionary_adapter, entry_wrapper},
-    body::{Body, BodyMode},
+    body::{Body, BodyMode, BodySourceMap},
     peephole::Instructions,
 };
 
@@ -504,7 +504,35 @@ pub(super) struct CodeSourceMapEntry {
     pub body: usize,
     /// Byte range within that body, which starts with its local declarations.
     pub bytes: Range<usize>,
+    /// The source of the code itself, synthesized for generated code that was inlined.
     pub span: Location,
+    /// The call sites the code was inlined through, from the innermost outward.
+    pub inlined_at: Vec<Location>,
+}
+
+/// Appends the source map of the body at `body` in the code section, whose spans index the inline
+/// chains of `module`.
+fn extend_source_map(
+    source_map: &mut Vec<CodeSourceMapEntry>,
+    body: usize,
+    body_source_map: BodySourceMap,
+    module: ModuleId,
+    env: ModuleEnv<'_>,
+) {
+    if body_source_map.is_empty() {
+        return;
+    }
+    let sites = env.inline_sites(module).borrow();
+    source_map.extend(
+        body_source_map
+            .into_iter()
+            .map(|(bytes, span)| CodeSourceMapEntry {
+                body,
+                bytes,
+                span: span.location,
+                inlined_at: sites.call_sites(span.inlined_at).collect(),
+            }),
+    );
 }
 
 fn dictionary_abi(
@@ -1166,15 +1194,12 @@ fn emit_with_export_kind(
         .and_then(Body::emit)
         .map_err(|reason| diagnostic(*id, body, &reason))?;
         code.function(&emitted.function);
-        source_map.extend(
-            emitted
-                .source_map
-                .into_iter()
-                .map(|(bytes, span)| CodeSourceMapEntry {
-                    body: body_index,
-                    bytes,
-                    span,
-                }),
+        extend_source_map(
+            &mut source_map,
+            body_index,
+            emitted.source_map,
+            id.module,
+            env,
         );
         body_index += 1;
         if body.result_convention() == CallResultConvention::YIELDED_ONCE {
@@ -1206,13 +1231,13 @@ fn emit_with_export_kind(
             .and_then(Body::emit)
             .map_err(|reason| diagnostic(*id, body, &reason))?;
             code.function(&emitted.function);
-            source_map.extend(emitted.source_map.into_iter().map(|(bytes, span)| {
-                CodeSourceMapEntry {
-                    body: body_index,
-                    bytes,
-                    span,
-                }
-            }));
+            extend_source_map(
+                &mut source_map,
+                body_index,
+                emitted.source_map,
+                id.module,
+                env,
+            );
             body_index += 1;
         }
     }

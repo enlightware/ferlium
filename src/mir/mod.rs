@@ -3,6 +3,7 @@
 
 pub(crate) mod builder;
 pub(crate) mod const_eval;
+pub mod debug_location;
 pub(crate) mod dominance;
 pub(crate) mod edit;
 pub mod function;
@@ -19,6 +20,7 @@ pub mod terminator;
 pub mod value;
 pub(crate) mod verify;
 
+pub use debug_location::{DebugLocation, InlineSite, InlineSiteId, InlineSites};
 pub use function::{BasicBlock, BlockId, Function, Parameter, ParameterKind};
 pub use operation::{CallMetadata, Instantiation, Operation, OperationKind, OperationResult};
 pub use value::{ParameterId, Value, ValueId};

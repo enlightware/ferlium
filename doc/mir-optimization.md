@@ -506,6 +506,17 @@ Cross-module inlining is allowed and is where most inlinable script callees live
 function, dictionary and subscript identities are global while constant identities are function-local
 and remapped into the caller's pool.
 
+### Source locations of inlined code
+
+A copied operation keeps its own source location and also records the call site it was inlined
+through. That call site may itself have been inlined, so each operation carries a chain of call sites,
+from the innermost outward, as LLVM's `inlinedAt`. The source map and the text views link code to its
+own source and to each call site, so code inlined from the standard library still links to the user's
+call.
+
+Chains are interned per module, and copied into the caller's module when inlining crosses modules, so
+no module refers to another's chains.
+
 ## Common-subexpression elimination
 
 `mir::pass::cse` has a pre-inline call pass and a post-inline operation pass.

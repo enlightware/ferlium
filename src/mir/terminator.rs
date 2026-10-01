@@ -8,9 +8,8 @@ use std::{fmt, slice::from_ref};
 use ustr::Ustr;
 
 use crate::{
-    Location,
     format::FormatWith,
-    mir::{self, BlockId, Operation},
+    mir::{self, BlockId, DebugLocation, Operation},
     module::ModuleEnv,
 };
 
@@ -18,28 +17,28 @@ use crate::{
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Terminator {
     /// The source region associated with the transfer.
-    pub span: Location,
+    pub span: DebugLocation,
 
     /// The kind-specific transfer and its successors.
     pub kind: TerminatorKind,
 }
 
 impl Terminator {
-    pub fn goto(span: Location, target: BlockId) -> Self {
+    pub fn goto(span: impl Into<DebugLocation>, target: BlockId) -> Self {
         Self {
-            span,
+            span: span.into(),
             kind: TerminatorKind::Goto { target },
         }
     }
 
     pub fn cond_br(
-        span: Location,
+        span: impl Into<DebugLocation>,
         condition: mir::Value,
         then_target: BlockId,
         else_target: BlockId,
     ) -> Self {
         Self {
-            span,
+            span: span.into(),
             kind: TerminatorKind::CondBr {
                 condition,
                 then_target,
@@ -50,13 +49,13 @@ impl Terminator {
 
     /// Branches on an opaque semantic variant tag.
     pub fn switch_variant(
-        span: Location,
+        span: impl Into<DebugLocation>,
         tag: mir::Value,
         cases: Vec<(Ustr, BlockId)>,
         default: BlockId,
     ) -> Self {
         Self {
-            span,
+            span: span.into(),
             kind: TerminatorKind::SwitchVariant {
                 tag,
                 cases,
@@ -65,9 +64,14 @@ impl Terminator {
         }
     }
 
-    pub fn invoke(span: Location, operation: Operation, normal: BlockId, error: BlockId) -> Self {
+    pub fn invoke(
+        span: impl Into<DebugLocation>,
+        operation: Operation,
+        normal: BlockId,
+        error: BlockId,
+    ) -> Self {
         Self {
-            span,
+            span: span.into(),
             kind: TerminatorKind::Invoke {
                 operation,
                 normal,
@@ -76,37 +80,37 @@ impl Terminator {
         }
     }
 
-    pub fn r#yield(span: Location, place: mir::Value, resume: BlockId) -> Self {
+    pub fn r#yield(span: impl Into<DebugLocation>, place: mir::Value, resume: BlockId) -> Self {
         Self {
-            span,
+            span: span.into(),
             kind: TerminatorKind::Yield { place, resume },
         }
     }
 
-    pub fn ret(span: Location) -> Self {
+    pub fn ret(span: impl Into<DebugLocation>) -> Self {
         Self {
-            span,
+            span: span.into(),
             kind: TerminatorKind::Return,
         }
     }
 
-    pub fn propagate_error(span: Location) -> Self {
+    pub fn propagate_error(span: impl Into<DebugLocation>) -> Self {
         Self {
-            span,
+            span: span.into(),
             kind: TerminatorKind::PropagateError,
         }
     }
 
-    pub fn failure_during_cleanup(span: Location) -> Self {
+    pub fn failure_during_cleanup(span: impl Into<DebugLocation>) -> Self {
         Self {
-            span,
+            span: span.into(),
             kind: TerminatorKind::FailureDuringCleanup,
         }
     }
 
-    pub fn invariant_failure(span: Location, message: Ustr) -> Self {
+    pub fn invariant_failure(span: impl Into<DebugLocation>, message: Ustr) -> Self {
         Self {
-            span,
+            span: span.into(),
             kind: TerminatorKind::InvariantFailure { message },
         }
     }

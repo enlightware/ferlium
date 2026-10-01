@@ -307,6 +307,7 @@ impl Compiler {
                         source_lookup.byte_to_position(entry.span.end_usize()),
                     )
                     .expect("playground source cannot exceed 4 GiB"),
+                    inline_depth: entry.inline_depth,
                 })
                 .collect(),
             text: text.text,

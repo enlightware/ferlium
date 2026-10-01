@@ -203,7 +203,10 @@ pub(crate) fn load_or_build_physical_std_mir(
         cache_path(),
         build,
         |artifacts| {
-            CompiledPhysicalMirSnapshot::capture(artifacts, module, parent_checksum)
+            let inline_sites = ModuleEnv::new(module, session.raw_modules())
+                .inline_sites(module.module_id())
+                .borrow();
+            CompiledPhysicalMirSnapshot::capture(artifacts, &inline_sites, module, parent_checksum)
                 .map_err(|error| error.to_string())?
                 .encode()
                 .map_err(|error| error.to_string())
@@ -233,10 +236,19 @@ fn load_or_build_mir(
         cache_path(),
         || Ok::<_, Infallible>(build()),
         |artifacts| {
-            CompiledStdMirSnapshot::capture(stage, parent_checksum, artifacts, module)
-                .map_err(|error| error.to_string())?
-                .encode()
-                .map_err(|error| error.to_string())
+            let inline_sites = ModuleEnv::new(module, modules)
+                .inline_sites(module.module_id())
+                .borrow();
+            CompiledStdMirSnapshot::capture(
+                stage,
+                parent_checksum,
+                artifacts,
+                &inline_sites,
+                module,
+            )
+            .map_err(|error| error.to_string())?
+            .encode()
+            .map_err(|error| error.to_string())
         },
         |bytes, verify| {
             let snapshot =

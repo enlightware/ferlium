@@ -105,7 +105,7 @@ impl PhysicalLowerer<'_> {
                 );
             }
             BufferPrimitive::Hash => {
-                finish_unit_result(&mut builder, block, destination, span, self.env);
+                finish_unit_result(&mut builder, block, destination, span.into(), self.env);
                 return self.lower_body(id, id, builder.finish_unverified());
             }
             BufferPrimitive::ToString => {

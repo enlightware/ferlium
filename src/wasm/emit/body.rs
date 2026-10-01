@@ -16,7 +16,8 @@ use crate::{
         value::{LiteralValue, VariantPayloadStorage},
     },
     mir::{
-        BlockId, Function, Operation, OperationKind, ParameterId, ParameterKind, Value, ValueId,
+        BlockId, DebugLocation, Function, Operation, OperationKind, ParameterId, ParameterKind,
+        Value, ValueId,
         operation::OperationKindDiscriminant,
         pass::{known_callee::KnownCallee, stack_region::no_op_stack_markers},
         physical::{
@@ -68,7 +69,7 @@ use super::{
 /// Code ranges generated for MIR operations and terminators, with their source spans. Ranges are
 /// ordered, and either disjoint or identical: code doing the work of several operations has one
 /// entry per span.
-pub(super) type BodySourceMap = Vec<(Range<usize>, Location)>;
+pub(super) type BodySourceMap = Vec<(Range<usize>, DebugLocation)>;
 
 #[derive(Clone, Copy)]
 enum Storage {
@@ -2229,7 +2230,7 @@ impl<'a, 's> Body<'a, 's> {
     /// A nested arm is not the terminator's code: it has the sources of its own blocks.
     fn enter(&mut self, target: BlockId, nested: &[(BlockId, Vec<Item>)]) -> Result<(), String> {
         if let Some((_, items)) = nested.iter().find(|(block, _)| *block == target) {
-            self.open_source(Location::new_synthesized());
+            self.open_source(DebugLocation::new_synthesized());
             self.emit_items(items, None)?;
             self.close_source();
             Ok(())
@@ -2512,12 +2513,14 @@ impl<'a, 's> Body<'a, 's> {
     /// Opens the source region of the code emitted until [`close_source`](Self::close_source).
     ///
     /// Regions nest, and the code of the inner one belongs to it only: the enclosing region pauses
-    /// until the inner one closes. A synthesized `span` gives its code no source, as does emission
-    /// without source map.
-    fn open_source(&mut self, span: Location) {
+    /// until the inner one closes. A synthesized `span` not inlined from anywhere gives its code no
+    /// source, as does emission without source map.
+    fn open_source(&mut self, span: DebugLocation) {
         self.sources.push(self.code.spans());
-        self.code
-            .set_source((self.source_map && !span.is_synthesized()).then_some(span));
+        self.code.set_source(
+            (self.source_map && (!span.is_synthesized() || span.inlined_at.is_some()))
+                .then_some(span),
+        );
     }
 
     fn close_source(&mut self) {
@@ -2744,9 +2747,9 @@ impl<'a, 's> Body<'a, 's> {
                 let MirType::Lowered(array_ty) = self.pointee_type(destination)? else {
                     return Err("array output must be a value place".into());
                 };
-                let layout = product_layout_spec(array_ty, op.span, &self.env)
+                let layout = product_layout_spec(array_ty, op.span.location, &self.env)
                     .ok_or("array representation")?;
-                let element = value_layout_for_type(*element_ty, op.span, &self.env)
+                let element = value_layout_for_type(*element_ty, op.span.location, &self.env)
                     .map_err(|e| format!("array element layout: {e:?}"))?;
                 let bytes = element
                     .size

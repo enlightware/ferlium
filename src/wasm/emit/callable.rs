@@ -701,7 +701,7 @@ impl Body<'_, '_> {
             let MirType::Lowered(ty) = self.pointee_type(capture)? else {
                 return Err("pointer capture".into());
             };
-            if let Ok(layout) = value_layout_for_type(ty, op.span, &self.env) {
+            if let Ok(layout) = value_layout_for_type(ty, op.span.location, &self.env) {
                 self.i(I::I32Const(layout.size as i32));
                 self.i(I::LocalSet(helpers.dynamic_size.as_u32()));
                 self.i(I::I32Const(layout.align as i32));

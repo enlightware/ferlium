@@ -1621,7 +1621,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     .map(|value| self.operand(body, args, registers, value))
                     .collect::<Result<Vec<_>, _>>()?;
                 self.invoke(callable, values)
-                    .map_err(|error| error.with_frame(id, operation.span))?;
+                    .map_err(|error| error.with_frame(id, operation.span.location))?;
                 None
             }
             DropInitialized { ty } => {
@@ -1687,7 +1687,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     callable,
                     arguments,
                     self.types.resolve(*yielded),
-                    operation.span,
+                    operation.span.location,
                 )?)
             }
             EndProject => {
@@ -1701,11 +1701,11 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 Some(Binding::Aggregate(Rc::new(self.clone_callable(
                     source,
                     self.types.resolve(*ty),
-                    operation.span,
+                    operation.span.location,
                 )?)))
             }
             DropClosureEnv | DropSubscriptEnv => {
-                self.drop_callable(place(0)?, operation.span)?;
+                self.drop_callable(place(0)?, operation.span.location)?;
                 None
             }
             Clone { .. } => {
@@ -1716,7 +1716,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     .map(operand)
                     .collect::<Result<_, _>>()?;
                 self.invoke(callable, values)
-                    .map_err(|error| error.with_frame(id, operation.span))?;
+                    .map_err(|error| error.with_frame(id, operation.span.location))?;
                 None
             }
             _ => unreachable!("lifecycle operation dispatch"),
@@ -1750,11 +1750,11 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         let marker = self.memory.len();
         let result = self
             .memory
-            .allocate(ScalarKind::Unit.ty(), Some(operation.span))?;
+            .allocate(ScalarKind::Unit.ty(), Some(operation.span.location))?;
         values.extend([Binding::Place(address), Binding::Place(result)]);
         let outcome = self.invoke(callable, values);
         self.memory.restore(marker);
-        outcome.map_err(|error| error.with_frame(id, operation.span))?;
+        outcome.map_err(|error| error.with_frame(id, operation.span.location))?;
         self.memory.clear(address)
     }
 
@@ -1795,7 +1795,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             if !same_storage_type(evidence.layout_type()?, ty) {
                 return Err(invalid("layout evidence differs from storage type"));
             }
-            let layout = self.witness_layout(evidence, operation.span)?;
+            let layout = self.witness_layout(evidence, operation.span.location)?;
             if matches!(operation.kind, Variant { .. }) {
                 self.memory.check_type_layout(ty, layout[0], layout[1])?;
             }
@@ -1857,7 +1857,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     dictionary,
                     &captures,
                     self.types.resolve(*ty),
-                    operation.span,
+                    operation.span.location,
                 )?;
                 Some(Binding::Aggregate(Rc::new(value)))
             }
@@ -1883,7 +1883,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     captures,
                     Some(self.types.resolve(*ty)),
                     false,
-                    Some(operation.span),
+                    Some(operation.span.location),
                 )?))
             }
             BuildSubscript { ty } => {
@@ -1902,7 +1902,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     None,
                     &[],
                     self.types.resolve(*ty),
-                    operation.span,
+                    operation.span.location,
                 )?;
                 Some(Binding::Aggregate(Rc::new(value)))
             }
@@ -1956,15 +1956,19 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     .collect::<Result<Vec<_>, _>>()?;
                 let destination = place(operation.operands.len() - 1)?;
                 self.memory
-                    .build_array(destination, element, &values, operation.span)?;
+                    .build_array(destination, element, &values, operation.span.location)?;
                 None
             }
             BuildDictionary { definition, .. } => {
                 let captures = (0..operation.operands.len())
                     .map(|i| operand(i)?.evidence(&self.memory))
                     .collect::<Result<_, _>>()?;
-                let evidence =
-                    self.build_evidence(*definition, captures, false, Some(operation.span))?;
+                let evidence = self.build_evidence(
+                    *definition,
+                    captures,
+                    false,
+                    Some(operation.span.location),
+                )?;
                 Some(Binding::Evidence(evidence))
             }
             DictEntry { entry_index, .. } => Some(Binding::Callable(
@@ -1973,17 +1977,19 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             Alloca { ty } => {
                 let ty = self.types.resolve(*ty);
                 Some(Binding::Place(match witnessed_layout {
-                    Some([size, align]) => {
-                        self.memory
-                            .allocate_witnessed(ty, size, align, Some(operation.span))?
-                    }
-                    None => self.memory.allocate(ty, Some(operation.span))?,
+                    Some([size, align]) => self.memory.allocate_witnessed(
+                        ty,
+                        size,
+                        align,
+                        Some(operation.span.location),
+                    )?,
+                    None => self.memory.allocate(ty, Some(operation.span.location))?,
                 }))
             }
-            AllocaPlace { pointing_to } => Some(Binding::Place(
-                self.memory
-                    .allocate_place(self.types.resolve(*pointing_to), Some(operation.span))?,
-            )),
+            AllocaPlace { pointing_to } => Some(Binding::Place(self.memory.allocate_place(
+                self.types.resolve(*pointing_to),
+                Some(operation.span.location),
+            )?)),
             RuntimeAlloc { pointee } => {
                 let (Scalar::Int(size), Scalar::Int(align)) = (
                     operand(0)?.scalar(&self.memory)?,
@@ -2007,14 +2013,14 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                         size,
                         align,
                         count,
-                        Some(operation.span),
+                        Some(operation.span.location),
                     )?))
                 } else {
                     Some(Binding::Place(self.memory.allocate_runtime(
                         pointee,
                         size,
                         align,
-                        Some(operation.span),
+                        Some(operation.span.location),
                     )?))
                 }
             }
@@ -2075,7 +2081,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     Binding::Aggregate(value) => self.memory.write_value(destination, &value)?,
                     Binding::Place(value) => self.memory.write_pointer(destination, value)?,
                     Binding::Callable(callable) => {
-                        self.store_callable(destination, callable, operation.span)?;
+                        self.store_callable(destination, callable, operation.span.location)?;
                     }
                     _ => return Err(invalid("expected a value register")),
                 }
@@ -2120,7 +2126,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 // Materializing one retains its evidence in the destination's own environment.
                 if let Binding::Callable(callable) = operand(0)? {
                     let destination = place(1)?;
-                    self.store_callable(destination, callable, operation.span)?;
+                    self.store_callable(destination, callable, operation.span.location)?;
                     return Ok(None);
                 }
                 let source = place(0)?;
@@ -2219,7 +2225,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                         SandboxViolationKind::CallDepthLimitExceeded {
                             limit: self.limits.execution.call_depth_limit,
                         },
-                        Some(operation.span),
+                        Some(operation.span.location),
                     ));
                 }
                 None
@@ -2229,7 +2235,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     if *fuel == 0 {
                         return Err(RuntimeError::new_sandbox_violation(
                             SandboxViolationKind::FuelExhausted,
-                            Some(operation.span),
+                            Some(operation.span.location),
                         ));
                     }
                     *fuel -= 1;

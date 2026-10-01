@@ -65,6 +65,9 @@ pub(crate) struct TextSourceMapEntry {
     pub(crate) from: usize,
     pub(crate) to: usize,
     pub(crate) span: Location,
+    /// 0 when `span` is the source of the code itself, `n` when it is the `n`th call site, from the
+    /// innermost outward, that the code was inlined through.
+    pub(crate) inline_depth: u32,
 }
 
 fn lower_static_evidence(evidence: &StaticEvidence) -> mir::value::StaticEvidence {
@@ -223,16 +226,31 @@ fn append_rendered_function(
     let rendered = function.render_with_source_map(env);
     let offset = output.len();
     output.push_str(&rendered.text);
-    source_map.extend(
-        rendered
-            .source_map
-            .into_iter()
-            .map(|entry| TextSourceMapEntry {
-                from: offset + entry.from,
-                to: offset + entry.to,
-                span: entry.span,
-            }),
-    );
+    // Only optimized code has inline chains, so the table is not asked for until one appears.
+    let mut sites = None;
+    for entry in rendered.source_map {
+        let (from, to) = (offset + entry.from, offset + entry.to);
+        let span = entry.span;
+        let call_sites: Vec<Location> = match span.inlined_at {
+            None => Vec::new(),
+            Some(_) => sites
+                .get_or_insert_with(|| env.inline_sites(env.current.module_id()).borrow())
+                .call_sites(span.inlined_at)
+                .collect(),
+        };
+        source_map.extend(
+            std::iter::once(span.location)
+                .chain(call_sites)
+                .zip(0..)
+                .filter(|(span, _)| !span.is_synthesized())
+                .map(|(span, inline_depth)| TextSourceMapEntry {
+                    from,
+                    to,
+                    span,
+                    inline_depth,
+                }),
+        );
+    }
 }
 
 /// The MIR blocks involved in the lowering of a case in a match expression.
@@ -3205,11 +3223,13 @@ impl<'a> Emitter<'a> {
         let normal = self.context.function.add_block();
         let error = match self.context.cleanup_unwind_target {
             CleanupUnwindTarget::CurrentScope => self
-                .innermost_pad(span)
-                .unwrap_or_else(|| self.propagate_error_block(span)),
+                .innermost_pad(span.location)
+                .unwrap_or_else(|| self.propagate_error_block(span.location)),
             CleanupUnwindTarget::Pad(target) => target,
-            CleanupUnwindTarget::PropagateWithoutPad => self.propagate_error_block(span),
-            CleanupUnwindTarget::FailureDuringCleanup => self.failure_during_cleanup_block(span),
+            CleanupUnwindTarget::PropagateWithoutPad => self.propagate_error_block(span.location),
+            CleanupUnwindTarget::FailureDuringCleanup => {
+                self.failure_during_cleanup_block(span.location)
+            }
         };
         let InsertionPoint::End(block) = self.context.point;
         let result = self

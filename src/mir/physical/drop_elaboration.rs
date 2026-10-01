@@ -180,7 +180,7 @@ pub(super) fn elaborate(
         edit.block_mut(cleanup)
             .operations
             .push(Operation::clear(op.span, op.operands[0].clone()));
-        expand_cleanup(&mut edit, &template, cleanup, 1, env);
+        expand_cleanup(&mut edit, &template, callee.module, cleanup, 1, env);
         edit.remove_unreachable_blocks();
         edit.reorder_blocks_in_reverse_postorder();
         body = edit.finish_unverified();

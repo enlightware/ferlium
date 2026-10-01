@@ -62,10 +62,9 @@ use super::{
     site::{OperationIndex, OperationSite},
 };
 use crate::{
-    Location,
     hir::value::LiteralValue,
     mir::{
-        self, BlockId, Function, Operation, OperationKind,
+        self, BlockId, DebugLocation, Function, Operation, OperationKind,
         edit::FunctionEdit,
         pass::budget::{FORWARD_BOOLEAN_BLOCKS, FORWARD_BOOLEAN_REPLAYED_OPERATIONS},
         terminator::{Terminator, TerminatorKind},
@@ -609,7 +608,12 @@ pub(crate) fn shadow_variant_tag_tests(func: &Function, env: ModuleEnv<'_>) -> O
 }
 
 impl Exit {
-    fn terminator(self, span: Location, edit: &mut FunctionEdit, block: BlockId) -> Terminator {
+    fn terminator(
+        self,
+        span: DebugLocation,
+        edit: &mut FunctionEdit,
+        block: BlockId,
+    ) -> Terminator {
         match self {
             Self::Goto(target) => Terminator::goto(span, target),
             Self::TestPlace {

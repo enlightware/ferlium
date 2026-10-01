@@ -41,8 +41,8 @@ use crate::mir::verify::verify_function;
 use crate::{
     hir::value::LiteralValue,
     mir::{
-        self, BasicBlock, BlockId, Function, Operation, OperationResult, Parameter, ParameterId,
-        ValueId,
+        self, BasicBlock, BlockId, DebugLocation, Function, Operation, OperationResult, Parameter,
+        ParameterId, ValueId,
         role::ValueRoles,
         terminator::{Terminator, TerminatorKind},
         value::{Constant, ConstantId},
@@ -515,6 +515,19 @@ impl FunctionEdit {
                 operation.operands.iter_mut().for_each(&mut visit);
             }
             visit_terminator_operands_mut(&mut block.terminator, &mut visit);
+        }
+    }
+
+    /// Visits the span of every operation and terminator.
+    pub(crate) fn visit_spans_mut(&mut self, mut visit: impl FnMut(&mut DebugLocation)) {
+        for block in &mut self.blocks {
+            for operation in &mut block.operations {
+                visit(&mut operation.span);
+            }
+            visit(&mut block.terminator.span);
+            if let TerminatorKind::Invoke { operation, .. } = &mut block.terminator.kind {
+                visit(&mut operation.span);
+            }
         }
     }
 

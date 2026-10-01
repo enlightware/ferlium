@@ -10,7 +10,6 @@ use super::{
     SnapshotTypeGraph, SnapshotTypeGraphBuilder, SnapshotTypeId,
 };
 use crate::{
-    Location,
     compiler::{
         Modules,
         artifacts::{MirArtifacts, Specialization},
@@ -18,7 +17,8 @@ use crate::{
     containers::DenseBitSet,
     hir::{function::ArgConvention, value::VariantPayloadStorage},
     mir::{
-        self, BasicBlock, Function, Operation, OperationKind, Parameter, ParameterKind,
+        self, BasicBlock, DebugLocation, Function, InlineSite, InlineSites, Operation,
+        OperationKind, Parameter, ParameterKind,
         operation::{ProductProjectionMetadata, VariantMetadata},
         pass::OptimizationStats,
         terminator::{Terminator, TerminatorKind},
@@ -63,6 +63,8 @@ pub(crate) struct SnapshotMirArtifacts {
     specializations: Vec<SnapshotSpecialization>,
     pruned_specializations: u64,
     bounds_checks_removed: u64,
+    /// The module's whole inline table once this stage was built
+    inline_sites: Vec<InlineSite>,
 }
 
 impl CompiledStdMirSnapshot {
@@ -70,6 +72,7 @@ impl CompiledStdMirSnapshot {
         stage: MirSnapshotStage,
         parent_checksum: CacheChecksum,
         artifacts: &MirArtifacts,
+        inline_sites: &InlineSites,
         module: &Module,
     ) -> Result<Self, SnapshotError> {
         Ok(Self {
@@ -79,7 +82,7 @@ impl CompiledStdMirSnapshot {
             std_source_fingerprint: env!("FERLIUM_STD_SOURCE_FINGERPRINT").to_owned(),
             semantic_build_fingerprint: env!("FERLIUM_SEMANTIC_BUILD_FINGERPRINT").to_owned(),
             parent_checksum,
-            payload: SnapshotMirArtifacts::capture(artifacts)?,
+            payload: SnapshotMirArtifacts::capture(artifacts, inline_sites)?,
         })
     }
 
@@ -211,7 +214,7 @@ struct SnapshotBasicBlock {
 #[derive(Debug, Clone)]
 struct SnapshotOperation {
     result_id: Option<mir::ValueId>,
-    span: Location,
+    span: DebugLocation,
     operands: Vec<SnapshotValue>,
     kind: SnapshotOperationKind,
 }
@@ -381,7 +384,7 @@ enum SnapshotOperationKind {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone)]
 struct SnapshotTerminator {
-    span: Location,
+    span: DebugLocation,
     kind: SnapshotTerminatorKind,
 }
 
@@ -418,8 +421,25 @@ enum SnapshotTerminatorKind {
     },
 }
 
+/// Extends `module`'s live inline table with a snapshot's, which must extend it.
+pub(super) fn restore_inline_sites(
+    sites: &[InlineSite],
+    module: &Module,
+    modules: &Modules,
+) -> Result<(), SnapshotError> {
+    ModuleEnv::new(module, modules)
+        .inline_sites(module.module_id())
+        .borrow_mut()
+        .restore(sites)
+        .then_some(())
+        .ok_or(SnapshotError::StaleSnapshot)
+}
+
 impl SnapshotMirArtifacts {
-    pub(crate) fn capture(artifacts: &MirArtifacts) -> Result<Self, SnapshotError> {
+    pub(crate) fn capture(
+        artifacts: &MirArtifacts,
+        inline_sites: &InlineSites,
+    ) -> Result<Self, SnapshotError> {
         let native_types = NativeTypeCatalog::std();
         let native_name = |native: &BareNativeTypeB| native_types.canonical_name(native);
         let mut graph = SnapshotTypeGraphBuilder::new(&native_name);
@@ -451,6 +471,7 @@ impl SnapshotMirArtifacts {
             specializations,
             pruned_specializations: artifacts.pruned_specializations() as u64,
             bounds_checks_removed: stats.bounds_checks_removed as u64,
+            inline_sites: inline_sites.sites().to_vec(),
         })
     }
 
@@ -474,6 +495,7 @@ impl SnapshotMirArtifacts {
         if verify {
             verify_functions(&functions, &[], module, modules)?;
         }
+        restore_inline_sites(&self.inline_sites, module, modules)?;
         Ok(MirArtifacts::from_snapshot_raw(functions, module, modules))
     }
 
@@ -501,6 +523,7 @@ impl SnapshotMirArtifacts {
         if verify {
             verify_functions(&functions, &specializations, module, modules)?;
         }
+        restore_inline_sites(&self.inline_sites, module, modules)?;
         Ok(MirArtifacts::from_snapshot_optimized(
             functions,
             specializations,
@@ -1339,8 +1362,10 @@ mod tests {
 
     #[test]
     fn invariant_failure_round_trips_its_diagnostic() {
-        let terminator =
-            Terminator::invariant_failure(Location::new_synthesized(), ustr("broken invariant"));
+        let terminator = Terminator::invariant_failure(
+            DebugLocation::new_synthesized(),
+            ustr("broken invariant"),
+        );
         let mut graph = SnapshotTypeGraphBuilder::new(&|_| None);
         let stored = SnapshotTerminator::capture(&terminator, &mut graph).unwrap();
         let bytes = postcard::to_allocvec(&stored).unwrap();
@@ -1358,9 +1383,16 @@ mod tests {
         let entry = session.raw_modules().get(STD_MODULE_ID).unwrap();
         let module = entry.module().unwrap();
         let raw = entry.raw_mir().unwrap();
+        let inline_sites = entry.artifacts().inline_sites();
 
-        let raw_snapshot =
-            CompiledStdMirSnapshot::capture(MirSnapshotStage::Raw, [7; 32], raw, module).unwrap();
+        let raw_snapshot = CompiledStdMirSnapshot::capture(
+            MirSnapshotStage::Raw,
+            [7; 32],
+            raw,
+            &inline_sites.borrow(),
+            module,
+        )
+        .unwrap();
         let encoded = raw_snapshot.encode().unwrap();
         let decoded = CompiledStdMirSnapshot::decode(&encoded).unwrap();
         assert_eq!(
@@ -1387,9 +1419,14 @@ mod tests {
         let restored_raw = decoded
             .restore_raw_verified(module, session.raw_modules())
             .unwrap();
-        let recaptured_raw =
-            CompiledStdMirSnapshot::capture(MirSnapshotStage::Raw, [7; 32], &restored_raw, module)
-                .unwrap();
+        let recaptured_raw = CompiledStdMirSnapshot::capture(
+            MirSnapshotStage::Raw,
+            [7; 32],
+            &restored_raw,
+            &inline_sites.borrow(),
+            module,
+        )
+        .unwrap();
         assert_eq!(recaptured_raw.encode().unwrap(), encoded);
 
         let optimized = MirArtifacts::optimize(raw, module, &session);
@@ -1397,6 +1434,7 @@ mod tests {
             MirSnapshotStage::Optimized,
             [9; 32],
             &optimized,
+            &inline_sites.borrow(),
             module,
         )
         .unwrap();
@@ -1417,6 +1455,7 @@ mod tests {
             MirSnapshotStage::Optimized,
             [9; 32],
             &restored_optimized,
+            &inline_sites.borrow(),
             module,
         )
         .unwrap();

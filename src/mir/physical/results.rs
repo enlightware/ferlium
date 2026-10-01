@@ -13,8 +13,8 @@ use crate::{
     containers::b,
     hir::{function::ArgConvention, value::LiteralValue},
     mir::{
-        BasicBlock, BlockId, Function, Operation, OperationKind, Parameter, ParameterId,
-        ParameterKind, Value,
+        BasicBlock, BlockId, DebugLocation, Function, Operation, OperationKind, Parameter,
+        ParameterId, ParameterKind, Value,
         edit::FunctionEdit,
         operation::CallMetadata,
         terminator::{Terminator, TerminatorKind},
@@ -269,7 +269,7 @@ fn store_result(
     edit: &mut FunctionEdit,
     result: Value,
     value: Constant,
-    span: Location,
+    span: DebugLocation,
     env: ModuleEnv<'_>,
 ) -> Operation {
     let constant = edit.add_constant(value.ty, value.representation, &env);
@@ -526,7 +526,7 @@ fn build_adapter(
         ty: result_ty,
         representation: result_value,
     };
-    let store = store_result(&mut edit, result, value, span, env);
+    let store = store_result(&mut edit, result, value, span.into(), env);
     edit.block_mut(BlockId::from_index(usize::from(fallible)))
         .operations
         .push(store);

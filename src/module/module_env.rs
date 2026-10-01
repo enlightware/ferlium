@@ -1,6 +1,8 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
+use std::cell::RefCell;
+
 use ustr::{Ustr, ustr};
 
 use crate::{
@@ -10,6 +12,7 @@ use crate::{
     format::FormatWith,
     hir::function::CallableDefinition,
     internal_compilation_error,
+    mir::InlineSites,
     module::{
         FunctionId, Module, ModuleFunction, ModuleId, Modules, ProjectionEntry, ProjectionKey,
         ProjectionOrigin, ProjectionReceiverKey, SubscriptId, SubscriptMemberFunctionKind, TraitId,
@@ -555,6 +558,15 @@ impl<'m> ModuleEnv<'m> {
             modules,
             unsafe_allowed: CompilationCapabilities::default().allows_unsafe(current.module_id()),
         }
+    }
+
+    /// The inline chains of `module`'s MIR, which its bodies' spans index.
+    pub(crate) fn inline_sites(self, module: ModuleId) -> &'m RefCell<InlineSites> {
+        self.modules
+            .get(module)
+            .unwrap_or_else(|| panic!("module {module} is not registered"))
+            .artifacts()
+            .inline_sites()
     }
 
     pub(crate) fn with_capabilities(mut self, capabilities: CompilationCapabilities) -> Self {

@@ -8,7 +8,7 @@ use std::ops::Range;
 use smallvec::SmallVec;
 use wasm_encoder::{Function as WasmFunction, Instruction as I, MemArg};
 
-use crate::Location;
+use crate::mir::DebugLocation;
 
 /// Where emitted instructions go: straight into a function, or through [`Code`]'s rewrites.
 pub(super) trait Instructions {
@@ -53,7 +53,7 @@ pub(super) struct Code {
     /// The spans of the code being emitted.
     spans: Spans,
     /// The span sets that [`Spans`] index, the first one empty.
-    span_sets: Vec<SmallVec<[Location; 1]>>,
+    span_sets: Vec<SmallVec<[DebugLocation; 1]>>,
     /// Written byte ranges with the spans whose work they do, ordered and disjoint.
     source_map: Vec<(Range<usize>, Spans)>,
 }
@@ -80,7 +80,7 @@ impl Code {
     }
 
     /// Sets the span of the code emitted from now on, if it has one.
-    pub(super) fn set_source(&mut self, source: Option<Location>) {
+    pub(super) fn set_source(&mut self, source: Option<DebugLocation>) {
         self.spans = match source {
             // Adjacent code of one span then shares its set, and so its range.
             Some(span) if self.span_sets.last().is_some_and(|last| last[..] == [span]) => {
@@ -91,14 +91,14 @@ impl Code {
         };
     }
 
-    fn span_set(&mut self, set: SmallVec<[Location; 1]>) -> Spans {
+    fn span_set(&mut self, set: SmallVec<[DebugLocation; 1]>) -> Spans {
         let spans = Spans(u32::try_from(self.span_sets.len()).expect("span sets fit in u32"));
         self.span_sets.push(set);
         spans
     }
 
     /// The function and its source map, with one entry per span of each written range.
-    pub(super) fn finish(mut self) -> (WasmFunction, Vec<(Range<usize>, Location)>) {
+    pub(super) fn finish(mut self) -> (WasmFunction, Vec<(Range<usize>, DebugLocation)>) {
         self.flush();
         let span_sets = &self.span_sets;
         let source_map = self
@@ -158,7 +158,7 @@ impl Code {
     fn merge(&mut self, count: usize, spans: Spans) -> Spans {
         let start = self.held.len() - count;
         let mut merged = Spans::NONE;
-        let mut union = None::<SmallVec<[Location; 1]>>;
+        let mut union = None::<SmallVec<[DebugLocation; 1]>>;
         let held = self.held[start..].iter().map(|(_, spans)| *spans);
         for held in held.chain([spans]).collect::<SmallVec<[Spans; 4]>>() {
             if held == merged || held == Spans::NONE {
@@ -394,7 +394,7 @@ mod tests {
     use wasm_encoder::BlockType;
 
     use super::*;
-    use crate::SourceId;
+    use crate::{Location, SourceId, mir::InlineSiteId};
 
     fn memarg(offset: u64) -> MemArg {
         MemArg {
@@ -476,8 +476,8 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn rewrites_keep_the_sources_of_what_they_merge() {
-        let span = |start| Location::new(start, start + 1, SourceId::new(1));
-        let sources = |input: &[(Option<Location>, I<'_>)]| {
+        let span = |start| DebugLocation::new(Location::new(start, start + 1, SourceId::new(1)));
+        let sources = |input: &[(Option<DebugLocation>, I<'_>)]| {
             let mut code = Code::new(WasmFunction::new([]));
             for (source, instruction) in input {
                 code.set_source(*source);
@@ -513,6 +513,18 @@ mod tests {
                 (Some(b), I::LocalSet(2)),
             ]),
             [a, b]
+        );
+        // One source inlined at two call sites is two sources.
+        let inlined = |site| DebugLocation {
+            inlined_at: Some(InlineSiteId::new(site)),
+            ..a
+        };
+        assert_eq!(
+            sources(&[
+                (Some(inlined(0)), I::LocalSet(3)),
+                (Some(inlined(1)), I::LocalGet(3))
+            ]),
+            [inlined(0), inlined(1)]
         );
     }
 

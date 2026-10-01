@@ -34,12 +34,12 @@ use itertools::Itertools;
 use ustr::Ustr;
 
 use crate::{
-    Location, cached_primitive_ty,
+    cached_primitive_ty,
     containers::{B, DenseBitSet, b},
     format::FormatWith,
     hir::value::VariantPayloadStorage,
     mir,
-    mir::ValueId,
+    mir::{DebugLocation, ValueId},
     module::{FunctionId, ModuleEnv, ProjectionIndex, TraitDictionaryId, TraitId},
     types::{
         effects::{EffType, Effect, PrimitiveEffect},
@@ -60,7 +60,7 @@ pub struct Operation {
     result_id: Option<ValueId>,
 
     /// The region of the code corresponding to this operation.
-    pub span: Location,
+    pub span: DebugLocation,
 
     /// The operands of the operation.
     pub operands: Box<[mir::Value]>,
@@ -176,13 +176,13 @@ impl Operation {
     /// Inlining decomposes a callee's operation and reassembles it with the caller's operands; the
     /// per-kind constructors above remain the only way to create one during lowering.
     pub(crate) fn from_parts(
-        span: Location,
+        span: impl Into<DebugLocation>,
         operands: Box<[mir::Value]>,
         kind: OperationKind,
     ) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands,
             kind,
         }
@@ -222,10 +222,10 @@ impl Operation {
     }
 
     /// Creates an `alloca` operation for storage whose size is known at compile time.
-    pub fn alloca(span: Location, ty: Type) -> Self {
+    pub fn alloca(span: impl Into<DebugLocation>, ty: Type) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([]),
             kind: OperationKind::Alloca { ty },
         }
@@ -236,10 +236,10 @@ impl Operation {
     /// `witness` is the place of the `Value` dictionary witnessing the run-time layout of `ty`;
     /// its `SIZE` and `ALIGN` associated const entries determine the size and alignment of the
     /// allocation.
-    pub fn alloca_dynamic(span: Location, ty: Type, witness: mir::Value) -> Self {
+    pub fn alloca_dynamic(span: impl Into<DebugLocation>, ty: Type, witness: mir::Value) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([witness]),
             kind: OperationKind::Alloca { ty },
         }
@@ -247,10 +247,10 @@ impl Operation {
 
     /// Creates an `alloca_place` operation: stack storage for a *pointer* to an instance of
     /// `pointing_to`. No operands; the result is the place of that pointer slot.
-    pub fn alloca_place(span: Location, pointing_to: Type) -> Self {
+    pub fn alloca_place(span: impl Into<DebugLocation>, pointing_to: Type) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([]),
             kind: OperationKind::AllocaPlace { pointing_to },
         }
@@ -264,14 +264,14 @@ impl Operation {
     /// uninitialized and remains live until its address is transferred to owning storage or passed
     /// to [`Self::runtime_dealloc`]. A zero-byte allocation is valid and reclaimable.
     pub fn runtime_alloc(
-        span: Location,
+        span: impl Into<DebugLocation>,
         pointee: Type,
         size: mir::Value,
         align: mir::Value,
     ) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([size, align]),
             kind: OperationKind::RuntimeAlloc { pointee },
         }
@@ -279,7 +279,7 @@ impl Operation {
 
     /// Allocates repeated storage, retaining its element count even for zero-sized elements.
     pub fn runtime_alloc_array(
-        span: Location,
+        span: impl Into<DebugLocation>,
         pointee: Type,
         size: mir::Value,
         align: mir::Value,
@@ -287,7 +287,7 @@ impl Operation {
     ) -> Self {
         Self {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([size, align, count]),
             kind: OperationKind::RuntimeAlloc { pointee },
         }
@@ -298,10 +298,10 @@ impl Operation {
     /// The target runtime recovers the allocation's byte extent and alignment from the address;
     /// neither is repeated in MIR. The allocation's initialized values must already have been
     /// dropped and its owning storage must be cleared separately.
-    pub fn runtime_dealloc(span: Location, address: mir::Value) -> Self {
+    pub fn runtime_dealloc(span: impl Into<DebugLocation>, address: mir::Value) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([address]),
             kind: OperationKind::RuntimeDealloc,
         }
@@ -332,7 +332,7 @@ impl Operation {
     /// of the visible arguments; a bare function value adds nothing. The same contract governs the
     /// [`drop`](Self::drop) callee.
     pub fn call<T: IntoIterator<Item = mir::Value>>(
-        span: Location,
+        span: impl Into<DebugLocation>,
         callee: mir::Value,
         arguments: T,
         ty: CallImplType,
@@ -344,7 +344,7 @@ impl Operation {
     ///
     /// See [`Instantiation`] and `doc/generic-instantiation.md`.
     pub fn instantiated_call<T: IntoIterator<Item = mir::Value>>(
-        span: Location,
+        span: impl Into<DebugLocation>,
         callee: mir::Value,
         arguments: T,
         ty: CallImplType,
@@ -354,7 +354,7 @@ impl Operation {
         operands.extend(arguments);
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: operands.into_boxed_slice(),
             kind: OperationKind::Call {
                 ty: b(ty),
@@ -381,7 +381,7 @@ impl Operation {
     /// place flows out as this operation's result register). Mirrors the HIR interpreter's
     /// `call_accessor_until_yield`.
     pub fn project<T: IntoIterator<Item = mir::Value>>(
-        span: Location,
+        span: impl Into<DebugLocation>,
         callee: mir::Value,
         arguments: T,
         yielded: Type,
@@ -391,7 +391,7 @@ impl Operation {
         operands.extend(arguments);
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: operands.into_boxed_slice(),
             kind: OperationKind::Project { yielded, ty: b(ty) },
         }
@@ -401,10 +401,10 @@ impl Operation {
     /// `0` is the place a [`project`](Self::project) exposed; this resumes that suspended accessor
     /// from after its `yield`, runs its slide to completion, and reclaims the accessor frame. Mirrors
     /// the HIR interpreter's `resume_suspended_accessor_epilogue`.
-    pub fn end_project(span: Location, place: mir::Value) -> Self {
+    pub fn end_project(span: impl Into<DebugLocation>, place: mir::Value) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([place]),
             kind: OperationKind::EndProject,
         }
@@ -417,10 +417,10 @@ impl Operation {
     /// the scrutinee stays live for the remaining alternatives and the arm body. An ordinary
     /// pattern reads a literal snapshot of a scalar or composite Ferlium value. A symbolic
     /// `VariantTag` pattern instead requires the opaque tag result of `extract_tag`.
-    pub fn compare_eq(span: Location, v1: mir::Value, v2: mir::Value) -> Self {
+    pub fn compare_eq(span: impl Into<DebugLocation>, v1: mir::Value, v2: mir::Value) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([v1, v2]),
             kind: OperationKind::CompareEqual,
         }
@@ -432,10 +432,10 @@ impl Operation {
     /// `source` must be a **place** whose pointee has a representation-copyable value (currently an
     /// internal place pointer). The source stays initialized. Ownership transfers are explicit
     /// [`move_value`](Self::move_value) operations rather than a run-time choice made by `load`.
-    pub fn load(span: Location, source: mir::Value) -> Self {
+    pub fn load(span: impl Into<DebugLocation>, source: mir::Value) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([source]),
             kind: OperationKind::Load,
         }
@@ -450,7 +450,7 @@ impl Operation {
     /// place without reading or moving the aggregate and lets static and run-time indices share one
     /// operation through physical lowering.
     pub fn product_subfield(
-        span: Location,
+        span: impl Into<DebugLocation>,
         source: mir::Value,
         index: mir::Value,
         ty: Type,
@@ -463,7 +463,7 @@ impl Operation {
         operands.extend(witnesses);
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: operands.into_boxed_slice(),
             kind: OperationKind::Subfield {
                 ty,
@@ -484,7 +484,7 @@ impl Operation {
     /// aligned for `ty`. `member` identifies a logical product field, including zero-sized fields
     /// that share their byte address with another member.
     pub fn address_offset(
-        span: Location,
+        span: impl Into<DebugLocation>,
         base: mir::Value,
         byte_offset: mir::Value,
         ty: Type,
@@ -492,7 +492,7 @@ impl Operation {
     ) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([base, byte_offset]),
             kind: OperationKind::AddressOffset { ty, member },
         }
@@ -501,14 +501,14 @@ impl Operation {
     /// Creates a physical byte-address projection to a slot containing a place of `pointing_to`.
     /// Loading the result yields the stored place rather than the pointee value.
     pub fn address_offset_place(
-        span: Location,
+        span: impl Into<DebugLocation>,
         base: mir::Value,
         byte_offset: mir::Value,
         pointing_to: Type,
     ) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([base, byte_offset]),
             kind: OperationKind::AddressOffsetPlace { pointing_to },
         }
@@ -516,7 +516,7 @@ impl Operation {
 
     /// Addresses one repeated element, preserving its logical index alongside its byte offset.
     pub fn address_offset_indexed(
-        span: Location,
+        span: impl Into<DebugLocation>,
         base: mir::Value,
         byte_offset: mir::Value,
         index: mir::Value,
@@ -524,7 +524,7 @@ impl Operation {
     ) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([base, byte_offset, index]),
             kind: OperationKind::AddressOffset { ty, member: None },
         }
@@ -534,7 +534,7 @@ impl Operation {
     /// case. The stored tag supplies inline/indirect classification. `layout_witness` is present
     /// exactly when `ty` has a run-time-dependent layout and supplies `Value<ty>`.
     pub fn variant_payload(
-        span: Location,
+        span: impl Into<DebugLocation>,
         source: mir::Value,
         index: mir::Value,
         ty: Type,
@@ -545,7 +545,7 @@ impl Operation {
         operands.extend(layout_witness);
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: operands.into_boxed_slice(),
             kind: OperationKind::Subfield {
                 ty,
@@ -565,7 +565,7 @@ impl Operation {
     /// retains this projection together with relocatable metadata for the referenced definition;
     /// whole-program assembly selects its target representation.
     pub fn dict_entry(
-        span: Location,
+        span: impl Into<DebugLocation>,
         dict: mir::Value,
         trait_id: TraitId,
         entry_index: TraitDictionaryEntryIndex,
@@ -573,7 +573,7 @@ impl Operation {
     ) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([dict]),
             kind: OperationKind::DictEntry {
                 trait_id,
@@ -588,14 +588,14 @@ impl Operation {
     /// independently of stack regions. Selected entry values retain their required evidence;
     /// invocation borrows that evidence without cloning source values.
     pub fn build_dictionary(
-        span: Location,
+        span: impl Into<DebugLocation>,
         definition: TraitDictionaryId,
         captures: Vec<mir::Value>,
         ty: Type,
     ) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: captures.into_boxed_slice(),
             kind: OperationKind::BuildDictionary { definition, ty },
         }
@@ -609,14 +609,14 @@ impl Operation {
     /// `ref`/`mut` member — a function value of type `ty` bundling the subscript's captured hidden
     /// evidence — which a `call`/`project` consumes by reference exactly like a closure callee.
     pub fn subscript_member(
-        span: Location,
+        span: impl Into<DebugLocation>,
         subscript: mir::Value,
         mut_member: bool,
         ty: Type,
     ) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([subscript]),
             kind: OperationKind::SubscriptMember { mut_member, ty },
         }
@@ -626,7 +626,7 @@ impl Operation {
     /// existing evidence environment. HIR elaboration flattens ordinary construction onto an open
     /// symbolic base.
     pub fn build_subscript_evidence(
-        span: Location,
+        span: impl Into<DebugLocation>,
         subscript: mir::Value,
         evidence: Vec<mir::Value>,
         ty: Type,
@@ -635,37 +635,45 @@ impl Operation {
         operands.extend(evidence);
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: operands.into_boxed_slice(),
             kind: OperationKind::BuildSubscriptEvidence { ty },
         }
     }
 
     /// Materializes closed subscript evidence as an owned first-class subscript value.
-    pub fn build_subscript(span: Location, subscript: mir::Value, ty: Type) -> Self {
+    pub fn build_subscript(
+        span: impl Into<DebugLocation>,
+        subscript: mir::Value,
+        ty: Type,
+    ) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([subscript]),
             kind: OperationKind::BuildSubscript { ty },
         }
     }
 
     /// Deep-clones the environment of the first-class subscript at `source`.
-    pub fn clone_subscript_env(span: Location, source: mir::Value, ty: Type) -> Self {
+    pub fn clone_subscript_env(
+        span: impl Into<DebugLocation>,
+        source: mir::Value,
+        ty: Type,
+    ) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([source]),
             kind: OperationKind::CloneSubscriptEnv { ty },
         }
     }
 
     /// Drops the owned environment of the first-class subscript at `target`.
-    pub fn drop_subscript_env(span: Location, target: mir::Value) -> Self {
+    pub fn drop_subscript_env(span: impl Into<DebugLocation>, target: mir::Value) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([target]),
             kind: OperationKind::DropSubscriptEnv,
         }
@@ -673,14 +681,14 @@ impl Operation {
 
     /// Borrows one callable member from a closed subscript without copying its environment.
     pub fn borrow_subscript_member(
-        span: Location,
+        span: impl Into<DebugLocation>,
         subscript: mir::Value,
         mut_member: bool,
         ty: Type,
     ) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([subscript]),
             kind: OperationKind::BorrowSubscriptMember { mut_member, ty },
         }
@@ -694,7 +702,7 @@ impl Operation {
     /// carries its `Value` layout witness so physical lowering can calculate its case-specific
     /// offset and allocate indirect storage.
     pub fn variant(
-        span: Location,
+        span: impl Into<DebugLocation>,
         tag: Ustr,
         t: Type,
         payload_ty: Type,
@@ -708,7 +716,7 @@ impl Operation {
         operands.extend(layout_witness);
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: operands.into_boxed_slice(),
             kind: OperationKind::Variant {
                 tag,
@@ -728,7 +736,7 @@ impl Operation {
     /// left to the existing in-place lowering. The trailing destination must name uninitialized
     /// `[element_ty]` storage.
     pub fn build_array<T: IntoIterator<Item = mir::Value>>(
-        span: Location,
+        span: impl Into<DebugLocation>,
         element_ty: Type,
         elements: T,
         destination: mir::Value,
@@ -737,7 +745,7 @@ impl Operation {
         operands.push(destination);
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: operands.into_boxed_slice(),
             kind: OperationKind::BuildArray { element_ty },
         }
@@ -752,10 +760,10 @@ impl Operation {
     /// mask. The reference interpreter keeps the tag symbolically. A concrete backend resolves the
     /// symbol through the compilation session's tag table only when lowering this opaque value to
     /// the ABI's 31-bit numeric identity.
-    pub fn extract_tag(span: Location, variant: mir::Value) -> Self {
+    pub fn extract_tag(span: impl Into<DebugLocation>, variant: mir::Value) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([variant]),
             kind: OperationKind::ExtractTag,
         }
@@ -766,10 +774,13 @@ impl Operation {
     /// This is a physical-MIR operation over the representation bit packed into the stored tag.
     /// Unlike [`Self::extract_tag`], its result is an ordinary materialized `bool` suitable for
     /// control flow inside generated payload addressors.
-    pub fn extract_payload_indirection(span: Location, variant: mir::Value) -> Self {
+    pub fn extract_payload_indirection(
+        span: impl Into<DebugLocation>,
+        variant: mir::Value,
+    ) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([variant]),
             kind: OperationKind::ExtractPayloadIndirection,
         }
@@ -780,10 +791,10 @@ impl Operation {
     /// Dense executors implement this with the drop flag associated with the place. The operation
     /// lets physical lowering spell conditional cleanup as ordinary control flow without exposing
     /// the executor's flag storage layout in MIR.
-    pub fn is_initialized(span: Location, place: mir::Value) -> Self {
+    pub fn is_initialized(span: impl Into<DebugLocation>, place: mir::Value) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([place]),
             kind: OperationKind::IsInitialized,
         }
@@ -795,10 +806,10 @@ impl Operation {
     /// Paired with `stack_restore`, this brackets a region (such as a loop body) so that the
     /// temporaries it allocates are reclaimed on every back-edge and exit, bounding stack use. The
     /// marker is an immutable frontier and may be restored repeatedly.
-    pub fn stack_save(span: Location) -> Self {
+    pub fn stack_save(span: impl Into<DebugLocation>) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([]),
             kind: OperationKind::StackSave,
         }
@@ -806,30 +817,30 @@ impl Operation {
 
     /// Creates a `stack_restore` operation, which resets the top of the stack to `marker` (the
     /// result of an earlier `stack_save`), reclaiming everything allocated since.
-    pub fn stack_restore(span: Location, marker: mir::Value) -> Self {
+    pub fn stack_restore(span: impl Into<DebugLocation>, marker: mir::Value) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([marker]),
             kind: OperationKind::StackRestore,
         }
     }
 
     /// Creates a runtime call-depth guard corresponding to HIR `CheckCallDepth`.
-    pub fn check_call_depth(span: Location) -> Self {
+    pub fn check_call_depth(span: impl Into<DebugLocation>) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([]),
             kind: OperationKind::CheckCallDepth,
         }
     }
 
     /// Creates a runtime fuel guard corresponding to HIR `CheckFuel`.
-    pub fn check_fuel(span: Location) -> Self {
+    pub fn check_fuel(span: impl Into<DebugLocation>) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([]),
             kind: OperationKind::CheckFuel,
         }
@@ -842,10 +853,14 @@ impl Operation {
     /// is absent or contains a `TrivialCopy` representation — so the emitter owes an explicit
     /// `drop` before overwriting a managed/custom-drop pointee. Yields no register; `value` is
     /// consumed (moved, for a non-trivial value).
-    pub fn store(span: Location, value: mir::Value, destination: mir::Value) -> Self {
+    pub fn store(
+        span: impl Into<DebugLocation>,
+        value: mir::Value,
+        destination: mir::Value,
+    ) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([value, destination]),
             kind: OperationKind::Store,
         }
@@ -854,10 +869,10 @@ impl Operation {
     /// Creates a `clear` operation that marks the storage at `destination` absent. The previous
     /// state must carry no live semantic drop obligation; clearing is initialization bookkeeping,
     /// not a semantic drop.
-    pub fn clear(span: Location, destination: mir::Value) -> Self {
+    pub fn clear(span: impl Into<DebugLocation>, destination: mir::Value) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([destination]),
             kind: OperationKind::Clear,
         }
@@ -873,10 +888,14 @@ impl Operation {
     /// **Requirement:** the pointee must have a **statically known layout** — a real backend sizes the
     /// copy from the type alone. Copies are always statically sized; a generic transfer is a
     /// [`move_dynamic`](Self::move_dynamic), never a `memcpy`.
-    pub fn memcpy(span: Location, source: mir::Value, destination: mir::Value) -> Self {
+    pub fn memcpy(
+        span: impl Into<DebugLocation>,
+        source: mir::Value,
+        destination: mir::Value,
+    ) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([source, destination]),
             kind: OperationKind::Memcpy,
         }
@@ -888,10 +907,14 @@ impl Operation {
     /// [`move_dynamic`](Self::move_dynamic). Unlike a copy, a move needs no `Value::clone`; unlike
     /// `memcpy`, it consumes the source.
     /// Moving an initialized place to itself leaves it unchanged.
-    pub fn move_value(span: Location, source: mir::Value, destination: mir::Value) -> Self {
+    pub fn move_value(
+        span: impl Into<DebugLocation>,
+        source: mir::Value,
+        destination: mir::Value,
+    ) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([source, destination]),
             kind: OperationKind::Move,
         }
@@ -904,14 +927,14 @@ impl Operation {
     /// (the witness is metadata it ignores); a real backend uses the witness to size the copy.
     /// As with [`move_value`](Self::move_value), an initialized self-move leaves storage unchanged.
     pub fn move_dynamic(
-        span: Location,
+        span: impl Into<DebugLocation>,
         source: mir::Value,
         destination: mir::Value,
         witness: mir::Value,
     ) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([source, destination, witness]),
             kind: OperationKind::Move,
         }
@@ -920,7 +943,7 @@ impl Operation {
     /// Observe `value` without changing it while preventing optimization from deriving its
     /// contents. A trailing witness supplies a run-time layout for generic storage.
     pub fn black_box(
-        span: Location,
+        span: impl Into<DebugLocation>,
         ty: Type,
         value: mir::Value,
         witness: Option<mir::Value>,
@@ -929,7 +952,7 @@ impl Operation {
         operands.extend(witness);
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: operands.into_boxed_slice(),
             kind: OperationKind::BlackBox { ty },
         }
@@ -941,7 +964,7 @@ impl Operation {
     /// and cannot fail partway through the transition.
     /// A third operand, when present, witnesses a dynamic layout as for `move_dynamic`.
     pub fn replace(
-        span: Location,
+        span: impl Into<DebugLocation>,
         replacement: mir::Value,
         destination: mir::Value,
         witness: Option<mir::Value>,
@@ -950,7 +973,7 @@ impl Operation {
         operands.extend(witness);
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: operands.into_boxed_slice(),
             kind: OperationKind::Replace,
         }
@@ -960,7 +983,7 @@ impl Operation {
     /// extent. For distinct places, the source becomes absent and the previously absent destination
     /// becomes initialized. An initialized self-move leaves storage unchanged.
     pub fn move_bytes(
-        span: Location,
+        span: impl Into<DebugLocation>,
         ty: Type,
         source: mir::Value,
         destination: mir::Value,
@@ -968,7 +991,7 @@ impl Operation {
     ) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([source, destination, size]),
             kind: OperationKind::MoveBytes { ty },
         }
@@ -985,10 +1008,15 @@ impl Operation {
     /// [`mir::Value::Function`] or the **place** of a function value (e.g. the `Value::drop` method
     /// slot `project`ed out of a dictionary), read by reference and never loaded into a register.
     /// Optimizations may append hidden evidence captured by a resolved dictionary entry after it.
-    pub fn drop(span: Location, target: mir::Value, callee: mir::Value, ty: Type) -> Self {
+    pub fn drop(
+        span: impl Into<DebugLocation>,
+        target: mir::Value,
+        callee: mir::Value,
+        ty: Type,
+    ) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([target, callee]),
             kind: OperationKind::Drop { ty },
         }
@@ -996,7 +1024,7 @@ impl Operation {
 
     /// Unconditionally destroys a fully initialized pointee; physical lowering supplies any guard.
     pub fn drop_initialized(
-        span: Location,
+        span: impl Into<DebugLocation>,
         target: mir::Value,
         callee: mir::Value,
         ty: Type,
@@ -1017,7 +1045,7 @@ impl Operation {
     /// Source-infallible: `Value::clone` is declared with an empty effect row, and a fallible impl
     /// is rejected at compile time, so a clone never needs an `invoke`.
     pub fn clone_value(
-        span: Location,
+        span: impl Into<DebugLocation>,
         source: mir::Value,
         destination: mir::Value,
         callee: mir::Value,
@@ -1025,7 +1053,7 @@ impl Operation {
     ) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([source, destination, callee]),
             kind: OperationKind::Clone { ty },
         }
@@ -1045,7 +1073,7 @@ impl Operation {
     /// Operand layout is `[hidden_dicts…, captures…, env_dict?]`. The result is a register holding
     /// the closure value (a runtime `FunctionValue`).
     pub fn build_closure(
-        span: Location,
+        span: impl Into<DebugLocation>,
         function: FunctionId,
         hidden_dicts: Vec<mir::Value>,
         env_dict: Option<mir::Value>,
@@ -1060,7 +1088,7 @@ impl Operation {
         operands.extend(env_dict);
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: operands.into_boxed_slice(),
             kind: OperationKind::BuildClosure {
                 function,
@@ -1073,10 +1101,10 @@ impl Operation {
 
     /// Creates a `clone_closure_env` operation, which deep-clones the captured environment of the
     /// closure at the place given by `source`, yielding a fresh closure value of type `ty`.
-    pub fn clone_closure_env(span: Location, source: mir::Value, ty: Type) -> Self {
+    pub fn clone_closure_env(span: impl Into<DebugLocation>, source: mir::Value, ty: Type) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([source]),
             kind: OperationKind::CloneClosureEnv { ty },
         }
@@ -1084,10 +1112,10 @@ impl Operation {
 
     /// Creates a `drop_closure_env` operation, which drops the owned captured environment of the
     /// closure at the place given by `target`.
-    pub fn drop_closure_env(span: Location, target: mir::Value) -> Self {
+    pub fn drop_closure_env(span: impl Into<DebugLocation>, target: mir::Value) -> Self {
         Operation {
             result_id: None,
-            span,
+            span: span.into(),
             operands: Box::new([target]),
             kind: OperationKind::DropClosureEnv,
         }
@@ -2146,14 +2174,14 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn operation_representation_stays_compact() {
         // Boxing call-site signatures prevents the largest operation variant from inflating every
-        // operation in a basic block.
+        // operation in a basic block. The inline chain of the span costs the last word.
         assert_eq!(size_of::<OperationKind>(), 24);
         assert_eq!(
             size_of::<Operation>(),
             if cfg!(target_pointer_width = "64") {
-                56
+                64
             } else {
-                48
+                52
             }
         );
     }

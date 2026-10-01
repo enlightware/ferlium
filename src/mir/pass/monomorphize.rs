@@ -55,6 +55,7 @@ use crate::{
     mir::{
         self, Function, Instantiation, Operation, OperationKind, ParameterId, ParameterKind,
         ValueId,
+        debug_location::InlineRebase,
         edit::FunctionEdit,
         operation::SourceFallibility,
         role::MirType,
@@ -607,6 +608,7 @@ impl Specializations {
             function: id,
         };
         let specialized = specialize(body, scheme, &key, own, env);
+        let specialized = move_inline_sites(specialized, key.callee.module, self.module, env);
 
         // Final exactly when the body read to create it was: a dependency's or a finished one.
         let from_final =
@@ -1005,7 +1007,9 @@ pub(crate) fn drop_redundant_layout_witnesses(edit: &mut FunctionEdit, env: Modu
                 // The operand is present exactly in the dynamic form; the type it describes is the
                 // operation's own.
                 OperationKind::Alloca { ty } => {
-                    if operation.operands.len() == 1 && type_has_static_layout(*ty, span, &env) {
+                    if operation.operands.len() == 1
+                        && type_has_static_layout(*ty, span.location, &env)
+                    {
                         operation.operands = Box::new([]);
                     }
                 }
@@ -1015,7 +1019,7 @@ pub(crate) fn drop_redundant_layout_witnesses(edit: &mut FunctionEdit, env: Modu
                     if operation.operands.len() == 3
                         && let Some(ty) = witnessed_type(&operation.operands[2], env)
                             .or_else(|| moved_types.get(&operation.operands[0]).copied())
-                        && type_has_static_layout(ty, span, &env)
+                        && type_has_static_layout(ty, span.location, &env)
                     {
                         let source = operation.operands[0].clone();
                         let destination = operation.operands[1].clone();
@@ -1034,7 +1038,8 @@ pub(crate) fn drop_redundant_layout_witnesses(edit: &mut FunctionEdit, env: Modu
                     if product.layout_witness_tys.is_empty() {
                         continue;
                     }
-                    let required = dynamic_product_member_layouts(product.aggregate_ty, span, &env);
+                    let required =
+                        dynamic_product_member_layouts(product.aggregate_ty, span.location, &env);
                     if required.as_slice() == product.layout_witness_tys.as_ref() {
                         continue;
                     }
@@ -1062,7 +1067,7 @@ pub(crate) fn drop_redundant_layout_witnesses(edit: &mut FunctionEdit, env: Modu
                     has_layout_witness,
                     ..
                 } => {
-                    if *has_layout_witness && type_has_static_layout(*ty, span, &env) {
+                    if *has_layout_witness && type_has_static_layout(*ty, span.location, &env) {
                         debug_assert_eq!(operation.operands.len(), 3);
                         operation.operands = operation.operands[..2].into();
                         *has_layout_witness = false;
@@ -1073,7 +1078,7 @@ pub(crate) fn drop_redundant_layout_witnesses(edit: &mut FunctionEdit, env: Modu
                     has_layout_witness,
                     ..
                 } if *has_layout_witness
-                    && type_has_static_layout(metadata.payload_ty, span, &env) =>
+                    && type_has_static_layout(metadata.payload_ty, span.location, &env) =>
                 {
                     let new_len = operation.operands.len() - 1;
                     operation.operands = operation.operands[..new_len].into();
@@ -1577,6 +1582,19 @@ fn specialization_for(
     Some(specializations.get_or_create(key, &scheme, &body, env))
 }
 
+/// Moves `body`'s inline chains from module `from`'s table into module `to`'s.
+fn move_inline_sites(body: Function, from: ModuleId, to: ModuleId, env: ModuleEnv<'_>) -> Function {
+    if from == to {
+        return body;
+    }
+    let source = env.inline_sites(from).borrow();
+    let mut sites = env.inline_sites(to).borrow_mut();
+    let mut rebase = InlineRebase::moved();
+    let mut edit = FunctionEdit::new(body);
+    edit.visit_spans_mut(|span| *span = rebase.span(*span, Some(&source), &mut sites));
+    edit.finish_unverified()
+}
+
 /// Whether substitution exposes a reason Ferlium keeps a specialized body.
 ///
 /// This is a linear preflight over the callee body, before cloning, verification or insertion into the
@@ -1698,7 +1716,7 @@ fn worth_specializing<Ty: TypeLike>(
                             operation.operands.first(),
                             Some(mir::Value::Parameter(id)) if bound.contains_key(id)
                         )
-                        && type_has_static_layout(ty.map(&mut mapper), operation.span, &env) =>
+                        && type_has_static_layout(ty.map(&mut mapper), operation.span.location, &env) =>
                 {
                     return true;
                 }
@@ -1716,7 +1734,7 @@ fn worth_specializing<Ty: TypeLike>(
                                 env,
                             )
                             .is_some_and(
-                                |ty| type_has_static_layout(ty, operation.span, &env),
+                                |ty| type_has_static_layout(ty, operation.span.location, &env),
                             )
                         }) =>
                 {
@@ -1744,7 +1762,7 @@ fn worth_specializing<Ty: TypeLike>(
                         .map(|ty| ty.map(&mut mapper))
                         .collect::<Vec<_>>();
                     let required =
-                        dynamic_product_member_layouts(aggregate_ty, operation.span, &env);
+                        dynamic_product_member_layouts(aggregate_ty, operation.span.location, &env);
                     if required != witness_tys {
                         let mut removes_bound_witness = false;
                         let schema_is_valid = visit_product_witness_retention(
@@ -1770,7 +1788,7 @@ fn worth_specializing<Ty: TypeLike>(
                     ..
                 } if operation.operands.get(2).is_some_and(|witness| {
                     matches!(witness, mir::Value::Parameter(id) if bound.contains_key(id))
-                }) && type_has_static_layout(ty.map(&mut mapper), operation.span, &env) =>
+                }) && type_has_static_layout(ty.map(&mut mapper), operation.span.location, &env) =>
                 {
                     return true;
                 }
@@ -1782,7 +1800,7 @@ fn worth_specializing<Ty: TypeLike>(
                     matches!(witness, mir::Value::Parameter(id) if bound.contains_key(id))
                 }) && type_has_static_layout(
                     metadata.payload_ty.map(&mut mapper),
-                    operation.span,
+                    operation.span.location,
                     &env,
                 ) =>
                 {

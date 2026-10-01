@@ -53,11 +53,13 @@ use crate::{
     CompilerSession, Location,
     containers::DenseBitSet,
     mir::{
-        self, BlockId, Function, Instantiation, Operation, OperationKind, ParameterKind, ValueId,
+        self, BlockId, DebugLocation, Function, InlineSites, Instantiation, Operation,
+        OperationKind, ParameterKind, ValueId,
+        debug_location::InlineRebase,
         edit::FunctionEdit,
         terminator::{Terminator, TerminatorKind},
     },
-    module::{FunctionId, ModuleEnv, id::Id},
+    module::{FunctionId, ModuleEnv, ModuleId, id::Id},
     types::{r#type::Type, type_like::TypeLike},
 };
 
@@ -103,7 +105,7 @@ struct Candidate<'a> {
     in_loop: bool,
     /// The callee's whole cost, which replaces the call's.
     cost: usize,
-    span: Location,
+    span: DebugLocation,
     inlining: Inlining<'a>,
 }
 
@@ -190,7 +192,13 @@ pub(crate) fn inline_function(
     // that is the terminator before the operations, and the operations in decreasing index — which
     // is the reverse of the order they were planned in.
     for inlining in sites.into_iter().rev() {
-        inline_at(&mut edit, &inlining.body, inlining.site, env);
+        inline_at(
+            &mut edit,
+            &inlining.body,
+            inlining.callee.module,
+            inlining.site,
+            env,
+        );
     }
     // Splicing always splits the call site's block and joins the pieces with jumps, so a callee
     // that needed no split arrives as three blocks. Collapse them here, in this pass's own edit,
@@ -265,7 +273,7 @@ fn plan_inlinings<'a>(
             let mut refuse = |reason: NotInlinable| {
                 if let Some(refusals) = refusals.as_mut() {
                     refusals.push(Refusal {
-                        site: operation.span,
+                        site: operation.span.location,
                         callee,
                         reason,
                     });
@@ -358,7 +366,7 @@ fn plan_inlinings<'a>(
         if !growth.reserve(candidate.block, 1, candidate.cost) {
             if let Some(refusals) = refusals.as_mut() {
                 refusals.push(Refusal {
-                    site: candidate.span,
+                    site: candidate.span.location,
                     callee: Some(candidate.inlining.callee),
                     reason: NotInlinable::GrowthBudgetExhausted,
                 });
@@ -621,7 +629,15 @@ fn check_inlinable(
 }
 
 /// Replaces the call at `site` with `body`, rewired into the caller.
-fn inline_at(edit: &mut FunctionEdit, body: &Function, site: Site, env: ModuleEnv<'_>) {
+///
+/// `body` was read from module `from`, whose table its inline chains index.
+fn inline_at(
+    edit: &mut FunctionEdit,
+    body: &Function,
+    from: ModuleId,
+    site: Site,
+    env: ModuleEnv<'_>,
+) {
     // Take the call apart, and decide where the callee's exits lead.
     let (call, normal, error) = match site {
         Site::Operation { block, index } => {
@@ -666,12 +682,19 @@ fn inline_at(edit: &mut FunctionEdit, body: &Function, site: Site, env: ModuleEn
         body.parameters().len(),
         call.operands,
     );
+    // The copies keep their own sources, and gain this call as their outermost inline site.
+    let module = env.current.module_id();
+    let mut sites = env.inline_sites(module).borrow_mut();
+    let source = (from != module).then(|| env.inline_sites(from).borrow());
     let mut copier = Copier {
         body,
         arguments,
         marker: mir::Value::Register(marker_id),
         normal,
         error,
+        rebase: InlineRebase::inlined_at(span, &mut sites),
+        source_sites: source.as_deref(),
+        sites: &mut sites,
         blocks: FxHashMap::default(),
         registers: FxHashMap::default(),
         constants: FxHashMap::default(),
@@ -685,6 +708,7 @@ fn inline_at(edit: &mut FunctionEdit, body: &Function, site: Site, env: ModuleEn
 pub(crate) fn expand_cleanup(
     edit: &mut FunctionEdit,
     body: &Function,
+    from: ModuleId,
     block: BlockId,
     index: usize,
     env: ModuleEnv<'_>,
@@ -699,6 +723,7 @@ pub(crate) fn expand_cleanup(
     inline_at(
         edit,
         body,
+        from,
         Site::Operation {
             block,
             index: OperationIndex::from_index(index),
@@ -710,6 +735,11 @@ pub(crate) fn expand_cleanup(
 /// The state of one splice: what the callee's identities become in the caller.
 struct Copier<'a> {
     body: &'a Function,
+    /// The inline chains of `body`, unless they are in `sites` already.
+    source_sites: Option<&'a InlineSites>,
+    /// The caller's inline chains.
+    sites: &'a mut InlineSites,
+    rebase: InlineRebase,
     /// The call's operands, which are the callee's parameters in signature order.
     arguments: Vec<mir::Value>,
     /// The stack marker every rewired exit restores to.
@@ -724,6 +754,10 @@ struct Copier<'a> {
 }
 
 impl Copier<'_> {
+    fn span(&mut self, span: DebugLocation) -> DebugLocation {
+        self.rebase.span(span, self.source_sites, self.sites)
+    }
+
     /// Copies the whole body into `edit`, returning the caller's block that is its entry.
     fn copy_into(&mut self, edit: &mut FunctionEdit, env: ModuleEnv<'_>) -> BlockId {
         // Blocks and result identities are allocated up front: an operand may name a value defined
@@ -806,7 +840,8 @@ impl Copier<'_> {
             .map(|operand| self.operand(edit, operand, env))
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        let mut copy = Operation::from_parts(operation.span, operands, operation.kind.clone());
+        let span = self.span(operation.span);
+        let mut copy = Operation::from_parts(span, operands, operation.kind.clone());
         if let Some(result) = operation.result_id() {
             copy.assign_result_id(Some(self.registers[&result]));
         }
@@ -821,7 +856,7 @@ impl Copier<'_> {
         operations: &mut Vec<Operation>,
         env: &ModuleEnv<'_>,
     ) -> Terminator {
-        let span = terminator.span;
+        let span = self.span(terminator.span);
         match &terminator.kind {
             TerminatorKind::Goto { target } => Terminator::goto(span, self.blocks[target]),
             TerminatorKind::CondBr {
@@ -885,7 +920,83 @@ impl Copier<'_> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{CompilerSession, MirOptimization};
+    use std::collections::BTreeMap;
+
+    use crate::{CompilerSession, ExecutionTarget, Location, MirOptimization, module::Path};
+
+    /// For each rendered range of `src`'s optimized MIR, its source links as `(inline depth, text)`.
+    fn optimized_links(src: &str) -> Vec<Vec<(u32, String)>> {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let module = session
+            .compile_for(
+                ExecutionTarget::Mir,
+                src,
+                "inline",
+                Path::single_str("inline"),
+            )
+            .unwrap()
+            .module_id;
+        let text = session.emit_mir_module_with_source_map(module);
+        let source = |span: Location| {
+            session
+                .source_table()
+                .get_source_text(span.source_id())
+                .unwrap()[span.start_usize()..span.end_usize()]
+                .to_owned()
+        };
+        let mut ranges = BTreeMap::<_, Vec<_>>::new();
+        for link in text.source_map {
+            ranges
+                .entry((link.from, link.to))
+                .or_default()
+                .push((link.inline_depth, source(link.span)));
+        }
+        ranges
+            .into_values()
+            .map(|mut links| {
+                links.sort();
+                links
+            })
+            .collect()
+    }
+
+    #[test]
+    fn inlined_code_links_to_every_call_site_it_was_inlined_through() {
+        let links = optimized_links(
+            "fn inner(x: int) -> int { x * 7 }\n\
+             fn middle(x: int) -> int { inner(x) + 1 }\n\
+             fn outer(x: int) -> int { middle(x) }",
+        );
+        let own = |text: &str| links.contains(&vec![(0, text.to_owned())]);
+        let chain = |chain: &[&str]| {
+            let chain: Vec<_> = (0..)
+                .zip(chain.iter().map(|text| text.to_string()))
+                .collect();
+            links.contains(&chain)
+        };
+        // In `inner` itself, and once inlined into `middle` and then into `outer`.
+        assert!(own("x * 7"), "{links:#?}");
+        assert!(chain(&["x * 7", "inner(x)"]), "{links:#?}");
+        assert!(chain(&["x * 7", "inner(x)", "middle(x)"]), "{links:#?}");
+        assert!(chain(&["inner(x) + 1", "middle(x)"]), "{links:#?}");
+    }
+
+    #[test]
+    fn std_code_inlined_within_std_keeps_its_chain_in_the_caller() {
+        // Indexing inlines std helpers that std itself built by inlining other helpers: their call
+        // sites come from std's inline table, and the user's from this module's.
+        let links = optimized_links("fn f(a: [int]) -> int { a[0] }");
+        assert!(
+            links.iter().any(|links| links.len() >= 3
+                && links
+                    .iter()
+                    .map(|(depth, _)| *depth)
+                    .eq(0..links.len() as u32)
+                && links.last().is_some_and(|(_, text)| text == "a[0]")),
+            "{links:#?}"
+        );
+    }
 
     fn optimized(src: &str) -> String {
         let mut session = CompilerSession::new();
@@ -952,6 +1063,7 @@ mod tests {
         inline_at(
             &mut edit,
             &callee,
+            STD_MODULE_ID,
             Site::Operation {
                 block,
                 index: OperationIndex::from_index(0),

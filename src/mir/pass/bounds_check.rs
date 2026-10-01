@@ -30,11 +30,10 @@
 //! tradeoff, not required for the check-removal semantics.
 
 use crate::{
-    Location,
     containers::b,
     hir::value::LiteralValue,
     mir::{
-        self, BlockId, Function, Operation, OperationKind,
+        self, BlockId, DebugLocation, Function, Operation, OperationKind,
         edit::FunctionEdit,
         pass::site::OperationIndex,
         terminator::{Terminator, TerminatorKind},
@@ -54,7 +53,7 @@ struct Proved {
     block: BlockId,
     /// Where the check sits: an operation index, or the block's terminator.
     operation: Option<OperationIndex>,
-    span: Location,
+    span: DebugLocation,
     replacement: Replacement,
     /// The successor a fallible check would have taken on success.
     normal: Option<BlockId>,
@@ -113,7 +112,7 @@ fn unchecked_array_index(
 
 /// Materializes the wrapping integer addition whose affine result the analysis proved in range.
 fn add_offset(
-    span: Location,
+    span: DebugLocation,
     known: &KnownCallees,
     length: mir::Value,
     index: mir::Value,
@@ -358,7 +357,8 @@ pub(crate) fn eliminate_bounds_checks(
                         &env,
                     );
                     debug_assert!(
-                        dynamic_product_member_layouts(array_ty, check.span, &env).is_empty(),
+                        dynamic_product_member_layouts(array_ty, check.span.location, &env)
+                            .is_empty(),
                         "array header projection requires a statically known product layout"
                     );
                     let length_id = edit.new_value();

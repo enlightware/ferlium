@@ -78,11 +78,11 @@ use super::{
     site::OperationIndex,
 };
 use crate::{
-    Location, define_id_type,
+    define_id_type,
     graph::reverse_postorder,
     hir::function::ArgConvention,
     mir::{
-        self, BlockId, Function, Operation, OperationKind,
+        self, BlockId, DebugLocation, Function, Operation, OperationKind,
         const_eval::effects_allow_const_eval,
         dominance::Dominance,
         edit::FunctionEdit,
@@ -638,7 +638,7 @@ struct CallReplacement {
     site: ReplacementSite,
     source: mir::Value,
     destination: mir::Value,
-    span: Location,
+    span: DebugLocation,
 }
 
 /// Eliminates repeated, statically known addressor and trivially-copyable value calls before the

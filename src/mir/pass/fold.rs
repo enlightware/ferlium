@@ -53,7 +53,7 @@ use crate::{
         },
     },
     mir::{
-        self, BlockId, Function, Operation, OperationKind, ValueId,
+        self, BlockId, DebugLocation, Function, Operation, OperationKind, ValueId,
         const_eval::{ConstArgument, ConstEvaluator, NotFoldable},
         edit::FunctionEdit,
         interpreter::static_evidence_value,
@@ -439,7 +439,7 @@ fn apply_array_elements(edit: &mut FunctionEdit, arrays: Vec<ArrayElements>, env
 /// Turns either full evaluation or a partial known-call identity into MIR operations.
 fn materialize_call_rewrite(
     edit: &mut FunctionEdit,
-    span: Location,
+    span: DebugLocation,
     rewrite: CallRewrite,
     destination: mir::Value,
     env: ModuleEnv<'_>,
@@ -491,7 +491,7 @@ fn materialize_call_rewrite(
 /// Turns a compile-time result into the MIR operations that initialize its destination.
 fn materialize_reification(
     edit: &mut FunctionEdit,
-    span: Location,
+    span: DebugLocation,
     reification: Reification,
     destination: mir::Value,
     env: ModuleEnv<'_>,
@@ -1231,7 +1231,7 @@ fn record_refusal(
 ) {
     if let Some(refusals) = refusals {
         refusals.push(Refusal {
-            site: operation.span,
+            site: operation.span.location,
             callee: match &operation.operands[0] {
                 mir::Value::Function(id) => Some(*id),
                 _ => None,
@@ -1510,7 +1510,7 @@ fn try_fold_call(
         ty.result_convention,
         ty.ret(),
         arguments,
-        operation.span,
+        operation.span.location,
     )?;
     let reified = reify(&value, ty.ret(), &context.env);
     value.discard_storage();

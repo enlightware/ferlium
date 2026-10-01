@@ -5,7 +5,7 @@
 
 use std::{
     fmt::{self, Write},
-    io,
+    io, iter,
     mem::{offset_of, size_of},
     ops::Range,
 };
@@ -202,8 +202,8 @@ fn source_exports<'a>(
 }
 
 /// Print a module, linking each instruction line to the source of the code containing it, once per
-/// source when that code does the work of several operations. Consecutive lines of the same source
-/// region form a single link.
+/// source when that code does the work of several operations, and to each call site that code was
+/// inlined through. Consecutive lines of the same source region form a single link.
 fn print(bytes: &[u8], source_map: &[CodeSourceMapEntry]) -> Result<MirText, String> {
     let mut printer = LinePrinter::default();
     Config::new()
@@ -227,20 +227,33 @@ fn print(bytes: &[u8], source_map: &[CodeSourceMapEntry]) -> Result<MirText, Str
         let from = start + line.len() - line.trim_start().len();
         let to = start + line.trim_end().len();
         let mut current: Vec<usize> = Vec::new();
-        for entry in entries {
-            let span = entry.span;
-            if current.iter().any(|&index| links[index].span == span) {
+        let chains = entries.iter().flat_map(|entry| {
+            iter::once(entry.span)
+                .chain(entry.inlined_at.iter().copied())
+                .zip(0..)
+                // Generated code has no source of its own, but may have call sites.
+                .filter(|(span, _)| !span.is_synthesized())
+        });
+        for (span, inline_depth) in chains {
+            let same =
+                |link: &TextSourceMapEntry| link.span == span && link.inline_depth == inline_depth;
+            if current.iter().any(|&index| same(&links[index])) {
                 continue;
             }
             let extended = open.iter().copied().find(|&index| {
-                links[index].span == span && text[links[index].to..from].trim().is_empty()
+                same(&links[index]) && text[links[index].to..from].trim().is_empty()
             });
             if let Some(index) = extended {
                 links[index].to = to;
                 current.push(index);
             } else {
                 current.push(links.len());
-                links.push(TextSourceMapEntry { from, to, span });
+                links.push(TextSourceMapEntry {
+                    from,
+                    to,
+                    span,
+                    inline_depth,
+                });
             }
         }
         open = current;
@@ -443,9 +456,11 @@ mod tests {
         }
     }
 
-    /// The source texts linked to the Wasm text at `offset`.
-    fn linked_sources(session: &CompilerSession, text: &MirText, offset: usize) -> Vec<String> {
-        text.source_map
+    /// The source texts linked to the Wasm text at `offset`, with their inline depth, innermost
+    /// first.
+    fn links(session: &CompilerSession, text: &MirText, offset: usize) -> Vec<(u32, String)> {
+        let mut links: Vec<_> = text
+            .source_map
             .iter()
             .filter(|entry| entry.from <= offset && offset < entry.to)
             .map(|entry| {
@@ -453,8 +468,22 @@ mod tests {
                     .source_table()
                     .get_source_text(entry.span.source_id())
                     .unwrap();
-                source[entry.span.as_range()].to_string()
+                (
+                    entry.inline_depth,
+                    source[entry.span.as_range()].to_string(),
+                )
             })
+            .collect();
+        links.sort();
+        links
+    }
+
+    /// The source texts of the code at `offset` in the Wasm text, without its call sites.
+    fn linked_sources(session: &CompilerSession, text: &MirText, offset: usize) -> Vec<String> {
+        links(session, text, offset)
+            .into_iter()
+            .filter(|(depth, _)| *depth == 0)
+            .map(|(_, source)| source)
             .collect()
     }
 
@@ -493,6 +522,26 @@ mod tests {
                 text.text
             );
         }
+    }
+
+    #[wasm_bindgen_test]
+    fn inlined_code_links_to_its_call_sites() {
+        let source = "fn helper(x: int) -> int { x * 3 }\n\
+            fn compute(x: int) -> int { helper(x) + 1 }";
+        let mut session = CompilerSession::new();
+        let module = session
+            .compile(source, "wasm_text", Path::single_str("wasm_text"))
+            .unwrap()
+            .module_id;
+        let text = module_text(&session, module).unwrap();
+        let body = text.text.find("(func $wasm_text::compute").unwrap();
+        let mul = body + text.text[body..].find("i32.mul").unwrap();
+        assert_eq!(
+            links(&session, &text, mul),
+            [(0, "x * 3".to_owned()), (1, "helper(x)".to_owned())],
+            "{}",
+            text.text
+        );
     }
 
     #[wasm_bindgen_test]

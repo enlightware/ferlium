@@ -6,11 +6,11 @@ use std::fmt::{self, Write};
 use ustr::Ustr;
 
 use crate::{
-    Location, define_id_type,
+    define_id_type,
     format::FormatWith,
     hir::function::ArgConvention,
     mir::{
-        self, Operation, ParameterId, ValueId,
+        self, DebugLocation, Operation, ParameterId, ValueId,
         role::ValueRoles,
         terminator::{Terminator, TerminatorKind},
         value::{Constant, ConstantId},
@@ -96,7 +96,7 @@ pub struct Function {
 pub(crate) struct RenderedSourceMapEntry {
     pub(crate) from: usize,
     pub(crate) to: usize,
-    pub(crate) span: Location,
+    pub(crate) span: DebugLocation,
 }
 
 /// A rendered MIR function with best-effort source links for its operations and terminators.
@@ -344,9 +344,9 @@ fn push_rendered_source_map_entry(
     source_map: &mut Vec<RenderedSourceMapEntry>,
     from: usize,
     to: usize,
-    span: Location,
+    span: DebugLocation,
 ) {
-    if !span.is_synthesized() {
+    if !span.is_synthesized() || span.inlined_at.is_some() {
         source_map.push(RenderedSourceMapEntry { from, to, span });
     }
 }

@@ -1,7 +1,10 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{cell::OnceCell, fmt};
+use std::{
+    cell::{OnceCell, RefCell},
+    fmt,
+};
 
 use ustr::Ustr;
 
@@ -21,7 +24,7 @@ use crate::{
     compiler::{CompilerSession, Modules},
     emit_mir::build_mir_function,
     mir::{
-        self,
+        self, InlineSites,
         pass::{
             OptimizationContext, OptimizationStats, Specializations,
             call_graph::CallGraph,
@@ -83,6 +86,12 @@ pub(crate) struct ModuleArtifacts {
     physical_mir: OnceCell<BackendReadyMirArtifacts>,
     /// Built only when explicitly comparing expansion with post-expansion optimization.
     unoptimized_physical_mir: OnceCell<BackendReadyMirArtifacts>,
+    /// The inline chains of every stage above, which only ever grows.
+    ///
+    /// Shared by the stages because they are built in a fixed order — optimized, then physical —
+    /// so each stage's links follow the previous stage's. A stage restored from a snapshot
+    /// therefore finds the table exactly as it was when it was captured; see [`InlineSites`].
+    inline_sites: RefCell<InlineSites>,
 }
 
 impl fmt::Debug for ModuleArtifacts {
@@ -99,6 +108,11 @@ impl fmt::Debug for ModuleArtifacts {
 }
 
 impl ModuleArtifacts {
+    /// The inline chains of this revision's MIR, in every stage.
+    pub(crate) fn inline_sites(&self) -> &RefCell<InlineSites> {
+        &self.inline_sites
+    }
+
     pub(crate) fn physical_mir(
         &self,
         optimization: MirOptimization,

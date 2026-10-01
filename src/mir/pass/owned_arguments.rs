@@ -455,7 +455,7 @@ impl VariantFactory<'_> {
             match &operation.kind {
                 OperationKind::Clone { ty }
                     if operand_index == 0
-                        && type_has_static_layout(*ty, operation.span, &self.env) =>
+                        && type_has_static_layout(*ty, operation.span.location, &self.env) =>
                 {
                     clone_sites.insert(site);
                 }

@@ -39,7 +39,8 @@ use crate::{
         value::{LiteralValue, VariantPayloadStorage},
     },
     mir::{
-        BlockId, Function, Operation, OperationKind, ParameterId, ParameterKind, Value, ValueId,
+        BlockId, DebugLocation, Function, Operation, OperationKind, ParameterId, ParameterKind,
+        Value, ValueId,
         builder::FunctionBuilder,
         edit::FunctionEdit,
         pass::{
@@ -903,7 +904,7 @@ struct VariantAllocationCleanup {
     base_slot: Value,
     variant_ty: Type,
     payload_ty: Type,
-    span: Location,
+    span: DebugLocation,
     depth: usize,
 }
 
@@ -1377,7 +1378,7 @@ impl<'a> PhysicalLowerer<'a> {
         };
         let field_index = constant_index(&operation.operands[1], edit)
             .ok_or(BackendReadinessError::InvalidProductProjection { function })?;
-        let spec = product_layout_spec(product.aggregate_ty, operation.span, &self.env)
+        let spec = product_layout_spec(product.aggregate_ty, operation.span.location, &self.env)
             .ok_or(BackendReadinessError::InvalidProductProjection { function })?;
         let Some(member) = spec.members.get(field_index.as_index()).copied() else {
             return Err(BackendReadinessError::InvalidProductProjection { function });
@@ -1448,7 +1449,7 @@ impl<'a> PhysicalLowerer<'a> {
             return Err(BackendReadinessError::InvalidVariantPayloadProjection { function });
         };
         let static_layout =
-            value_layout_for_type(payload_ty, candidate.operation.span, &self.env).ok();
+            value_layout_for_type(payload_ty, candidate.operation.span.location, &self.env).ok();
         if has_layout_witness != static_layout.is_none() {
             return Err(BackendReadinessError::InvalidVariantPayloadProjection { function });
         }
@@ -1598,7 +1599,7 @@ impl<'a> PhysicalLowerer<'a> {
                 continue;
             }
             let static_layout =
-                value_layout_for_type(metadata.payload_ty, shell.span, &self.env).ok();
+                value_layout_for_type(metadata.payload_ty, shell.span.location, &self.env).ok();
             if *has_layout_witness != static_layout.is_none() {
                 return Err(BackendReadinessError::InvalidVariantPayloadProjection { function });
             }
@@ -1926,7 +1927,7 @@ fn edit_int_binary(
     callee: (FunctionId, &CallImplType),
     left: Value,
     right: Value,
-    span: Location,
+    span: DebugLocation,
 ) -> Value {
     let result = edit_result(edit, operations, Operation::alloca(span, int_type()));
     operations.push(Operation::call(
@@ -1943,7 +1944,7 @@ fn edit_buffer_pointer_slot(
     operations: &mut Vec<Operation>,
     buffer: Value,
     element_ty: Type,
-    span: Location,
+    span: DebugLocation,
     env: ModuleEnv<'_>,
 ) -> Value {
     let zero = edit_int_constant(edit, 0, env);
@@ -1963,7 +1964,7 @@ fn edit_buffer_element_address(
     element_size: Value,
     element_ty: Type,
     known: &KnownCallees,
-    span: Location,
+    span: DebugLocation,
     env: ModuleEnv<'_>,
 ) -> Value {
     let pointer_slot = edit_buffer_pointer_slot(edit, operations, buffer, element_ty, span, env);
@@ -1989,7 +1990,7 @@ fn edit_store_unit(
     edit: &mut FunctionEdit,
     operations: &mut Vec<Operation>,
     destination: Value,
-    span: Location,
+    span: DebugLocation,
     env: ModuleEnv<'_>,
 ) {
     let unit = edit.add_constant(Type::unit(), LiteralValue::new_native(()), &env);
@@ -2024,7 +2025,7 @@ fn build_buffer_drop(
     );
     builder.append_operation(entry, Operation::runtime_dealloc(span, allocation));
     builder.append_operation(entry, Operation::clear(span, pointer_slot));
-    finish_unit_result(&mut builder, entry, destination, span, env);
+    finish_unit_result(&mut builder, entry, destination, span.into(), env);
     builder.finish_unverified()
 }
 
@@ -2142,7 +2143,7 @@ fn variant_payload_release_call(
     helper: FunctionId,
     base: Value,
     variant_ty: Type,
-    span: Location,
+    span: DebugLocation,
 ) -> Vec<Operation> {
     let mut result_operation = Operation::alloca(span, Type::unit());
     let result = edit
@@ -2208,7 +2209,7 @@ fn build_variant_payload_allocation(
         static_layout,
         witness.as_ref(),
         VALUE_SIZE_ASSOC_CONST_INDEX,
-        span,
+        span.into(),
         env,
     );
     let align = payload_layout_place(
@@ -2217,7 +2218,7 @@ fn build_variant_payload_allocation(
         static_layout,
         witness.as_ref(),
         VALUE_ALIGN_ASSOC_CONST_INDEX,
-        span,
+        span.into(),
         env,
     );
     let size = append_result(&mut builder, allocate, Operation::load(span, size));
@@ -2229,7 +2230,7 @@ fn build_variant_payload_allocation(
     );
     let pointer_layout = ResolvedValueLayout::native::<usize>();
     let slot_offset = isize::try_from(variant_payload_offset(pointer_layout.align)).unwrap();
-    let slot_offset = int_constant_value(&mut builder, allocate, slot_offset, span, env);
+    let slot_offset = int_constant_value(&mut builder, allocate, slot_offset, span.into(), env);
     let slot = append_result(
         &mut builder,
         allocate,
@@ -2237,7 +2238,7 @@ fn build_variant_payload_allocation(
     );
     builder.append_operation(allocate, Operation::store(span, allocation, slot));
     builder.set_terminator(allocate, Terminator::goto(span, done));
-    finish_unit_result(&mut builder, done, destination, span, env);
+    finish_unit_result(&mut builder, done, destination, span.into(), env);
     builder.finish_unverified()
 }
 
@@ -2297,7 +2298,7 @@ fn build_variant_payload_addressor(
             static_layout,
             witness.as_ref(),
             known,
-            span,
+            span.into(),
             env,
         );
         let inline_offset =
@@ -2317,7 +2318,7 @@ fn build_variant_payload_addressor(
     if let Some(indirect) = indirect {
         let pointer_layout = ResolvedValueLayout::native::<usize>();
         let slot_offset = isize::try_from(variant_payload_offset(pointer_layout.align)).unwrap();
-        let slot_offset = int_constant_value(&mut builder, indirect, slot_offset, span, env);
+        let slot_offset = int_constant_value(&mut builder, indirect, slot_offset, span.into(), env);
         let slot = append_result(
             &mut builder,
             indirect,
@@ -2334,7 +2335,7 @@ fn finish_unit_result(
     builder: &mut FunctionBuilder,
     block: BlockId,
     destination: Value,
-    span: Location,
+    span: DebugLocation,
     env: ModuleEnv<'_>,
 ) {
     let unit = builder.add_constant(Type::unit(), LiteralValue::new_native(()), &env);
@@ -2376,7 +2377,7 @@ fn build_variant_payload_release(
 
     let pointer_layout = ResolvedValueLayout::native::<usize>();
     let offset = isize::try_from(variant_payload_offset(pointer_layout.align)).unwrap();
-    let offset = int_constant_value(&mut builder, indirect_check, offset, span, env);
+    let offset = int_constant_value(&mut builder, indirect_check, offset, span.into(), env);
     let slot = append_result(
         &mut builder,
         indirect_check,
@@ -2405,7 +2406,7 @@ fn variant_payload_offset_place(
     static_layout: Option<ResolvedValueLayout>,
     witness: Option<&Value>,
     known: &KnownCallees,
-    span: Location,
+    span: DebugLocation,
     env: ModuleEnv<'_>,
 ) -> Value {
     if let Some(layout) = static_layout {
@@ -2442,7 +2443,7 @@ fn payload_layout_place(
     static_layout: Option<ResolvedValueLayout>,
     witness: Option<&Value>,
     associated_const: TraitAssociatedConstIndex,
-    span: Location,
+    span: DebugLocation,
     env: ModuleEnv<'_>,
 ) -> Value {
     if let Some(layout) = static_layout {
@@ -2470,7 +2471,7 @@ fn int_constant_value(
     builder: &mut FunctionBuilder,
     block: BlockId,
     value: isize,
-    span: Location,
+    span: DebugLocation,
     env: ModuleEnv<'_>,
 ) -> Value {
     let place = int_constant_place(builder, block, value, span, env);
@@ -2538,7 +2539,7 @@ fn build_product_addressor(
             base,
             destination,
             known,
-            span,
+            span.into(),
             env,
         ),
         ProductLayoutOrder::CompactRecord => build_compact_record_addressor(
@@ -2550,7 +2551,7 @@ fn build_product_addressor(
             base,
             destination,
             known,
-            span,
+            span.into(),
             env,
         ),
     }
@@ -2566,7 +2567,7 @@ fn build_positional_product_addressor(
     base: Value,
     destination: Value,
     known: &KnownCallees,
-    span: Location,
+    span: DebugLocation,
     env: ModuleEnv<'_>,
 ) -> Function {
     let mut offset = int_constant_place(&mut builder, block, 0, span, env);
@@ -2617,7 +2618,7 @@ fn build_compact_record_addressor(
     base: Value,
     destination: Value,
     known: &KnownCallees,
-    span: Location,
+    span: DebugLocation,
     env: ModuleEnv<'_>,
 ) -> Function {
     let target = key.field_index.as_index();
@@ -2728,7 +2729,7 @@ fn finish_product_addressor(
     destination: Value,
     offset: Value,
     field_index: ProjectionIndex,
-    span: Location,
+    span: DebugLocation,
 ) -> Function {
     let byte_offset = append_result(&mut builder, block, Operation::load(span, offset));
     let projection =
@@ -2749,7 +2750,7 @@ fn int_constant_place(
     builder: &mut FunctionBuilder,
     block: BlockId,
     value: isize,
-    span: Location,
+    span: DebugLocation,
     env: ModuleEnv<'_>,
 ) -> Value {
     let constant = builder.add_constant(int_type(), LiteralValue::new_native(value), &env);
@@ -2766,7 +2767,7 @@ fn value_layout_place(
     block: BlockId,
     dictionary: Value,
     associated_const: TraitAssociatedConstIndex,
-    span: Location,
+    span: DebugLocation,
     env: ModuleEnv<'_>,
 ) -> Value {
     let (entry, getter_ty) = value_layout_getter_entry(&env, associated_const);
@@ -2800,7 +2801,7 @@ fn member_layout_place(
     member: ProductMemberLayout,
     witness: Option<&Value>,
     associated_const: TraitAssociatedConstIndex,
-    span: Location,
+    span: DebugLocation,
     env: ModuleEnv<'_>,
 ) -> Value {
     if let Some(layout) = member.static_layout {
@@ -2838,7 +2839,7 @@ fn add_member_size_to_offset(
     witness: Option<&Value>,
     offset: &Value,
     known: &KnownCallees,
-    span: Location,
+    span: DebugLocation,
     env: ModuleEnv<'_>,
 ) {
     let size = member_layout_place(
@@ -2861,7 +2862,7 @@ fn align_up_place(
     offset: Value,
     align: Value,
     known: &KnownCallees,
-    span: Location,
+    span: DebugLocation,
     env: ModuleEnv<'_>,
 ) -> Value {
     let one = int_constant_place(builder, block, 1, span, env);
@@ -2891,7 +2892,7 @@ fn int_binary(
     callee: (FunctionId, &CallImplType),
     left: Value,
     right: Value,
-    span: Location,
+    span: DebugLocation,
 ) -> Value {
     debug_assert_eq!(callee.1.ret(), int_type());
     binary_call(builder, block, callee, left, right, span)
@@ -2903,7 +2904,7 @@ fn binary_call(
     callee: (FunctionId, &CallImplType),
     left: Value,
     right: Value,
-    span: Location,
+    span: DebugLocation,
 ) -> Value {
     let result = append_result(builder, block, Operation::alloca(span, callee.1.ret()));
     builder.append_operation(
@@ -2923,7 +2924,7 @@ fn int_unary(
     block: BlockId,
     callee: (FunctionId, &CallImplType),
     value: Value,
-    span: Location,
+    span: DebugLocation,
 ) -> Value {
     let result = append_result(builder, block, Operation::alloca(span, int_type()));
     builder.append_operation(

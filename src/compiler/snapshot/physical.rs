@@ -7,14 +7,17 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use super::{
     CacheChecksum, NativeTypeCatalog, SnapshotError, SnapshotTypeGraph, SnapshotTypeGraphBuilder,
-    mir::SnapshotMirFunction,
+    mir::{SnapshotMirFunction, restore_inline_sites},
 };
 use crate::{
     compiler::{CompilerSession, MirArtifacts},
     hir::native_functions::{
         NativeFailureConvention, NativeLayout, NativeParameter, NativeResult, NativeScalar,
     },
-    mir::physical::{BackendReadyMirArtifacts, prepare_physical_mir},
+    mir::{
+        InlineSite, InlineSites,
+        physical::{BackendReadyMirArtifacts, prepare_physical_mir},
+    },
     module::{
         FunctionId, LocalFunctionId, Module, ModuleEnv, ModuleId, function::CallableOrigin, id::Id,
     },
@@ -32,11 +35,14 @@ pub(crate) struct CompiledPhysicalMirSnapshot {
     functions: Vec<Option<SnapshotMirFunction>>,
     direct_entries: Vec<(LocalFunctionId, LocalFunctionId)>,
     native: NativeBindings,
+    /// The module's whole inline table once this stage was built; see [`InlineSites::restore`].
+    inline_sites: Vec<InlineSite>,
 }
 
 impl CompiledPhysicalMirSnapshot {
     pub(crate) fn capture(
         artifacts: &BackendReadyMirArtifacts,
+        inline_sites: &InlineSites,
         module: &Module,
         parent_checksum: CacheChecksum,
     ) -> Result<Self, SnapshotError> {
@@ -66,6 +72,7 @@ impl CompiledPhysicalMirSnapshot {
             functions,
             direct_entries,
             native: NativeBindings::capture(artifacts)?,
+            inline_sites: inline_sites.sites().to_vec(),
         })
     }
 
@@ -138,6 +145,7 @@ impl CompiledPhysicalMirSnapshot {
         }))
         .map_err(|_| SnapshotError::InvalidMir("physical MIR verification failed".into()))?
         .map_err(|error| SnapshotError::InvalidMir(error.to_string()))?;
+        restore_inline_sites(&self.inline_sites, module, session.raw_modules())?;
         if self.native != NativeBindings::capture(&artifacts)? {
             return Err(SnapshotError::InvalidMir(
                 "physical native layout/ABI contract changed".into(),
@@ -300,6 +308,10 @@ mod tests {
             .artifacts()
             .mir(MirOptimization::Enabled)
             .unwrap();
+        let inline_sites = session
+            .expect_module_entry(STD_MODULE_ID)
+            .artifacts()
+            .inline_sites();
         let physical = lower_physical_mir(
             STD_MODULE_ID,
             optimized,
@@ -307,7 +319,13 @@ mod tests {
             session.known_callees(),
         )
         .unwrap();
-        let snapshot = CompiledPhysicalMirSnapshot::capture(&physical, module, [7; 32]).unwrap();
+        let snapshot = CompiledPhysicalMirSnapshot::capture(
+            &physical,
+            &inline_sites.borrow(),
+            module,
+            [7; 32],
+        )
+        .unwrap();
         let bytes = snapshot.encode().unwrap();
         let decoded = CompiledPhysicalMirSnapshot::decode(&bytes).unwrap();
         let restore = |snapshot: &CompiledPhysicalMirSnapshot| {
@@ -324,10 +342,15 @@ mod tests {
         assert_eq!(restored.subscripts(), physical.subscripts());
         assert_eq!(restored.subscript_imports(), physical.subscript_imports());
         assert_eq!(
-            CompiledPhysicalMirSnapshot::capture(&restored, module, [7; 32])
-                .unwrap()
-                .encode()
-                .unwrap(),
+            CompiledPhysicalMirSnapshot::capture(
+                &restored,
+                &inline_sites.borrow(),
+                module,
+                [7; 32]
+            )
+            .unwrap()
+            .encode()
+            .unwrap(),
             bytes
         );
 
