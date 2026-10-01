@@ -31,9 +31,16 @@ use crate::{
 };
 
 use super::{
-    Global, ScalarType, adapters::NativeOptionalResultAdapter, allocate_frame, body::Body,
+    Global, ScalarType,
+    adapters::NativeOptionalResultAdapter,
+    allocate_frame,
+    body::{
+        Body,
+        HelperLocal::{DynamicAlign, DynamicSize, Scratch},
+    },
     context_pointer, dictionary_table, enter_frame, frame_address, frame_bytes, leave_frame,
-    memarg, memarg_at, operations, peephole::Instructions,
+    memarg, memarg_at, operations,
+    peephole::Instructions,
 };
 
 /// Construction schema; every materialization of a given target has the same leading parameters.
@@ -509,7 +516,7 @@ impl Body<'_, '_> {
         destination: &Value,
         entry: (TraitId, TraitDictionaryEntryIndex),
     ) -> Result<(), String> {
-        let scratch = self.helper_locals().scratch;
+        let scratch = self.helper_locals().get(Scratch);
         self.i(I::I32Const(0));
         self.i(I::I32Const(1));
         self.i(I::I32Const(1));
@@ -642,8 +649,8 @@ impl Body<'_, '_> {
         let (environment, cursor) = self.callable_locals.expect("closure construction locals");
         if has_env_dict {
             self.dynamic_layout(&op.operands[end])?;
-            self.i(I::LocalGet(helpers.dynamic_size.as_u32()));
-            self.i(I::LocalGet(helpers.dynamic_align.as_u32()));
+            self.i(I::LocalGet(helpers.get(DynamicSize).as_u32()));
+            self.i(I::LocalGet(helpers.get(DynamicAlign).as_u32()));
         } else {
             self.i(I::I32Const(0));
             self.i(I::I32Const(1));
@@ -703,9 +710,9 @@ impl Body<'_, '_> {
             };
             if let Ok(layout) = value_layout_for_type(ty, op.span.location, &self.env) {
                 self.i(I::I32Const(layout.size as i32));
-                self.i(I::LocalSet(helpers.dynamic_size.as_u32()));
+                self.i(I::LocalSet(helpers.get(DynamicSize).as_u32()));
                 self.i(I::I32Const(layout.align as i32));
-                self.i(I::LocalSet(helpers.dynamic_align.as_u32()));
+                self.i(I::LocalSet(helpers.get(DynamicAlign).as_u32()));
             } else {
                 let witness = self
                     .capture_witness(ty, &op.operands)
@@ -714,12 +721,12 @@ impl Body<'_, '_> {
             }
             // Positional tuple layout: align each field, then advance by its representation size.
             self.i(I::LocalGet(cursor.as_u32()));
-            self.i(I::LocalGet(helpers.dynamic_align.as_u32()));
+            self.i(I::LocalGet(helpers.get(DynamicAlign).as_u32()));
             self.i(I::I32Const(1));
             self.i(I::I32Sub);
             self.i(I::I32Add);
             self.i(I::I32Const(0));
-            self.i(I::LocalGet(helpers.dynamic_align.as_u32()));
+            self.i(I::LocalGet(helpers.get(DynamicAlign).as_u32()));
             self.i(I::I32Sub);
             self.i(I::I32And);
             self.i(I::LocalSet(cursor.as_u32()));
@@ -733,13 +740,13 @@ impl Body<'_, '_> {
             self.i(I::LocalGet(cursor.as_u32()));
             self.i(I::I32Add);
             self.address(capture)?;
-            self.i(I::LocalGet(helpers.dynamic_size.as_u32()));
+            self.i(I::LocalGet(helpers.get(DynamicSize).as_u32()));
             self.i(I::MemoryCopy {
                 src_mem: 0,
                 dst_mem: 0,
             });
             self.i(I::LocalGet(cursor.as_u32()));
-            self.i(I::LocalGet(helpers.dynamic_size.as_u32()));
+            self.i(I::LocalGet(helpers.get(DynamicSize).as_u32()));
             self.i(I::I32Add);
             self.i(I::LocalSet(cursor.as_u32()));
         }

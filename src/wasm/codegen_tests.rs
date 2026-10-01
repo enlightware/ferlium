@@ -6,7 +6,7 @@ use std::{cell::Cell, fmt::Debug, hint::black_box, mem::offset_of, ptr};
 use js_sys::{Function as JsFunction, Reflect, Uint8Array, WebAssembly};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_test::wasm_bindgen_test;
-use wasmparser::{Operator, Parser, Payload};
+use wasmparser::{FunctionBody, Operator, Parser, Payload};
 
 use crate::{
     CompilerSession, FxHashSet, Location,
@@ -313,25 +313,32 @@ fn wasm_operator_count(bytes: &[u8], mut matches: impl FnMut(&Operator<'_>) -> b
         .sum()
 }
 
-/// Instructions of a named exported function, independent of code-section ordering.
+/// Body and parameter count of a named exported function, independent of code-section ordering.
 ///
 /// This follows the export exactly, so a fallible scalar entry resolves to its generated wrapper
 /// rather than the wrapped Ferlium function.
-fn exported_function_operators<'a>(bytes: &'a [u8], name: &str) -> Vec<Operator<'a>> {
+fn exported_function_body<'a>(bytes: &'a [u8], name: &str) -> (FunctionBody<'a>, u32) {
+    let mut types = Vec::new();
+    let mut function_types = Vec::new();
     let mut imported_functions = 0usize;
     let mut function_index = None;
     for payload in Parser::new(0).parse_all(bytes) {
         match payload.unwrap() {
+            Payload::TypeSection(section) => {
+                types.extend(section.into_iter_err_on_gc_types().map(Result::unwrap))
+            }
             Payload::ImportSection(section) => {
-                imported_functions += section
-                    .into_imports()
-                    .filter(|import| {
-                        matches!(
-                            import.as_ref().unwrap().ty,
-                            wasmparser::TypeRef::Func(_) | wasmparser::TypeRef::FuncExact(_)
-                        )
-                    })
-                    .count();
+                function_types.extend(section.into_imports().filter_map(|import| {
+                    match import.unwrap().ty {
+                        wasmparser::TypeRef::Func(index)
+                        | wasmparser::TypeRef::FuncExact(index) => Some(index),
+                        _ => None,
+                    }
+                }));
+                imported_functions = function_types.len();
+            }
+            Payload::FunctionSection(section) => {
+                function_types.extend(section.into_iter().map(Result::unwrap));
             }
             Payload::ExportSection(section) => {
                 for export in section {
@@ -344,8 +351,11 @@ fn exported_function_operators<'a>(bytes: &'a [u8], name: &str) -> Vec<Operator<
             _ => {}
         }
     }
+    let function_index = function_index.expect("fixture must export its entry");
+    let parameter_count = types[function_types[function_index] as usize]
+        .params()
+        .len() as u32;
     let body_index = function_index
-        .expect("fixture must export its entry")
         .checked_sub(imported_functions)
         .expect("exported entry must be defined in the generated module");
     let body = Parser::new(0)
@@ -356,7 +366,13 @@ fn exported_function_operators<'a>(bytes: &'a [u8], name: &str) -> Vec<Operator<
         })
         .nth(body_index)
         .expect("exported entry must have a code body");
-    body.get_operators_reader()
+    (body, parameter_count)
+}
+
+fn exported_function_operators<'a>(bytes: &'a [u8], name: &str) -> Vec<Operator<'a>> {
+    exported_function_body(bytes, name)
+        .0
+        .get_operators_reader()
         .unwrap()
         .into_iter()
         .collect::<Result<_, _>>()
@@ -751,6 +767,7 @@ fn wasm_codegen_witnessed_layout_shares_descriptor_lookup() {
     let code = compile_raw(&session, entry);
     let mut lookups = 0;
     let mut calls = 0;
+    let mut dynamic_allocations = 0;
     for payload in Parser::new(0).parse_all(code.bytes()) {
         if let Payload::CodeSectionEntry(body) = payload.unwrap() {
             let ops = body
@@ -759,6 +776,18 @@ fn wasm_codegen_witnessed_layout_shares_descriptor_lookup() {
                 .into_iter()
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap();
+            // Witnessed storage uses the checked dynamic allocator: its end is held in an
+            // i64 helper, while size, alignment and base require three i32 helpers.
+            if ops.iter().any(|op| matches!(op, Operator::I64GtU)) {
+                assert!(
+                    body.get_locals_reader()
+                        .unwrap()
+                        .into_iter()
+                        .any(|local| local.unwrap().1 == wasmparser::ValType::I64),
+                    "dynamic allocation must reserve its i64 end helper"
+                );
+                dynamic_allocations += 1;
+            }
             calls += ops
                 .iter()
                 .filter(|op| matches!(op, Operator::CallIndirect { .. }))
@@ -776,6 +805,10 @@ fn wasm_codegen_witnessed_layout_shares_descriptor_lookup() {
                 .count();
         }
     }
+    assert!(
+        dynamic_allocations > 0,
+        "fixture must exercise witnessed allocation"
+    );
     assert!(lookups > 0);
     assert!(
         lookups < calls,
@@ -1249,13 +1282,53 @@ fn wasm_codegen_trivial_boxed_entry_keeps_runtime_context() {
 }
 
 #[wasm_bindgen_test]
-fn wasm_codegen_witnessed_alloca_reserves_helper_locals() {
-    let operation = Operation::alloca_dynamic(
-        Location::new_synthesized(),
-        Type::unit(),
-        MirValue::Parameter(ParameterId::from_index(0)),
-    );
-    assert!(emit::operation_needs_helper_locals(&operation));
+fn wasm_codegen_reserves_only_needed_helper_locals() {
+    for (source, expected) in [
+        (
+            "#[inline(never)] fn bump(x: int) -> int { x + 1 } fn compute(x: int) -> int { bump(x) }",
+            8,
+        ),
+        (
+            "fn compute(x: int) -> int { let values = [x, x + 1]; len(values) }",
+            2,
+        ),
+    ] {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        session.set_physical_mir_optimization(MirOptimization::Enabled);
+        let entry = compile(&mut session, source);
+        let code = CompiledProgram::compile(&session, entry).unwrap();
+        assert_eq!(
+            code.instantiate::<(isize,), isize>()
+                .unwrap()
+                .run((7,), WasmLimits::default())
+                .unwrap(),
+            expected
+        );
+        let (body, parameter_count) = exported_function_body(code.bytes(), ENTRY_EXPORT);
+        let locals = body
+            .get_locals_reader()
+            .unwrap()
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        // Neither static calls nor array construction needs the i64 allocation-end helper.
+        assert!(
+            locals.iter().all(|(_, ty)| *ty == wasmparser::ValType::I32),
+            "{source}: {locals:?}"
+        );
+        let operations = exported_function_operators(code.bytes(), ENTRY_EXPORT);
+        let count: u32 = locals.iter().map(|(count, _)| count).sum();
+        for local_index in parameter_count..parameter_count + count {
+            assert!(
+                operations.iter().any(|op| matches!(op,
+                Operator::LocalGet { local_index: index }
+                | Operator::LocalSet { local_index: index }
+                | Operator::LocalTee { local_index: index } if *index == local_index)),
+                "{source}: local {local_index} was reserved but never used"
+            );
+        }
+    }
 }
 
 #[wasm_bindgen_test]

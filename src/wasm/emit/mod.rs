@@ -71,11 +71,6 @@ use super::{
 };
 
 #[cfg(test)]
-pub(super) fn operation_needs_helper_locals(operation: &Operation) -> bool {
-    body::operation_needs_helper_locals(operation)
-}
-
-#[cfg(test)]
 pub(super) use body::{operation_changes_stack_frontier, terminator_changes_stack_frontier};
 
 fn is_elided_stack_operation(

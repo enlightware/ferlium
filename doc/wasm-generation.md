@@ -9,6 +9,14 @@ from a literal and read only within the same block. Other uses keep private copi
 neither an indirect call nor a derived address proves that a handle will remain read-only.
 This borrows the immutable handle, while materialized strings still have owned mutable storage.
 
+## Plan scratch locals before emission
+
+For MIR bodies, scratch locals are reserved for the emission paths they need, after dictionary and
+subscript selection. A use without a declared requirement panics as an internal compiler error.
+They are assigned after value registers, so narrowing scratch reservations does not change which values
+cross a projection's suspension boundary. Scratch contents are temporary and are never retained
+across a yield.
+
 ## Share implementations after lowering
 
 Distinct typed functions can have identical Wasm implementations. Layout queries are one example:
