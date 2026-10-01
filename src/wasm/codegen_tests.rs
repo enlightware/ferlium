@@ -954,6 +954,157 @@ fn wasm_codegen_native_addressors() {
 }
 
 #[wasm_bindgen_test]
+fn wasm_codegen_shared_helper_source_maps_preserve_origins_and_split_boundaries() {
+    let source = Location::new_synthesized().source_id();
+    let first = Location::new(1, 2, source);
+    let second = Location::new(3, 4, source);
+    let caller = Location::new(5, 6, source);
+    let entry = |bytes, span, inlined_at| emit::CodeSourceMapEntry {
+        body: 7,
+        bytes,
+        span,
+        inlined_at,
+    };
+    let merged = emit::merge_helper_source_maps(vec![
+        entry(2..6, first, vec![]),
+        entry(2..4, second, vec![caller]),
+        entry(4..6, second, vec![caller]),
+        entry(2..6, first, vec![]),
+    ]);
+    assert_eq!(merged.len(), 4);
+    for (entries, range) in merged.as_chunks::<2>().0.iter().zip([2..4, 4..6]) {
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.body == 7 && entry.bytes == range)
+        );
+        assert_eq!(entries[0].span, first);
+        assert_eq!(entries[1].span, second);
+        assert_eq!(entries[1].inlined_at, [caller]);
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_generated_helpers_and_adapters_are_shared() {
+    let mut session = CompilerSession::new();
+    session.set_mir_optimization(MirOptimization::Enabled);
+    let module = session
+        .compile(
+            &format!(
+                "{}\npub fn quicksort_float_a(a: [float]) {{ quicksort_array(a) }}",
+                include_str!("../../tests/modules/quicksort.fer")
+            ),
+            "sharing",
+            Path::single_str("sharing"),
+        )
+        .unwrap()
+        .module_id;
+    let program = session.prepare_physical_program(module).unwrap();
+    let roots = (0..program.module(module).unwrap().entry_count())
+        .map(LocalFunctionId::from_index)
+        .filter(|&id| program.module(module).unwrap().get(id).is_some())
+        .map(|id| FunctionId::new(module, id))
+        .collect::<Vec<_>>();
+    let mut imports = Imports::new().unwrap();
+    let mapped = emit::emit_with_source_map(&program, &roots, &[], &mut imports, &session).unwrap();
+    let mut imports = Imports::new().unwrap();
+    let plain = emit::emit(&program, &roots, &[], &mut imports, &session).unwrap();
+    assert_eq!(
+        mapped.bytes, plain.bytes,
+        "debug locations must not affect sharing"
+    );
+    // Compiling the result checks call signatures and all remapped table/function indices.
+    WebAssembly::Module::new(&Uint8Array::from(mapped.bytes.as_slice())).unwrap();
+    let mut imported = 0;
+    let mut signatures = Vec::new();
+    let mut bodies = Vec::new();
+    let mut names = Vec::new();
+    let mut table_functions = Vec::new();
+    for payload in Parser::new(0).parse_all(&mapped.bytes) {
+        match payload.unwrap() {
+            Payload::ImportSection(section) => {
+                imported = section
+                    .into_imports()
+                    .filter(|entry| {
+                        matches!(
+                            entry.as_ref().unwrap().ty,
+                            wasmparser::TypeRef::Func(_) | wasmparser::TypeRef::FuncExact(_)
+                        )
+                    })
+                    .count();
+            }
+            Payload::FunctionSection(section) => {
+                signatures.extend(section.into_iter().map(Result::unwrap))
+            }
+            Payload::CodeSectionEntry(body) => bodies.push(body.as_bytes()),
+            Payload::CustomSection(section) if section.name() == "name" => {
+                for name in wasmparser::NameSectionReader::new(section.data_reader()) {
+                    if let wasmparser::Name::Function(map) = name.unwrap() {
+                        names.extend(map.into_iter().map(Result::unwrap));
+                    }
+                }
+            }
+            Payload::ElementSection(section) => {
+                for element in section {
+                    if let wasmparser::ElementItems::Functions(functions) = element.unwrap().items {
+                        table_functions.extend(functions.into_iter().map(Result::unwrap));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        names
+            .iter()
+            .any(|name| name.name.starts_with("<dictionary adapter Value::")),
+        "unshared adapters must retain descriptive method names"
+    );
+    let mut keys = FxHashSet::default();
+    let mut helpers = 0;
+    let mut adapters = 0;
+    for name in names {
+        if name.name.starts_with("<shared generated helper ")
+            || name.name.starts_with("<shared dictionary adapter ")
+        {
+            assert!(
+                name.name.contains('×'),
+                "shared group size missing: {}",
+                name.name
+            );
+            let index = name.index as usize - imported;
+            assert!(
+                keys.insert((signatures[index], bodies[index])),
+                "duplicate {}",
+                name.name
+            );
+            if name.name.starts_with("<shared generated helper ") {
+                helpers += 1;
+            } else {
+                adapters += 1;
+            }
+        }
+    }
+    assert!(
+        helpers >= 2 && adapters >= 2,
+        "fixture must exercise both sharing stages: {helpers} helper groups, {adapters} adapters"
+    );
+    assert!(
+        table_functions.len() > table_functions.iter().collect::<FxHashSet<_>>().len(),
+        "distinct dictionary slots should share an adapter function"
+    );
+    for pair in mapped.source_map.windows(2) {
+        assert!(
+            pair[0].body < pair[1].body
+                || (pair[0].body == pair[1].body
+                    && (pair[0].bytes.end <= pair[1].bytes.start
+                        || pair[0].bytes == pair[1].bytes)),
+            "unordered source-map entries: {pair:?}"
+        );
+    }
+}
+
+#[wasm_bindgen_test]
 fn wasm_codegen_function_types_are_interned() {
     let mut session = CompilerSession::new();
     let entry = compile(&mut session, "fn compute(x: int, y: int) -> int { x + y }");

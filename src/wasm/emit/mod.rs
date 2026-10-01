@@ -19,7 +19,7 @@ use self::{
     peephole::Instructions,
 };
 
-use std::{iter, mem::offset_of, ops::Range};
+use std::{iter, mem::offset_of, ops::Range, rc::Rc};
 
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, ElementSection, Elements, EntityType, ExportKind,
@@ -30,7 +30,7 @@ use wasm_encoder::{
 
 use crate::{
     CompilerSession, FxHashMap, FxHashSet, Location, MirOptimization,
-    hir::{function::ArgConvention, native_functions::NativeScalar},
+    hir::{function::ArgConvention, native_functions::NativeScalar, value::LiteralValue},
     mir::{
         BasicBlock, Function, Operation, OperationKind, ParameterKind, Value, ValueId,
         pass::known_callee::KnownCallee,
@@ -510,6 +510,36 @@ pub(super) struct CodeSourceMapEntry {
     pub inlined_at: Vec<Location>,
 }
 
+/// Split differing region boundaries so shared instructions have disjoint or identical ranges.
+/// Debug locations do not participate in body interning, but every origin remains navigable.
+/// This boundary-by-origin scan is quadratic, restricted to small shared helpers with debug maps.
+/// Entries cover encoded instructions, so their ranges are nonempty.
+pub(super) fn merge_helper_source_maps(
+    entries: Vec<CodeSourceMapEntry>,
+) -> Vec<CodeSourceMapEntry> {
+    let mut boundaries = entries
+        .iter()
+        .flat_map(|entry| [entry.bytes.start, entry.bytes.end])
+        .collect::<Vec<_>>();
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    let mut merged = Vec::new();
+    for range in boundaries.windows(2) {
+        let mut origins = FxHashSet::default();
+        for entry in &entries {
+            if entry.bytes.start <= range[0]
+                && range[1] <= entry.bytes.end
+                && origins.insert((entry.span, entry.inlined_at.clone()))
+            {
+                let mut entry = entry.clone();
+                entry.bytes = range[0]..range[1];
+                merged.push(entry);
+            }
+        }
+    }
+    merged
+}
+
 /// Appends the source map of the body at `body` in the code section, whose spans index the inline
 /// chains of `module`.
 fn extend_source_map(
@@ -983,10 +1013,11 @@ fn emit_with_export_kind(
     // The shared failure function comes first, so every emitter knows its index from the imports.
     // A module without runtime globals has no invocation state, hence no check that could fail.
     let emit_failure_function = runtime_globals.count != 0;
-    let mut direct_index =
+    let first_body_index =
         imports.failure_function().as_index() + usize::from(emit_failure_function);
+    let mut direct_index = first_body_index;
     let mut resume_indices = FxHashMap::default();
-    let callees: FxHashMap<_, _> = bodies
+    let mut callees: FxHashMap<_, _> = bodies
         .iter()
         .map(|(id, body, sig, _)| {
             let start = WasmFunctionId::from_index(direct_index);
@@ -1021,7 +1052,7 @@ fn emit_with_export_kind(
             )
         })
         .collect();
-    let adapter_base = WasmFunctionId::from_index(direct_index);
+    let mut adapter_base = WasmFunctionId::from_index(direct_index);
     for &(target, captures) in &callables.entries {
         let abi = callees[&program.direct_entry(target)].1;
         callables
@@ -1066,7 +1097,7 @@ fn emit_with_export_kind(
         adapters.len() + callable_count + subscript_adapters.len() + resume_slots.len();
     // Resume slots hold the resume bodies themselves; every other slot holds an adapter.
     let adapter_count = table_count - resume_slots.len();
-    let glue_base = WasmFunctionId::from_index(adapter_base.as_index() + adapter_count);
+    let mut glue_base = WasmFunctionId::from_index(adapter_base.as_index() + adapter_count);
     let mut evidence =
         evidence::Image::build(program, &reachable, &dictionary_table, &subscript_table);
     let emit_callable_glue = callable_count != 0 || needs_callable_glue;
@@ -1140,6 +1171,110 @@ fn emit_with_export_kind(
             .or_insert_with(|| types.intern(subscript::parameters(arity), subscript::results()));
     }
     let mut strings = StringLiterals::default();
+    // Only generated, call-free helpers can be encoded before their final indices are known.
+    // Their bodies use imports (whose indices are fixed), never other defined functions.
+    // Make accidental dependencies on defined-function indices fail during early encoding.
+    let early_callees = FxHashMap::default();
+    let early_resumes = FxHashMap::default();
+    let early_callables = callable::Entries {
+        slots: FxHashMap::default(),
+        signatures: FxHashMap::default(),
+        references: FxHashMap::default(),
+        selected: FxHashMap::default(),
+        clone: None,
+        drop: None,
+        value_methods: None,
+    };
+    let mut helper_keys = FxHashMap::default();
+    let mut helper_bodies = FxHashMap::default();
+    let mut helper_aliases = FxHashMap::default();
+    for (id, body, signature, selections) in &bodies {
+        if !can_preencode_generated_helper(body) {
+            continue;
+        }
+        let emitted = Body::new(
+            body,
+            signature,
+            &early_callees,
+            &early_resumes,
+            program,
+            session,
+            session
+                .modules()
+                .env_for(session.expect_fresh_module(id.module)),
+            imports,
+            &mut strings,
+            &evidence,
+            &entry_abis,
+            layout_entries,
+            &early_callables,
+            &subscript_entries,
+            selections,
+            BodyMode::Normal,
+            runtime_globals,
+            depth_tracked.contains(id),
+            with_source_map,
+        )
+        .and_then(Body::emit)
+        .map_err(|reason| diagnostic(*id, body, &reason))?;
+        let ty = types.intern(signature.params(), signature.results());
+        let bytes = Rc::<[u8]>::from(emitted.function.into_raw_body());
+        let canonical = *helper_keys.entry((ty, bytes.clone())).or_insert(*id);
+        helper_aliases.insert(*id, canonical);
+        let entry = helper_bodies
+            .entry(canonical)
+            .or_insert_with(|| (bytes, Vec::new()));
+        entry.1.push((id.module, emitted.source_map));
+    }
+    direct_index = first_body_index;
+    resume_indices.clear();
+    for (id, body, _, _) in &bodies {
+        if helper_aliases
+            .get(id)
+            .is_some_and(|canonical| canonical != id)
+        {
+            continue;
+        }
+        callees.get_mut(id).unwrap().0 = WasmFunctionId::from_index(direct_index);
+        direct_index += 1;
+        if body.result_convention() == CallResultConvention::YIELDED_ONCE {
+            resume_indices.insert(*id, WasmFunctionId::from_index(direct_index));
+            direct_index += 1;
+        }
+    }
+    for (id, canonical) in &helper_aliases {
+        let index = callees[canonical].0;
+        callees.get_mut(id).unwrap().0 = index;
+    }
+    adapter_base = WasmFunctionId::from_index(direct_index);
+    // Dictionary slots keep their identities, but may point at the same encoded adapter.
+    let mut adapter_keys = FxHashMap::default();
+    let mut adapter_bodies = Vec::new();
+    let mut adapter_indices = Vec::new();
+    let mut adapter_names = Vec::new();
+    for &(id, entry) in &adapters {
+        let definition = program.dictionary(id).unwrap();
+        let (ty, abi) = &entry_abis[&(definition.trait_id(), entry)];
+        let bytes = Rc::<[u8]>::from(
+            dictionary_adapter(program, id, entry, abi, &callees, session, imports)?
+                .into_raw_body(),
+        );
+        let next = adapter_bodies.len();
+        let index = *adapter_keys.entry((*ty, bytes.clone())).or_insert(next);
+        if index == next {
+            adapter_bodies.push((*ty, bytes));
+            adapter_names.push((dictionary_entry_name(env, definition.trait_id(), entry), 0));
+        }
+        adapter_names[index].1 += 1;
+        adapter_indices.push(WasmFunctionId::from_index(adapter_base.as_index() + index));
+    }
+    let other_adapter_count = adapter_count - adapters.len();
+    glue_base = WasmFunctionId::from_index(
+        adapter_base.as_index() + adapter_bodies.len() + other_adapter_count,
+    );
+    callable_entries.clone = emit_callable_glue.then_some(glue_base);
+    callable_entries.drop =
+        emit_callable_glue.then(|| WasmFunctionId::from_index(glue_base.as_index() + 1));
     let mut names = WasmNames::new(session, imports);
     let mut source_map = Vec::new();
     if emit_failure_function {
@@ -1150,6 +1285,46 @@ fn emit_with_export_kind(
     // Code-section entries, the source map's body numbering; the failure function is the first.
     let mut body_index = usize::from(emit_failure_function);
     for (id, body, signature, selections) in &bodies {
+        if helper_aliases
+            .get(id)
+            .is_some_and(|canonical| canonical != id)
+        {
+            continue;
+        }
+        if let Some((bytes, locations)) = helper_bodies.remove(id) {
+            let shared = locations.len() > 1;
+            if shared {
+                names.push(format!(
+                    "<shared generated helper {}::{} ×{}>",
+                    module_path(session, id.module),
+                    body.name,
+                    locations.len()
+                ));
+            } else {
+                names.push(format!(
+                    "{}::{}",
+                    module_path(session, id.module),
+                    body.name
+                ));
+            }
+            functions.function(
+                types
+                    .intern(signature.params(), signature.results())
+                    .as_u32(),
+            );
+            code.raw(&bytes);
+            let mut shared_locations = Vec::new();
+            for (module, locations) in locations {
+                extend_source_map(&mut shared_locations, body_index, locations, module, env);
+            }
+            if shared {
+                source_map.extend(merge_helper_source_maps(shared_locations));
+            } else {
+                source_map.extend(shared_locations);
+            }
+            body_index += 1;
+            continue;
+        }
         names.push(format!(
             "{}::{}",
             module_path(session, id.module),
@@ -1241,17 +1416,15 @@ fn emit_with_export_kind(
             body_index += 1;
         }
     }
-    for &(id, entry) in &adapters {
-        let definition = program.dictionary(id).unwrap();
-        let (ty, abi) = &entry_abis[&(definition.trait_id(), entry)];
-        names.push(format!(
-            "<dictionary adapter {}>",
-            dictionary_entry_name(env, definition.trait_id(), entry)
-        ));
+    for (index, (ty, bytes)) in adapter_bodies.iter().enumerate() {
+        let (name, count) = &adapter_names[index];
+        names.push(if *count == 1 {
+            format!("<dictionary adapter {name}>")
+        } else {
+            format!("<shared dictionary adapter {name} ×{count}>")
+        });
         functions.function(ty.as_u32());
-        code.function(&dictionary_adapter(
-            program, id, entry, abi, &callees, session, imports,
-        )?);
+        code.raw(bytes);
     }
     for &(target, captures) in &callables.entries {
         let arity = callable::visible_arity(callees[&program.direct_entry(target)].1, captures)?;
@@ -1328,8 +1501,13 @@ fn emit_with_export_kind(
         None,
         &ConstExpr::i32_const(1),
         Elements::Functions(
-            (0..adapter_count)
-                .map(|index| WasmFunctionId::from_index(adapter_base.as_index() + index))
+            adapter_indices
+                .into_iter()
+                .chain((0..other_adapter_count).map(|index| {
+                    WasmFunctionId::from_index(
+                        adapter_base.as_index() + adapter_bodies.len() + index,
+                    )
+                }))
                 .chain(
                     bodies
                         .iter()
@@ -1489,6 +1667,45 @@ fn depth_tracked_bodies<'a>(
             return tracked;
         }
     }
+}
+
+/// Generated scalar/layout and buffer-drop bodies whose encoding needs no defined-function ids.
+/// Names only restrict eligibility; equality uses the complete signature and encoded body.
+fn can_preencode_generated_helper(body: &Function) -> bool {
+    (body.name.as_str().contains("#impl:")
+        || body.name.as_str().starts_with("#physical:buffer_drop:"))
+        && body.blocks().count() == 1
+        && body.result_convention() != CallResultConvention::YIELDED_ONCE
+        && body.blocks().all(|block| {
+            let block = body.block(block);
+            matches!(block.terminator().kind, TerminatorKind::Return)
+                && block.operations().iter().all(|operation| {
+                    matches!(
+                        operation.kind,
+                        OperationKind::Alloca { .. }
+                            | OperationKind::AllocaPlace { .. }
+                            | OperationKind::Load
+                            | OperationKind::Store
+                            | OperationKind::Clear
+                            | OperationKind::AddressOffset { .. }
+                            | OperationKind::AddressOffsetPlace { .. }
+                            | OperationKind::RuntimeDealloc
+                    ) && layout_witness(operation).is_none()
+                        && operation.operands.iter().all(|value| {
+                            matches!(
+                                value,
+                                Value::Parameter(_) | Value::Register(_) | Value::Constant(_)
+                            )
+                        })
+                })
+        })
+        && body.constants().iter().all(|constant| {
+            constant
+                .representation
+                .as_primitive_ty::<StaticStr>()
+                .is_none()
+                && !matches!(constant.representation, LiteralValue::Tuple(_))
+        })
 }
 
 /// A body proven not to touch the shadow stack or invocation diagnostics.
