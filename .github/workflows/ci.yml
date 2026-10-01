@@ -51,7 +51,7 @@ jobs:
 
       - name: Run Clippy (Linting)
         if: runner.os != 'macOS'
-        run: cargo clippy -- -D warnings
+        run: make lint
 
       - name: Build
         run: cargo build

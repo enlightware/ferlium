@@ -42,6 +42,11 @@ install-deps:
 	cargo install cargo-nextest --locked
 	cargo install --version 0.19.4 gungraun-runner
 
+lint:
+	# Temporary workaround for Clippy linting derive-generated field initializers.
+	# Remove the allow flag once https://github.com/rust-lang/rust-clippy/issues/17525 is fixed in stable.
+	cargo clippy -- -D warnings -A clippy::redundant_field_names
+
 test-local:
 	RUST_LOG=ferlium=debug cargo nextest run --no-fail-fast
 
