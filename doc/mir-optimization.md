@@ -202,13 +202,16 @@ while the unknown one keeps its slot, and `dce` collects whatever became unread.
 the array's own fact is derived from these same element facts, so the next round's analysis learns
 nothing from the rewrite.
 
-The same pass also simplifies a call from a documented std contract when only the relevant
-arguments are known. Callees are recognized by resolved `FunctionId`, including through
-specialization, rather than by name or body shape. For `int`, it applies the wrapping-sound
-identities `0 + x`, `x + 0`, `x - 0`, `x - x`, `0 * x`, `x * 0`, `1 * x`, `x * 1`, and reflexive
-comparison. For `float`, Ferlium values are finite but retain observable signed zero, so the safe
-set is narrower: `x - +0.0`, `x - x`, `1.0 * x`, `x * 1.0`, and reflexive comparison. In
-particular, neither `x + 0.0` nor `x * 0.0` is rewritten for an unknown float.
+The same pass simplifies arithmetic and comparisons using known std contracts, even when some
+arguments remain unknown. For example, multiplying an unknown integer by zero becomes a constant
+store. Callees are recognized by resolved `FunctionId`, including through specialization. Rewrites
+preserve wrapping integer arithmetic and observable float signed zero. Constant equality, hashing,
+and dataflow joins keep the two zero representations distinct when pooling constants or sharing
+bodies.
+
+The pass also cancels redundant arithmetic negations within a block when their operands remain
+unchanged. Simplification can expose further folding opportunities, and later dead-code cleanup
+collects the computations and storage made unused by these rewrites.
 
 A `condbr` on a known condition becomes a jump. A source-fallible call whose evaluation *succeeds*
 becomes a store plus a jump to the normal successor, and its error edge dies; an evaluation that

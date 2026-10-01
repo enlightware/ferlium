@@ -1859,8 +1859,10 @@ mod tests {
     use crate::{
         CompilerSession, ExecutionTarget, MirOptimization,
         compiler::ensure_mir_artifacts,
+        hir::value::LiteralValue,
         mir::{Value, terminator::TerminatorKind},
         module::{ModuleId, Path},
+        std::math::Float,
         types::{
             effects::{EffType, EffectVar},
             mutability::MutType,
@@ -2284,6 +2286,43 @@ mod tests {
         assert!(
             free_ty_vars(&specialized, session.module_env()).is_empty(),
             "no type variable may survive specialization at a concrete call site"
+        );
+    }
+
+    #[test]
+    fn specializations_with_different_zero_signs_are_distinct() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            "fn with_zero(x) { (x, 0.0) }
+fn use_it(x: int) { with_zero(x) }",
+        );
+        let site = site(&session, module, "use_it", "with_zero");
+        let positive = site.specialize(session.module_env());
+        let mut edit = FunctionEdit::new(positive.clone());
+        let zero = edit
+            .constants_mut()
+            .iter_mut()
+            .find(|constant| {
+                constant
+                    .representation
+                    .as_primitive_ty::<Float>()
+                    .is_some_and(|value| value.into_inner().to_bits() == 0.0f64.to_bits())
+            })
+            .expect("the specialization must contain positive zero");
+        zero.representation = LiteralValue::new_native(Float::new(-0.0).unwrap());
+        let negative = edit.finish(session.module_env());
+        let canonical = |id| id;
+
+        assert!(structurally_identical(
+            &positive, &canonical, &positive, &canonical
+        ));
+        assert!(!structurally_identical(
+            &positive, &canonical, &negative, &canonical
+        ));
+        assert_ne!(
+            structure_digest(&positive, site.key.callee, &canonical),
+            structure_digest(&negative, site.key.callee, &canonical),
         );
     }
 

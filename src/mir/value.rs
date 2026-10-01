@@ -1,7 +1,11 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fmt;
+use std::{
+    fmt,
+    hash::{Hash, Hasher},
+    mem::discriminant,
+};
 
 use crate::{
     containers::B,
@@ -9,6 +13,7 @@ use crate::{
     format::FormatWith,
     hir::value::LiteralValue,
     module::{FunctionId, ModuleEnv, QualifiedNameEnv, SubscriptId, TraitDictionaryId, id::Id},
+    std::math::Float,
     types::r#type::Type,
 };
 
@@ -142,10 +147,74 @@ define_id_type!(
 );
 
 /// A typed, trivially-copyable HIR immediate representation.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Eq, Debug)]
 pub struct Constant {
     pub ty: Type,
     pub representation: LiteralValue,
+}
+
+/// MIR constants compare by observable representation, rather than runtime numeric equality.
+impl PartialEq for Constant {
+    fn eq(&self, other: &Self) -> bool {
+        self.ty == other.ty
+            && same_literal_representation(&self.representation, &other.representation)
+    }
+}
+
+impl Hash for Constant {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.ty.hash(state);
+        hash_literal_representation(&self.representation, state);
+    }
+}
+
+/// Representation equality for MIR constants and dataflow facts, rather than numeric equality.
+/// Keep this match exhaustive: any future composite literal must compare its children recursively.
+pub(crate) fn same_literal_representation(left: &LiteralValue, right: &LiteralValue) -> bool {
+    match left {
+        LiteralValue::Tuple(left) => {
+            let LiteralValue::Tuple(right) = right else {
+                return false;
+            };
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right.iter())
+                    .all(|(left, right)| same_literal_representation(left, right))
+        }
+        LiteralValue::Native(_) => match (
+            left.as_primitive_ty::<Float>(),
+            right.as_primitive_ty::<Float>(),
+        ) {
+            (Some(left), Some(right)) => {
+                left.into_inner().to_bits() == right.into_inner().to_bits()
+            }
+            _ => left == right,
+        },
+        LiteralValue::VariantTag(left) => {
+            matches!(right, LiteralValue::VariantTag(right) if left == right)
+        }
+    }
+}
+
+fn hash_literal_representation<H: Hasher>(literal: &LiteralValue, state: &mut H) {
+    discriminant(literal).hash(state);
+    match literal {
+        LiteralValue::Tuple(values) => {
+            values.len().hash(state);
+            for value in values.iter() {
+                hash_literal_representation(value, state);
+            }
+        }
+        LiteralValue::Native(value) => {
+            if let Some(value) = literal.as_primitive_ty::<Float>() {
+                value.into_inner().to_bits().hash(state);
+            } else {
+                value.hash(state);
+            }
+        }
+        LiteralValue::VariantTag(tag) => tag.hash(state),
+    }
 }
 
 impl FormatWith<ModuleEnv<'_>> for Value {
@@ -276,5 +345,42 @@ fn format_subscript_definition(
             qualified_names.fully_qualified_subscript_name(id.module, &name)
         ),
         None => write!(f, "m{}:s{}", id.module, id.subscript),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+    use crate::std::math::float_type;
+
+    #[test]
+    fn constant_keys_preserve_signed_zero_in_nested_tuples() {
+        let float = float_type();
+        for nested in [false, true] {
+            let constant = |value| {
+                let mut ty = float;
+                let mut representation = LiteralValue::new_native(Float::new(value).unwrap());
+                if nested {
+                    ty = Type::tuple([Type::tuple([float])]);
+                    representation = LiteralValue::new_tuple(vec![LiteralValue::new_tuple(vec![
+                        representation,
+                    ])]);
+                }
+                Constant { ty, representation }
+            };
+            let positive = constant(0.0);
+            let negative = constant(-0.0);
+            assert_ne!(positive, negative);
+            let mut keys = HashSet::new();
+            keys.insert(positive);
+            keys.insert(negative);
+            assert!(keys.contains(&constant(0.0)));
+            assert!(keys.contains(&constant(-0.0)));
+            assert!(!keys.insert(constant(0.0)));
+            assert!(!keys.insert(constant(-0.0)));
+            assert_eq!(keys.len(), 2);
+        }
     }
 }

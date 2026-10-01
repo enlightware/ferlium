@@ -270,6 +270,8 @@ pub(crate) struct KnownCallees {
     int_mul_ty: CallImplType,
     int_neg: FunctionId,
     int_neg_ty: CallImplType,
+    float_neg: FunctionId,
+    float_neg_ty: CallImplType,
     int_bit_and: FunctionId,
     int_bit_and_ty: CallImplType,
     int_cmp: FunctionId,
@@ -307,6 +309,7 @@ impl KnownCallees {
         let int_sub = resolver.method(NUM_TRAIT_NAME, int_type(), "sub");
         let int_mul = resolver.method(NUM_TRAIT_NAME, int_type(), "mul");
         let int_neg = resolver.method(NUM_TRAIT_NAME, int_type(), "neg");
+        let float_neg = resolver.method(NUM_TRAIT_NAME, float_type(), "neg");
         let int_bit_and = resolver.method(BITS_TRAIT_NAME, int_type(), "bit_and");
         let int_cmp = resolver.method(ORD_TRAIT_NAME, int_type(), "cmp");
         let array_index = resolver.subscript_mut_member("array_index");
@@ -357,10 +360,7 @@ impl KnownCallees {
                 resolver.method(NUM_TRAIT_NAME, float_type(), "mul"),
                 KnownCallee::FloatMul,
             ),
-            (
-                resolver.method(NUM_TRAIT_NAME, float_type(), "neg"),
-                KnownCallee::FloatNeg,
-            ),
+            (float_neg, KnownCallee::FloatNeg),
             (
                 resolver.method(ORD_TRAIT_NAME, float_type(), "cmp"),
                 KnownCallee::FloatCmp,
@@ -468,6 +468,8 @@ impl KnownCallees {
             int_mul_ty: resolver.call_impl_type(int_mul),
             int_neg,
             int_neg_ty: resolver.call_impl_type(int_neg),
+            float_neg,
+            float_neg_ty: resolver.call_impl_type(float_neg),
             int_bit_and,
             int_bit_and_ty: resolver.call_impl_type(int_bit_and),
             int_cmp,
@@ -515,6 +517,10 @@ impl KnownCallees {
 
     pub(crate) fn int_neg(&self) -> (FunctionId, &CallImplType) {
         (self.int_neg, &self.int_neg_ty)
+    }
+
+    pub(crate) fn float_neg(&self) -> (FunctionId, &CallImplType) {
+        (self.float_neg, &self.float_neg_ty)
     }
 
     pub(crate) fn int_bit_and(&self) -> (FunctionId, &CallImplType) {

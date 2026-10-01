@@ -43,7 +43,7 @@ use crate::{
     mir::{
         self, BlockId, Function, Operation, OperationKind, ParameterKind,
         terminator::TerminatorKind,
-        value::{ParameterId, StaticEvidence, ValueId},
+        value::{ParameterId, StaticEvidence, ValueId, same_literal_representation},
     },
     module::{
         FunctionId, ModuleEnv, ProjectionIndex, TraitDictionaryEntry, TraitDictionaryId, id::Id,
@@ -206,7 +206,7 @@ impl PlaceBindings {
 /// each payload within 24 bytes also gives this enum a tag word of its own: an inline
 /// `StaticEvidence` would lend its tag byte as a niche for both this enum and [`Fact`], and
 /// decoding and copying that packed layout made cloning facts slower despite the smaller size.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, Eq, Debug)]
 pub(crate) enum Const {
     /// A trivially-copyable value, in the form a MIR constant pool holds.
     Literal(Rc<LiteralValue>),
@@ -228,6 +228,49 @@ pub(crate) enum Const {
         element_ty: Type,
         elements: Rc<[LiteralValue]>,
     },
+}
+
+impl PartialEq for Const {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Literal(left), Self::Literal(right)) => {
+                Rc::ptr_eq(left, right) || same_literal_representation(left, right)
+            }
+            (Self::Function(left), Self::Function(right)) => left == right,
+            (Self::Dictionary(left), Self::Dictionary(right)) => left == right,
+            (Self::Evidence(left), Self::Evidence(right)) => left == right,
+            (Self::VariantTag(left), Self::VariantTag(right)) => left == right,
+            (
+                Self::ClosedFunction {
+                    function: left,
+                    hidden_evidence: left_evidence,
+                },
+                Self::ClosedFunction {
+                    function: right,
+                    hidden_evidence: right_evidence,
+                },
+            ) => left == right && left_evidence == right_evidence,
+            (
+                Self::Array {
+                    element_ty: left_ty,
+                    elements: left,
+                },
+                Self::Array {
+                    element_ty: right_ty,
+                    elements: right,
+                },
+            ) => {
+                left_ty == right_ty
+                    && (Rc::ptr_eq(left, right)
+                        || (left.len() == right.len()
+                            && left
+                                .iter()
+                                .zip(right.iter())
+                                .all(|(left, right)| same_literal_representation(left, right))))
+            }
+            _ => false,
+        }
+    }
 }
 
 impl Const {

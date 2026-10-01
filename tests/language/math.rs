@@ -5,7 +5,7 @@ use ferlium::compiler::error::{CompilationErrorImpl, SourceFailureKind};
 use indoc::indoc;
 use test_log::test;
 
-use crate::harness::{TestSession, bool, float, int};
+use crate::harness::{TestSession, bool, float, int, string};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -50,6 +50,76 @@ fn integer_arithmetic_wraps_at_the_target_width() {
     assert_val_eq!(session.run(&format!("{min} min - 1")), int(isize::MAX));
     assert_val_eq!(session.run(&format!("{min} min * -1")), int(isize::MIN));
     assert_val_eq!(session.run(&format!("{min} -min")), int(isize::MIN));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn arithmetic_identities_preserve_signed_zero_and_wrapping() {
+    let mut session = TestSession::new();
+    for (input, unchanged, negated) in [
+        ("0.0", "0", "-0"),
+        ("-0.0", "-0", "0"),
+        ("3.5", "3.5", "-3.5"),
+        ("-3.5", "-3.5", "3.5"),
+    ] {
+        for (expression, expected) in [
+            ("x + -0.0", unchanged),
+            ("-0.0 + x", unchanged),
+            ("-(-x)", unchanged),
+            ("-0.0 - x", negated),
+            ("x * -1.0", negated),
+            ("-1.0 * x", negated),
+        ] {
+            assert_val_eq!(
+                session.run(&format!(
+                    "let x = black_box({input}); to_string({expression})"
+                )),
+                string(expected)
+            );
+        }
+    }
+    assert_val_eq!(
+        session.run(
+            "let positive = black_box((0.0, 0.0)); let negative = (0.0, -0.0); to_string(negative)"
+        ),
+        string("(0, -0)")
+    );
+    for (condition, expected) in [("true", "-0"), ("false", "0")] {
+        assert_val_eq!(
+            session.run(&format!(
+                "let x = black_box(-0.0); let z = if black_box({condition}) {{ -0.0 }} else {{ 0.0 }}; to_string(x + z)"
+            )),
+            string(expected)
+        );
+    }
+    for input in [isize::MIN, isize::MAX, -1, 0, 1] {
+        for expression in ["0 - x", "x * -1", "-1 * x", "-(-x)"] {
+            let expected = if expression == "-(-x)" {
+                input
+            } else {
+                input.wrapping_neg()
+            };
+            assert_val_eq!(
+                session.run(&format!(
+                    "let x: int = black_box({}); {expression}",
+                    if input == isize::MIN {
+                        "bit(count_zeros(0) - 1)".to_string()
+                    } else {
+                        input.to_string()
+                    }
+                )),
+                int(expected)
+            );
+        }
+    }
+    assert_val_eq!(
+        session.run("let mut x = black_box(3); let y = -x; x = 7; -y + x"),
+        int(10)
+    );
+    assert_val_eq!(
+        session.run("let x = black_box(3); let mut y = -x; y = 7; -y"),
+        int(-7)
+    );
 }
 
 #[test]

@@ -15,7 +15,7 @@
 //! A second path needs only the callee identity and the arguments mentioned by a documented
 //! identity. It simplifies concrete integer and float std calls such as `x * 1`, `x - 0` and
 //! `cmp(x, x)` even when `x` is unknown. Float identities are representation-preserving: signed
-//! zero deliberately excludes `x + 0.0` and `x * 0.0`.
+//! zero deliberately excludes `x + +0.0` and `x * 0.0`.
 //!
 //! The rewrite is then local: `call f(a, b, ret)` becomes a store of a constant or captureless
 //! function, a `build_array`, or a bounded `StaticStr` plus `string_from_static` construction into
@@ -32,13 +32,13 @@
 
 use std::rc::Rc;
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use ustr::{Ustr, ustr};
 
 use super::{
     OptimizationStage,
     cost::{Growth, GrowthBase},
-    dataflow::{self, Analysis, Const, Fact, Root, State},
+    dataflow::{self, Analysis, Const, Fact, PlaceId, Root, State},
     known_callee::{KnownCallee, KnownCallees},
     site::OperationIndex,
 };
@@ -82,6 +82,12 @@ enum CallRewrite {
     EqualOrdering,
     /// A boolean negation, expressed as the comparison MIR already has.
     Negate(mir::Value),
+    /// Arithmetic negation uses the declared concrete std native.
+    ArithmeticNegation {
+        source: mir::Value,
+        callee: FunctionId,
+        ty: CallImplType,
+    },
 }
 
 /// The two inputs needed to recognize a known call, kept together at folding entry points.
@@ -299,7 +305,8 @@ pub(crate) struct Folded {
     ///
     /// **A rewrite whose result stays unknown does not.** Replacing a call with a copy of an
     /// unknown argument, or with a comparison of one, is a smaller body computing the same unknown
-    /// value: the next round's analysis learns nothing from it. Measured on std, granting rounds
+    /// value: the next round's analysis learns nothing from it. Rewriting binary arithmetic to
+    /// negation is an exception: it may expose a double negation. Measured on std, granting rounds
     /// for those cost 0.14% of MIR optimization time and changed no optimized body.
     ///
     /// **Devirtualization does.** Closed-dictionary lowering deliberately makes even concrete trait
@@ -455,6 +462,12 @@ fn materialize_call_rewrite(
             string_materializer,
         ),
         CallRewrite::Copy(source) => vec![Operation::memcpy(span, source, destination)],
+        CallRewrite::ArithmeticNegation { source, callee, ty } => vec![Operation::call(
+            span,
+            mir::Value::Function(callee),
+            [source, destination],
+            ty,
+        )],
         CallRewrite::Negate(source) => {
             let mut comparison = Operation::compare_eq(
                 span,
@@ -562,7 +575,7 @@ fn reification_operation_count(reification: &Reification) -> usize {
 fn call_rewrite_operation_count(rewrite: &CallRewrite) -> usize {
     match rewrite {
         CallRewrite::Reification(reification) => reification_operation_count(reification),
-        CallRewrite::Copy(_) => 1,
+        CallRewrite::Copy(_) | CallRewrite::ArithmeticNegation { .. } => 1,
         CallRewrite::EqualOrdering | CallRewrite::Negate(_) => 2,
     }
 }
@@ -802,10 +815,14 @@ fn plan_folds_with(
         // rest of the walk what it produced: `2 + 3` then `* 7` folds in one pass.
         let mut state = analysis.entry_state(block);
         let basic_block = func.block(block);
+        let mut negations = ArithmeticNegations::default();
         for (index, operation) in basic_block.operations().iter().enumerate() {
+            let double_negation = negations.double_negation(operation, &state, &context);
+            negations.step(operation, &state, &context);
             if let OperationKind::Call { ty, .. } = &operation.kind
                 && let Some(destination) = dataflow::call_result_operand(&operation.operands, ty)
-                && let Some(result) = partial_call_outcome(operation, ty, &state, &context)
+                && let Some(result) = double_negation
+                    .or_else(|| partial_call_outcome(operation, ty, &state, &context))
                     .filter(|rewrite| {
                         context.evaluator.is_some()
                             || !matches!(rewrite, CallRewrite::EqualOrdering)
@@ -820,9 +837,9 @@ fn plan_folds_with(
                     .reserve(block, 1, call_rewrite_operation_count(&result))
                 {
                     let destination = destination.clone();
-                    // Only a rewrite that produced a value the next round can reason about buys
-                    // one.
-                    plan.warrants_another_round |= yields_known_value(&result, &state, analysis);
+                    // Known results and newly exposed arithmetic negations can enable another fold.
+                    plan.warrants_another_round |=
+                        warrants_another_fold_round(&result, &state, analysis);
                     if let Some(place) = analysis.tracked_place_of(&destination) {
                         let fact = fact_for_call_rewrite(&result, &state, analysis);
                         analysis.set_place_known(&mut state, place, fact);
@@ -954,12 +971,12 @@ fn plan_folds_with(
     plan
 }
 
-/// Whether a rewrite leaves behind a value the next round's analysis can reason about.
+/// Whether a rewrite exposes a known value or arithmetic negation to the next folding round.
 ///
 /// Deliberately answers without building the fact: literal and array facts require cloning their
 /// representation, and this is asked about every planned fold rather than only those writing a
 /// place the analysis tracks.
-fn yields_known_value(rewrite: &CallRewrite, state: &State, analysis: &Analysis) -> bool {
+fn warrants_another_fold_round(rewrite: &CallRewrite, state: &State, analysis: &Analysis) -> bool {
     match rewrite {
         CallRewrite::Reification(
             Reification::Constant(_) | Reification::BareFunction(_) | Reification::Array { .. },
@@ -970,6 +987,8 @@ fn yields_known_value(rewrite: &CallRewrite, state: &State, analysis: &Analysis)
         CallRewrite::Reification(Reification::String(_)) => false,
         // Negation reproduces an argument the analysis already did not know.
         CallRewrite::Negate(_) => false,
+        // A binary operation rewritten to negation can expose a double negation next round.
+        CallRewrite::ArithmeticNegation { .. } => true,
         CallRewrite::Copy(source) => analysis
             .tracked_place_of(source)
             .is_some_and(|place| state.place_is_known(place)),
@@ -984,17 +1003,156 @@ fn fact_for_call_rewrite(rewrite: &CallRewrite, state: &State, analysis: &Analys
             .map(|place| state.place(place))
             .unwrap_or_default(),
         CallRewrite::EqualOrdering => Fact::Known(Const::VariantTag(ustr(ORDERING_EQUAL))),
-        // Only an unknown argument reaches the negation rewrite; a known one folds outright.
-        CallRewrite::Negate(_) => Fact::Unknown,
+        // Negation does not establish a literal fact here; the next fold can evaluate the native.
+        CallRewrite::Negate(_) | CallRewrite::ArithmeticNegation { .. } => Fact::Unknown,
+    }
+}
+
+/// A block-local negation result and the unchanged place its operand came from.
+#[derive(Clone)]
+struct ArithmeticNegation {
+    kind: KnownCallee,
+    source: mir::Value,
+    source_place: PlaceId,
+}
+
+/// Available negations over non-escaping storage. Copying a result preserves its origin, but any
+/// write to either the original operand or the result's root invalidates the relation. Unknown
+/// operations clear the table. Starting empty in each block avoids moving reads across joins or
+/// loop iterations; the normal fold rounds and block merging expose further local opportunities.
+#[derive(Default)]
+struct ArithmeticNegations {
+    places: FxHashMap<PlaceId, ArithmeticNegation>,
+}
+
+impl ArithmeticNegations {
+    fn call<'a>(
+        operation: &'a Operation,
+        state: &State,
+        context: &FoldContext<'_>,
+    ) -> Option<(KnownCallee, &'a mir::Value, &'a mir::Value)> {
+        let OperationKind::Call { ty, .. } = &operation.kind else {
+            return None;
+        };
+        if !ty.effects().is_empty() || ty.result_convention != CallResultConvention::Value {
+            return None;
+        }
+        let call = dataflow::call_operands(&operation.operands, ty)?;
+        let [(source, ArgConvention::Let)] = call.arguments.as_slice() else {
+            return None;
+        };
+        let callee = match call.callee {
+            mir::Value::Function(callee) => *callee,
+            operand => match state.place(context.analysis.tracked_place_of(operand)?) {
+                Fact::Known(Const::Function(callee)) => callee,
+                _ => return None,
+            },
+        };
+        let known = context.known_calls.resolve(callee)?;
+        matches!(known, KnownCallee::IntNeg | KnownCallee::FloatNeg).then_some((
+            known,
+            *source,
+            dataflow::call_result_operand(&operation.operands, ty)?,
+        ))
+    }
+
+    fn double_negation(
+        &self,
+        operation: &Operation,
+        state: &State,
+        context: &FoldContext<'_>,
+    ) -> Option<CallRewrite> {
+        let (kind, source, _) = Self::call(operation, state, context)?;
+        let first = self
+            .places
+            .get(&context.analysis.tracked_place_of(source)?)?;
+        (first.kind == kind).then(|| CallRewrite::Copy(first.source.clone()))
+    }
+
+    fn forget_write(&mut self, destination: &mir::Value, analysis: &Analysis) {
+        let Some(place) = analysis.place_of(destination) else {
+            self.places.clear();
+            return;
+        };
+        let root = analysis.root_of_place(place);
+        self.places.retain(|place, negation| {
+            analysis.root_of_place(*place) != root
+                && analysis.root_of_place(negation.source_place) != root
+        });
+    }
+
+    fn step(&mut self, operation: &Operation, state: &State, context: &FoldContext<'_>) {
+        let analysis = &context.analysis;
+        match &operation.kind {
+            OperationKind::Call { ty, .. } => {
+                let Some(call) = dataflow::call_operands(&operation.operands, ty) else {
+                    self.places.clear();
+                    return;
+                };
+                if !ty.effects().is_empty()
+                    || ty.result_convention != CallResultConvention::Value
+                    || call
+                        .arguments
+                        .iter()
+                        .any(|(_, convention)| *convention != ArgConvention::Let)
+                {
+                    self.places.clear();
+                    return;
+                }
+                let Some(destination) = dataflow::call_result_operand(&operation.operands, ty)
+                else {
+                    self.places.clear();
+                    return;
+                };
+                self.forget_write(destination, analysis);
+                if let Some((kind, source, destination)) = Self::call(operation, state, context)
+                    && let Some(source_place) = analysis.tracked_place_of(source)
+                    && let Some(place) = analysis.tracked_place_of(destination)
+                    && analysis.root_of_place(place) != analysis.root_of_place(source_place)
+                {
+                    self.places.insert(
+                        place,
+                        ArithmeticNegation {
+                            kind,
+                            source: source.clone(),
+                            source_place,
+                        },
+                    );
+                }
+            }
+            OperationKind::Memcpy => {
+                let [source, destination] = operation.operands.as_ref() else {
+                    self.places.clear();
+                    return;
+                };
+                let origin = analysis
+                    .tracked_place_of(source)
+                    .and_then(|place| self.places.get(&place))
+                    .cloned();
+                self.forget_write(destination, analysis);
+                if let Some(origin) = origin
+                    && let Some(place) = analysis.tracked_place_of(destination)
+                    && analysis.root_of_place(place) != analysis.root_of_place(origin.source_place)
+                {
+                    self.places.insert(place, origin);
+                }
+            }
+            OperationKind::Store => self.forget_write(&operation.operands[1], analysis),
+            OperationKind::Alloca { .. }
+            | OperationKind::Load
+            | OperationKind::DictEntry { .. }
+            | OperationKind::Subfield { .. }
+            | OperationKind::StackSave => {}
+            _ => self.places.clear(),
+        }
     }
 }
 
 /// Applies known-callee rewrites that need less than the whole of the arguments.
 ///
 /// Most are identities: the result is one of the inputs, or a constant, even though an argument is
-/// unknown. [`BoolNot`](KnownCallee::BoolNot) is the exception, and is here for the same reason —
-/// its meaning is a MIR operation rather than a call, so naming the callee is all it takes to stop
-/// calling it.
+/// unknown. Other rules replace binary arithmetic with the declared unary negation, or replace
+/// [`BoolNot`](KnownCallee::BoolNot) with the comparison MIR already has.
 ///
 /// The callee identity is the contract. Effects and convention are checked independently so adding
 /// an entry from [`KnownCallees`] here never silently grants permission to discard an effect or
@@ -1060,6 +1218,20 @@ fn partial_call_outcome(
                 .is_some_and(|left_place| context.analysis.place_of(right) == Some(left_place))
     };
     let copy = |index| argument(index).cloned().map(CallRewrite::Copy);
+    let negate = |index, float| {
+        let (callee, ty) = if float {
+            context.known_calls.callees.float_neg()
+        } else {
+            context.known_calls.callees.int_neg()
+        };
+        argument(index)
+            .cloned()
+            .map(|source| CallRewrite::ArithmeticNegation {
+                source,
+                callee,
+                ty: ty.clone(),
+            })
+    };
     let int_is = |index, expected| {
         literal(index).and_then(|literal| literal.as_primitive_ty::<isize>().copied())
             == Some(expected)
@@ -1129,9 +1301,12 @@ fn partial_call_outcome(
         KnownCallee::IntAdd if int_is(1, 0) => copy(0),
         KnownCallee::IntSub if same_argument(0, 1) => zero(),
         KnownCallee::IntSub if int_is(1, 0) => copy(0),
+        KnownCallee::IntSub if int_is(0, 0) => negate(1, false),
         KnownCallee::IntMul if int_is(0, 0) || int_is(1, 0) => zero(),
         KnownCallee::IntMul if int_is(0, 1) => copy(1),
         KnownCallee::IntMul if int_is(1, 1) => copy(0),
+        KnownCallee::IntMul if int_is(0, -1) => negate(1, false),
+        KnownCallee::IntMul if int_is(1, -1) => negate(0, false),
         KnownCallee::IntCmp | KnownCallee::FloatCmp if same_argument(0, 1) => {
             Some(CallRewrite::EqualOrdering)
         }
@@ -1145,10 +1320,15 @@ fn partial_call_outcome(
 
         // `+0.0` is not an identity for `-0.0`, and multiplying an unknown negative value by
         // `+0.0` produces `-0.0`. Both signs are observable through formatting and hashing.
+        KnownCallee::FloatAdd if float_is(0, -0.0) => copy(1),
+        KnownCallee::FloatAdd if float_is(1, -0.0) => copy(0),
         KnownCallee::FloatSub if same_argument(0, 1) => zero(),
         KnownCallee::FloatSub if float_is(1, 0.0) => copy(0),
+        KnownCallee::FloatSub if float_is(0, -0.0) => negate(1, true),
         KnownCallee::FloatMul if float_is(0, 1.0) => copy(1),
         KnownCallee::FloatMul if float_is(1, 1.0) => copy(0),
+        KnownCallee::FloatMul if float_is(0, -1.0) => negate(1, true),
+        KnownCallee::FloatMul if float_is(1, -1.0) => negate(0, true),
         KnownCallee::FloatCmp if same_argument(0, 1) => Some(CallRewrite::EqualOrdering),
         _ => None,
     }
@@ -1958,6 +2138,67 @@ mod tests {
                 && !body.contains("call std::Ord<std::float>"),
             "the signed-zero-safe float identities must become copies or constants:\n{body}"
         );
+    }
+
+    #[test]
+    fn arithmetic_identities_become_negations() {
+        for (ty, expressions) in [
+            ("int", ["0 - x", "-1 * x", "x * -1"]),
+            ("float", ["-0.0 - x", "-1.0 * x", "x * -1.0"]),
+        ] {
+            for expression in expressions {
+                let body = optimized_main(&format!("fn main(x: {ty}) -> {ty} {{ {expression} }}"));
+                assert_eq!(body.matches("call ").count(), 1, "{expression}: {body}");
+                assert!(
+                    body.contains(&format!("call std::Num<std::{ty}>::neg")),
+                    "{expression}: {body}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn negative_zero_addition_is_elided() {
+        for expression in ["x + -0.0", "-0.0 + x"] {
+            let body = optimized_main(&format!("fn main(x: float) -> float {{ {expression} }}"));
+            assert!(!body.contains("call "), "{expression}: {body}");
+        }
+    }
+
+    #[test]
+    fn double_arithmetic_negation_is_elided() {
+        for (ty, expressions) in [
+            ("int", ["-(-x)", "-1 * (0 - x)", "let y = -x; -y"]),
+            ("float", ["-(-x)", "-1.0 * (-0.0 - x)", "let y = -x; -y"]),
+        ] {
+            for expression in expressions {
+                let body = optimized_main(&format!("fn main(x: {ty}) -> {ty} {{ {expression} }}"));
+                assert!(!body.contains("call "), "{expression}: {body}");
+            }
+        }
+    }
+
+    #[test]
+    fn double_negation_does_not_forward_across_mutation() {
+        for ty in ["int", "float"] {
+            let one = if ty == "int" { "1" } else { "1.0" };
+            for expression in [
+                format!("let mut y = -x; y = {one}; -y"),
+                format!("let mut y = x; let z = -y; y = {one}; -z + y"),
+            ] {
+                let body = optimized_main(&format!("fn main(x: {ty}) -> {ty} {{ {expression} }}"));
+                // The second expression needs the old negation; the first folds its overwritten
+                // value to a constant rather than copying x.
+                if expression.contains("let z") {
+                    assert!(
+                        body.contains(&format!("call std::Num<std::{ty}>::neg")),
+                        "{body}"
+                    );
+                } else {
+                    assert!(body.contains("store @c"), "{body}");
+                }
+            }
+        }
     }
 
     /// Signed zero is a Ferlium float value and is observable through formatting and hashing.
