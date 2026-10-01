@@ -229,11 +229,6 @@ impl Plan {
             let Some(source) = definition else { continue };
             let id = ValueId::from_index(index);
             let value = Value::Register(id);
-            if inputs.is_addressed(&value, parameter_count, value_count)
-                || comparison_fusions[id.as_index()].is_some()
-            {
-                continue;
-            }
             let Some(consumer) = inputs.value_uses[index].one() else {
                 continue;
             };
@@ -243,9 +238,42 @@ impl Plan {
             {
                 continue;
             }
-            let scalar_result = roles
-                .get(&Value::Register(id), body.constants())
-                .is_some_and(|role| {
+            let role = roles.get(&value, body.constants());
+            // These producers yield an address, rather than allocating storage whose identity
+            // needs a local. Defer only to consumers that emit that address exactly once.
+            let address_result = role.as_ref().is_some_and(|role| {
+                matches!(&**role, ValueRole::Materialized(MirType::Pointer(_)))
+                    || matches!(&**role, ValueRole::Place(_))
+                        && matches!(
+                            body.block(source.block).operations()[source.operation_id().as_index()]
+                                .kind,
+                            OperationKind::AddressOffset { .. }
+                                | OperationKind::AddressOffsetPlace { .. }
+                        )
+            }) && body
+                .block(consumer.block)
+                .operations()
+                .get(consumer.operation_id().as_index())
+                .is_some_and(|operation| {
+                    match operation.kind {
+                        // Evidence loads can release an old environment before reading the
+                        // source. Keep deferral at consumers with a plain scalar load.
+                        OperationKind::Load => operation.result_id().is_some_and(|id| {
+                            roles.get(&Value::Register(id), body.constants()).is_some_and(|role|
+                                matches!(&*role, ValueRole::Materialized(ty) if scalar(ty, &env).is_ok()))
+                        }),
+                        OperationKind::RuntimeDealloc | OperationKind::AddressOffset { .. }
+                            | OperationKind::AddressOffsetPlace { .. } => true,
+                        _ => false,
+                    }
+                });
+            if !address_result && inputs.is_addressed(&value, parameter_count, value_count)
+                || comparison_fusions[id.as_index()].is_some()
+            {
+                continue;
+            }
+            let scalar_result = address_result
+                || role.is_some_and(|role| {
                     matches!(&*role, ValueRole::VariantTag)
                         || matches!(&*role, ValueRole::Materialized(ty) if scalar(ty, &env).is_ok())
                 });
@@ -701,7 +729,11 @@ impl Inputs {
                 let source = Source::from_index(block_id, operation);
                 if let Some(id) = op.result_id() {
                     definitions[id.as_index()] = Some(source);
-                    if matches!(op.kind, OperationKind::Alloca { .. }) && op.operands.is_empty() {
+                    if matches!(
+                        op.kind,
+                        OperationKind::Alloca { .. } | OperationKind::AllocaPlace { .. }
+                    ) && op.operands.is_empty()
+                    {
                         place_roots[parameter_count + id.as_index()] = true;
                     } else if matches!(
                         op.kind,
@@ -709,6 +741,8 @@ impl Inputs {
                             | OperationKind::CompareEqual
                             | OperationKind::ExtractTag
                             | OperationKind::ExtractPayloadIndirection
+                            | OperationKind::AddressOffset { .. }
+                            | OperationKind::AddressOffsetPlace { .. }
                     ) {
                         value_definitions[id.as_index()] = Some(source);
                     }
@@ -804,6 +838,10 @@ impl<'a> OperandScan<'a> {
         intrinsic: Option<KnownCallee>,
         call_abi: Option<&CallAbi>,
     ) {
+        // Clear ends a MIR lifetime but emits no read or write of its backing bytes.
+        if matches!(operation.kind, OperationKind::Clear) {
+            return;
+        }
         for (index, operand) in operation.operands.iter().enumerate() {
             self.operand(operand, source, classify_access(operation, index));
             if is_elidable_operand(operation, index) {
@@ -1004,7 +1042,8 @@ fn stackifiable_operation(operation: &Operation) -> bool {
 fn stackifiable_consumer(body: &Function, source: Source) -> bool {
     let block = body.block(source.block);
     if let Some(operation) = block.operations().get(source.operation_id().as_index()) {
-        return stackifiable_operation(operation);
+        return stackifiable_operation(operation)
+            || matches!(operation.kind, OperationKind::RuntimeDealloc);
     }
     match &block.terminator().kind {
         TerminatorKind::CondBr { .. } | TerminatorKind::Return => true,

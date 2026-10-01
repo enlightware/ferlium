@@ -1063,7 +1063,38 @@ fn wasm_codegen_generated_helpers_and_adapters_are_shared() {
     let mut keys = FxHashSet::default();
     let mut helpers = 0;
     let mut adapters = 0;
+    let mut buffer_drops = 0;
     for name in names {
+        if name.name.contains("#physical:buffer_drop:") {
+            buffer_drops += 1;
+            let body = wasmparser::FunctionBody::new(wasmparser::BinaryReader::new(
+                bodies[name.index as usize - imported],
+                0,
+            ));
+            assert_eq!(
+                body.get_locals_reader().unwrap().get_count(),
+                0,
+                "buffer-drop address and loaded pointer must need no locals: {}, {:?}",
+                name.name,
+                body.get_operators_reader()
+                    .unwrap()
+                    .into_iter()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+            );
+            assert!(
+                !body
+                    .get_operators_reader()
+                    .unwrap()
+                    .into_iter()
+                    .any(|operation| matches!(
+                        operation.unwrap(),
+                        Operator::LocalSet { .. } | Operator::LocalTee { .. }
+                    )),
+                "buffer-drop temporaries must stay on the expression stack: {}",
+                name.name
+            );
+        }
         if name.name.starts_with("<shared generated helper ")
             || name.name.starts_with("<shared dictionary adapter ")
         {
@@ -1085,6 +1116,10 @@ fn wasm_codegen_generated_helpers_and_adapters_are_shared() {
             }
         }
     }
+    assert!(
+        buffer_drops > 0,
+        "fixture must include a generated buffer drop"
+    );
     assert!(
         helpers >= 2 && adapters >= 2,
         "fixture must exercise both sharing stages: {helpers} helper groups, {adapters} adapters"
