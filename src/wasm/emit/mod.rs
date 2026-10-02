@@ -1195,7 +1195,10 @@ fn emit_with_export_kind(
     }
     // Code-section entries, the source map's body numbering; the failure function is the first.
     let mut body_index = usize::from(emit_failure_function);
+    // Layouts depend on the current module; reuse sizes only within this compilation and module.
+    let mut module_type_sizes = FxHashMap::default();
     for (id, body, signature, selections) in &bodies {
+        let type_sizes = module_type_sizes.entry(id.module).or_default();
         names.push(format!(
             "{}::{}",
             module_path(session, id.module),
@@ -1224,6 +1227,7 @@ fn emit_with_export_kind(
             session
                 .modules()
                 .env_for(session.expect_fresh_module(id.module)),
+            type_sizes,
             imports,
             &mut strings,
             &evidence,
@@ -1261,6 +1265,7 @@ fn emit_with_export_kind(
                 session
                     .modules()
                     .env_for(session.expect_fresh_module(id.module)),
+                type_sizes,
                 imports,
                 &mut strings,
                 &evidence,

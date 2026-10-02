@@ -234,8 +234,8 @@ pub(super) struct Body<'a, 's> {
     signature: &'a CallAbi,
     pub(super) roles: ValueRoles,
     pub(super) env: ModuleEnv<'a>,
-    /// Sizes are fixed in this environment, shared by storage planning and emission.
-    type_sizes: RefCell<FxHashMap<Type, u32>>,
+    /// Validated sizes shared by bodies in this module's fixed type environment.
+    type_sizes: &'s RefCell<FxHashMap<Type, u32>>,
     pub(super) imports: &'a Imports,
     strings: &'a mut StringLiterals,
     evidence: &'a evidence::Image,
@@ -319,6 +319,7 @@ impl<'a, 's> Body<'a, 's> {
         program: &'a ResolvedPhysicalProgram<'a>,
         session: &'a CompilerSession,
         env: ModuleEnv<'a>,
+        type_sizes: &'s RefCell<FxHashMap<Type, u32>>,
         imports: &'a Imports,
         strings: &'a mut StringLiterals,
         evidence: &'a evidence::Image,
@@ -366,7 +367,7 @@ impl<'a, 's> Body<'a, 's> {
             body,
             signature,
             env,
-            type_sizes: RefCell::default(),
+            type_sizes,
             imports,
             strings,
             evidence,
