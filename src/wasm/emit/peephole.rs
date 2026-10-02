@@ -11,7 +11,7 @@ use wasm_encoder::{Function as WasmFunction, Instruction as I, MemArg};
 use crate::mir::DebugLocation;
 
 /// Where emitted instructions go: straight into a function, or through [`Code`]'s rewrites.
-pub(super) trait Instructions {
+pub(in crate::wasm) trait Instructions {
     fn instruction(&mut self, instruction: &I<'_>);
 }
 

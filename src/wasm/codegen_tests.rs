@@ -2761,6 +2761,169 @@ fn wasm_codegen_inactive_entry_does_not_write_memory() {
 }
 
 #[wasm_bindgen_test]
+fn wasm_codegen_small_copies_preserve_overlapping_bytes() {
+    use super::abi::WasmLocalId;
+    use wasm_encoder::{
+        CodeSection, ExportKind, ExportSection, Function, FunctionSection, Instruction as I,
+        MemArg, MemorySection, MemoryType, Module, TypeSection, ValType,
+    };
+
+    for (size, source_offset, destination_offset, align) in
+        [(12, 0, 0, 0), (16, 0, 0, 0), (12, 8, 24, 3), (16, 24, 8, 3)]
+    {
+        // Deliberately unaligned addresses also work with stronger alignment hints in Wasm.
+        let mut types = TypeSection::new();
+        types.ty().function([ValType::I32, ValType::I32], []);
+        let mut functions = FunctionSection::new();
+        functions.function(0);
+        let mut memories = MemorySection::new();
+        memories.memory(MemoryType {
+            minimum: 1,
+            maximum: None,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        });
+        let mut exports = ExportSection::new();
+        exports.export("copy", ExportKind::Func, 0);
+        exports.export("memory", ExportKind::Memory, 0);
+        let mut body = Function::new([]);
+        let source_address = MemArg {
+            offset: source_offset,
+            align,
+            memory_index: 0,
+        };
+        let destination_address = MemArg {
+            offset: destination_offset,
+            align,
+            memory_index: 0,
+        };
+        emit::emit_small_copy(
+            &mut body,
+            size,
+            (WasmLocalId::from_index(1), source_address),
+            (WasmLocalId::from_index(0), destination_address),
+        );
+        body.instruction(&I::End);
+        let mut code = CodeSection::new();
+        code.function(&body);
+        let mut module = Module::new();
+        module
+            .section(&types)
+            .section(&functions)
+            .section(&memories)
+            .section(&exports)
+            .section(&code);
+        let module =
+            WebAssembly::Module::new(&Uint8Array::from(module.finish().as_slice())).unwrap();
+        let instance = WebAssembly::Instance::new(&module, &js_sys::Object::new()).unwrap();
+        let copy: JsFunction = Reflect::get(&instance.exports(), &"copy".into())
+            .unwrap()
+            .dyn_into()
+            .unwrap();
+        let memory: WebAssembly::Memory = Reflect::get(&instance.exports(), &"memory".into())
+            .unwrap()
+            .dyn_into()
+            .unwrap();
+        let bytes = Uint8Array::new(&memory.buffer());
+        for (destination, source) in [(0, 32), (1, 0), (0, 1), (4, 0), (0, 4), (3, 3)] {
+            let original = (0_u8..128).collect::<Vec<_>>();
+            bytes.set(&Uint8Array::from(original.as_slice()), 0);
+            let mut expected = original;
+            let source_start = source + source_offset as usize;
+            expected.copy_within(
+                source_start..source_start + size as usize,
+                destination + destination_offset as usize,
+            );
+            copy.call2(
+                &JsValue::UNDEFINED,
+                &(destination as u32).into(),
+                &(source as u32).into(),
+            )
+            .unwrap();
+            assert_eq!(
+                bytes.slice(0, 128).to_vec(),
+                expected,
+                "size {size}, source {source}, destination {destination}"
+            );
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_expands_fixed_aggregate_copies() {
+    use wasmparser::{Name, NameSectionReader, TypeRef};
+
+    for (fields, source) in [
+        (3, "#[inline(never)] fn copy(x: (int, int, int)) -> (int, int, int) { x }
+         fn compute(x: int) -> int { let v = copy((x, x + 1, x + 2)); v.0 + v.1 + v.2 }"),
+        (4, "#[inline(never)] fn copy(x: (int, int, int, int)) -> (int, int, int, int) { x }
+         fn compute(x: int) -> int { let v = copy((x, x + 1, x + 2, x + 3)); v.0 + v.1 + v.2 + v.3 }"),
+    ] {
+        let mut session = CompilerSession::new();
+        let entry = compile(&mut session, source);
+        let code = compile_raw(&session, entry);
+        let mut loads = 0;
+        let mut imported = 0;
+        let mut copy_index = None;
+        let mut bodies = Vec::new();
+        for payload in Parser::new(0).parse_all(code.bytes()) {
+            match payload.unwrap() {
+                Payload::ImportSection(section) => {
+                    imported = section.into_imports().filter(|import| matches!(
+                        import.as_ref().unwrap().ty,
+                        TypeRef::Func(_) | TypeRef::FuncExact(_)
+                    )).count();
+                }
+                Payload::CustomSection(section) if section.name() == "name" => {
+                    for name in NameSectionReader::new(section.data_reader()) {
+                        if let Name::Function(map) = name.unwrap() {
+                            for name in map {
+                                let name = name.unwrap();
+                                if name.name.contains("wasm_test::copy") {
+                                    copy_index = Some(name.index as usize);
+                                }
+                            }
+                        }
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    let operations = body
+                        .get_operators_reader()
+                        .unwrap()
+                        .into_iter()
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap();
+                    loads += operations
+                        .iter()
+                        .filter(|op| matches!(op, Operator::I64Load { .. }))
+                        .count();
+                    assert!(
+                        !operations.iter().any(|op| matches!(op, Operator::MemoryCopy { .. })),
+                        "all copies in the fixed aggregate fixture must be expanded"
+                    );
+                    bodies.push(operations);
+                }
+                _ => (),
+            }
+        }
+        assert!(loads >= 1, "aggregate copies must load an eight-byte chunk");
+        let copy = &bodies[copy_index.expect("fixture must contain its copy function") - imported];
+        assert!(
+            !copy.iter().any(|op| matches!(op, Operator::LocalSet { .. } | Operator::LocalTee { .. })),
+            "copying between indirect parameters must reuse their locals: {copy:?}"
+        );
+        let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+        for x in [-7, 0, 8] {
+            assert_eq!(
+                instance.run((x,), WasmLimits::default()).unwrap(),
+                fields * x + fields * (fields - 1) / 2
+            );
+        }
+    }
+}
+
+#[wasm_bindgen_test]
 fn wasm_codegen_sharing_relocates_calls_and_debug_ranges() {
     use wasm_encoder::{
         CodeSection, ConstExpr, ElementSection, Elements, ExportKind, ExportSection, Function,

@@ -1623,6 +1623,44 @@ fn context_pointer(code: &mut impl Instructions, offset: usize) {
     }));
 }
 
+/// Copies from reusable address bases and memory offsets, reading all bytes before writing.
+pub(super) fn emit_small_copy(
+    code: &mut impl Instructions,
+    size: u32,
+    (source, source_arg): (WasmLocalId, MemArg),
+    (destination, destination_arg): (WasmLocalId, MemArg),
+) {
+    assert!(matches!(size, 12 | 16));
+    // Valid Ferlium copies are in bounds; partial writes after an invalid access are unspecified.
+    code.instruction(&I::LocalGet(destination.as_u32()));
+    code.instruction(&I::LocalGet(source.as_u32()));
+    code.instruction(&I::I64Load(source_arg));
+    code.instruction(&I::LocalGet(destination.as_u32()));
+    code.instruction(&I::LocalGet(source.as_u32()));
+    let source_tail = MemArg {
+        offset: source_arg.offset + 8,
+        ..source_arg
+    };
+    let destination_tail = MemArg {
+        offset: destination_arg.offset + 8,
+        ..destination_arg
+    };
+    if size == 12 {
+        code.instruction(&I::I32Load(MemArg {
+            align: source_tail.align.min(2),
+            ..source_tail
+        }));
+        code.instruction(&I::I32Store(MemArg {
+            align: destination_tail.align.min(2),
+            ..destination_tail
+        }));
+    } else {
+        code.instruction(&I::I64Load(source_tail));
+        code.instruction(&I::I64Store(destination_tail));
+    }
+    code.instruction(&I::I64Store(destination_arg));
+}
+
 fn frame_address(code: &mut impl Instructions, frame: WasmLocalId, offset: u32) {
     code.instruction(&I::LocalGet(frame.as_u32()));
     if offset != 0 {

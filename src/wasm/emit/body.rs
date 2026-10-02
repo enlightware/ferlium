@@ -6,7 +6,8 @@
 use std::{mem::offset_of, ops::Range};
 
 use self::HelperLocal::{
-    AllocationEnd, DynamicAlign, DynamicBase, DynamicSize, PendingFailure, Scratch,
+    AllocationEnd, CopyDestination, CopySource, DynamicAlign, DynamicBase, DynamicSize,
+    PendingFailure, Scratch,
 };
 
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction as I, MemArg, ValType};
@@ -63,7 +64,7 @@ use super::{
     adapters::NativeOptionalResultAdapter,
     allocate_frame, callable, callee, context_pointer,
     control_flow::{ControlFlow, Item, conditional_targets, distinct_targets},
-    dictionary_table, emit_failure, enter_frame,
+    dictionary_table, emit_failure, emit_small_copy, enter_frame,
     expressions::{
         Analysis as ExpressionAnalysis, Plan as ExpressionPlan, Source as ExpressionSource,
     },
@@ -146,17 +147,21 @@ pub(super) enum HelperLocal {
     DynamicAlign,
     DynamicBase,
     AllocationEnd,
+    CopySource,
+    CopyDestination,
 }
 
 impl HelperLocal {
     // Discriminants index storage; this lists every helper once. Order only sets allocation order.
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 8] = [
         Self::PendingFailure,
         Self::Scratch,
         Self::DynamicSize,
         Self::DynamicAlign,
         Self::DynamicBase,
         Self::AllocationEnd,
+        Self::CopySource,
+        Self::CopyDestination,
     ];
 
     fn ty(self) -> ValType {
@@ -864,6 +869,7 @@ impl<'a, 's> Body<'a, 's> {
                 required[helper as usize] = true;
             }
         };
+        let mut small_copy_types = FxHashMap::default();
         for block in self.body.blocks() {
             let block = self.body.block(block);
             if matches!(
@@ -883,6 +889,14 @@ impl<'a, 's> Body<'a, 's> {
                 {
                     require(&[Scratch]);
                     continue;
+                }
+                if let Some(needed) = self.small_copy_locals(operation, &mut small_copy_types) {
+                    if needed[0] {
+                        require(&[CopySource]);
+                    }
+                    if needed[1] {
+                        require(&[CopyDestination]);
+                    }
                 }
                 let witnessed = layout_witness(operation).is_some();
                 match operation.kind {
@@ -983,6 +997,104 @@ impl<'a, 's> Body<'a, 's> {
             }
         }
         required
+    }
+
+    /// A conservative scratch requirement; emission chooses copies in the existing fallback arms.
+    fn small_copy_locals(
+        &self,
+        operation: &Operation,
+        types: &mut FxHashMap<Type, bool>,
+    ) -> Option<[bool; 2]> {
+        use OperationKind::*;
+        let args = &operation.operands;
+        let place = match operation.kind {
+            Load => &args[0],
+            Store => &args[1],
+            Memcpy | Move if layout_witness(operation).is_none() => &args[1],
+            _ => return None,
+        };
+        let known_address = |value: &Value| {
+            matches!(self.storage.get(value), Some(Storage::Stack(_)))
+                || self.copy_address_local(value).is_some()
+        };
+        let destination_known = if operation.kind == Load {
+            known_address(&Value::Register(operation.result_id().unwrap()))
+        } else {
+            known_address(&args[1])
+        };
+        let needed = [!known_address(&args[0]), !destination_known];
+        // Known bases need no scratch locals, regardless of the copy's size.
+        if !needed.contains(&true) {
+            return None;
+        }
+        let ty = self.pointee_type(place).ok()?;
+        let MirType::Lowered(lowered) = &ty else {
+            return None;
+        };
+        // Recursive aggregate layouts are expensive; classify each type once per planning scan.
+        let small = *types.entry(*lowered).or_insert_with(|| {
+            scalar(&ty, &self.env).is_err() && matches!(self.size(&ty), Ok(12 | 16))
+        });
+        small.then_some(needed)
+    }
+
+    /// An address already in an immutable local, without storage or deferred evaluation.
+    fn copy_address_local(&self, value: &Value) -> Option<WasmLocalId> {
+        if self.storage.contains_key(value) || self.borrowed_static_strings.contains_key(value) {
+            return None;
+        }
+        match value {
+            Value::Parameter(id) => Some(self.parameter_local(*id)),
+            Value::Register(id) if !self.expressions.has_value(*id) => {
+                self.registers.get(id).copied()
+            }
+            _ => None,
+        }
+    }
+
+    fn copy_bytes(&mut self, source: &Value, destination: &Value, size: u32) -> Result<(), String> {
+        // Non-scalar Store values use the same backing-storage address as place operands.
+        if !matches!(size, 12 | 16) {
+            self.address(destination)?;
+            self.address(source)?;
+            self.i(I::I32Const(size as i32));
+            self.i(I::MemoryCopy {
+                src_mem: 0,
+                dst_mem: 0,
+            });
+            return Ok(());
+        }
+        // Fixed slots reuse the frame base and put their offsets directly into memory accesses.
+        let known_address = |value: &Value| match self.storage.get(value) {
+            Some(&Storage::Stack(offset)) => Some((
+                self.frame.expect("reserved frame storage"),
+                memarg_at(3, offset),
+            )),
+            _ => self
+                .copy_address_local(value)
+                .map(|local| (local, memarg(0))),
+        };
+        let source_base = known_address(source);
+        let destination_base = known_address(destination);
+        if destination_base.is_none() {
+            self.address(destination)?;
+        }
+        if source_base.is_none() {
+            self.address(source)?;
+        }
+        // Evaluate both addresses before capturing either, so nested emission cannot clobber them.
+        let source = source_base.unwrap_or_else(|| {
+            let local = self.helpers.get(CopySource);
+            self.i(I::LocalSet(local.as_u32()));
+            (local, memarg(0))
+        });
+        let destination = destination_base.unwrap_or_else(|| {
+            let local = self.helpers.get(CopyDestination);
+            self.i(I::LocalSet(local.as_u32()));
+            (local, memarg(0))
+        });
+        emit_small_copy(&mut self.code, size, source, destination);
+        Ok(())
     }
 
     fn scratch_address(&mut self, ty: Type) {
@@ -1937,6 +2049,14 @@ impl<'a, 's> Body<'a, 's> {
         }
     }
 
+    fn parameter_local(&self, id: ParameterId) -> WasmLocalId {
+        if self.body.parameters()[id.as_index()].kind == ParameterKind::Return {
+            self.input_local(self.signature.parameters.len())
+        } else {
+            self.input_local(id.as_index())
+        }
+    }
+
     /// Whether register `id` is read only as the value of one `store`.
     fn only_stored(&self, id: ValueId) -> bool {
         self.analysis.sole_use(id).is_some_and(|source| {
@@ -2060,14 +2180,7 @@ impl<'a, 's> Body<'a, 's> {
                     .ok_or_else(|| format!("register {id:?} has no Wasm value"))?;
                 self.i(I::LocalGet(local.as_u32()));
             }
-            Value::Parameter(id) => self.i(I::LocalGet(
-                (if self.body.parameters()[id.as_index()].kind == ParameterKind::Return {
-                    self.input_local(self.signature.parameters.len())
-                } else {
-                    self.input_local(id.as_index())
-                })
-                .as_u32(),
-            )),
+            Value::Parameter(id) => self.i(I::LocalGet(self.parameter_local(*id).as_u32())),
             Value::Constant(id) => self.literal(&self.body.constant(*id).representation)?,
             Value::Pattern(literal) => self.literal(literal)?,
             _ => return Err(format!("unsupported operand {value}")),
@@ -3070,13 +3183,11 @@ impl<'a, 's> Body<'a, 's> {
                 if let Ok(scalar) = scalar(&ty, &self.env) {
                     self.load_place(&args[0], scalar)?;
                 } else {
-                    self.address(&Value::Register(op.result_id().unwrap()))?;
-                    self.address(&args[0])?;
-                    self.i(I::I32Const(self.size(&ty)? as i32));
-                    self.i(I::MemoryCopy {
-                        src_mem: 0,
-                        dst_mem: 0,
-                    });
+                    self.copy_bytes(
+                        &args[0],
+                        &Value::Register(op.result_id().unwrap()),
+                        self.size(&ty)?,
+                    )?;
                     return Ok(());
                 }
             }
@@ -3125,13 +3236,7 @@ impl<'a, 's> Body<'a, 's> {
                     let constant = self.body.constant(*id);
                     self.initialize_literal(&args[1], constant.ty, &constant.representation, 0)?;
                 } else {
-                    self.address(&args[1])?;
-                    self.value(&args[0])?;
-                    self.i(I::I32Const(self.size(&ty)? as i32));
-                    self.i(I::MemoryCopy {
-                        src_mem: 0,
-                        dst_mem: 0,
-                    });
+                    self.copy_bytes(&args[0], &args[1], self.size(&ty)?)?;
                 }
             }
             Memcpy | Move | MoveBytes { .. } => {
@@ -3144,14 +3249,16 @@ impl<'a, 's> Body<'a, 's> {
                     self.read(&args[0])?;
                     self.finish_store(&args[1], ty, offset);
                 } else {
+                    if !matches!(op.kind, MoveBytes { .. }) && layout_witness(op).is_none() {
+                        self.copy_bytes(&args[0], &args[1], self.size(&ty)?)?;
+                        return Ok(());
+                    }
                     self.address(&args[1])?;
                     self.address(&args[0])?;
                     if matches!(op.kind, MoveBytes { .. }) {
                         self.read(&args[2])?;
-                    } else if layout_witness(op).is_some() {
-                        self.i(I::LocalGet(self.helper_locals().get(DynamicSize).as_u32()));
                     } else {
-                        self.i(I::I32Const(self.size(&ty)? as i32));
+                        self.i(I::LocalGet(self.helper_locals().get(DynamicSize).as_u32()));
                     }
                     self.i(I::MemoryCopy {
                         src_mem: 0,

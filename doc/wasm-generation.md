@@ -11,11 +11,23 @@ This borrows the immutable handle, while materialized strings still have owned m
 
 ## Plan scratch locals before emission
 
-For MIR bodies, scratch locals are reserved for the emission paths they need, after dictionary and
+For MIR bodies, scratch locals are reserved for the emission paths they may need, after dictionary and
 subscript selection. A use without a declared requirement panics as an internal compiler error.
 They are assigned after value registers, so narrowing scratch reservations does not change which values
 cross a projection's suspension boundary. Scratch contents are temporary and are never retained
 across a yield.
+
+## Expand small copies without changing overlap behavior
+
+Multi-chunk expansion is limited to fixed 12- and 16-byte copies; smaller single-chunk copies
+remain in the peephole. Expansion happens during body emission, where storage and address locals
+are still known.
+
+Fixed-size copies can use scalar loads and stores, but must read every source chunk before any
+write because valid source and destination ranges may overlap. Known frame slots use memory
+offsets directly, and addresses already in locals reuse those locals. Other addresses are evaluated
+once and use reusable scratch locals. Valid Ferlium copies are in bounds; partial destination
+contents after an invalid memory access are not part of the language contract.
 
 ## Share implementations after lowering
 
