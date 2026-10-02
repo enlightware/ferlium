@@ -17,6 +17,15 @@ They are assigned after value registers, so narrowing scratch reservations does 
 cross a projection's suspension boundary. Scratch contents are temporary and are never retained
 across a yield.
 
+## Keep interpreter provenance separate from Wasm uses
+
+Indexed physical addresses retain a logical index for interpreter provenance alongside their byte
+offset. Unboxed interpreter storage still tracks element identity: distinct zero-sized elements can
+have the same byte offset. Wasm uses only the byte address: the logical index does not expose
+storage or prevent stackification at a real consumer. Scalar loads used only to supply that index
+can be omitted, provided their removal does not discard deferred source work. Other producers retain
+their effects and ownership work. The shared MIR keeps the logical index.
+
 ## Expand small copies without changing overlap behavior
 
 Multi-chunk expansion is limited to fixed 12- and 16-byte copies; smaller single-chunk copies

@@ -103,6 +103,7 @@ pub(super) struct Analysis {
     intrinsics: Vec<Option<KnownCallee>>,
     comparison_fusions: Vec<Option<ComparisonFusion>>,
     value_uses: Vec<Uses>,
+    metadata_loads: Vec<bool>,
 }
 
 impl Analysis {
@@ -138,6 +139,7 @@ impl Analysis {
             no_op_stack_markers,
             env,
         );
+        let metadata_loads = metadata_loads(body, roles, &inputs, &plan, env);
         let analysis = Self {
             parameter_count: body.parameters().len(),
             register_count: roles.register_count(),
@@ -146,8 +148,15 @@ impl Analysis {
             intrinsics: inputs.intrinsics,
             comparison_fusions,
             value_uses: inputs.value_uses,
+            metadata_loads,
         };
         (analysis, plan)
+    }
+
+    pub(super) fn skips_metadata_load(&self, operation: &Operation) -> bool {
+        operation
+            .result_id()
+            .is_some_and(|id| self.metadata_loads[id.as_index()])
     }
 
     pub(super) fn is_addressed(&self, value: &Value) -> bool {
@@ -433,7 +442,10 @@ impl Plan {
             let producer = &body.block(candidate.source.block).operations()
                 [candidate.source.operation_id().as_index()];
             let reads = tree_reads.entry(ultimate_root).or_default();
-            for operand in &producer.operands {
+            for (index, operand) in producer.operands.iter().enumerate() {
+                if is_metadata_operand(producer, index) {
+                    continue;
+                }
                 if let Some(slot) = place_index(operand, parameter_count) {
                     reads.push((source, slot));
                 }
@@ -598,6 +610,8 @@ fn dense_value_index(
 enum Uses {
     #[default]
     None,
+    /// Uses exist only in operands that Wasm never reads.
+    Metadata,
     One(Source),
     Two,
     Multiple,
@@ -608,7 +622,7 @@ enum Uses {
 impl Uses {
     fn add(&mut self, source: Source) {
         *self = match *self {
-            Self::None => Self::One(source),
+            Self::None | Self::Metadata => Self::One(source),
             Self::One(_) => Self::Two,
             Self::Two | Self::Multiple => Self::Multiple,
             Self::Elidable => Self::Elidable,
@@ -618,7 +632,7 @@ impl Uses {
     fn one(self) -> Option<Source> {
         match self {
             Self::One(source) => Some(source),
-            Self::None | Self::Two | Self::Multiple | Self::Elidable => None,
+            Self::None | Self::Metadata | Self::Two | Self::Multiple | Self::Elidable => None,
         }
     }
 
@@ -843,6 +857,14 @@ impl<'a> OperandScan<'a> {
             return;
         }
         for (index, operand) in operation.operands.iter().enumerate() {
+            if is_metadata_operand(operation, index) {
+                if let Value::Register(id) = operand
+                    && matches!(self.value_uses[id.as_index()], Uses::None)
+                {
+                    self.value_uses[id.as_index()] = Uses::Metadata;
+                }
+                continue;
+            }
             self.operand(operand, source, classify_access(operation, index));
             if is_elidable_operand(operation, index) {
                 self.elidable_operand(operand);
@@ -950,6 +972,50 @@ fn observes_address(
         }
         _ => true,
     }
+}
+
+/// Reuse the operand census to find scalar loads used only by interpreter metadata.
+fn metadata_loads(
+    body: &Function,
+    roles: &ValueRoles,
+    inputs: &Inputs,
+    plan: &Plan,
+    env: ModuleEnv<'_>,
+) -> Vec<bool> {
+    inputs
+        .definitions
+        .iter()
+        .enumerate()
+        .map(|(index, source)| {
+            if !matches!(inputs.value_uses[index], Uses::Metadata) {
+                return false;
+            }
+            let Some(source) = source else { return false };
+            let operation =
+                &body.block(source.block).operations()[source.operation_id().as_index()];
+            if !matches!(operation.kind, OperationKind::Load) {
+                return false;
+            }
+            // Keep the load if its source is deferred: skipping it would discard that producer,
+            // including any nested place writes, and leave an unconsumed expression in the plan.
+            let address = &operation.operands[0];
+            if plan.has_place(address)
+                || matches!(address, Value::Register(id) if plan.has_value(*id))
+            {
+                return false;
+            }
+            // Evidence and aggregate loads keep their ownership and materialization work.
+            let value = Value::Register(ValueId::from_index(index));
+            roles.get(&value, body.constants()).is_some_and(
+                |role| matches!(&*role, ValueRole::Materialized(ty) if scalar(ty, &env).is_ok()),
+            )
+        })
+        .collect()
+}
+
+/// The logical index accompanies an indexed byte address for interpreter provenance only.
+fn is_metadata_operand(operation: &Operation, index: usize) -> bool {
+    matches!(operation.kind, OperationKind::AddressOffset { .. }) && index == 2
 }
 
 /// Whether emission may skip reading an operand.
@@ -1177,4 +1243,136 @@ fn comparison_fusions(
         }
     }
     fused
+}
+
+#[cfg(test)]
+mod tests {
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::*;
+    use crate::{
+        Location,
+        hir::{function::ArgConvention, value::LiteralValue},
+        mir::{builder::FunctionBuilder, terminator::Terminator},
+        module::Path,
+        std::{buffer::buffer_type, math::int_type},
+        types::r#type::CallResultConvention,
+    };
+
+    #[wasm_bindgen_test]
+    fn wasm_codegen_metadata_load_keeps_its_deferred_producer() {
+        let mut session = CompilerSession::new();
+        let module = session
+            .compile(
+                "fn unused() {}",
+                "metadata_guard",
+                Path::single_str("metadata_guard"),
+            )
+            .unwrap()
+            .module_id;
+        let program = session.prepare_physical_program(module).unwrap();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        for (defer_store, defer_address) in [(true, false), (false, true), (false, false)] {
+            let mut builder =
+                FunctionBuilder::new("metadata_guard".into(), CallResultConvention::NoValue);
+            let buffer = Value::Parameter(builder.add_parameter(
+                buffer_type(int_type()),
+                ParameterKind::Parameter(ArgConvention::Let),
+            ));
+            let block = builder.add_block();
+            let zero = Value::Constant(builder.add_constant(
+                int_type(),
+                LiteralValue::new_native(0_isize),
+                &env,
+            ));
+            let slot = builder
+                .append_operation(
+                    block,
+                    Operation::address_offset_place(span, buffer, zero.clone(), int_type()),
+                )
+                .unwrap();
+            let base = builder
+                .append_operation(block, Operation::load(span, slot))
+                .unwrap();
+            let index = if defer_address {
+                builder
+                    .append_operation(
+                        block,
+                        Operation::address_offset(
+                            span,
+                            base.clone(),
+                            zero.clone(),
+                            int_type(),
+                            None,
+                        ),
+                    )
+                    .unwrap()
+            } else {
+                let index = builder
+                    .append_operation(block, Operation::alloca(span, int_type()))
+                    .unwrap();
+                builder
+                    .append_operation(block, Operation::store(span, zero.clone(), index.clone()));
+                if !defer_store {
+                    // Two writes prevent deferral, making this a metadata load that can disappear.
+                    builder.append_operation(
+                        block,
+                        Operation::store(span, zero.clone(), index.clone()),
+                    );
+                }
+                index
+            };
+            let logical_index = builder
+                .append_operation(block, Operation::load(span, index.clone()))
+                .unwrap();
+            builder.append_operation(
+                block,
+                Operation::address_offset_indexed(
+                    span,
+                    base,
+                    zero,
+                    logical_index.clone(),
+                    int_type(),
+                ),
+            );
+            builder.set_terminator(block, Terminator::ret(span));
+            let body = builder.finish_physical(env);
+            let roles = ValueRoles::derive(&body);
+            let (analysis, plan) = Analysis::of(
+                &body,
+                &roles,
+                &FxHashMap::default(),
+                &program,
+                &session,
+                env,
+                false,
+                &FxHashSet::default(),
+            );
+            assert_eq!(
+                plan.has_place(&index),
+                defer_store,
+                "fixture must exercise store deferral"
+            );
+            let Value::Register(index_id) = &index else {
+                unreachable!()
+            };
+            assert_eq!(
+                plan.has_value(*index_id),
+                defer_address,
+                "fixture must exercise address deferral"
+            );
+            let load = body
+                .block(block)
+                .operations()
+                .iter()
+                .find(|op| op.result_id().map(Value::Register).as_ref() == Some(&logical_index))
+                .unwrap();
+            assert_eq!(
+                analysis.skips_metadata_load(load),
+                !defer_store && !defer_address,
+                "a metadata-only load must execute its deferred source"
+            );
+        }
+    }
 }

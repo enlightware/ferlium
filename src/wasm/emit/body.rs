@@ -507,7 +507,9 @@ impl<'a, 's> Body<'a, 's> {
         }
         for block in body.blocks() {
             for operation in operations(body.block(block)) {
-                if is_elided_stack_operation(operation, &this.no_op_stack_markers) {
+                if is_elided_stack_operation(operation, &this.no_op_stack_markers)
+                    || this.analysis.skips_metadata_load(operation)
+                {
                     continue;
                 }
                 if matches!(operation.kind, OperationKind::BuildClosure { .. }) {
@@ -888,7 +890,9 @@ impl<'a, 's> Body<'a, 's> {
                 require(&[PendingFailure]);
             }
             for operation in operations(block) {
-                if is_elided_stack_operation(operation, &self.no_op_stack_markers) {
+                if is_elided_stack_operation(operation, &self.no_op_stack_markers)
+                    || self.analysis.skips_metadata_load(operation)
+                {
                     continue;
                 }
                 if matches!(operation.kind, Store | Move | Memcpy | MoveBytes { .. })
@@ -2651,7 +2655,9 @@ impl<'a, 's> Body<'a, 's> {
         let mut index = 0;
         while index < operations.len() {
             let operation = &operations[index];
-            if is_elided_stack_operation(operation, &self.no_op_stack_markers) {
+            if is_elided_stack_operation(operation, &self.no_op_stack_markers)
+                || self.analysis.skips_metadata_load(operation)
+            {
                 index += 1;
                 continue;
             }

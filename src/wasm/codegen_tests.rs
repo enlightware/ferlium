@@ -6,7 +6,7 @@ use std::{cell::Cell, fmt::Debug, hint::black_box, mem::offset_of, ptr};
 use js_sys::{Function as JsFunction, Reflect, Uint8Array, WebAssembly};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_test::wasm_bindgen_test;
-use wasmparser::{FunctionBody, Operator, Parser, Payload};
+use wasmparser::{FunctionBody, Name, NameSectionReader, Operator, Parser, Payload, TypeRef};
 
 use crate::{
     CompilerSession, FxHashSet, Location,
@@ -1329,6 +1329,144 @@ fn wasm_codegen_reserves_only_needed_helper_locals() {
             );
         }
     }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_index_metadata_does_not_materialize_scalar_snapshots() {
+    let mut session = CompilerSession::new();
+    let entry = compile(
+        &mut session,
+        "fn compute(i: int) -> int { let a = [5, 8, 13]; a[i] }",
+    );
+    let code = CompiledProgram::compile(&session, entry).unwrap();
+    // The host export is a fallible wrapper. Inspect the named Ferlium body itself.
+    let mut imported = 0;
+    let mut bodies = Vec::new();
+    let mut function_index = None;
+    for payload in Parser::new(0).parse_all(code.bytes()) {
+        match payload.unwrap() {
+            Payload::ImportSection(section) => {
+                imported = section
+                    .into_imports()
+                    .filter(|import| {
+                        matches!(
+                            import.as_ref().unwrap().ty,
+                            TypeRef::Func(_) | TypeRef::FuncExact(_)
+                        )
+                    })
+                    .count();
+            }
+            Payload::CodeSectionEntry(body) => bodies.push(body),
+            Payload::CustomSection(section) if section.name() == "name" => {
+                for name in NameSectionReader::new(section.data_reader()) {
+                    if let Name::Function(map) = name.unwrap() {
+                        function_index = map
+                            .into_iter()
+                            .map(Result::unwrap)
+                            .find(|name| name.name == "wasm_test::compute")
+                            .map(|name| name.index as usize);
+                    }
+                }
+            }
+            _ => (),
+        }
+    }
+    let operations = bodies[function_index.expect("fixture must name compute") - imported]
+        .get_operators_reader()
+        .unwrap()
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let stores = operations
+        .iter()
+        .filter(|op| matches!(op, Operator::I32Store { .. }))
+        .count();
+    assert_eq!(
+        stores, 8,
+        "only three elements, four descriptor fields and the result need stores: {operations:?}"
+    );
+    let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+    for (index, expected) in [(0, 5), (1, 8), (2, 13), (-1, 13), (-3, 5)] {
+        assert_eq!(
+            instance.run((index,), WasmLimits::default()).unwrap(),
+            expected
+        );
+    }
+    assert!(instance.run((3,), WasmLimits::default()).is_err());
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_index_metadata_preserves_real_uses_and_effects() {
+    for (expression, observes_index) in [
+        ("{ let index = next(counter); a[index] + index }", true),
+        ("a[next(counter)]", false),
+    ] {
+        let mut session = CompilerSession::new();
+        let entry = compile(
+            &mut session,
+            &format!(
+                r#"
+            #[inline(never)] fn next(counter: &mut int) -> int {{
+                let index = counter;
+                counter += 1;
+                index
+            }}
+            fn compute(i: int) -> int {{
+                let a = [5, 8, 13];
+                let mut counter = i;
+                {expression} + counter * 100
+            }}
+        "#
+            ),
+        );
+        let code = CompiledProgram::compile(&session, entry).unwrap();
+        let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+        for (index, element) in [(0, 5), (1, 8), (-1, 13), (-3, 5)] {
+            let expected = element + (index + 1) * 100 + if observes_index { index } else { 0 };
+            assert_eq!(
+                instance.run((index,), WasmLimits::default()).unwrap(),
+                expected,
+                "{expression}: {index}"
+            );
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_metadata_only_indices_keep_failure_and_one_byte_element_effects() {
+    let mut session = CompilerSession::new();
+    let entry = compile(
+        &mut session,
+        r#"
+        #[inline(never)] fn next(counter: &mut int) -> int {
+            let index = counter;
+            counter += 1;
+            index
+        }
+        fn compute(i: int) -> int {
+            let a = [false, true, false];
+            let mut counter = i;
+            let selected = if a[next(counter)] { 1 } else { 0 };
+            selected + counter * 100
+        }
+    "#,
+    );
+    let code = CompiledProgram::compile(&session, entry).unwrap();
+    let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+    for (index, expected) in [(0, 100), (1, 201), (-1, 0), (-3, -200)] {
+        assert_eq!(
+            instance.run((index,), WasmLimits::default()).unwrap(),
+            expected
+        );
+    }
+    let entry = compile(
+        &mut session,
+        "fn compute(i: int) -> bool { let a = [false, true]; a[idiv(1, i)] }",
+    );
+    let code = CompiledProgram::compile(&session, entry).unwrap();
+    let mut instance = code.instantiate::<(isize,), bool>().unwrap();
+    assert!(instance.run((0,), WasmLimits::default()).is_err());
+    assert!(instance.run((1,), WasmLimits::default()).unwrap());
 }
 
 #[wasm_bindgen_test]
