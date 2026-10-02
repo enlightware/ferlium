@@ -3,7 +3,7 @@
 
 //! Per-function storage assignment and instruction emission.
 
-use std::{mem::offset_of, ops::Range};
+use std::{cell::RefCell, mem::offset_of, ops::Range};
 
 use self::HelperLocal::{
     AllocationEnd, CopyDestination, CopySource, DynamicAlign, DynamicBase, DynamicSize,
@@ -234,6 +234,8 @@ pub(super) struct Body<'a, 's> {
     signature: &'a CallAbi,
     pub(super) roles: ValueRoles,
     pub(super) env: ModuleEnv<'a>,
+    /// Sizes are fixed in this environment, shared by storage planning and emission.
+    type_sizes: RefCell<FxHashMap<Type, u32>>,
     pub(super) imports: &'a Imports,
     strings: &'a mut StringLiterals,
     evidence: &'a evidence::Image,
@@ -364,6 +366,7 @@ impl<'a, 's> Body<'a, 's> {
             body,
             signature,
             env,
+            type_sizes: RefCell::default(),
             imports,
             strings,
             evidence,
@@ -831,11 +834,15 @@ impl<'a, 's> Body<'a, 's> {
         match ty {
             MirType::Pointer(_) => Ok(ScalarType::pointer().size()),
             MirType::Lowered(ty) => {
+                if let Some(&size) = self.type_sizes.borrow().get(ty) {
+                    return Ok(size);
+                }
                 let layout = value_layout_for_type(*ty, Location::new_synthesized(), &self.env)
                     .map_err(|e| format!("Wasm storage layout: {e:?}"))?;
                 if layout.align > 8 {
                     return Err("Wasm frame alignment above eight bytes".into());
                 }
+                self.type_sizes.borrow_mut().insert(*ty, layout.size);
                 Ok(layout.size)
             }
         }
@@ -869,7 +876,6 @@ impl<'a, 's> Body<'a, 's> {
                 required[helper as usize] = true;
             }
         };
-        let mut small_copy_types = FxHashMap::default();
         for block in self.body.blocks() {
             let block = self.body.block(block);
             if matches!(
@@ -890,7 +896,7 @@ impl<'a, 's> Body<'a, 's> {
                     require(&[Scratch]);
                     continue;
                 }
-                if let Some(needed) = self.small_copy_locals(operation, &mut small_copy_types) {
+                if let Some(needed) = self.small_copy_locals(operation) {
                     if needed[0] {
                         require(&[CopySource]);
                     }
@@ -1000,11 +1006,7 @@ impl<'a, 's> Body<'a, 's> {
     }
 
     /// A conservative scratch requirement; emission chooses copies in the existing fallback arms.
-    fn small_copy_locals(
-        &self,
-        operation: &Operation,
-        types: &mut FxHashMap<Type, bool>,
-    ) -> Option<[bool; 2]> {
+    fn small_copy_locals(&self, operation: &Operation) -> Option<[bool; 2]> {
         use OperationKind::*;
         let args = &operation.operands;
         let place = match operation.kind {
@@ -1028,14 +1030,10 @@ impl<'a, 's> Body<'a, 's> {
             return None;
         }
         let ty = self.pointee_type(place).ok()?;
-        let MirType::Lowered(lowered) = &ty else {
+        if scalar(&ty, &self.env).is_ok() {
             return None;
-        };
-        // Recursive aggregate layouts are expensive; classify each type once per planning scan.
-        let small = *types.entry(*lowered).or_insert_with(|| {
-            scalar(&ty, &self.env).is_err() && matches!(self.size(&ty), Ok(12 | 16))
-        });
-        small.then_some(needed)
+        }
+        matches!(self.size(&ty), Ok(12 | 16)).then_some(needed)
     }
 
     /// An address already in an immutable local, without storage or deferred evaluation.
