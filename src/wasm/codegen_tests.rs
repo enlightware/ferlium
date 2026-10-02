@@ -1139,7 +1139,7 @@ fn wasm_codegen_generated_helpers_and_adapters_are_shared() {
         }
         if name.name.starts_with("<shared function ") {
             assert!(
-                name.name.contains('×'),
+                name.name.contains(" x"),
                 "shared group size missing: {}",
                 name.name
             );

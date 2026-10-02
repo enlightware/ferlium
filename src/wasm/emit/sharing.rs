@@ -322,7 +322,7 @@ pub(in crate::wasm) fn share(
                         functions.append(
                             indices[index],
                             &format!(
-                                "<shared function {} ×{}>",
+                                "<shared function {} x{}>",
                                 name.strip_prefix('<')
                                     .and_then(|name| name.strip_suffix('>'))
                                     .unwrap_or(name),

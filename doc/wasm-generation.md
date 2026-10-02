@@ -46,7 +46,7 @@ code offsets must be generated after this stage.
 Names and source locations describe an implementation's origins; they do not determine its
 behavior. Including them in equality would prevent otherwise valid sharing. Shared
 implementations name the first original function in emission order and the number of shared
-origins; unshared adapters retain their descriptive names. Source maps combine
+origins with an ASCII `xN` suffix; unshared adapters retain their descriptive names. Source maps combine
 the original locations and inline chains. Different region boundaries are split so lookup still
 sees disjoint or identical byte ranges.
 
