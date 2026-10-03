@@ -19,6 +19,7 @@ use crate::{
         value::ConstantId,
     },
     module::{FunctionId, ModuleEnv, id::Id},
+    std::math::Float,
     wasm::abi::{CallAbi, Parameter as ParameterTransport, WasmFunctionId},
 };
 
@@ -168,6 +169,13 @@ impl Analysis {
 
     pub(super) fn integer_constant(&self, body: &Function, value: &Value) -> Option<i32> {
         super::body::integer_constant(body, value, &self.definitions, &self.integer_constants)
+    }
+
+    /// Resolve primitive float literals using the existing immutable-storage proof.
+    pub(super) fn float_constant(&self, body: &Function, value: &Value) -> Option<f64> {
+        super::body::literal_constant(body, value, &self.definitions, Some(&self.scalar_constants))?
+            .as_primitive_ty::<Float>()
+            .map(|value| value.into_inner())
     }
 
     pub(super) fn scalar_constant(&self, value: &Value) -> Option<ConstantId> {

@@ -2155,10 +2155,36 @@ impl<'a, 's> Body<'a, 's> {
                 // Ferlium floats are finite. Operations on finite operands cannot produce NaN,
                 // but overflow can produce either infinity; clamp it exactly as
                 // Float::new_saturating does in the native implementation.
-                self.i(I::F64Const((-f64::MAX).into()));
-                self.i(I::F64Max);
-                self.i(I::F64Const(f64::MAX.into()));
-                self.i(I::F64Min);
+                let mut lower = true;
+                let mut upper = true;
+                for (index, input) in inputs.iter().take(2).enumerate() {
+                    let Some(mut constant) = self.analysis.float_constant(self.body, input) else {
+                        continue;
+                    };
+                    match intrinsic {
+                        KnownCallee::FloatAdd | KnownCallee::FloatSub => {
+                            if intrinsic == KnownCallee::FloatSub && index == 1 {
+                                constant = -constant;
+                            }
+                            // A nonnegative contribution cannot overflow downward, and vice versa.
+                            lower &= constant < 0.0;
+                            upper &= constant > 0.0;
+                        }
+                        KnownCallee::FloatMul if constant.abs() <= 1.0 => {
+                            lower = false;
+                            upper = false;
+                        }
+                        _ => {}
+                    }
+                }
+                if lower {
+                    self.i(I::F64Const((-f64::MAX).into()));
+                    self.i(I::F64Max);
+                }
+                if upper {
+                    self.i(I::F64Const(f64::MAX.into()));
+                    self.i(I::F64Min);
+                }
             }
             // Both float types are f64 values, so a raw operation reads a `float` input as is.
             KnownCallee::RawFloatAdd | KnownCallee::RawFloatSub | KnownCallee::RawFloatMul => {
@@ -4117,28 +4143,42 @@ pub(super) fn integer_constant(
     {
         return Some(constant);
     }
-    let value = if let Value::Register(id) = value {
-        let source = definitions.get(id.as_index()).copied().flatten()?;
-        let operation = body
-            .block(source.block)
-            .operations()
-            .get(source.operation_id().as_index())?;
-        if !matches!(operation.kind, OperationKind::Load) {
-            return None;
-        }
-        operation.operands.first()?
-    } else {
-        value
-    };
-    // Only immutable literal storage proves a constant; mutable places keep their call path.
-    let literal = match value {
-        Value::Constant(id) => &body.constant(*id).representation,
-        Value::Pattern(literal) => literal,
-        _ => return None,
-    };
-    literal
+    literal_constant(body, value, definitions, None)?
         .as_primitive_ty::<isize>()
         .and_then(|value| i32::try_from(*value).ok())
+}
+
+/// Resolve a literal or its defining load, optionally using proven immutable scalar places.
+/// Integers pass `None`: their caller already consults the separate `integer_constants` map.
+pub(super) fn literal_constant<'a>(
+    body: &'a Function,
+    value: &'a Value,
+    definitions: &[Option<ExpressionSource>],
+    constants: Option<&FxHashMap<ValueId, ConstantId>>,
+) -> Option<&'a LiteralValue> {
+    let literal = |value: &'a Value| match value {
+        Value::Constant(id) => Some(&body.constant(*id).representation),
+        Value::Pattern(literal) => Some(&**literal),
+        Value::Register(id) => constants
+            .and_then(|constants| constants.get(id))
+            .map(|id| &body.constant(*id).representation),
+        _ => None,
+    };
+    if let Some(literal) = literal(value) {
+        return Some(literal);
+    }
+    let Value::Register(id) = value else {
+        return None;
+    };
+    let source = definitions.get(id.as_index()).copied().flatten()?;
+    let operation = body
+        .block(source.block)
+        .operations()
+        .get(source.operation_id().as_index())?;
+    if !matches!(operation.kind, OperationKind::Load) {
+        return None;
+    }
+    literal(operation.operands.first()?)
 }
 
 /// Emitted reads of a zero-based call input, including reads in distinct Wasm branches.

@@ -2481,6 +2481,62 @@ fn wasm_codegen_known_float_calls_select_saturating_instructions() {
     }
 }
 
+/// Literal proofs remove only unreachable overflow directions, preserving IEEE signed zero.
+#[wasm_bindgen_test]
+fn wasm_codegen_float_literals_remove_redundant_clamps() {
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(optimization);
+        session.set_physical_mir_optimization(optimization);
+        type Case<'a> = (&'a str, usize, usize, fn(f64) -> f64);
+        // Constant folding produces a large literal; source float syntax has no exponent form.
+        let cases: &[Case<'_>] = &[
+            ("x + 1.0", 0, 1, |x| x + 1.0),
+            ("1.0 + x", 0, 1, |x| 1.0 + x),
+            ("x + -1.0", 1, 0, |x| x + -1.0),
+            ("x - 1.0", 1, 0, |x| x - 1.0),
+            ("1.0 - x", 0, 1, |x| 1.0 - x),
+            ("-1.0 - x", 1, 0, |x| -1.0 - x),
+            ("x * 0.5", 0, 0, |x| x * 0.5),
+            ("0.5 * x", 0, 0, |x| 0.5 * x),
+            ("x * -1.0", 0, 0, |x| -x),
+            ("x * 2.0", 1, 1, |x| x * 2.0),
+            ("x + 0.0", 0, 0, |x| x + 0.0),
+            ("x * -0.0", 0, 0, |x| x * -0.0),
+            ("x + pow(2.0, 1023.0)", 0, 1, |x| x + 2.0_f64.powi(1023)),
+            ("-pow(2.0, 1023.0) - x", 1, 0, |x| -2.0_f64.powi(1023) - x),
+            ("let c = 1.0; x + c", 0, 1, |x| x + 1.0),
+        ];
+        for &(expression, lower, upper, operation) in cases {
+            let entry = compile(
+                &mut session,
+                &format!("fn compute(x: float) -> float {{ {expression} }}"),
+            );
+            let code = CompiledProgram::compile(&session, entry).unwrap();
+            assert_eq!(
+                count_operators(&code, |op| matches!(op, Operator::F64Max)),
+                lower,
+                "{expression} {optimization:?}"
+            );
+            assert_eq!(
+                count_operators(&code, |op| matches!(op, Operator::F64Min)),
+                upper,
+                "{expression} {optimization:?}"
+            );
+            let mut instance = code.instantiate::<(Float,), Float>().unwrap();
+            for x in [-f64::MAX, -1.0, -0.0, 0.0, 1.0, f64::MAX] {
+                let expected = Float::new_saturating(operation(x)).into_inner().to_bits();
+                let actual = instance
+                    .run((Float::new(x).unwrap(),), WasmLimits::default())
+                    .unwrap()
+                    .into_inner()
+                    .to_bits();
+                assert_eq!(actual, expected, "{expression} {optimization:?} x={x:?}");
+            }
+        }
+    }
+}
+
 /// Counts selected operators across every function body of a compiled program.
 fn count_operators(code: &CompiledProgram, mut counted: impl FnMut(&Operator) -> bool) -> usize {
     let mut count = 0;
@@ -2502,15 +2558,16 @@ fn wasm_codegen_speculated_float_tree_saturates_only_on_its_slow_path() {
         "fn compute(x: float, y: float) -> float { (x * y + 1.0) * x - y }",
     );
     let code = CompiledProgram::compile(&session, entry).unwrap();
-    // Four saturating operations remain, all on the slow path; the fast path checks its root once
-    // and converts it back without a fallback, since the conversion is only reached when finite.
+    // Four operations remain on the slow path; adding 1.0 needs only the upper clamp.
+    // The fast path checks its root once and converts it back without a fallback, since the
+    // conversion is only reached when finite.
     assert_eq!(
         count_operators(&code, |operation| matches!(operation, Operator::F64Min)),
         4
     );
     assert_eq!(
         count_operators(&code, |operation| matches!(operation, Operator::F64Max)),
-        4
+        3
     );
     assert_eq!(
         count_operators(&code, |operation| matches!(operation, Operator::Select)),
