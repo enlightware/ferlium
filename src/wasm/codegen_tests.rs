@@ -313,60 +313,129 @@ fn wasm_operator_count(bytes: &[u8], mut matches: impl FnMut(&Operator<'_>) -> b
         .sum()
 }
 
-/// Body and parameter count of a named exported function, independent of code-section ordering.
-///
-/// This follows the export exactly, so a fallible scalar entry resolves to its generated wrapper
-/// rather than the wrapped Ferlium function.
-fn exported_function_body<'a>(bytes: &'a [u8], name: &str) -> (FunctionBody<'a>, u32) {
-    let mut types = Vec::new();
-    let mut function_types = Vec::new();
-    let mut imported_functions = 0usize;
-    let mut function_index = None;
-    for payload in Parser::new(0).parse_all(bytes) {
-        match payload.unwrap() {
-            Payload::TypeSection(section) => {
-                types.extend(section.into_iter_err_on_gc_types().map(Result::unwrap))
-            }
-            Payload::ImportSection(section) => {
-                function_types.extend(section.into_imports().filter_map(|import| {
-                    match import.unwrap().ty {
-                        wasmparser::TypeRef::Func(index)
-                        | wasmparser::TypeRef::FuncExact(index) => Some(index),
-                        _ => None,
-                    }
-                }));
-                imported_functions = function_types.len();
-            }
-            Payload::FunctionSection(section) => {
-                function_types.extend(section.into_iter().map(Result::unwrap));
-            }
-            Payload::ExportSection(section) => {
-                for export in section {
-                    let export = export.unwrap();
-                    if export.name == name && export.kind == wasmparser::ExternalKind::Func {
-                        function_index = Some(export.index as usize);
+/// Function signatures, bodies and names used by code-generation assertions.
+struct WasmFunctions<'a> {
+    parameter_counts: Vec<u32>,
+    function_types: Vec<u32>,
+    imported: usize,
+    bodies: Vec<FunctionBody<'a>>,
+    exports: Vec<(&'a str, u32)>,
+    names: Vec<(&'a str, u32)>,
+}
+
+impl<'a> WasmFunctions<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        let mut functions = Self {
+            parameter_counts: Vec::new(),
+            function_types: Vec::new(),
+            imported: 0,
+            bodies: Vec::new(),
+            exports: Vec::new(),
+            names: Vec::new(),
+        };
+        for payload in Parser::new(0).parse_all(bytes) {
+            match payload.unwrap() {
+                Payload::TypeSection(section) => functions.parameter_counts.extend(
+                    section
+                        .into_iter_err_on_gc_types()
+                        .map(|ty| ty.unwrap().params().len() as u32),
+                ),
+                Payload::ImportSection(section) => {
+                    functions
+                        .function_types
+                        .extend(section.into_imports().filter_map(
+                            |import| match import.unwrap().ty {
+                                TypeRef::Func(index) | TypeRef::FuncExact(index) => Some(index),
+                                _ => None,
+                            },
+                        ));
+                    functions.imported = functions.function_types.len();
+                }
+                Payload::FunctionSection(section) => {
+                    functions
+                        .function_types
+                        .extend(section.into_iter().map(Result::unwrap));
+                }
+                Payload::ExportSection(section) => {
+                    functions
+                        .exports
+                        .extend(section.into_iter().filter_map(|export| {
+                            let export = export.unwrap();
+                            (export.kind == wasmparser::ExternalKind::Func)
+                                .then_some((export.name, export.index))
+                        }));
+                }
+                Payload::CustomSection(section) if section.name() == "name" => {
+                    for name in NameSectionReader::new(section.data_reader()) {
+                        if let Name::Function(map) = name.unwrap() {
+                            functions.names.extend(map.into_iter().map(|name| {
+                                let name = name.unwrap();
+                                (name.name, name.index)
+                            }));
+                        }
                     }
                 }
+                Payload::CodeSectionEntry(body) => functions.bodies.push(body),
+                _ => (),
             }
-            _ => {}
+        }
+        functions
+    }
+
+    fn body(&self, index: u32) -> (FunctionBody<'a>, u32) {
+        let index = index as usize;
+        let body_index = index
+            .checked_sub(self.imported)
+            .expect("fixture function must be defined in the generated module");
+        (
+            self.bodies[body_index].clone(),
+            self.parameter_counts[self.function_types[index] as usize],
+        )
+    }
+}
+
+/// Follow the export exactly, including generated fallible entry wrappers.
+fn exported_function_body<'a>(bytes: &'a [u8], name: &str) -> (FunctionBody<'a>, u32) {
+    let functions = WasmFunctions::new(bytes);
+    let index = functions
+        .exports
+        .iter()
+        .find(|(export, _)| *export == name)
+        .expect("fixture must export its entry")
+        .1;
+    functions.body(index)
+}
+
+/// Check every reserved local is referenced and return the number of declarations.
+fn assert_reserved_locals_used(
+    body: &FunctionBody<'_>,
+    parameter_count: u32,
+    context: &str,
+) -> u32 {
+    let count: u32 = body
+        .get_locals_reader()
+        .unwrap()
+        .into_iter()
+        .map(|local| local.unwrap().0)
+        .sum();
+    let mut used = FxHashSet::default();
+    for operation in body.get_operators_reader().unwrap() {
+        match operation.unwrap() {
+            Operator::LocalGet { local_index }
+            | Operator::LocalSet { local_index }
+            | Operator::LocalTee { local_index } => {
+                used.insert(local_index);
+            }
+            _ => (),
         }
     }
-    let function_index = function_index.expect("fixture must export its entry");
-    let parameter_count = types[function_types[function_index] as usize]
-        .params()
-        .len() as u32;
-    let body_index = function_index
-        .checked_sub(imported_functions)
-        .expect("exported entry must be defined in the generated module");
-    let body = Parser::new(0)
-        .parse_all(bytes)
-        .filter_map(|payload| match payload.unwrap() {
-            Payload::CodeSectionEntry(body) => Some(body),
-            _ => None,
-        })
-        .nth(body_index)
-        .expect("exported entry must have a code body");
-    (body, parameter_count)
+    for index in parameter_count..parameter_count + count {
+        assert!(
+            used.contains(&index),
+            "{context}: local {index} reserved but never used"
+        );
+    }
+    count
 }
 
 fn exported_function_operators<'a>(bytes: &'a [u8], name: &str) -> Vec<Operator<'a>> {
@@ -1281,6 +1350,101 @@ fn wasm_codegen_trivial_boxed_entry_keeps_runtime_context() {
     assert_eq!(value.as_primitive_ty::<isize>(), Some(&2));
 }
 
+fn callable_adapter_local_counts(bytes: &[u8]) -> Vec<(&str, u32)> {
+    let functions = WasmFunctions::new(bytes);
+    functions
+        .names
+        .iter()
+        .filter(|(name, _)| name.contains("<callable adapter "))
+        .map(|&(name, index)| {
+            let (body, parameter_count) = functions.body(index);
+            (
+                name,
+                assert_reserved_locals_used(&body, parameter_count, name),
+            )
+        })
+        .collect()
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_callable_adapters_reserve_only_needed_locals() {
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(optimization);
+        session.set_physical_mir_optimization(optimization);
+        let path = Path::single_str("probe");
+        let mut module = Module::new(session.modules().next_id(), path.clone());
+        module.add_function(
+            ustr("increment"),
+            NativeFnN::from_rust(|x: isize| x + 1).description(["x"], "", Default::default()),
+        );
+        module.add_function(
+            ustr("optional"),
+            NativeOptionalFnN::from_rust(
+                |x: isize| (x > 0).then_some(x + 1),
+                option_type(Type::primitive::<isize>()),
+            )
+            .description(["x"], "", Default::default()),
+        );
+        session.register_module(path, module);
+        for (source, expected, minimal) in [
+            (
+                "#[inline(never)] fn bridge(f: (int) -> int, x: int) -> int { f(x) }
+              fn compute(x: int) -> int { bridge(probe::increment, x) }",
+                8,
+                Some(("probe::increment", 0)),
+            ),
+            (
+                "#[inline(never)] fn bridge(f, x) -> int { match f(x) { None => 7, Some(n) => n } }
+              fn compute(x: int) -> int { bridge(probe::optional, x) }",
+                8,
+                Some(("probe::optional", 1)),
+            ),
+            (
+                "#[inline(never)] fn bridge(f: (int) -> int, x: int) -> int { f(x) }
+              #[inline(never)] fn maker(x: int) { |n| x + n }
+              fn compute(x: int) -> int { bridge(maker(x), 10) }",
+                17,
+                None,
+            ),
+            (
+                "#[inline(never)] fn bridge(f: (int) -> int, x: int) -> int { f(x) }
+              fn identity<T>(x: T) -> T { x }
+              fn compute(x: int) -> int { bridge(identity, x) }",
+                7,
+                None,
+            ),
+        ] {
+            let entry = compile(&mut session, source);
+            let code = CompiledProgram::compile(&session, entry).unwrap();
+            let locals = callable_adapter_local_counts(code.bytes());
+            assert!(
+                !locals.is_empty(),
+                "fixture must emit callable adapters: {optimization:?}: {source}"
+            );
+            if let Some((target, expected)) = minimal {
+                assert_eq!(
+                    locals.len(),
+                    1,
+                    "{target} must be the fixture's only callable adapter: {locals:?}"
+                );
+                assert_eq!(
+                    locals[0].1, expected,
+                    "{target} should require {expected} locals: {}",
+                    locals[0].0
+                );
+            }
+            let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+            assert_eq!(instance.run((7,), WasmLimits::default()).unwrap(), expected);
+            if minimal.is_some_and(|(name, _)| name == "probe::optional") {
+                assert_eq!(instance.run((0,), WasmLimits::default()).unwrap(), 7);
+                // Some -> None -> Some checks that absence leaves the instance ready for reuse.
+                assert_eq!(instance.run((7,), WasmLimits::default()).unwrap(), 8);
+            }
+        }
+    }
+}
+
 #[wasm_bindgen_test]
 fn wasm_codegen_reserves_only_needed_helper_locals() {
     for (source, expected) in [
@@ -1317,17 +1481,7 @@ fn wasm_codegen_reserves_only_needed_helper_locals() {
             locals.iter().all(|(_, ty)| *ty == wasmparser::ValType::I32),
             "{source}: {locals:?}"
         );
-        let operations = exported_function_operators(code.bytes(), ENTRY_EXPORT);
-        let count: u32 = locals.iter().map(|(count, _)| count).sum();
-        for local_index in parameter_count..parameter_count + count {
-            assert!(
-                operations.iter().any(|op| matches!(op,
-                Operator::LocalGet { local_index: index }
-                | Operator::LocalSet { local_index: index }
-                | Operator::LocalTee { local_index: index } if *index == local_index)),
-                "{source}: local {local_index} was reserved but never used"
-            );
-        }
+        assert_reserved_locals_used(&body, parameter_count, source);
     }
 }
 

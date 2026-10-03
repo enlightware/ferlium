@@ -1162,7 +1162,7 @@ impl<'a, 's> Body<'a, 's> {
             &mut self.code,
             helpers.get(DynamicBase),
             helpers.get(DynamicSize),
-            helpers.get(Scratch),
+            Some(helpers.get(Scratch)),
             self.imports.function_index("alloc"),
         );
         Ok(())

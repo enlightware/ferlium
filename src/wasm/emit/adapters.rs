@@ -33,6 +33,61 @@ use super::{
     frame_bytes, leave_frame, memarg, peephole::Instructions,
 };
 
+/// Target types and result conversion shared by dictionary and uniform callable adapters.
+pub(super) struct AdapterTarget {
+    pub inputs: Vec<Type>,
+    pub result: Type,
+    pub optional: Option<NativeOptionalResultAdapter>,
+}
+
+impl AdapterTarget {
+    pub(super) fn new(
+        program: &ResolvedPhysicalProgram<'_>,
+        target: FunctionId,
+        direct: &CallAbi,
+        env: ModuleEnv<'_>,
+        session: &CompilerSession,
+    ) -> Result<Self, String> {
+        let native = program
+            .module(target.module)
+            .and_then(|m| m.native_entry(target));
+        let (inputs, result) = if let Some(body) = program.function(target) {
+            (
+                body.parameters()
+                    .iter()
+                    .filter(|p| p.kind != ParameterKind::Return)
+                    .map(|p| p.ty)
+                    .collect(),
+                body.parameters()
+                    .iter()
+                    .find(|p| p.kind == ParameterKind::Return)
+                    .map_or(Type::unit(), |p| p.ty),
+            )
+        } else {
+            let signature = native.ok_or("missing adapter target")?.signature();
+            (
+                signature.parameters.iter().map(|p| p.layout().ty).collect(),
+                signature.result.ty(),
+            )
+        };
+        let optional = if matches!(direct.result, ResultKind::Optional) {
+            let NativeResult::Optional { payload, .. } = native.unwrap().signature().result else {
+                unreachable!()
+            };
+            Some(NativeOptionalResultAdapter::new(
+                result, payload.ty, env, session,
+            )?)
+        } else {
+            None
+        };
+        Ok(Self {
+            inputs,
+            result,
+            optional,
+        })
+    }
+}
+
 /// Bridge the declaration-fixed dictionary ABI to the implementation's direct ABI.
 pub(super) fn dictionary_adapter(
     program: &ResolvedPhysicalProgram<'_>,
@@ -47,45 +102,18 @@ pub(super) fn dictionary_adapter(
     let entry = &definition.entries()[entry.as_index()];
     let target = program.direct_entry(entry.function());
     let (index, direct) = &callees[&target];
-    let native = program
-        .module(target.module)
-        .and_then(|module| module.native_entry(target));
-    let (input_types, result_ty) = if let Some(body) = program.function(target) {
-        (
-            body.parameters()
-                .iter()
-                .filter(|p| p.kind != ParameterKind::Return)
-                .map(|p| p.ty)
-                .collect::<Vec<_>>(),
-            body.parameters()
-                .iter()
-                .find(|p| p.kind == ParameterKind::Return)
-                .map_or(Type::unit(), |p| p.ty),
-        )
-    } else {
-        let native = native.unwrap().signature();
-        (
-            native.parameters.iter().map(|p| p.layout().ty).collect(),
-            native.result.ty(),
-        )
-    };
+    let env = session
+        .modules()
+        .env_for(session.expect_fresh_module(target.module));
+    let AdapterTarget {
+        inputs: input_types,
+        result: result_ty,
+        optional,
+    } = AdapterTarget::new(program, target, direct, env, session)?;
     let captures = entry.capture_mapping();
     if direct.parameters.len() != captures.len() + abi.parameters.len() - 1 {
         return Err(format!("dictionary adapter argument count for {target:?}"));
     }
-    let env = session
-        .modules()
-        .env_for(session.expect_fresh_module(target.module));
-    let optional = if matches!(direct.result, ResultKind::Optional) {
-        let NativeResult::Optional { payload, .. } = native.unwrap().signature().result else {
-            unreachable!()
-        };
-        Some(NativeOptionalResultAdapter::new(
-            result_ty, payload.ty, env, session,
-        )?)
-    } else {
-        None
-    };
     let mut frame_size = optional
         .as_ref()
         .map(|adapter| frame_bytes(adapter.payload_size))
@@ -167,7 +195,7 @@ pub(super) fn dictionary_adapter(
             &mut code,
             abi.output_local(),
             frame,
-            scratch,
+            Some(scratch),
             imports.function_index("alloc"),
         );
     }
@@ -240,12 +268,13 @@ impl NativeOptionalResultAdapter {
         })
     }
 
+    /// `scratch` is required exactly when `needs_scratch()` returns true.
     pub(super) fn emit(
         &self,
         code: &mut impl Instructions,
         output: WasmLocalId,
         payload: WasmLocalId,
-        scratch: WasmLocalId,
+        scratch: Option<WasmLocalId>,
         allocate: WasmFunctionId,
     ) {
         code.instruction(&I::If(BlockType::Empty)); // Native presence, not a failure status.
@@ -262,6 +291,7 @@ impl NativeOptionalResultAdapter {
         ));
         code.instruction(&I::I32Add);
         if self.storage.is_indirect() {
+            let scratch = scratch.expect("indirect optional payload requires scratch storage");
             code.instruction(&I::I32Const(self.size as i32));
             code.instruction(&I::I32Const(self.align as i32));
             code.instruction(&I::Call(allocate.as_u32()));
@@ -282,6 +312,10 @@ impl NativeOptionalResultAdapter {
         code.instruction(&I::I32Const(self.none_tag as i32));
         code.instruction(&I::I32Store(memarg(2)));
         code.instruction(&I::End);
+    }
+
+    pub(super) fn needs_scratch(&self) -> bool {
+        self.storage.is_indirect()
     }
 }
 

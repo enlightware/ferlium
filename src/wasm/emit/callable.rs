@@ -9,9 +9,8 @@ use wasm_encoder::{BlockType, Function as WasmFunction, Instruction as I, MemArg
 
 use crate::{
     CompilerSession, FxHashMap, FxHashSet,
-    hir::native_functions::NativeResult,
     mir::{
-        Function, Operation, OperationKind, ParameterKind, Value, ValueId,
+        Function, Operation, OperationKind, Value, ValueId,
         physical::{DictionaryReference, program::ResolvedPhysicalProgram},
         role::{MirType, ValueRole},
     },
@@ -32,7 +31,7 @@ use crate::{
 
 use super::{
     Global, ScalarType,
-    adapters::NativeOptionalResultAdapter,
+    adapters::AdapterTarget,
     allocate_frame,
     body::{
         Body,
@@ -312,6 +311,18 @@ pub(super) fn drop_entry(imports: &Imports, method: ValueMethod) -> WasmFunction
     code
 }
 
+/// State needed to copy and clean up a callable's source captures.
+struct CaptureState {
+    frame: WasmLocalId,
+    temporary: WasmLocalId,
+    size: WasmLocalId,
+    align: WasmLocalId,
+    base: WasmLocalId,
+    end: WasmLocalId,
+    pending: Option<WasmLocalId>,
+    methods: ValueMethods,
+}
+
 /// Bridge one uniform entry to its target. Evidence-only calls borrow their environment; source
 /// captures get an independent invocation copy, destroyed on both success and source failure.
 pub(super) fn adapter(
@@ -328,94 +339,87 @@ pub(super) fn adapter(
         .modules()
         .env_for(session.expect_fresh_module(target.module));
     let (index, direct) = callees[&target];
-    let native = program
-        .module(target.module)
-        .and_then(|m| m.native_entry(target));
-    let (input_types, result_ty) = if let Some(body) = program.function(target) {
-        (
-            body.parameters()
-                .iter()
-                .filter(|p| p.kind != ParameterKind::Return)
-                .map(|p| p.ty)
-                .collect::<Vec<_>>(),
-            body.parameters()
-                .iter()
-                .find(|p| p.kind == ParameterKind::Return)
-                .map_or(Type::unit(), |p| p.ty),
-        )
-    } else {
-        let signature = native.ok_or("missing callable native")?.signature();
-        (
-            signature.parameters.iter().map(|p| p.layout().ty).collect(),
-            signature.result.ty(),
-        )
-    };
+    let AdapterTarget {
+        inputs: input_types,
+        result: result_ty,
+        optional,
+    } = AdapterTarget::new(program, target, direct, env, session)?;
     let leading = captures
         .hidden
         .checked_add(captures.values)
         .ok_or("callable capture arity")?;
     let abi = abi(visible_arity(direct, captures)?);
-    let environment = WasmLocalId::from_index(abi.parameter_count());
-    let status = WasmLocalId::from_index(abi.parameter_count() + 1);
-    let pending = WasmLocalId::from_index(abi.parameter_count() + 2);
-    let frame = WasmLocalId::from_index(abi.parameter_count() + 3);
-    let scratch = WasmLocalId::from_index(abi.parameter_count() + 4);
-    let temporary = WasmLocalId::from_index(abi.parameter_count() + 5);
-    let size = WasmLocalId::from_index(abi.parameter_count() + 6);
-    let align = WasmLocalId::from_index(abi.parameter_count() + 7);
-    let base = WasmLocalId::from_index(abi.parameter_count() + 8);
-    let optional_frame = WasmLocalId::from_index(abi.parameter_count() + 9);
-    let end = WasmLocalId::from_index(abi.parameter_count() + 10);
-    let mut code = WasmFunction::new([(10, ValType::I32), (1, ValType::I64)]);
-    code.instruction(&I::LocalGet(abi.input_local(0).as_u32()));
-    code.instruction(&I::LocalSet(environment.as_u32()));
-    if captures.values != 0 {
-        let methods = entries
+    let mut locals = Vec::new();
+    let mut local = |ty| {
+        let id = WasmLocalId::from_index(abi.parameter_count() + locals.len());
+        locals.push(ty);
+        id
+    };
+    let environment = (leading != 0).then(|| local(ValType::I32));
+    let status = direct.fallible.then(|| local(ValType::I32));
+    let optional_frame = optional.as_ref().map(|_| local(ValType::I32));
+    let scratch = optional
+        .as_ref()
+        .filter(|adapter| adapter.needs_scratch())
+        .map(|_| local(ValType::I32));
+    let capture_state = (captures.values != 0).then(|| CaptureState {
+        frame: local(ValType::I32),
+        temporary: local(ValType::I32),
+        size: local(ValType::I32),
+        align: local(ValType::I32),
+        base: local(ValType::I32),
+        pending: status.map(|_| local(ValType::I32)),
+        // Keep the wide allocation helper last so declarations form at most two type groups.
+        end: local(ValType::I64),
+        methods: entries
             .value_methods
-            .expect("value captures require callable Value methods");
+            .expect("value captures require callable Value methods"),
+    });
+    let mut code = WasmFunction::new_with_locals_types(locals);
+    if let Some(environment) = environment {
+        code.instruction(&I::LocalGet(abi.input_local(0).as_u32()));
+        code.instruction(&I::LocalSet(environment.as_u32()));
+    }
+    if let Some(capture) = &capture_state {
+        let environment = environment.unwrap();
         code.instruction(&I::GlobalGet(Global::Stack as u32));
-        code.instruction(&I::LocalSet(frame.as_u32()));
+        code.instruction(&I::LocalSet(capture.frame.as_u32()));
         field(&mut code, environment, offset_of!(Environment, values_size));
-        code.instruction(&I::LocalSet(size.as_u32()));
+        code.instruction(&I::LocalSet(capture.size.as_u32()));
         field(
             &mut code,
             environment,
             offset_of!(Environment, values_align),
         );
-        code.instruction(&I::LocalSet(align.as_u32()));
+        code.instruction(&I::LocalSet(capture.align.as_u32()));
         allocate_frame(
             &mut code,
             imports.failure_function(),
-            size,
-            align,
-            temporary,
-            end,
+            capture.size,
+            capture.align,
+            capture.temporary,
+            capture.end,
         );
         code.instruction(&I::Drop);
         dictionary(&mut code, environment);
         values(&mut code, environment);
-        code.instruction(&I::LocalGet(temporary.as_u32()));
-        value_entry(&mut code, environment, base, methods.clone.entry);
+        code.instruction(&I::LocalGet(capture.temporary.as_u32()));
+        value_entry(
+            &mut code,
+            environment,
+            capture.base,
+            capture.methods.clone.entry,
+        );
         code.instruction(&I::CallIndirect {
-            type_index: methods.clone.ty.as_u32(),
+            type_index: capture.methods.clone.ty.as_u32(),
             table_index: 0,
         });
     }
-    let optional = if matches!(direct.result, ResultKind::Optional) {
-        let NativeResult::Optional { payload, .. } = native.unwrap().signature().result else {
-            unreachable!()
-        };
-        Some(NativeOptionalResultAdapter::new(
-            result_ty, payload.ty, env, session,
-        )?)
-    } else {
-        None
-    };
     if let Some(optional) = &optional {
         enter_frame(
             &mut code,
             imports.failure_function(),
-            optional_frame,
+            optional_frame.unwrap(),
             frame_bytes(optional.payload_size)?,
         );
     }
@@ -427,12 +431,17 @@ pub(super) fn adapter(
     }
     for (i, (&transport, &ty)) in direct.parameters.iter().zip(&input_types).enumerate() {
         if i < captures.hidden {
-            frame_address(&mut code, environment, Environment::hidden_offset(i));
+            frame_address(
+                &mut code,
+                environment.unwrap(),
+                Environment::hidden_offset(i),
+            );
         } else if i < leading {
-            code.instruction(&I::LocalGet(temporary.as_u32()));
+            let capture = capture_state.as_ref().unwrap();
+            code.instruction(&I::LocalGet(capture.temporary.as_u32()));
             field(
                 &mut code,
-                environment,
+                environment.unwrap(),
                 Environment::capture_offset(captures.hidden, i - captures.hidden) as usize,
             );
             code.instruction(&I::I32Add);
@@ -445,66 +454,73 @@ pub(super) fn adapter(
     }
     if direct.output() {
         code.instruction(&I::LocalGet(
-            if optional.is_some() {
-                optional_frame
-            } else {
-                abi.output_local()
-            }
-            .as_u32(),
+            optional_frame
+                .unwrap_or_else(|| abi.output_local())
+                .as_u32(),
         ));
     }
     code.instruction(&I::Call(index.as_u32()));
-    if direct.fallible {
+    if let Some(status) = status {
         code.instruction(&I::LocalSet(status.as_u32()));
-    } else {
-        if let Some(optional) = optional {
-            optional.emit(
-                &mut code,
-                abi.output_local(),
-                optional_frame,
-                scratch,
-                imports.function_index("alloc"),
-            );
-            leave_frame(&mut code, optional_frame);
-        } else if matches!(direct.result, ResultKind::Direct(_)) {
-            ScalarType::in_env(result_ty, &env)?.store(&mut code);
-        }
+    } else if let Some(optional) = optional {
+        optional.emit(
+            &mut code,
+            abi.output_local(),
+            optional_frame.unwrap(),
+            scratch,
+            imports.function_index("alloc"),
+        );
+        leave_frame(&mut code, optional_frame.unwrap());
+    } else if matches!(direct.result, ResultKind::Direct(_)) {
+        ScalarType::in_env(result_ty, &env)?.store(&mut code);
     }
-    if captures.values != 0 {
-        let methods = entries
-            .value_methods
-            .expect("value captures require callable Value methods");
+    if let Some(capture) = &capture_state {
+        let environment = environment.unwrap();
         // Detach the call's diagnostic before invoking guest cleanup, so a trap during drop
         // preserves the original cause in the invocation's pending-failure stack.
-        code.instruction(&I::LocalGet(status.as_u32()));
-        code.instruction(&I::If(BlockType::Empty));
-        context_pointer(&mut code, offset_of!(InvocationState, diagnostics));
-        code.instruction(&I::I32Const(0));
-        code.instruction(&I::Call(imports.function_index("capture_failure").as_u32()));
-        code.instruction(&I::LocalSet(pending.as_u32()));
-        code.instruction(&I::End);
+        if let Some(status) = status {
+            code.instruction(&I::LocalGet(status.as_u32()));
+            code.instruction(&I::If(BlockType::Empty));
+            context_pointer(&mut code, offset_of!(InvocationState, diagnostics));
+            code.instruction(&I::I32Const(0));
+            code.instruction(&I::Call(imports.function_index("capture_failure").as_u32()));
+            code.instruction(&I::LocalSet(capture.pending.unwrap().as_u32()));
+            code.instruction(&I::End);
+        }
         dictionary(&mut code, environment);
-        code.instruction(&I::LocalGet(temporary.as_u32()));
-        code.instruction(&I::LocalGet(temporary.as_u32())); // Unit result, no bytes written.
-        value_entry(&mut code, environment, base, methods.drop.entry);
+        code.instruction(&I::LocalGet(capture.temporary.as_u32()));
+        code.instruction(&I::LocalGet(capture.temporary.as_u32())); // Unit result, no bytes written.
+        value_entry(
+            &mut code,
+            environment,
+            capture.base,
+            capture.methods.drop.entry,
+        );
         code.instruction(&I::CallIndirect {
-            type_index: methods.drop.ty.as_u32(),
+            type_index: capture.methods.drop.ty.as_u32(),
             table_index: 0,
         });
-        leave_frame(&mut code, frame);
-        code.instruction(&I::LocalGet(status.as_u32()));
-        code.instruction(&I::If(BlockType::Empty));
-        context_pointer(&mut code, offset_of!(InvocationState, diagnostics));
-        code.instruction(&I::LocalGet(pending.as_u32()));
-        code.instruction(&I::Call(
-            imports.function_index("propagate_failure").as_u32(),
-        ));
-        code.instruction(&I::If(BlockType::Empty));
-        code.instruction(&I::Unreachable);
-        code.instruction(&I::End);
-        code.instruction(&I::End);
+        leave_frame(&mut code, capture.frame);
+        if let Some(status) = status {
+            code.instruction(&I::LocalGet(status.as_u32()));
+            code.instruction(&I::If(BlockType::Empty));
+            context_pointer(&mut code, offset_of!(InvocationState, diagnostics));
+            code.instruction(&I::LocalGet(capture.pending.unwrap().as_u32()));
+            code.instruction(&I::Call(
+                imports.function_index("propagate_failure").as_u32(),
+            ));
+            code.instruction(&I::If(BlockType::Empty));
+            code.instruction(&I::Unreachable);
+            code.instruction(&I::End);
+            code.instruction(&I::End);
+        }
     }
-    code.instruction(&I::LocalGet(status.as_u32()));
+    if let Some(status) = status {
+        code.instruction(&I::LocalGet(status.as_u32()));
+    } else {
+        // Uniform callable entries return a status even when the direct target is infallible.
+        code.instruction(&I::I32Const(0));
+    }
     code.instruction(&I::End);
     Ok(code)
 }
@@ -763,6 +779,7 @@ mod tests {
         Location, MirOptimization,
         hir::function::ArgConvention,
         mir::{
+            ParameterKind,
             builder::FunctionBuilder,
             physical::{prepare_physical_mir, program::resolve_physical_program},
             terminator::Terminator,
