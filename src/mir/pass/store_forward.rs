@@ -13,7 +13,8 @@
 //! value, and a read its write dominates sees:
 //! - the stored register, when the write stores a materialized register: a `load`'s uses are
 //!   rewritten to it, a `comp_eq` scrutinee reads it, and a copy from the cell stores it;
-//! - the stored constant, when the write stores one: a copy from the cell stores it;
+//! - the stored constant, when the write stores one: a load's uses or a comparison name the
+//!   constant, and a copy from the cell stores it;
 //! - what another cell holds, when the write copies that cell and its own write dominates the copy:
 //!   the read is forwarded to what that cell's reads are forwarded to, or reads it in place when it
 //!   lives as long as the function.
@@ -52,7 +53,7 @@ use crate::{
 
 /// Rewrites reads of single-assignment cells to what they hold, returning `None` when there is
 /// none.
-pub(crate) fn forward_stored_registers(func: &Function, env: ModuleEnv<'_>) -> Option<Function> {
+pub(crate) fn forward_stored_values(func: &Function, env: ModuleEnv<'_>) -> Option<Function> {
     let census = census(func, env);
     if census.cells.is_empty() {
         return None;
@@ -83,7 +84,7 @@ pub(crate) fn forward_stored_registers(func: &Function, env: ModuleEnv<'_>) -> O
 
     // Which reads are forwarded, per cell, so that a cell with a read left keeps its storage.
     let mut forwarded_reads: FxHashMap<ValueId, usize> = FxHashMap::default();
-    let mut loads: FxHashMap<ValueId, ValueId> = FxHashMap::default();
+    let mut loads: FxHashMap<ValueId, mir::Value> = FxHashMap::default();
     let mut rewrites: Vec<(OperationSite, &Target)> = Vec::new();
     // Drops of cells holding a bare function, which release nothing.
     let mut empty_drops: FxHashSet<OperationSite> = FxHashSet::default();
@@ -95,10 +96,11 @@ pub(crate) fn forward_stored_registers(func: &Function, env: ModuleEnv<'_>) -> O
             continue;
         };
         let forwardable = match (read_kind(&operation.kind, operation.operands.len()), target) {
-            // Only copies out of it; a load's register cannot become a pool constant.
-            (Some(Read::Value), Target::Function(_) | Target::Constant(_)) => {
+            // A bare function is not the ordinary materialized value a load produces.
+            (Some(Read::Value), Target::Function(_)) => {
                 matches!(operation.kind, OperationKind::Memcpy | OperationKind::Move)
             }
+            // Loads, comparisons and copies accept either a register or a pool constant.
             (Some(Read::Value), _) => true,
             (Some(Read::Callee), Target::Function(_)) => true,
             // Only an operation in the block can be removed; an invoked drop stays.
@@ -112,9 +114,14 @@ pub(crate) fn forward_stored_registers(func: &Function, env: ModuleEnv<'_>) -> O
         }
         *forwarded_reads.entry(*cell).or_default() += 1;
         match (&operation.kind, target) {
-            (OperationKind::Load, Target::Register(stored)) => {
+            (OperationKind::Load, Target::Register(_) | Target::Constant(_)) => {
                 if let Some(result) = operation.result_id() {
-                    loads.insert(result, *stored);
+                    let stored = match target {
+                        Target::Register(id) => mir::Value::Register(*id),
+                        Target::Constant(id) => mir::Value::Constant(*id),
+                        _ => unreachable!(),
+                    };
+                    loads.insert(result, stored);
                 }
             }
             (OperationKind::Drop { .. }, _) => {
@@ -126,15 +133,30 @@ pub(crate) fn forward_stored_registers(func: &Function, env: ModuleEnv<'_>) -> O
     if loads.is_empty() && rewrites.is_empty() && empty_drops.is_empty() {
         return None;
     }
-    // A stored register may itself be a forwarded load: resolve chains to their root register.
-    let resolve = |mut id: ValueId| {
-        while let Some(stored) = loads.get(&id) {
-            id = *stored;
+    // Resolve substitution chains once, including chains ending in a constant. Each edge is
+    // visited at most once before its result is cached; uses then need only one map lookup.
+    // Dominance makes the chains acyclic, even when the function's block order is arbitrary.
+    let mut roots: FxHashMap<ValueId, mir::Value> = FxHashMap::default();
+    let mut path = Vec::new();
+    for &load in loads.keys() {
+        path.clear();
+        let mut value = mir::Value::Register(load);
+        while let mir::Value::Register(id) = value {
+            if let Some(root) = roots.get(&id) {
+                value = root.clone();
+                break;
+            }
+            let Some(stored) = loads.get(&id) else {
+                break;
+            };
+            path.push(id);
+            value = stored.clone();
         }
-        id
-    };
-    let roots: FxHashMap<ValueId, ValueId> =
-        loads.keys().map(|load| (*load, resolve(*load))).collect();
+        for &id in &path {
+            roots.insert(id, value.clone());
+        }
+    }
+    let resolve = |id: ValueId| roots.get(&id).cloned().unwrap_or(mir::Value::Register(id));
 
     let removed_cells: FxHashSet<ValueId> = forwarded_reads
         .into_iter()
@@ -162,7 +184,7 @@ pub(crate) fn forward_stored_registers(func: &Function, env: ModuleEnv<'_>) -> O
             },
         };
         let stored = match target {
-            Target::Register(stored) => mir::Value::Register(resolve(*stored)),
+            Target::Register(stored) => resolve(*stored),
             Target::Function(function) => mir::Value::Function(*function),
             Target::Constant(constant) => mir::Value::Constant(*constant),
             Target::Place(place) => {
@@ -193,7 +215,7 @@ pub(crate) fn forward_stored_registers(func: &Function, env: ModuleEnv<'_>) -> O
         if let mir::Value::Register(id) = operand
             && let Some(stored) = roots.get(id)
         {
-            *id = *stored;
+            *operand = stored.clone();
         }
     });
     for block in func.blocks() {
@@ -350,7 +372,7 @@ fn census(func: &Function, env: ModuleEnv<'_>) -> Census {
         cells: FxHashMap::default(),
         whole_function: FxHashSet::default(),
     };
-    // Structural gate first: only allocas receiving a register or function store, or a copy, are
+    // Structural gate first: only allocas receiving a value store or a copy are
     // candidates, and types are queried only for the cells the census keeps.
     let written: FxHashSet<ValueId> = func
         .blocks()
@@ -611,7 +633,7 @@ fn targets(
 
 #[cfg(test)]
 mod tests {
-    use super::forward_stored_registers;
+    use super::forward_stored_values;
     use crate::{
         CompilerSession, Location,
         containers::b,
@@ -620,8 +642,12 @@ mod tests {
             Function, Operation, OperationKind, ParameterKind, Value,
             builder::FunctionBuilder,
             terminator::{Terminator, TerminatorKind},
+            verify::verify_function,
         },
-        std::logic::bool_type,
+        std::{
+            logic::bool_type,
+            math::{Float, float_type},
+        },
     };
 
     /// ```text
@@ -675,7 +701,7 @@ mod tests {
     fn a_dominated_read_takes_the_stored_register_and_the_cell_goes() {
         let session = CompilerSession::new();
         let (source, computed) = stored_then_read(&session, false);
-        let forwarded = forward_stored_registers(&source, session.module_env())
+        let forwarded = forward_stored_values(&source, session.module_env())
             .expect("the read must be forwarded");
         let entry = forwarded.block(forwarded.entry());
         assert!(
@@ -723,7 +749,7 @@ mod tests {
         builder.set_terminator(exit, Terminator::ret(span));
         let source = builder.finish(env);
 
-        let forwarded = forward_stored_registers(&source, session.module_env())
+        let forwarded = forward_stored_values(&source, session.module_env())
             .expect("the chain must be forwarded");
         let entry = forwarded.block(forwarded.entry());
         assert!(
@@ -734,6 +760,233 @@ mod tests {
             1,
             "only the root load must remain"
         );
+    }
+
+    #[test]
+    fn constant_loads_forward_through_register_chains_and_across_blocks() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        // Preserve literal representations, including the sign of zero.
+        for value in [0.75, 0.0, -0.0] {
+            let mut builder = FunctionBuilder::new("constant_reads".into(), Default::default());
+            let output = builder.add_parameter(float_type(), ParameterKind::Return);
+            let entry = builder.add_block();
+            let left = builder.add_block();
+            let right = builder.add_block();
+            let literal = Value::Constant(builder.add_constant(
+                float_type(),
+                LiteralValue::new_native(Float::new(value).unwrap()),
+                &env,
+            ));
+            let cell = builder
+                .append_operation(entry, Operation::alloca(span, float_type()))
+                .unwrap();
+            builder.append_operation(entry, Operation::store(span, literal.clone(), cell.clone()));
+            let read = builder
+                .append_operation(entry, Operation::load(span, cell.clone()))
+                .unwrap();
+            // A second cell stores a register which itself resolves to the literal.
+            let other = builder
+                .append_operation(entry, Operation::alloca(span, float_type()))
+                .unwrap();
+            builder.append_operation(entry, Operation::store(span, read, other.clone()));
+            let condition = Value::Constant(builder.add_constant(
+                bool_type(),
+                LiteralValue::new_native(true),
+                &env,
+            ));
+            builder.set_terminator(entry, Terminator::cond_br(span, condition, left, right));
+            for (block, source) in [(left, cell), (right, other)] {
+                let read = builder
+                    .append_operation(block, Operation::load(span, source))
+                    .unwrap();
+                builder.append_operation(
+                    block,
+                    Operation::store(span, read, Value::Parameter(output)),
+                );
+                builder.set_terminator(block, Terminator::ret(span));
+            }
+            let source = builder.finish(env);
+            let forwarded =
+                forward_stored_values(&source, env).expect("constant reads must forward");
+            assert!(forwarded.block(entry).operations().is_empty());
+            for block in [left, right] {
+                let operations = forwarded.block(block).operations();
+                assert_eq!(operations.len(), 1);
+                assert_eq!(operations[0].operands[0], literal);
+                let Value::Constant(id) = operations[0].operands[0] else {
+                    panic!("the stored value must be a constant");
+                };
+                let actual = forwarded
+                    .constant(id)
+                    .representation
+                    .as_primitive_ty::<Float>()
+                    .unwrap();
+                assert_eq!(actual.into_inner().to_bits(), value.to_bits());
+            }
+            // Check operand roles and dominance after replacing registers with constants.
+            verify_function(&forwarded, env);
+            assert!(forward_stored_values(&forwarded, env).is_none());
+        }
+    }
+
+    #[test]
+    fn constant_forwarding_checks_dominance_and_escape() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        for case in [
+            "multiple writes",
+            "exposed",
+            "read before write",
+            "branch write",
+            "loop",
+        ] {
+            let mut builder = FunctionBuilder::new(case.into(), Default::default());
+            let entry = builder.add_block();
+            let body = builder.add_block();
+            let exit = builder.add_block();
+            let literal = Value::Constant(builder.add_constant(
+                bool_type(),
+                LiteralValue::new_native(true),
+                &env,
+            ));
+            let cell = builder
+                .append_operation(entry, Operation::alloca(span, bool_type()))
+                .unwrap();
+            let write_block = if case == "branch write" || case == "loop" {
+                body
+            } else {
+                entry
+            };
+            if case == "read before write" {
+                builder.append_operation(entry, Operation::load(span, cell.clone()));
+            }
+            builder.append_operation(
+                write_block,
+                Operation::store(span, literal.clone(), cell.clone()),
+            );
+            if case == "branch write" {
+                builder.set_terminator(
+                    entry,
+                    Terminator::cond_br(span, literal.clone(), body, exit),
+                );
+            } else {
+                builder.set_terminator(entry, Terminator::goto(span, body));
+            }
+            if case == "multiple writes" {
+                builder
+                    .append_operation(body, Operation::store(span, literal.clone(), cell.clone()));
+            }
+            if case == "exposed" {
+                builder.append_operation(
+                    body,
+                    Operation::black_box(span, bool_type(), cell.clone(), None),
+                );
+            }
+            // A write in the loop dominates the read on each iteration and is safe to forward.
+            let read = builder
+                .append_operation(body, Operation::load(span, cell.clone()))
+                .unwrap();
+            let then_target = if case == "loop" { body } else { exit };
+            builder.set_terminator(body, Terminator::cond_br(span, read, then_target, exit));
+            builder.append_operation(exit, Operation::load(span, cell));
+            builder.set_terminator(exit, Terminator::ret(span));
+            // The undominated cases intentionally model invalid/uninitialized reads.
+            let source = builder.finish_unverified();
+            let forwarded = forward_stored_values(&source, env);
+            if case == "loop" {
+                let forwarded = forwarded.expect("initialized loop reads must forward");
+                assert!(forwarded.block(body).operations().is_empty());
+                assert!(forwarded.block(exit).operations().is_empty());
+                assert!(matches!(&forwarded.block(body).terminator().kind,
+                    TerminatorKind::CondBr { condition, .. } if *condition == literal));
+                verify_function(&forwarded, env);
+            } else if case == "branch write" || case == "read before write" {
+                let forwarded = forwarded.expect("the dominated read can still forward");
+                assert!(matches!(&forwarded.block(body).terminator().kind,
+                    TerminatorKind::CondBr { condition, .. } if *condition == literal));
+                let retained = if case == "branch write" { exit } else { entry };
+                assert!(
+                    forwarded
+                        .block(retained)
+                        .operations()
+                        .iter()
+                        .any(|op| op.kind == OperationKind::Load)
+                );
+                assert!(
+                    forwarded
+                        .block(entry)
+                        .operations()
+                        .iter()
+                        .any(|op| matches!(op.kind, OperationKind::Alloca { .. }))
+                );
+            } else {
+                assert!(forwarded.is_none(), "{case}");
+            }
+        }
+    }
+
+    #[test]
+    fn comparisons_read_stored_constants_directly_or_through_chains() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        for chain in ["direct", "load", "copy"] {
+            let mut builder = FunctionBuilder::new(chain.into(), Default::default());
+            let entry = builder.add_block();
+            let exit = builder.add_block();
+            let literal = Value::Constant(builder.add_constant(
+                bool_type(),
+                LiteralValue::new_native(true),
+                &env,
+            ));
+            let cell = builder
+                .append_operation(entry, Operation::alloca(span, bool_type()))
+                .unwrap();
+            builder.append_operation(entry, Operation::store(span, literal.clone(), cell.clone()));
+            let source = if chain == "direct" {
+                cell
+            } else {
+                let other = builder
+                    .append_operation(entry, Operation::alloca(span, bool_type()))
+                    .unwrap();
+                if chain == "load" {
+                    let read = builder
+                        .append_operation(entry, Operation::load(span, cell))
+                        .unwrap();
+                    builder.append_operation(entry, Operation::store(span, read, other.clone()));
+                } else {
+                    builder.append_operation(entry, Operation::memcpy(span, cell, other.clone()));
+                }
+                other
+            };
+            let test = builder
+                .append_operation(
+                    entry,
+                    Operation::compare_eq(
+                        span,
+                        source,
+                        Value::Pattern(b(LiteralValue::new_native(false))),
+                    ),
+                )
+                .unwrap();
+            builder.set_terminator(entry, Terminator::cond_br(span, test, exit, exit));
+            builder.set_terminator(exit, Terminator::ret(span));
+            let source = builder.finish(env);
+            let forwarded =
+                forward_stored_values(&source, env).expect("the comparison must forward");
+            let operations = forwarded.block(entry).operations();
+            assert_eq!(
+                operations.len(),
+                1,
+                "{chain}: only the comparison must remain"
+            );
+            assert!(operations[0].kind == OperationKind::CompareEqual);
+            assert_eq!(operations[0].operands[0], literal);
+            verify_function(&forwarded, env);
+        }
     }
 
     #[test]
@@ -753,14 +1006,14 @@ mod tests {
         builder.append_operation(entry, Operation::load(span, cell));
         builder.set_terminator(entry, Terminator::ret(span));
         let source = builder.finish_unverified();
-        assert!(forward_stored_registers(&source, env).is_none());
+        assert!(forward_stored_values(&source, env).is_none());
     }
 
     #[test]
     fn a_copy_out_of_a_cell_stores_its_register() {
         let session = CompilerSession::new();
         let (source, computed) = stored_then_read(&session, true);
-        let forwarded = forward_stored_registers(&source, session.module_env())
+        let forwarded = forward_stored_values(&source, session.module_env())
             .expect("the copy and the read must be forwarded");
         let operations = forwarded.block(forwarded.entry()).operations();
         let kinds: Vec<_> = operations
@@ -820,7 +1073,7 @@ mod tests {
         builder.set_terminator(exit, Terminator::ret(span));
         let source = builder.finish(env);
 
-        let forwarded = forward_stored_registers(&source, session.module_env())
+        let forwarded = forward_stored_values(&source, session.module_env())
             .expect("the chain must be forwarded");
         let body = forwarded.block(body);
         assert!(
@@ -860,7 +1113,7 @@ mod tests {
         builder.set_terminator(exit, Terminator::ret(span));
         let source = builder.finish(env);
 
-        let forwarded = forward_stored_registers(&source, session.module_env())
+        let forwarded = forward_stored_values(&source, session.module_env())
             .expect("the read must be forwarded");
         let operations = forwarded.block(forwarded.entry()).operations();
         assert_eq!(operations.len(), 1, "only the load must remain");
@@ -900,7 +1153,7 @@ mod tests {
         builder.set_terminator(exit, Terminator::ret(span));
         let source = builder.finish_unverified();
 
-        let forwarded = forward_stored_registers(&source, env);
+        let forwarded = forward_stored_values(&source, env);
         let body = forwarded.as_ref().unwrap_or(&source).block(body);
         assert!(
             body.operations()

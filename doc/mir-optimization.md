@@ -35,7 +35,7 @@ for round in 0..MAX_ROUNDS:
     specialize    // point generic calls at concrete copies
     call CSE      // merge repeated addressor and trivial value calls before copying their bodies
     copy forward  // coalesce redundant trivial-copy storage exposed during the round
-    store forward // read single-store cells as the register stored into them
+    store forward // read single-store cells as their stored values
     place CSE     // merge repeated subfield and dictionary-entry places
     inline        // budget-limited; block merging inside its own edit
     stop if nothing warranted another round
@@ -651,6 +651,10 @@ elimination, see its canonical form, and again in each final cleanup sweep, wher
 simplification stores computed predicates. Structural gates restrict type queries to the cells the
 use census keeps.
 
+Loads and comparisons of constant cells read the pool constant directly, preserving its
+representation. Ordinary call arguments still require places; this does not substitute scalar
+constants for places passed to calls.
+
 ## Local branch forwarding
 
 `mir::pass::branch_forward` removes a boolean storage round-trip created when one control-flow
@@ -1004,10 +1008,12 @@ single synthetic MIR score would assert backend costs the interpreter cannot est
 
 ## Post-expansion optimization
 
-Physical MIR reuses shared folding, CSE, inlining, storage, control-flow, and stack-region cleanup
-passes. Stage-specific callee lookup reads immutable inputs: the module's finished or raw and its
-dependencies' optimized semantic bodies for semantic optimization, expanded module-local bodies and helpers for physical optimization. Foreign physical
-bodies remain opaque. Generic specialization and constructive semantic reification do not run on
+Physical MIR reuses shared folding, CSE, inlining, storage and single-store value forwarding,
+control-flow, and stack-region cleanup passes. Physical expansion introduces further single-store
+cells in generated helpers. Stage-specific callee lookup reads immutable inputs: the module's
+finished or raw and its dependencies' optimized semantic bodies for semantic optimization,
+expanded module-local bodies and helpers for physical optimization. Foreign physical bodies
+remain opaque. Generic specialization and constructive semantic reification do not run on
 physical bodies; arithmetic/boolean identities and constant integer arithmetic need no script
 evaluation. Both stages fold constant wrapping integer addition, subtraction, multiplication and
 negation directly, without invoking the boxed constant evaluator.

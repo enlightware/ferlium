@@ -126,7 +126,7 @@ impl<'a> OptimizationContext<'a> {
 /// alternate to a fixed point: removing a trivial representation result can expose a proven-total
 /// call, whose removal can in turn make its result storage dead. Every successful step removes at
 /// least one operation, so the loop is bounded by the rewritten body's operation count.
-/// Forwards stored registers, negations and boolean joins to their canonical form, repeating while
+/// Forwards stored values, negations and boolean joins to their canonical form, repeating while
 /// the body shrinks: each pass can produce the shape another reads.
 fn canonicalize_boolean_flow(
     function: &Function,
@@ -140,7 +140,7 @@ fn canonicalize_boolean_flow(
         let source = current.as_ref().unwrap_or(function);
         let before = source.operation_count() + source.blocks().count();
         let mut changed = false;
-        if let Some(forwarded) = store_forward::forward_stored_registers(source, env) {
+        if let Some(forwarded) = store_forward::forward_stored_values(source, env) {
             current = Some(forwarded);
             changed = true;
         }
@@ -368,7 +368,7 @@ pub(crate) fn optimize_function(
         // Its register counterpart: a value parked in a single-store cell, such as an inlined
         // callee's `@ret`, is read where it is computed.
         let source = current.as_ref().unwrap_or(function);
-        if let Some(forwarded) = store_forward::forward_stored_registers(source, env) {
+        if let Some(forwarded) = store_forward::forward_stored_values(source, env) {
             current = Some(forwarded);
             changed = true;
         }
@@ -421,7 +421,7 @@ pub(crate) fn optimize_function(
             current = Some(forwarded);
         }
         let source = current.as_ref().unwrap_or(function);
-        if let Some(forwarded) = store_forward::forward_stored_registers(source, env) {
+        if let Some(forwarded) = store_forward::forward_stored_values(source, env) {
             current = Some(forwarded);
         }
     }

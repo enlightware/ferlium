@@ -16,7 +16,7 @@ use super::{
     known_callee::KnownCallees,
     peephole,
     provenance::{AddressorSummaries, AddressorSummary},
-    stack_region,
+    stack_region, store_forward,
     string_accumulate::StringFunctions,
     tail_merge,
 };
@@ -88,6 +88,7 @@ pub(crate) fn optimize(
                     apply!(copy_forward::forward_redundant_storage(
                         &current, env, stage
                     ));
+                    apply!(store_forward::forward_stored_values(&current, env));
                     apply!(inline::inline_function(&current, growth_base, env, stage));
                     apply!(branch_forward::forward_boolean_branches(&current));
                     apply!(peephole::materialize_boolean_results(&current));
@@ -117,7 +118,7 @@ mod tests {
             OperationKind, operation::OperationKindDiscriminant, pass::known_callee::KnownCallee,
             profile::MirInstructionKind, terminator::TerminatorKind,
         },
-        module::{FunctionId, Path},
+        module::{FunctionId, LocalFunctionId, Path, id::Id},
     };
     use ustr::ustr;
 
@@ -141,6 +142,7 @@ mod tests {
             .get_local_function_id(ustr("compute"))
             .unwrap();
         let mut counts = Vec::new();
+        let mut allocation_helper_loads = Vec::new();
         for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
             session.set_physical_mir_optimization(optimization);
             let (value, profile) = session
@@ -149,7 +151,31 @@ mod tests {
             assert_eq!(value.into_primitive_ty::<isize>().unwrap(), 41);
             assert!(profile.peak_cells() > 0);
             counts.push(profile.total().total());
+            let program = session.prepare_physical_program(module).unwrap();
+            let artifacts = program.module(module).unwrap();
+            let loads = (0..artifacts.entry_count())
+                .filter_map(|index| artifacts.get(LocalFunctionId::from_index(index)))
+                .filter(|body| {
+                    body.name
+                        .as_str()
+                        .starts_with("#physical:variant_payload_allocation:")
+                })
+                .flat_map(|body| {
+                    body.blocks()
+                        .flat_map(|block| body.block(block).operations())
+                })
+                .filter(|operation| operation.kind == OperationKind::Load)
+                .count();
+            allocation_helper_loads.push(loads);
         }
+        assert!(
+            allocation_helper_loads[0] > 0,
+            "the expansion must exercise literal loads"
+        );
+        assert_eq!(
+            allocation_helper_loads[1], 0,
+            "allocation sizes and offsets must read literals directly"
+        );
         assert!(
             counts[1] < counts[0],
             "expanded/optimized dynamic counts: {counts:?}"

@@ -935,7 +935,7 @@ fn plan_folds_with(
                 then_target,
                 else_target,
             } => {
-                if let Some(taken) = known_condition(condition, &state) {
+                if let Some(taken) = known_condition(condition, &state, func) {
                     // Deciding a branch deletes an arm, which is new for every later pass.
                     plan.warrants_another_round = true;
                     plan.branches
@@ -1532,14 +1532,16 @@ fn call_destinations(func: &Function) -> FxHashSet<ValueId> {
 }
 
 /// The value of a branch condition, when the analysis knows it.
-fn known_condition(condition: &mir::Value, state: &State) -> Option<bool> {
-    let mir::Value::Register(id) = condition else {
-        return None;
+fn known_condition(condition: &mir::Value, state: &State, func: &Function) -> Option<bool> {
+    let literal = match condition {
+        mir::Value::Constant(id) => &func.constant(*id).representation,
+        mir::Value::Register(id) => match state.register(*id)? {
+            Fact::Known(Const::Literal(literal)) => literal,
+            _ => return None,
+        },
+        _ => return None,
     };
-    match state.register(*id)? {
-        Fact::Known(Const::Literal(literal)) => literal.as_primitive_ty::<bool>().copied(),
-        _ => None,
-    }
+    literal.as_primitive_ty::<bool>().copied()
 }
 
 /// A switch is decided when every possible semantic tag selects the same successor.
