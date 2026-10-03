@@ -1272,11 +1272,25 @@ fn partial_call_outcome(
         })));
     }
 
+    // Physical folding has no native evaluator: materialize the unsigned range predicate here,
+    // giving the same results as its native body and Wasm lowering for target-range values.
+    if known == KnownCallee::ArrayOffsetInBounds
+        && let Some((offset, length)) = integer(0).zip(integer(1))
+    {
+        return Some(CallRewrite::Reification(Reification::Constant(Constant {
+            ty: ty.ret(),
+            representation: LiteralValue::new_native(
+                offset.cast_unsigned() < length.cast_unsigned(),
+            ),
+        })));
+    }
+
     // Float excludes NaN, so reflexive comparisons obey the same laws as integers.
     if same_argument(0, 1) {
         let predicate = match known {
             KnownCallee::IntLt
             | KnownCallee::IntGt
+            | KnownCallee::ArrayOffsetInBounds
             | KnownCallee::FloatLt
             | KnownCallee::FloatGt => Some(false),
             KnownCallee::IntLe
@@ -2026,6 +2040,101 @@ mod tests {
             main.contains("store @c") && main.contains("to %p0"),
             "the result must be stored into the return place:\n{main}"
         );
+    }
+
+    /// Exercise the physical fallback directly, without the native evaluator or whole-std
+    /// optimization. The out-of-range cases must fold to false, not become runtime calls.
+    #[test]
+    fn physical_unsigned_bounds_constants_fold_without_an_evaluator() {
+        use super::*;
+        use crate::{
+            mir::{builder::FunctionBuilder, terminator::Terminator},
+            std::{
+                STD_MODULE_ID, logic::bool_type, math::int_type,
+                string::STRING_FROM_STATIC_FUNCTION_NAME,
+            },
+        };
+
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let std = session.expect_fresh_module(STD_MODULE_ID);
+        let local = std
+            .get_local_function_id(ustr("array_offset_in_bounds"))
+            .unwrap();
+        let callee = FunctionId::new(STD_MODULE_ID, local);
+        let ty = CallImplType::value(
+            std.get_function_by_id(local)
+                .unwrap()
+                .definition
+                .ty_scheme
+                .ty
+                .clone(),
+        );
+        let string_from_static = FunctionId::new(
+            STD_MODULE_ID,
+            std.get_local_function_id(ustr(STRING_FROM_STATIC_FUNCTION_NAME))
+                .unwrap(),
+        );
+        let span = Location::new_synthesized();
+        for (offset, length, expected) in [
+            (2isize, 3isize, true),
+            (3, 3, false),
+            (-1, 3, false),
+            (0, 0, false),
+            (isize::MIN, isize::MAX, false),
+            (isize::MAX - 1, isize::MAX, true),
+        ] {
+            let mut builder = FunctionBuilder::new("bounds".into(), Default::default());
+            let block = builder.add_block();
+            let arguments = [offset, length].map(|value| {
+                let place = builder
+                    .append_operation(block, Operation::alloca(span, int_type()))
+                    .unwrap();
+                let literal =
+                    builder.add_constant(int_type(), LiteralValue::new_native(value), &env);
+                builder.append_operation(
+                    block,
+                    Operation::store(span, mir::Value::Constant(literal), place.clone()),
+                );
+                place
+            });
+            let result = builder
+                .append_operation(block, Operation::alloca(span, bool_type()))
+                .unwrap();
+            builder.append_operation(
+                block,
+                Operation::call(
+                    span,
+                    mir::Value::Function(callee),
+                    arguments.into_iter().chain([result]),
+                    ty.clone(),
+                ),
+            );
+            builder.set_terminator(block, Terminator::ret(span));
+            let body = builder.finish_physical(env);
+            let context = FoldContext {
+                evaluator: None,
+                env,
+                analysis: dataflow::analyze(&body, env),
+                known_calls: KnownCallSemantics::new(session.known_callees(), &|_| None),
+                string_from_static,
+                refusal: None,
+            };
+            let operations = body.block(block).operations();
+            let mut state = context.analysis.entry_state(block);
+            for operation in &operations[..operations.len() - 1] {
+                context.analysis.step(&body, env, operation, &mut state);
+            }
+            let outcome = partial_call_outcome(operations.last().unwrap(), &ty, &state, &context);
+            let Some(CallRewrite::Reification(Reification::Constant(constant))) = outcome else {
+                panic!("bounds({offset}, {length}) must fold without an evaluator");
+            };
+            assert_eq!(
+                constant.representation.as_primitive_ty::<bool>(),
+                Some(&expected),
+                "bounds({offset}, {length})"
+            );
+        }
     }
 
     /// A captureless function returned by a folded call is a bare MIR function operand. Keeping it

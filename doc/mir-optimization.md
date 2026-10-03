@@ -787,6 +787,12 @@ removes stranded blocks and DCE collects dead panic storage and cleanup. The pas
 boolean flow has been canonicalized, so an inlined guard reaches it as a `condbr` on the comparison
 itself rather than on a flag stored in the comparison's arms, which the analysis could not relate.
 
+The retained guard uses the internal `array_offset_in_bounds(offset, len)` predicate, lowered to
+one unsigned comparison in Wasm. Its nonnegative array-length precondition makes success equivalent
+to `0 <= offset < len`; analysis retains both facts. Failure is a disjunction and only refines a
+signed bound when the other failure case is already ruled out. Signed-index normalization and the
+original index in failure messages are unchanged.
+
 The proof is a forward value-version analysis over affine integer forms and predicates. Because
 `int` wraps, only an equality is reduced to a difference: an order keeps both sides, since
 `x + 1 < x` holds at the maximum. An offset crosses an order only where it cannot wrap, as a

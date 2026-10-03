@@ -1756,6 +1756,7 @@ fn wasm_intrinsic(session: &CompilerSession, operation: &Operation) -> Option<Kn
             | KnownCallee::IntGt
             | KnownCallee::IntGe
             | KnownCallee::IntEq
+            | KnownCallee::ArrayOffsetInBounds
             | KnownCallee::FloatAdd
             | KnownCallee::FloatSub
             | KnownCallee::FloatMul

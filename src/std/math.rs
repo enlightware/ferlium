@@ -666,6 +666,20 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
+    // Internal precondition: length is a nonnegative array length.
+    to.add_function_with_visibility(
+        ustr("array_offset_in_bounds"),
+        NativeFnNN::from_rust(|offset: Int, length: Int| {
+            offset.cast_unsigned() < length.cast_unsigned()
+        })
+        .description(
+            ["offset", "length"],
+            "Internal array bounds predicate.",
+            no_effects(),
+        ),
+        Visibility::Module,
+    );
+
     add_predicate!("lt_int", Int, <);
     add_predicate!("le_int", Int, <=);
     add_predicate!("gt_int", Int, >);

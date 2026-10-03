@@ -600,6 +600,9 @@ pub(crate) enum Fact {
     Ordering { left: Affine, right: Affine },
     /// The symbol is a boolean, true exactly when this holds.
     Truth(Predicate),
+    /// The internal array predicate is true exactly when both signed bounds hold.
+    /// Its length argument must be nonnegative; failure is a disjunction, not two negated facts.
+    InBounds { offset: Affine, length: Affine },
     /// The symbol is a boolean whose truth *implies* these, without the converse.
     ///
     /// Separate from [`Truth`](Self::Truth) because one direction is all a yielded option gives:
@@ -1834,6 +1837,9 @@ fn writes_into(operation: &Operation, root: Root, register_places: &PlaceBinding
 /// whose two arms are the same block refines neither: the block is reached whichever way the
 /// condition went.
 ///
+/// An `InBounds` condition contributes both signed bounds on success. Failure is their disjunction;
+/// it contributes one negated bound only when the other bound already holds.
+///
 /// A `switch_variant` carries the same fact directly on a symbolic tag edge. Its default edge
 /// carries the negation of every named truth predicate.
 ///
@@ -1866,6 +1872,9 @@ fn refine<'a>(
                 } else {
                     predicate.negated()
                 }],
+                Some(Fact::InBounds { offset, length }) => {
+                    bounds_edge_predicates(state, offset, length, successor == *then_target)
+                }
                 Some(Fact::Implies(predicates)) if successor == *then_target => predicates,
                 _ => return Some(Cow::Borrowed(state)),
             }
@@ -1923,6 +1932,9 @@ fn refine<'a>(
         },
         _ => return Some(Cow::Borrowed(state)),
     };
+    if assumed.is_empty() {
+        return Some(Cow::Borrowed(state));
+    }
     // An edge whose condition contradicts what is known is never taken. Nothing flows along it, so
     // a join below does not lose what the feasible edges agree on.
     if assumed
@@ -1936,6 +1948,29 @@ fn refine<'a>(
         refined.assume(predicate);
     }
     Some(Cow::Owned(refined))
+}
+
+/// A failed range check is `offset < 0 || offset >= length`. Refine it only when
+/// an already established bound rules out one side; assuming both would be unsound.
+fn bounds_edge_predicates(
+    state: &State,
+    offset: Affine,
+    length: Affine,
+    success: bool,
+) -> Vec<Predicate> {
+    let nonnegative = Predicate::between(&Affine::constant(0), Comparison::LessOrEqual, &offset)
+        .expect("an order always has an affine representation");
+    let below_length = Predicate::between(&offset, Comparison::Less, &length)
+        .expect("an order always has an affine representation");
+    if success {
+        vec![nonnegative, below_length]
+    } else if state.implies(&nonnegative) {
+        vec![below_length.negated()]
+    } else if state.implies(&below_length) {
+        vec![nonnegative.negated()]
+    } else {
+        Vec::new()
+    }
 }
 
 /// What a bounds check proves by returning at all, for the edge along which it returned.
@@ -2354,6 +2389,10 @@ fn result_fact(
         // The conversion every integer literal is desugared into, and at `int` it converts nothing:
         // the result is the argument, so it must not become an unrelated symbol.
         KnownCallee::IntFromInt => Some(Fact::Value(affine(0, interner)?)),
+        KnownCallee::ArrayOffsetInBounds => Some(Fact::InBounds {
+            offset: affine(0, interner)?,
+            length: affine(1, interner)?,
+        }),
         KnownCallee::IntLt => Predicate::between(
             &affine(0, interner)?,
             Comparison::Less,
@@ -3111,6 +3150,34 @@ mod tests {
         assert!(state.implies(&goal));
     }
 
+    #[test]
+    fn unsigned_bounds_edges_preserve_the_conjunction_and_failure_disjunction() {
+        let offset = Affine::symbol(SymbolId::new(0));
+        let length = Affine::symbol(SymbolId::new(1));
+        let lower =
+            Predicate::between(&Affine::constant(0), Comparison::LessOrEqual, &offset).unwrap();
+        let upper = Predicate::between(&offset, Comparison::Less, &length).unwrap();
+        let mut state = State::default();
+        let edge = |state: &State, success| bounds_edge_predicates(state, offset, length, success);
+        assert_eq!(edge(&state, true), vec![lower.clone(), upper.clone()]);
+        assert!(
+            edge(&state, false).is_empty(),
+            "failure alone establishes neither alternative"
+        );
+        state.assume(lower.clone());
+        assert_eq!(edge(&state, false), vec![upper.negated()]);
+        state = State::default();
+        state.assume(upper.clone());
+        assert_eq!(edge(&state, false), vec![lower.negated()]);
+        state.assume(lower.clone());
+        assert!(
+            edge(&state, false)
+                .iter()
+                .any(|predicate| state.implies(&predicate.negated())),
+            "a fully proved range makes the failure edge infeasible"
+        );
+    }
+
     /// `int` wraps, so an order is not decided by the difference of its sides: `x + 1 < x` holds at
     /// the maximum, and `0 <= MIN` never does although `0 - MIN` wraps to `MIN`.
     #[test]
@@ -3234,8 +3301,18 @@ mod tests {
     /// fixture that *keeps* a check is one whose index nothing bounds.
     #[test]
     fn a_body_with_no_bounds_check_is_filtered_out() {
-        with_analysis(UNPROVABLE, "get", |function, _, known| {
+        with_analysis(UNPROVABLE, "get", |function, analysis, known| {
             assert!(worth_analyzing(function, known, &|_| None));
+            assert!(
+                facts(function, analysis)
+                    .iter()
+                    .any(|fact| matches!(fact, Fact::InBounds { .. })),
+                "the retained unsigned guard must remain visible to relational analysis"
+            );
+            assert!(
+                bounds_its_cursor(function, analysis),
+                "the unsigned guard's success edge must establish both signed bounds"
+            );
         });
         with_analysis(
             "fn step(i: int) -> int { i + 1 }",

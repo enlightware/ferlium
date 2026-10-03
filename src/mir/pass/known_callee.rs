@@ -165,6 +165,8 @@ pub(crate) enum KnownCallee {
     BoolEq,
     /// `array_len(array)` — the array's element count, which is its `len` field.
     ArrayLen,
+    /// Unsigned `offset < length`; internal callers supply a nonnegative array length.
+    ArrayOffsetInBounds,
     /// `array_resolve_index(index, len)` — `index` when `0 <= index < len`, `len + index` when
     /// `-len <= index < 0`, and a panic otherwise.
     ///
@@ -240,6 +242,7 @@ impl KnownCallee {
                 | Self::IntGt
                 | Self::IntGe
                 | Self::IntEq
+                | Self::ArrayOffsetInBounds
                 | Self::FloatAdd
                 | Self::FloatSub
                 | Self::FloatMul
@@ -510,6 +513,10 @@ impl KnownCallees {
                 KnownCallee::BoolEq,
             ),
             (resolver.function("array_len"), KnownCallee::ArrayLen),
+            (
+                resolver.function("array_offset_in_bounds"),
+                KnownCallee::ArrayOffsetInBounds,
+            ),
             (
                 resolver.function("array_resolve_index"),
                 KnownCallee::ArrayResolveIndex,

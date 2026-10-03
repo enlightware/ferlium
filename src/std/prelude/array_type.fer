@@ -30,7 +30,9 @@ fn array_signed_index_to_offset(index: int, len: int) -> int {
 
 fn array_resolve_index(index: int, len: int) -> int {
 	let resolved = array_signed_index_to_offset(index, len);
-	if resolved < 0 or resolved >= len {
+	if array_offset_in_bounds(resolved, len) {
+		// Branch directly on the predicate so range analysis sees both successful bounds.
+	} else {
 		array_index_out_of_bounds(index, len);
 	};
 	resolved

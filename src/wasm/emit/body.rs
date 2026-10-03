@@ -2005,6 +2005,7 @@ impl<'a, 's> Body<'a, 's> {
             | KnownCallee::IntGt
             | KnownCallee::IntGe
             | KnownCallee::IntEq
+            | KnownCallee::ArrayOffsetInBounds
             | KnownCallee::BoolEq
             | KnownCallee::FloatAdd
             | KnownCallee::FloatSub
@@ -2208,6 +2209,7 @@ impl<'a, 's> Body<'a, 's> {
             | KnownCallee::IntGt
             | KnownCallee::IntGe
             | KnownCallee::IntEq
+            | KnownCallee::ArrayOffsetInBounds
             | KnownCallee::BoolEq => {
                 self.read(inputs[0])?;
                 self.read(inputs[1])?;
@@ -2217,6 +2219,7 @@ impl<'a, 's> Body<'a, 's> {
                     KnownCallee::IntGt => I::I32GtS,
                     KnownCallee::IntGe => I::I32GeS,
                     KnownCallee::IntEq | KnownCallee::BoolEq => I::I32Eq,
+                    KnownCallee::ArrayOffsetInBounds => I::I32LtU,
                     _ => unreachable!(),
                 });
             }

@@ -108,6 +108,95 @@ fn wasm_codegen_tag_scalars_cross_direct_calls_without_memory() {
 }
 
 #[wasm_bindgen_test]
+fn wasm_codegen_unsigned_array_bounds_preserve_signed_indices_and_failures() {
+    let source = "fn compute(index: int, empty: bool) -> int {
+        let a = if empty { [] } else { [10, 20, 30] };
+        a[index]
+    }";
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(optimization);
+        session.set_physical_mir_optimization(optimization);
+        let entry = compile(&mut session, source);
+        let code = CompiledProgram::compile(&session, entry).unwrap();
+        let functions = WasmFunctions::new(code.bytes());
+        assert!(
+            !functions
+                .names
+                .iter()
+                .any(|(name, _)| name.contains("array_offset_in_bounds")),
+            "{optimization:?}: bounds predicates must lower to intrinsics"
+        );
+        if optimization == MirOptimization::Enabled {
+            // The exported fallible bridge only calls the script body; inspect the body itself.
+            let index = functions
+                .names
+                .iter()
+                .find(|(name, _)| name.ends_with("::compute"))
+                .expect("fixture declares compute")
+                .1;
+            let (body, _) = functions.body(index);
+            let operators = body
+                .get_operators_reader()
+                .unwrap()
+                .into_iter()
+                .map(Result::unwrap)
+                .collect::<Vec<_>>();
+            // Exclude fixed-frame stack-limit comparisons; allow either branch polarity.
+            // The bounds operands can come from locals or directly from the operand stack.
+            let stack_checks = operators
+                .windows(3)
+                .filter(|ops| {
+                    matches!(
+                        ops,
+                        [
+                            Operator::I32Sub,
+                            Operator::I32Const { .. },
+                            Operator::I32LtU | Operator::I32GeU
+                        ]
+                    )
+                })
+                .count();
+            let unsigned_comparisons = operators
+                .iter()
+                .filter(|op| matches!(op, Operator::I32LtU | Operator::I32GeU))
+                .count();
+            assert_eq!(
+                unsigned_comparisons,
+                stack_checks + 1,
+                "one unsigned bounds comparison beyond stack-limit checks: {operators:?}"
+            );
+        }
+        let mut instance = code.instantiate::<(isize, bool), isize>().unwrap();
+        for (index, expected) in [(-3, 10), (-2, 20), (-1, 30), (0, 10), (1, 20), (2, 30)] {
+            assert_eq!(
+                instance.run((index, false), WasmLimits::default()).unwrap(),
+                expected,
+                "{optimization:?} index {index}"
+            );
+        }
+        for (empty, indices) in [
+            (false, &[-4, 3, isize::MIN, isize::MAX][..]),
+            (true, &[-1, 0, isize::MIN, isize::MAX][..]),
+        ] {
+            for &index in indices {
+                let length = if empty { 0 } else { 3 };
+                let error = instance
+                    .run((index, empty), WasmLimits::default())
+                    .unwrap_err();
+                assert_eq!(
+                    error.kind(),
+                    RuntimeErrorKind::SourceFailure(SourceFailureKind::Aborted(Some(format!(
+                        "Array access out of bounds: index {index} for length {length}"
+                    )))),
+                    "{optimization:?} empty {empty} index {index}"
+                );
+            }
+        }
+    }
+}
+
+#[wasm_bindgen_test]
 fn wasm_codegen_tag_scalars_keep_mutable_generic_and_callable_contracts() {
     for source in [
         "#[inline(never)] fn replace(x: &mut Ordering, y: Ordering) { x = y; }
