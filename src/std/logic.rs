@@ -45,8 +45,8 @@ impl NativeDisplay for bool {
     }
 }
 
-extern "C" fn false_with_int(_: bool, _: Int) -> bool {
-    false
+extern "C" fn shift_bool(value: bool, shift: Int) -> bool {
+    value && shift == 0
 }
 
 extern "C" fn identity_with_int(value: bool, _: Int) -> bool {
@@ -124,8 +124,8 @@ pub fn add_to_module(to: &mut Module) {
             b(NativeFnNN::from_rust(<bool as std::ops::BitOr>::bitor)) as Function,
             b(NativeFnNN::from_rust(<bool as std::ops::BitXor>::bitxor)) as Function,
             b(NativeFnN::new(not_bool)) as Function,
-            b(NativeFnNN::new(false_with_int)) as Function,
-            b(NativeFnNN::new(false_with_int)) as Function,
+            b(NativeFnNN::new(shift_bool)) as Function,
+            b(NativeFnNN::new(shift_bool)) as Function,
             b(NativeFnNN::new(identity_with_int)) as Function,
             b(NativeFnNN::new(identity_with_int)) as Function,
             b(NativeFnN::new(count_ones)) as Function,

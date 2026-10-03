@@ -308,49 +308,36 @@ fn clamp_to_u32(value: Int) -> u32 {
     }
 }
 
-fn clamped_negated_shift_to_u32(shift: Int) -> u32 {
-    let shift = if shift == Int::MIN { Int::MAX } else { -shift };
-    clamp_to_u32(shift)
-}
-
 extern "C" fn shift_left(value: Int, shift: Int) -> Int {
+    // Bound the unsigned magnitude before narrowing it, including for Int::MIN.
+    let count = shift.unsigned_abs().min(Int::BITS as usize) as u32;
     if shift < 0 {
-        let shift = clamped_negated_shift_to_u32(shift);
-        value.wrapping_shr(shift)
+        value
+            .checked_shr(count)
+            .unwrap_or(if value < 0 { -1 } else { 0 })
     } else {
-        let shift = clamp_to_u32(shift);
-        value.wrapping_shl(shift)
+        value.checked_shl(count).unwrap_or(0)
     }
 }
 
 extern "C" fn shift_right(value: Int, shift: Int) -> Int {
+    let count = shift.unsigned_abs().min(Int::BITS as usize) as u32;
     if shift < 0 {
-        let shift = clamped_negated_shift_to_u32(shift);
-        value.wrapping_shl(shift)
+        value.checked_shl(count).unwrap_or(0)
     } else {
-        let shift = clamp_to_u32(shift);
-        value.wrapping_shr(shift)
+        value
+            .checked_shr(count)
+            .unwrap_or(if value < 0 { -1 } else { 0 })
     }
 }
 
-extern "C" fn rotate_left(value: Int, shift: Int) -> Int {
-    if shift < 0 {
-        let shift = clamped_negated_shift_to_u32(shift);
-        value.rotate_right(shift)
-    } else {
-        let shift = clamp_to_u32(shift);
-        value.rotate_left(shift)
-    }
+extern "C" fn rotate_left(value: Int, rotate: Int) -> Int {
+    // Reducing the signed count also handles direction reversal without negating it.
+    value.rotate_left(rotate.rem_euclid(Int::BITS as Int) as u32)
 }
 
-extern "C" fn rotate_right(value: Int, shift: Int) -> Int {
-    if shift < 0 {
-        let shift = clamped_negated_shift_to_u32(shift);
-        value.rotate_left(shift)
-    } else {
-        let shift = clamp_to_u32(shift);
-        value.rotate_right(shift)
-    }
+extern "C" fn rotate_right(value: Int, rotate: Int) -> Int {
+    value.rotate_right(rotate.rem_euclid(Int::BITS as Int) as u32)
 }
 
 extern "C" fn count_ones(value: Int) -> Int {

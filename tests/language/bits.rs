@@ -88,6 +88,58 @@ fn int_shift_right() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn int_shifts_discard_bits_and_reverse_negative_counts() {
+    let mut session = TestSession::new();
+    let setup =
+        "let bits = count_zeros(0); let imin: int = bit(bits - 1); let imax = bit_not(imin);";
+    let mut cases = vec![
+        ("-8", "-bits - 1", -1, 0),
+        ("-8", "-bits", -1, 0),
+        ("-8", "1 - bits", -1, 0),
+        ("-8", "-1", -4, -16),
+        ("-8", "0", -8, -8),
+        ("-8", "1", -16, -4),
+        ("-8", "bits - 1", 0, -1),
+        ("-8", "bits", 0, -1),
+        ("-8", "bits + 1", 0, -1),
+        ("-8", "imin", -1, 0),
+        ("-8", "imax", 0, -1),
+        ("1", "1 - bits", 0, isize::MIN),
+        ("1", "bits - 1", isize::MIN, 0),
+        ("1", "-bits", 0, 0),
+        ("1", "bits", 0, 0),
+        ("1", "imin", 0, 0),
+        ("1", "imax", 0, 0),
+        ("0", "imin", 0, 0),
+        ("0", "imax", 0, 0),
+        ("imin", "-1", isize::MIN / 2, 0),
+        ("imin", "1", 0, isize::MIN / 2),
+        ("imin", "imin", -1, 0),
+        ("imin", "imax", 0, -1),
+    ];
+    if isize::BITS > 32 {
+        cases.extend([("1", "4294967297", 0, 0), ("1", "-4294967297", 0, 0)]);
+    }
+    for (value, count, left, right) in cases {
+        // Check both constant folding and calls whose operands are only known at runtime.
+        for runtime in [false, true] {
+            let operands = if runtime {
+                format!("let value = black_box({value}); let count = black_box({count});")
+            } else {
+                format!("let value = {value}; let count = {count};")
+            };
+            for (operation, expected) in [("shift_left", left), ("shift_right", right)] {
+                assert_val_eq!(
+                    session.run(&format!("{setup} {operands} {operation}(value, count)")),
+                    int(expected)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn int_rotate_left() {
     let mut session = TestSession::new();
     // Rotating by 0 returns original
@@ -106,6 +158,55 @@ fn int_rotate_right() {
     // Basic rotations
     assert_val_eq!(session.run("rotate_right(2, 1)"), int(1));
     assert_val_eq!(session.run("rotate_right(4, 2)"), int(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn int_rotations_wrap_signed_counts_modulo_the_width() {
+    let mut session = TestSession::new();
+    let setup =
+        "let bits = count_zeros(0); let imin: int = bit(bits - 1); let imax = bit_not(imin);";
+    let mut cases = vec![
+        ("5", "-bits - 1", isize::MIN + 2, 10),
+        ("5", "-bits", 5, 5),
+        ("5", "1 - bits", 10, isize::MIN + 2),
+        ("5", "-1", isize::MIN + 2, 10),
+        ("5", "0", 5, 5),
+        ("5", "1", 10, isize::MIN + 2),
+        ("5", "bits - 1", isize::MIN + 2, 10),
+        ("5", "bits", 5, 5),
+        ("5", "bits + 1", 10, isize::MIN + 2),
+        ("5", "imin", 5, 5),
+        ("5", "imin + 1", 10, isize::MIN + 2),
+        ("5", "imax - 1", -(isize::MIN / 2) + 1, 20),
+        ("5", "imax", isize::MIN + 2, 10),
+        ("-8", "1", -15, isize::MAX - 3),
+        ("-8", "-1", isize::MAX - 3, -15),
+        ("-8", "bits", -8, -8),
+        ("-8", "imin", -8, -8),
+    ];
+    if isize::BITS > 32 {
+        // Counts wider than u32 still use their actual remainder, without saturation.
+        cases.extend([
+            ("5", "4294967297", 10, isize::MIN + 2),
+            ("5", "-4294967297", isize::MIN + 2, 10),
+        ]);
+    }
+    for (value, count, left, right) in cases {
+        for runtime in [false, true] {
+            let operands = if runtime {
+                format!("let value = black_box({value}); let count = black_box({count});")
+            } else {
+                format!("let value = {value}; let count = {count};")
+            };
+            for (operation, expected) in [("rotate_left", left), ("rotate_right", right)] {
+                assert_val_eq!(
+                    session.run(&format!("{setup} {operands} {operation}(value, count)")),
+                    int(expected)
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -233,22 +334,46 @@ fn bool_bit_not() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn bool_shift_left() {
     let mut session = TestSession::new();
-    // For bool, shift_left always returns false (see logic.rs implementation)
     assert_val_eq!(session.run("shift_left(false, 0)"), bool(false));
     assert_val_eq!(session.run("shift_left(false, 1)"), bool(false));
-    assert_val_eq!(session.run("shift_left(true, 0)"), bool(false));
+    assert_val_eq!(session.run("shift_left(true, 0)"), bool(true));
     assert_val_eq!(session.run("shift_left(true, 1)"), bool(false));
+    assert_bool_shift_counts(&mut session, "shift_left");
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn bool_shift_right() {
     let mut session = TestSession::new();
-    // For bool, shift_right always returns false (see logic.rs implementation)
     assert_val_eq!(session.run("shift_right(false, 0)"), bool(false));
     assert_val_eq!(session.run("shift_right(false, 1)"), bool(false));
-    assert_val_eq!(session.run("shift_right(true, 0)"), bool(false));
+    assert_val_eq!(session.run("shift_right(true, 0)"), bool(true));
     assert_val_eq!(session.run("shift_right(true, 1)"), bool(false));
+    assert_bool_shift_counts(&mut session, "shift_right");
+}
+
+fn assert_bool_shift_counts(session: &mut TestSession, operation: &str) {
+    for (count, expected_true) in [
+        ("0", true),
+        ("1", false),
+        ("-1", false),
+        ("bit(count_zeros(0) - 1)", false),
+        ("bit_not(bit(count_zeros(0) - 1))", false),
+    ] {
+        for runtime in [false, true] {
+            for (value, expected) in [(true, expected_true), (false, false)] {
+                let operands = if runtime {
+                    format!("let value = black_box({value}); let count = black_box({count});")
+                } else {
+                    format!("let value = {value}; let count = {count};")
+                };
+                assert_val_eq!(
+                    session.run(&format!("{operands} {operation}(value, count)")),
+                    bool(expected)
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -260,6 +385,8 @@ fn bool_rotate_left() {
     assert_val_eq!(session.run("rotate_left(false, 1)"), bool(false));
     assert_val_eq!(session.run("rotate_left(true, 0)"), bool(true));
     assert_val_eq!(session.run("rotate_left(true, 1)"), bool(true));
+    assert_val_eq!(session.run("rotate_left(true, -1)"), bool(true));
+    assert_val_eq!(session.run("rotate_left(false, -1)"), bool(false));
 }
 
 #[test]
@@ -271,6 +398,8 @@ fn bool_rotate_right() {
     assert_val_eq!(session.run("rotate_right(false, 1)"), bool(false));
     assert_val_eq!(session.run("rotate_right(true, 0)"), bool(true));
     assert_val_eq!(session.run("rotate_right(true, 1)"), bool(true));
+    assert_val_eq!(session.run("rotate_right(true, -1)"), bool(true));
+    assert_val_eq!(session.run("rotate_right(false, -1)"), bool(false));
 }
 
 #[test]

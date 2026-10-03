@@ -32,7 +32,8 @@ On `bool`, these collapse to the matching logical operators:
 
 ## Shifts and rotations
 
-`shift_left` and `shift_right` move bits by a given amount, filling with zeros (shift right on a negative `int` preserves the sign):
+On `int`, `shift_left` and `shift_right` move bits along the word, discarding bits that leave it.
+Left shifts introduce zeros; right shifts repeat the sign bit, preserving the sign:
 
 ```ferlium
 shift_left(1, 4)
@@ -42,13 +43,26 @@ shift_left(1, 4)
 shift_right(0b10100, 2)
 ```
 
+For example, `shift_right(-8, 1)` returns `-4`.
+Negative counts reverse direction: `shift_left(8, -1)` returns `4`, and `shift_right(8, -1)` returns `16`.
+
+Shift counts do not wrap.
+When the count's magnitude is at least the integer width, a left shift returns `0`, and a right shift returns `0` for nonnegative values or `-1` for negative values.
+
 `rotate_left` and `rotate_right` move bits without losing them: bits that fall off one end re-enter at the other.
 
 ```ferlium
 rotate_left(1, 3)
 ```
 
-The shift and rotation amount is always an `int`.
+Negative rotation counts also reverse direction.
+Rotation counts wrap modulo the integer width, so a rotation by the width returns the original value.
+
+```ferlium
+rotate_left(5, -1) == rotate_right(5, 1)
+```
+
+This returns `true`.
 
 ## Counting bits
 
@@ -95,9 +109,9 @@ let flags = set_bit(set_bit(0, 0), 3);
 
 ## Notes on `bool`
 
-Because `bool` holds a single bit, some operations behave specially:
+For bit operations, `bool` behaves like a single unsigned bit:
 
-- `shift_left` and `shift_right` always return `false`, since the bit is shifted out.
+- `shift_left` and `shift_right` preserve the value for a zero count; any nonzero count returns `false`.
 - `rotate_left` and `rotate_right` are the identity, since there is nowhere for the bit to move.
 - `bit(0)` is `true`; `bit(n)` for any other `n` is `false`.
 - `set_bit`, `clear_bit`, and `test_bit` only affect position `0`; other positions leave the value unchanged or return `false`.
