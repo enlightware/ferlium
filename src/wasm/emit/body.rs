@@ -92,6 +92,12 @@ enum Storage {
     Expression,
 }
 
+#[derive(Clone, Copy)]
+enum CopyAddress<'a> {
+    Value(&'a Value),
+    Base(WasmLocalId, MemArg),
+}
+
 /// An enclosing Wasm construct of structured emission.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Label {
@@ -917,12 +923,13 @@ impl<'a, 's> Body<'a, 's> {
                     Move | Memcpy | MoveBytes { .. } | BlackBox { .. } if witnessed => {
                         require(&[DynamicSize, DynamicAlign]);
                     }
-                    Replace => {
-                        require(&[DynamicBase, DynamicSize]);
-                        if witnessed {
-                            require(&[Scratch, DynamicAlign, AllocationEnd]);
-                        }
-                    }
+                    Replace if witnessed => require(&[
+                        DynamicBase,
+                        DynamicSize,
+                        Scratch,
+                        DynamicAlign,
+                        AllocationEnd,
+                    ]),
                     BuildArray { .. } => require(&[Scratch]),
                     BuildClosure {
                         num_hidden_dicts,
@@ -997,6 +1004,7 @@ impl<'a, 's> Body<'a, 's> {
                     | Clear
                     | Memcpy
                     | Move
+                    | Replace
                     | MoveBytes { .. }
                     | StackSave
                     | StackRestore
@@ -1017,7 +1025,7 @@ impl<'a, 's> Body<'a, 's> {
         let place = match operation.kind {
             Load => &args[0],
             Store => &args[1],
-            Memcpy | Move if layout_witness(operation).is_none() => &args[1],
+            Memcpy | Move | Replace if layout_witness(operation).is_none() => &args[1],
             _ => return None,
         };
         let known_address = |value: &Value| {
@@ -1029,7 +1037,11 @@ impl<'a, 's> Body<'a, 's> {
         } else {
             known_address(&args[1])
         };
-        let needed = [!known_address(&args[0]), !destination_known];
+        let mut needed = [!known_address(&args[0]), !destination_known];
+        if operation.kind == Replace {
+            // Both operands are sources and destinations during the exchange.
+            needed = [needed.contains(&true); 2];
+        }
         // Known bases need no scratch locals, regardless of the copy's size.
         if !needed.contains(&true) {
             return None;
@@ -1056,10 +1068,37 @@ impl<'a, 's> Body<'a, 's> {
     }
 
     fn copy_bytes(&mut self, source: &Value, destination: &Value, size: u32) -> Result<(), String> {
+        self.copy_bytes_at(
+            CopyAddress::Value(source),
+            CopyAddress::Value(destination),
+            size,
+        )
+    }
+
+    fn copy_address(&mut self, address: CopyAddress<'_>) -> Result<(), String> {
+        match address {
+            CopyAddress::Value(value) => self.address(value),
+            CopyAddress::Base(local, arg) => {
+                self.i(I::LocalGet(local.as_u32()));
+                if arg.offset != 0 {
+                    self.i(I::I32Const(arg.offset as i32));
+                    self.i(I::I32Add);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn copy_bytes_at(
+        &mut self,
+        source: CopyAddress<'_>,
+        destination: CopyAddress<'_>,
+        size: u32,
+    ) -> Result<(), String> {
         // Non-scalar Store values use the same backing-storage address as place operands.
         if !matches!(size, 12 | 16) {
-            self.address(destination)?;
-            self.address(source)?;
+            self.copy_address(destination)?;
+            self.copy_address(source)?;
             self.i(I::I32Const(size as i32));
             self.i(I::MemoryCopy {
                 src_mem: 0,
@@ -1068,22 +1107,25 @@ impl<'a, 's> Body<'a, 's> {
             return Ok(());
         }
         // Fixed slots reuse the frame base and put their offsets directly into memory accesses.
-        let known_address = |value: &Value| match self.storage.get(value) {
-            Some(&Storage::Stack(offset)) => Some((
-                self.frame.expect("reserved frame storage"),
-                memarg_at(3, offset),
-            )),
-            _ => self
-                .copy_address_local(value)
-                .map(|local| (local, memarg(0))),
+        let known_address = |address| match address {
+            CopyAddress::Base(local, arg) => Some((local, arg)),
+            CopyAddress::Value(value) => match self.storage.get(value) {
+                Some(&Storage::Stack(offset)) => Some((
+                    self.frame.expect("reserved frame storage"),
+                    memarg_at(3, offset),
+                )),
+                _ => self
+                    .copy_address_local(value)
+                    .map(|local| (local, memarg(0))),
+            },
         };
         let source_base = known_address(source);
         let destination_base = known_address(destination);
         if destination_base.is_none() {
-            self.address(destination)?;
+            self.copy_address(destination)?;
         }
         if source_base.is_none() {
-            self.address(source)?;
+            self.copy_address(source)?;
         }
         // Evaluate both addresses before capturing either, so nested emission cannot clobber them.
         let source = source_base.unwrap_or_else(|| {
@@ -3490,10 +3532,16 @@ impl<'a, 's> Body<'a, 's> {
                     self.dynamic_alloca();
                     self.i(I::Drop);
                 } else {
-                    self.scratch_address(ty);
-                    self.i(I::LocalSet(helpers.get(DynamicBase).as_u32()));
-                    self.i(I::I32Const(self.size(&MirType::Lowered(ty))? as i32));
-                    self.i(I::LocalSet(helpers.get(DynamicSize).as_u32()));
+                    let size = self.size(&MirType::Lowered(ty))?;
+                    let scratch = CopyAddress::Base(
+                        self.frame.expect("reserved exchange storage"),
+                        memarg_at(3, self.scratch_slots[&ty]),
+                    );
+                    // Keep the temporary and copy order: each individual copy permits overlap.
+                    self.copy_bytes_at(CopyAddress::Value(&args[0]), scratch, size)?;
+                    self.copy_bytes(&args[1], &args[0], size)?;
+                    self.copy_bytes_at(scratch, CopyAddress::Value(&args[1]), size)?;
+                    return Ok(());
                 }
                 self.i(I::LocalGet(helpers.get(DynamicBase).as_u32()));
                 self.address(&args[0])?;

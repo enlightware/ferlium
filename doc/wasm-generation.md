@@ -30,7 +30,8 @@ their effects and ownership work. The shared MIR keeps the logical index.
 
 Multi-chunk expansion is limited to fixed 12- and 16-byte copies; smaller single-chunk copies
 remain in the peephole. Expansion happens during body emission, where storage and address locals
-are still known.
+are still known. Fixed-layout replacement uses this same policy for its three copies, retaining
+the exchange temporary and copy order.
 
 Fixed-size copies can use scalar loads and stores, but must read every source chunk before any
 write because valid source and destination ranges may overlap. Known frame slots use memory

@@ -31,7 +31,7 @@ use crate::{
         terminator::TerminatorKind,
     },
     module::{FunctionId, LocalFunctionId, Module, Path, Visibility, id::Id},
-    std::{math::Float, option::option_type, string::String},
+    std::{math::Float, option::option_type, string::String, value::value_layout_for_type},
     types::{
         effects::{PrimitiveEffect, effect, no_effects},
         r#type::{CallImplType, FnType, Type},
@@ -3291,6 +3291,158 @@ fn wasm_codegen_small_copies_preserve_overlapping_bytes() {
                 expected,
                 "size {size}, source {source}, destination {destination}"
             );
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_fixed_replacements_use_small_copy_policy() {
+    for (size, ty, old, new, result, expected) in [
+        (1, "bool", "false", "x > 0", "if $VALUE { 1 } else { 0 }", 1),
+        (
+            2,
+            "(bool, bool)",
+            "(false, false)",
+            "(x > 0, false)",
+            "if $VALUE.0 { 1 } else { 0 }",
+            1,
+        ),
+        (
+            4,
+            "(bool, bool, bool, bool)",
+            "(false, false, false, false)",
+            "(x > 0, false, true, false)",
+            "if $VALUE.0 and $VALUE.2 { 1 } else { 0 }",
+            1,
+        ),
+        (
+            8,
+            "(int, int)",
+            "(0, 0)",
+            "(x, x + 1)",
+            "$VALUE.0 + $VALUE.1",
+            15,
+        ),
+        (
+            12,
+            "(int, int, int)",
+            "(0, 0, 0)",
+            "(x, x + 1, x + 2)",
+            "$VALUE.0 + $VALUE.1 + $VALUE.2",
+            24,
+        ),
+        (
+            16,
+            "(int, int, int, int)",
+            "(0, 0, 0, 0)",
+            "(x, x + 1, x + 2, x + 3)",
+            "$VALUE.0 + $VALUE.1 + $VALUE.2 + $VALUE.3",
+            34,
+        ),
+        (
+            20,
+            "(int, int, int, int, int)",
+            "(0, 0, 0, 0, 0)",
+            "(x, x + 1, x + 2, x + 3, x + 4)",
+            "$VALUE.0 + $VALUE.1 + $VALUE.2 + $VALUE.3 + $VALUE.4",
+            45,
+        ),
+    ] {
+        for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+            for projected in [false, true] {
+                let mut session = CompilerSession::new();
+                session.set_allow_unsafe(true);
+                session.set_mir_optimization(optimization);
+                session.set_physical_mir_optimization(optimization);
+                let path = Path::single_str("probe");
+                let mut module = Module::new(session.modules().next_id(), path.clone());
+                module.add_function(
+                    ustr("record"),
+                    NativeFnN::from_rust(record_drop).description(
+                        ["id"],
+                        "",
+                        effect(PrimitiveEffect::Write),
+                    ),
+                );
+                session.register_module(path, module);
+                let value = if projected { "v.p.0" } else { "v.0" };
+                let result_value = result.replace("$VALUE", value);
+                let result_value = if projected {
+                    format!("({result_value}) + v.anchor")
+                } else {
+                    result_value
+                };
+                let drop_value = result.replace("$VALUE", "p.0");
+                let (initial, destination) = if projected {
+                    (format!("{{ anchor: 100, p: Probe({old}) }}"), "v.p")
+                } else {
+                    (format!("Probe({old})"), "v")
+                };
+                let source = format!(
+                    r#"
+                    struct Probe({ty})
+                    impl Value for Probe {{
+                        fn eq(a: Probe, b: Probe) -> bool {{ false }}
+                        fn to_string(p: Probe) -> string {{ "probe" }}
+                        fn hash(p: Probe, h: &mut hasher) {{}}
+                        fn clone(p: Probe) -> Probe {{ Probe(p.0) }}
+                        fn drop(p: &mut Probe) {{
+                            effects_unsafe {{ probe::record(if ({drop_value}) == 0 {{ 1 }} else {{ 2 }}); }}
+                        }}
+                    }}
+                    fn compute(x: int) -> int {{
+                        let mut v = {initial};
+                        {destination} = Probe({new});
+                        {result_value}
+                    }}
+                "#
+                );
+                let entry = compile(&mut session, &source);
+                let module = session.expect_fresh_module(entry.module);
+                let probe = Type::named(module.get_type_def_id(ustr("Probe")).unwrap(), []);
+                let layout = value_layout_for_type(
+                    probe,
+                    Location::new_synthesized(),
+                    &session.modules().env_for(module),
+                )
+                .unwrap();
+                assert_eq!(layout.size, size, "fixture size must match Probe's layout");
+                let program = session.prepare_physical_program(entry.module).unwrap();
+                let body = program.function(entry).unwrap();
+                assert!(
+                    body.blocks()
+                        .any(
+                            |block| body.block(block).operations().iter().any(|operation| {
+                                operation.kind == OperationKind::Replace
+                                    && operation.operands.len() == 2
+                            })
+                        ),
+                    "fixture must exercise fixed replacement: {size}, {optimization:?}, projected={projected}"
+                );
+                let code = CompiledProgram::compile(&session, entry).unwrap();
+                let copies = wasm_operator_count(code.bytes(), |op| {
+                    matches!(op, Operator::MemoryCopy { .. })
+                });
+                if size <= 16 {
+                    assert_eq!(copies, 0, "{size}, {optimization:?}, projected={projected}");
+                } else {
+                    assert!(
+                        copies >= 3,
+                        "large exchanges must retain memory.copy: {size}, {optimization:?}, projected={projected}"
+                    );
+                }
+                DROP_LOG.set(0);
+                let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+                assert_eq!(
+                    instance.run((7,), WasmLimits::default()).unwrap(),
+                    expected + if projected { 100 } else { 0 }
+                );
+                assert_eq!(
+                    DROP_LOG.get(),
+                    12,
+                    "the displaced and installed values must each be dropped once"
+                );
+            }
         }
     }
 }
