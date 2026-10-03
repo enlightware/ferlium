@@ -131,8 +131,13 @@ pub(super) fn dictionary_adapter(
         }
     }
     let frame = WasmLocalId::from_index(abi.parameter_count());
-    let scratch = WasmLocalId::from_index(abi.parameter_count() + 1);
-    let mut code = WasmFunction::new([(if frame_size == 0 { 0 } else { 2 }, ValType::I32)]);
+    let scratch = optional
+        .as_ref()
+        .filter(|adapter| adapter.needs_scratch())
+        // Optional results always reserve a frame, so scratch follows its local.
+        .map(|_| WasmLocalId::from_index(abi.parameter_count() + 1));
+    let local_count = u32::from(frame_size != 0) + u32::from(scratch.is_some());
+    let mut code = WasmFunction::new([(local_count, ValType::I32)]);
     if frame_size != 0 {
         enter_frame(&mut code, imports.failure_function(), frame, frame_size);
         for (i, offset) in spills.iter().enumerate() {
@@ -195,7 +200,7 @@ pub(super) fn dictionary_adapter(
             &mut code,
             abi.output_local(),
             frame,
-            Some(scratch),
+            scratch,
             imports.function_index("alloc"),
         );
     }

@@ -997,20 +997,54 @@ fn wasm_codegen_native_dictionary_adapters() {
             ],
         );
         session.register_module(path, module);
-        for (input, expected) in [(0, 3), (4, 8)] {
-            assert_wasm_runs::<isize, isize>(
-                &mut session,
-                r#"
-                use traits::*; use native_probe::*;
-                #[inline(never)] fn forward<T>(x: T) -> int where T: Probe {
-                            let n = add_offset(x, 3);
-                    match maybe(x) { None => n, Some(text) => n + len(text) }
+        let entry = compile(
+            &mut session,
+            r#"
+            use traits::*; use native_probe::*;
+            #[inline(never)] fn forward<T>(x: T) -> int where T: Probe {
+                let n = add_offset(x, 3);
+                match maybe(x) { None => n, Some(text) => n + len(text) }
+            }
+            fn compute(x: int) -> int { forward(x) }
+            "#,
+        );
+        // The raw pipeline retains dispatch; the normal pipeline checks end-to-end behavior.
+        // Option<string> covers inline storage. Recursive indirect payloads are not supported
+        // by the current native optional-result API.
+        for (pipeline, requires_adapters, code) in [
+            ("raw", true, compile_raw(&session, entry)),
+            (
+                "normal",
+                false,
+                CompiledProgram::compile(&session, entry).unwrap(),
+            ),
+        ] {
+            let functions = WasmFunctions::new(code.bytes());
+            let mut adapters = 0;
+            for &(name, index) in &functions.names {
+                if !name.contains("<dictionary adapter ") {
+                    continue;
                 }
-                fn compute(x: int) -> int { forward(x) }
-                "#,
-                input,
-                expected,
-            );
+                adapters += 1;
+                let (body, parameters) = functions.body(index);
+                let context = format!("{optimization:?} {pipeline}: {name}");
+                let count = assert_reserved_locals_used(&body, parameters, &context);
+                assert!(count <= 1, "{context}: these adapters need at most a frame");
+            }
+            if requires_adapters {
+                assert!(
+                    adapters > 0,
+                    "{optimization:?} {pipeline}: fixture must retain dictionary adapters"
+                );
+            }
+            let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+            for (input, expected) in [(4, 8), (0, 3), (4, 8)] {
+                assert_eq!(
+                    instance.run((input,), WasmLimits::default()).unwrap(),
+                    expected,
+                    "{optimization:?} {pipeline}: input {input}"
+                );
+            }
         }
     }
 }
