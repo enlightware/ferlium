@@ -1836,6 +1836,98 @@ impl<'a, 's> Body<'a, 's> {
         Ok(())
     }
 
+    fn constant_integer_shift(
+        &mut self,
+        value: &Value,
+        count: i32,
+        intrinsic: KnownCallee,
+    ) -> Result<(), String> {
+        let instruction = match (intrinsic, count < 0) {
+            (KnownCallee::IntShiftLeft, false)
+            | (KnownCallee::IntShiftRight | KnownCallee::IntShiftRightLogical, true) => I::I32Shl,
+            (KnownCallee::IntShiftRight, false) | (KnownCallee::IntShiftLeft, true) => I::I32ShrS,
+            (KnownCallee::IntShiftRightLogical, false) => I::I32ShrU,
+            _ => unreachable!(),
+        };
+        // Consume the input once even for a zero result: it may be a deferred expression.
+        self.read(value)?;
+        let magnitude = count.unsigned_abs();
+        if magnitude < 32 {
+            if magnitude != 0 {
+                self.i(I::I32Const(magnitude as i32));
+                self.i(instruction);
+            }
+        } else if matches!(instruction, I::I32ShrS) {
+            self.i(I::I32Const(31));
+            self.i(I::I32ShrS);
+        } else {
+            self.i(I::Drop);
+            self.i(I::I32Const(0));
+        }
+        Ok(())
+    }
+
+    /// Produce a one-bit mask; the unsigned comparison also excludes negative positions.
+    fn integer_bit(&mut self, position: &Value) -> Result<(), String> {
+        if let Some(constant) = self.analysis.integer_constant(self.body, position) {
+            // Consume a deferred literal load before replacing it with its mask.
+            self.read(position)?;
+            self.i(I::Drop);
+            let position = constant;
+            let mask = if (0..32).contains(&position) {
+                1_i32 << position
+            } else {
+                0
+            };
+            self.i(I::I32Const(mask));
+            return Ok(());
+        }
+        self.read(position)?;
+        self.i(I::I32Const(32));
+        self.i(I::I32LtU);
+        self.i(I::If(BlockType::Result(ValType::I32)));
+        self.i(I::I32Const(1));
+        self.read(position)?;
+        self.i(I::I32Shl);
+        self.i(I::Else);
+        self.i(I::I32Const(0));
+        self.i(I::End);
+        Ok(())
+    }
+
+    /// Guard the count before Wasm can wrap it. Signed bounds avoid negating MIN.
+    fn integer_shift(
+        &mut self,
+        value: &Value,
+        count: &Value,
+        instruction: I<'static>,
+        negative: bool,
+    ) -> Result<(), String> {
+        self.read(count)?;
+        self.i(I::I32Const(if negative { -32 } else { 32 }));
+        self.i(if negative { I::I32LeS } else { I::I32GeS });
+        self.i(I::If(BlockType::Result(ValType::I32)));
+        if matches!(instruction, I::I32ShrS) {
+            self.read(value)?;
+            self.i(I::I32Const(31));
+            self.i(I::I32ShrS);
+        } else {
+            self.i(I::I32Const(0));
+        }
+        self.i(I::Else);
+        self.read(value)?;
+        if negative {
+            self.i(I::I32Const(0));
+        }
+        self.read(count)?;
+        if negative {
+            self.i(I::I32Sub);
+        }
+        self.i(instruction);
+        self.i(I::End);
+        Ok(())
+    }
+
     /// Emits a known callee inline. `checked` says that a `raw_float_to_float` operand is known
     /// to be finite, which makes the conversion the identity.
     fn call_intrinsic(
@@ -1848,6 +1940,17 @@ impl<'a, 's> Body<'a, 's> {
     ) -> Result<(), String> {
         let arity = match intrinsic {
             KnownCallee::IntAdd
+            | KnownCallee::IntBitAnd
+            | KnownCallee::IntBitOr
+            | KnownCallee::IntBitXor
+            | KnownCallee::IntShiftLeft
+            | KnownCallee::IntShiftRight
+            | KnownCallee::IntShiftRightLogical
+            | KnownCallee::IntRotateLeft
+            | KnownCallee::IntRotateRight
+            | KnownCallee::IntSetBit
+            | KnownCallee::IntClearBit
+            | KnownCallee::IntTestBit
             | KnownCallee::IntSub
             | KnownCallee::IntMul
             | KnownCallee::IntCmp
@@ -1870,6 +1973,10 @@ impl<'a, 's> Body<'a, 's> {
             | KnownCallee::RawFloatSub
             | KnownCallee::RawFloatMul => 2,
             KnownCallee::IntNeg
+            | KnownCallee::IntBitNot
+            | KnownCallee::IntCountOnes
+            | KnownCallee::IntCountZeros
+            | KnownCallee::IntBit
             | KnownCallee::IntFromInt
             | KnownCallee::FloatNeg
             | KnownCallee::RawFloatNeg
@@ -1885,6 +1992,94 @@ impl<'a, 's> Body<'a, 's> {
         let ty = self.pointee(output)?;
         let offset = self.prepare_store(output)?;
         match intrinsic {
+            KnownCallee::IntBitAnd
+            | KnownCallee::IntBitOr
+            | KnownCallee::IntBitXor
+            | KnownCallee::IntRotateLeft
+            | KnownCallee::IntRotateRight => {
+                self.read(inputs[0])?;
+                self.read(inputs[1])?;
+                // Wasm masks rotation counts modulo 32, including negative signed counts.
+                self.i(match intrinsic {
+                    KnownCallee::IntBitAnd => I::I32And,
+                    KnownCallee::IntBitOr => I::I32Or,
+                    KnownCallee::IntBitXor => I::I32Xor,
+                    KnownCallee::IntRotateLeft => I::I32Rotl,
+                    KnownCallee::IntRotateRight => I::I32Rotr,
+                    _ => unreachable!(),
+                });
+            }
+            KnownCallee::IntBitNot => {
+                self.read(inputs[0])?;
+                self.i(I::I32Const(-1));
+                self.i(I::I32Xor);
+            }
+            KnownCallee::IntCountOnes | KnownCallee::IntCountZeros => {
+                if intrinsic == KnownCallee::IntCountZeros {
+                    self.i(I::I32Const(32));
+                }
+                self.read(inputs[0])?;
+                self.i(I::I32Popcnt);
+                if intrinsic == KnownCallee::IntCountZeros {
+                    self.i(I::I32Sub);
+                }
+            }
+            KnownCallee::IntBit => self.integer_bit(inputs[0])?,
+            KnownCallee::IntSetBit | KnownCallee::IntClearBit | KnownCallee::IntTestBit => {
+                self.read(inputs[0])?;
+                self.integer_bit(inputs[1])?;
+                if intrinsic == KnownCallee::IntClearBit {
+                    self.i(I::I32Const(-1));
+                    self.i(I::I32Xor);
+                }
+                self.i(if intrinsic == KnownCallee::IntSetBit {
+                    I::I32Or
+                } else {
+                    I::I32And
+                });
+                if intrinsic == KnownCallee::IntTestBit {
+                    self.i(I::I32Const(0));
+                    self.i(I::I32Ne);
+                }
+            }
+            KnownCallee::IntShiftLeft
+            | KnownCallee::IntShiftRight
+            | KnownCallee::IntShiftRightLogical => {
+                if let Some(count) = self.analysis.integer_constant(self.body, inputs[1]) {
+                    // A literal can arrive through a deferred load register.
+                    self.read(inputs[1])?;
+                    self.i(I::Drop);
+                    self.constant_integer_shift(inputs[0], count, intrinsic)?;
+                } else {
+                    self.read(inputs[1])?;
+                    self.i(I::I32Const(0));
+                    self.i(I::I32LtS);
+                    self.i(I::If(BlockType::Result(ValType::I32)));
+                    self.integer_shift(
+                        inputs[0],
+                        inputs[1],
+                        if intrinsic == KnownCallee::IntShiftLeft {
+                            I::I32ShrS
+                        } else {
+                            I::I32Shl
+                        },
+                        true,
+                    )?;
+                    self.i(I::Else);
+                    self.integer_shift(
+                        inputs[0],
+                        inputs[1],
+                        match intrinsic {
+                            KnownCallee::IntShiftLeft => I::I32Shl,
+                            KnownCallee::IntShiftRight => I::I32ShrS,
+                            KnownCallee::IntShiftRightLogical => I::I32ShrU,
+                            _ => unreachable!(),
+                        },
+                        false,
+                    )?;
+                    self.i(I::End);
+                }
+            }
             KnownCallee::IntNeg => {
                 self.i(I::I32Const(0));
                 self.read(inputs[0])?;
@@ -3847,4 +4042,66 @@ fn forwarded_result(body: &Function, signature: &CallAbi, mode: BodyMode) -> Opt
         return None;
     }
     Some(last.operands[0].clone())
+}
+
+/// Resolve a literal integer, a load from literal storage, or a proven constant place.
+pub(super) fn integer_constant(
+    body: &Function,
+    value: &Value,
+    definitions: &[Option<ExpressionSource>],
+    constants: &FxHashMap<ValueId, i32>,
+) -> Option<i32> {
+    if let Value::Register(id) = value
+        && let Some(&constant) = constants.get(id)
+    {
+        return Some(constant);
+    }
+    let value = if let Value::Register(id) = value {
+        let source = definitions.get(id.as_index()).copied().flatten()?;
+        let operation = body
+            .block(source.block)
+            .operations()
+            .get(source.operation_id().as_index())?;
+        if !matches!(operation.kind, OperationKind::Load) {
+            return None;
+        }
+        operation.operands.first()?
+    } else {
+        value
+    };
+    // Only immutable literal storage proves a constant; mutable places keep their call path.
+    let literal = match value {
+        Value::Constant(id) => &body.constant(*id).representation,
+        Value::Pattern(literal) => literal,
+        _ => return None,
+    };
+    literal
+        .as_primitive_ty::<isize>()
+        .and_then(|value| i32::try_from(*value).ok())
+}
+
+/// Emitted reads of a zero-based call input, including reads in distinct Wasm branches.
+/// Keep this contract alongside `call_intrinsic` whenever its emission changes.
+pub(super) fn intrinsic_reads_input_repeatedly(
+    intrinsic: KnownCallee,
+    input: usize,
+    inputs: &[Value],
+    body: &Function,
+    definitions: &[Option<ExpressionSource>],
+    constants: &FxHashMap<ValueId, i32>,
+) -> bool {
+    match intrinsic {
+        KnownCallee::IntShiftLeft
+        | KnownCallee::IntShiftRight
+        | KnownCallee::IntShiftRightLogical => {
+            input < 2 && integer_constant(body, &inputs[1], definitions, constants).is_none()
+        }
+        KnownCallee::IntBit => {
+            input == 0 && integer_constant(body, &inputs[0], definitions, constants).is_none()
+        }
+        KnownCallee::IntSetBit | KnownCallee::IntClearBit | KnownCallee::IntTestBit => {
+            input == 1 && integer_constant(body, &inputs[1], definitions, constants).is_none()
+        }
+        _ => false,
+    }
 }

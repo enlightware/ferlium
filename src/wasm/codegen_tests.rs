@@ -1666,6 +1666,313 @@ fn wasm_codegen_typed_binding_and_direct_calls() {
 }
 
 #[wasm_bindgen_test]
+fn wasm_codegen_integer_bits_select_instructions_and_preserve_counts() {
+    for optimization in [MirOptimization::Enabled, MirOptimization::Disabled] {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(optimization);
+        session.set_physical_mir_optimization(optimization);
+        for computed in [false, true] {
+            for operation in [
+                "bit_and",
+                "bit_or",
+                "bit_xor",
+                "bit_not",
+                "shift_left",
+                "shift_right",
+                "shift_right_logical",
+                "rotate_left",
+                "rotate_right",
+                "count_ones",
+                "count_zeros",
+                "bit",
+                "set_bit",
+                "clear_bit",
+                "test_bit",
+            ] {
+                let unary = matches!(operation, "bit_not" | "count_ones" | "count_zeros" | "bit");
+                // Test direct parameters and computed operands that may be deferred.
+                let (value, count) = if computed {
+                    ("x + 1", "n + 1")
+                } else {
+                    ("x", "n")
+                };
+                let expression = if unary {
+                    format!("{operation}({value})")
+                } else {
+                    format!("{operation}({value}, {count})")
+                };
+                let result = if operation == "test_bit" {
+                    "bool"
+                } else {
+                    "int"
+                };
+                let entry = compile(
+                    &mut session,
+                    &format!("fn compute(x: int, n: int) -> {result} {{ {expression} }}"),
+                );
+                let code = CompiledProgram::compile(&session, entry).unwrap();
+                let operators = exported_function_operators(code.bytes(), ENTRY_EXPORT);
+                assert!(
+                    !operators.iter().any(|op| matches!(
+                        op,
+                        Operator::Call { .. } | Operator::CallIndirect { .. }
+                    )),
+                    "{operation} {optimization:?}: {operators:?}"
+                );
+                assert!(
+                    operators.iter().any(|op| match operation {
+                        "bit_and" | "clear_bit" | "test_bit" => matches!(op, Operator::I32And),
+                        "bit_or" | "set_bit" => matches!(op, Operator::I32Or),
+                        "bit_xor" | "bit_not" => matches!(op, Operator::I32Xor),
+                        "rotate_left" => matches!(op, Operator::I32Rotl),
+                        "rotate_right" => matches!(op, Operator::I32Rotr),
+                        "count_ones" | "count_zeros" => matches!(op, Operator::I32Popcnt),
+                        "shift_right" => matches!(op, Operator::I32ShrS),
+                        "shift_right_logical" => matches!(op, Operator::I32ShrU),
+                        _ => matches!(op, Operator::I32Shl),
+                    }),
+                    "{operation}: {operators:?}"
+                );
+                let mut integer = if result == "int" {
+                    Some(code.instantiate::<(isize, isize), isize>().unwrap())
+                } else {
+                    None
+                };
+                let mut boolean = if result == "bool" {
+                    Some(code.instantiate::<(isize, isize), bool>().unwrap())
+                } else {
+                    None
+                };
+                for x in [
+                    0_i32,
+                    1,
+                    5,
+                    -9,
+                    -8,
+                    -2,
+                    -1,
+                    30,
+                    31,
+                    32,
+                    i32::MIN,
+                    i32::MAX - 1,
+                    i32::MAX,
+                ] {
+                    for n in [
+                        0_i32,
+                        1,
+                        -1,
+                        -2,
+                        30,
+                        31,
+                        -31,
+                        32,
+                        -32,
+                        33,
+                        -33,
+                        -34,
+                        i32::MIN,
+                        i32::MAX,
+                    ] {
+                        let arguments = (x as isize, n as isize);
+                        let x = if computed { x.wrapping_add(1) } else { x };
+                        let n = if computed { n.wrapping_add(1) } else { n };
+                        let count = n.unsigned_abs();
+                        let left = || x.checked_shl(count).unwrap_or(0);
+                        let right = || x.checked_shr(count).unwrap_or(if x < 0 { -1 } else { 0 });
+                        let mask = |position: i32| {
+                            if (0..32).contains(&position) {
+                                1_i32 << position
+                            } else {
+                                0
+                            }
+                        };
+                        let expected = match operation {
+                            "bit_and" => x & n,
+                            "bit_or" => x | n,
+                            "bit_xor" => x ^ n,
+                            "bit_not" => !x,
+                            "shift_left" => {
+                                if n < 0 {
+                                    right()
+                                } else {
+                                    left()
+                                }
+                            }
+                            "shift_right" => {
+                                if n < 0 {
+                                    left()
+                                } else {
+                                    right()
+                                }
+                            }
+                            "shift_right_logical" => {
+                                if n < 0 {
+                                    left()
+                                } else {
+                                    (x as u32).checked_shr(count).unwrap_or(0) as i32
+                                }
+                            }
+                            "rotate_left" => x.rotate_left(n.rem_euclid(32) as u32),
+                            "rotate_right" => x.rotate_right(n.rem_euclid(32) as u32),
+                            "count_ones" => x.count_ones() as i32,
+                            "count_zeros" => x.count_zeros() as i32,
+                            "bit" => mask(x),
+                            "set_bit" => x | mask(n),
+                            "clear_bit" => x & !mask(n),
+                            "test_bit" => i32::from(x & mask(n) != 0),
+                            _ => unreachable!(),
+                        };
+                        let actual = if let Some(instance) = integer.as_mut() {
+                            instance.run(arguments, WasmLimits::default()).unwrap()
+                        } else {
+                            isize::from(
+                                boolean
+                                    .as_mut()
+                                    .unwrap()
+                                    .run(arguments, WasmLimits::default())
+                                    .unwrap(),
+                            )
+                        };
+                        assert_eq!(
+                            actual, expected as isize,
+                            "{operation}({x}, {n}) {optimization:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_integer_bits_specialize_literal_counts_and_positions() {
+    let mut session = CompilerSession::new();
+    // Normal optimization leaves literal arguments in single-store temporary places.
+    for (expression, expected, mask) in [
+        ("shift_left(x + 1, 0)", -8, false),
+        ("shift_left(x + 1, 3)", -64, false),
+        ("shift_left(x + 1, -3)", -1, false),
+        ("shift_left(x + 1, -32)", -1, false),
+        ("shift_left(x + 1, 32)", 0, false),
+        ("shift_left(x + 1, bit(31))", -1, false),
+        ("shift_right(x + 1, 3)", -1, false),
+        ("shift_right(x + 1, -3)", -64, false),
+        ("shift_right(x + 1, 32)", -1, false),
+        ("shift_right(x + 1, -32)", 0, false),
+        ("shift_right(x + 1, bit(31))", 0, false),
+        ("shift_right_logical(x + 1, 3)", 536870911, false),
+        ("shift_right_logical(x + 1, -3)", -64, false),
+        ("shift_right_logical(x + 1, 32)", 0, false),
+        ("shift_right_logical(x + 1, bit(31))", 0, false),
+        ("shift_right(x + 1, 2147483647)", -1, false),
+        ("set_bit(x + 1, 3)", -8, true),
+        ("set_bit(x + 1, 32)", -8, true),
+        ("set_bit(x + 1, -1)", -8, true),
+        ("clear_bit(x + 1, 3)", -16, true),
+        ("clear_bit(x + 1, 31)", 2147483640, true),
+        ("clear_bit(x + 1, 32)", -8, true),
+        ("if test_bit(x + 1, 31) { 1 } else { 0 }", 1, true),
+        ("if test_bit(x + 1, 32) { 1 } else { 0 }", 0, true),
+        ("bit(31)", i32::MIN, true),
+        ("bit(32)", 0, true),
+        ("bit(bit(31))", 0, true),
+    ] {
+        let entry = compile(
+            &mut session,
+            &format!("fn compute(x: int) -> int {{ {expression} }}"),
+        );
+        if expression == "shift_left(x + 1, 3)" {
+            let program = session.prepare_physical_program(entry.module).unwrap();
+            let body = program.function(entry).unwrap();
+            // Confirm that this case exercises a literal stored in a place, rather than a
+            // constant passed directly to the shift.
+            assert!(body.blocks().any(|block| {
+                let operations = body.block(block).operations();
+                operations.iter().enumerate().any(|(index, store)| {
+                    let Some(MirValue::Constant(id)) = store.operands.first() else {
+                        return false;
+                    };
+                    matches!(store.kind, OperationKind::Store)
+                        && body.constant(*id).representation.as_primitive_ty::<isize>() == Some(&3)
+                        && operations[index + 1..].iter().any(|call| {
+                            matches!(call.kind, OperationKind::Call { .. })
+                                && call.operands.get(2) == store.operands.get(1)
+                        })
+                })
+            }));
+        }
+        let code = CompiledProgram::compile(&session, entry).unwrap();
+        let operators = exported_function_operators(code.bytes(), ENTRY_EXPORT);
+        assert!(
+            !operators
+                .iter()
+                .any(|op| matches!(op, Operator::Call { .. } | Operator::CallIndirect { .. })),
+            "{expression}: {operators:?}"
+        );
+        let shifts = operators
+            .iter()
+            .filter(|op| matches!(op, Operator::I32Shl | Operator::I32ShrS | Operator::I32ShrU))
+            .count();
+        assert!(
+            shifts <= usize::from(!mask),
+            "literal count should need no guards: {expression}: {operators:?}"
+        );
+        let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+        assert_eq!(
+            instance.run((-9,), WasmLimits::default()).unwrap(),
+            expected as isize,
+            "{expression}"
+        );
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_integer_shift_keeps_guards_for_mutated_counts() {
+    for optimization in [MirOptimization::Enabled, MirOptimization::Disabled] {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(optimization);
+        session.set_physical_mir_optimization(optimization);
+        let entry = compile(
+            &mut session,
+            "fn compute(x: int, n: int) -> int {
+            let mut count = 3;
+            if n < 0 { count = -n; } else { count = n; };
+            shift_left(x, count)
+        }",
+        );
+        let code = CompiledProgram::compile(&session, entry).unwrap();
+        let operators = exported_function_operators(code.bytes(), ENTRY_EXPORT);
+        // Both magnitude guards must survive even though the place was initialized by a literal.
+        assert!(
+            operators.iter().any(|op| matches!(op, Operator::I32GeS)),
+            "{operators:?}"
+        );
+        assert!(
+            operators.iter().any(|op| matches!(op, Operator::I32LeS)),
+            "{operators:?}"
+        );
+        let mut instance = code.instantiate::<(isize, isize), isize>().unwrap();
+        for (x, n, expected) in [
+            (-8, 0, -8),
+            (-8, 3, -64),
+            (-8, -3, -64),
+            (-8, 32, 0),
+            (-8, -32, 0),
+            (5, isize::MIN, 0),
+            (-8, isize::MIN, -1),
+            (-8, isize::MAX, 0),
+        ] {
+            assert_eq!(
+                instance.run((x, n), WasmLimits::default()).unwrap(),
+                expected,
+                "compute({x}, {n}) {optimization:?}"
+            );
+        }
+    }
+}
+
+#[wasm_bindgen_test]
 fn wasm_codegen_known_integer_calls_select_instructions() {
     let mut session = CompilerSession::new();
     session.set_mir_optimization(MirOptimization::Disabled);

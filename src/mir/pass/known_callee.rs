@@ -88,6 +88,25 @@ pub(crate) enum KnownCallee {
     IntSub,
     /// `Num<int>::mul(left, right)` — `left * right`.
     IntMul,
+    // Integer bit operations on the target-width signed bit pattern.
+    IntBitAnd,
+    IntBitOr,
+    IntBitXor,
+    IntBitNot,
+    // Signed counts reverse direction when negative; oversized shifts saturate.
+    IntShiftLeft,
+    IntShiftRight,
+    /// Zero-fill right shift on int, with negative counts shifting left.
+    IntShiftRightLogical,
+    // Signed rotation counts wrap modulo the target integer width.
+    IntRotateLeft,
+    IntRotateRight,
+    IntCountOnes,
+    IntCountZeros,
+    IntBit,
+    IntSetBit,
+    IntClearBit,
+    IntTestBit,
     /// `Num<int>::neg(value)` — `-value`.
     IntNeg,
     /// `Num<int>::from_int(value)` — `value` itself.
@@ -196,6 +215,21 @@ impl KnownCallee {
         matches!(
             self,
             Self::IntAdd
+                | Self::IntBitAnd
+                | Self::IntBitOr
+                | Self::IntBitXor
+                | Self::IntBitNot
+                | Self::IntShiftLeft
+                | Self::IntShiftRight
+                | Self::IntShiftRightLogical
+                | Self::IntRotateLeft
+                | Self::IntRotateRight
+                | Self::IntCountOnes
+                | Self::IntCountZeros
+                | Self::IntBit
+                | Self::IntSetBit
+                | Self::IntClearBit
+                | Self::IntTestBit
                 | Self::IntSub
                 | Self::IntMul
                 | Self::IntNeg
@@ -338,6 +372,63 @@ impl KnownCallees {
         let entries = [
             (resolver.function("black_box"), KnownCallee::BlackBox),
             (int_add, KnownCallee::IntAdd),
+            (int_bit_and, KnownCallee::IntBitAnd),
+            (
+                resolver.method(BITS_TRAIT_NAME, int_type(), "bit_or"),
+                KnownCallee::IntBitOr,
+            ),
+            (
+                resolver.method(BITS_TRAIT_NAME, int_type(), "bit_xor"),
+                KnownCallee::IntBitXor,
+            ),
+            (
+                resolver.method(BITS_TRAIT_NAME, int_type(), "bit_not"),
+                KnownCallee::IntBitNot,
+            ),
+            (
+                resolver.method(BITS_TRAIT_NAME, int_type(), "shift_left"),
+                KnownCallee::IntShiftLeft,
+            ),
+            (
+                resolver.method(BITS_TRAIT_NAME, int_type(), "shift_right"),
+                KnownCallee::IntShiftRight,
+            ),
+            (
+                resolver.function("shift_right_logical"),
+                KnownCallee::IntShiftRightLogical,
+            ),
+            (
+                resolver.method(BITS_TRAIT_NAME, int_type(), "rotate_left"),
+                KnownCallee::IntRotateLeft,
+            ),
+            (
+                resolver.method(BITS_TRAIT_NAME, int_type(), "rotate_right"),
+                KnownCallee::IntRotateRight,
+            ),
+            (
+                resolver.method(BITS_TRAIT_NAME, int_type(), "count_ones"),
+                KnownCallee::IntCountOnes,
+            ),
+            (
+                resolver.method(BITS_TRAIT_NAME, int_type(), "count_zeros"),
+                KnownCallee::IntCountZeros,
+            ),
+            (
+                resolver.method(BITS_TRAIT_NAME, int_type(), "bit"),
+                KnownCallee::IntBit,
+            ),
+            (
+                resolver.method(BITS_TRAIT_NAME, int_type(), "set_bit"),
+                KnownCallee::IntSetBit,
+            ),
+            (
+                resolver.method(BITS_TRAIT_NAME, int_type(), "clear_bit"),
+                KnownCallee::IntClearBit,
+            ),
+            (
+                resolver.method(BITS_TRAIT_NAME, int_type(), "test_bit"),
+                KnownCallee::IntTestBit,
+            ),
             (int_sub, KnownCallee::IntSub),
             (int_mul, KnownCallee::IntMul),
             (int_neg, KnownCallee::IntNeg),
@@ -781,7 +872,7 @@ mod tests {
         let session = CompilerSession::new();
         assert_eq!(
             known_callees(&session).by_id.len(),
-            54,
+            69,
             "two known callees resolved to the same function id"
         );
     }

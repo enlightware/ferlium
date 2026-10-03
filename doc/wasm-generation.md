@@ -74,3 +74,10 @@ sees disjoint or identical byte ranges.
 This preserves source navigation and makes sharing independent of whether debug information is
 requested. It does not recover which semantic function a particular runtime invocation came
 through; multiple source origins are not distinct runtime stack frames.
+
+## Lower known primitive operations to intrinsics
+
+Concrete builtin operations on primitive types can lower directly to Wasm instructions.
+The known-callee registry establishes their identity independently of source or generated names.
+Inline lowering preserves Ferlium semantics wherever they differ from Wasm instructions.
+Other implementations and unresolved indirect calls retain the ordinary call path.

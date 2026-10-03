@@ -1731,6 +1731,21 @@ fn wasm_intrinsic(session: &CompilerSession, operation: &Operation) -> Option<Kn
     matches!(
         known,
         KnownCallee::IntAdd
+            | KnownCallee::IntBitAnd
+            | KnownCallee::IntBitOr
+            | KnownCallee::IntBitXor
+            | KnownCallee::IntBitNot
+            | KnownCallee::IntShiftLeft
+            | KnownCallee::IntShiftRight
+            | KnownCallee::IntShiftRightLogical
+            | KnownCallee::IntRotateLeft
+            | KnownCallee::IntRotateRight
+            | KnownCallee::IntCountOnes
+            | KnownCallee::IntCountZeros
+            | KnownCallee::IntBit
+            | KnownCallee::IntSetBit
+            | KnownCallee::IntClearBit
+            | KnownCallee::IntTestBit
             | KnownCallee::IntSub
             | KnownCallee::IntMul
             | KnownCallee::IntNeg

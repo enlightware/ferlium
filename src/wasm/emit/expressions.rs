@@ -18,7 +18,10 @@ use crate::{
     wasm::abi::{CallAbi, Parameter as ParameterTransport, WasmFunctionId},
 };
 
-use super::{control_flow::conditional_targets, is_elided_stack_operation, scalar, wasm_intrinsic};
+use super::{
+    body::intrinsic_reads_input_repeatedly, control_flow::conditional_targets,
+    is_elided_stack_operation, scalar, wasm_intrinsic,
+};
 
 const MAX_EXPRESSION_DEPTH: usize = 128;
 
@@ -104,6 +107,8 @@ pub(super) struct Analysis {
     comparison_fusions: Vec<Option<ComparisonFusion>>,
     value_uses: Vec<Uses>,
     metadata_loads: Vec<bool>,
+    definitions: Vec<Option<Source>>,
+    integer_constants: FxHashMap<ValueId, i32>,
 }
 
 impl Analysis {
@@ -149,8 +154,14 @@ impl Analysis {
             comparison_fusions,
             value_uses: inputs.value_uses,
             metadata_loads,
+            definitions: inputs.definitions,
+            integer_constants: inputs.integer_constants,
         };
         (analysis, plan)
+    }
+
+    pub(super) fn integer_constant(&self, body: &Function, value: &Value) -> Option<i32> {
+        super::body::integer_constant(body, value, &self.definitions, &self.integer_constants)
     }
 
     pub(super) fn skips_metadata_load(&self, operation: &Operation) -> bool {
@@ -698,6 +709,7 @@ struct Inputs {
     place_accesses: Vec<Accesses>,
     addressed: Vec<bool>,
     intrinsics: Vec<Option<KnownCallee>>,
+    integer_constants: FxHashMap<ValueId, i32>,
 }
 
 impl Inputs {
@@ -737,6 +749,7 @@ impl Inputs {
 
         let mut scan = OperandScan::new(body, roles, parameter_count, value_count, env);
         let mut intrinsics = vec![None; layout.operation_count];
+        let mut intrinsic_calls = Vec::new();
         for block_id in body.blocks() {
             let block = body.block(block_id);
             for (operation, op) in block.operations().iter().enumerate() {
@@ -763,6 +776,9 @@ impl Inputs {
                 }
                 let intrinsic = wasm_intrinsic(session, op);
                 intrinsics[layout.index(source).as_index()] = intrinsic;
+                if let Some(known) = intrinsic {
+                    intrinsic_calls.push((source, op, known));
+                }
                 scan.operands(
                     op,
                     source,
@@ -775,6 +791,9 @@ impl Inputs {
                 TerminatorKind::Invoke { operation, .. } => {
                     let intrinsic = wasm_intrinsic(session, operation);
                     intrinsics[layout.index(source).as_index()] = intrinsic;
+                    if let Some(known) = intrinsic {
+                        intrinsic_calls.push((source, operation, known));
+                    }
                     scan.operands(
                         operation,
                         source,
@@ -802,6 +821,60 @@ impl Inputs {
                 }
             }
         }
+        let mut integer_constants = FxHashMap::default();
+        for index in parameter_count..place_count {
+            let id = ValueId::from_index(index - parameter_count);
+            if !place_roots[index] || scan.addressed[index] {
+                continue;
+            }
+            let Some((first, second)) = scan.place_accesses[index].pair() else {
+                continue;
+            };
+            let (write, read) = match (first.kind, second.kind) {
+                (AccessKind::Write, AccessKind::Read) => (first, second),
+                (AccessKind::Read, AccessKind::Write) => (second, first),
+                _ => continue,
+            };
+            if write.source.block != read.source.block
+                || write.source.operation_id().as_index() >= read.source.operation_id().as_index()
+            {
+                continue;
+            }
+            let operation = &body.block(write.source.block).operations()
+                [write.source.operation_id().as_index()];
+            if !matches!(operation.kind, OperationKind::Store) {
+                continue;
+            }
+            if let Some(constant) = super::body::integer_constant(
+                body,
+                &operation.operands[0],
+                &definitions,
+                &integer_constants,
+            ) {
+                integer_constants.insert(id, constant);
+            }
+        }
+        // Add emitted rereads after discovering immutable literal places from the ordinary census.
+        for (source, operation, intrinsic) in intrinsic_calls {
+            let OperationKind::Call { ty, .. } = &operation.kind else {
+                unreachable!()
+            };
+            let end =
+                operation.operands.len() - usize::from(ty.result_convention.has_result_place());
+            let inputs = &operation.operands[1..end];
+            for (input, operand) in inputs.iter().enumerate() {
+                if intrinsic_reads_input_repeatedly(
+                    intrinsic,
+                    input,
+                    inputs,
+                    body,
+                    &definitions,
+                    &integer_constants,
+                ) {
+                    scan.operand(operand, source, classify_access(operation, input + 1));
+                }
+            }
+        }
         Self {
             value_uses: scan.value_uses,
             value_definitions,
@@ -810,6 +883,7 @@ impl Inputs {
             place_accesses: scan.place_accesses,
             addressed: scan.addressed,
             intrinsics,
+            integer_constants,
         }
     }
 }
