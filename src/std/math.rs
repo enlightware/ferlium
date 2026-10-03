@@ -331,6 +331,17 @@ extern "C" fn shift_right(value: Int, shift: Int) -> Int {
     }
 }
 
+extern "C" fn shift_right_logical(value: Int, shift: Int) -> Int {
+    let count = shift.unsigned_abs().min(Int::BITS as usize) as u32;
+    let bits = value.cast_unsigned();
+    let shifted = if shift < 0 {
+        bits.checked_shl(count)
+    } else {
+        bits.checked_shr(count)
+    };
+    shifted.unwrap_or(0).cast_signed()
+}
+
 extern "C" fn rotate_left(value: Int, rotate: Int) -> Int {
     // Reducing the signed count also handles direction reversal without negating it.
     value.rotate_left(rotate.rem_euclid(Int::BITS as Int) as u32)
@@ -646,6 +657,14 @@ pub fn add_to_module(to: &mut Module) {
             b(NativeFnNN::new(clear_bit)) as Function,
             b(NativeFnNN::new(test_bit)) as Function,
         ],
+    );
+    to.add_function(
+        ustr("shift_right_logical"),
+        NativeFnNN::new(shift_right_logical).description(
+            ["value", "shift"],
+            "Shifts `value` right by `shift` bits, filling with zeros. Negative counts shift left.",
+            no_effects(),
+        ),
     );
     add_predicate!("lt_int", Int, <);
     add_predicate!("le_int", Int, <=);

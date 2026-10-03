@@ -49,6 +49,15 @@ Negative counts reverse direction: `shift_left(8, -1)` returns `4`, and `shift_r
 Shift counts do not wrap.
 When the count's magnitude is at least the integer width, a left shift returns `0`, and a right shift returns `0` for nonnegative values or `-1` for negative values.
 
+Use `shift_right_logical` to introduce zeros instead of repeating the sign bit. It is an `int`-only free function, separate from `Bits`:
+
+```ferlium
+shift_right_logical(-1, 1)
+```
+
+This returns the largest positive `int`.
+Negative counts shift left; counts whose magnitude reaches the integer width return `0`.
+
 `rotate_left` and `rotate_right` move bits without losing them: bits that fall off one end re-enter at the other.
 
 ```ferlium

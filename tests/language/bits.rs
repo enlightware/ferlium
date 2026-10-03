@@ -88,6 +88,65 @@ fn int_shift_right() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn int_shift_right_logical() {
+    let mut session = TestSession::new();
+    let setup =
+        "let bits = count_zeros(0); let imin: int = bit(bits - 1); let imax = bit_not(imin);";
+    let mut cases = vec![
+        ("0", "0", 0),
+        ("0", "imin", 0),
+        ("0", "imax", 0),
+        ("8", "0", 8),
+        ("8", "1", 4),
+        ("8", "-1", 16),
+        ("8", "-2", 32),
+        ("-8", "0", -8),
+        ("-8", "1", isize::MAX - 3),
+        ("-8", "-1", -16),
+        ("-1", "1", isize::MAX),
+        ("-1", "bits - 1", 1),
+        ("-1", "bits", 0),
+        ("-1", "bits + 1", 0),
+        ("-1", "1 - bits", isize::MIN),
+        ("-1", "-bits", 0),
+        ("-1", "-bits - 1", 0),
+        ("-1", "imin", 0),
+        ("-1", "imax", 0),
+        ("imin", "0", isize::MIN),
+        ("imin", "1", -(isize::MIN / 2)),
+        ("imin", "-1", 0),
+        ("imin", "bits - 1", 1),
+        ("imax", "0", isize::MAX),
+        ("imax", "1", isize::MAX / 2),
+        ("imax", "-1", -2),
+    ];
+    if isize::BITS > 32 {
+        cases.extend([
+            ("1", "4294967297", 0),
+            ("1", "-4294967297", 0),
+            ("-1", "4294967297", 0),
+            ("-1", "-4294967297", 0),
+        ]);
+    }
+    for (value, count, expected) in cases {
+        for runtime in [false, true] {
+            let operands = if runtime {
+                format!("let value = black_box({value}); let count = black_box({count});")
+            } else {
+                format!("let value = {value}; let count = {count};")
+            };
+            assert_val_eq!(
+                session.run(&format!(
+                    "{setup} {operands} shift_right_logical(value, count)"
+                )),
+                int(expected)
+            );
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn int_shifts_discard_bits_and_reverse_negative_counts() {
     let mut session = TestSession::new();
     let setup =
