@@ -3,16 +3,20 @@
 
 //! Shared scalar-storage facts and conservative Wasm expression-tree plans.
 
+use std::cell::OnceCell;
+
 use crate::{
     CompilerSession, FxHashMap, FxHashSet, define_id_type,
     mir::{
         BasicBlock, BlockId, Function, Operation, OperationKind, ParameterId, ParameterKind, Value,
         ValueId,
+        dominance::Dominance,
         pass::known_callee::KnownCallee,
         physical::program::ResolvedPhysicalProgram,
         role::{MirType, ValueRole, ValueRoles},
         site::OperationIndex,
         terminator::TerminatorKind,
+        value::ConstantId,
     },
     module::{FunctionId, ModuleEnv, id::Id},
     wasm::abi::{CallAbi, Parameter as ParameterTransport, WasmFunctionId},
@@ -109,6 +113,7 @@ pub(super) struct Analysis {
     metadata_loads: Vec<bool>,
     definitions: Vec<Option<Source>>,
     integer_constants: FxHashMap<ValueId, i32>,
+    scalar_constants: FxHashMap<ValueId, ConstantId>,
 }
 
 impl Analysis {
@@ -156,12 +161,20 @@ impl Analysis {
             metadata_loads,
             definitions: inputs.definitions,
             integer_constants: inputs.integer_constants,
+            scalar_constants: inputs.scalar_constants,
         };
         (analysis, plan)
     }
 
     pub(super) fn integer_constant(&self, body: &Function, value: &Value) -> Option<i32> {
         super::body::integer_constant(body, value, &self.definitions, &self.integer_constants)
+    }
+
+    pub(super) fn scalar_constant(&self, value: &Value) -> Option<ConstantId> {
+        let Value::Register(id) = value else {
+            return None;
+        };
+        self.scalar_constants.get(id).copied()
     }
 
     pub(super) fn skips_metadata_load(&self, operation: &Operation) -> bool {
@@ -319,6 +332,7 @@ impl Plan {
                 Value::Register(ValueId::from_index(index - parameter_count))
             };
             if inputs.is_addressed(&value, parameter_count, value_count)
+                || matches!(&value, Value::Register(id) if inputs.scalar_constants.contains_key(id))
                 || !roles
                     .get(&value, body.constants())
                     .and_then(|role| role.place_pointee_type())
@@ -683,10 +697,19 @@ struct Accesses {
     first: Option<Access>,
     second: Option<Access>,
     multiple: bool,
+    write: Option<Access>,
+    multiple_writes: bool,
+    unsupported: bool,
 }
 
 impl Accesses {
     fn add(&mut self, access: Access) {
+        match access.kind {
+            AccessKind::Write if self.write.is_some() => self.multiple_writes = true,
+            AccessKind::Write => self.write = Some(access),
+            AccessKind::Unsupported => self.unsupported = true,
+            AccessKind::Read => (),
+        }
         if self.first.is_none() {
             self.first = Some(access);
         } else if self.second.is_none() {
@@ -710,6 +733,7 @@ struct Inputs {
     addressed: Vec<bool>,
     intrinsics: Vec<Option<KnownCallee>>,
     integer_constants: FxHashMap<ValueId, i32>,
+    scalar_constants: FxHashMap<ValueId, ConstantId>,
 }
 
 impl Inputs {
@@ -821,10 +845,23 @@ impl Inputs {
                 }
             }
         }
+        let scalar_constants = scalar_constants(body, &place_roots, &scan);
         let mut integer_constants = FxHashMap::default();
-        for index in parameter_count..place_count {
+        for (&id, &constant) in &scalar_constants {
+            if let Some(value) = super::body::integer_constant(
+                body,
+                &Value::Constant(constant),
+                &definitions,
+                &integer_constants,
+            ) {
+                integer_constants.insert(id, value);
+            }
+        }
+        // Direct literal stores are covered above. Also specialize a single-read integer place
+        // initialized by a load of a literal; its store must still consume that producer.
+        for (index, &is_root) in place_roots.iter().enumerate().skip(parameter_count) {
             let id = ValueId::from_index(index - parameter_count);
-            if !place_roots[index] || scan.addressed[index] {
+            if !is_root || scan.addressed[index] {
                 continue;
             }
             let Some((first, second)) = scan.place_accesses[index].pair() else {
@@ -840,8 +877,13 @@ impl Inputs {
             {
                 continue;
             }
-            let operation = &body.block(write.source.block).operations()
-                [write.source.operation_id().as_index()];
+            let Some(operation) = body
+                .block(write.source.block)
+                .operations()
+                .get(write.source.operation_id().as_index())
+            else {
+                continue;
+            };
             if !matches!(operation.kind, OperationKind::Store) {
                 continue;
             }
@@ -884,8 +926,115 @@ impl Inputs {
             addressed: scan.addressed,
             intrinsics,
             integer_constants,
+            scalar_constants,
         }
     }
+}
+
+/// Literal scalar storage can be rematerialized at every read when its single write dominates
+/// them all. Reuse the address/write census, then validate reads in one additional operand scan.
+/// Same-block reads need only instruction ordering; build block dominance lazily for other reads.
+fn scalar_constants(
+    body: &Function,
+    place_roots: &[bool],
+    scan: &OperandScan<'_>,
+) -> FxHashMap<ValueId, ConstantId> {
+    let mut constants = FxHashMap::default();
+    for (index, accesses) in scan
+        .place_accesses
+        .iter()
+        .enumerate()
+        .skip(scan.parameter_count)
+    {
+        if !place_roots[index]
+            || scan.addressed[index]
+            || accesses.multiple_writes
+            || accesses.unsupported
+        {
+            continue;
+        }
+        let Some(write) = accesses.write else {
+            continue;
+        };
+        let Some(operation) = body
+            .block(write.source.block)
+            .operations()
+            .get(write.source.operation_id().as_index())
+        else {
+            continue;
+        };
+        if !matches!(operation.kind, OperationKind::Store) {
+            continue;
+        }
+        let Value::Constant(constant) = operation.operands[0] else {
+            continue;
+        };
+        // Restrict this to primitive literals; pointer slots and aggregate/tag representations
+        // require their own materialization and ownership rules.
+        if super::ScalarType::of(body.constant(constant).ty).is_ok() {
+            constants.insert(ValueId::from_index(index - scan.parameter_count), constant);
+        }
+    }
+    if constants.is_empty() {
+        return constants;
+    }
+    let dominance = OnceCell::new();
+    let mut check_read = |value: &Value, source: Source| {
+        let Value::Register(id) = value else { return };
+        if !constants.contains_key(id) {
+            return;
+        }
+        let write = scan.place_accesses[scan.parameter_count + id.as_index()]
+            .write
+            .unwrap()
+            .source;
+        let dominates = if write.block == source.block {
+            write.operation_id().as_index() < source.operation_id().as_index()
+        } else {
+            dominance
+                .get_or_init(|| {
+                    let successors = body
+                        .blocks()
+                        .map(|block| {
+                            body.block(block)
+                                .terminator()
+                                .successors()
+                                .map(|target| target.as_index())
+                                .collect()
+                        })
+                        .collect::<Vec<_>>();
+                    Dominance::of(&successors, body.entry().as_index())
+                })
+                .dominates(write.block.as_index(), source.block.as_index())
+        };
+        if !dominates {
+            constants.remove(id);
+        }
+    };
+    for block_id in body.blocks() {
+        let block = body.block(block_id);
+        let invoked = match &block.terminator().kind {
+            TerminatorKind::Invoke { operation, .. } => Some(operation),
+            _ => None,
+        };
+        for (index, operation) in block.operations().iter().chain(invoked).enumerate() {
+            let source = Source::from_index(block_id, index);
+            for (index, operand) in operation.operands.iter().enumerate() {
+                if !is_metadata_operand(operation, index)
+                    && classify_access(operation, index) == Some(AccessKind::Read)
+                {
+                    check_read(operand, source);
+                }
+            }
+        }
+        if invoked.is_none() {
+            let source = Source::from_index(block_id, block.operations().len());
+            for operand in block.terminator().operands() {
+                check_read(operand, source);
+            }
+        }
+    }
+    constants
 }
 
 struct OperandScan<'a> {
@@ -1329,9 +1478,85 @@ mod tests {
         hir::{function::ArgConvention, value::LiteralValue},
         mir::{builder::FunctionBuilder, terminator::Terminator},
         module::Path,
-        std::{buffer::buffer_type, math::int_type},
+        std::{buffer::buffer_type, logic::bool_type, math::int_type},
         types::r#type::CallResultConvention,
     };
+
+    #[wasm_bindgen_test]
+    fn wasm_codegen_literal_rematerialization_requires_dominating_write() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        for case in ["both branches", "branch write", "read before write", "loop"] {
+            let mut builder = FunctionBuilder::new(case.into(), CallResultConvention::NoValue);
+            let entry = builder.add_block();
+            let left = builder.add_block();
+            let right = builder.add_block();
+            let join = builder.add_block();
+            let literal = builder.add_constant(int_type(), LiteralValue::new_native(3_isize), &env);
+            let condition = Value::Constant(builder.add_constant(
+                bool_type(),
+                LiteralValue::new_native(true),
+                &env,
+            ));
+            let cell = builder
+                .append_operation(entry, Operation::alloca(span, int_type()))
+                .unwrap();
+            if case == "read before write" {
+                builder.append_operation(entry, Operation::load(span, cell.clone()));
+            }
+            let write_block = if case == "branch write" || case == "loop" {
+                left
+            } else {
+                entry
+            };
+            builder.append_operation(
+                write_block,
+                Operation::store(span, Value::Constant(literal), cell.clone()),
+            );
+            if case == "loop" {
+                builder.set_terminator(entry, Terminator::goto(span, left));
+            } else {
+                builder.set_terminator(
+                    entry,
+                    Terminator::cond_br(span, condition.clone(), left, right),
+                );
+            }
+            builder.append_operation(left, Operation::load(span, cell.clone()));
+            if matches!(case, "both branches" | "read before write") {
+                builder.append_operation(right, Operation::load(span, cell.clone()));
+            }
+            builder.append_operation(join, Operation::load(span, cell.clone()));
+            if case == "loop" {
+                builder.set_terminator(left, Terminator::cond_br(span, condition, left, join));
+            } else {
+                builder.set_terminator(left, Terminator::goto(span, join));
+            }
+            builder.set_terminator(right, Terminator::goto(span, join));
+            builder.set_terminator(join, Terminator::ret(span));
+            // Rejected cases deliberately model uninitialized reads. The physical verifier
+            // checks roles and SSA, leaving storage initialization to the executor; do not run them.
+            let body = builder.finish_physical(env);
+            let roles = ValueRoles::derive(&body);
+            let mut scan = OperandScan::new(&body, &roles, 0, roles.register_count(), env);
+            for block in body.blocks() {
+                for (index, operation) in body.block(block).operations().iter().enumerate() {
+                    scan.operands(operation, Source::from_index(block, index), None, None);
+                }
+            }
+            let Value::Register(id) = cell else {
+                unreachable!()
+            };
+            let mut roots = vec![false; roles.register_count()];
+            roots[id.as_index()] = true;
+            let constants = scalar_constants(&body, &roots, &scan);
+            assert_eq!(
+                constants.get(&id).copied(),
+                matches!(case, "both branches" | "loop").then_some(literal),
+                "{case}"
+            );
+        }
+    }
 
     #[wasm_bindgen_test]
     fn wasm_codegen_metadata_load_keeps_its_deferred_producer() {
@@ -1354,7 +1579,14 @@ mod tests {
                 buffer_type(int_type()),
                 ParameterKind::Parameter(ArgConvention::Let),
             ));
+            let input = Value::Parameter(
+                builder.add_parameter(int_type(), ParameterKind::Parameter(ArgConvention::Let)),
+            );
             let block = builder.add_block();
+            // Use a runtime value so literal rematerialization does not replace store deferral.
+            let input = builder
+                .append_operation(block, Operation::load(span, input))
+                .unwrap();
             let zero = Value::Constant(builder.add_constant(
                 int_type(),
                 LiteralValue::new_native(0_isize),
@@ -1387,12 +1619,12 @@ mod tests {
                     .append_operation(block, Operation::alloca(span, int_type()))
                     .unwrap();
                 builder
-                    .append_operation(block, Operation::store(span, zero.clone(), index.clone()));
+                    .append_operation(block, Operation::store(span, input.clone(), index.clone()));
                 if !defer_store {
                     // Two writes prevent deferral, making this a metadata load that can disappear.
                     builder.append_operation(
                         block,
-                        Operation::store(span, zero.clone(), index.clone()),
+                        Operation::store(span, input.clone(), index.clone()),
                     );
                 }
                 index

@@ -9,6 +9,12 @@ from a literal and read only within the same block. Other uses keep private copi
 neither an indirect call nor a derived address proves that a handle will remain read-only.
 This borrows the immutable handle, while materialized strings still have owned mutable storage.
 
+## Rematerialize primitive literals
+
+Primitive scalar places with one literal store dominating all reads and no exposed address emit
+immediate literals; pointer, tag and aggregate representations retain existing rules. Repeated
+`f64` literals can cost more bytes than local reads.
+
 ## Plan scratch locals before emission
 
 For MIR bodies, scratch locals are reserved for the emission paths they may need, after dictionary and

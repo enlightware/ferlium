@@ -86,6 +86,8 @@ pub(super) type BodySourceMap = Vec<(Range<usize>, DebugLocation)>;
 #[derive(Clone, Copy)]
 enum Storage {
     Local(WasmLocalId),
+    /// An unaddressed scalar place whose literal is emitted at each read.
+    Constant(ConstantId),
     /// Byte offset from the function's frame base in linear memory.
     Stack(u32),
     /// A single-assignment scalar place whose value is emitted at its only read.
@@ -684,7 +686,9 @@ impl<'a, 's> Body<'a, 's> {
                     };
                     if let Some(ty) = storage_ty {
                         let value = Value::Register(id);
-                        if this.expressions.has_place(&value) {
+                        if let Some(constant) = this.analysis.scalar_constant(&value) {
+                            this.storage.insert(value, Storage::Constant(constant));
+                        } else if this.expressions.has_place(&value) {
                             this.storage.insert(value, Storage::Expression);
                         } else if !this.analysis.is_addressed(&value)
                             && let Ok(ty) = scalar(&ty, &this.env)
@@ -2347,7 +2351,9 @@ impl<'a, 's> Body<'a, 's> {
                 let offset = *offset;
                 self.frame_address(offset);
             }
-            Some(Storage::Local(_)) => return Err("address requested for promoted storage".into()),
+            Some(Storage::Local(_) | Storage::Constant(_)) => {
+                return Err("address requested for promoted storage".into());
+            }
             Some(Storage::Expression) => {
                 return Err("address requested for stackified storage".into());
             }
@@ -2492,6 +2498,7 @@ impl<'a, 's> Body<'a, 's> {
 
     fn load_place(&mut self, value: &Value, ty: ScalarType) -> Result<(), String> {
         match self.storage.get(value).copied() {
+            Some(Storage::Constant(id)) => self.literal(&self.body.constant(id).representation)?,
             Some(Storage::Local(local)) => self.i(I::LocalGet(local.as_u32())),
             Some(Storage::Expression) => {
                 let source = self
@@ -2522,6 +2529,7 @@ impl<'a, 's> Body<'a, 's> {
 
     fn finish_store(&mut self, destination: &Value, ty: ScalarType, offset: u32) {
         match self.storage.get(destination) {
+            Some(Storage::Constant(_)) => unreachable!("write to rematerialized literal storage"),
             Some(Storage::Local(local)) => self.i(I::LocalSet(local.as_u32())),
             Some(Storage::Expression) => (),
             Some(Storage::Stack(_)) | None => ty.store_at(&mut self.code, offset),
@@ -3434,7 +3442,9 @@ impl<'a, 's> Body<'a, 's> {
                 }
             }
             Store => {
-                if self.borrowed_static_strings.contains_key(&args[1]) {
+                if self.borrowed_static_strings.contains_key(&args[1])
+                    || matches!(self.storage.get(&args[1]), Some(Storage::Constant(_)))
+                {
                     return Ok(());
                 }
                 // Store takes a materialized value, including a pointer; it must not dereference

@@ -2034,6 +2034,116 @@ fn wasm_codegen_integer_bits_select_instructions_and_preserve_counts() {
 }
 
 #[wasm_bindgen_test]
+fn wasm_codegen_rematerializes_immutable_scalar_literals() {
+    for optimization in [MirOptimization::Enabled, MirOptimization::Disabled] {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(optimization);
+        session.set_physical_mir_optimization(optimization);
+        let entry = compile(
+            &mut session,
+            "fn compute(x: float) -> float { (x * 0.75 - 0.25) * x + 0.125 }",
+        );
+        let physical = session.prepare_physical_program(entry.module).unwrap();
+        let body = physical.function(entry).unwrap();
+        for coefficient in [0.75_f64, 0.25, 0.125] {
+            assert!(
+                body.blocks().any(|block| {
+                    body.block(block).operations().iter().any(|store| {
+                        let [MirValue::Constant(id), place] = &*store.operands else {
+                            return false;
+                        };
+                        matches!(store.kind, OperationKind::Store)
+                            && body
+                                .constant(*id)
+                                .representation
+                                .as_primitive_ty::<Float>()
+                                .is_some_and(|value| {
+                                    value.into_inner().to_bits() == coefficient.to_bits()
+                                })
+                            && body.blocks().any(|block| {
+                                body.block(block).operations().iter().any(|call| {
+                                    let OperationKind::Call { ty, .. } = &call.kind else {
+                                        return false;
+                                    };
+                                    let end = call.operands.len()
+                                        - usize::from(ty.result_convention.has_result_place());
+                                    call.operands[1..end].contains(place)
+                                })
+                            })
+                    })
+                }),
+                "{optimization:?}: fixture must retain a coefficient place for {coefficient}"
+            );
+        }
+        let code = CompiledProgram::compile(&session, entry).unwrap();
+        let operators = exported_function_operators(code.bytes(), ENTRY_EXPORT);
+        assert!(
+            !operators.iter().any(|operator| matches!(
+                operator,
+                Operator::F64Load { .. } | Operator::F64Store { .. }
+            )),
+            "{optimization:?}: scalar arithmetic must not use frame storage: {operators:?}"
+        );
+        for coefficient in [0.75_f64, 0.25, 0.125] {
+            assert!(operators.iter().any(|operator| {
+                matches!(operator, Operator::F64Const { value } if value.bits() == coefficient.to_bits())
+            }), "{optimization:?}: missing coefficient {coefficient}");
+            assert!(!operators.windows(2).any(|pair| {
+                matches!(pair[0], Operator::F64Const { value } if value.bits() == coefficient.to_bits())
+                    && matches!(pair[1], Operator::LocalSet { .. } | Operator::LocalTee { .. })
+            }), "{optimization:?}: coefficient {coefficient} still parked in a local: {operators:?}");
+        }
+        let mut instance = code.instantiate::<(Float,), Float>().unwrap();
+        for (x, expected) in [
+            (-2.0, 3.625),
+            (0.0, 0.125),
+            (2.0, 2.625),
+            (f64::MAX, f64::MAX),
+        ] {
+            assert_eq!(
+                instance
+                    .run((Float::new(x).unwrap(),), WasmLimits::default())
+                    .unwrap(),
+                Float::new(expected).unwrap(),
+                "{optimization:?}: x = {x}"
+            );
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_keeps_mutated_and_addressed_scalar_literals() {
+    let mut session = CompilerSession::new();
+    session.set_mir_optimization(MirOptimization::Disabled);
+    session.set_physical_mir_optimization(MirOptimization::Disabled);
+    let entry = compile(
+        &mut session,
+        r#"
+        #[inline(never)]
+        fn update(value: &mut float, replacement: float) { value = replacement; }
+        fn compute(x: float, change: bool) -> float {
+            let mut coefficient = 0.75;
+            if change { coefficient = x; };
+            let mut exposed = 0.25;
+            update(exposed, x);
+            coefficient * exposed
+        }
+    "#,
+    );
+    let code = CompiledProgram::compile(&session, entry).unwrap();
+    let mut instance = code.instantiate::<(Float, bool), Float>().unwrap();
+    for (x, change, expected) in [(2.0, false, 1.5), (2.0, true, 4.0), (-2.0, true, 4.0)] {
+        assert_eq!(
+            instance
+                .run((Float::new(x).unwrap(), change), WasmLimits::default())
+                .unwrap(),
+            Float::new(expected).unwrap(),
+            "x = {x}, change = {change}"
+        );
+    }
+}
+
+#[wasm_bindgen_test]
 fn wasm_codegen_integer_bits_specialize_literal_counts_and_positions() {
     let mut session = CompilerSession::new();
     // Normal optimization leaves literal arguments in single-store temporary places.
