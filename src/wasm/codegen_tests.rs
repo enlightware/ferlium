@@ -3575,6 +3575,118 @@ fn wasm_codegen_stackifies_single_use_scalar_expressions() {
 }
 
 #[wasm_bindgen_test]
+fn wasm_codegen_keeps_terminal_scalar_results_on_the_stack() {
+    let mut session = CompilerSession::new();
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        session.set_mir_optimization(optimization);
+        session.set_physical_mir_optimization(optimization);
+        for (source, expected, has_frame) in [
+            (
+                "fn compute(n: int) -> int { if n <= 1 { 1 } else { n * compute(n - 1) } }",
+                [1, 1, 120],
+                false,
+            ),
+            (
+                "fn compute(n: int) -> int { if n <= 1 { 1 } else { n + 2 } }",
+                [1, 1, 7],
+                false,
+            ),
+            ("fn compute(n: int) -> int { n + 2 }", [2, 3, 7], false),
+            (
+                "#[inline(never)] fn plus(n: int) -> int { n + 2 }
+              fn compute(n: int) -> int { if n <= 1 { 1 } else { plus(n) } }",
+                [1, 1, 7],
+                false,
+            ),
+            (
+                "fn compute(n: int) -> int {
+                    let p = black_box((n, 7));
+                    if n <= 1 { p.0 } else { p.1 }
+                }",
+                [0, 1, 7],
+                true,
+            ),
+        ] {
+            let entry = compile(&mut session, source);
+            let code = CompiledProgram::compile(&session, entry).unwrap();
+            let functions = WasmFunctions::new(code.bytes());
+            let (_, index) = functions
+                .names
+                .iter()
+                .find(|(name, _)| name.ends_with("::compute"))
+                .unwrap();
+            let (body, parameters) = functions.body(*index);
+            let context = format!("{optimization:?}: {source}");
+            assert_reserved_locals_used(&body, parameters, &context);
+            let operators: Vec<_> = body
+                .get_operators_reader()
+                .unwrap()
+                .into_iter()
+                .map(Result::unwrap)
+                .collect();
+            if has_frame {
+                // The tuple field load must feed the return directly through frame cleanup.
+                // Output-local fallback inserts a set/get (or tee) between the load and restore.
+                assert!(
+                    operators.windows(4).any(|window| matches!(
+                        window,
+                        [
+                            Operator::I32Load { .. },
+                            Operator::LocalGet { .. },
+                            Operator::GlobalSet { .. },
+                            Operator::Return
+                        ]
+                    )),
+                    "{context}: result must stay on the stack through frame cleanup"
+                );
+            }
+            let reads: FxHashSet<_> = operators
+                .iter()
+                .filter_map(|op| match op {
+                    Operator::LocalGet { local_index } => Some(*local_index),
+                    _ => None,
+                })
+                .collect();
+            for op in &operators {
+                if let Operator::LocalSet { local_index } | Operator::LocalTee { local_index } = op
+                {
+                    assert!(
+                        reads.contains(local_index),
+                        "{context}: write-only local {local_index}"
+                    );
+                }
+            }
+            let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+            for (input, expected) in [0, 1, 5].into_iter().zip(expected) {
+                assert_eq!(
+                    instance.run((input,), WasmLimits::default()).unwrap(),
+                    expected,
+                    "{context}: input {input}"
+                );
+            }
+        }
+        // f64 results must also survive return epilogues without changing signed zero.
+        let entry = compile(
+            &mut session,
+            "fn compute(x: float) -> float { if x < 0.0 { x * 0.5 } else { x } }",
+        );
+        let code = CompiledProgram::compile(&session, entry).unwrap();
+        let mut instance = code.instantiate::<(Float,), Float>().unwrap();
+        for (input, expected) in [(-4.0, -2.0_f64), (-0.0, -0.0), (0.0, 0.0), (8.0, 8.0)] {
+            assert_eq!(
+                instance
+                    .run((Float::new(input).unwrap(),), WasmLimits::default())
+                    .unwrap()
+                    .into_inner()
+                    .to_bits(),
+                expected.to_bits(),
+                "{optimization:?}: input {input}"
+            );
+        }
+    }
+}
+
+#[wasm_bindgen_test]
 fn wasm_codegen_stackifies_scalar_tuple_field_stores() {
     let mut session = CompilerSession::new();
     for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {

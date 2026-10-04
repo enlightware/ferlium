@@ -39,6 +39,13 @@ comparisons when ordering permits. Materialized pointers used elsewhere retain o
 planning. Aggregate operations and witnessed moves retain address locals because they can reread
 an address or call out before consuming it.
 
+## Keep terminal scalar results on the stack
+
+Infallible direct scalar returns need no output local when every use of the return place is a
+supported final writer immediately before a normal return. Each writer leaves its result on the
+operand stack, where it survives the existing epilogue. Other return-place uses retain ordinary
+storage.
+
 ## Expand small copies without changing overlap behavior
 
 Multi-chunk expansion is limited to fixed 12- and 16-byte copies; smaller single-chunk copies

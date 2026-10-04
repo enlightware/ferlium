@@ -5,6 +5,8 @@
 
 use std::cell::OnceCell;
 
+use smallvec::SmallVec;
+
 use crate::{
     CompilerSession, FxHashMap, FxHashSet, define_id_type,
     mir::{
@@ -20,7 +22,7 @@ use crate::{
     },
     module::{FunctionId, ModuleEnv, id::Id},
     std::math::Float,
-    wasm::abi::{CallAbi, Parameter as ParameterTransport, WasmFunctionId},
+    wasm::abi::{CallAbi, Parameter as ParameterTransport, ResultKind, WasmFunctionId},
 };
 
 use super::{
@@ -130,6 +132,8 @@ pub(super) struct Analysis {
     definitions: Vec<Option<Source>>,
     integer_constants: FxHashMap<ValueId, i32>,
     scalar_constants: FxHashMap<ValueId, ConstantId>,
+    /// The direct result is left on the operand stack by each terminal writer.
+    pub(super) stack_return: Option<ParameterId>,
 }
 
 impl Analysis {
@@ -145,7 +149,7 @@ impl Analysis {
         no_op_stack_markers: &FxHashSet<ValueId>,
     ) -> (Self, Plan) {
         let layout = OperationLayout::of(body);
-        let inputs = Inputs::of(
+        let mut inputs = Inputs::of(
             body,
             roles,
             callees,
@@ -155,6 +159,14 @@ impl Analysis {
             returns_direct_place,
             &layout,
         );
+        let stack_return = returns_direct_place
+            .then(|| stack_return(body, &inputs, &layout, callees, program))
+            .flatten();
+        if let Some(id) = stack_return {
+            // Terminal writers emit at their original position, rather than being deferred to a
+            // synthetic return-place read. Other expression trees keep their ordinary planning.
+            inputs.place_roots[id.as_index()] = false;
+        }
         let comparison_fusions = comparison_fusions(body, &layout, &inputs);
         let plan = Plan::of(
             body,
@@ -178,6 +190,7 @@ impl Analysis {
             definitions: inputs.definitions,
             integer_constants: inputs.integer_constants,
             scalar_constants: inputs.scalar_constants,
+            stack_return,
         };
         (analysis, plan)
     }
@@ -253,6 +266,52 @@ impl Analysis {
             _ => None,
         }
     }
+}
+
+/// A scalar output needs no storage when its only uses are final writers at normal returns.
+/// Reuse the operand census, then check only return blocks. One output use per return and one
+/// valid terminal writer in each block exclude every other read, write or exposed address.
+/// The writer must be the literal last operation, even when later operations emit no code.
+fn stack_return(
+    body: &Function,
+    inputs: &Inputs,
+    layout: &OperationLayout,
+    callees: &FxHashMap<FunctionId, (WasmFunctionId, &CallAbi)>,
+    program: &ResolvedPhysicalProgram<'_>,
+) -> Option<ParameterId> {
+    let id = inputs.return_parameter?;
+    let output = Value::Parameter(id);
+    if inputs.return_blocks.is_empty()
+        || inputs.return_uses != inputs.return_blocks.len()
+        || inputs.is_addressed(&output, body.parameters().len(), inputs.value_uses.len())
+    {
+        return None;
+    }
+    for &block_id in &inputs.return_blocks {
+        let block = body.block(block_id);
+        let (operation, _) = block.operations().split_last()?;
+        let destination = match &operation.kind {
+            OperationKind::Store => Some(1),
+            OperationKind::Memcpy | OperationKind::Move | OperationKind::MoveBytes { .. }
+                if layout_witness(operation).is_none() =>
+            {
+                Some(1)
+            }
+            OperationKind::Call { ty, .. } if ty.result_convention.has_result_place() => {
+                let source = Source::from_index(block_id, block.operations().len() - 1);
+                let intrinsic = inputs.intrinsic(layout, source);
+                let direct = call_abi(operation, intrinsic, callees, program).is_some_and(|abi| {
+                    !abi.fallible && matches!(abi.result, ResultKind::Direct(_))
+                });
+                (intrinsic.is_some() || direct).then_some(operation.operands.len() - 1)
+            }
+            _ => None,
+        };
+        if destination.and_then(|index| operation.operands.get(index)) != Some(&output) {
+            return None;
+        }
+    }
+    Some(id)
 }
 
 /// Scalar producers which may be deferred until their sole consumer is emitted.
@@ -745,6 +804,10 @@ impl Accesses {
 }
 
 struct Inputs {
+    return_parameter: Option<ParameterId>,
+    /// Actual MIR occurrences, excluding synthetic reads and intrinsic rereads.
+    return_uses: usize,
+    return_blocks: SmallVec<[BlockId; 2]>,
     value_uses: Vec<Uses>,
     value_definitions: Vec<Option<Source>>,
     definitions: Vec<Option<Source>>,
@@ -783,15 +846,18 @@ impl Inputs {
         let mut value_definitions = vec![None; value_count];
         let mut definitions = vec![None; value_count];
         let mut place_roots = vec![false; place_count];
+        let mut scan = OperandScan::new(body, roles, parameter_count, value_count, env);
         if returns_direct_place {
-            for (index, parameter) in body.parameters().iter().enumerate() {
-                if parameter.kind == ParameterKind::Return {
-                    place_roots[index] = true;
-                }
+            scan.return_parameter = body
+                .parameters()
+                .iter()
+                .position(|parameter| parameter.kind == ParameterKind::Return)
+                .map(ParameterId::from_index);
+            if let Some(id) = scan.return_parameter {
+                place_roots[id.as_index()] = true;
             }
         }
-
-        let mut scan = OperandScan::new(body, roles, parameter_count, value_count, env);
+        let mut return_blocks = SmallVec::new();
         let mut intrinsics = vec![None; layout.operation_count];
         let mut intrinsic_calls = Vec::new();
         for block_id in body.blocks() {
@@ -846,13 +912,13 @@ impl Inputs {
                     );
                 }
                 TerminatorKind::Return => {
-                    for (index, parameter) in body.parameters().iter().enumerate() {
-                        if parameter.kind == ParameterKind::Return && place_roots[index] {
-                            scan.place_accesses[index].add(Access {
-                                source,
-                                kind: AccessKind::Read,
-                            });
-                        }
+                    if let Some(id) = scan.return_parameter {
+                        return_blocks.push(block_id);
+                        // This implicit ABI read is not an occurrence in the MIR use count.
+                        scan.place_accesses[id.as_index()].add(Access {
+                            source,
+                            kind: AccessKind::Read,
+                        });
                     }
                 }
                 _ => {
@@ -865,6 +931,8 @@ impl Inputs {
                 }
             }
         }
+        // Freeze the MIR occurrence count before accounting for emitted intrinsic rereads.
+        let return_uses = scan.return_uses;
         let scalar_constants = scalar_constants(body, &place_roots, &scan);
         let mut integer_constants = FxHashMap::default();
         for (&id, &constant) in &scalar_constants {
@@ -938,6 +1006,9 @@ impl Inputs {
             }
         }
         Self {
+            return_parameter: scan.return_parameter,
+            return_uses,
+            return_blocks,
             value_uses: scan.value_uses,
             value_definitions,
             definitions,
@@ -1063,6 +1134,8 @@ struct OperandScan<'a> {
     roles: &'a ValueRoles,
     parameter_count: usize,
     register_count: usize,
+    return_parameter: Option<ParameterId>,
+    return_uses: usize,
     value_uses: Vec<Uses>,
     place_accesses: Vec<Accesses>,
     addressed: Vec<bool>,
@@ -1082,6 +1155,8 @@ impl<'a> OperandScan<'a> {
             roles,
             parameter_count,
             register_count,
+            return_parameter: None,
+            return_uses: 0,
             value_uses: vec![Uses::None; register_count],
             place_accesses: vec![Accesses::default(); parameter_count + register_count],
             addressed: vec![false; parameter_count + register_count + body.constants().len()],
@@ -1097,10 +1172,14 @@ impl<'a> OperandScan<'a> {
     ) {
         // Clear ends a MIR lifetime but emits no read or write of its backing bytes.
         if matches!(operation.kind, OperationKind::Clear) {
+            for operand in &operation.operands {
+                self.count_return_use(operand);
+            }
             return;
         }
         for (index, operand) in operation.operands.iter().enumerate() {
             if is_metadata_operand(operation, index) {
+                self.count_return_use(operand);
                 if let Value::Register(id) = operand
                     && matches!(self.value_uses[id.as_index()], Uses::None)
                 {
@@ -1126,7 +1205,16 @@ impl<'a> OperandScan<'a> {
         }
     }
 
+    fn count_return_use(&mut self, operand: &Value) {
+        if let Value::Parameter(id) = operand
+            && Some(*id) == self.return_parameter
+        {
+            self.return_uses += 1;
+        }
+    }
+
     fn operand(&mut self, operand: &Value, source: Source, kind: Option<AccessKind>) {
+        self.count_return_use(operand);
         if let Value::Register(id) = operand {
             self.value_uses[id.as_index()].add(source);
         }
@@ -1537,6 +1625,132 @@ mod tests {
         types::r#type::{CallImplType, CallResultConvention, Type},
         ustr,
     };
+
+    #[wasm_bindgen_test]
+    fn wasm_codegen_stack_returns_require_terminal_unexposed_writes() {
+        let mut session = CompilerSession::new();
+        let module = session
+            .compile(
+                "fn seed() {}",
+                "return_plan",
+                Path::single_str("return_plan"),
+            )
+            .unwrap()
+            .module_id;
+        let program = session.prepare_physical_program(module).unwrap();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        for case in [
+            "stores",
+            "copies",
+            "read",
+            "address",
+            "nonterminal",
+            "join",
+            "self copy",
+            "clear",
+        ] {
+            let mut builder = FunctionBuilder::new(case.into(), CallResultConvention::Value);
+            let condition = Value::Parameter(
+                builder.add_parameter(bool_type(), ParameterKind::Parameter(ArgConvention::Let)),
+            );
+            let id = builder.add_parameter(int_type(), ParameterKind::Return);
+            let output = Value::Parameter(id);
+            let entry = builder.add_block();
+            let left = builder.add_block();
+            let right = builder.add_block();
+            let join = (case == "join").then(|| builder.add_block());
+            let one = Value::Constant(builder.add_constant(
+                int_type(),
+                LiteralValue::new_native(1_isize),
+                &env,
+            ));
+            let condition = builder
+                .append_operation(entry, Operation::load(span, condition))
+                .unwrap();
+            builder.set_terminator(entry, Terminator::cond_br(span, condition, left, right));
+            for block in [left, right] {
+                if case == "copies" {
+                    let cell = builder
+                        .append_operation(block, Operation::alloca(span, int_type()))
+                        .unwrap();
+                    builder
+                        .append_operation(block, Operation::store(span, one.clone(), cell.clone()));
+                    builder.append_operation(block, Operation::memcpy(span, cell, output.clone()));
+                } else {
+                    if case == "address" {
+                        builder.append_operation(
+                            block,
+                            Operation::address_offset(
+                                span,
+                                output.clone(),
+                                one.clone(),
+                                int_type(),
+                                None,
+                            ),
+                        );
+                    }
+                    if case == "clear" {
+                        builder.append_operation(block, Operation::clear(span, output.clone()));
+                    }
+                    builder.append_operation(
+                        block,
+                        Operation::store(span, one.clone(), output.clone()),
+                    );
+                    match case {
+                        "read" => {
+                            builder.append_operation(block, Operation::load(span, output.clone()));
+                        }
+                        "nonterminal" => {
+                            builder.append_operation(block, Operation::alloca(span, int_type()));
+                        }
+                        "self copy" => {
+                            builder.append_operation(
+                                block,
+                                Operation::memcpy(span, output.clone(), output.clone()),
+                            );
+                        }
+                        _ => (),
+                    }
+                }
+                builder.set_terminator(
+                    block,
+                    join.map_or_else(
+                        || Terminator::ret(span),
+                        |join| Terminator::goto(span, join),
+                    ),
+                );
+            }
+            if let Some(join) = join {
+                builder.set_terminator(join, Terminator::ret(span));
+            }
+            let body = builder.finish_physical(env);
+            let roles = ValueRoles::derive(&body);
+            for direct in [false, true] {
+                let (analysis, plan) = Analysis::of(
+                    &body,
+                    &roles,
+                    &FxHashMap::default(),
+                    &program,
+                    &session,
+                    env,
+                    direct,
+                    &FxHashSet::default(),
+                );
+                assert_eq!(
+                    analysis.stack_return,
+                    (direct && matches!(case, "stores" | "copies")).then_some(id),
+                    "{case}, direct={direct}"
+                );
+                if analysis.stack_return.is_some() {
+                    assert!(
+                        !plan.has_place(&output),
+                        "terminal writers must not be deferred"
+                    );
+                }
+            }
+        }
+    }
 
     #[wasm_bindgen_test]
     fn wasm_codegen_literal_rematerialization_requires_dominating_write() {

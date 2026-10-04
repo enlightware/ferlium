@@ -92,6 +92,8 @@ enum Storage {
     Stack(u32),
     /// A single-assignment scalar place whose value is emitted at its only read.
     Expression,
+    /// A terminal scalar writer leaves the direct function result on the operand stack.
+    ReturnValue,
 }
 
 #[derive(Clone, Copy)]
@@ -295,7 +297,6 @@ pub(super) struct Body<'a, 's> {
     frame_size: u32,
     runtime_globals: RuntimeGlobals,
     track_depth: bool,
-    forwarded_result: Option<Value>,
     /// The block whose return falls through the end of the function, if any.
     fallthrough_return: Option<BlockId>,
     analysis: ExpressionAnalysis,
@@ -354,7 +355,6 @@ impl<'a, 's> Body<'a, 's> {
         };
         let control_flow = ControlFlow::of(body, entry);
         let dispatched = matches!(control_flow, ControlFlow::Dispatcher);
-        let forwarded_result = forwarded_result(body, signature, mode);
         let fallthrough_return = has_fallthrough_return(body, mode, &control_flow);
         let roles = ValueRoles::derive(body);
         let no_op_stack_markers = no_op_stack_markers(
@@ -369,7 +369,7 @@ impl<'a, 's> Body<'a, 's> {
             program,
             session,
             env,
-            returns_direct_result(mode, signature) && forwarded_result.is_none(),
+            returns_direct_result(mode, signature),
             &no_op_stack_markers,
         );
         let mut this = Self {
@@ -426,7 +426,6 @@ impl<'a, 's> Body<'a, 's> {
             },
             runtime_globals,
             track_depth,
-            forwarded_result,
             fallthrough_return,
             checked_float_conversions: checked_float_conversions(body, &analysis),
             float_conversion_local: None,
@@ -492,8 +491,7 @@ impl<'a, 's> Body<'a, 's> {
         for (index, parameter) in body.parameters().iter().enumerate() {
             if (parameter.kind == ParameterKind::Return
                 && parameter.ty != Type::never()
-                && !signature.output()
-                && this.forwarded_result.is_none())
+                && !signature.output())
                 || signature
                     .parameters
                     .get(index)
@@ -501,7 +499,9 @@ impl<'a, 's> Body<'a, 's> {
             {
                 let value = Value::Parameter(ParameterId::from_index(index));
                 let ty = this.pointee(&value)?;
-                if this.expressions.has_place(&value) {
+                if this.analysis.stack_return == Some(ParameterId::from_index(index)) {
+                    this.storage.insert(value, Storage::ReturnValue);
+                } else if this.expressions.has_place(&value) {
                     this.storage.insert(value, Storage::Expression);
                 } else if this.analysis.is_addressed(&value) {
                     this.slot(value, ty.size())?;
@@ -1610,17 +1610,13 @@ impl<'a, 's> Body<'a, 's> {
         if failed && !self.signature.fallible {
             return Err("failure in an infallible entry".into());
         }
-        // Read a direct result while its frame and evidence are still live. Keeping the value on
-        // the Wasm operand stack across the epilogue also lets expression stackification defer its
-        // producer safely to this point.
-        if returns_direct_result(self.mode, self.signature) {
-            if let Some(result) = self.forwarded_result.clone() {
-                self.value(&result)?;
-            } else {
-                let result =
-                    Value::Parameter(ParameterId::from_index(self.body.parameters().len() - 1));
-                self.load_place(&result, self.pointee(&result)?)?;
-            }
+        // Terminal writers already leave their direct result on the operand stack. Otherwise,
+        // read it while the frame and evidence are still live, before running the epilogue.
+        if returns_direct_result(self.mode, self.signature) && self.analysis.stack_return.is_none()
+        {
+            let result =
+                Value::Parameter(ParameterId::from_index(self.body.parameters().len() - 1));
+            self.load_place(&result, self.pointee(&result)?)?;
         }
         for index in 0..self.owned_evidence.len() {
             self.release_evidence(&Value::Register(self.owned_evidence[index]))?;
@@ -2391,7 +2387,7 @@ impl<'a, 's> Body<'a, 's> {
                 let offset = *offset;
                 self.frame_address(offset);
             }
-            Some(Storage::Local(_) | Storage::Constant(_)) => {
+            Some(Storage::Local(_) | Storage::Constant(_) | Storage::ReturnValue) => {
                 return Err("address requested for promoted storage".into());
             }
             Some(Storage::Expression) => {
@@ -2540,6 +2536,7 @@ impl<'a, 's> Body<'a, 's> {
         match self.storage.get(value).copied() {
             Some(Storage::Constant(id)) => self.literal(&self.body.constant(id).representation)?,
             Some(Storage::Local(local)) => self.i(I::LocalGet(local.as_u32())),
+            Some(Storage::ReturnValue) => return Err("read of terminal return storage".into()),
             Some(Storage::Expression) => {
                 let source = self
                     .expressions
@@ -2560,7 +2557,7 @@ impl<'a, 's> Body<'a, 's> {
     fn prepare_store(&mut self, destination: &Value) -> Result<u32, String> {
         if matches!(
             self.storage.get(destination),
-            Some(Storage::Local(_) | Storage::Expression)
+            Some(Storage::Local(_) | Storage::Expression | Storage::ReturnValue)
         ) {
             return Ok(0);
         }
@@ -2571,7 +2568,7 @@ impl<'a, 's> Body<'a, 's> {
         match self.storage.get(destination) {
             Some(Storage::Constant(_)) => unreachable!("write to rematerialized literal storage"),
             Some(Storage::Local(local)) => self.i(I::LocalSet(local.as_u32())),
-            Some(Storage::Expression) => (),
+            Some(Storage::Expression | Storage::ReturnValue) => (),
             Some(Storage::Stack(_)) | None => ty.store_at(&mut self.code, offset),
         }
     }
@@ -2936,7 +2933,6 @@ impl<'a, 's> Body<'a, 's> {
     fn emit_operations(&mut self, block_id: BlockId) -> Result<(), String> {
         self.emitted[block_id.as_index()] = true;
         let operations = self.body.block(block_id).operations();
-        let operation_count = operations.len();
         let mut index = 0;
         while index < operations.len() {
             let operation = &operations[index];
@@ -2956,13 +2952,6 @@ impl<'a, 's> Body<'a, 's> {
             if operation
                 .result_id()
                 .is_some_and(|id| self.expressions.has_pending_value(id))
-            {
-                index += 1;
-                continue;
-            }
-            if self.forwarded_result.is_some()
-                && block_id == self.body.entry()
-                && index + 1 == operation_count
             {
                 index += 1;
                 continue;
@@ -4110,36 +4099,6 @@ fn has_fallthrough_return(
         }
         _ => None,
     }
-}
-
-fn forwarded_result(body: &Function, signature: &CallAbi, mode: BodyMode) -> Option<Value> {
-    if !matches!(mode, BodyMode::Normal)
-        || body.blocks().count() != 1
-        || signature.fallible
-        || !matches!(signature.result, ResultKind::Direct(_))
-        || !matches!(
-            body.block(body.entry()).terminator().kind,
-            TerminatorKind::Return
-        )
-    {
-        return None;
-    }
-    let block = body.block(body.entry());
-    let return_id = body
-        .parameters()
-        .iter()
-        .position(|parameter| parameter.kind == ParameterKind::Return)?;
-    let destination = Value::Parameter(ParameterId::from_index(return_id));
-    let (last, prefix) = block.operations().split_last()?;
-    if !matches!(last.kind, OperationKind::Store)
-        || last.operands.get(1) != Some(&destination)
-        || prefix
-            .iter()
-            .any(|operation| operation.operands.contains(&destination))
-    {
-        return None;
-    }
-    Some(last.operands[0].clone())
 }
 
 /// Resolve a literal integer, a load from literal storage, or a proven constant place.
