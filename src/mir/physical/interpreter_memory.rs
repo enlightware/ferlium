@@ -1347,11 +1347,11 @@ impl Memory {
             }
             let spec = product_layout_spec(ty, span, env)
                 .ok_or_else(|| unsupported("this storage type"))?;
+            let offsets = spec
+                .static_field_offsets()
+                .ok_or_else(|| unsupported("dynamic product layouts"))?;
             let mut members = Vec::new();
-            for (index, member) in spec.members.iter().enumerate() {
-                let offset = spec
-                    .static_field_offset(ProjectionIndex::from_index(index))
-                    .ok_or_else(|| unsupported("dynamic product layouts"))?;
+            for (member, offset) in spec.members.iter().zip(offsets) {
                 members.push((offset, self.shape(member.ty)?));
             }
             let layout = value_layout_for_type(ty, span, env)
@@ -3719,7 +3719,7 @@ mod tests {
         let pair = Type::tuple(vec![int, int]);
         let left = Type::tuple(vec![pair, int]);
         let right = Type::tuple(vec![int, pair]);
-        let mixed = Type::tuple(vec![int, Type::unit(), int]);
+        let mixed = Type::tuple(vec![int, Type::unit(), ScalarKind::Bool.ty()]);
         let mut memory = Memory::default();
         for ty in [left, right, mixed] {
             memory.prepare_type(ty, &env).unwrap();
@@ -3745,7 +3745,9 @@ mod tests {
         let product = memory.allocate(mixed, None).unwrap();
         let offset = size_of::<isize>();
         let unit = memory.offset(product, offset, Type::unit()).unwrap();
-        let sized = memory.offset(product, offset, int).unwrap();
+        let sized = memory
+            .offset(product, offset, ScalarKind::Bool.ty())
+            .unwrap();
         assert_eq!(
             memory.pointer(unit).unwrap(),
             memory.pointer(sized).unwrap()
@@ -3755,9 +3757,9 @@ mod tests {
         assert!(memory.overlaps(product, unit).unwrap());
         assert!(memory.overlaps(unit, unit).unwrap());
         memory.write(unit, Scalar::Unit).unwrap();
-        memory.write(sized, Scalar::Int(42)).unwrap();
+        memory.write(sized, Scalar::Bool(true)).unwrap();
         memory.clear(unit).unwrap();
-        assert_eq!(memory.read(sized).unwrap(), Scalar::Int(42));
+        assert_eq!(memory.read(sized).unwrap(), Scalar::Bool(true));
     }
 
     #[test]
@@ -3820,11 +3822,12 @@ mod tests {
         let outer = Type::tuple(vec![empty, empty, ScalarKind::Int.ty()]);
         memory.prepare_type(outer, &env).unwrap();
         let root = memory.allocate(outer, None).unwrap();
+        let offset = size_of::<isize>();
         let first = memory
-            .project(root, 0, empty, Some(ProjectionIndex::from_index(0)))
+            .project(root, offset, empty, Some(ProjectionIndex::from_index(0)))
             .unwrap();
         let second = memory
-            .project(root, 0, empty, Some(ProjectionIndex::from_index(1)))
+            .project(root, offset, empty, Some(ProjectionIndex::from_index(1)))
             .unwrap();
         assert_ne!(first, second);
         assert_eq!(

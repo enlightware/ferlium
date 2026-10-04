@@ -14,8 +14,12 @@ use crate::{
         physical::{DictionaryReference, program::ResolvedPhysicalProgram},
         role::{MirType, ValueRole},
     },
-    module::{FunctionId, ModuleEnv, TraitId, id::Id},
-    std::{core_traits_names::VALUE_TRAIT_NAME, logic::bool_type, value::value_layout_for_type},
+    module::{FunctionId, ModuleEnv, ProjectionIndex, TraitId, id::Id},
+    std::{
+        core_traits_names::VALUE_TRAIT_NAME,
+        logic::bool_type,
+        value::{ProductLayoutSpec, ProductMemberLayout, product_layout_spec},
+    },
     types::{r#trait::TraitDictionaryEntryIndex, r#type::Type},
     wasm::{
         Imports,
@@ -35,12 +39,37 @@ use super::{
     allocate_frame,
     body::{
         Body,
-        HelperLocal::{DynamicAlign, DynamicSize, Scratch},
+        HelperLocal::{DynamicAlign, DynamicBase, DynamicSize, Scratch},
     },
     context_pointer, dictionary_table, enter_frame, frame_address, frame_bytes, leave_frame,
     memarg, memarg_at, operations,
     peephole::Instructions,
 };
+
+fn closure_value_captures(op: &Operation) -> &[Value] {
+    let OperationKind::BuildClosure {
+        num_hidden_dicts,
+        has_env_dict,
+        ..
+    } = op.kind
+    else {
+        unreachable!()
+    };
+    let end = op.operands.len() - usize::from(has_env_dict);
+    &op.operands[num_hidden_dicts as usize..end]
+}
+
+/// One recipe shared by local planning and capture emission. Static layouts are resolved once.
+pub(super) struct CaptureLayout {
+    spec: ProductLayoutSpec,
+    offsets: Option<Vec<usize>>,
+}
+
+impl CaptureLayout {
+    pub(super) fn needs_order_scratch(&self) -> bool {
+        self.offsets.is_none()
+    }
+}
 
 /// Construction schema; every materialization of a given target has the same leading parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -629,6 +658,52 @@ impl Body<'_, '_> {
         None
     }
 
+    pub(super) fn plan_closure_captures(&self, op: &Operation) -> Result<CaptureLayout, String> {
+        let captures = closure_value_captures(op);
+        let capture_types = captures
+            .iter()
+            .map(|capture| {
+                let MirType::Lowered(ty) = self.pointee_type(capture)? else {
+                    return Err("pointer capture".into());
+                };
+                Ok(ty)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let spec = if capture_types.is_empty() {
+            ProductLayoutSpec {
+                members: Vec::new(),
+            }
+        } else {
+            product_layout_spec(Type::tuple(capture_types), op.span.location, &self.env)
+                .ok_or("expected capture tuple layout")?
+        };
+        let offsets = spec.static_field_offsets();
+        Ok(CaptureLayout { spec, offsets })
+    }
+
+    fn closure_capture_layout(
+        &mut self,
+        member: ProductMemberLayout,
+        operands: &[Value],
+    ) -> Result<(), String> {
+        let helpers = self.helper_locals();
+        if let Some(layout) = member.static_layout {
+            self.i(I::I32Const(layout.size as i32));
+            self.i(I::LocalSet(helpers.get(DynamicSize).as_u32()));
+            self.i(I::I32Const(layout.align as i32));
+            self.i(I::LocalSet(helpers.get(DynamicAlign).as_u32()));
+            Ok(())
+        } else {
+            let witness = self.capture_witness(member.ty, operands).ok_or_else(|| {
+                format!(
+                    "missing explicit closure capture layout for {:?}",
+                    member.ty
+                )
+            })?;
+            self.dynamic_layout(&witness)
+        }
+    }
+
     pub(super) fn build_closure(&mut self, op: &Operation) -> Result<(), String> {
         let OperationKind::BuildClosure {
             function,
@@ -641,7 +716,7 @@ impl Body<'_, '_> {
         };
         let hidden = num_hidden_dicts as usize;
         let end = op.operands.len() - usize::from(has_env_dict);
-        let captures = &op.operands[hidden..end];
+        let captures = closure_value_captures(op);
         assert!(
             has_env_dict || captures.is_empty(),
             "closure value captures require a Value dictionary"
@@ -718,34 +793,50 @@ impl Body<'_, '_> {
                 ));
             }
         }
-        self.i(I::I32Const(0));
-        self.i(I::LocalSet(cursor.as_u32()));
+        if captures.is_empty() {
+            return Ok(());
+        }
+        let layout = self
+            .closure_layouts
+            .remove(&op.result_id().unwrap())
+            .expect("each closure is emitted once after layout planning");
+        let spec = &layout.spec;
+        let static_offsets = &layout.offsets;
         for (index, capture) in captures.iter().enumerate() {
-            let MirType::Lowered(ty) = self.pointee_type(capture)? else {
-                return Err("pointer capture".into());
-            };
-            if let Ok(layout) = value_layout_for_type(ty, op.span.location, &self.env) {
-                self.i(I::I32Const(layout.size as i32));
-                self.i(I::LocalSet(helpers.get(DynamicSize).as_u32()));
-                self.i(I::I32Const(layout.align as i32));
-                self.i(I::LocalSet(helpers.get(DynamicAlign).as_u32()));
+            let target = ProjectionIndex::from_index(index);
+            let member = spec.members[index];
+            if let Some(offsets) = static_offsets {
+                self.i(I::I32Const(offsets[index] as i32));
+                self.i(I::LocalSet(cursor.as_u32()));
+                self.closure_capture_layout(member, &op.operands)?;
             } else {
-                let witness = self
-                    .capture_witness(ty, &op.operands)
-                    .ok_or_else(|| format!("missing explicit closure capture layout for {ty:?}"))?;
-                self.dynamic_layout(&witness)?;
+                self.i(I::I32Const(
+                    spec.static_prefix_offset(target).unwrap_or(0) as i32
+                ));
+                self.i(I::LocalSet(cursor.as_u32()));
+                self.closure_capture_layout(member, &op.operands)?;
+                self.i(I::LocalGet(helpers.get(DynamicAlign).as_u32()));
+                self.i(I::LocalSet(helpers.get(Scratch).as_u32()));
+                // DynamicBase temporarily holds the target size; candidate layout queries
+                // overwrite DynamicSize/Align but leave this local intact.
+                self.i(I::LocalGet(helpers.get(DynamicSize).as_u32()));
+                self.i(I::LocalSet(helpers.get(DynamicBase).as_u32()));
+                for (candidate_index, equal_precedes) in spec.runtime_order_candidates(target) {
+                    let candidate = spec.members[candidate_index.as_index()];
+                    self.closure_capture_layout(candidate, &op.operands)?;
+                    self.i(I::LocalGet(helpers.get(DynamicAlign).as_u32()));
+                    self.i(I::LocalGet(helpers.get(Scratch).as_u32()));
+                    self.i(if equal_precedes { I::I32GeU } else { I::I32GtU });
+                    self.i(I::If(BlockType::Empty));
+                    self.i(I::LocalGet(cursor.as_u32()));
+                    self.i(I::LocalGet(helpers.get(DynamicSize).as_u32()));
+                    self.i(I::I32Add);
+                    self.i(I::LocalSet(cursor.as_u32()));
+                    self.i(I::End);
+                }
+                self.i(I::LocalGet(helpers.get(DynamicBase).as_u32()));
+                self.i(I::LocalSet(helpers.get(DynamicSize).as_u32()));
             }
-            // Positional tuple layout: align each field, then advance by its representation size.
-            self.i(I::LocalGet(cursor.as_u32()));
-            self.i(I::LocalGet(helpers.get(DynamicAlign).as_u32()));
-            self.i(I::I32Const(1));
-            self.i(I::I32Sub);
-            self.i(I::I32Add);
-            self.i(I::I32Const(0));
-            self.i(I::LocalGet(helpers.get(DynamicAlign).as_u32()));
-            self.i(I::I32Sub);
-            self.i(I::I32And);
-            self.i(I::LocalSet(cursor.as_u32()));
             self.i(I::LocalGet(environment.as_u32()));
             self.i(I::LocalGet(cursor.as_u32()));
             self.i(I::I32Store(MemArg {
@@ -761,10 +852,6 @@ impl Body<'_, '_> {
                 src_mem: 0,
                 dst_mem: 0,
             });
-            self.i(I::LocalGet(cursor.as_u32()));
-            self.i(I::LocalGet(helpers.get(DynamicSize).as_u32()));
-            self.i(I::I32Add);
-            self.i(I::LocalSet(cursor.as_u32()));
         }
         Ok(())
     }

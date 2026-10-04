@@ -17,12 +17,7 @@ mod results;
 mod subscript;
 mod subscript_lifecycle;
 
-use std::{
-    cmp::{Ordering, Reverse},
-    error::Error,
-    fmt,
-    slice::from_ref,
-};
+use std::{cmp::Reverse, error::Error, fmt, slice::from_ref};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use ustr::Ustr;
@@ -70,10 +65,10 @@ use crate::{
         option::{NativeOptionalContractError, native_optional_payload_contract_with},
         ordering::{ORDERING_EQUAL, ORDERING_GREATER},
         value::{
-            ProductLayoutOrder, ProductLayoutSpec, ProductMemberLayout,
-            VALUE_ALIGN_ASSOC_CONST_INDEX, VALUE_SIZE_ASSOC_CONST_INDEX, is_value_drop_function,
-            product_layout_spec, type_has_static_layout, value_layout_for_type,
-            value_layout_getter_entry, variant_indirect_payload_type, variant_payload_offset,
+            ProductLayoutSpec, ProductMemberLayout, VALUE_ALIGN_ASSOC_CONST_INDEX,
+            VALUE_SIZE_ASSOC_CONST_INDEX, is_value_drop_function, product_layout_spec,
+            type_has_static_layout, value_layout_for_type, value_layout_getter_entry,
+            variant_indirect_payload_type, variant_payload_offset,
             variant_payload_storage_for_payload_type, variant_tag_layout,
         },
     },
@@ -2533,127 +2528,11 @@ fn build_product_addressor(
     ));
     let field = spec.members[key.field_index.as_index()];
     let destination = Value::Parameter(builder.add_parameter(field.ty, ParameterKind::Return));
-    let entry = builder.add_block();
-
-    match spec.order {
-        ProductLayoutOrder::Positional => build_positional_product_addressor(
-            builder,
-            entry,
-            key,
-            spec,
-            &member_witnesses,
-            base,
-            destination,
-            known,
-            span.into(),
-            env,
-        ),
-        ProductLayoutOrder::CompactRecord => build_compact_record_addressor(
-            builder,
-            entry,
-            key,
-            spec,
-            &member_witnesses,
-            base,
-            destination,
-            known,
-            span.into(),
-            env,
-        ),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_positional_product_addressor(
-    mut builder: FunctionBuilder,
-    block: BlockId,
-    key: &ProductAddressorKey,
-    spec: &ProductLayoutSpec,
-    member_witnesses: &[Option<Value>],
-    base: Value,
-    destination: Value,
-    known: &KnownCallees,
-    span: DebugLocation,
-    env: ModuleEnv<'_>,
-) -> Function {
-    let mut offset = int_constant_place(&mut builder, block, 0, span, env);
-    for (index, member) in spec.members.iter().enumerate() {
-        let align = member_layout_place(
-            &mut builder,
-            block,
-            *member,
-            member_witnesses[index].as_ref(),
-            VALUE_ALIGN_ASSOC_CONST_INDEX,
-            span,
-            env,
-        );
-        offset = align_up_place(&mut builder, block, offset, align, known, span, env);
-        if index == key.field_index.as_index() {
-            return finish_product_addressor(
-                builder,
-                block,
-                *member,
-                base,
-                destination,
-                offset,
-                key.field_index,
-                span,
-            );
-        }
-        let size = member_layout_place(
-            &mut builder,
-            block,
-            *member,
-            member_witnesses[index].as_ref(),
-            VALUE_SIZE_ASSOC_CONST_INDEX,
-            span,
-            env,
-        );
-        offset = int_binary(&mut builder, block, known.int_add(), offset, size, span);
-    }
-    unreachable!("the product addressor field was validated against the layout recipe")
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_compact_record_addressor(
-    mut builder: FunctionBuilder,
-    mut block: BlockId,
-    key: &ProductAddressorKey,
-    spec: &ProductLayoutSpec,
-    member_witnesses: &[Option<Value>],
-    base: Value,
-    destination: Value,
-    known: &KnownCallees,
-    span: DebugLocation,
-    env: ModuleEnv<'_>,
-) -> Function {
+    let mut block = builder.add_block();
+    let span = DebugLocation::from(span);
     let target = key.field_index.as_index();
-    let target_static_layout = spec.members[target].static_layout;
-    let mut static_offset = 0isize;
-    if let Some(target_layout) = target_static_layout {
-        for (candidate, member) in spec.members.iter().enumerate() {
-            if candidate == target {
-                continue;
-            }
-            let Some(candidate_layout) = member.static_layout else {
-                continue;
-            };
-            if spec.compact_member_precedes(
-                ProjectionIndex::from_index(candidate),
-                key.field_index,
-                candidate_layout.align.cmp(&target_layout.align),
-            ) {
-                static_offset = static_offset
-                    .checked_add(
-                        candidate_layout
-                            .size
-                            .try_into()
-                            .expect("Value size fits in int"),
-                    )
-                    .expect("product offset fits in int");
-            }
-        }
-    }
+    let static_offset = isize::try_from(spec.static_prefix_offset(key.field_index).unwrap_or(0))
+        .expect("product offset fits in int");
     let offset = int_constant_place(&mut builder, block, static_offset, span, env);
     let target_align = member_layout_place(
         &mut builder,
@@ -2667,14 +2546,9 @@ fn build_compact_record_addressor(
     // Compact order is decreasing alignment. Every preceding member's power-of-two alignment is
     // therefore a multiple of the target alignment, and its size is a multiple of that alignment;
     // summing preceding sizes already produces an aligned target offset without padding.
-    for (candidate, member) in spec.members.iter().enumerate() {
-        if candidate == target {
-            continue;
-        }
-        let candidate_index = ProjectionIndex::from_index(candidate);
-        if member.static_layout.is_some() && target_static_layout.is_some() {
-            continue;
-        }
+    for (candidate_index, equal_precedes) in spec.runtime_order_candidates(key.field_index) {
+        let candidate = candidate_index.as_index();
+        let member = &spec.members[candidate];
         let candidate_align = member_layout_place(
             &mut builder,
             block,
@@ -2696,7 +2570,7 @@ fn build_compact_record_addressor(
         );
         let tag = append_result(&mut builder, block, Operation::extract_tag(span, ordering));
         let mut cases = vec![(Ustr::from(ORDERING_GREATER), add)];
-        if spec.compact_member_precedes(candidate_index, key.field_index, Ordering::Equal) {
+        if equal_precedes {
             cases.push((Ustr::from(ORDERING_EQUAL), add));
         }
         builder.set_terminator(block, Terminator::switch_variant(span, tag, cases, next));
@@ -5214,12 +5088,12 @@ mod tests {
     }
 
     #[test]
-    fn positional_addressors_only_materialize_layouts_through_the_target() {
+    fn tuple_addressors_consider_all_member_alignments() {
         let mut session = CompilerSession::new();
         let module = compile(
             &mut session,
             "fn middle<A, B>(value: (int, A, B)) -> A { value.1 }",
-            "generic_positional_subfield",
+            "generic_compact_tuple_subfield",
         );
         let (physical, first_helper) = lower(&mut session, module).unwrap();
         assert_eq!(physical.entry_count() - first_helper.as_index(), 1);
@@ -5230,8 +5104,8 @@ mod tests {
             .filter(|operation| matches!(operation.kind, OperationKind::DictEntry { .. }))
             .count();
         assert_eq!(
-            layout_getters, 1,
-            "only the target alignment is needed; its size and B's layout are unused"
+            layout_getters, 3,
+            "the target alignment and B's alignment and size determine the offset"
         );
     }
 
@@ -5303,8 +5177,8 @@ mod tests {
         );
         assert_eq!(
             physical.entry_count() - first_helper.as_index(),
-            1,
-            "field zero has a constant offset and the second open member needs an addressor"
+            2,
+            "both open members need addressors because either can precede the other"
         );
     }
 

@@ -315,14 +315,9 @@ Equivalent to Rust's `#[repr(C)]` after canonical ordering.
 
 # Tuples
 
-Tuples are laid out linearly in memory without boxing.
-Tuples are **positional**:
-
-- Order = declared order `(T₀, T₁, …)`
-- Layout follows record rules with that order
-- Alignment = maximum element alignment
-
-Equivalent to a C struct with fields in positional order.
+Tuples are laid out inline using the same compact layout algorithm as records.
+Physical fields are ordered by decreasing alignment, with ties broken by numeric tuple index.
+Tuple indices retain their logical meaning regardless of physical field order.
 
 # Tagged unions
 

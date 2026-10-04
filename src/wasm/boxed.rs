@@ -11,7 +11,7 @@ use crate::{
         native_functions::NativeEntry,
         value::{Value, VariantPayloadStorage},
     },
-    module::{FunctionId, ProjectionIndex, id::Id},
+    module::FunctionId,
     std::{
         array::array_type_def,
         buffer::{Buffer, buffer_element_type},
@@ -117,15 +117,15 @@ fn read_usize(address: *mut u8) -> usize {
 fn product_offsets(ty: Type, env: &ModuleEnv<'_>) -> Result<Vec<(Type, usize)>, String> {
     let spec = product_layout_spec(ty, Location::new_synthesized(), env)
         .ok_or_else(|| error("expected boxed Wasm product result"))?;
-    spec.members
+    let offsets = spec
+        .static_field_offsets()
+        .ok_or_else(|| error("open boxed Wasm product layout"))?;
+    Ok(spec
+        .members
         .iter()
-        .enumerate()
-        .map(|(index, member)| {
-            spec.static_field_offset(ProjectionIndex::from_index(index))
-                .map(|offset| (member.ty, offset))
-                .ok_or_else(|| error("open boxed Wasm product layout"))
-        })
-        .collect()
+        .zip(offsets)
+        .map(|(member, offset)| (member.ty, offset))
+        .collect())
 }
 
 /// Reject result shapes the temporary boxed boundary cannot consume before guest code runs.

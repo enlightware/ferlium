@@ -33,7 +33,7 @@ use crate::{
         terminator::TerminatorKind,
         value::ConstantId,
     },
-    module::{FunctionId, ModuleEnv, ProjectionIndex, TraitId, id::Id},
+    module::{FunctionId, ModuleEnv, TraitId, id::Id},
     std::{
         STD_MODULE_ID,
         logic::bool_type,
@@ -252,6 +252,7 @@ pub(super) struct Body<'a, 's> {
     pub(super) callable_entries: &'a callable::Entries,
     subscript_entries: &'a subscript::Entries,
     pub(super) callable_locals: Option<(WasmLocalId, WasmLocalId)>,
+    pub(super) closure_layouts: FxHashMap<ValueId, callable::CaptureLayout>,
     callable_values: FxHashSet<ValueId>,
     subscript_values: FxHashSet<ValueId>,
     borrowed_subscripts: FxHashMap<ValueId, subscript::Borrowed>,
@@ -384,6 +385,7 @@ impl<'a, 's> Body<'a, 's> {
             callable_entries,
             subscript_entries,
             callable_locals: None,
+            closure_layouts: FxHashMap::default(),
             callable_values: FxHashSet::default(),
             subscript_values: FxHashSet::default(),
             borrowed_subscripts: FxHashMap::default(),
@@ -521,6 +523,9 @@ impl<'a, 's> Body<'a, 's> {
                     continue;
                 }
                 if matches!(operation.kind, OperationKind::BuildClosure { .. }) {
+                    let layout = this.plan_closure_captures(operation)?;
+                    this.closure_layouts
+                        .insert(operation.result_id().unwrap(), layout);
                     if this.callable_locals.is_none() {
                         this.callable_locals =
                             Some((this.local(ValType::I32), this.local(ValType::I32)));
@@ -944,6 +949,11 @@ impl<'a, 's> Body<'a, 's> {
                         // and the environment dictionary do, even when their layout is static.
                         if has_env_dict || operation.operands.len() > num_hidden_dicts as usize {
                             require(&[DynamicSize, DynamicAlign]);
+                        }
+                        if self.closure_layouts[&operation.result_id().unwrap()]
+                            .needs_order_scratch()
+                        {
+                            require(&[Scratch, DynamicBase]);
                         }
                     }
                     Project { .. } => match &operation.operands[0] {
@@ -1692,10 +1702,11 @@ impl<'a, 's> Body<'a, 's> {
         } else if let LiteralValue::Tuple(fields) = literal {
             let layout = product_layout_spec(ty, Location::new_synthesized(), &self.env)
                 .ok_or("expected product constant")?;
+            let offsets = layout
+                .static_field_offsets()
+                .ok_or("open constant layout")?;
             for (index, field) in fields.iter().enumerate() {
-                let field_offset = layout
-                    .static_field_offset(ProjectionIndex::from_index(index))
-                    .ok_or("open constant layout")? as u32;
+                let field_offset = offsets[index] as u32;
                 self.initialize_literal(
                     destination,
                     layout.members[index].ty,
@@ -1752,12 +1763,12 @@ impl<'a, 's> Body<'a, 's> {
             if fields.len() != layout.members.len() {
                 return Err("product pattern arity mismatch".into());
             }
+            let offsets = layout
+                .static_field_offsets()
+                .ok_or("open product pattern layout")?;
             self.i(I::I32Const(1));
             for (index, field) in fields.iter().enumerate() {
-                let field_offset = layout
-                    .static_field_offset(ProjectionIndex::from_index(index))
-                    .ok_or("open product pattern layout")?
-                    as u32;
+                let field_offset = offsets[index] as u32;
                 self.pattern_equal_at(
                     value,
                     offset + field_offset,
@@ -3368,7 +3379,10 @@ impl<'a, 's> Body<'a, 's> {
                     }
                 }
                 // The compiler-known array fields are normalized as capacity, data, len, start.
-                for index in 0..4 {
+                let offsets = layout
+                    .static_field_offsets()
+                    .ok_or("open array field offset")?;
+                for (index, field) in offsets.into_iter().enumerate() {
                     let base = self.address_base(destination)?;
                     if index == 1 {
                         self.i(I::LocalGet(helpers.get(Scratch).as_u32()));
@@ -3379,10 +3393,7 @@ impl<'a, 's> Body<'a, 's> {
                             elements.len() as i32
                         }));
                     }
-                    let field = layout
-                        .static_field_offset(ProjectionIndex::from_index(index))
-                        .ok_or("open array field offset")? as u32;
-                    self.i(I::I32Store(memarg_at(2, base + field)));
+                    self.i(I::I32Store(memarg_at(2, base + field as u32)));
                 }
             }
             BuildDictionary { definition, .. } => {

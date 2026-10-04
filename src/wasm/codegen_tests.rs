@@ -30,8 +30,13 @@ use crate::{
         },
         terminator::TerminatorKind,
     },
-    module::{FunctionId, LocalFunctionId, Module, Path, Visibility, id::Id},
-    std::{math::Float, option::option_type, string::String, value::value_layout_for_type},
+    module::{FunctionId, LocalFunctionId, Module, Path, ProjectionIndex, Visibility, id::Id},
+    std::{
+        math::Float,
+        option::option_type,
+        string::String,
+        value::{product_layout_spec, value_layout_for_type},
+    },
     types::{
         effects::{PrimitiveEffect, effect, no_effects},
         r#type::{CallImplType, FnType, Type},
@@ -76,6 +81,46 @@ fn compile_raw(session: &CompilerSession, entry: FunctionId) -> CompiledProgram 
     with_raw_program(session, entry, |program| {
         CompiledProgram::from_physical(session, program, entry).unwrap()
     })
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_compact_tuples_preserve_logical_fields_and_generic_dispatch() {
+    let mut session = CompilerSession::new();
+    let ty = Type::tuple([
+        Type::primitive::<isize>(),
+        Type::primitive::<Float>(),
+        Type::primitive::<isize>(),
+    ]);
+    let env = session.module_env();
+    let spec = product_layout_spec(ty, Location::new_synthesized(), &env).unwrap();
+    assert_eq!(
+        value_layout_for_type(ty, Location::new_synthesized(), &env)
+            .unwrap()
+            .size,
+        16
+    );
+    for (index, offset) in [8, 0, 12].into_iter().enumerate() {
+        assert_eq!(
+            spec.static_field_offset(ProjectionIndex::from_index(index)),
+            Some(offset)
+        );
+    }
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        session.set_mir_optimization(optimization);
+        assert_wasm_runs(
+            &mut session,
+            "#[inline(never)] fn middle<A>(p: (bool, A, bool)) -> A { p.1 }
+             #[inline(never)] fn pair<A, B>(a: A, b: B) -> (A, B) { (a, b) }
+             pub fn compute(n: int) -> int {
+                 let p = (n, n as float, n + 2);
+                 let q = pair(true, p);
+                 let r = middle((false, q.1, true));
+                 r.0 + (r.1 as int) + r.2
+             }",
+            5_isize,
+            17_isize,
+        );
+    }
 }
 
 #[wasm_bindgen_test]
@@ -822,6 +867,48 @@ fn wasm_codegen_subscript_caller_failure_resumes_owned_evidence() {
                 before,
                 "input {input} ({optimization:?})"
             );
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_compact_closure_captures_clone_and_drop() {
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        let mut session = CompilerSession::new();
+        session.set_physical_mir_optimization(optimization);
+        let entry = compile(
+            &mut session,
+            r#"
+            #[inline(never)]
+            fn maker<T>(flag: bool, value: T, n: int, last: bool) where T: Value {
+                || if flag and last and to_string(value) == to_string(to_string(n)) {
+                    n
+                } else { -1 }
+            }
+            #[inline(never)] fn twice(f) { let g = f; f() + g() }
+            pub fn compute(n: int) -> int {
+                let text = to_string(n);
+                let f = maker(true, text, n, true);
+                twice(f)
+            }
+        "#,
+        );
+        for code in [
+            compile_raw(&session, entry),
+            CompiledProgram::compile(&session, entry).unwrap(),
+        ] {
+            let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+            for n in [5, 7, 5] {
+                let live = LIVE_CALLABLE_ENVIRONMENTS.get();
+                let evidence = LIVE_ENVIRONMENTS.get();
+                assert_eq!(
+                    instance.run((n,), WasmLimits::default()).unwrap(),
+                    n * 2,
+                    "{optimization:?} input {n}"
+                );
+                assert_eq!(LIVE_CALLABLE_ENVIRONMENTS.get(), live);
+                assert_eq!(LIVE_ENVIRONMENTS.get(), evidence);
+            }
         }
     }
 }
