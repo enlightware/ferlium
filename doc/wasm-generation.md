@@ -32,6 +32,13 @@ storage or prevent stackification at a real consumer. Scalar loads used only to 
 can be omitted, provided their removal does not discard deferred source work. Other producers retain
 their effects and ownership work. The shared MIR keeps the logical index.
 
+## Keep single-use scalar addresses on the stack
+
+Expression planning defers single-use addresses to scalar loads, stores, copies, moves and
+comparisons when ordering permits. Materialized pointers used elsewhere retain ordinary scalar
+planning. Aggregate operations and witnessed moves retain address locals because they can reread
+an address or call out before consuming it.
+
 ## Expand small copies without changing overlap behavior
 
 Multi-chunk expansion is limited to fixed 12- and 16-byte copies; smaller single-chunk copies

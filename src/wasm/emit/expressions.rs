@@ -25,7 +25,7 @@ use crate::{
 
 use super::{
     body::intrinsic_reads_input_repeatedly, control_flow::conditional_targets,
-    is_elided_stack_operation, scalar, wasm_intrinsic,
+    is_elided_stack_operation, layout_witness, scalar, wasm_intrinsic,
 };
 
 const MAX_EXPRESSION_DEPTH: usize = 128;
@@ -64,6 +64,21 @@ impl Source {
 
     pub(super) fn operation_id(self) -> OperationIndex {
         self.operation
+    }
+
+    /// The operation at this source, including an Invoke at the terminator position.
+    fn operation(self, body: &Function) -> Option<&Operation> {
+        let block = body.block(self.block);
+        let index = self.operation.as_index();
+        block.operations().get(index).or_else(|| {
+            if index == block.operations().len()
+                && let TerminatorKind::Invoke { operation, .. } = &block.terminator().kind
+            {
+                Some(operation)
+            } else {
+                None
+            }
+        })
     }
 }
 
@@ -291,23 +306,20 @@ impl Plan {
                             OperationKind::AddressOffset { .. }
                                 | OperationKind::AddressOffsetPlace { .. }
                         )
-            }) && body
-                .block(consumer.block)
-                .operations()
-                .get(consumer.operation_id().as_index())
-                .is_some_and(|operation| {
-                    match operation.kind {
-                        // Evidence loads can release an old environment before reading the
-                        // source. Keep deferral at consumers with a plain scalar load.
-                        OperationKind::Load => operation.result_id().is_some_and(|id| {
-                            roles.get(&Value::Register(id), body.constants()).is_some_and(|role|
-                                matches!(&*role, ValueRole::Materialized(ty) if scalar(ty, &env).is_ok()))
-                        }),
-                        OperationKind::RuntimeDealloc | OperationKind::AddressOffset { .. }
-                            | OperationKind::AddressOffsetPlace { .. } => true,
-                        _ => false,
-                    }
-                });
+            });
+            let address_consumer = if address_result {
+                consumer.operation(body).and_then(|operation| {
+                    stackifiable_address_consumer(operation, body, roles, env)
+                })
+            } else {
+                None
+            };
+            if address_consumer == Some(false) {
+                continue;
+            }
+            // Other consumers retain the ordinary scalar path for materialized pointers,
+            // including the address-exposure check. A place is not a scalar value.
+            let address_result = address_consumer == Some(true);
             if !address_result && inputs.is_addressed(&value, parameter_count, value_count)
                 || comparison_fusions[id.as_index()].is_some()
             {
@@ -1332,21 +1344,54 @@ fn stackifiable_operation(operation: &Operation) -> bool {
     )
 }
 
+/// Whether an address consumer reads each address exactly once before any call.
+/// Returns None for other operations, whose materialized pointers follow scalar planning.
+///
+/// Scalar memory operations use a single load/store; aggregate initialization, copying and
+/// comparison may reread an address. Evidence loads and witnessed moves can call out before
+/// reading their operands, so retain their producers at the original position.
+fn stackifiable_address_consumer(
+    operation: &Operation,
+    body: &Function,
+    roles: &ValueRoles,
+    env: ModuleEnv<'_>,
+) -> Option<bool> {
+    let scalar_place = |value: &Value| {
+        roles
+            .get(value, body.constants())
+            .and_then(|role| role.place_pointee_type())
+            .is_some_and(|ty| scalar(&ty, &env).is_ok())
+    };
+    Some(match operation.kind {
+        OperationKind::Load => operation.result_id().is_some_and(|id| {
+            roles.get(&Value::Register(id), body.constants()).is_some_and(|role|
+                matches!(&*role, ValueRole::Materialized(ty) if scalar(ty, &env).is_ok()))
+        }),
+        OperationKind::Store => scalar_place(&operation.operands[1]),
+        OperationKind::Memcpy | OperationKind::Move | OperationKind::MoveBytes { .. } => {
+            layout_witness(operation).is_none() && scalar_place(&operation.operands[1])
+        }
+        OperationKind::CompareEqual => scalar_place(&operation.operands[0]),
+        OperationKind::RuntimeDealloc
+        | OperationKind::AddressOffset { .. }
+        | OperationKind::AddressOffsetPlace { .. } => true,
+        _ => return None,
+    })
+}
+
 /// Whether emission consumes eligible scalar operands exactly once before performing effects.
 ///
 /// This is deliberately an allow-list: adding a MIR operation cannot silently make deferred
 /// producers sound without also documenting its emission contract here.
 fn stackifiable_consumer(body: &Function, source: Source) -> bool {
-    let block = body.block(source.block);
-    if let Some(operation) = block.operations().get(source.operation_id().as_index()) {
+    if let Some(operation) = source.operation(body) {
         return stackifiable_operation(operation)
             || matches!(operation.kind, OperationKind::RuntimeDealloc);
     }
-    match &block.terminator().kind {
-        TerminatorKind::CondBr { .. } | TerminatorKind::Return => true,
-        TerminatorKind::Invoke { operation, .. } => stackifiable_operation(operation),
-        _ => false,
-    }
+    matches!(
+        body.block(source.block).terminator().kind,
+        TerminatorKind::CondBr { .. } | TerminatorKind::Return
+    )
 }
 
 fn fused_comparison_call(
@@ -1480,14 +1525,17 @@ fn comparison_fusions(
 mod tests {
     use wasm_bindgen_test::wasm_bindgen_test;
 
+    use super::super::script_abi;
     use super::*;
     use crate::{
         Location,
+        containers::b,
         hir::{function::ArgConvention, value::LiteralValue},
         mir::{builder::FunctionBuilder, terminator::Terminator},
         module::Path,
         std::{buffer::buffer_type, logic::bool_type, math::int_type},
-        types::r#type::CallResultConvention,
+        types::r#type::{CallImplType, CallResultConvention, Type},
+        ustr,
     };
 
     #[wasm_bindgen_test]
@@ -1563,6 +1611,194 @@ mod tests {
                 matches!(case, "both branches" | "loop").then_some(literal),
                 "{case}"
             );
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn wasm_codegen_address_deferral_requires_single_scalar_consumption() {
+        let mut session = CompilerSession::new();
+        let module = session
+            .compile(
+                "#[inline(never)] fn consume(x: int) {}
+                 #[inline(never)] fn checked(x: int) { let a = [0]; a[x]; }",
+                "address_guard",
+                Path::single_str("address_guard"),
+            )
+            .unwrap()
+            .module_id;
+        let program = session.prepare_physical_program(module).unwrap();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let targets = ["consume", "checked"].map(|name| {
+            let local = session
+                .expect_fresh_module(module)
+                .get_local_function_id(ustr(name))
+                .unwrap();
+            let callee = FunctionId::new(module, local);
+            let definition = &session
+                .expect_fresh_module(module)
+                .get_function_by_id(local)
+                .unwrap()
+                .definition;
+            let body = program.function(callee).unwrap();
+            (
+                callee,
+                CallImplType::new(definition.ty_scheme.ty.clone(), body.result_convention()),
+                script_abi(program.function(program.direct_entry(callee)).unwrap(), env).unwrap(),
+            )
+        });
+        let callees = targets
+            .iter()
+            .map(|(callee, _, abi)| {
+                (
+                    program.direct_entry(*callee),
+                    (WasmFunctionId::from_index(0), abi),
+                )
+            })
+            .collect();
+
+        for aggregate in [false, true] {
+            let ty = if aggregate {
+                Type::tuple(vec![int_type(), int_type()])
+            } else {
+                int_type()
+            };
+            let literal = if aggregate {
+                LiteralValue::new_tuple([
+                    LiteralValue::new_native(5_isize),
+                    LiteralValue::new_native(7_isize),
+                ])
+            } else {
+                LiteralValue::new_native(5_isize)
+            };
+            for pointer_slot in [false, true] {
+                for case in [
+                    "load",
+                    "store",
+                    "copy source",
+                    "copy destination",
+                    "move source",
+                    "move destination",
+                    "bytes source",
+                    "bytes destination",
+                    "compare",
+                    "self copy",
+                    "direct call",
+                    "invoke",
+                ] {
+                    if aggregate && matches!(case, "direct call" | "invoke") {
+                        continue;
+                    }
+                    let mut builder =
+                        FunctionBuilder::new(case.into(), CallResultConvention::NoValue);
+                    let base = Value::Parameter(
+                        builder
+                            .add_parameter(ty, ParameterKind::Parameter(ArgConvention::MutableRef)),
+                    );
+                    let other = Value::Parameter(
+                        builder
+                            .add_parameter(ty, ParameterKind::Parameter(ArgConvention::MutableRef)),
+                    );
+                    let block = builder.add_block();
+                    let zero = Value::Constant(builder.add_constant(
+                        int_type(),
+                        LiteralValue::new_native(0_isize),
+                        &env,
+                    ));
+                    let value = Value::Constant(builder.add_constant(ty, literal.clone(), &env));
+                    let size = Value::Constant(builder.add_constant(
+                        int_type(),
+                        LiteralValue::new_native(if aggregate { 8_isize } else { 4_isize }),
+                        &env,
+                    ));
+                    let address = if pointer_slot {
+                        let slot = builder
+                            .append_operation(block, Operation::alloca_place(span, ty))
+                            .unwrap();
+                        builder.append_operation(block, Operation::store(span, base, slot.clone()));
+                        builder
+                            .append_operation(block, Operation::load(span, slot))
+                            .unwrap()
+                    } else {
+                        builder
+                            .append_operation(
+                                block,
+                                Operation::address_offset(span, base, zero.clone(), ty, None),
+                            )
+                            .unwrap()
+                    };
+                    let operation = match case {
+                        "load" => Operation::load(span, address.clone()),
+                        "store" => Operation::store(span, value, address.clone()),
+                        "copy source" => Operation::memcpy(span, address.clone(), other),
+                        "copy destination" => Operation::memcpy(span, other, address.clone()),
+                        "move source" => Operation::move_value(span, address.clone(), other),
+                        "move destination" => Operation::move_value(span, other, address.clone()),
+                        "bytes source" => {
+                            Operation::move_bytes(span, ty, address.clone(), other, size)
+                        }
+                        "bytes destination" => {
+                            Operation::move_bytes(span, ty, other, address.clone(), size)
+                        }
+                        "compare" => Operation::compare_eq(
+                            span,
+                            address.clone(),
+                            Value::Pattern(b(literal.clone())),
+                        ),
+                        "self copy" => Operation::memcpy(span, address.clone(), address.clone()),
+                        "direct call" | "invoke" => {
+                            let (callee, call_ty, _) = &targets[usize::from(case == "invoke")];
+                            let output = builder
+                                .append_operation(block, Operation::alloca(span, Type::unit()))
+                                .unwrap();
+                            Operation::call(
+                                span,
+                                Value::Function(*callee),
+                                [address.clone(), output],
+                                call_ty.clone(),
+                            )
+                        }
+                        _ => unreachable!(),
+                    };
+                    if case == "invoke" {
+                        let normal = builder.add_block();
+                        let error = builder.add_block();
+                        builder.set_terminator(
+                            block,
+                            Terminator::invoke(span, operation, normal, error),
+                        );
+                        builder.set_terminator(normal, Terminator::ret(span));
+                        builder.set_terminator(error, Terminator::propagate_error(span));
+                    } else {
+                        builder.append_operation(block, operation);
+                        builder.set_terminator(block, Terminator::ret(span));
+                    }
+                    let body = builder.finish_physical(env);
+                    let roles = ValueRoles::derive(&body);
+                    let (_, plan) = Analysis::of(
+                        &body,
+                        &roles,
+                        &callees,
+                        &program,
+                        &session,
+                        env,
+                        false,
+                        &FxHashSet::default(),
+                    );
+                    let Value::Register(id) = address else {
+                        unreachable!()
+                    };
+                    assert_eq!(
+                        plan.has_value(id),
+                        if matches!(case, "direct call" | "invoke") {
+                            pointer_slot
+                        } else {
+                            !aggregate && case != "self copy"
+                        },
+                        "{case}, aggregate={aggregate}, pointer_slot={pointer_slot}"
+                    );
+                }
+            }
         }
     }
 

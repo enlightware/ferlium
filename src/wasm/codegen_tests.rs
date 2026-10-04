@@ -3575,6 +3575,64 @@ fn wasm_codegen_stackifies_single_use_scalar_expressions() {
 }
 
 #[wasm_bindgen_test]
+fn wasm_codegen_stackifies_scalar_tuple_field_stores() {
+    let mut session = CompilerSession::new();
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        session.set_mir_optimization(optimization);
+        session.set_physical_mir_optimization(optimization);
+        for input in ["5", "black_box(5)"] {
+            let entry = compile(
+                &mut session,
+                &format!(
+                    "fn compute() -> (int, float, int) {{
+                    let a: int = {input}; let b = a as float + 0.4;
+                    let c = 5.7 as int; (a, b, c)
+                }}"
+                ),
+            );
+            // The playground uses a boxed bridge for tuple results; inspect the script body.
+            let program = session.prepare_physical_program(entry.module).unwrap();
+            let mut imports = Imports::new().unwrap();
+            let code = emit::emit_boxed(
+                &program,
+                &[entry],
+                &[(entry, ENTRY_EXPORT.into())],
+                &mut imports,
+                &session,
+            )
+            .unwrap();
+            let functions = WasmFunctions::new(&code.bytes);
+            let (_, index) = functions
+                .names
+                .iter()
+                .find(|(name, _)| name.ends_with("::compute"))
+                .unwrap();
+            let (body, parameter_count) = functions.body(*index);
+            assert_reserved_locals_used(
+                &body,
+                parameter_count,
+                &format!("{optimization:?}, {input}"),
+            );
+            if input == "5" {
+                assert_eq!(
+                    body.get_locals_reader().unwrap().get_count(),
+                    0,
+                    "literal tuple stores need no temporary locals: {optimization:?}"
+                );
+            }
+            let value = run_boxed_entry(&session, entry, WasmLimits::default()).unwrap();
+            let fields = value.as_tuple().unwrap();
+            assert_eq!(fields[0].as_primitive_ty::<isize>(), Some(&5));
+            assert_eq!(
+                fields[1].as_primitive_ty::<Float>().unwrap().into_inner(),
+                5.4
+            );
+            assert_eq!(fields[2].as_primitive_ty::<isize>(), Some(&5));
+        }
+    }
+}
+
+#[wasm_bindgen_test]
 fn wasm_codegen_stackifies_across_elided_stack_markers() {
     let mut session = CompilerSession::new();
     let entry = compile(
