@@ -2123,6 +2123,89 @@ fn wasm_codegen_integer_bits_select_instructions_and_preserve_counts() {
 }
 
 #[wasm_bindgen_test]
+fn wasm_codegen_scalar_replaces_nested_mutable_products() {
+    let source = "struct State { count: int, pair: (int, int) }
+        pub fn compute(n: int) -> int {
+            let mut state = State { count: 0, pair: (n, 1) };
+            let mut total = 0;
+            let mut i = 0;
+            loop {
+                if i >= n { break };
+                if i < 3 { state.pair.0 = state.pair.0 + state.pair.1 }
+                else { state.pair.1 = state.pair.1 + 1 };
+                state.count = state.count + 1;
+                total = total + state.pair.0;
+                i = i + 1
+            };
+            total + state.count + state.pair.1
+        }";
+    // Keep semantic optimization fixed: this checks the pre-expansion storage rewrite and the
+    // physical cleanup it enables, rather than comparing different inlining decisions.
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        session.set_physical_mir_optimization(optimization);
+        let entry = compile(&mut session, source);
+        let code = CompiledProgram::compile(&session, entry).unwrap();
+        let functions = WasmFunctions::new(code.bytes());
+        // Inspect the source body, excluding the fallible export bridge's own memory accesses.
+        let (_, index) = functions
+            .names
+            .iter()
+            .find(|(name, _)| name.ends_with("::compute"))
+            .unwrap();
+        let (body, _) = functions.body(*index);
+        let memory_accesses = body
+            .get_operators_reader()
+            .unwrap()
+            .into_iter()
+            .filter(|op| {
+                matches!(
+                    op.as_ref().unwrap(),
+                    Operator::I32Load { .. }
+                        | Operator::I32Store { .. }
+                        | Operator::I32Load8S { .. }
+                        | Operator::I32Load8U { .. }
+                        | Operator::I32Load16S { .. }
+                        | Operator::I32Load16U { .. }
+                        | Operator::I32Store8 { .. }
+                        | Operator::I32Store16 { .. }
+                        | Operator::MemoryCopy { .. }
+                )
+            })
+            .count();
+        if optimization == MirOptimization::Enabled {
+            assert_eq!(
+                memory_accesses, 0,
+                "nested state fields must stay in locals"
+            );
+        } else {
+            assert!(
+                memory_accesses > 0,
+                "fixture must exercise aggregate storage without the rewrite"
+            );
+        }
+        let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+        for n in [0, 1, 2, 8] {
+            let (mut left, mut right, mut total) = (n, 1, 0);
+            for i in 0..n {
+                if i < 3 {
+                    left += right;
+                } else {
+                    right += 1;
+                }
+                total += left;
+            }
+            assert_eq!(
+                instance.run((n,), WasmLimits::default()).unwrap(),
+                total + n + right,
+                "{optimization:?}, n={n}"
+            );
+        }
+    }
+}
+
+#[wasm_bindgen_test]
 fn wasm_codegen_rematerializes_immutable_scalar_literals() {
     for optimization in [MirOptimization::Enabled, MirOptimization::Disabled] {
         let mut session = CompilerSession::new();

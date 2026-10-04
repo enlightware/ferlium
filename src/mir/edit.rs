@@ -279,16 +279,27 @@ impl FunctionEdit {
         representation: LiteralValue,
         env: &ModuleEnv<'_>,
     ) -> ConstantId {
-        debug_assert!(
-            representation.has_representation_type_in(ty, env),
-            "MIR constant representation does not match its declared type"
-        );
         let constant = Constant { ty, representation };
         if let Some(index) = self.constants.iter().position(|item| item == &constant) {
             return ConstantId::from_index(index);
         }
+        self.append_constant(constant.ty, constant.representation, env)
+    }
+
+    /// Appends a typed constant without searching the pool. Bulk rewrites which maintain their
+    /// own hash interner use this to avoid a quadratic sequence of `add_constant` searches.
+    pub(crate) fn append_constant(
+        &mut self,
+        ty: Type,
+        representation: LiteralValue,
+        env: &ModuleEnv<'_>,
+    ) -> ConstantId {
+        debug_assert!(
+            representation.has_representation_type_in(ty, env),
+            "MIR constant representation does not match its declared type"
+        );
         let id = ConstantId::from_index(self.constants.len());
-        self.constants.push(constant);
+        self.constants.push(Constant { ty, representation });
         id
     }
 

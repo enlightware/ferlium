@@ -56,6 +56,8 @@
 //! **Final bodies only.** Physical expansion runs the pass on optimized bodies. Semantic MIR, which
 //! callers inline, keeps its saturating trees, so an inlined tree joins its caller's.
 
+use std::mem;
+
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
@@ -350,7 +352,7 @@ fn speculate(
     original_of: &impl Fn(FunctionId) -> Option<FunctionId>,
 ) -> BlockId {
     let root = *tree.members.last().unwrap();
-    let operations = std::mem::take(&mut edit.block_mut(block).operations);
+    let operations = mem::take(&mut edit.block_mut(block).operations);
     let snapshots = needs_snapshots(&operations, &tree.members, registers, known, original_of);
     let mut operations = operations.into_iter();
     let original: Vec<_> = operations.by_ref().take(root + 1).collect();
@@ -510,7 +512,15 @@ pub(crate) fn speculate_float_trees(
 
 #[cfg(test)]
 mod tests {
-    use crate::{CompilerSession, MirOptimization, module::Path};
+    use std::mem;
+
+    use crate::{
+        CompilerSession, MirOptimization,
+        format::FormatWith,
+        mir::{Operation, OperationKind, edit::FunctionEdit},
+        module::Path,
+        std::math::float_type,
+    };
 
     /// Optimized physical MIR, where the pass runs.
     fn optimized(src: &str) -> String {
@@ -576,15 +586,70 @@ mod tests {
         assert_eq!(count(body, "raw_float_sub"), 1, "{body}");
     }
 
-    /// An inlined callee's inputs may be projections of its own storage, released before the
-    /// root: the tree reads them through snapshots taken where it stood.
+    /// Inputs may project temporary storage released before the root: the tree reads them through
+    /// snapshots taken where it stood, as for a local product in an inlined callee.
     #[test]
     fn inputs_released_before_the_root_are_snapshotted() {
-        let module = optimized(
-            "fn g(x: float, y: float) -> float { let p = (x, y); p.0 * p.1 }
-             fn f(a: float, b: float) -> float { g(a, b) * b - a }",
+        // Inspect speculation before aggregate splitting removes the tuple and its stack region.
+        // This pins the lifetime proof independently of later storage cleanup.
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let module = session
+            .compile(
+                "fn f(a: float, b: float) -> float {
+                    let t = { let p = (a, b); p.0 * p.1 };
+                    t * b - a
+                }",
+                "float",
+                Path::single_str("float"),
+            )
+            .unwrap()
+            .module_id;
+        session.emit_mir_module(module);
+        let entry = session
+            .expect_fresh_module(module)
+            .get_local_function_id("f".into())
+            .unwrap();
+        let source = session
+            .mir_artifacts_for(module, MirOptimization::Enabled)
+            .unwrap()
+            .get(entry)
+            .unwrap();
+        let env = session
+            .modules()
+            .env_for(session.expect_fresh_module(module));
+        // Give the tuple an explicit scoped lifetime, as inlining does. Keep arithmetic result
+        // cells outside that region so the original body remains valid after its restoration.
+        let mut edit = FunctionEdit::new(source.clone());
+        let entry = edit.entry();
+        let original = mem::take(&mut edit.block_mut(entry).operations);
+        let span = original[0].span;
+        let (mut cells, original): (Vec<_>, Vec<_>) = original
+            .into_iter()
+            .partition(|op| matches!(op.kind, OperationKind::Alloca { ty } if ty == float_type()));
+        let mut save = Operation::stack_save(span);
+        let marker = edit.assign_new_result(&mut save).unwrap();
+        cells.push(save);
+        let mut restored = false;
+        for operation in original {
+            let first_arithmetic = !restored
+                && super::arithmetic(&operation, session.known_callees(), &|_| None).is_some();
+            cells.push(operation);
+            if first_arithmetic {
+                cells.push(Operation::stack_restore(span, marker.clone()));
+                restored = true;
+            }
+        }
+        assert!(
+            restored,
+            "fixture must contain arithmetic inside its region"
         );
-        let body = body_of(&module, "f");
+        edit.block_mut(entry).operations = cells;
+        let source = edit.finish(env);
+        let speculated =
+            super::speculate_float_trees(&source, session.known_callees(), &|_| None, env).unwrap();
+        let rendered = speculated.format_with(&env).to_string();
+        let body = rendered.as_str();
         assert_eq!(count(body, "raw_float_is_finite"), 1, "{body}");
         let restore = body.find("stack_restore").expect(body);
         let snapshots = body[..restore].matches("memcpy").count();

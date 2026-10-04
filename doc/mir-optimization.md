@@ -1012,6 +1012,21 @@ fixed storage, addressing/evidence, scalar/control, then interpreter scaffolding
 weights. Native-call cost is callee-dependent and representation-copy cost is type-dependent, so a
 single synthetic MIR score would assert backend costs the interpreter cannot establish.
 
+## Local product scalar replacement
+
+Before expansion, `mir::pass::scalar_replace` splits local `TrivialCopy` tuples and records,
+including named and nested products, into independent field places. Static projections share
+the same field; literal stores, copies between eligible products and clears become fieldwise
+operations.
+Whole-value reads, escaping aggregate addresses, dynamic projections, managed products and native
+`TrivialCopy` opt-ins retain their storage. An opt-in guarantees copying the whole representation,
+not its fields independently. Field allocations keep the original lifetime boundary. The pass runs
+on final bodies after float speculation, preserving the aggregate structure used by semantic range
+analysis and inlining; unoptimized physical preparation skips it. A bounded shape-expansion budget
+prevents deeply nested products from causing excessive compilation growth, independently of byte
+size. Existing forwarding and cleanup then simplify the fields and let scalar backends keep them
+in locals.
+
 ## Post-expansion optimization
 
 Physical MIR reuses shared folding, CSE, inlining, storage and single-store value forwarding,

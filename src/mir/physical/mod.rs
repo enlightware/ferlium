@@ -48,6 +48,7 @@ use crate::{
             dce, float_speculation,
             known_callee::{KnownCallee, KnownCallees},
             physical::optimize,
+            scalar_replace,
         },
         role::{MirType, ValueRoles},
         terminator::{Terminator, TerminatorKind},
@@ -564,15 +565,15 @@ pub(crate) fn lower_unoptimized_physical_mir(
     prepare_physical_mir(entries, direct, semantic, env)
 }
 
-/// With `speculate_floats`, float arithmetic trees are first speculated without per-operation
-/// saturation. Only final bodies are rewritten: semantic MIR, which callers inline, keeps the
-/// saturating trees, so an inlined callee's tree can join its caller's and is checked once.
+/// Optimize final typed bodies before expanding their storage: speculate float trees and split
+/// non-escaping products. Semantic bodies retained for inlining keep their saturating arithmetic
+/// and aggregate structure, which range analysis uses to recognize iterator induction.
 fn expand_physical_mir(
     module: ModuleId,
     semantic: &MirArtifacts,
     env: ModuleEnv<'_>,
     known: &KnownCallees,
-    speculate_floats: bool,
+    optimize_pre_expansion: bool,
 ) -> Result<Vec<Option<Function>>, BackendReadinessError> {
     assert_eq!(
         env.current.module_id(),
@@ -652,7 +653,7 @@ fn expand_physical_mir(
             let original = semantic
                 .specialization(local)
                 .map_or(function, |specialization| specialization.original);
-            let body = if speculate_floats {
+            let body = if optimize_pre_expansion {
                 float_speculation::speculate_float_trees(
                     &body,
                     known,
@@ -665,6 +666,11 @@ fn expand_physical_mir(
                     env,
                 )
                 .unwrap_or(body)
+            } else {
+                body
+            };
+            let body = if optimize_pre_expansion {
+                scalar_replace::split_local_products(&body, env).unwrap_or(body)
             } else {
                 body
             };
