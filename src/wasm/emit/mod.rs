@@ -160,15 +160,19 @@ impl ScalarType {
     }
 
     fn load(self, code: &mut impl Instructions) {
+        self.load_at(code, 0);
+    }
+
+    fn load_at(self, code: &mut impl Instructions, offset: u32) {
         let instruction = if self.is_unit() {
             code.instruction(&I::Drop);
             I::I32Const(0)
         } else if self.0 == bool_type() {
-            I::I32Load8U(memarg(0))
+            I::I32Load8U(memarg_at(0, offset))
         } else if self.is_f64() {
-            I::F64Load(memarg(3))
+            I::F64Load(memarg_at(3, offset))
         } else {
-            I::I32Load(memarg(2))
+            I::I32Load(memarg_at(2, offset))
         };
         code.instruction(&instruction);
     }
@@ -1950,6 +1954,11 @@ fn scalar(ty: &MirType, env: &impl TypeLayoutEnv) -> Result<ScalarType, String> 
         MirType::Pointer(_) => Ok(ScalarType::pointer()),
         MirType::Lowered(ty) => ScalarType::in_env(*ty, env),
     }
+}
+
+fn offset_sum(base: u32, offset: u32) -> Result<u32, String> {
+    base.checked_add(offset)
+        .ok_or_else(|| "memory offset overflow".into())
 }
 
 fn memarg(align: u32) -> MemArg {

@@ -653,6 +653,10 @@ impl Plan {
         self.values.get(id.as_index()).is_some_and(Option::is_some)
     }
 
+    pub(super) fn pending_value(&self, id: ValueId) -> Option<Source> {
+        self.values.get(id.as_index()).copied().flatten()
+    }
+
     pub(super) fn take_value(&mut self, id: ValueId) -> Option<Source> {
         self.values.get_mut(id.as_index())?.take()
     }

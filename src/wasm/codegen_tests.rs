@@ -3687,6 +3687,81 @@ fn wasm_codegen_keeps_terminal_scalar_results_on_the_stack() {
 }
 
 #[wasm_bindgen_test]
+fn wasm_codegen_uses_static_field_memory_offsets() {
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(optimization);
+        session.set_physical_mir_optimization(optimization);
+        for (source, stores) in [
+            (
+                "fn compute() -> (int, float) { let a: int = 5; let b = 1.2; (a, b) }",
+                true,
+            ),
+            (
+                "fn compute() -> int { let p = black_box((1.2, (5, 7))); p.1.1 }",
+                false,
+            ),
+        ] {
+            let entry = compile(&mut session, source);
+            let program = session.prepare_physical_program(entry.module).unwrap();
+            let mut imports = Imports::new().unwrap();
+            let code = emit::emit_boxed(
+                &program,
+                &[entry],
+                &[(entry, ENTRY_EXPORT.into())],
+                &mut imports,
+                &session,
+            )
+            .unwrap();
+            let functions = WasmFunctions::new(&code.bytes);
+            let (_, index) = functions
+                .names
+                .iter()
+                .find(|(name, _)| name.ends_with("::compute"))
+                .unwrap();
+            let (body, _) = functions.body(*index);
+            let operators = body
+                .get_operators_reader()
+                .unwrap()
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            if stores {
+                assert!(
+                    operators.iter().any(|op| matches!(op,
+                    Operator::I32Store { memarg } if memarg.offset == 8)),
+                    "{optimization:?}"
+                );
+                assert!(
+                    !operators.windows(2).any(|pair| matches!(
+                        pair,
+                        [Operator::I32Const { value: 8 }, Operator::I32Add]
+                    )),
+                    "literal result fields need no address additions: {optimization:?}"
+                );
+            } else {
+                assert!(
+                    operators.iter().any(|op| matches!(op,
+                    Operator::I32Load { memarg } if memarg.offset > 0)),
+                    "{optimization:?}"
+                );
+            }
+            let value = run_boxed_entry(&session, entry, WasmLimits::default()).unwrap();
+            if stores {
+                let fields = value.as_tuple().unwrap();
+                assert_eq!(fields[0].as_primitive_ty::<isize>(), Some(&5));
+                assert_eq!(
+                    fields[1].as_primitive_ty::<Float>().unwrap().into_inner(),
+                    1.2
+                );
+            } else {
+                assert_eq!(value.as_primitive_ty::<isize>(), Some(&7));
+            }
+        }
+    }
+}
+
+#[wasm_bindgen_test]
 fn wasm_codegen_stackifies_scalar_tuple_field_stores() {
     let mut session = CompilerSession::new();
     for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {

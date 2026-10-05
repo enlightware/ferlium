@@ -69,7 +69,7 @@ use super::{
         Analysis as ExpressionAnalysis, Plan as ExpressionPlan, Source as ExpressionSource,
     },
     frame_address, frame_bytes, is_elided_stack_operation, layout_witness, leave_frame, memarg,
-    memarg_at, operations,
+    memarg_at, offset_sum, operations,
     peephole::{Code, Spans},
     scalar, stack, subscript,
     suspension::Crossing,
@@ -1694,7 +1694,7 @@ impl<'a, 's> Body<'a, 's> {
                 2,
                 (index * size_of::<StaticStr>()) as u32,
             )));
-            self.i(I::I32Store(memarg_at(2, base + offset)));
+            self.i(I::I32Store(memarg_at(2, offset_sum(base, offset)?)));
         } else if let LiteralValue::Tuple(fields) = literal {
             let layout = product_layout_spec(ty, Location::new_synthesized(), &self.env)
                 .ok_or("expected product constant")?;
@@ -1713,7 +1713,7 @@ impl<'a, 's> Body<'a, 's> {
         } else {
             let base = self.address_base(destination)?;
             self.literal(literal)?;
-            ScalarType::in_env(ty, &self.env)?.store_at(&mut self.code, base + offset);
+            ScalarType::in_env(ty, &self.env)?.store_at(&mut self.code, offset_sum(base, offset)?);
         }
         Ok(())
     }
@@ -2405,6 +2405,44 @@ impl<'a, 's> Body<'a, 's> {
         if let Some(&Storage::Stack(offset)) = self.storage.get(value) {
             return Ok(self.frame_base(offset));
         }
+        if !self.storage.contains_key(value)
+            && let Value::Register(id) = value
+            && let Some(source) = self.expressions.pending_value(*id)
+        {
+            let body = self.body;
+            let operation =
+                &body.block(source.block).operations()[source.operation_id().as_index()];
+            if matches!(
+                operation.kind,
+                OperationKind::AddressOffset { .. } | OperationKind::AddressOffsetPlace { .. }
+            ) && operation.operands.len() == 2
+            {
+                // Only literal offsets can disappear without consuming another deferred producer.
+                let literal = match &operation.operands[1] {
+                    Value::Constant(id) => Some(&body.constant(*id).representation),
+                    Value::Pattern(literal) => Some(literal.as_ref()),
+                    _ => None,
+                };
+                if let Some(offset) = literal
+                    .and_then(|literal| literal.as_primitive_ty::<isize>())
+                    .and_then(|offset| i32::try_from(*offset).ok())
+                    .and_then(|offset| u32::try_from(offset).ok())
+                {
+                    self.expressions.take_value(*id);
+                    self.open_source(operation.span);
+                    let base = self.address_base(&operation.operands[0])?;
+                    self.close_source();
+                    // Valid field addresses do not wrap at runtime. Combining static offsets
+                    // can overflow here; keep an explicit addition in that case.
+                    if let Some(combined) = base.checked_add(offset) {
+                        return Ok(combined);
+                    }
+                    self.i(I::I32Const(base as i32));
+                    self.i(I::I32Add);
+                    return Ok(offset);
+                }
+            }
+        }
         self.address(value)?;
         Ok(0)
     }
@@ -2545,8 +2583,8 @@ impl<'a, 's> Body<'a, 's> {
                 self.stackified(source)?;
             }
             Some(Storage::Stack(_)) | None => {
-                self.address(value)?;
-                self.load(ty);
+                let offset = self.address_base(value)?;
+                ty.load_at(&mut self.code, offset);
             }
         }
         Ok(())
@@ -3187,7 +3225,7 @@ impl<'a, 's> Body<'a, 's> {
                 self.i(I::Call(clone.as_u32()));
                 self.i(I::I32Store(memarg_at(
                     2,
-                    offset + ENVIRONMENT_OFFSET as u32,
+                    offset_sum(offset, ENVIRONMENT_OFFSET as u32)?,
                 )));
                 return Ok(());
             }
@@ -3210,7 +3248,7 @@ impl<'a, 's> Body<'a, 's> {
                 self.i(I::Call(clone.as_u32()));
                 self.i(I::I32Store(memarg_at(
                     2,
-                    offset + ENVIRONMENT_OFFSET as u32,
+                    offset_sum(offset, ENVIRONMENT_OFFSET as u32)?,
                 )));
                 return Ok(());
             }
@@ -3324,7 +3362,7 @@ impl<'a, 's> Body<'a, 's> {
                 ));
                 self.i(I::I32Store(memarg_at(
                     2,
-                    offset + ENVIRONMENT_OFFSET as u32,
+                    offset_sum(offset, ENVIRONMENT_OFFSET as u32)?,
                 )));
                 return Ok(());
             }
@@ -3382,7 +3420,13 @@ impl<'a, 's> Body<'a, 's> {
                             elements.len() as i32
                         }));
                     }
-                    self.i(I::I32Store(memarg_at(2, base + field as u32)));
+                    self.i(I::I32Store(memarg_at(
+                        2,
+                        offset_sum(
+                            base,
+                            u32::try_from(field).map_err(|_| "memory offset overflow")?,
+                        )?,
+                    )));
                 }
             }
             BuildDictionary { definition, .. } => {

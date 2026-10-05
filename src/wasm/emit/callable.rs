@@ -42,7 +42,7 @@ use super::{
         HelperLocal::{DynamicAlign, DynamicBase, DynamicSize, Scratch},
     },
     context_pointer, dictionary_table, enter_frame, frame_address, frame_bytes, leave_frame,
-    memarg, memarg_at, operations,
+    memarg, memarg_at, offset_sum, operations,
     peephole::Instructions,
 };
 
@@ -592,7 +592,7 @@ impl Body<'_, '_> {
         self.i(I::LocalGet(scratch.as_u32()));
         self.i(I::I32Store(memarg_at(
             2,
-            offset + ENVIRONMENT_OFFSET as u32,
+            offset_sum(offset, ENVIRONMENT_OFFSET as u32)?,
         )));
         Ok(())
     }
@@ -732,7 +732,7 @@ impl Body<'_, '_> {
             self.i(I::I32Const(0));
             self.i(I::I32Store(memarg_at(
                 2,
-                offset + ENVIRONMENT_OFFSET as u32,
+                offset_sum(offset, ENVIRONMENT_OFFSET as u32)?,
             )));
             return Ok(());
         }
@@ -758,7 +758,7 @@ impl Body<'_, '_> {
         self.i(I::LocalGet(environment.as_u32()));
         self.i(I::I32Store(memarg_at(
             2,
-            offset + ENVIRONMENT_OFFSET as u32,
+            offset_sum(offset, ENVIRONMENT_OFFSET as u32)?,
         )));
         for index in 0..hidden + usize::from(has_env_dict) {
             let (offset, value) = if index == hidden {
