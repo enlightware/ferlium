@@ -16,6 +16,7 @@ use ustr::{Ustr, ustr};
 
 use crate::{
     CompilerSession, FxHashMap, FxHashSet, Location,
+    containers::DenseBitSet,
     hir::{
         native_functions::{NativeResult, NativeScalar},
         value::{LiteralValue, VariantPayloadStorage},
@@ -193,7 +194,12 @@ pub(super) struct HelperLocals([Option<WasmLocalId>; HelperLocal::ALL.len()]);
 
 impl HelperLocals {
     pub(super) fn get(self, helper: HelperLocal) -> WasmLocalId {
-        self.0[helper as usize].unwrap_or_else(|| panic!("unreserved helper local: {helper:?}"))
+        self.try_get(helper)
+            .unwrap_or_else(|| panic!("unreserved helper local: {helper:?}"))
+    }
+
+    pub(super) fn try_get(self, helper: HelperLocal) -> Option<WasmLocalId> {
+        self.0[helper as usize]
     }
 }
 
@@ -276,6 +282,8 @@ pub(super) struct Body<'a, 's> {
     stored_variants: FxHashMap<ValueId, i32>,
     layout_slot: Option<u32>,
     helpers: HelperLocals,
+    /// Error continuations needing no work before propagation.
+    immediate_propagation: DenseBitSet,
     evidence_base: Option<WasmLocalId>,
     layout_locals: Option<LayoutLocals>,
     scratch_slots: FxHashMap<Type, u32>,
@@ -405,6 +413,7 @@ impl<'a, 's> Body<'a, 's> {
             stored_variants: FxHashMap::default(),
             layout_slot: None,
             helpers: HelperLocals::default(),
+            immediate_propagation: DenseBitSet::empty(),
             evidence_base: None,
             layout_locals: None,
             scratch_slots: FxHashMap::default(),
@@ -521,7 +530,11 @@ impl<'a, 's> Body<'a, 's> {
                 }
             }
         }
+        let mut error_targets = DenseBitSet::empty();
         for block in body.blocks() {
+            if let TerminatorKind::Invoke { error, .. } = body.block(block).terminator().kind {
+                error_targets.insert(error.as_index());
+            }
             for operation in operations(body.block(block)) {
                 if is_elided_stack_operation(operation, &this.no_op_stack_markers)
                     || this.analysis.skips_metadata_load(operation)
@@ -776,6 +789,8 @@ impl<'a, 's> Body<'a, 's> {
                 output: this.local(ValType::I32),
             });
         }
+        this.immediate_propagation =
+            immediate_propagation_blocks(body, &error_targets, &this.no_op_stack_markers);
         let required = this.required_helper_locals();
         for helper in HelperLocal::ALL {
             if required[helper as usize] {
@@ -902,12 +917,13 @@ impl<'a, 's> Body<'a, 's> {
         };
         for block_id in self.body.blocks() {
             let block = self.body.block(block_id);
-            if matches!(
-                block.terminator().kind,
-                TerminatorKind::Invoke { .. }
-                    | TerminatorKind::PropagateError
-                    | TerminatorKind::FailureDuringCleanup
-            ) {
+            if match &block.terminator().kind {
+                TerminatorKind::Invoke { error, .. } => {
+                    !self.immediate_propagation.contains(error.as_index())
+                }
+                TerminatorKind::FailureDuringCleanup => true,
+                _ => false,
+            } {
                 require(&[PendingFailure]);
             }
             for (index, operation) in operations(block).enumerate() {
@@ -1667,7 +1683,10 @@ impl<'a, 's> Body<'a, 's> {
         }
     }
 
-    fn capture_failure(&mut self) {
+    fn capture_failure(&mut self, error: BlockId) {
+        if self.immediate_propagation.contains(error.as_index()) {
+            return;
+        }
         let pending = self.helper_locals().get(PendingFailure);
         self.context_pointer(offset_of!(InvocationState, diagnostics));
         self.i(I::LocalGet(pending.as_u32()));
@@ -1678,9 +1697,12 @@ impl<'a, 's> Body<'a, 's> {
     }
 
     fn propagate_failure(&mut self) {
-        let pending = self.helper_locals().get(PendingFailure);
         self.context_pointer(offset_of!(InvocationState, diagnostics));
-        self.i(I::LocalGet(pending.as_u32()));
+        if let Some(pending) = self.helpers.try_get(PendingFailure) {
+            self.i(I::LocalGet(pending.as_u32()));
+        } else {
+            self.i(I::I32Const(0));
+        }
         self.i(I::Call(
             self.imports.function_index("propagate_failure").as_u32(),
         ));
@@ -2996,19 +3018,19 @@ impl<'a, 's> Body<'a, 's> {
                 self.call_operation(operation, true, source)?;
                 if normal == error {
                     self.i(I::If(BlockType::Empty));
-                    self.capture_failure();
+                    self.capture_failure(*error);
                     self.i(I::End);
                 } else if untested == Some(*normal) {
                     self.i(I::If(BlockType::Empty));
                     self.labels.push(Label::If);
-                    self.capture_failure();
+                    self.capture_failure(*error);
                     self.enter(*error, nested)?;
                     self.labels.pop();
                     self.i(I::End);
                 } else {
                     self.i(I::I32Eqz);
                     self.enter_if(*normal, nested)?;
-                    self.capture_failure();
+                    self.capture_failure(*error);
                 }
                 self.close_source();
             }
@@ -3308,23 +3330,23 @@ impl<'a, 's> Body<'a, 's> {
                 self.call_operation(operation, true, source)?;
                 if normal == error {
                     self.i(I::If(BlockType::Empty));
-                    self.capture_failure();
+                    self.capture_failure(*error);
                     self.i(I::End);
                     self.dispatch_branch(*normal, depth, next, 0);
                 } else if Some(*normal) == next {
                     self.i(I::If(BlockType::Empty));
-                    self.capture_failure();
+                    self.capture_failure(*error);
                     self.dispatch_branch(*error, depth, None, 1);
                     self.i(I::End);
                 } else if Some(*error) == next {
                     self.i(I::If(BlockType::Empty));
-                    self.capture_failure();
+                    self.capture_failure(*error);
                     self.i(I::Else);
                     self.dispatch_branch(*normal, depth, None, 1);
                     self.i(I::End);
                 } else {
                     self.i(I::If(BlockType::Result(ValType::I32)));
-                    self.capture_failure();
+                    self.capture_failure(*error);
                     self.i(I::I32Const(error.as_u32() as i32));
                     self.i(I::Else);
                     self.i(I::I32Const(normal.as_u32() as i32));
@@ -4077,6 +4099,55 @@ impl<'a, 's> Body<'a, 's> {
         };
         self.emit_comparison_predicate(intrinsic, call, mask)
     }
+}
+
+/// Follow only Clear and elided stack markers through Gotos to PropagateError. Even an operation
+/// that only traps requires retention: `Failures::finish` cannot recover the native failure cell.
+/// Start only at Invoke error targets collected during storage planning. Each visited block is
+/// decided once; a tentative false decision terminates cycles without an exit.
+fn immediate_propagation_blocks(
+    body: &Function,
+    error_targets: &DenseBitSet,
+    no_op_stack_markers: &FxHashSet<ValueId>,
+) -> DenseBitSet {
+    if error_targets.is_empty() {
+        return DenseBitSet::empty();
+    }
+    let mut result = DenseBitSet::with_capacity(body.blocks().count());
+    let mut decided = DenseBitSet::with_capacity(body.blocks().count());
+    let mut path = Vec::new();
+    for start in error_targets.iter_ones() {
+        let mut id = BlockId::from_index(start);
+        let immediate = loop {
+            if decided.contains(id.as_index()) {
+                break result.contains(id.as_index());
+            }
+            decided.insert(id.as_index());
+            path.push(id);
+            let block = body.block(id);
+            let next = match block.terminator().kind {
+                TerminatorKind::PropagateError => None,
+                TerminatorKind::Goto { target } => Some(target),
+                _ => break false,
+            };
+            if !block.operations().iter().all(|operation| {
+                matches!(operation.kind, OperationKind::Clear)
+                    || is_elided_stack_operation(operation, no_op_stack_markers)
+            }) {
+                break false;
+            }
+            match next {
+                None => break true,
+                Some(target) => id = target,
+            }
+        };
+        for id in path.drain(..) {
+            if immediate {
+                result.insert(id.as_index());
+            }
+        }
+    }
+    result
 }
 
 /// Which constants are only ever the value a `store` writes.

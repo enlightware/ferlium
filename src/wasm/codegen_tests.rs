@@ -22,13 +22,13 @@ use crate::{
         },
     },
     mir::{
-        BlockId, Operation, OperationKind, ParameterId, Value as MirValue,
+        BasicBlock, BlockId, Operation, OperationKind, ParameterId, Value as MirValue,
         pass::stack_region::no_op_stack_markers,
         physical::{
-            lower_physical_mir, lower_unoptimized_physical_mir,
+            lower_physical_mir, lower_unoptimized_physical_mir, prepare_physical_mir,
             program::{ResolvedPhysicalProgram, resolve_physical_program},
         },
-        terminator::TerminatorKind,
+        terminator::{Terminator, TerminatorKind},
     },
     module::{FunctionId, LocalFunctionId, Module, Path, ProjectionIndex, Visibility, id::Id},
     std::{
@@ -3587,7 +3587,55 @@ fn wasm_codegen_optional_native_results() {
 }
 
 #[wasm_bindgen_test]
-fn wasm_codegen_cleanup_failures() {
+fn wasm_codegen_immediate_failure_propagation() {
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        for source in [
+            "fn compute(a: int, b: int) -> int { rem(a, b) }",
+            "fn remainder(a: int, b: int) -> int { rem(a, b) } fn compute(a: int, b: int) -> int { remainder(a, b) }",
+        ] {
+            let mut session = CompilerSession::new();
+            session.set_mir_optimization(optimization);
+            session.set_physical_mir_optimization(optimization);
+            let entry = compile(&mut session, source);
+            let code = CompiledProgram::compile(&session, entry).unwrap();
+            let capture = Parser::new(0)
+                .parse_all(code.bytes())
+                .find_map(|payload| {
+                    let Payload::ImportSection(imports) = payload.unwrap() else {
+                        return None;
+                    };
+                    imports
+                        .into_imports()
+                        .map(Result::unwrap)
+                        .filter(|import| {
+                            matches!(import.ty, TypeRef::Func(_) | TypeRef::FuncExact(_))
+                        })
+                        .position(|import| import.name == "capture_failure")
+                })
+                .unwrap() as u32;
+            assert_eq!(
+                wasm_operator_count(code.bytes(), |op| {
+                    matches!(op, Operator::Call { function_index } if *function_index == capture)
+                }),
+                0,
+                "immediate propagation must not retain a diagnostic: {source}"
+            );
+            let mut instance = code.instantiate::<(isize, isize), isize>().unwrap();
+            assert_eq!(instance.run((7, 3), WasmLimits::default()).unwrap(), 1);
+            assert_eq!(
+                instance
+                    .run((7, 0), WasmLimits::default())
+                    .unwrap_err()
+                    .kind(),
+                RuntimeErrorKind::SourceFailure(SourceFailureKind::RemainderByZero)
+            );
+            assert_eq!(instance.run((8, 3), WasmLimits::default()).unwrap(), 2);
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_cleanup_failures_and_immediate_propagation() {
     // Backend invariant: source cleanup runs, but poisoning never executes the outer destructor.
     for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
         let mut session = CompilerSession::new();
@@ -3622,18 +3670,69 @@ fn wasm_codegen_cleanup_failures() {
                 }
             }
             fn compute(x: int) -> int {
-                let outer = Probe(9);
-                let inner = Probe(x);
-                idiv(20, if x <= 3 { 0 } else { x })
+                // This error needs no cleanup, despite other paths needing a pending handle.
+                if x < 0 { idiv(20, x + 1) } else {
+                    let outer = Probe(9);
+                    let inner = Probe(x);
+                    idiv(20, if x <= 3 { 0 } else { x })
+                }
             }
         "#,
         );
-        let mut instance = CompiledProgram::compile(&session, entry)
-            .unwrap()
-            .instantiate::<(isize,), isize>()
+        let prepared = session.prepare_physical_program(entry.module).unwrap();
+        let module = prepared
+            .modules()
+            .iter()
+            .find(|module| module.module() == entry.module)
             .unwrap();
+        let mut entries = (0..module.entry_count())
+            .map(|index| module.get(LocalFunctionId::from_index(index)).cloned())
+            .collect::<Vec<_>>();
+        let body = entries[entry.function.as_index()].take().unwrap();
+        let (name, convention, parameters, constants, mut blocks) = body.into_parts();
+        let shared = BlockId::from_index(blocks.len());
+        // Join the propagation exits explicitly, preserving all preceding cleanup and stack work.
+        // This fixes the fixture's shape independently of the optimizer's block-merging policy.
+        blocks = blocks
+            .into_iter()
+            .map(|block| {
+                if matches!(block.terminator().kind, TerminatorKind::PropagateError) {
+                    BasicBlock::new(
+                        block.operations().to_vec(),
+                        Terminator::goto(block.terminator().span, shared),
+                    )
+                } else {
+                    block
+                }
+            })
+            .collect();
+        blocks.push(BasicBlock::new(
+            Vec::new(),
+            Terminator::propagate_error(Location::new_synthesized()),
+        ));
+        entries[entry.function.as_index()] = Some(crate::mir::Function::new(
+            name, convention, parameters, constants, blocks,
+        ));
+        let semantic = session
+            .mir_artifacts_for(entry.module, optimization)
+            .unwrap();
+        let env = session
+            .modules()
+            .env_for(session.expect_fresh_module(entry.module));
+        let module =
+            prepare_physical_mir(entries, module.direct_entries().clone(), semantic, env).unwrap();
+        let program = resolve_physical_program(prepared.modules().iter().map(|original| {
+            if original.module() == entry.module {
+                &module
+            } else {
+                *original
+            }
+        }))
+        .unwrap();
+        let code = CompiledProgram::from_physical(&session, &program, entry).unwrap();
+        let mut instance = code.instantiate::<(isize,), isize>().unwrap();
         let limits = ReferenceInterpreterLimits::default().with_fuel_limit(Some(100));
-        for (input, log) in [(4, 49), (3, 39), (2, 2), (4, 49)] {
+        for (input, log) in [(-1, 0), (4, 49), (3, 39), (2, 2), (-1, 0), (4, 49)] {
             DROP_LOG.set(0);
             let actual = instance.run(
                 (input,),
@@ -3644,7 +3743,7 @@ fn wasm_codegen_cleanup_failures() {
             );
             match input {
                 4 => assert_eq!(actual.unwrap(), 5),
-                3 => assert_eq!(
+                -1 | 3 => assert_eq!(
                     actual.unwrap_err().kind(),
                     RuntimeErrorKind::SourceFailure(SourceFailureKind::DivisionByZero)
                 ),
