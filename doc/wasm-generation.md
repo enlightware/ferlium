@@ -34,11 +34,11 @@ their effects and ownership work. The shared MIR keeps the logical index.
 
 ## Keep single-use addresses on the stack
 
-Expression planning defers single-use addresses to memory operations and tag reads when ordering
-permits and the consumer evaluates each address once. Materialized pointers used elsewhere retain
-ordinary scalar planning. Literal aggregate initialization, selected method stores, aggregate
-comparisons and witnessed moves retain address locals because they can reread an address or call
-out before consuming it.
+Expression planning defers single-use addresses to memory operations, tag reads and plain scalar
+intrinsic results when ordering permits and the consumer evaluates each address once. Materialized
+pointers used elsewhere retain ordinary scalar planning. Literal aggregate initialization, selected
+method stores, aggregate comparisons and witnessed moves retain address locals because they can
+reread an address or call out before consuming it.
 
 ## Keep terminal scalar results on the stack
 

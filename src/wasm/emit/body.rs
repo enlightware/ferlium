@@ -2094,6 +2094,9 @@ impl<'a, 's> Body<'a, 's> {
 
     /// Emits a known callee inline. `checked` says that a `raw_float_to_float` operand is known
     /// to be finite, which makes the conversion the identity.
+    ///
+    /// Plain calls prepare their result address once before reading inputs or performing effects;
+    /// expression planning relies on this order when deferring destination addresses.
     fn call_intrinsic(
         &mut self,
         intrinsic: KnownCallee,
@@ -2421,6 +2424,8 @@ impl<'a, 's> Body<'a, 's> {
     }
 
     /// Return the usual fallible-call status; initialize the output only on success.
+    /// Plain calls must prepare their result address once before reading inputs or performing
+    /// effects, like other scalar intrinsics. Invokes prepare it only on the success path.
     fn call_division(
         &mut self,
         intrinsic: KnownCallee,

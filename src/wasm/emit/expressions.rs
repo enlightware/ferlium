@@ -367,9 +367,7 @@ impl Plan {
                         )
             });
             let address_consumer = if address_result {
-                consumer.operation(body).and_then(|operation| {
-                    stackifiable_address_consumer(operation, body, roles, &inputs.definitions, env)
-                })
+                stackifiable_address_consumer(consumer, &value, body, roles, inputs, layout, env)
             } else {
                 None
             };
@@ -1446,12 +1444,15 @@ fn stackifiable_operation(operation: &Operation) -> bool {
 /// and aggregate comparison may reread an address. Evidence loads and witnessed moves can call out
 /// before reading their operands, so retain their producers at the original position.
 fn stackifiable_address_consumer(
-    operation: &Operation,
+    consumer: Source,
+    value: &Value,
     body: &Function,
     roles: &ValueRoles,
-    definitions: &[Option<Source>],
+    inputs: &Inputs,
+    layout: &OperationLayout,
     env: ModuleEnv<'_>,
 ) -> Option<bool> {
+    let operation = consumer.operation(body)?;
     // Selected methods allocate and retain their evidence before reading the destination,
     // then read it twice. Trace the same DictEntry/Load chain as callable::selections.
     if matches!(
@@ -1463,7 +1464,8 @@ fn stackifiable_address_consumer(
     ) {
         let mut source = &operation.operands[0];
         while let Value::Register(id) = source {
-            let Some(producer) = definitions[id.as_index()].and_then(|site| site.operation(body))
+            let Some(producer) =
+                inputs.definitions[id.as_index()].and_then(|site| site.operation(body))
             else {
                 break;
             };
@@ -1481,6 +1483,18 @@ fn stackifiable_address_consumer(
             .is_some_and(|ty| scalar(&ty, &env).is_ok())
     };
     Some(match operation.kind {
+        // Plain scalar intrinsics prepare their result address once before reading inputs
+        // or performing effects. Invokes may prepare it only on success; other call operands
+        // retain ordinary scalar planning.
+        OperationKind::Call { ref ty, .. }
+            if consumer.operation_id().as_index()
+                < body.block(consumer.block).operations().len()
+                && inputs.intrinsic(layout, consumer).is_some()
+                && ty.result_convention.has_result_place()
+                && operation.operands.last() == Some(value) =>
+        {
+            true
+        }
         OperationKind::Load => operation.result_id().is_some_and(|id| {
             roles
                 .get(&Value::Register(id), body.constants())
@@ -1675,7 +1689,7 @@ mod tests {
         hir::{function::ArgConvention, value::LiteralValue},
         mir::{builder::FunctionBuilder, terminator::Terminator},
         module::Path,
-        std::{buffer::buffer_type, logic::bool_type, math::int_type},
+        std::{STD_MODULE_ID, buffer::buffer_type, logic::bool_type, math::int_type},
         types::{
             r#trait::TraitDictionaryEntryIndex,
             r#type::{CallImplType, CallResultConvention, Type},
@@ -2081,6 +2095,111 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn wasm_codegen_intrinsic_destinations_require_plain_single_address_consumption() {
+        let mut session = CompilerSession::new();
+        let module = session
+            .compile(
+                "#[inline(never)] fn opaque(a: int, b: int) -> int { a + b }",
+                "intrinsic_destination",
+                Path::single_str("intrinsic_destination"),
+            )
+            .unwrap()
+            .module_id;
+        let program = session.prepare_physical_program(module).unwrap();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        for (native, invoked, result) in [
+            (true, false, true),
+            (true, true, true),
+            (false, false, true),
+            (true, false, false),
+        ] {
+            let target_module = if native { STD_MODULE_ID } else { module };
+            let target = session.expect_fresh_module(target_module);
+            let name = match (native, invoked) {
+                (true, false) => "rem_nonzero",
+                (true, true) => "rem",
+                (false, _) => "opaque",
+            };
+            let local = target.get_local_function_id(ustr(name)).unwrap();
+            let definition = &target.get_function_by_id(local).unwrap().definition;
+            let ty =
+                CallImplType::new(definition.ty_scheme.ty.clone(), CallResultConvention::Value);
+            let callee = FunctionId::new(target_module, local);
+            let mut builder =
+                FunctionBuilder::new("field_result".into(), CallResultConvention::NoValue);
+            let base = Value::Parameter(builder.add_parameter(
+                Type::tuple([int_type(), int_type()]),
+                ParameterKind::Parameter(ArgConvention::MutableRef),
+            ));
+            let block = builder.add_block();
+            let inputs = [5_isize, 3_isize].map(|value| {
+                let literal = Value::Constant(builder.add_constant(
+                    int_type(),
+                    LiteralValue::new_native(value),
+                    &env,
+                ));
+                let place = builder
+                    .append_operation(block, Operation::alloca(span, int_type()))
+                    .unwrap();
+                builder.append_operation(block, Operation::store(span, literal, place.clone()));
+                place
+            });
+            let offset = Value::Constant(builder.add_constant(
+                int_type(),
+                LiteralValue::new_native(4_isize),
+                &env,
+            ));
+            let address = builder
+                .append_operation(
+                    block,
+                    Operation::address_offset(span, base, offset, int_type(), None),
+                )
+                .unwrap();
+            let operation = Operation::call(
+                span,
+                Value::Function(callee),
+                if result {
+                    [inputs[0].clone(), inputs[1].clone(), address.clone()]
+                } else {
+                    [address.clone(), inputs[1].clone(), inputs[0].clone()]
+                },
+                ty,
+            );
+            if invoked {
+                let normal = builder.add_block();
+                let error = builder.add_block();
+                builder.set_terminator(block, Terminator::invoke(span, operation, normal, error));
+                builder.set_terminator(normal, Terminator::ret(span));
+                builder.set_terminator(error, Terminator::propagate_error(span));
+            } else {
+                builder.append_operation(block, operation);
+                builder.set_terminator(block, Terminator::ret(span));
+            }
+            let body = builder.finish_physical(env);
+            let roles = ValueRoles::derive(&body);
+            let (_, plan) = Analysis::of(
+                &body,
+                &roles,
+                &FxHashMap::default(),
+                &program,
+                &session,
+                env,
+                false,
+                &FxHashSet::default(),
+            );
+            let Value::Register(id) = address else {
+                unreachable!()
+            };
+            assert_eq!(
+                plan.has_value(id),
+                native && !invoked && result,
+                "native={native}, invoked={invoked}, result={result}"
+            );
         }
     }
 

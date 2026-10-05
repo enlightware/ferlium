@@ -4363,6 +4363,75 @@ fn wasm_codegen_stackifies_scalar_tuple_field_stores() {
 }
 
 #[wasm_bindgen_test]
+fn wasm_codegen_intrinsic_field_results_use_memory_offsets() {
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(optimization);
+        session.set_physical_mir_optimization(optimization);
+        for (expression, expected) in [("n + 2", 7), ("idiv(n, -1)", -5), ("rem(n, 3)", 2)] {
+            let entry = compile(
+                &mut session,
+                &format!(
+                    "fn compute(n: int) -> int {{ let p = black_box((n, {expression})); p.1 }}"
+                ),
+            );
+            let program = session.prepare_physical_program(entry.module).unwrap();
+            let mut imports = Imports::new().unwrap();
+            let code = emit::emit(
+                &program,
+                &[entry],
+                &[(entry, ENTRY_EXPORT.into())],
+                &mut imports,
+                &session,
+            )
+            .unwrap();
+            let functions = WasmFunctions::new(&code.bytes);
+            let (_, index) = functions
+                .names
+                .iter()
+                .find(|(name, _)| name.ends_with("::compute"))
+                .unwrap();
+            let (body, _) = functions.body(*index);
+            let operators = body
+                .get_operators_reader()
+                .unwrap()
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            let offsets: Vec<_> = operators
+                .iter()
+                .filter_map(|op| match op {
+                    Operator::I32Store { memarg } => Some(memarg.offset),
+                    _ => None,
+                })
+                .collect();
+            // The tuple fields are four bytes apart, independently of the frame slot's base.
+            assert_eq!(offsets.len(), 2, "{optimization:?}, {expression}");
+            assert_eq!(
+                offsets[1],
+                offsets[0] + 4,
+                "intrinsic field result needs a store offset: {optimization:?}, {expression}"
+            );
+            assert!(
+                !operators.windows(2).any(|ops| matches!(
+                    ops,
+                    [
+                        Operator::I32Add,
+                        Operator::LocalSet { .. } | Operator::LocalTee { .. }
+                    ]
+                )),
+                "field addresses need no temporary local: {optimization:?}, {expression}"
+            );
+            let mut instance = CompiledProgram::compile(&session, entry)
+                .unwrap()
+                .instantiate::<(isize,), isize>()
+                .unwrap();
+            assert_eq!(instance.run((5,), WasmLimits::default()).unwrap(), expected);
+        }
+    }
+}
+
+#[wasm_bindgen_test]
 fn wasm_codegen_stackifies_across_elided_stack_markers() {
     let mut session = CompilerSession::new();
     let entry = compile(
