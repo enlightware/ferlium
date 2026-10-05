@@ -405,6 +405,8 @@ fn ferlium_function_inputs_follow_interpreter_calling_convention() {
 fn mutable_let_initialization_uses_value_clone() {
     let mut session = TestSession::new();
     session.allow_unsafe();
+    // This dispatch probe deliberately violates clone's value-preservation contract.
+    session.without_optimized_mode();
     assert_val_eq!(
         session.run(
             r#"

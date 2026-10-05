@@ -1838,6 +1838,8 @@ fn cross_frame_drops_run_callee_first_on_runtime_error() {
 fn auto_derived_struct_value_clone_uses_field_clone() {
     let mut session = TestSession::new();
     session.allow_unsafe();
+    // This dispatch probe deliberately violates clone's value-preservation contract.
+    session.without_optimized_mode();
     assert_val_eq!(
         session.run(
             r#"
@@ -1958,6 +1960,8 @@ fn auto_derived_nested_value_drop_uses_member_drop() {
 fn explicit_concrete_value_impl_suppresses_auto_blanket_impl() {
     let mut session = TestSession::new();
     session.allow_unsafe();
+    // This dispatch probe deliberately violates clone's value-preservation contract.
+    session.without_optimized_mode();
     assert_val_eq!(
         session.run(
             r#"
@@ -3817,4 +3821,45 @@ fn value_ne_default_uses_custom_eq_and_override_takes_precedence() {
         );
         assert_val_eq!(session.run(&source), bool_value(override_ne.is_empty()));
     }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn read_only_clone_lifetimes_preserve_readers_and_failure_cleanup() {
+    let mut session = TestSession::new();
+    let source = r#"
+        fn inspect(value: (string, int), divisor: int, calls: &mut int) -> int {
+            let mut copy = value;
+            calls += 1;
+            idiv(len(copy.0) + copy.1, divisor)
+        }
+    "#;
+    assert_val_eq!(
+        session.run(&format!(
+            r#"{source}
+        let mut original = ("abc", 5);
+        let mut calls = 0;
+        let result = inspect(original, 2, calls);
+        original.1 = 9;
+        result * 100 + calls * 10 + original.1
+    "#
+        )),
+        int(419)
+    );
+    assert_eq!(
+        session.fail_run(&format!(
+            r#"{source}
+        let mut calls = 0; inspect(("abc", 5), 0, calls)
+    "#
+        )),
+        SourceFailureKind::DivisionByZero
+    );
+    assert_val_eq!(
+        session.run(&format!(
+            r#"{source}
+        let mut calls = 0; inspect(("abc", 5), 2, calls)
+    "#
+        )),
+        int(4)
+    );
 }

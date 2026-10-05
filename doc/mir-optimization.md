@@ -53,6 +53,7 @@ LICM              // hoist invariant pure direct calls with passive inputs and c
 discarded results // remove unread TrivialCopy result places exposed by inlining
 dead proven calls // remove unused chains of known-total numeric or proved-returning script calls
 dead stores       // remove unread initialization overwritten on every following path
+clone borrowing   // redirect read-only clone lifetimes to a source that outlives them
 dce               // on every body, not only a changed one
 stack markers     // drop a mark duplicating one already held, and restores that pop nothing
 dead snapshots    // collect stack saves whose last restore disappeared
@@ -123,6 +124,14 @@ subset separately. A semantic clone whose destination is never observed is remov
 the drops ending that cloned lifetime. This includes a complete dead local lifetime across cleanup
 edges and an exact same-block clone/drop pair before the cell is reused. The latter rejects any
 read, projection, call argument or other alias-producing use of the local root.
+
+Read-only clones have a separate lifetime proof: readers borrow the source while its value and
+storage remain valid, and the clone's cleanup drops disappear together. The proof follows both
+normal and failure paths to cleanup, using immutable, non-escaping argument contracts and storage
+roots rather than recognizing particular callees. For example, a local string copy used only by
+`len` can read the original instead. Unresolved aliases, consuming uses, storage reclamation and
+cycles inside the borrowed lifetime retain the copy. This runs after the semantic rounds settle,
+before DCE removes the unused destination storage.
 
 A source-fallible call is an `invoke` terminator, so its result place is deliberately outside this
 first pass; the error edge and cleanup would need their own proof. DS has its own strict operand-role

@@ -946,10 +946,11 @@ mod tests {
     #[test]
     fn map_pipeline_moves_last_use_array_and_mapper_after_thunk_inlining() {
         // A fully constant array pipeline now folds to `build_array` before this pass. Make the
-        // array depend on a parameter while still creating an owned local copy, so this test keeps
+        // array depend on a parameter while constructing a fresh owned local, so this test keeps
         // exercising transfer of both the array and mapper rather than resource reification.
-        let module =
-            optimized("fn apply(xs: [int]) -> [int] { let mut ys = xs; ys |> map(|x| x*x) }");
+        let module = optimized(
+            "fn apply(xs: [int]) -> [int] { let mut ys = [len(xs)]; ys |> map(|x| x*x) }",
+        );
         let entry = body_of(&module, "apply");
         assert!(
             entry.contains("#owned:[0,1]")
@@ -960,6 +961,21 @@ mod tests {
         assert!(
             !entry.contains("drop (int) -> int %r1") && !entry.contains("drop [int] %r0"),
             "the transferred arguments must not retain drops after the call:\n{entry}"
+        );
+    }
+
+    #[test]
+    fn read_only_array_clone_keeps_the_input_borrowed_and_transfers_the_mapper() {
+        let module =
+            optimized("fn apply(xs: [int]) -> [int] { let mut ys = xs; ys |> map(|x| x*x) }");
+        let entry = body_of(&module, "apply");
+        assert!(
+            !entry.contains("clone [int]") && !entry.contains("move %p0"),
+            "the read-only input must remain borrowed:\n{entry}"
+        );
+        assert!(
+            entry.contains("#owned:[1]") && !entry.contains("#owned:[0,1]"),
+            "only the mapper may transfer ownership:\n{entry}"
         );
     }
 
