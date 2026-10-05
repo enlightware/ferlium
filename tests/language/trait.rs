@@ -1639,7 +1639,13 @@ fn recursion_through_ownership_operations_is_bounded() {
     let mut session = TestSession::new();
     session.allow_unsafe();
     for (clone, drop, entry) in [
-        ("copy(x)", "()", "copy(Probe(1))"),
+        // Keep the source alive and mutate the copy so ownership optimization cannot replace
+        // the deliberately recursive clone with a move or a read-only borrow.
+        (
+            "copy(x)",
+            "()",
+            "let source = Probe(1); let mut duplicate = copy(source); duplicate.0 += 1; source.0 + duplicate.0",
+        ),
         ("Probe(x.0)", "make_temporary()", "make_temporary()"),
     ] {
         let source = format!(

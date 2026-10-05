@@ -596,20 +596,24 @@ fn lexical_drop_runs_on_outer_loop_continue() {
 fn closure_drop_drops_captured_values() {
     let mut session = TestSession::new();
     session.allow_unsafe();
+    // Mutating the original and observing the closure requires independent capture storage.
     let source = format!(
         r#"
         {}
         testing::reset_tracked_drops();
-        {{
-            let captured = Probe(7);
+        let observed = {{
+            let mut captured = Probe(7);
             let f = || captured.0;
-            ();
+            captured.0 = 8;
+            f()
         }};
-        testing::tracked_drop_log()
+        observed * 100 + testing::tracked_drop_log()
         "#,
         tracked_probe_value_impl()
     );
-    assert_val_eq!(session.run(&source), int(77));
+    // Calling the closure drops its temporary capture copy (7), then scope exit drops the
+    // closure's capture (7) and the mutated original (8): observed 7 * 100 + drop log 778.
+    assert_val_eq!(session.run(&source), int(1478));
 }
 
 #[test]
@@ -3865,6 +3869,52 @@ fn read_only_clone_lifetimes_preserve_readers_and_failure_cleanup() {
     "#
         )),
         int(4)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn owned_locals_in_returned_fields_preserve_values_and_failure_cleanup() {
+    let mut session = TestSession::new();
+    let source = r#"
+        struct Result { values: [string], count: int }
+        #[inline(never)]
+        fn build(n: int, divisor: int) -> (Result, string) {
+            let mut values = [to_string(n)];
+            let count = idiv(12, divisor);
+            let text = to_string(n + 1);
+            (Result { values, count }, text)
+        }
+        fn inspect(n: int, divisor: int) -> string {
+            let mut result = build(n, divisor);
+            result.0.values[0] = "changed";
+            string_concat(string_concat(result.0.values[0], to_string(result.0.count)), result.1)
+        }
+    "#;
+    assert_val_eq!(
+        session.run(&format!("{source} inspect(7, 3)")),
+        string("changed48")
+    );
+    assert_eq!(
+        session.fail_run(&format!("{source} inspect(7, 0)")),
+        SourceFailureKind::DivisionByZero
+    );
+    assert_val_eq!(
+        session.run(&format!("{source} inspect(8, 2)")),
+        string("changed69")
+    );
+    assert_val_eq!(
+        session.run(
+            r#"
+            #[inline(never)] fn pair(n: int) -> ([string], [string]) {
+                let mut values = [to_string(n)]; (values, values)
+            }
+            let mut result = pair(7);
+            result.0[0] = "changed";
+            result.1[0]
+        "#
+        ),
+        string("7")
     );
 }
 

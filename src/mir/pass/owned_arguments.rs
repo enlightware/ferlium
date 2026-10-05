@@ -1,7 +1,7 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-//! Forwarding a caller's last ownership into a callee.
+//! Forwarding last ownership into another place or a callee.
 //!
 //! Source-level `let` parameters borrow: a callee that retains an argument clones it, and the
 //! caller later drops its own value. Once MIR proves that drop is the caller's last use, the
@@ -11,6 +11,12 @@
 //! another such variant. This is deliberately after ordinary optimization and specialization: the
 //! concrete clone and the forwarding thunk are visible then, and no earlier pass needs to reason
 //! about the narrowed ABI.
+//!
+//! The local form moves a private local into its final clone destination, including a returned
+//! aggregate field. It shares the terminal-cleanup proof and rewrite with forwarding into owned
+//! calls, and the alias/access proof with read-only clone borrowing. Earlier failure cleanup is
+//! retained. Plain moves require statically sized source values, as for owned-ABI variants.
+//! Uses and escapes are indexed once; each candidate scans only its return-block suffix.
 
 use std::iter::once;
 
@@ -18,14 +24,21 @@ use itertools::Itertools;
 use rustc_hash::{FxHashMap, FxHashSet};
 use ustr::ustr;
 
-use super::{budget, dce, site::OperationIndex, stack_region};
+use super::{
+    budget, clone_borrow,
+    dataflow::Root,
+    dce,
+    provenance::{AddressorSummary, PlaceOrigins},
+    site::OperationIndex,
+    stack_region,
+};
 use crate::{
     compiler::Specialization,
     containers::{DenseBitSet, b},
     hir::function::ArgConvention,
     mir::{
         self, BlockId, CallMetadata, Function, Operation, OperationKind, ParameterId,
-        ParameterKind, ValueId, edit::FunctionEdit, terminator::TerminatorKind,
+        ParameterKind, ValueId, edit::FunctionEdit, role::ValueRoles, terminator::TerminatorKind,
     },
     module::{FunctionId, LocalFunctionId, ModuleEnv, ModuleId, id::Id, unique_generated_name},
     std::value::type_has_static_layout,
@@ -195,6 +208,174 @@ pub(crate) fn forward_owned_arguments(
     }
 }
 
+/// Transfer a private local's last ownership into its clone destination, including a
+/// returned aggregate field. The existing clone establishes destination initialization; only
+/// the source lifetime changes. Earlier failure paths keep their cleanup unchanged.
+///
+/// This form requires a clone and its sole subsequent source drop in a return block.
+/// Consequently the removed drop cannot be reached without executing the clone, even when
+/// earlier error exits bypass that block. No exit-dominance requirement is needed.
+pub(crate) fn forward_terminal_clones(
+    source: &Function,
+    env: ModuleEnv<'_>,
+    summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
+) -> Option<Function> {
+    let candidates = terminal_clone_candidates(source);
+    if candidates.is_empty() {
+        return None;
+    }
+    let candidate_roots: FxHashSet<_> = candidates.iter().map(|(_, root)| *root).collect();
+    let provenance = PlaceOrigins::of(source, summary_of);
+    let roles = ValueRoles::derive(source);
+    // Reuse the terminal-cleanup proof with the shared provenance, including addressor referents.
+    let mut origins = FxHashMap::default();
+    for (_, operation) in all_operations(source) {
+        for operand in operation.operands.iter() {
+            if let mir::Value::Register(id) = operand
+                && let Some(origin) = provenance.origin_of(operand)
+                && let Root::Alloca(root) = origin.root
+                && candidate_roots.contains(&root)
+            {
+                origins.insert(*id, root);
+            }
+        }
+    }
+    let mut escaped = FxHashSet::default();
+    for (_, operation) in all_operations(source) {
+        for (position, operand) in operation.operands.iter().enumerate() {
+            if let Some(origin) = provenance.origin_of(operand)
+                && let Root::Alloca(root) = origin.root
+                && candidate_roots.contains(&root)
+                && !matches!(operation.kind, OperationKind::Move)
+                && clone_borrow::access(
+                    operation,
+                    position,
+                    &roles,
+                    source,
+                    &provenance,
+                    summary_of,
+                ) == clone_borrow::Access::Escape
+            {
+                escaped.insert(root);
+            }
+        }
+    }
+    for block in source.blocks() {
+        let terminator = source.block(block).terminator();
+        if !matches!(terminator.kind, TerminatorKind::Invoke { .. }) {
+            for operand in terminator.operands() {
+                if let Some(origin) = provenance.origin_of(operand)
+                    && let Root::Alloca(root) = origin.root
+                    && candidate_roots.contains(&root)
+                {
+                    escaped.insert(root);
+                }
+            }
+        }
+    }
+    let mut rewrites = Vec::new();
+    let mut removed = FxHashSet::default();
+    for (site, root) in candidates {
+        let Site::Operation { block, index } = site else {
+            unreachable!()
+        };
+        let basic = source.block(block);
+        let operation = &basic.operations()[index.as_index()];
+        let OperationKind::Clone { ty } = operation.kind else {
+            unreachable!()
+        };
+        // Plain moves need a static layout, as do owned-ABI variants below. Retained generic
+        // values require a live layout witness; preserving that witness is a separate proof.
+        if !type_has_static_layout(ty, operation.span.location, &env) {
+            continue;
+        }
+        let operand = &operation.operands[0];
+        if provenance.origin_of(operand).map(|origin| origin.root) != Some(Root::Alloca(root)) {
+            continue;
+        }
+        let Some(destination) = provenance.origin_of(&operation.operands[1]) else {
+            continue;
+        };
+        if destination.root == Root::Alloca(root) {
+            continue;
+        }
+        // Unknown aliases and scoped accessors must not leave a hidden later reader.
+        if escaped.contains(&root)
+            || basic.operations()[index.as_index() + 1..]
+                .iter()
+                .any(|operation| matches!(operation.kind, OperationKind::StackRestore))
+        {
+            continue;
+        }
+        let Some(index) = sole_drop_in_operations(
+            basic.operations(),
+            index.as_index() + 1,
+            operand,
+            root,
+            &origins,
+        ) else {
+            continue;
+        };
+        let drop = Site::Operation { block, index };
+        if !removed.insert(drop) {
+            continue;
+        }
+        rewrites.push((
+            site,
+            operand.clone(),
+            operation.operands[1].clone(),
+            vec![drop],
+        ));
+    }
+    rewrite_clones_as_moves(source, rewrites)
+}
+
+/// Syntactic admission only: a whole alloca source must have a later matching drop in the
+/// same return block. Reverse scanning indexes later drops without walking a suffix per clone.
+/// Bodies without such a candidate never pay for provenance, roles or escape classification.
+fn terminal_clone_candidates(source: &Function) -> Vec<(Site, ValueId)> {
+    let mut candidates = Vec::new();
+    for block in source.blocks() {
+        let basic = source.block(block);
+        if !matches!(basic.terminator().kind, TerminatorKind::Return) {
+            continue;
+        }
+        let mut dropped = FxHashSet::default();
+        for (index, operation) in basic.operations().iter().enumerate().rev() {
+            match operation.kind {
+                OperationKind::Drop { .. } => {
+                    if let mir::Value::Register(root) = operation.operands[0] {
+                        dropped.insert(root);
+                    }
+                }
+                OperationKind::Clone { .. } => {
+                    if let mir::Value::Register(root) = operation.operands[0]
+                        && dropped.contains(&root)
+                    {
+                        candidates.push((
+                            Site::Operation {
+                                block,
+                                index: OperationIndex::from_index(index),
+                            },
+                            root,
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if candidates.is_empty() {
+        return candidates;
+    }
+    let allocas: FxHashSet<_> = all_operations(source)
+        .filter(|(_, operation)| matches!(operation.kind, OperationKind::Alloca { .. }))
+        .map(|(_, operation)| operation.result_id().unwrap())
+        .collect();
+    candidates.retain(|(_, root)| allocas.contains(root));
+    candidates
+}
+
 /// Replace a clone with a move when its destination is part of an aggregate consumed by an owned
 /// invoke and the source is otherwise only dropped on both successor paths.
 ///
@@ -280,6 +461,14 @@ fn forward_clones_into_owned_invokes(source: &Function) -> Option<Function> {
         }
     }
 
+    rewrite_clones_as_moves(source, rewrites)
+}
+
+/// Apply either local ownership proof through the same clone-to-move rewrite.
+fn rewrite_clones_as_moves(
+    source: &Function,
+    rewrites: Vec<(Site, mir::Value, mir::Value, Vec<Site>)>,
+) -> Option<Function> {
     if rewrites.is_empty() {
         return None;
     }
@@ -941,6 +1130,138 @@ mod tests {
             .split("\nfn ")
             .next()
             .unwrap()
+    }
+
+    fn check_terminal_clone(source: &str, expected: bool) {
+        use super::{AddressorSummary, all_operations, forward_terminal_clones};
+        use crate::{
+            ExecutionTarget, Path,
+            format::FormatWith,
+            mir::{OperationKind, verify::verify_function},
+            module::FunctionId,
+        };
+        use ustr::ustr;
+
+        let mut session = CompilerSession::new();
+        let module_id = session
+            .compile_for(
+                ExecutionTarget::Mir,
+                source,
+                "terminal_clone",
+                Path::single_str("terminal_clone"),
+            )
+            .unwrap()
+            .module_id;
+        let module = session.expect_fresh_module(module_id);
+        let id = module.get_local_function_id(ustr("view")).unwrap();
+        let body = session
+            .mir_artifacts_for(module_id, MirOptimization::Disabled)
+            .unwrap()
+            .get(id)
+            .unwrap();
+        let env = session.modules().env_for(module);
+        let summary_of = |callee: FunctionId| {
+            session
+                .mir_artifacts_for(callee.module, MirOptimization::Disabled)
+                .map_or(AddressorSummary::UNKNOWN, |artifacts| {
+                    artifacts.addressor_summary(callee.module, callee.function)
+                })
+        };
+        if super::terminal_clone_candidates(body).is_empty() {
+            assert!(
+                forward_terminal_clones(body, env, &|_| panic!("prefilter must skip analysis"))
+                    .is_none()
+            );
+        }
+        let rewritten = forward_terminal_clones(body, env, &summary_of);
+        assert_eq!(rewritten.is_some(), expected, "{}", body.format_with(&env));
+        if let Some(rewritten) = rewritten {
+            verify_function(&rewritten, env);
+            let drops = |function: &Function| {
+                all_operations(function)
+                    .filter(|(_, operation)| matches!(operation.kind, OperationKind::Drop { .. }))
+                    .count()
+            };
+            assert_eq!(
+                drops(&rewritten) + 1,
+                drops(body),
+                "only the terminal source cleanup is removed"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_clones_move_owned_locals_into_nested_results() {
+        check_terminal_clone(
+            "fn view(n: int) -> ([int], int) { let mut a = [n]; (a, n) }",
+            true,
+        );
+        check_terminal_clone(
+            "fn view(n: int) -> (([int], int), int) { let mut a = [n]; ((a, n), n) }",
+            true,
+        );
+        // Only the last copy can move; the first still owns independent storage.
+        check_terminal_clone(
+            "fn view(n: int) -> ([int], [int]) { let mut a = [n]; (a, a) }",
+            true,
+        );
+        check_terminal_clone(
+            "fn view(n: int) -> ([int], int) { let mut a = [n]; let m = idiv(12, n); (a, m) }",
+            true,
+        );
+    }
+
+    #[test]
+    fn read_only_local_clones_borrow_before_terminal_forwarding() {
+        let module = optimized("fn view(n: int) -> int { let mut a = [n]; let mut b = a; len(b) }");
+        let body = body_of(&module, "view");
+        assert!(!body.contains("clone [int]"), "{body}");
+        assert_eq!(
+            body.lines()
+                .filter(|line| line.contains("= alloca [int]"))
+                .count(),
+            1,
+            "borrowing must eliminate the destination storage: {body}"
+        );
+    }
+
+    #[test]
+    fn terminal_result_forwarding_keeps_earlier_failure_cleanup() {
+        let module = optimized(
+            "struct Result { values: [string], count: int }
+             #[inline(never)] fn build(n: int, divisor: int) -> (Result, string) {
+                 let mut values = [to_string(n)];
+                 let count = idiv(12, divisor);
+                 let text = to_string(n + 1);
+                 (Result { values, count }, text)
+             }",
+        );
+        let body = body_of(&module, "build");
+        assert!(
+            !body.contains("clone [string]") && !body.contains("clone string"),
+            "{body}"
+        );
+        assert!(
+            body.contains("drop [string]") && body.contains("propagate_error"),
+            "earlier failures still own the array: {body}"
+        );
+    }
+
+    #[test]
+    fn terminal_clones_retain_borrowed_fields_and_later_reads() {
+        check_terminal_clone("fn view(a: [int]) -> ([int], int) { (a, 1) }", false);
+        check_terminal_clone(
+            "fn view<T>(x: T) -> (T, int) { let mut a = x; (a, 1) }",
+            false,
+        );
+        check_terminal_clone(
+            "fn view(n: int) -> ([int], int) { let mut a = [n]; (a, len(a)) }",
+            false,
+        );
+        check_terminal_clone(
+            "fn view(n: int) -> ([int], int) { let mut a = ([n], n); (a.0, n) }",
+            false,
+        );
     }
 
     #[test]

@@ -43,7 +43,7 @@ use crate::{
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Access {
+pub(super) enum Access {
     Read,
     /// A non-mutating reader whose signature nevertheless requires mutable storage.
     ReadMutable,
@@ -316,7 +316,7 @@ fn supports_mutable_reader<'a>(
     }
 }
 
-fn access(
+pub(super) fn access(
     operation: &Operation,
     position: usize,
     roles: &ValueRoles,
@@ -351,6 +351,9 @@ fn access(
             _ => Access::Escape,
         },
         OperationKind::Store if position == 1 => Access::Write,
+        OperationKind::BuildArray { .. } if position + 1 == operation.operands.len() => {
+            Access::Write
+        }
         OperationKind::Drop { .. }
         | OperationKind::DropInitialized { .. }
         | OperationKind::Clear
@@ -822,10 +825,10 @@ mod tests {
             "fixture must specialize matrix multiplication"
         );
         for specialization in bodies {
-            // The fresh output array still needs OM's separate ownership-transfer proof.
+            // Inputs borrow their sources; the fresh output moves into the returned matrix.
             assert_eq!(
                 clones(&specialization.body),
-                1,
+                0,
                 "{}",
                 specialization
                     .body

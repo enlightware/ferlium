@@ -712,16 +712,18 @@ fn temporary_array_index_let_uses_value_clone() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn temporary_tuple_projection_shared_ref_call_does_not_clone() {
     let mut session = TestSession::new();
+    // Read the original after the temporary so its construction requires an independent clone.
     assert_val_eq!(
         session.run(
             r#"
             let value = testing::make_clone_tracked();
             testing::reset_clone_tracked_clones();
-            testing::clone_tracked_payload((value,).0) * 10
-                + testing::clone_tracked_clone_count()
+            let observed = testing::clone_tracked_payload((value,).0) * 10
+                + testing::clone_tracked_clone_count();
+            observed + testing::clone_tracked_payload(value) * 100
             "#
         ),
-        int(71)
+        int(771)
     );
 }
 
@@ -729,17 +731,19 @@ fn temporary_tuple_projection_shared_ref_call_does_not_clone() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn temporary_tuple_projection_let_uses_value_clone() {
     let mut session = TestSession::new();
+    // Read the original after the temporary so its construction requires an independent clone.
     assert_val_eq!(
         session.run(
             r#"
             let value = testing::make_clone_tracked();
             testing::reset_clone_tracked_clones();
             let item = (value,).0;
-            testing::clone_tracked_payload(item) * 10
-                + testing::clone_tracked_clone_count()
+            let observed = testing::clone_tracked_payload(item) * 10
+                + testing::clone_tracked_clone_count();
+            observed + testing::clone_tracked_payload(value) * 100
             "#
         ),
-        int(72)
+        int(772)
     );
 }
 
@@ -747,16 +751,18 @@ fn temporary_tuple_projection_let_uses_value_clone() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn temporary_record_projection_shared_ref_call_does_not_clone() {
     let mut session = TestSession::new();
+    // Read the original after the temporary so its construction requires an independent clone.
     assert_val_eq!(
         session.run(
             r#"
             let value = testing::make_clone_tracked();
             testing::reset_clone_tracked_clones();
-            testing::clone_tracked_payload({item: value}.item) * 10
-                + testing::clone_tracked_clone_count()
+            let observed = testing::clone_tracked_payload({item: value}.item) * 10
+                + testing::clone_tracked_clone_count();
+            observed + testing::clone_tracked_payload(value) * 100
             "#
         ),
-        int(71)
+        int(771)
     );
 }
 
@@ -764,17 +770,45 @@ fn temporary_record_projection_shared_ref_call_does_not_clone() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn temporary_record_projection_let_uses_value_clone() {
     let mut session = TestSession::new();
+    // Read the original after the temporary so its construction requires an independent clone.
     assert_val_eq!(
         session.run(
             r#"
             let value = testing::make_clone_tracked();
             testing::reset_clone_tracked_clones();
             let item = {item: value}.item;
-            testing::clone_tracked_payload(item) * 10
-                + testing::clone_tracked_clone_count()
+            let observed = testing::clone_tracked_payload(item) * 10
+                + testing::clone_tracked_clone_count();
+            observed + testing::clone_tracked_payload(value) * 100
             "#
         ),
-        int(72)
+        int(772)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn temporary_tuple_projection_moves_a_last_use_owned_value() {
+    use crate::harness::RunMode;
+
+    let mut session = TestSession::new();
+    // This counter deliberately observes ownership optimizations, so compare only optimized
+    // execution modes. The borrowing projection needs no clone after the final value moves.
+    session.run_modes(
+        RunMode::ALL
+            .into_iter()
+            .filter(|mode| !matches!(mode, RunMode::Hir | RunMode::Mir)),
+    );
+    assert_val_eq!(
+        session.run(
+            r#"
+        let value = testing::make_clone_tracked();
+        testing::reset_clone_tracked_clones();
+        testing::clone_tracked_payload((value,).0) * 10
+            + testing::clone_tracked_clone_count()
+    "#
+        ),
+        int(70)
     );
 }
 

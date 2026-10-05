@@ -125,6 +125,20 @@ the drops ending that cloned lifetime. This includes a complete dead local lifet
 edges and an exact same-block clone/drop pair before the cell is reused. The latter rejects any
 read, projection, call argument or other alias-producing use of the local root.
 
+A private local's last ownership can also move into its clone destination, including another
+local or a field of a returned aggregate. Read-only borrowing runs first because it can eliminate
+the destination storage entirely. The terminal ownership-forwarding rule requires the clone and
+exactly one subsequent source drop in the same return block, with no other source or derived-place use
+between the clone and return. Shared place provenance and access classification reject escaping
+aliases and scoped accessors. The source must be a whole local allocation with a static layout;
+borrowed parameters and managed source fields remain outside this rule. Values needing a run-time
+layout witness retain their clone, as in owned-ABI forwarding. Restores after the clone are conservative
+proof boundaries. Rewriting the clone to `move` removes only that block's source drop, retaining
+cleanup on earlier failure paths. The destination retains its original ownership obligations;
+ordinary DCE collects the unused clone/drop dispatch evidence. A syntactic scan admits only
+whole alloca sources with a later matching drop in the same return block, before deriving
+provenance and value roles. Escape classification is limited to those candidate roots.
+
 Read-only clones have a separate lifetime proof: readers borrow the source while its value and
 storage remain valid, and the clone's cleanup drops disappear together. The proof follows both
 normal and failure paths to cleanup, using immutable, non-escaping argument contracts and storage

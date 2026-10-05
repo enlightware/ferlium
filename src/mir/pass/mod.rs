@@ -577,6 +577,15 @@ pub(crate) fn optimize_function(
     {
         current = Some(borrowed);
     }
+    // Transfer a private local's final ownership into its clone destination, including fields
+    // of returned aggregates. Prefer borrowing read-only locals first, since it can eliminate
+    // their destination storage too. Keep cleanup on earlier failure paths.
+    let source = current.as_ref().unwrap_or(function);
+    if let Some(moved) = owned_arguments::forward_terminal_clones(source, env, &|callee| {
+        callees.addressor_summary(callee)
+    }) {
+        current = Some(moved);
+    }
     // Cleanup runs once, after the rounds have settled, and on every body rather than only on one a
     // pass changed. A specialization arrives already carrying dead code — substitution turns its
     // semantic clones and drops into representation copies and nothing, leaving the dictionary
