@@ -31,7 +31,7 @@ use self::abi::{CallAbi, HostTableSlotId};
 
 use crate::{
     FxHashMap,
-    hir::native_functions::{NativeEntry, NativeSignature},
+    hir::native_functions::{NativeEntry, NativeFailureState, NativeSignature},
     module::{FunctionId, id::Id},
 };
 
@@ -200,18 +200,27 @@ impl Imports {
 
     /// Division's cold path needs a diagnostic writer only in modules that lower division.
     pub(super) fn add_division_by_zero(&mut self) -> Result<(), JsValue> {
-        if !self
-            .functions
-            .iter()
-            .any(|function| function.name == "division_by_zero")
-        {
+        self.add_failure_writer("division_by_zero", failure::division_by_zero)
+    }
+
+    /// Remainder's cold path uses its own source-failure kind.
+    pub(super) fn add_remainder_by_zero(&mut self) -> Result<(), JsValue> {
+        self.add_failure_writer("remainder_by_zero", failure::remainder_by_zero)
+    }
+
+    fn add_failure_writer(
+        &mut self,
+        name: &str,
+        writer: extern "C" fn(&mut NativeFailureState) -> u32,
+    ) -> Result<(), JsValue> {
+        if !self.functions.iter().any(|function| function.name == name) {
             self.insert(
                 FunctionImport {
-                    name: "division_by_zero".into(),
+                    name: name.into(),
                     parameters: vec![ValType::I32],
                     results: vec![ValType::I32],
                 },
-                failure::division_by_zero as *const (),
+                writer as *const (),
             )?;
         }
         Ok(())

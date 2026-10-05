@@ -91,6 +91,10 @@ pub(crate) enum KnownCallee {
     IntMul,
     /// `idiv(left, right)` — wrapping truncating division, failing on zero.
     IntDiv,
+    /// `rem(left, right)` — signed remainder, failing on zero.
+    IntRem,
+    /// `mod(left, right)` — nonnegative Euclidean remainder, failing on zero.
+    IntMod,
     // Integer bit operations on the target-width signed bit pattern.
     IntBitAnd,
     IntBitOr,
@@ -440,6 +444,8 @@ impl KnownCallees {
             (int_sub, KnownCallee::IntSub),
             (int_mul, KnownCallee::IntMul),
             (resolver.function("idiv"), KnownCallee::IntDiv),
+            (resolver.function("rem"), KnownCallee::IntRem),
+            (resolver.function("mod"), KnownCallee::IntMod),
             (int_neg, KnownCallee::IntNeg),
             (
                 resolver.method(NUM_TRAIT_NAME, int_type(), "from_int"),
@@ -889,7 +895,7 @@ mod tests {
         let session = CompilerSession::new();
         assert_eq!(
             known_callees(&session).by_id.len(),
-            72,
+            74,
             "two known callees resolved to the same function id"
         );
     }

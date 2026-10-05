@@ -509,6 +509,110 @@ fn wasm_codegen_integer_division_wraps_and_reports_zero() {
 }
 
 #[wasm_bindgen_test]
+fn wasm_codegen_integer_remainders_preserve_signs_boundaries_and_failures() {
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        for function in ["rem", "mod"] {
+            let mut session = CompilerSession::new();
+            session.set_mir_optimization(optimization);
+            session.set_physical_mir_optimization(optimization);
+            let entry = compile(
+                &mut session,
+                &format!("fn compute(x: int, y: int) -> int {{ {function}(x + 1, y - 1) }}"),
+            );
+            let code = CompiledProgram::compile(&session, entry).unwrap();
+            assert_eq!(
+                wasm_operator_count(code.bytes(), |op| matches!(op, Operator::I32RemS)),
+                1
+            );
+            assert_eq!(
+                wasm_operator_count(code.bytes(), |op| matches!(op, Operator::I32DivS)),
+                0
+            );
+            let mut instance = code.instantiate::<(isize, isize), isize>().unwrap();
+            for dividend in [isize::MIN, isize::MAX, -7, -1, 0, 1, 7] {
+                for divisor in [isize::MIN, isize::MAX, -3, -1, 1, 3] {
+                    let result = instance
+                        .run(
+                            (dividend.wrapping_sub(1), divisor.wrapping_add(1)),
+                            WasmLimits::default(),
+                        )
+                        .unwrap();
+                    let expected = if function == "rem" {
+                        dividend.wrapping_rem(divisor)
+                    } else {
+                        dividend.wrapping_rem_euclid(divisor)
+                    };
+                    assert_eq!(result, expected, "{function}({dividend}, {divisor})");
+                }
+            }
+            let error = instance.run((6, 1), WasmLimits::default()).unwrap_err();
+            assert_eq!(
+                error.kind(),
+                RuntimeErrorKind::SourceFailure(SourceFailureKind::RemainderByZero)
+            );
+            // Source failures leave the executor usable.
+            assert_eq!(instance.run((8, 4), WasmLimits::default()).unwrap(), 0);
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_constant_remainders_omit_zero_guards() {
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        for function in ["rem", "mod"] {
+            for divisor in [-3, -1, 1, 3] {
+                let mut session = CompilerSession::new();
+                session.set_mir_optimization(optimization);
+                session.set_physical_mir_optimization(optimization);
+                let entry = compile(
+                    &mut session,
+                    &format!("fn compute(x: int) -> int {{ {function}(x + 1, {divisor}) }}"),
+                );
+                let code = CompiledProgram::compile(&session, entry).unwrap();
+                assert_eq!(
+                    wasm_operator_count(code.bytes(), |op| matches!(op, Operator::I32RemS)),
+                    1
+                );
+                let failure_index = Parser::new(0)
+                    .parse_all(code.bytes())
+                    .flat_map(|payload| match payload.unwrap() {
+                        Payload::ImportSection(section) => section
+                            .into_imports()
+                            .map(Result::unwrap)
+                            .filter(|import| {
+                                matches!(import.ty, TypeRef::Func(_) | TypeRef::FuncExact(_))
+                            })
+                            .map(|import| import.name)
+                            .collect::<Vec<_>>(),
+                        _ => Vec::new(),
+                    })
+                    .position(|name| name == "remainder_by_zero")
+                    .expect("conservative import discovery must retain the failure writer");
+                assert_eq!(
+                    wasm_operator_count(code.bytes(), |op| {
+                        matches!(op, Operator::Call { function_index } if *function_index == failure_index as u32)
+                    }),
+                    0
+                );
+                let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+                for input in [isize::MIN, isize::MAX, -7, -1, 0, 1, 7] {
+                    let dividend = input.wrapping_add(1);
+                    let expected = if function == "rem" {
+                        dividend.wrapping_rem(divisor)
+                    } else {
+                        dividend.wrapping_rem_euclid(divisor)
+                    };
+                    assert_eq!(
+                        instance.run((input,), WasmLimits::default()).unwrap(),
+                        expected
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[wasm_bindgen_test]
 fn wasm_codegen_constant_divisors_omit_unneeded_guards() {
     for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
         for (divisor, expected_divisions) in [(3, 1), (-1, 0)] {

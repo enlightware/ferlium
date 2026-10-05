@@ -16,6 +16,11 @@ pub(super) extern "C" fn division_by_zero(state: &mut NativeFailureState) -> u32
     state.fail(SourceFailureKind::DivisionByZero)
 }
 
+/// Supply the same diagnostic and status as the native remainder entries.
+pub(super) extern "C" fn remainder_by_zero(state: &mut NativeFailureState) -> u32 {
+    state.fail(SourceFailureKind::RemainderByZero)
+}
+
 #[derive(Default)]
 pub(super) struct Failures {
     pub native: NativeFailureState,

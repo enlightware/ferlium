@@ -68,8 +68,8 @@ use super::{
     expressions::{
         Analysis as ExpressionAnalysis, Plan as ExpressionPlan, Source as ExpressionSource,
     },
-    frame_address, frame_bytes, is_elided_stack_operation, layout_witness, leave_frame, memarg,
-    memarg_at, offset_sum, operations,
+    frame_address, frame_bytes, is_elided_stack_operation, is_fallible_intrinsic, layout_witness,
+    leave_frame, memarg, memarg_at, offset_sum, operations,
     peephole::{Code, Spans},
     scalar, stack, subscript,
     suspension::Crossing,
@@ -900,8 +900,8 @@ impl<'a, 's> Body<'a, 's> {
                 required[helper as usize] = true;
             }
         };
-        for block in self.body.blocks() {
-            let block = self.body.block(block);
+        for block_id in self.body.blocks() {
+            let block = self.body.block(block_id);
             if matches!(
                 block.terminator().kind,
                 TerminatorKind::Invoke { .. }
@@ -910,7 +910,7 @@ impl<'a, 's> Body<'a, 's> {
             ) {
                 require(&[PendingFailure]);
             }
-            for operation in operations(block) {
+            for (index, operation) in operations(block).enumerate() {
                 if is_elided_stack_operation(operation, &self.no_op_stack_markers)
                     || self.analysis.skips_metadata_load(operation)
                 {
@@ -981,6 +981,13 @@ impl<'a, 's> Body<'a, 's> {
                         _ => (), // Unsupported targets are diagnosed during emission.
                     },
                     Call { .. } | Clone { .. } | Drop { .. } | DropInitialized { .. } => {
+                        if self
+                            .analysis
+                            .intrinsic(ExpressionSource::from_index(block_id, index))
+                            == Some(KnownCallee::IntMod)
+                        {
+                            require(&[Scratch]);
+                        }
                         match callee(operation) {
                             Some(Value::Register(id))
                                 if self.borrowed_subscripts.contains_key(id) =>
@@ -2073,7 +2080,7 @@ impl<'a, 's> Body<'a, 's> {
         invoked: bool,
         checked: bool,
     ) -> Result<(), String> {
-        if matches!(intrinsic, KnownCallee::IntDiv | KnownCallee::FloatDiv) {
+        if is_fallible_intrinsic(intrinsic) {
             return self.call_division(intrinsic, inputs, output, invoked);
         }
         let arity = match intrinsic {
@@ -2404,7 +2411,7 @@ impl<'a, 's> Body<'a, 's> {
         }
         let output = output.ok_or("wasm division result storage")?;
         let ty = self.pointee(output)?;
-        let nonzero = if intrinsic == KnownCallee::IntDiv {
+        let nonzero = if intrinsic != KnownCallee::FloatDiv {
             self.analysis
                 .integer_constant(self.body, inputs[1])
                 .is_some_and(|value| value != 0)
@@ -2417,7 +2424,7 @@ impl<'a, 's> Body<'a, 's> {
         let guarded = invoked && !nonzero;
         if guarded {
             self.read(inputs[1])?;
-            if intrinsic == KnownCallee::IntDiv {
+            if intrinsic != KnownCallee::FloatDiv {
                 self.i(I::I32Eqz);
             } else {
                 self.i(I::F64Const(0.0.into()));
@@ -2426,7 +2433,15 @@ impl<'a, 's> Body<'a, 's> {
             self.i(I::If(BlockType::Result(ValType::I32)));
             self.context_pointer(offset_of!(InvocationState, native_failure));
             self.i(I::Call(
-                self.imports.function_index("division_by_zero").as_u32(),
+                self.imports
+                    .function_index(
+                        if matches!(intrinsic, KnownCallee::IntRem | KnownCallee::IntMod) {
+                            "remainder_by_zero"
+                        } else {
+                            "division_by_zero"
+                        },
+                    )
+                    .as_u32(),
             ));
             self.i(I::Else);
         }
@@ -2458,6 +2473,40 @@ impl<'a, 's> Body<'a, 's> {
                 if divisor.is_none() {
                     self.i(I::End);
                 }
+            }
+        } else if matches!(intrinsic, KnownCallee::IntRem | KnownCallee::IntMod) {
+            self.read(inputs[0])?;
+            self.read(inputs[1])?;
+            // Unlike div_s, rem_s returns zero for MIN / -1.
+            self.i(I::I32RemS);
+            if intrinsic == KnownCallee::IntMod {
+                let remainder = self.helpers.get(Scratch);
+                self.i(I::LocalTee(remainder.as_u32()));
+                self.i(I::I32Const(0));
+                self.i(I::I32LtS);
+                self.i(I::If(BlockType::Result(ValType::I32)));
+                if let Some(divisor) = self.analysis.integer_constant(self.body, inputs[1]) {
+                    self.i(I::LocalGet(remainder.as_u32()));
+                    self.read(inputs[1])?;
+                    self.i(if divisor < 0 { I::I32Sub } else { I::I32Add });
+                } else {
+                    self.read(inputs[1])?;
+                    self.i(I::I32Const(0));
+                    self.i(I::I32LtS);
+                    self.i(I::If(BlockType::Result(ValType::I32)));
+                    self.i(I::LocalGet(remainder.as_u32()));
+                    self.read(inputs[1])?;
+                    // Subtract directly: abs(MIN) is not representable as a signed int.
+                    self.i(I::I32Sub);
+                    self.i(I::Else);
+                    self.i(I::LocalGet(remainder.as_u32()));
+                    self.read(inputs[1])?;
+                    self.i(I::I32Add);
+                    self.i(I::End);
+                }
+                self.i(I::Else);
+                self.i(I::LocalGet(remainder.as_u32()));
+                self.i(I::End);
             }
         } else {
             self.read(inputs[0])?;
@@ -4369,6 +4418,13 @@ pub(super) fn intrinsic_reads_input_repeatedly(
             (input == 0 && divisor.is_none())
                 || (input == 1 && (divisor.is_none() || (invoked && divisor == Some(0))))
         }
+        KnownCallee::IntRem => {
+            input == 1
+                && invoked
+                && integer_constant(body, &inputs[1], definitions, constants)
+                    .is_none_or(|divisor| divisor == 0)
+        }
+        KnownCallee::IntMod => input == 1,
         KnownCallee::FloatDiv => {
             input == 1
                 && invoked

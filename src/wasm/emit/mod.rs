@@ -967,11 +967,15 @@ fn emit_with_export_kind(
                     _ => (),
                 }
                 let intrinsic = wasm_intrinsic(session, operation);
-                if matches!(intrinsic, Some(KnownCallee::IntDiv | KnownCallee::FloatDiv)) {
-                    // Conservative: constant or plain divisions may omit the guard during emission.
-                    imports
+                // Conservative: constant or plain calls may omit the guard during emission.
+                match intrinsic {
+                    Some(KnownCallee::IntDiv | KnownCallee::FloatDiv) => imports
                         .add_division_by_zero()
-                        .map_err(|error| format!("division failure linkage: {error:?}"))?;
+                        .map_err(|error| format!("division failure linkage: {error:?}"))?,
+                    Some(KnownCallee::IntRem | KnownCallee::IntMod) => imports
+                        .add_remainder_by_zero()
+                        .map_err(|error| format!("remainder failure linkage: {error:?}"))?,
+                    _ => (),
                 }
                 if intrinsic.is_none()
                     && let Some(Value::Function(target)) = callee(operation)
@@ -1728,7 +1732,10 @@ fn callee(op: &Operation) -> Option<&Value> {
 
 /// These initialize result storage only on success and leave a status for Invoke.
 fn is_fallible_intrinsic(intrinsic: KnownCallee) -> bool {
-    matches!(intrinsic, KnownCallee::IntDiv | KnownCallee::FloatDiv)
+    matches!(
+        intrinsic,
+        KnownCallee::IntDiv | KnownCallee::FloatDiv | KnownCallee::IntRem | KnownCallee::IntMod
+    )
 }
 
 /// Resolve a direct MIR call for target-specific Wasm instruction selection.
@@ -1765,6 +1772,8 @@ fn wasm_intrinsic(session: &CompilerSession, operation: &Operation) -> Option<Kn
             | KnownCallee::IntSub
             | KnownCallee::IntMul
             | KnownCallee::IntDiv
+            | KnownCallee::IntRem
+            | KnownCallee::IntMod
             | KnownCallee::IntNeg
             | KnownCallee::IntFromInt
             | KnownCallee::IntCmp
