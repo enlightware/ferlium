@@ -266,12 +266,155 @@ pub(super) fn verify(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test;
+
     use super::*;
     use crate::{
         CompilerSession,
         hir::native_functions::{NativeFailureConvention, NativeLayout},
+        mir::pass::{
+            clone_borrow::borrow_read_only_clones,
+            provenance::{AddressorSummary, ArgumentId, ResultProvenance},
+        },
         std::string::String as NativeString,
     };
+
+    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    fn shared_native_member_borrows_preserve_reader_permissions() {
+        let session = CompilerSession::new();
+        let env = ModuleEnv::new(session.std_module(), session.raw_modules());
+        let module = session.modules().next_id();
+        let owner = FunctionId::new(module, LocalFunctionId::from_index(0));
+        let shared = FunctionId::new(module, LocalFunctionId::from_index(1));
+        let reader = FunctionId::new(module, LocalFunctionId::from_index(2));
+        let lifecycle = FunctionId::new(module, LocalFunctionId::from_index(3));
+        let helpers = FunctionId::new(module, LocalFunctionId::from_index(4));
+        let layout = NativeLayout::of::<NativeString>();
+        let span = Location::new_synthesized();
+        let summary = |callee| {
+            if callee == shared || callee == reader {
+                AddressorSummary {
+                    provenance: ResultProvenance::Argument(ArgumentId::from_index(0)),
+                    repeatable: true,
+                }
+            } else {
+                AddressorSummary::UNKNOWN
+            }
+        };
+        for mutable in [false, true] {
+            for copies in [1, 2] {
+                let mut f =
+                    FunctionBuilder::new("shared_borrow".into(), CallResultConvention::Value);
+                let receiver = Value::Parameter(
+                    f.add_parameter(layout.ty, ParameterKind::Parameter(ArgConvention::Let)),
+                );
+                let block = f.add_block();
+                let slot = append_result(&mut f, block, Operation::alloca_place(span, layout.ty));
+                f.append_operation(
+                    block,
+                    Operation::call(
+                        span,
+                        Value::Function(shared),
+                        [receiver, slot.clone()],
+                        CallImplType::new(
+                            FnType::new_mut_resolved([(layout.ty, false)], layout.ty, no_effects()),
+                            CallResultConvention::ADDRESSOR_PLACE,
+                        ),
+                    ),
+                );
+                let mut value = append_result(&mut f, block, Operation::load(span, slot));
+                let mut destinations = Vec::new();
+                for _ in 0..copies {
+                    let destination =
+                        append_result(&mut f, block, Operation::alloca(span, layout.ty));
+                    f.append_operation(
+                        block,
+                        Operation::clone_value(
+                            span,
+                            value,
+                            destination.clone(),
+                            Value::Function(lifecycle),
+                            layout.ty,
+                        ),
+                    );
+                    value = destination.clone();
+                    destinations.push(destination);
+                }
+                let output = append_result(&mut f, block, Operation::alloca_place(span, layout.ty));
+                f.append_operation(
+                    block,
+                    Operation::call(
+                        span,
+                        Value::Function(reader),
+                        [value, output],
+                        CallImplType::new(
+                            FnType::new_mut_resolved(
+                                [(layout.ty, mutable)],
+                                layout.ty,
+                                no_effects(),
+                            ),
+                            CallResultConvention::ADDRESSOR_PLACE,
+                        ),
+                    ),
+                );
+                for destination in destinations.into_iter().rev() {
+                    f.append_operation(
+                        block,
+                        Operation::drop(span, destination, Value::Function(lifecycle), layout.ty),
+                    );
+                }
+                f.set_terminator(block, Terminator::ret(span));
+                let body = f.finish_unverified();
+                let signatures = FxHashMap::from_iter([(shared, false), (reader, mutable)].map(
+                    |(id, mutable)| {
+                        (
+                            id,
+                            NativeSignature {
+                                failure: NativeFailureConvention::Infallible,
+                                parameters: vec![if mutable {
+                                    NativeParameter::Mutable(layout)
+                                } else {
+                                    NativeParameter::Shared(layout)
+                                }],
+                                result: NativeResult::Addressor {
+                                    pointee: layout,
+                                    root: 0,
+                                    mutable,
+                                },
+                            },
+                        )
+                    },
+                ));
+                let check = |body| {
+                    verify(
+                        body,
+                        owner,
+                        owner,
+                        helpers,
+                        &signatures,
+                        &FxHashMap::default(),
+                        env,
+                    )
+                };
+                check(&body).unwrap();
+                let rewritten = borrow_read_only_clones(&body, &summary);
+                let rewritten = rewritten.as_ref().unwrap_or(&body);
+                check(rewritten).unwrap();
+                let clones = rewritten
+                    .blocks()
+                    .flat_map(|block| rewritten.block(block).operations())
+                    .filter(|operation| matches!(operation.kind, OperationKind::Clone { .. }))
+                    .count();
+                assert_eq!(
+                    clones,
+                    usize::from(mutable),
+                    "mutable={mutable}, copies={copies}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn native_member_physical_access_checks_aliases_and_consuming_entries() {

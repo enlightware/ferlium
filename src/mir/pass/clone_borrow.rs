@@ -6,8 +6,10 @@
 //! Clone/drop pairs have no observable behavior under the language's ownership contract. Their
 //! storage can nevertheless be shared only while the source stays alive and unchanged. This pass
 //! proves that interval on every success and failure path, stopping at the clone's cleanup drop.
-//! Product/variant projections keep their storage root; immutable non-escaping call arguments are
-//! readers, whereas mutable/owned arguments, escapes and initialization queries are not.
+//! Product/variant projections and proven caller-rooted addressors keep their storage root;
+//! immutable non-escaping call arguments are readers. Repeatable addressors read their owner;
+//! uses of the returned place retain that owner. Other mutable/owned arguments, escapes and
+//! initialization queries are not readers.
 //!
 //! The first version requires a fresh destination with one static clone constructor, and a source
 //! rooted in an immutable parameter or a private local allocated before the destination in the
@@ -15,12 +17,13 @@
 //! proof boundaries, not assumptions about lowering. Uses are indexed once, and only candidate
 //! lifetime regions are walked; unchanged bodies are never opened for editing.
 
-use std::cell::OnceCell;
+use std::{cell::OnceCell, iter::once};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{
-    dataflow::{Root, call_operands},
+    dataflow::{CallOperands, Root, call_operands},
+    provenance::{AddressorSummary, PlaceOrigins, ResultProvenance},
     site::OperationSite,
 };
 use crate::{
@@ -33,12 +36,14 @@ use crate::{
         site::OperationIndex,
         terminator::TerminatorKind,
     },
-    module::id::Id,
+    module::{FunctionId, id::Id},
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Access {
     Read,
+    /// A non-mutating reader whose signature nevertheless requires mutable storage.
+    ReadMutable,
     Write,
     Escape,
 }
@@ -49,48 +54,11 @@ struct Use {
     access: Access,
 }
 
-struct Roots<'a> {
-    definitions: FxHashMap<ValueId, &'a Operation>,
-    resolved: FxHashMap<ValueId, Option<Root>>,
-}
-
-impl Roots<'_> {
-    fn of(&mut self, value: &mir::Value) -> Option<Root> {
-        let &mir::Value::Register(mut id) = value else {
-            return match value {
-                mir::Value::Parameter(id) => Some(Root::Parameter(*id)),
-                _ => None,
-            };
-        };
-        let mut path = Vec::new();
-        let found = loop {
-            if let Some(root) = self.resolved.get(&id) {
-                break *root;
-            }
-            path.push(id);
-            match self.definitions.get(&id) {
-                Some(operation) if matches!(operation.kind, OperationKind::Alloca { .. }) => {
-                    break Some(Root::Alloca(id));
-                }
-                Some(operation) if matches!(operation.kind, OperationKind::Subfield { .. }) => {
-                    match &operation.operands[0] {
-                        mir::Value::Register(base) => id = *base,
-                        mir::Value::Parameter(base) => break Some(Root::Parameter(*base)),
-                        _ => break None,
-                    }
-                }
-                _ => break None,
-            }
-        };
-        for id in path {
-            self.resolved.insert(id, found);
-        }
-        found
-    }
-}
-
 /// Returns a rewritten semantic body only after proving an entire borrowed lifetime.
-pub(crate) fn borrow_read_only_clones(func: &Function) -> Option<Function> {
+pub(crate) fn borrow_read_only_clones(
+    func: &Function,
+    summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
+) -> Option<Function> {
     let mut candidates = Vec::new();
     let mut allocas = FxHashMap::default();
     for block in func.blocks() {
@@ -113,27 +81,14 @@ pub(crate) fn borrow_read_only_clones(func: &Function) -> Option<Function> {
         return None;
     }
 
-    let mut roots = Roots {
-        definitions: func
-            .blocks()
-            .flat_map(|block| {
-                let basic = func.block(block);
-                basic
-                    .operations()
-                    .iter()
-                    .chain(match &basic.terminator().kind {
-                        TerminatorKind::Invoke { operation, .. } => Some(operation),
-                        _ => None,
-                    })
-            })
-            .filter_map(|operation| operation.result_id().map(|id| (id, operation)))
-            .collect(),
-        resolved: FxHashMap::default(),
-    };
+    let origins = PlaceOrigins::of(func, summary_of);
     let mut tracked = FxHashSet::default();
     candidates.retain(|(site, destination)| {
         let operation = &func.block(site.block).operations()[site.index.as_index()];
-        let Some(source) = roots.of(&operation.operands[0]) else {
+        let Some(source) = origins
+            .origin_of(&operation.operands[0])
+            .map(|origin| origin.root)
+        else {
             return false;
         };
         let eligible_source = match source {
@@ -176,19 +131,19 @@ pub(crate) fn borrow_read_only_clones(func: &Function) -> Option<Function> {
                 index: OperationIndex::from_index(index),
             };
             for (position, operand) in operation.operands.iter().enumerate() {
-                if let Some(root) = roots.of(operand)
+                if let Some(root) = origins.origin_of(operand).map(|origin| origin.root)
                     && let Some(uses) = uses.get_mut(&root)
                 {
                     uses.push(Use {
                         site,
-                        access: access(operation, position, &roles, func),
+                        access: access(operation, position, &roles, func, &origins, summary_of),
                     });
                 }
             }
         }
         if !matches!(basic.terminator().kind, TerminatorKind::Invoke { .. }) {
             for operand in basic.terminator().operands() {
-                if let Some(root) = roots.of(operand)
+                if let Some(root) = origins.origin_of(operand).map(|origin| origin.root)
                     && let Some(uses) = uses.get_mut(&root)
                 {
                     uses.push(Use {
@@ -205,10 +160,13 @@ pub(crate) fn borrow_read_only_clones(func: &Function) -> Option<Function> {
 
     let dominance = OnceCell::new();
     let mut replacements = FxHashMap::default();
-    let mut removed = FxHashSet::default();
+    let mut cleanups = Vec::new();
     for (site, destination) in candidates {
         let operation = &func.block(site.block).operations()[site.index.as_index()];
-        let source = roots.of(&operation.operands[0]).unwrap();
+        let source = origins
+            .origin_of(&operation.operands[0])
+            .map(|origin| origin.root)
+            .unwrap();
         let destination_uses = &uses[&Root::Alloca(destination)];
         // All source aliases must remain known: even an earlier escape could permit mutation
         // through an unrelated operand during the lifetime being borrowed.
@@ -253,12 +211,33 @@ pub(crate) fn borrow_read_only_clones(func: &Function) -> Option<Function> {
             }
         }
         replacements.insert(destination, operation.operands[0].clone());
-        removed.insert(site);
-        removed.extend(drops);
+        cleanups.push((destination, site, drops));
+    }
+    // A rooted, repeatable addressor proves non-mutation, not write permission. Addressor
+    // referents may be shared native members. Require structural storage for mutable readers,
+    // following proposed substitutions too so chained clone elimination cannot bypass this rule.
+    // Rejecting all such referents is conservative until summaries carry access permissions.
+    let rejected = replacements
+        .iter()
+        .filter_map(|(&destination, source)| {
+            let needs_mutable = uses[&Root::Alloca(destination)]
+                .iter()
+                .any(|usage| usage.access == Access::ReadMutable);
+            (needs_mutable && !supports_mutable_reader(source, &origins, &replacements))
+                .then_some(destination)
+        })
+        .collect::<Vec<_>>();
+    for destination in rejected {
+        replacements.remove(&destination);
     }
     if replacements.is_empty() {
         return None;
     }
+    let removed: FxHashSet<_> = cleanups
+        .into_iter()
+        .filter(|(destination, _, _)| replacements.contains_key(destination))
+        .flat_map(|(_, site, drops)| once(site).chain(drops))
+        .collect();
     // Resolve nested borrowed clones before substitution. Every edge refers to storage already
     // available at the clone, so the replacement graph is acyclic.
     for id in replacements.keys().copied().collect::<Vec<_>>() {
@@ -293,7 +272,36 @@ pub(crate) fn borrow_read_only_clones(func: &Function) -> Option<Function> {
     Some(edit.finish_unverified())
 }
 
-fn access(operation: &Operation, position: usize, roles: &ValueRoles, func: &Function) -> Access {
+fn supports_mutable_reader<'a>(
+    mut source: &'a mir::Value,
+    origins: &PlaceOrigins,
+    replacements: &'a FxHashMap<ValueId, mir::Value>,
+) -> bool {
+    loop {
+        let Some(origin) = origins.origin_of(source) else {
+            return false;
+        };
+        if !origin.structural {
+            return false;
+        }
+        let Root::Alloca(root) = origin.root else {
+            return true;
+        };
+        let Some(replacement) = replacements.get(&root) else {
+            return true;
+        };
+        source = replacement;
+    }
+}
+
+fn access(
+    operation: &Operation,
+    position: usize,
+    roles: &ValueRoles,
+    func: &Function,
+    origins: &PlaceOrigins,
+    summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
+) -> Access {
     match &operation.kind {
         OperationKind::Subfield { .. } if position == 0 => Access::Read,
         OperationKind::Load if position == 0 => {
@@ -332,7 +340,10 @@ fn access(operation: &Operation, position: usize, roles: &ValueRoles, func: &Fun
             let Some(call) = call_operands(&operation.operands, ty) else {
                 return Access::Escape;
             };
-            if ty.result_convention.returns_borrow() {
+            // Repeatability proves even an `&mut` addressor input is not written by this call.
+            // The returned place carries its owner, so later writes through it remain writes.
+            let rooted_reader = ty.result_convention.returns_borrow();
+            if rooted_reader && !is_rooted_repeatable_addressor(&call, origins, summary_of) {
                 return Access::Escape;
             }
             let start = 1 + call.extras.len();
@@ -344,7 +355,9 @@ fn access(operation: &Operation, position: usize, roles: &ValueRoles, func: &Fun
                     .is_some_and(|metadata| metadata.owned_arguments.contains(index))
                 {
                     Access::Write
-                } else if *convention == ArgConvention::Let {
+                } else if rooted_reader && *convention == ArgConvention::MutableRef {
+                    Access::ReadMutable
+                } else if rooted_reader || *convention == ArgConvention::Let {
                     Access::Read
                 } else {
                     Access::Write
@@ -357,6 +370,20 @@ fn access(operation: &Operation, position: usize, roles: &ValueRoles, func: &Fun
         }
         _ => Access::Escape,
     }
+}
+
+fn is_rooted_repeatable_addressor(
+    call: &CallOperands<'_>,
+    origins: &PlaceOrigins,
+    summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
+) -> bool {
+    let mir::Value::Function(callee) = call.callee else {
+        return false;
+    };
+    let summary = summary_of(*callee);
+    summary.repeatable
+        && matches!(summary.provenance, ResultProvenance::Argument(_))
+        && origins.returned_origin(call.result).is_some()
 }
 
 /// Proves that every path ends this particular clone lifetime before touching its source.
@@ -372,7 +399,7 @@ fn lifetime(
     let writes: FxHashSet<_> = uses[&source]
         .iter()
         .chain(destination_uses)
-        .filter(|usage| usage.access != Access::Read)
+        .filter(|usage| !matches!(usage.access, Access::Read | Access::ReadMutable))
         .map(|usage| usage.site)
         .collect();
     let mut done = FxHashSet::default();
@@ -438,20 +465,33 @@ fn lifetime(
             }
         }
     }
-    if destination_uses.iter().any(|usage| {
-        usage.site != clone
-            && !visited
+    for usage in destination_uses {
+        if usage.site == clone
+            || visited
                 .get(&usage.site.block)
                 .is_some_and(|&(start, end)| (start..end).contains(&usage.site.index.as_index()))
-    }) {
-        return None;
+        {
+            continue;
+        }
+        let block = func.block(usage.site.block);
+        let operation = block.operations().get(usage.site.index.as_index())?;
+        // The constructor is unique and every constructed lifetime reaches a cleanup above.
+        // Outside those intervals the destination is absent, so its whole-value cleanup is empty.
+        // Any other use (including another initializer or a field drop) invalidates that argument.
+        if matches!(operation.kind, OperationKind::Drop { ty } if ty == cloned)
+            && operation.operands[0] == mir::Value::Register(destination)
+        {
+            drops.push(usage.site);
+        } else {
+            return None;
+        }
     }
     Some(drops)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::borrow_read_only_clones;
+    use super::{AddressorSummary, FunctionId, borrow_read_only_clones};
     use crate::{
         CompilerSession, ExecutionTarget, MirOptimization, Path,
         format::FormatWith,
@@ -461,6 +501,7 @@ mod tests {
 
     fn check(source: &str, expected: bool) {
         let mut session = CompilerSession::new();
+        session.set_allow_experimental(true);
         let module_id = session
             .compile_for(
                 ExecutionTarget::Mir,
@@ -478,13 +519,20 @@ mod tests {
             .get(id)
             .unwrap();
         let env = session.modules().env_for(module);
+        let summary_of = |callee: FunctionId| {
+            session
+                .mir_artifacts_for(callee.module, MirOptimization::Disabled)
+                .map_or(AddressorSummary::UNKNOWN, |artifacts| {
+                    artifacts.addressor_summary(callee.module, callee.function)
+                })
+        };
         assert!(
             body.blocks()
                 .flat_map(|block| body.block(block).operations())
                 .any(|op| matches!(op.kind, OperationKind::Clone { .. })),
             "fixture needs a clone"
         );
-        let rewritten = borrow_read_only_clones(body);
+        let rewritten = borrow_read_only_clones(body, &summary_of);
         assert_eq!(rewritten.is_some(), expected, "{}", body.format_with(&env));
         if let Some(body) = rewritten {
             verify_function(&body, env);
@@ -497,6 +545,58 @@ mod tests {
             .flat_map(|block| body.block(block).operations())
             .filter(|op| matches!(op.kind, OperationKind::Clone { .. }))
             .count()
+    }
+
+    #[test]
+    fn borrows_caller_rooted_indexed_values_through_success_and_failure_cleanup() {
+        for value in ["string", "(string, int)"] {
+            let reader = if value == "string" {
+                "len(copy)"
+            } else {
+                "len(copy.0) + copy.1"
+            };
+            let mut session = CompilerSession::new();
+            session.set_mir_optimization(MirOptimization::Enabled);
+            let source = format!(
+                "fn view(x: [{value}], d: int) -> int {{ let mut copy = x[0]; idiv({reader}, d) }}"
+            );
+            let body = session.emit_mir("indexed_borrow", &source);
+            assert!(
+                body.contains("buffer_slot::ref_mut"),
+                "fixture needs an addressor: {body}"
+            );
+            assert!(
+                !body.contains(&format!("clone {value}"))
+                    && !body.contains(&format!("drop {value}")),
+                "the indexed copy and both initialized/absent cleanup paths must borrow: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn borrows_an_array_clone_used_only_by_a_repeatable_addressor() {
+        check(
+            "fn view(x: [int]) -> int { let mut copy = x; copy[0] }",
+            true,
+        );
+    }
+
+    #[test]
+    fn keeps_an_indexed_copy_when_its_owner_changes() {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let body = session.emit_mir(
+            "indexed_write",
+            r#"
+            fn view(mut x: [string]) -> int {
+                let mut copy = x[0]; x[0] = "changed"; len(copy)
+            }
+        "#,
+        );
+        assert!(
+            body.contains("clone string"),
+            "mutation must retain the copy: {body}"
+        );
     }
 
     #[test]
@@ -566,9 +666,16 @@ mod tests {
             .get(id)
             .unwrap();
         let env = session.modules().env_for(module);
+        let summary_of = |callee: FunctionId| {
+            session
+                .mir_artifacts_for(callee.module, MirOptimization::Disabled)
+                .map_or(AddressorSummary::UNKNOWN, |artifacts| {
+                    artifacts.addressor_summary(callee.module, callee.function)
+                })
+        };
         assert_eq!(clones(body), 1);
         assert!(
-            borrow_read_only_clones(body).is_some(),
+            borrow_read_only_clones(body, &summary_of).is_some(),
             "fixture must otherwise qualify"
         );
         let block = body.blocks().next().unwrap();
@@ -591,17 +698,18 @@ mod tests {
         operations.insert(clone + 1, drop);
         let body = edit.finish_unverified();
         verify_function(&body, env);
-        assert!(borrow_read_only_clones(&body).is_none());
+        assert!(borrow_read_only_clones(&body, &summary_of).is_none());
     }
 
     #[test]
-    fn rejects_cycles_and_escaping_accessors() {
+    fn rejects_cycles_and_scoped_accessors() {
         check(
             "fn view(x: string, n: int) -> int { let mut copy = x; let mut total = 0; for i in 0..n { total += len(copy); }; total }",
             false,
         );
         check(
-            "fn view(x: [int]) -> int { let mut copy = x; copy[0] }",
+            "subscript held(value: string) -> string { ref { let mut local = value; yield local } }\n\
+             fn view(x: string) -> int { let mut copy = x; len(copy->[held]) }",
             false,
         );
     }

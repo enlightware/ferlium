@@ -18,14 +18,14 @@
 //! semantic MIR body to analyze. For example, `buffer_slot` declares
 //! [`CallableDefinition::result_rooted_in`] as part of its intrinsic contract.
 //!
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::dataflow::call_operands;
+use super::dataflow::{CallOperands, Root, call_operands};
 use crate::{
     define_id_type,
     hir::function::ArgConvention,
     mir::{
-        self, Function, OperationKind, ParameterId, ParameterKind, ValueId,
+        self, Function, Operation, OperationKind, ParameterId, ParameterKind, ValueId,
         const_eval::effects_allow_const_eval, terminator::TerminatorKind,
     },
     module::{FunctionId, LocalFunctionId, ModuleEnv, ModuleId, id::Id},
@@ -148,6 +148,225 @@ impl AddressorSummaries {
             .copied()
             .unwrap_or(AddressorSummary::UNKNOWN)
     }
+}
+
+/// Where a place points, and whether writing through it may replace storage containing addressor
+/// metadata. A place loaded from an addressor's out-slot is a leaf projection: writing its pointee
+/// changes the selected value, not the allocation which contains it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PlaceOrigin {
+    pub(crate) root: Root,
+    pub(crate) structural: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct PlaceOrigins {
+    registers: FxHashMap<ValueId, PlaceOrigin>,
+    /// Out-slots an addressor call filled, before the following `load` materializes the place.
+    returned: FxHashMap<ValueId, PlaceOrigin>,
+    single_writer_slots: FxHashSet<ValueId>,
+}
+
+impl PlaceOrigins {
+    pub(crate) fn of(
+        func: &Function,
+        summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
+    ) -> PlaceOrigins {
+        let mut origins = PlaceOrigins {
+            single_writer_slots: single_writer_addressor_slots(func),
+            ..Self::default()
+        };
+        // Canonical block order normally defines every operand before it is seen. Iterating to a
+        // fixpoint also covers a place flowing through an unusual loop-shaped body without making
+        // that ordering an analysis contract.
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for block_id in func.blocks() {
+                let block = func.block(block_id);
+                for operation in block
+                    .operations()
+                    .iter()
+                    .chain(match &block.terminator().kind {
+                        TerminatorKind::Invoke { operation, .. } => Some(operation),
+                        _ => None,
+                    })
+                {
+                    changed |= origins.learn(operation, summary_of);
+                }
+            }
+        }
+        origins
+    }
+
+    pub(crate) fn origin_of(&self, value: &mir::Value) -> Option<PlaceOrigin> {
+        match value {
+            mir::Value::Parameter(id) => Some(PlaceOrigin {
+                root: Root::Parameter(*id),
+                structural: true,
+            }),
+            mir::Value::Register(id) => self.registers.get(id).copied(),
+            _ => None,
+        }
+    }
+
+    /// The referent owner recorded for an addressor's parsed result slot.
+    pub(crate) fn returned_origin(&self, slot: &mir::Value) -> Option<PlaceOrigin> {
+        let mir::Value::Register(id) = slot else {
+            return None;
+        };
+        self.returned.get(id).copied()
+    }
+
+    fn learn(
+        &mut self,
+        operation: &Operation,
+        summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
+    ) -> bool {
+        let Some(result) = operation.result_id() else {
+            return self.learn_call_result(operation, summary_of);
+        };
+        let origin = match &operation.kind {
+            OperationKind::Alloca { .. }
+            | OperationKind::AllocaPlace { .. }
+            | OperationKind::RuntimeAlloc { .. }
+            | OperationKind::DictEntry { .. }
+            | OperationKind::SubscriptMember { .. } => Some(PlaceOrigin {
+                root: Root::Alloca(result),
+                structural: true,
+            }),
+            OperationKind::Subfield { .. }
+            | OperationKind::AddressOffset { .. }
+            | OperationKind::AddressOffsetPlace { .. } => self.origin_of(&operation.operands[0]),
+            OperationKind::Load => {
+                self.returned_origin(&operation.operands[0])
+                    .map(|origin| PlaceOrigin {
+                        root: origin.root,
+                        structural: false,
+                    })
+            }
+            _ => None,
+        };
+        let mut changed = origin
+            .is_some_and(|origin| self.registers.insert(result, origin).as_ref() != Some(&origin));
+        changed |= self.learn_call_result(operation, summary_of);
+        changed
+    }
+
+    fn learn_call_result(
+        &mut self,
+        operation: &Operation,
+        summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
+    ) -> bool {
+        let Some(call) = addressor_call(operation) else {
+            return false;
+        };
+        let mir::Value::Function(callee) = call.callee else {
+            return false;
+        };
+        let ResultProvenance::Argument(index) = summary_of(*callee).provenance else {
+            return false;
+        };
+        let Some((argument, _)) = call.arguments.get(index.as_index()) else {
+            return false;
+        };
+        let Some(origin) = self.origin_of(argument) else {
+            return false;
+        };
+        let mir::Value::Register(output) = call.result else {
+            return false;
+        };
+        if !self.single_writer_slots.contains(output) {
+            return false;
+        }
+        self.returned.insert(*output, origin).as_ref() != Some(&origin)
+    }
+}
+
+/// Parse the same addressor call shape for writer discovery, use validation and origin learning.
+fn addressor_call(operation: &Operation) -> Option<CallOperands<'_>> {
+    let OperationKind::Call { ty, .. } = &operation.kind else {
+        return None;
+    };
+    if ty.result_convention != CallResultConvention::ADDRESSOR_PLACE {
+        return None;
+    }
+    call_operands(&operation.operands, ty)
+}
+
+/// Only private, single-writer pointer slots can have a function-wide referent origin. A slot's
+/// own storage is distinct from the object named by its contents. Other writes, projected aliases
+/// or escapes would need a flow-sensitive pointer analysis and deliberately remain unknown.
+fn single_writer_addressor_slots(func: &Function) -> FxHashSet<ValueId> {
+    let operations = || {
+        func.blocks().flat_map(|block| {
+            let block = func.block(block);
+            block
+                .operations()
+                .iter()
+                .chain(match &block.terminator().kind {
+                    TerminatorKind::Invoke { operation, .. } => Some(operation),
+                    _ => None,
+                })
+        })
+    };
+    let mut slots = FxHashMap::<ValueId, usize>::default();
+    for operation in operations() {
+        if let Some(call) = addressor_call(operation)
+            && let mir::Value::Register(slot) = call.result
+        {
+            *slots.entry(*slot).or_default() += 1;
+        }
+    }
+    let mut valid: FxHashSet<_> = slots
+        .into_iter()
+        .filter_map(|(slot, writers)| (writers == 1).then_some(slot))
+        .collect();
+    if valid.is_empty() {
+        return valid;
+    }
+    let mut allocated = FxHashSet::default();
+    for operation in operations() {
+        if matches!(
+            operation.kind,
+            OperationKind::Alloca { .. } | OperationKind::AllocaPlace { .. }
+        ) && let Some(id) = operation.result_id()
+            && valid.contains(&id)
+        {
+            allocated.insert(id);
+        }
+        for (index, operand) in operation.operands.iter().enumerate() {
+            let mir::Value::Register(id) = operand else {
+                continue;
+            };
+            if !valid.contains(id) {
+                continue;
+            }
+            let allowed = match &operation.kind {
+                OperationKind::Load | OperationKind::Clear => index == 0,
+                OperationKind::Call { .. } => {
+                    index + 1 == operation.operands.len()
+                        && addressor_call(operation).is_some_and(|call| call.result == operand)
+                }
+                _ => false,
+            };
+            if !allowed {
+                valid.remove(id);
+            }
+        }
+    }
+    for block in func.blocks() {
+        let terminator = func.block(block).terminator();
+        if !matches!(terminator.kind, TerminatorKind::Invoke { .. }) {
+            for operand in terminator.operands() {
+                if let mir::Value::Register(id) = operand {
+                    valid.remove(id);
+                }
+            }
+        }
+    }
+    valid.retain(|slot| allocated.contains(slot));
+    valid
 }
 
 /// What a native declares about where its result points.
@@ -537,6 +756,103 @@ mod tests {
         std::math::int_type,
         types::r#type::{SubscriptType, Type},
     };
+
+    #[test]
+    fn pointer_slot_storage_and_referent_owners_stay_distinct() {
+        use super::{AddressorSummary, PlaceOrigins};
+        use crate::format::FormatWith;
+        use crate::{
+            mir::{self, OperationKind, edit::FunctionEdit, verify::verify_function},
+            module::FunctionId,
+            types::r#type::CallResultConvention,
+        };
+        let mut session = CompilerSession::new();
+        let module_id = session
+            .compile_for(
+                ExecutionTarget::Mir,
+                "fn view(xs: [string], ys: [string]) -> int { len(xs[0]) + len(ys[0]) }",
+                "slot_origins",
+                Path::single_str("slot_origins"),
+            )
+            .unwrap()
+            .module_id;
+        session.set_mir_optimization(MirOptimization::Enabled);
+        session.emit_mir_module(module_id);
+        let module = session.expect_fresh_module(module_id);
+        let id = module.get_local_function_id(ustr("view")).unwrap();
+        let body = session
+            .mir_artifacts_for(module_id, MirOptimization::Enabled)
+            .unwrap()
+            .get(id)
+            .unwrap();
+        let summary_of = |callee: FunctionId| {
+            session
+                .mir_artifacts_for(callee.module, MirOptimization::Disabled)
+                .map_or(AddressorSummary::UNKNOWN, |artifacts| {
+                    artifacts.addressor_summary(callee.module, callee.function)
+                })
+        };
+        let mut calls = Vec::new();
+        for block in body.blocks() {
+            for (index, operation) in body.block(block).operations().iter().enumerate() {
+                if matches!(&operation.kind, OperationKind::Call { ty, .. }
+                    if ty.result_convention == CallResultConvention::ADDRESSOR_PLACE)
+                {
+                    calls.push((block, index, operation.operands.last().unwrap().clone()));
+                }
+            }
+        }
+        assert_eq!(
+            calls.len(),
+            2,
+            "fixture needs two independently rooted addressors: {}",
+            body.format_with(&session.modules().env_for(module))
+        );
+        let loads: Vec<_> = calls
+            .iter()
+            .map(|(_, _, slot)| {
+                body.blocks()
+                    .flat_map(|block| body.block(block).operations())
+                    .find(|op| matches!(op.kind, OperationKind::Load) && op.operands[0] == *slot)
+                    .unwrap()
+                    .result_id()
+                    .unwrap()
+            })
+            .collect();
+        let origins = PlaceOrigins::of(body, &summary_of);
+        for (index, ((_, _, slot), load)) in calls.iter().zip(&loads).enumerate() {
+            assert!(matches!(
+                origins.origin_of(slot).unwrap().root,
+                Root::Alloca(_)
+            ));
+            let origin = origins.origin_of(&mir::Value::Register(*load)).unwrap();
+            assert_eq!(
+                origin.root,
+                Root::Parameter(mir::ParameterId::from_index(index))
+            );
+            assert!(!origin.structural);
+        }
+        // Both calls can validly reuse one pointer slot. Its contents then have no single owner.
+        let mut edit = FunctionEdit::new(body.clone());
+        let (block, index, _) = &calls[1];
+        *edit.block_mut(*block).operations[*index]
+            .operands
+            .last_mut()
+            .unwrap() = calls[0].2.clone();
+        for block in edit.blocks().collect::<Vec<_>>() {
+            for op in &mut edit.block_mut(block).operations {
+                if matches!(op.kind, OperationKind::Load) && op.operands[0] == calls[1].2 {
+                    op.operands[0] = calls[0].2.clone();
+                }
+            }
+        }
+        let changed = edit.finish_unverified();
+        verify_function(&changed, session.modules().env_for(module));
+        let origins = PlaceOrigins::of(&changed, &summary_of);
+        for load in loads {
+            assert!(origins.origin_of(&mir::Value::Register(load)).is_none());
+        }
+    }
 
     /// Provenance over a compiled module, plus a lookup from source name to local id.
     fn provenance_of(src: &str) -> (AddressorSummaries, impl Fn(&str) -> LocalFunctionId) {

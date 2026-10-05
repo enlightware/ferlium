@@ -463,6 +463,8 @@ fn mutable_let_clone_does_not_clone_more_than_needed() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_index_uses_value_clone() {
     let mut session = TestSession::new();
+    // Exact clone counts test dispatch in unoptimized modes; ownership rewrites may remove clones.
+    session.without_optimized_mode();
     assert_val_eq!(
         session.run(
             r#"
@@ -814,6 +816,8 @@ fn array_append_and_concat_use_value_clone() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_value_clone_uses_element_value_clone() {
     let mut session = TestSession::new();
+    // Exact clone counts test dispatch in unoptimized modes; ownership rewrites may remove clones.
+    session.without_optimized_mode();
     assert_val_eq!(
         session.run(
             r#"

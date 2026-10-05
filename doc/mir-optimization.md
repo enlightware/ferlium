@@ -128,10 +128,13 @@ read, projection, call argument or other alias-producing use of the local root.
 Read-only clones have a separate lifetime proof: readers borrow the source while its value and
 storage remain valid, and the clone's cleanup drops disappear together. The proof follows both
 normal and failure paths to cleanup, using immutable, non-escaping argument contracts and storage
-roots rather than recognizing particular callees. For example, a local string copy used only by
-`len` can read the original instead. Unresolved aliases, consuming uses, storage reclamation and
-cycles inside the borrowed lifetime retain the copy. This runs after the semantic rounds settle,
-before DCE removes the unused destination storage.
+roots rather than recognizing particular callees. CSE and clone borrowing share the place-origin
+analysis, including caller-rooted addressor results held in private, single-writer pointer slots.
+Caller-rooted provenance does not imply write permission: readers with mutable signatures require
+structural storage, retaining a copy when the source is an addressor referent with unproved permissions.
+For example, a local string copy used only by `len` can read the original instead. Unresolved
+aliases, consuming uses, storage reclamation and cycles inside the borrowed lifetime retain the copy.
+This runs after the semantic rounds settle, before DCE removes the unused destination storage.
 
 A source-fallible call is an `invoke` terminator, so its result place is deliberately outside this
 first pass; the error edge and cleanup would need their own proof. DS has its own strict operand-role

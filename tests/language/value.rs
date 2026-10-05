@@ -3863,3 +3863,37 @@ fn read_only_clone_lifetimes_preserve_readers_and_failure_cleanup() {
         int(4)
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn caller_rooted_clones_preserve_nested_values_and_failure_cleanup() {
+    let mut session = TestSession::new();
+    let inspect = r#"
+        fn inspect(values: [(string, int)], divisor: int) -> int {
+            let mut copy = values[0]; idiv(len(copy.0) + copy.1, divisor)
+        }
+    "#;
+    assert_val_eq!(
+        session.run(&format!(r#"{inspect} inspect([("abc", 5)], 2)"#)),
+        int(4)
+    );
+    assert_eq!(
+        session.fail_run(&format!(r#"{inspect} inspect([("abc", 5)], 0)"#)),
+        SourceFailureKind::DivisionByZero
+    );
+    assert_val_eq!(
+        session.run(&format!(r#"{inspect} inspect([("abc", 5)], 2)"#)),
+        int(4)
+    );
+    assert_val_eq!(
+        session.run(
+            r#"
+        fn change(mut values: [string]) -> int {
+            let mut copy = values[0]; values[0] = "longer"; len(copy)
+        }
+        change(["abc"])
+    "#
+        ),
+        int(3)
+    );
+}

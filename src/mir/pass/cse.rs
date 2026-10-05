@@ -74,7 +74,7 @@ use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 
 use super::{
     dataflow::{CallOperands, Root, call_operands},
-    provenance::{AddressorSummary, ResultProvenance},
+    provenance::{AddressorSummary, PlaceOrigins, ResultProvenance},
     site::OperationIndex,
 };
 use crate::{
@@ -495,129 +495,6 @@ impl<'a> CallSteps<'a> {
 
     fn available(&self, call: CallId) -> &AvailableCall {
         &self.available[call.as_index()]
-    }
-}
-
-/// Where a place points, and whether writing through it may replace storage containing addressor
-/// metadata. A place loaded from an addressor's out-slot is a leaf projection: writing its pointee
-/// changes the selected value, not the allocation which contains it.
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct PlaceOrigin {
-    root: Root,
-    structural: bool,
-}
-
-#[derive(Default)]
-struct PlaceOrigins {
-    registers: FxHashMap<ValueId, PlaceOrigin>,
-    /// Out-slots an addressor call filled, before the following `load` materializes the place.
-    returned: FxHashMap<ValueId, PlaceOrigin>,
-}
-
-impl PlaceOrigins {
-    fn of(func: &Function, summary_of: &dyn Fn(FunctionId) -> AddressorSummary) -> PlaceOrigins {
-        let mut origins = PlaceOrigins::default();
-        // Canonical block order normally defines every operand before it is seen. Iterating to a
-        // fixpoint also covers a place flowing through an unusual loop-shaped body without making
-        // that ordering an analysis contract.
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for block_id in func.blocks() {
-                let block = func.block(block_id);
-                for operation in block
-                    .operations()
-                    .iter()
-                    .chain(match &block.terminator().kind {
-                        TerminatorKind::Invoke { operation, .. } => Some(operation),
-                        _ => None,
-                    })
-                {
-                    changed |= origins.learn(operation, summary_of);
-                }
-            }
-        }
-        origins
-    }
-
-    fn origin_of(&self, value: &mir::Value) -> Option<PlaceOrigin> {
-        match value {
-            mir::Value::Parameter(id) => Some(PlaceOrigin {
-                root: Root::Parameter(*id),
-                structural: true,
-            }),
-            mir::Value::Register(id) => self.registers.get(id).copied(),
-            _ => None,
-        }
-    }
-
-    fn learn(
-        &mut self,
-        operation: &Operation,
-        summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
-    ) -> bool {
-        let Some(result) = operation.result_id() else {
-            return self.learn_call_result(operation, summary_of);
-        };
-        let origin = match &operation.kind {
-            OperationKind::Alloca { .. }
-            | OperationKind::AllocaPlace { .. }
-            | OperationKind::RuntimeAlloc { .. }
-            | OperationKind::DictEntry { .. }
-            | OperationKind::SubscriptMember { .. } => Some(PlaceOrigin {
-                root: Root::Alloca(result),
-                structural: true,
-            }),
-            OperationKind::Subfield { .. }
-            | OperationKind::AddressOffset { .. }
-            | OperationKind::AddressOffsetPlace { .. } => self.origin_of(&operation.operands[0]),
-            OperationKind::Load => match &operation.operands[0] {
-                mir::Value::Register(slot) => {
-                    self.returned.get(slot).copied().map(|origin| PlaceOrigin {
-                        root: origin.root,
-                        structural: false,
-                    })
-                }
-                _ => None,
-            },
-            _ => None,
-        };
-        let mut changed = origin
-            .is_some_and(|origin| self.registers.insert(result, origin).as_ref() != Some(&origin));
-        changed |= self.learn_call_result(operation, summary_of);
-        changed
-    }
-
-    fn learn_call_result(
-        &mut self,
-        operation: &Operation,
-        summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
-    ) -> bool {
-        let OperationKind::Call { ty, .. } = &operation.kind else {
-            return false;
-        };
-        if ty.result_convention != CallResultConvention::ADDRESSOR_PLACE {
-            return false;
-        }
-        let Some(call) = call_operands(&operation.operands, ty) else {
-            return false;
-        };
-        let mir::Value::Function(callee) = call.callee else {
-            return false;
-        };
-        let ResultProvenance::Argument(index) = summary_of(*callee).provenance else {
-            return false;
-        };
-        let Some((argument, _)) = call.arguments.get(index.as_index()) else {
-            return false;
-        };
-        let Some(origin) = self.origin_of(argument) else {
-            return false;
-        };
-        let mir::Value::Register(output) = call.result else {
-            return false;
-        };
-        self.returned.insert(*output, origin).as_ref() != Some(&origin)
     }
 }
 

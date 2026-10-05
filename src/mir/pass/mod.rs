@@ -572,7 +572,9 @@ pub(crate) fn optimize_function(
     // Borrow read-only clone lifetimes only after the semantic rounds settle. Preserve the
     // source through every normal/error cleanup path; DCE then collects the unused local.
     let source = current.as_ref().unwrap_or(function);
-    if let Some(borrowed) = clone_borrow::borrow_read_only_clones(source) {
+    if let Some(borrowed) =
+        clone_borrow::borrow_read_only_clones(source, &|callee| callees.addressor_summary(callee))
+    {
         current = Some(borrowed);
     }
     // Cleanup runs once, after the rounds have settled, and on every body rather than only on one a
