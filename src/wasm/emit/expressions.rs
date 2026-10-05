@@ -368,7 +368,7 @@ impl Plan {
             });
             let address_consumer = if address_result {
                 consumer.operation(body).and_then(|operation| {
-                    stackifiable_address_consumer(operation, body, roles, env)
+                    stackifiable_address_consumer(operation, body, roles, &inputs.definitions, env)
                 })
             } else {
                 None
@@ -1439,15 +1439,38 @@ fn stackifiable_operation(operation: &Operation) -> bool {
 /// Whether an address consumer reads each address exactly once before any call.
 /// Returns None for other operations, whose materialized pointers follow scalar planning.
 ///
-/// Scalar memory operations use a single load/store; aggregate initialization, copying and
-/// comparison may reread an address. Evidence loads and witnessed moves can call out before
-/// reading their operands, so retain their producers at the original position.
+/// Scalar accesses and fixed copies evaluate each address once. Literal aggregate initialization
+/// and aggregate comparison may reread an address. Evidence loads and witnessed moves can call out
+/// before reading their operands, so retain their producers at the original position.
 fn stackifiable_address_consumer(
     operation: &Operation,
     body: &Function,
     roles: &ValueRoles,
+    definitions: &[Option<Source>],
     env: ModuleEnv<'_>,
 ) -> Option<bool> {
+    // Selected methods allocate and retain their evidence before reading the destination,
+    // then read it twice. Trace the same DictEntry/Load chain as callable::selections.
+    if matches!(
+        operation.kind,
+        OperationKind::Store
+            | OperationKind::Memcpy
+            | OperationKind::Move
+            | OperationKind::MoveBytes { .. }
+    ) {
+        let mut source = &operation.operands[0];
+        while let Value::Register(id) = source {
+            let Some(producer) = definitions[id.as_index()].and_then(|site| site.operation(body))
+            else {
+                break;
+            };
+            match producer.kind {
+                OperationKind::DictEntry { .. } => return Some(false),
+                OperationKind::Load => source = &producer.operands[0],
+                _ => break,
+            }
+        }
+    }
     let scalar_place = |value: &Value| {
         roles
             .get(value, body.constants())
@@ -1456,11 +1479,28 @@ fn stackifiable_address_consumer(
     };
     Some(match operation.kind {
         OperationKind::Load => operation.result_id().is_some_and(|id| {
-            roles.get(&Value::Register(id), body.constants()).is_some_and(|role|
-                matches!(&*role, ValueRole::Materialized(ty) if scalar(ty, &env).is_ok()))
+            roles
+                .get(&Value::Register(id), body.constants())
+                .is_some_and(|role| matches!(&*role, ValueRole::Materialized(_)))
         }),
-        OperationKind::Store => scalar_place(&operation.operands[1]),
-        OperationKind::Memcpy | OperationKind::Move | OperationKind::MoveBytes { .. } => {
+        OperationKind::Store => {
+            // Literal aggregate initialization may reread its destination; a materialized
+            // source uses one copy. Opaque dictionary selections stay outside this rule.
+            scalar_place(&operation.operands[1])
+                || matches!(
+                    operation.operands[0],
+                    Value::Register(_) | Value::Parameter(_)
+                ) && roles
+                    .get(&operation.operands[0], body.constants())
+                    .is_some_and(|role| matches!(&*role, ValueRole::Materialized(_)))
+        }
+        OperationKind::Memcpy | OperationKind::Move => {
+            layout_witness(operation).is_none()
+                && roles
+                    .get(&operation.operands[0], body.constants())
+                    .is_some_and(|role| role.place_pointee_type().is_some())
+        }
+        OperationKind::MoveBytes { .. } => {
             layout_witness(operation).is_none() && scalar_place(&operation.operands[1])
         }
         OperationKind::CompareEqual => scalar_place(&operation.operands[0]),
@@ -1633,7 +1673,10 @@ mod tests {
         mir::{builder::FunctionBuilder, terminator::Terminator},
         module::Path,
         std::{buffer::buffer_type, logic::bool_type, math::int_type},
-        types::r#type::{CallImplType, CallResultConvention, Type},
+        types::{
+            r#trait::TraitDictionaryEntryIndex,
+            r#type::{CallImplType, CallResultConvention, Type},
+        },
         ustr,
     };
 
@@ -1840,7 +1883,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn wasm_codegen_address_deferral_requires_single_scalar_consumption() {
+    fn wasm_codegen_address_deferral_requires_single_address_consumption() {
         let mut session = CompilerSession::new();
         let module = session
             .compile(
@@ -2018,11 +2061,123 @@ mod tests {
                         if matches!(case, "direct call" | "invoke") {
                             pointer_slot
                         } else {
-                            !aggregate && case != "self copy"
+                            if aggregate {
+                                matches!(
+                                    case,
+                                    "load"
+                                        | "copy source"
+                                        | "copy destination"
+                                        | "move source"
+                                        | "move destination"
+                                )
+                            } else {
+                                case != "self copy"
+                            }
                         },
                         "{case}, aggregate={aggregate}, pointer_slot={pointer_slot}"
                     );
                 }
+            }
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn wasm_codegen_selected_method_stores_keep_destination_addresses() {
+        let mut session = CompilerSession::new();
+        let module = session
+            .compile(
+                "trait Tag<Self> { fn tag(value: Self) -> int; } fn seed() {}",
+                "selected_address_guard",
+                Path::single_str("selected_address_guard"),
+            )
+            .unwrap()
+            .module_id;
+        let trait_id = session
+            .expect_fresh_module(module)
+            .get_trait_id(ustr("Tag"))
+            .unwrap();
+        let program = session.prepare_physical_program(module).unwrap();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let ty = Type::function_by_val([int_type()], int_type());
+        for selected in [false, true] {
+            for (name, kind) in [
+                ("store", OperationKind::Store),
+                ("copy", OperationKind::Memcpy),
+                ("move", OperationKind::Move),
+            ] {
+                let mut builder =
+                    FunctionBuilder::new("selected_field".into(), CallResultConvention::NoValue);
+                let destination = Value::Parameter(builder.add_parameter(
+                    Type::tuple([ty, ty]),
+                    ParameterKind::Parameter(ArgConvention::MutableRef),
+                ));
+                let block = builder.add_block();
+                let source = if selected {
+                    let dictionary = Value::Parameter(
+                        builder.add_parameter(Type::unit(), ParameterKind::Dictionary),
+                    );
+                    builder
+                        .append_operation(
+                            block,
+                            Operation::dict_entry(
+                                span,
+                                dictionary,
+                                trait_id,
+                                TraitDictionaryEntryIndex::from_index(0),
+                                ty,
+                            ),
+                        )
+                        .unwrap()
+                } else {
+                    Value::Parameter(
+                        builder
+                            .add_parameter(ty, ParameterKind::Parameter(ArgConvention::MutableRef)),
+                    )
+                };
+                let source = if kind == OperationKind::Store {
+                    // Store uses a materialized Load; copies and moves use the entry place.
+                    builder
+                        .append_operation(block, Operation::load(span, source))
+                        .unwrap()
+                } else {
+                    source
+                };
+                let offset = Value::Constant(builder.add_constant(
+                    int_type(),
+                    LiteralValue::new_native(8_isize),
+                    &env,
+                ));
+                let address = builder
+                    .append_operation(
+                        block,
+                        Operation::address_offset(span, destination, offset, ty, None),
+                    )
+                    .unwrap();
+                let operation = match kind {
+                    OperationKind::Store => Operation::store(span, source, address.clone()),
+                    OperationKind::Memcpy => Operation::memcpy(span, source, address.clone()),
+                    OperationKind::Move => Operation::move_value(span, source, address.clone()),
+                    _ => unreachable!(),
+                };
+                builder.append_operation(block, operation);
+                builder.set_terminator(block, Terminator::ret(span));
+                let body = builder.finish_physical(env);
+                let roles = ValueRoles::derive(&body);
+                let (_, plan) = Analysis::of(
+                    &body,
+                    &roles,
+                    &FxHashMap::default(),
+                    &program,
+                    &session,
+                    env,
+                    false,
+                    &FxHashSet::default(),
+                );
+                let Value::Register(id) = address else {
+                    unreachable!()
+                };
+                assert_eq!(plan.has_value(id), !selected, "{name}, selected={selected}");
             }
         }
     }

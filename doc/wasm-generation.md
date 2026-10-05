@@ -32,12 +32,13 @@ storage or prevent stackification at a real consumer. Scalar loads used only to 
 can be omitted, provided their removal does not discard deferred source work. Other producers retain
 their effects and ownership work. The shared MIR keeps the logical index.
 
-## Keep single-use scalar addresses on the stack
+## Keep single-use addresses on the stack
 
-Expression planning defers single-use addresses to scalar loads, stores, copies, moves,
-comparisons and tag reads when ordering permits. Materialized pointers used elsewhere retain ordinary scalar
-planning. Aggregate operations and witnessed moves retain address locals because they can reread
-an address or call out before consuming it.
+Expression planning defers single-use addresses to memory operations and tag reads when ordering
+permits and the consumer evaluates each address once. Materialized pointers used elsewhere retain
+ordinary scalar planning. Literal aggregate initialization, selected method stores, aggregate
+comparisons and witnessed moves retain address locals because they can reread an address or call
+out before consuming it.
 
 ## Keep terminal scalar results on the stack
 
@@ -53,11 +54,11 @@ remain in the peephole. Expansion happens during body emission, where storage an
 are still known. Fixed-layout replacement uses this same policy for its three copies, retaining
 the exchange temporary and copy order.
 
-Fixed-size copies can use scalar loads and stores, but must read every source chunk before any
-write because valid source and destination ranges may overlap. Known frame slots use memory
-offsets directly, and addresses already in locals reuse those locals. Other addresses are evaluated
-once and use reusable scratch locals. Valid Ferlium copies are in bounds; partial destination
-contents after an invalid memory access are not part of the language contract.
+Fixed-size copies can use scalar loads and stores, but must read every source chunk before any write
+because valid source and destination ranges may overlap. Known frame or local bases reuse memory
+offsets, including static field projections. Other bases are evaluated once and use reusable scratch
+locals. Valid Ferlium copies are in bounds; partial destination contents after an invalid memory
+access are not part of the language contract.
 
 ## Share implementations after lowering
 

@@ -4382,6 +4382,75 @@ fn wasm_codegen_fixed_replacements_use_small_copy_policy() {
 }
 
 #[wasm_bindgen_test]
+fn wasm_codegen_small_field_copies_reuse_bases_and_offsets() {
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        for fields in [3, 4] {
+            let tuple = vec!["int"; fields].join(", ");
+            let values = (0..fields)
+                .map(|i| format!("n + {i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sum = (0..fields)
+                .map(|i| format!("v.inner.payload.{i}"))
+                .collect::<Vec<_>>()
+                .join(" + ");
+            let mut session = CompilerSession::new();
+            session.set_mir_optimization(optimization);
+            session.set_physical_mir_optimization(optimization);
+            let entry = compile(&mut session, &format!(
+                "struct Inner {{ prefix: float, payload: ({tuple}), suffix: int }}
+                 struct Outer {{ ahead: float, inner: Inner }}
+                 #[inline(never)] fn copy_field(v: Outer) -> ({tuple}) {{ v.inner.payload }}
+                 #[inline(never)] fn put_field(v: &mut Outer, p: ({tuple})) {{ v.inner.payload = p }}
+                 fn compute(n: int) -> int {{
+                    let mut v = Outer {{ ahead: 3.5, inner: Inner {{ prefix: 2.5,
+                        payload: ({values}), suffix: 17 }} }};
+                    let p = copy_field(v);
+                    put_field(v, p);
+                    {sum} + v.inner.suffix
+                 }}"));
+            let code = CompiledProgram::compile(&session, entry).unwrap();
+            let functions = WasmFunctions::new(code.bytes());
+            for name in ["::copy_field", "::put_field"] {
+                let (_, index) = functions
+                    .names
+                    .iter()
+                    .find(|(n, _)| n.contains(&format!("wasm_test{name}")))
+                    .unwrap();
+                let (body, parameter_count) = functions.body(*index);
+                assert_reserved_locals_used(&body, parameter_count, name);
+                let ops = body
+                    .get_operators_reader()
+                    .unwrap()
+                    .into_iter()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                assert!(
+                    !ops.iter().any(|op| matches!(
+                        op,
+                        Operator::I32Add
+                            | Operator::LocalSet { .. }
+                            | Operator::LocalTee { .. }
+                            | Operator::MemoryCopy { .. }
+                    )),
+                    "field copies must reuse parameter bases and memory offsets: {optimization:?}, {fields}, {name}: {ops:?}"
+                );
+                assert!(ops.iter().any(|op| matches!(op,
+                    Operator::I64Load { memarg } | Operator::I64Store { memarg } if memarg.offset >= 16)),
+                    "nested field offsets must be combined: {ops:?}");
+            }
+            let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+            for n in [-7, 0, 8] {
+                assert_eq!(
+                    instance.run((n,), WasmLimits::default()).unwrap(),
+                    fields as isize * n + (fields * (fields - 1) / 2) as isize + 17
+                );
+            }
+        }
+    }
+}
+
+#[wasm_bindgen_test]
 fn wasm_codegen_expands_fixed_aggregate_copies() {
     use wasmparser::{Name, NameSectionReader, TypeRef};
 

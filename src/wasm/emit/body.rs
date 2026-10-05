@@ -102,6 +102,12 @@ enum CopyAddress<'a> {
     Base(WasmLocalId, MemArg),
 }
 
+#[derive(Clone, Copy)]
+enum CopyBase {
+    Frame,
+    Local(WasmLocalId),
+}
+
 /// An enclosing Wasm construct of structured emission.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Label {
@@ -1042,10 +1048,8 @@ impl<'a, 's> Body<'a, 's> {
             Memcpy | Move | Replace if layout_witness(operation).is_none() => &args[1],
             _ => return None,
         };
-        let known_address = |value: &Value| {
-            matches!(self.storage.get(value), Some(Storage::Stack(_)))
-                || self.copy_address_local(value).is_some()
-        };
+        let known_address =
+            |value: &Value| self.known_copy_address(CopyAddress::Value(value)).is_some();
         let destination_known = if operation.kind == Load {
             known_address(&Value::Register(operation.result_id().unwrap()))
         } else {
@@ -1078,6 +1082,72 @@ impl<'a, 's> Body<'a, 's> {
                 self.registers.get(id).copied()
             }
             _ => None,
+        }
+    }
+
+    /// A literal, non-indexed address derivation which has not yet been emitted.
+    fn constant_address_offset(
+        &self,
+        value: &Value,
+    ) -> Option<(ValueId, ExpressionSource, &'a Value, u32)> {
+        if self.storage.contains_key(value) {
+            return None;
+        }
+        let Value::Register(id) = value else {
+            return None;
+        };
+        let source = self.expressions.pending_value(*id)?;
+        let operation =
+            &self.body.block(source.block).operations()[source.operation_id().as_index()];
+        if !matches!(
+            operation.kind,
+            OperationKind::AddressOffset { .. } | OperationKind::AddressOffsetPlace { .. }
+        ) || operation.operands.len() != 2
+        {
+            return None;
+        }
+        // A literal has no deferred work to consume when its addition is removed.
+        let literal = match &operation.operands[1] {
+            Value::Constant(id) => &self.body.constant(*id).representation,
+            Value::Pattern(literal) => literal.as_ref(),
+            _ => return None,
+        };
+        let offset =
+            u32::try_from(i32::try_from(*literal.as_primitive_ty::<isize>()?).ok()?).ok()?;
+        Some((*id, source, &operation.operands[0], offset))
+    }
+
+    /// Shared by scratch planning and emission; a known base needs no temporary local.
+    fn known_copy_address(&self, address: CopyAddress<'_>) -> Option<(CopyBase, MemArg)> {
+        let mut value = match address {
+            CopyAddress::Base(local, arg) => return Some((CopyBase::Local(local), arg)),
+            CopyAddress::Value(value) => value,
+        };
+        let mut extra = 0_u32;
+        while let Some((_, _, base, offset)) = self.constant_address_offset(value) {
+            extra = extra.checked_add(offset)?;
+            value = base;
+        }
+        let (local, mut arg) = match self.storage.get(value) {
+            // Planning runs before the frame local is allocated.
+            Some(&Storage::Stack(offset)) => (CopyBase::Frame, memarg_at(3, offset)),
+            _ => (CopyBase::Local(self.copy_address_local(value)?), memarg(0)),
+        };
+        arg.offset = arg.offset.checked_add(u64::from(extra))?;
+        if arg.offset.checked_add(8)? > u64::from(u32::MAX) {
+            return None;
+        }
+        // Frame bases are eight-aligned; a field offset may reduce that alignment.
+        arg.align = arg.align.min(extra.trailing_zeros());
+        Some((local, arg))
+    }
+
+    fn consume_known_copy_address(&mut self, address: CopyAddress<'_>) {
+        if let CopyAddress::Value(mut value) = address {
+            while let Some((id, _, base, _)) = self.constant_address_offset(value) {
+                self.expressions.take_value(id);
+                value = base;
+            }
         }
     }
 
@@ -1120,38 +1190,50 @@ impl<'a, 's> Body<'a, 's> {
             });
             return Ok(());
         }
-        // Fixed slots reuse the frame base and put their offsets directly into memory accesses.
-        let known_address = |address| match address {
-            CopyAddress::Base(local, arg) => Some((local, arg)),
-            CopyAddress::Value(value) => match self.storage.get(value) {
-                Some(&Storage::Stack(offset)) => Some((
-                    self.frame.expect("reserved frame storage"),
-                    memarg_at(3, offset),
-                )),
-                _ => self
-                    .copy_address_local(value)
-                    .map(|local| (local, memarg(0))),
-            },
+        let resolve = |(base, arg)| {
+            (
+                match base {
+                    CopyBase::Frame => self.frame.expect("reserved frame storage"),
+                    CopyBase::Local(local) => local,
+                },
+                arg,
+            )
         };
-        let source_base = known_address(source);
-        let destination_base = known_address(destination);
-        if destination_base.is_none() {
-            self.copy_address(destination)?;
+        let source_base = self.known_copy_address(source).map(resolve);
+        let destination_base = self.known_copy_address(destination).map(resolve);
+        let mut destination_offset = 0;
+        if destination_base.is_some() {
+            self.consume_known_copy_address(destination);
+        } else if let CopyAddress::Value(value) = destination {
+            destination_offset = self.address_base(value)?;
         }
-        if source_base.is_none() {
-            self.copy_address(source)?;
+        let mut source_offset = 0;
+        if source_base.is_some() {
+            self.consume_known_copy_address(source);
+        } else if let CopyAddress::Value(value) = source {
+            source_offset = self.address_base(value)?;
         }
-        // Evaluate both addresses before capturing either, so nested emission cannot clobber them.
+        // Evaluate both bases before capturing either, so nested emission cannot clobber them.
         let source = source_base.unwrap_or_else(|| {
             let local = self.helpers.get(CopySource);
             self.i(I::LocalSet(local.as_u32()));
-            (local, memarg(0))
+            (local, memarg_at(0, source_offset))
         });
         let destination = destination_base.unwrap_or_else(|| {
             let local = self.helpers.get(CopyDestination);
             self.i(I::LocalSet(local.as_u32()));
-            (local, memarg(0))
+            (local, memarg_at(0, destination_offset))
         });
+        // The tail access adds eight to each memory offset; keep it within memory32.
+        for (_, arg) in [source, destination] {
+            if arg
+                .offset
+                .checked_add(8)
+                .is_none_or(|offset| offset > u64::from(u32::MAX))
+            {
+                return Err("memory offset overflow".into());
+            }
+        }
         emit_small_copy(&mut self.code, size, source, destination);
         Ok(())
     }
@@ -2405,43 +2487,21 @@ impl<'a, 's> Body<'a, 's> {
         if let Some(&Storage::Stack(offset)) = self.storage.get(value) {
             return Ok(self.frame_base(offset));
         }
-        if !self.storage.contains_key(value)
-            && let Value::Register(id) = value
-            && let Some(source) = self.expressions.pending_value(*id)
-        {
-            let body = self.body;
+        if let Some((id, source, root, offset)) = self.constant_address_offset(value) {
             let operation =
-                &body.block(source.block).operations()[source.operation_id().as_index()];
-            if matches!(
-                operation.kind,
-                OperationKind::AddressOffset { .. } | OperationKind::AddressOffsetPlace { .. }
-            ) && operation.operands.len() == 2
-            {
-                // Only literal offsets can disappear without consuming another deferred producer.
-                let literal = match &operation.operands[1] {
-                    Value::Constant(id) => Some(&body.constant(*id).representation),
-                    Value::Pattern(literal) => Some(literal.as_ref()),
-                    _ => None,
-                };
-                if let Some(offset) = literal
-                    .and_then(|literal| literal.as_primitive_ty::<isize>())
-                    .and_then(|offset| i32::try_from(*offset).ok())
-                    .and_then(|offset| u32::try_from(offset).ok())
-                {
-                    self.expressions.take_value(*id);
-                    self.open_source(operation.span);
-                    let base = self.address_base(&operation.operands[0])?;
-                    self.close_source();
-                    // Valid field addresses do not wrap at runtime. Combining static offsets
-                    // can overflow here; keep an explicit addition in that case.
-                    if let Some(combined) = base.checked_add(offset) {
-                        return Ok(combined);
-                    }
-                    self.i(I::I32Const(base as i32));
-                    self.i(I::I32Add);
-                    return Ok(offset);
-                }
+                &self.body.block(source.block).operations()[source.operation_id().as_index()];
+            self.expressions.take_value(id);
+            self.open_source(operation.span);
+            let base = self.address_base(root)?;
+            self.close_source();
+            // Valid field addresses do not wrap at runtime. Combining static offsets
+            // can overflow here; keep an explicit addition in that case.
+            if let Some(combined) = base.checked_add(offset) {
+                return Ok(combined);
             }
+            self.i(I::I32Const(base as i32));
+            self.i(I::I32Add);
+            return Ok(offset);
         }
         self.address(value)?;
         Ok(0)
