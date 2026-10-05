@@ -557,7 +557,7 @@ fn wasm_codegen_integer_remainders_preserve_signs_boundaries_and_failures() {
 }
 
 #[wasm_bindgen_test]
-fn wasm_codegen_constant_remainders_omit_zero_guards() {
+fn wasm_codegen_constant_remainders_preserve_results_and_elide_proven_guards() {
     for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
         for function in ["rem", "mod"] {
             for divisor in [-3, -1, 1, 3] {
@@ -568,7 +568,10 @@ fn wasm_codegen_constant_remainders_omit_zero_guards() {
                     &mut session,
                     &format!("fn compute(x: int) -> int {{ {function}(x + 1, {divisor}) }}"),
                 );
-                let code = CompiledProgram::compile(&session, entry).unwrap();
+                let code = match optimization {
+                    MirOptimization::Disabled => compile_raw(&session, entry),
+                    MirOptimization::Enabled => CompiledProgram::compile(&session, entry).unwrap(),
+                };
                 assert_eq!(
                     wasm_operator_count(code.bytes(), |op| matches!(op, Operator::I32RemS)),
                     1
@@ -586,14 +589,18 @@ fn wasm_codegen_constant_remainders_omit_zero_guards() {
                             .collect::<Vec<_>>(),
                         _ => Vec::new(),
                     })
-                    .position(|name| name == "remainder_by_zero")
-                    .expect("conservative import discovery must retain the failure writer");
-                assert_eq!(
-                    wasm_operator_count(code.bytes(), |op| {
-                        matches!(op, Operator::Call { function_index } if *function_index == failure_index as u32)
-                    }),
-                    0
-                );
+                    .position(|name| name == "remainder_by_zero");
+                match optimization {
+                    // Raw literal conversions are not folded, so the checked call keeps its guard.
+                    MirOptimization::Disabled => assert!(
+                        failure_index.is_some(),
+                        "raw checked calls retain their failure import"
+                    ),
+                    MirOptimization::Enabled => assert!(
+                        failure_index.is_none(),
+                        "proven calls need no arithmetic failure import"
+                    ),
+                }
                 let mut instance = code.instantiate::<(isize,), isize>().unwrap();
                 for input in [isize::MIN, isize::MAX, -7, -1, 0, 1, 7] {
                     let dividend = input.wrapping_add(1);
@@ -609,6 +616,78 @@ fn wasm_codegen_constant_remainders_omit_zero_guards() {
                 }
             }
         }
+    }
+}
+
+fn assert_no_arithmetic_failure_transport(bytes: &[u8]) {
+    let mut function_index = 0;
+    for payload in Parser::new(0).parse_all(bytes) {
+        if let Payload::ImportSection(section) = payload.unwrap() {
+            for import in section.into_imports() {
+                let import = import.unwrap();
+                if !matches!(import.ty, TypeRef::Func(_) | TypeRef::FuncExact(_)) {
+                    continue;
+                }
+                if matches!(import.name, "division_by_zero" | "remainder_by_zero") {
+                    panic!("unused arithmetic failure import: {}", import.name);
+                }
+                if matches!(import.name, "capture_failure" | "propagate_failure") {
+                    assert_eq!(
+                        wasm_operator_count(
+                            bytes,
+                            |op| matches!(op, Operator::Call { function_index: target } if *target == function_index)
+                        ),
+                        0,
+                        "unexpected call to {}",
+                        import.name
+                    );
+                }
+                function_index += 1;
+            }
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_proven_nonzero_arithmetic_has_no_failure_transport() {
+    for (expression, expected) in [
+        ("idiv(x, -1)", isize::wrapping_neg as fn(isize) -> isize),
+        ("rem(x, 3)", |x: isize| x.wrapping_rem(3)),
+        ("mod(x, -3)", |x: isize| x.wrapping_rem_euclid(-3)),
+        ("idiv(x, if x < 0 { -3 } else { 3 })", |x: isize| {
+            x.wrapping_div(if x < 0 { -3 } else { 3 })
+        }),
+    ] {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let entry = compile(
+            &mut session,
+            &format!("fn compute(x: int) -> int {{ {expression} }}"),
+        );
+        let code = CompiledProgram::compile(&session, entry).unwrap();
+        assert_no_arithmetic_failure_transport(code.bytes());
+        let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+        for x in [isize::MIN, isize::MAX, -7, 0, 7] {
+            assert_eq!(
+                instance.run((x,), WasmLimits::default()).unwrap(),
+                expected(x)
+            );
+        }
+    }
+    let mut session = CompilerSession::new();
+    session.set_mir_optimization(MirOptimization::Enabled);
+    let entry = compile(&mut session, "fn compute(x: float) -> float { x / 0.5 }");
+    let code = CompiledProgram::compile(&session, entry).unwrap();
+    assert_no_arithmetic_failure_transport(code.bytes());
+    let mut instance = code.instantiate::<(Float,), Float>().unwrap();
+    for x in [0.0, -0.0, 1.0, -1.0, f64::MAX, -f64::MAX] {
+        let actual = instance
+            .run((Float::new(x).unwrap(),), WasmLimits::default())
+            .unwrap();
+        assert_eq!(
+            actual.into_inner().to_bits(),
+            Float::new_saturating(x / 0.5).into_inner().to_bits()
+        );
     }
 }
 

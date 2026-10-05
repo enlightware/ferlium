@@ -183,6 +183,8 @@ impl Site {
 pub(crate) struct Plan {
     calls: Vec<Fold>,
     invokes: Vec<InvokeFold>,
+    /// Runtime calls proved unable to take their source-error edge.
+    nonzero_invokes: Vec<(BlockId, FunctionId, CallImplType)>,
     /// Conditional branches whose condition is known, and the successor they always take.
     branches: Vec<(BlockId, BlockId)>,
     /// `build_array` element slots to replace with the constants they hold.
@@ -202,6 +204,7 @@ impl Plan {
     fn is_empty(&self) -> bool {
         self.calls.is_empty()
             && self.invokes.is_empty()
+            && self.nonzero_invokes.is_empty()
             && self.branches.is_empty()
             && self.arrays.is_empty()
     }
@@ -384,6 +387,26 @@ pub(crate) fn fold_function(
         let block = edit.block_mut(invoke.block);
         block.operations.extend(replacements);
         block.terminator = Terminator::goto(span, invoke.normal);
+    }
+    for (block_id, callee, ty) in plan.nonzero_invokes {
+        let block = edit.block_mut(block_id);
+        let TerminatorKind::Invoke {
+            operation, normal, ..
+        } = &block.terminator.kind
+        else {
+            unreachable!("planned against an Invoke");
+        };
+        let normal = *normal;
+        let mut operation = operation.clone();
+        operation.operands[0] = mir::Value::Function(callee);
+        let OperationKind::Call { ty: call_ty, .. } = &mut operation.kind else {
+            unreachable!("only calls have nonzero counterparts");
+        };
+        // Retargetable declarations have identical instantiation and ownership conventions.
+        // Preserve the original metadata while replacing the callee's effect type.
+        *call_ty = b(ty);
+        block.operations.push(operation);
+        block.terminator = Terminator::goto(block.terminator.span, normal);
     }
     for (block, target) in plan.branches {
         let span = edit.block(block).terminator.span;
@@ -919,6 +942,11 @@ fn plan_folds_with(
                         refusals,
                     );
                 }
+                if let Some((callee, ty)) = proven_nonzero_arithmetic(operation, &state, &context) {
+                    plan.nonzero_invokes.push((block, callee, ty));
+                    plan.warrants_another_round = true;
+                    continue;
+                }
                 if let Some(devirtualizations) = devirtualizations.as_mut()
                     && let Some(resolved) = resolved_callee(operation, &state, analysis)
                 {
@@ -1146,6 +1174,42 @@ impl ArithmeticNegations {
             _ => self.places.clear(),
         }
     }
+}
+
+/// Retarget only a concrete std call whose divisor facts exclude both zero representations.
+fn proven_nonzero_arithmetic(
+    operation: &Operation,
+    state: &State,
+    context: &FoldContext<'_>,
+) -> Option<(FunctionId, CallImplType)> {
+    let OperationKind::Call { ty, .. } = &operation.kind else {
+        return None;
+    };
+    let mir::Value::Function(callee) = operation.operands.first()? else {
+        return None;
+    };
+    let known = context.known_calls.resolve(*callee)?;
+    let (replacement, replacement_ty) = context.known_calls.callees.nonzero_arithmetic(known)?;
+    let call = dataflow::call_operands(&operation.operands, ty)?;
+    // These concrete primitives have no hidden evidence or ownership transfer.
+    if !call.extras.is_empty() || call.arguments.len() != 2 {
+        return None;
+    }
+    let (divisor, _) = call.arguments.get(1)?;
+    let fact = state.place(context.analysis.tracked_place_of(divisor)?);
+    let nonzero = match fact {
+        Fact::Known(Const::Literal(value)) if known == KnownCallee::FloatDiv => value
+            .as_primitive_ty::<Float>()
+            .is_some_and(|value| value.into_inner() != 0.0),
+        Fact::Known(Const::Literal(value)) => value
+            .as_primitive_ty::<isize>()
+            .is_some_and(|value| *value != 0),
+        Fact::Outcomes(values) if known != KnownCallee::FloatDiv => values
+            .iter()
+            .all(|value| matches!(value, dataflow::Outcome::Int(value) if *value != 0)),
+        _ => false,
+    };
+    nonzero.then(|| (replacement, replacement_ty.clone()))
 }
 
 /// Applies known-callee rewrites that need less than the whole of the arguments.
@@ -1742,6 +1806,40 @@ mod tests {
             .nth(1)
             .expect("the module defines main")
             .to_string()
+    }
+
+    #[test]
+    fn proven_nonzero_divisors_remove_only_impossible_error_edges() {
+        for (expression, helper) in [
+            ("idiv(x, 3)", "idiv_nonzero"),
+            ("idiv(x, -1)", "idiv_nonzero"),
+            ("rem(x, 3)", "rem_nonzero"),
+            ("mod(x, -3)", "mod_nonzero"),
+            ("idiv(x, if x < 0 { -3 } else { 3 })", "idiv_nonzero"),
+        ] {
+            let body = optimized_main(&format!("fn main(x: int) -> int {{ {expression} }}"));
+            assert!(body.contains(helper), "{expression}: {body}");
+            assert!(!body.contains("invoke "), "{expression}: {body}");
+        }
+        let body = optimized_main("fn main(x: float) -> float { x / 3.0 }");
+        assert!(body.contains("div_float_nonzero"), "{body}");
+        assert!(!body.contains("invoke "), "{body}");
+        for expression in [
+            "idiv(x, 0)",
+            "rem(x, 0)",
+            "mod(x, 0)",
+            "idiv(x, if x < 0 { 0 } else { 3 })",
+            "idiv(3, x)",
+        ] {
+            let body = optimized_main(&format!("fn main(x: int) -> int {{ {expression} }}"));
+            assert!(body.contains("invoke "), "{expression}: {body}");
+            assert!(!body.contains("_nonzero"), "{expression}: {body}");
+        }
+        for divisor in ["0.0", "-0.0", "x"] {
+            let body = optimized_main(&format!("fn main(x: float) -> float {{ x / {divisor} }}"));
+            assert!(body.contains("invoke "), "{divisor}: {body}");
+            assert!(!body.contains("div_float_nonzero"), "{divisor}: {body}");
+        }
     }
 
     /// An array literal stores each element into a fresh slot only for the construction to read it

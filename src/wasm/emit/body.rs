@@ -69,7 +69,7 @@ use super::{
     expressions::{
         Analysis as ExpressionAnalysis, Plan as ExpressionPlan, Source as ExpressionSource,
     },
-    frame_address, frame_bytes, is_elided_stack_operation, is_fallible_intrinsic, layout_witness,
+    frame_address, frame_bytes, is_division_intrinsic, is_elided_stack_operation, layout_witness,
     leave_frame, memarg, memarg_at, offset_sum, operations,
     peephole::{Code, Spans},
     scalar, stack, subscript,
@@ -2102,7 +2102,7 @@ impl<'a, 's> Body<'a, 's> {
         invoked: bool,
         checked: bool,
     ) -> Result<(), String> {
-        if is_fallible_intrinsic(intrinsic) {
+        if is_division_intrinsic(intrinsic) {
             return self.call_division(intrinsic, inputs, output, invoked);
         }
         let arity = match intrinsic {
@@ -2546,11 +2546,12 @@ impl<'a, 's> Body<'a, 's> {
             }
         }
         self.finish_store(output, ty, offset);
-        self.i(I::I32Const(0));
+        if invoked {
+            self.i(I::I32Const(0));
+        }
         if guarded {
             self.i(I::End);
         }
-        self.call_status(invoked, true);
         Ok(())
     }
 

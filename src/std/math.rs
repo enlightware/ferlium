@@ -572,7 +572,52 @@ fn modulo(lhs: isize, rhs: isize) -> Result<isize, SourceFailureKind> {
     }
 }
 
+// Compiler-only entry points: the caller has proved that the divisor is nonzero.
+// Rust's wrapping integer operations panic on zero; floats need an explicit assertion.
+fn div_float_nonzero(lhs: Float, rhs: Float) -> Float {
+    assert!(rhs.into_inner() != 0.0, "invalid nonzero division proof");
+    Float::new_saturating(lhs.into_inner() / rhs.into_inner())
+}
+
 pub fn add_to_module(to: &mut Module) {
+    for (name, function) in [
+        (
+            "idiv_nonzero",
+            NativeFnNN::from_rust(isize::wrapping_div).description(
+                ["left", "right"],
+                "Internal division by a proven nonzero divisor.",
+                no_effects(),
+            ),
+        ),
+        (
+            "rem_nonzero",
+            NativeFnNN::from_rust(isize::wrapping_rem).description(
+                ["left", "right"],
+                "Internal remainder with a proven nonzero divisor.",
+                no_effects(),
+            ),
+        ),
+        (
+            "mod_nonzero",
+            NativeFnNN::from_rust(isize::wrapping_rem_euclid).description(
+                ["left", "right"],
+                "Internal modulo with a proven nonzero divisor.",
+                no_effects(),
+            ),
+        ),
+    ] {
+        to.add_function_with_visibility(ustr(name), function, Visibility::Module);
+    }
+    to.add_function_with_visibility(
+        ustr("div_float_nonzero"),
+        NativeFnNN::from_rust(div_float_nonzero).description(
+            ["left", "right"],
+            "Internal float division by a proven nonzero divisor.",
+            no_effects(),
+        ),
+        Visibility::Module,
+    );
+
     macro_rules! add_predicate {
         ($name:literal, $ty:ty, $op:tt) => {
             to.add_function_with_visibility(

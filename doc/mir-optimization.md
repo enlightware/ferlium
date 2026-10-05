@@ -202,6 +202,11 @@ while the unknown one keeps its slot, and `dce` collects whatever became unread.
 the array's own fact is derived from these same element facts, so the next round's analysis learns
 nothing from the rewrite.
 
+When existing divisor facts exclude zero, folding retargets division and remainder Invokes to
+private, infallible std counterparts. The ordinary call and normal successor replace the Invoke;
+dead-code cleanup removes the unreachable failure path. These counterparts preserve the arithmetic
+semantics; their Rust implementations panic on violated preconditions.
+
 The same pass simplifies arithmetic and comparisons using known std contracts, even when some
 arguments remain unknown. For example, multiplying an unknown integer by zero becomes a constant
 store. Callees are recognized by resolved `FunctionId`, including through specialization. Rewrites

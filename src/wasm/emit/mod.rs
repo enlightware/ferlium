@@ -36,6 +36,7 @@ use crate::{
     hir::{function::ArgConvention, native_functions::NativeScalar},
     mir::{
         BasicBlock, Function, Operation, OperationKind, ParameterKind, Value, ValueId,
+        operation::SourceFallibility,
         pass::known_callee::KnownCallee,
         physical::{constructed_subscript_definitions, program::ResolvedPhysicalProgram},
         role::MirType,
@@ -967,8 +968,11 @@ fn emit_with_export_kind(
                     _ => (),
                 }
                 let intrinsic = wasm_intrinsic(session, operation);
-                // Conservative: constant or plain calls may omit the guard during emission.
-                match intrinsic {
+                // Only source-fallible arithmetic calls can emit a diagnostic writer.
+                // Constant divisors may still let emission omit its guard.
+                match intrinsic
+                    .filter(|_| operation.source_fallibility() == SourceFallibility::Fallible)
+                {
                     Some(KnownCallee::IntDiv | KnownCallee::FloatDiv) => imports
                         .add_division_by_zero()
                         .map_err(|error| format!("division failure linkage: {error:?}"))?,
@@ -1730,8 +1734,8 @@ fn callee(op: &Operation) -> Option<&Value> {
     }
 }
 
-/// These initialize result storage only on success and leave a status for Invoke.
-fn is_fallible_intrinsic(intrinsic: KnownCallee) -> bool {
+/// Arithmetic operations with a checked Invoke form and a proven-success plain-call form.
+fn is_division_intrinsic(intrinsic: KnownCallee) -> bool {
     matches!(
         intrinsic,
         KnownCallee::IntDiv | KnownCallee::FloatDiv | KnownCallee::IntRem | KnownCallee::IntMod

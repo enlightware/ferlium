@@ -1173,11 +1173,11 @@ mod tests {
     #[test]
     fn a_fallible_callee_is_inlined_at_its_invoke() {
         let module = optimized(
-            "fn half(x: int) -> int { idiv(x, 2) }\nfn use_it(n: int) -> int { half(n) }",
+            "fn divide(x: int) -> int { idiv(2, x) }\nfn use_it(n: int) -> int { divide(n) }",
         );
         let caller = body_of(&module, "use_it");
         assert!(
-            !caller.contains("call inline::half"),
+            !caller.contains("call inline::divide"),
             "the fallible callee must be inlined:\n{caller}"
         );
         assert!(

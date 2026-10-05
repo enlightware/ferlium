@@ -75,6 +75,9 @@ fn named_def(ty: Type) -> Option<TypeDefId> {
 
 /// What a call to a known std function computes.
 ///
+/// Checked arithmetic and its nonzero counterparts share a value identity; call effects
+/// distinguish their source-failure contracts.
+///
 /// Each variant is a statement about the returned value in terms of the arguments, in argument
 /// order. Wrapping behaviour is the runtime's: Ferlium's `int` is a wrapping two's-complement
 /// integer, so `IntAdd` is exact modulo that and a consumer reasoning about magnitudes must account
@@ -326,6 +329,7 @@ pub(crate) struct KnownCallees {
     array_offset_unchecked_effects: EffType,
     /// The compiler-internal raw float operations float speculation emits, with their call types.
     raw_float: Vec<(KnownCallee, FunctionId, CallImplType)>,
+    nonzero_arithmetic: Vec<(KnownCallee, FunctionId, CallImplType)>,
     layouts: Layouts,
     /// The type definitions a place has to be an instance of for a field position above to mean
     /// anything.
@@ -354,6 +358,10 @@ impl KnownCallees {
         let int_add = resolver.method(NUM_TRAIT_NAME, int_type(), "add");
         let int_sub = resolver.method(NUM_TRAIT_NAME, int_type(), "sub");
         let int_mul = resolver.method(NUM_TRAIT_NAME, int_type(), "mul");
+        let int_div = resolver.function("idiv");
+        let int_rem = resolver.function("rem");
+        let int_mod = resolver.function("mod");
+        let float_div = resolver.method(DIV_TRAIT_NAME, float_type(), "div");
         let int_neg = resolver.method(NUM_TRAIT_NAME, int_type(), "neg");
         let float_neg = resolver.method(NUM_TRAIT_NAME, float_type(), "neg");
         let int_bit_and = resolver.method(BITS_TRAIT_NAME, int_type(), "bit_and");
@@ -378,6 +386,19 @@ impl KnownCallees {
         .into_iter()
         .map(|(name, known)| {
             let function = resolver.function(name);
+            (known, function, resolver.call_impl_type(function))
+        })
+        .collect();
+        let nonzero_arithmetic: Vec<_> = [
+            (int_div, "idiv_nonzero", KnownCallee::IntDiv),
+            (int_rem, "rem_nonzero", KnownCallee::IntRem),
+            (int_mod, "mod_nonzero", KnownCallee::IntMod),
+            (float_div, "div_float_nonzero", KnownCallee::FloatDiv),
+        ]
+        .into_iter()
+        .map(|(checked, name, known)| {
+            let function = resolver.function(name);
+            resolver.assert_retargetable(checked, function);
             (known, function, resolver.call_impl_type(function))
         })
         .collect();
@@ -443,9 +464,9 @@ impl KnownCallees {
             ),
             (int_sub, KnownCallee::IntSub),
             (int_mul, KnownCallee::IntMul),
-            (resolver.function("idiv"), KnownCallee::IntDiv),
-            (resolver.function("rem"), KnownCallee::IntRem),
-            (resolver.function("mod"), KnownCallee::IntMod),
+            (int_div, KnownCallee::IntDiv),
+            (int_rem, KnownCallee::IntRem),
+            (int_mod, KnownCallee::IntMod),
             (int_neg, KnownCallee::IntNeg),
             (
                 resolver.method(NUM_TRAIT_NAME, int_type(), "from_int"),
@@ -467,10 +488,7 @@ impl KnownCallees {
                 KnownCallee::FloatMul,
             ),
             (float_neg, KnownCallee::FloatNeg),
-            (
-                resolver.method(DIV_TRAIT_NAME, float_type(), "div"),
-                KnownCallee::FloatDiv,
-            ),
+            (float_div, KnownCallee::FloatDiv),
             (
                 resolver.method(ORD_TRAIT_NAME, float_type(), "cmp"),
                 KnownCallee::FloatCmp,
@@ -558,6 +576,11 @@ impl KnownCallees {
                 .iter()
                 .map(|(known, function, _)| (*function, *known)),
         );
+        by_id.extend(
+            nonzero_arithmetic
+                .iter()
+                .map(|(known, function, _)| (*function, *known)),
+        );
         by_id.extend(resolver.std_module.functions.iter().enumerate().filter_map(
             |(index, function)| {
                 let CallableOrigin::BufferPrimitive(primitive) = function.origin else {
@@ -591,6 +614,7 @@ impl KnownCallees {
             array_offset_unchecked,
             array_offset_unchecked_effects: resolver.effects(array_offset_unchecked),
             raw_float,
+            nonzero_arithmetic,
             layouts: Layouts {
                 array_len: resolver.field("array", "len"),
                 range: resolver.range_layout("RangeIterator", "Range"),
@@ -663,6 +687,17 @@ impl KnownCallees {
             .find(|(candidate, _, _)| *candidate == known)
             .unwrap_or_else(|| panic!("{known:?} is not a raw float operation"));
         (*function, ty)
+    }
+
+    /// The private success-only counterpart of a division or remainder operation.
+    pub(crate) fn nonzero_arithmetic(
+        &self,
+        known: KnownCallee,
+    ) -> Option<(FunctionId, &CallImplType)> {
+        self.nonzero_arithmetic
+            .iter()
+            .find(|(candidate, _, _)| *candidate == known)
+            .map(|(_, function, ty)| (*function, ty))
     }
 
     /// Whether `ty` is the std array type, at any element type.
@@ -756,7 +791,7 @@ impl Resolver<'_> {
         )
     }
 
-    /// Checks the ABI assumption used when bounds elimination retargets one call to another.
+    /// Checks the ABI assumption used when a proof retargets one call to another.
     ///
     /// The effect row is deliberately the one difference: removing the proved panic makes the
     /// replacement infallible. Quantifiers and constraints must stay positional because the call's
@@ -774,15 +809,15 @@ impl Resolver<'_> {
         expected.ty.effects = unchecked.definition.ty_scheme.ty.effects.clone();
         assert_eq!(
             expected, unchecked.definition.ty_scheme,
-            "checked and unchecked array addressors must differ only in effects"
+            "checked and proven callees must differ only in effects"
         );
         assert_eq!(
             checked.definition.result_convention, unchecked.definition.result_convention,
-            "checked and unchecked array addressors must use one result convention"
+            "checked and proven callees must use one result convention"
         );
         assert_eq!(
             checked.parameter_passing, unchecked.parameter_passing,
-            "checked and unchecked array addressors must pass visible arguments identically"
+            "checked and proven callees must pass visible arguments identically"
         );
     }
 
@@ -895,7 +930,7 @@ mod tests {
         let session = CompilerSession::new();
         assert_eq!(
             known_callees(&session).by_id.len(),
-            74,
+            78,
             "two known callees resolved to the same function id"
         );
     }

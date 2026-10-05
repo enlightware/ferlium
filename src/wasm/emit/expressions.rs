@@ -27,7 +27,7 @@ use crate::{
 
 use super::{
     body::intrinsic_reads_input_repeatedly, control_flow::conditional_targets,
-    is_elided_stack_operation, is_fallible_intrinsic, layout_witness, scalar, wasm_intrinsic,
+    is_elided_stack_operation, layout_witness, scalar, wasm_intrinsic,
 };
 
 const MAX_EXPRESSION_DEPTH: usize = 128;
@@ -303,8 +303,7 @@ fn stack_return(
                 let direct = call_abi(operation, intrinsic, callees, program).is_some_and(|abi| {
                     !abi.fallible && matches!(abi.result, ResultKind::Direct(_))
                 });
-                (intrinsic.is_some_and(|intrinsic| !is_fallible_intrinsic(intrinsic)) || direct)
-                    .then_some(operation.operands.len() - 1)
+                (intrinsic.is_some() || direct).then_some(operation.operands.len() - 1)
             }
             _ => None,
         };
@@ -444,14 +443,14 @@ impl Plan {
             else {
                 continue;
             };
+            // Writers in the operation list are plain calls: their source success is guaranteed.
             let supported =
                 match writer.kind {
                     OperationKind::Store => true,
                     OperationKind::Call { .. } => inputs
                         .intrinsic(layout, write.source)
                         .is_some_and(|callee| {
-                            !is_fallible_intrinsic(callee)
-                                && !matches!(callee, KnownCallee::IntCmp | KnownCallee::FloatCmp)
+                            !matches!(callee, KnownCallee::IntCmp | KnownCallee::FloatCmp)
                         }),
                     _ => false,
                 };
