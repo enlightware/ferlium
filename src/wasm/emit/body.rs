@@ -3690,8 +3690,8 @@ impl<'a, 's> Body<'a, 's> {
                 if tag_scalar {
                     self.read(&args[0])?;
                 } else {
-                    self.address(&args[0])?;
-                    self.i(I::I32Load(memarg(2)));
+                    let offset = self.address_base(&args[0])?;
+                    self.i(I::I32Load(memarg_at(2, offset)));
                 }
                 if tag_scalar && matches!(op.kind, ExtractTag) {
                     // Every case is inline: the representation bit is statically clear.

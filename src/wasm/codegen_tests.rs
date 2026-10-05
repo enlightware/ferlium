@@ -3687,6 +3687,81 @@ fn wasm_codegen_keeps_terminal_scalar_results_on_the_stack() {
 }
 
 #[wasm_bindgen_test]
+fn wasm_codegen_nested_variant_fields_use_memory_offsets() {
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        for payload in [
+            "(n, (n + 1, 2.5))",
+            "Fields { first: n, nested: (n + 1, 2.5) }",
+        ] {
+            let mut session = CompilerSession::new();
+            session.set_mir_optimization(optimization);
+            session.set_physical_mir_optimization(optimization);
+            let access = if payload.starts_with('(') {
+                "p.1.0"
+            } else {
+                "p.nested.0"
+            };
+            let entry = compile(
+                &mut session,
+                &format!(
+                    "struct Fields {{ first: int, nested: (int, float) }}
+                 fn compute(n: int, present: bool) -> int {{
+                    let inner = if present {{ Some({payload}) }} else {{ None }};
+                    let v = black_box((2.5, inner));
+                    match v.1 {{ None => -1, Some(p) => {access} }}
+                 }}"
+                ),
+            );
+            let code = CompiledProgram::compile(&session, entry).unwrap();
+            let functions = WasmFunctions::new(code.bytes());
+            let (_, index) = functions
+                .names
+                .iter()
+                .find(|(name, _)| name.ends_with("::compute"))
+                .unwrap();
+            let (body, parameter_count) = functions.body(*index);
+            assert_reserved_locals_used(
+                &body,
+                parameter_count,
+                &format!("{optimization:?}, {payload}"),
+            );
+            let operators = body
+                .get_operators_reader()
+                .unwrap()
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            // Identify the tag read by its representation-bit mask, rather than accepting
+            // a payload field load whose offset could already fold before this change.
+            let tag_loads = operators
+                .windows(3)
+                .filter_map(|ops| match ops {
+                    [
+                        Operator::I32Load { memarg },
+                        Operator::I32Const { value: 0x7fff_ffff },
+                        Operator::I32And,
+                    ] => Some(memarg.offset),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert!(!tag_loads.is_empty(), "fixture must read a variant tag");
+            assert!(
+                tag_loads.iter().all(|offset| *offset > 0),
+                "tag reads must fold their field address into a memory offset: {optimization:?}, {payload}"
+            );
+            let mut instance = code.instantiate::<(isize, bool), isize>().unwrap();
+            for n in [-5, 0, 7] {
+                assert_eq!(
+                    instance.run((n, true), WasmLimits::default()).unwrap(),
+                    n + 1
+                );
+                assert_eq!(instance.run((n, false), WasmLimits::default()).unwrap(), -1);
+            }
+        }
+    }
+}
+
+#[wasm_bindgen_test]
 fn wasm_codegen_uses_static_field_memory_offsets() {
     for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
         let mut session = CompilerSession::new();

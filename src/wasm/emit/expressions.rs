@@ -1464,7 +1464,9 @@ fn stackifiable_address_consumer(
             layout_witness(operation).is_none() && scalar_place(&operation.operands[1])
         }
         OperationKind::CompareEqual => scalar_place(&operation.operands[0]),
-        OperationKind::RuntimeDealloc
+        OperationKind::ExtractTag
+        | OperationKind::ExtractPayloadIndirection
+        | OperationKind::RuntimeDealloc
         | OperationKind::AddressOffset { .. }
         | OperationKind::AddressOffsetPlace { .. } => true,
         _ => return None,
@@ -1478,7 +1480,12 @@ fn stackifiable_address_consumer(
 fn stackifiable_consumer(body: &Function, source: Source) -> bool {
     if let Some(operation) = source.operation(body) {
         return stackifiable_operation(operation)
-            || matches!(operation.kind, OperationKind::RuntimeDealloc);
+            || matches!(
+                operation.kind,
+                OperationKind::RuntimeDealloc
+                    | OperationKind::ExtractTag
+                    | OperationKind::ExtractPayloadIndirection
+            );
     }
     matches!(
         body.block(source.block).terminator().kind,

@@ -30,7 +30,7 @@ use crate::{
 
 use super::{
     ScalarType, check_context, context_pointer, emit_failure, enter_frame, frame_address,
-    frame_bytes, leave_frame, memarg, peephole::Instructions,
+    frame_bytes, leave_frame, memarg, memarg_at, peephole::Instructions,
 };
 
 /// Target types and result conversion shared by dictionary and uniform callable adapters.
@@ -287,22 +287,23 @@ impl NativeOptionalResultAdapter {
         code.instruction(&I::I32Const(self.some_tag as i32));
         code.instruction(&I::I32Store(memarg(2)));
         code.instruction(&I::LocalGet(output.as_u32()));
-        code.instruction(&I::I32Const(
-            variant_payload_offset(if self.storage.is_indirect() {
-                align_of::<usize>() as u32
-            } else {
-                self.align
-            }) as i32,
-        ));
-        code.instruction(&I::I32Add);
+        let offset = variant_payload_offset(if self.storage.is_indirect() {
+            align_of::<usize>() as u32
+        } else {
+            self.align
+        });
         if self.storage.is_indirect() {
             let scratch = scratch.expect("indirect optional payload requires scratch storage");
             code.instruction(&I::I32Const(self.size as i32));
             code.instruction(&I::I32Const(self.align as i32));
             code.instruction(&I::Call(allocate.as_u32()));
             code.instruction(&I::LocalTee(scratch.as_u32()));
-            code.instruction(&I::I32Store(memarg(2)));
+            code.instruction(&I::I32Store(memarg_at(2, offset)));
             code.instruction(&I::LocalGet(scratch.as_u32()));
+        } else {
+            // The inline copy needs a complete destination pointer, rather than a memory offset.
+            code.instruction(&I::I32Const(offset as i32));
+            code.instruction(&I::I32Add);
         }
         code.instruction(&I::I32Const(self.field as i32));
         code.instruction(&I::I32Add);
@@ -395,4 +396,51 @@ pub(super) fn boxed_entry_wrapper(
     }
     code.instruction(&I::End);
     Ok(code)
+}
+
+#[cfg(test)]
+mod tests {
+    use wasm_bindgen_test::wasm_bindgen_test;
+    use wasmparser::{BinaryReader, FunctionBody, Operator};
+
+    use super::*;
+
+    #[wasm_bindgen_test]
+    fn indirect_optional_payload_pointer_uses_store_offset() {
+        // Native optional APIs currently expose only inline payloads. Exercise the indirect
+        // adapter recipe directly, keeping the real presence and allocation instruction order.
+        let adapter = NativeOptionalResultAdapter {
+            some_tag: VariantPayloadStorage::Indirect.encode_tag_id(1),
+            none_tag: 0,
+            storage: VariantPayloadStorage::Indirect,
+            size: 16,
+            align: 8,
+            field: 0,
+            payload_size: 8,
+        };
+        let mut code = WasmFunction::new([(3, ValType::I32)]);
+        code.instruction(&I::I32Const(1));
+        adapter.emit(
+            &mut code,
+            WasmLocalId::from_index(0),
+            WasmLocalId::from_index(1),
+            Some(WasmLocalId::from_index(2)),
+            WasmFunctionId::from_index(0),
+        );
+        code.instruction(&I::End);
+        let bytes = code.into_raw_body();
+        let body = FunctionBody::new(BinaryReader::new(&bytes, 0));
+        let operators = body
+            .get_operators_reader()
+            .unwrap()
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let offset = u64::from(variant_payload_offset(align_of::<usize>() as u32));
+        assert!(operators.windows(3).any(|ops| matches!(ops,
+            [Operator::Call { function_index: 0 }, Operator::LocalTee { local_index: 2 },
+             Operator::I32Store { memarg }] if memarg.offset == offset)));
+        assert!(!operators.windows(2).any(|ops| matches!(ops,
+            [Operator::I32Const { value }, Operator::I32Add] if i64::from(*value) == offset as i64)));
+    }
 }
