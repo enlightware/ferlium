@@ -1196,7 +1196,7 @@ mod tests {
 
     use super::{
         super::stack_region::remove_redundant_stack_markers, may_leave_frame_storage,
-        remove_dead_trivial_results, remove_discarded_trivial_copy_results,
+        remove_dead_storage, remove_dead_trivial_results, remove_discarded_trivial_copy_results,
     };
     use crate::{
         CompilerSession, ExecutionTarget, Location, MirOptimization, Path,
@@ -1449,8 +1449,31 @@ mod tests {
     #[test]
     fn a_read_managed_clone_lifetime_is_retained() {
         let source = "fn first(x: [int]) -> int { let mut copy = x; copy[0] }";
-        let module = optimized(source);
-        let body = body_of(&module, "first");
+        let mut session = CompilerSession::new();
+        let module_id = session
+            .compile_for(
+                ExecutionTarget::Mir,
+                source,
+                "dce_read",
+                Path::single_str("dce_read"),
+            )
+            .unwrap()
+            .module_id;
+        let module = session.expect_fresh_module(module_id);
+        let id = module.get_local_function_id(ustr("first")).unwrap();
+        let body = session
+            .mir_artifacts_for(module_id, MirOptimization::Disabled)
+            .unwrap()
+            .get(id)
+            .unwrap();
+        // DCE must retain an observed clone. The later borrowing pass can separately prove that
+        // its readers may share the original; testing the complete pipeline conflates the rules.
+        let rewritten = remove_dead_storage(body);
+        let body = rewritten
+            .as_ref()
+            .unwrap_or(body)
+            .format_with(&session.modules().env_for(module))
+            .to_string();
         assert!(
             body.contains("clone [int]") && body.contains("drop [int]"),
             "an observed clone is not a dead ownership lifetime:\n{body}"

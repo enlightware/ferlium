@@ -1,7 +1,7 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-//! Removal of stack markers that record a frontier already recorded.
+//! Stack-region facts and removal of markers that record a frontier already recorded.
 //!
 //! A stack marker is the interpreter's `environment.len()` at the point it was taken, and
 //! `stack_restore` pops back down to it. Only an `alloca` pushes. Two facts follow, and they need
@@ -25,12 +25,17 @@
 //! The analysis is a forward fixpoint whose state is the set of markers known equal to the current
 //! frontier, intersected at joins. Its caller supplies what changes that frontier: the MIR cleanup
 //! pass uses [`dce`]'s storage predicate, while a backend may model its own storage representation.
+//! A separate allocation-preservation query tracks which markers retain one local allocation,
+//! allowing ownership rewrites to cross inner restores without deleting lifetime boundaries.
 
 use std::{cmp::Ordering, collections::VecDeque};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::{dce::may_leave_frame_storage, site::OperationIndex};
+use super::{
+    dce::may_leave_frame_storage,
+    site::{OperationIndex, OperationSite},
+};
 use crate::{
     mir::{
         self, BlockId, Function, Operation, OperationKind, edit::FunctionEdit, role::ValueRoles,
@@ -324,16 +329,203 @@ fn step(
     }
 }
 
+/// Restores proved to preserve the current incarnation of one local allocation on every path.
+///
+/// A marker protects the allocation only if saved while it is live. Reexecuting the allocation
+/// invalidates all older snapshots: static allocation identities alone cannot distinguish loop
+/// iterations. Intersecting facts at joins keeps this a small must-analysis, without the
+/// verifier's relational allocation-frontier alternatives. Unknown histories lose the proof.
+pub(crate) fn restores_preserving_alloca(
+    func: &Function,
+    allocation: ValueId,
+) -> FxHashSet<OperationSite> {
+    #[derive(Clone, Default, PartialEq, Eq)]
+    struct State {
+        live: bool,
+        markers: Frontier,
+    }
+
+    fn step_allocation(operation: &Operation, allocation: ValueId, state: &mut State) {
+        match operation.kind {
+            OperationKind::Alloca { .. } if operation.result_id() == Some(allocation) => {
+                state.live = true;
+                state.markers.clear();
+            }
+            OperationKind::StackSave => {
+                let marker = operation.result_id().unwrap();
+                if state.live {
+                    record(&mut state.markers, marker);
+                } else {
+                    state.markers.retain(|&saved| saved != marker);
+                }
+            }
+            OperationKind::StackRestore => {
+                state.live &= matches!(operation.operands.first(), Some(mir::Value::Register(marker))
+                    if holds(&state.markers, *marker));
+                if !state.live {
+                    state.markers.clear();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut inputs = vec![None; func.blocks().count()];
+    inputs[func.entry().as_index()] = Some(State::default());
+    let mut pending = VecDeque::from([func.entry()]);
+    let mut queued = vec![false; inputs.len()];
+    queued[func.entry().as_index()] = true;
+    while let Some(block) = pending.pop_front() {
+        queued[block.as_index()] = false;
+        let mut state = inputs[block.as_index()].clone().unwrap();
+        let basic = func.block(block);
+        for operation in basic.operations() {
+            step_allocation(operation, allocation, &mut state);
+        }
+        if let TerminatorKind::Invoke { operation, .. } = &basic.terminator().kind {
+            step_allocation(operation, allocation, &mut state);
+        }
+        if matches!(basic.terminator().kind, TerminatorKind::Yield { .. }) {
+            state = State::default();
+        }
+        for successor in basic.terminator().successors() {
+            let slot = &mut inputs[successor.as_index()];
+            let updated = slot.as_ref().map_or_else(
+                || state.clone(),
+                |existing| State {
+                    live: existing.live && state.live,
+                    markers: intersect(&existing.markers, &state.markers),
+                },
+            );
+            if slot.as_ref() != Some(&updated) {
+                *slot = Some(updated);
+                if !queued[successor.as_index()] {
+                    queued[successor.as_index()] = true;
+                    pending.push_back(successor);
+                }
+            }
+        }
+    }
+
+    let mut preserving = FxHashSet::default();
+    for block in func.blocks() {
+        let Some(mut state) = inputs[block.as_index()].clone() else {
+            continue;
+        };
+        for (index, operation) in func.block(block).operations().iter().enumerate() {
+            if state.live
+                && matches!(operation.kind, OperationKind::StackRestore)
+                && matches!(operation.operands.first(), Some(mir::Value::Register(marker))
+                    if holds(&state.markers, *marker))
+            {
+                preserving.insert(OperationSite {
+                    block,
+                    index: OperationIndex::from_index(index),
+                });
+            }
+            step_allocation(operation, allocation, &mut state);
+        }
+    }
+    preserving
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mir::{Value, builder::FunctionBuilder, terminator::Terminator};
-    use crate::{CompilerSession, Location, MirOptimization};
+    use crate::mir::{ParameterKind, Value, builder::FunctionBuilder, terminator::Terminator};
+    use crate::{
+        CompilerSession, Location, MirOptimization,
+        hir::function::ArgConvention,
+        std::{logic::bool_type, math::int_type},
+    };
 
     fn optimized(src: &str) -> String {
         let mut session = CompilerSession::new();
         session.set_mir_optimization(MirOptimization::Enabled);
         session.emit_mir("stack", src)
+    }
+
+    #[test]
+    fn allocation_preservation_distinguishes_inner_and_outer_restores_across_a_loop() {
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new("allocation_lifetime".into(), Default::default());
+        let entry = builder.add_block();
+        let body = builder.add_block();
+        let outer = builder
+            .append_operation(entry, Operation::stack_save(span))
+            .unwrap();
+        let allocation = builder
+            .append_operation(entry, Operation::alloca(span, int_type()))
+            .unwrap();
+        let inner = builder
+            .append_operation(entry, Operation::stack_save(span))
+            .unwrap();
+        builder.set_terminator(entry, Terminator::goto(span, body));
+        builder.append_operation(body, Operation::alloca(span, int_type()));
+        builder.append_operation(body, Operation::stack_restore(span, inner));
+        builder.append_operation(body, Operation::stack_restore(span, outer));
+        builder.set_terminator(body, Terminator::goto(span, body));
+        let function = builder.finish_unverified();
+        let Value::Register(allocation) = allocation else {
+            unreachable!()
+        };
+        // The backedge follows reclamation of the source. Even the inner marker cannot prove
+        // preservation on *every* visit; a snapshot does not resurrect an ended allocation.
+        assert!(restores_preserving_alloca(&function, allocation).is_empty());
+
+        let mut edit = FunctionEdit::new(function);
+        edit.block_mut(body).operations.pop();
+        let function = edit.finish_unverified();
+        assert_eq!(
+            restores_preserving_alloca(&function, allocation),
+            FxHashSet::from_iter([OperationSite {
+                block: body,
+                index: OperationIndex::from_index(1)
+            }])
+        );
+    }
+
+    #[test]
+    fn allocation_preservation_intersects_histories_at_joins() {
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new("allocation_join".into(), Default::default());
+        let entry = builder.add_block();
+        let keep = builder.add_block();
+        let reclaim = builder.add_block();
+        let join = builder.add_block();
+        let outer = builder
+            .append_operation(entry, Operation::stack_save(span))
+            .unwrap();
+        let allocation = builder
+            .append_operation(entry, Operation::alloca(span, int_type()))
+            .unwrap();
+        let inner = builder
+            .append_operation(entry, Operation::stack_save(span))
+            .unwrap();
+        // Neither history at the join may be ignored.
+        let condition =
+            builder.add_parameter(bool_type(), ParameterKind::Parameter(ArgConvention::Let));
+        let condition = builder
+            .append_operation(entry, Operation::load(span, Value::Parameter(condition)))
+            .unwrap();
+        builder.set_terminator(entry, Terminator::cond_br(span, condition, keep, reclaim));
+        builder.append_operation(keep, Operation::stack_restore(span, inner.clone()));
+        builder.set_terminator(keep, Terminator::goto(span, join));
+        builder.append_operation(reclaim, Operation::stack_restore(span, outer));
+        builder.set_terminator(reclaim, Terminator::goto(span, join));
+        builder.append_operation(join, Operation::stack_restore(span, inner));
+        builder.set_terminator(join, Terminator::ret(span));
+        let function = builder.finish_unverified();
+        let Value::Register(allocation) = allocation else {
+            unreachable!()
+        };
+        assert_eq!(
+            restores_preserving_alloca(&function, allocation),
+            FxHashSet::from_iter([OperationSite {
+                block: keep,
+                index: OperationIndex::from_index(0)
+            }])
+        );
     }
 
     #[test]

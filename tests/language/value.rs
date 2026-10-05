@@ -290,7 +290,7 @@ fn incrementing_clone_probe_value_impl() -> &'static str {
     // Deliberately violates the `Value` ownership laws: `clone` changes the observable payload and
     // `drop` records an observable event. This makes required ownership operations visible to
     // tests, but must not constrain optimizations that replace a clone followed by the end of the
-    // source's lifetime with a move.
+    // source's lifetime with a move, or borrow a read-only copy while its source remains alive.
     r#"
     struct Probe(int)
 
@@ -323,6 +323,7 @@ fn incrementing_clone_probe_value_impl() -> &'static str {
 fn array_clone_returns_owned_array_without_extra_drop() {
     let mut session = TestSession::new();
     session.allow_unsafe();
+    // Mutating the copy requires independent storage even in optimized modes.
     let source = format!(
         r#"
         {}
@@ -330,6 +331,7 @@ fn array_clone_returns_owned_array_without_extra_drop() {
         {{
             let original = [Probe(1), Probe(2)];
             let mut cloned = original;
+            cloned[0].0 = 9;
             original[0].0 + cloned[0].0;
             ();
         }};
@@ -337,7 +339,7 @@ fn array_clone_returns_owned_array_without_extra_drop() {
         "#,
         incrementing_clone_probe_value_impl()
     );
-    assert_val_eq!(session.run(&source), int(3221));
+    assert_val_eq!(session.run(&source), int(3921));
 }
 
 /// A unit-shaped generic type has no data to copy, so its derived `Value::clone` must construct a
@@ -1028,19 +1030,21 @@ fn labeled_break_moves_target_loop_local_and_drops_intervening_locals() {
 fn break_clones_owned_outer_local_when_loop_does_not_exit_its_scope() {
     let mut session = TestSession::new();
     session.allow_unsafe();
+    // Mutating the break result while retaining the source makes its clone necessary.
     let source = format!(
         r#"
         {}
         testing::reset_tracked_drops();
         let source = Probe(7);
-        let moved = loop {{
+        let mut moved = loop {{
             break source;
         }};
+        moved.0 += 1;
         moved.0 * 100 + source.0 * 10 + testing::tracked_drop_log()
         "#,
         incrementing_clone_probe_value_impl()
     );
-    assert_val_eq!(session.run(&source), int(870));
+    assert_val_eq!(session.run(&source), int(970));
 }
 
 #[test]
@@ -3861,6 +3865,65 @@ fn read_only_clone_lifetimes_preserve_readers_and_failure_cleanup() {
     "#
         )),
         int(4)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn read_only_loop_clones_preserve_nested_reads_exits_and_failure_cleanup() {
+    let mut session = TestSession::new();
+    let source = r#"
+        fn inspect(value: [string], n: int, divisor: int) -> int {
+            let mut copy = value;
+            let mut total = 0;
+            for i in 0..n {
+                for j in 0..2 { total += idiv(len(copy[0]), divisor); };
+                if i == 2 { return total; }
+            };
+            total
+        }
+        fn inspect_local(n: int) -> int {
+            let mut original = to_string(123);
+            let mut copy = original;
+            let mut total = 0;
+            for i in 0..n {
+                let s = to_string(i);
+                total += len(copy) + len(s);
+            };
+            total
+        }
+    "#;
+    for (n, expected) in [(0, 0), (1, 8), (5, 24)] {
+        assert_val_eq!(
+            session.run(&format!(r#"{source} inspect(["abcd"], {n}, 1)"#)),
+            int(expected)
+        );
+    }
+    assert_val_eq!(session.run(&format!("{source} inspect_local(4)")), int(16));
+    assert_eq!(
+        session.fail_run(&format!(r#"{source} inspect(["abcd"], 3, 0)"#)),
+        SourceFailureKind::DivisionByZero
+    );
+    assert!(matches!(
+        session.fail_run(&format!(r#"{source} inspect([], 3, 1)"#)),
+        SourceFailureKind::Aborted(_)
+    ));
+    assert_val_eq!(
+        session.run(&format!(r#"{source} inspect(["abcd"], 3, 2)"#)),
+        int(12)
+    );
+    assert_val_eq!(
+        session.run(
+            r#"
+        fn inspect(mut values: [string]) -> int {
+            let mut copy = values[0];
+            for i in 0..3 { values[0] = "longer"; };
+            len(copy)
+        }
+        inspect(["abc"])
+    "#
+        ),
+        int(3)
     );
 }
 

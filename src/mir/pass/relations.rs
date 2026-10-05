@@ -2804,8 +2804,17 @@ mod tests {
         name: &str,
         check: impl FnOnce(&Function, &mut Analysis, &KnownCallees),
     ) {
+        with_analysis_at_stage(src, name, MirOptimization::Enabled, check);
+    }
+
+    fn with_analysis_at_stage(
+        src: &str,
+        name: &str,
+        stage: MirOptimization,
+        check: impl FnOnce(&Function, &mut Analysis, &KnownCallees),
+    ) {
         let mut session = CompilerSession::new();
-        session.set_mir_optimization(MirOptimization::Enabled);
+        session.set_mir_optimization(stage);
         let module_id: ModuleId = session
             .compile_for(ExecutionTarget::Mir, src, "test", Path::single_str("test"))
             .expect("the test source compiles")
@@ -2813,8 +2822,8 @@ mod tests {
         session.prepare_execution_target(ExecutionTarget::Mir, module_id);
         let known = session.known_callees();
         let artifacts = session
-            .mir_artifacts_for(module_id, MirOptimization::Enabled)
-            .expect("optimized artifacts were just built");
+            .mir_artifacts_for(module_id, stage)
+            .expect("artifacts were just built");
         let function = artifacts
             .bodies()
             .iter()
@@ -3019,14 +3028,15 @@ mod tests {
         );
     }
 
-    /// The loop this whole item exists for: the index arrives from an un-inlined
-    /// `Iterator::next`, whose iterator is a `&mut` argument. Folding has to escape that place;
-    /// this analysis must not, or the induction variable is out of reach.
+    /// Concrete range calls are already direct in raw MIR. Inspect them before inlining and
+    /// clone borrowing remove the places whose mutable calls and drops distinguish the analyses.
+    /// The optimized form below confirms that the range-next call no longer survives there.
     #[test]
     fn a_known_callees_mutable_argument_stays_tracked() {
-        with_analysis(
+        with_analysis_at_stage(
             "fn total(mut a: [int]) -> int { let mut t = 0; for i in 0..len(a) { t = t + i }; t }",
             "total",
+            MirOptimization::Disabled,
             |function, analysis, _| {
                 let (folding_escapes, _) = escaping_roots(function, &|_| false);
                 let ours = folding_escapes
@@ -3037,6 +3047,33 @@ mod tests {
                     ours < folding_escapes.len(),
                     "modelling the known callees' writes must keep at least one root tracked that \
                      folding has to give up on"
+                );
+            },
+        );
+        with_analysis(
+            "fn total(mut a: [int]) -> int { let mut t = 0; for i in 0..len(a) { t = t + i }; t }",
+            "total",
+            |function, _, known| {
+                assert!(
+                    function.blocks().all(|block| {
+                        function
+                            .block(block)
+                            .operations()
+                            .iter()
+                            .chain(match &function.block(block).terminator().kind {
+                                TerminatorKind::Invoke { operation, .. } => Some(operation),
+                                _ => None,
+                            })
+                            .all(|operation| {
+                                // Range-next callees are never specialized, so resolving them
+                                // needs no mapping from a specialization to its original.
+                                !matches!(
+                                    resolved_callee(operation, known, &|_| None),
+                                    Some(KnownCallee::RangeNext | KnownCallee::RangeInclusiveNext)
+                                )
+                            })
+                    }),
+                    "the range-next call should have been inlined in optimized MIR"
                 );
             },
         );

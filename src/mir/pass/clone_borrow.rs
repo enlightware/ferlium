@@ -11,11 +11,13 @@
 //! uses of the returned place retain that owner. Other mutable/owned arguments, escapes and
 //! initialization queries are not readers.
 //!
-//! The first version requires a fresh destination with one static clone constructor, and a source
+//! The proof requires a fresh destination with one static clone constructor, and a source
 //! rooted in an immutable parameter or a private local allocated before the destination in the
-//! same block. It rejects stack restores and CFG cycles inside the borrowed lifetime. These are
-//! proof boundaries, not assumptions about lowering. Uses are indexed once, and only candidate
-//! lifetime regions are walked; unchanged bodies are never opened for editing.
+//! same block. A finite-state walk proves read-only lifetimes even across CFG cycles. Stack
+//! restores must preserve the source allocation; suspension remains a proof boundary. Uses are
+//! indexed once, and unchanged bodies are never opened for editing.
+//! Each candidate walks the reachable CFG in at most two states per block, including paths
+//! before its clone, so proof cost is O(candidates × reachable blocks and operations).
 
 use std::{cell::OnceCell, iter::once};
 
@@ -25,6 +27,7 @@ use super::{
     dataflow::{CallOperands, Root, call_operands},
     provenance::{AddressorSummary, PlaceOrigins, ResultProvenance},
     site::OperationSite,
+    stack_region,
 };
 use crate::{
     hir::function::ArgConvention,
@@ -161,6 +164,7 @@ pub(crate) fn borrow_read_only_clones(
     let dominance = OnceCell::new();
     let mut replacements = FxHashMap::default();
     let mut cleanups = Vec::new();
+    let mut preserving_restores = FxHashMap::default();
     for (site, destination) in candidates {
         let operation = &func.block(site.block).operations()[site.index.as_index()];
         let source = origins
@@ -179,7 +183,25 @@ pub(crate) fn borrow_read_only_clones(
         {
             continue;
         }
-        let Some(drops) = lifetime(func, site, destination, source, &uses) else {
+        let Some(drops) =
+            lifetime(
+                func,
+                site,
+                destination,
+                source,
+                &uses,
+                &mut |restore| match source {
+                    // Let parameters borrow caller storage in both interpreters and Wasm;
+                    // restoring this callee's stack region cannot free that storage.
+                    Root::Parameter(_) => true,
+                    Root::Alloca(id) => preserving_restores
+                        .entry(id)
+                        .or_insert_with(|| stack_region::restores_preserving_alloca(func, id))
+                        .contains(&restore),
+                    _ => false,
+                },
+            )
+        else {
             continue;
         };
         // A structural source register may have been defined only on the constructor's path.
@@ -386,14 +408,17 @@ fn is_rooted_repeatable_addressor(
         && origins.returned_origin(call.result).is_some()
 }
 
-/// Proves that every path ends this particular clone lifetime before touching its source.
-/// Cycles are rejected explicitly rather than treating a visited node as a completed proof.
+/// Checks every reachable absent/active state of this clone's lifetime. A read-only cycle needs
+/// no termination proof: every finite exit must end the lifetime, and every active operation
+/// must preserve the source. Visiting a block in both states prevents a join from hiding uses
+/// after cleanup or a backedge from reconstructing an already active destination.
 fn lifetime(
     func: &Function,
     clone: OperationSite,
     destination: ValueId,
     source: Root,
     uses: &FxHashMap<Root, Vec<Use>>,
+    preserves_storage: &mut impl FnMut(OperationSite) -> bool,
 ) -> Option<Vec<OperationSite>> {
     let destination_uses = &uses[&Root::Alloca(destination)];
     let writes: FxHashSet<_> = uses[&source]
@@ -402,32 +427,21 @@ fn lifetime(
         .filter(|usage| !matches!(usage.access, Access::Read | Access::ReadMutable))
         .map(|usage| usage.site)
         .collect();
-    let mut done = FxHashSet::default();
-    let mut active = FxHashSet::default();
-    let mut visited = FxHashMap::default();
+    let destination_sites: FxHashSet<_> = destination_uses.iter().map(|usage| usage.site).collect();
+    let mut visited = vec![[false; 2]; func.blocks().count()];
     let OperationKind::Clone { ty: cloned } =
         func.block(clone.block).operations()[clone.index.as_index()].kind
     else {
         unreachable!("candidate is a clone")
     };
-    let mut drops = Vec::new();
-    let mut work = vec![(clone.block, clone.index.as_index() + 1, false)];
-    while let Some((block, start, exiting)) = work.pop() {
-        if exiting {
-            active.remove(&block);
-            done.insert(block);
+    let mut drops = FxHashSet::default();
+    let mut work = vec![(func.entry(), false)];
+    while let Some((block, mut active)) = work.pop() {
+        if visited[block.as_index()][usize::from(active)] {
             continue;
         }
-        if active.contains(&block) {
-            return None;
-        }
-        if done.contains(&block) {
-            continue;
-        }
-        active.insert(block);
-        work.push((block, start, true));
+        visited[block.as_index()][usize::from(active)] = true;
         let basic = func.block(block);
-        let mut ended = false;
         for (index, operation) in basic
             .operations()
             .iter()
@@ -436,57 +450,74 @@ fn lifetime(
                 _ => None,
             })
             .enumerate()
-            .skip(start)
         {
             let site = OperationSite {
                 block,
                 index: OperationIndex::from_index(index),
             };
+            if site == clone {
+                if active {
+                    return None;
+                }
+                active = true;
+                continue;
+            }
             if matches!(operation.kind, OperationKind::Drop { ty } if ty == cloned)
                 && operation.operands[0] == mir::Value::Register(destination)
             {
-                drops.push(site);
-                visited.insert(block, (start, index + 1));
-                ended = true;
-                break;
+                drops.insert(site);
+                active = false;
+                continue;
             }
-            if matches!(operation.kind, OperationKind::StackRestore) || writes.contains(&site) {
+            if !active && destination_sites.contains(&site) {
                 return None;
             }
-            visited.insert(block, (start, index + 1));
-        }
-        if !ended {
-            let successors: Vec<_> = basic.terminator().successors().collect();
-            if successors.is_empty() {
+            if active
+                && (writes.contains(&site)
+                    || matches!(operation.kind, OperationKind::Alloca { .. })
+                        && operation
+                            .result_id()
+                            .is_some_and(|id| id == destination || source == Root::Alloca(id))
+                    || matches!(operation.kind, OperationKind::StackRestore)
+                        && !preserves_storage(site))
+            {
                 return None;
             }
-            for target in successors {
-                work.push((target, 0, false));
-            }
         }
+        // A suspended frame can permit mutation outside this function. No local read-only
+        // proof covers that interval, even when the source is caller-rooted.
+        if active && matches!(basic.terminator().kind, TerminatorKind::Yield { .. }) {
+            return None;
+        }
+        let mut successors = basic.terminator().successors().peekable();
+        if active && successors.peek().is_none() {
+            return None;
+        }
+        work.extend(successors.map(|target| (target, active)));
     }
+    // Substitution rewrites unreachable blocks too. Keep the original whole-place rule there:
+    // empty cleanup is harmless, but other uses could turn a destination initializer into a
+    // write to borrowed storage or make the substituted register unavailable.
     for usage in destination_uses {
-        if usage.site == clone
-            || visited
-                .get(&usage.site.block)
-                .is_some_and(|&(start, end)| (start..end).contains(&usage.site.index.as_index()))
+        if visited[usage.site.block.as_index()]
+            .iter()
+            .any(|&state| state)
         {
             continue;
         }
-        let block = func.block(usage.site.block);
-        let operation = block.operations().get(usage.site.index.as_index())?;
-        // The constructor is unique and every constructed lifetime reaches a cleanup above.
-        // Outside those intervals the destination is absent, so its whole-value cleanup is empty.
-        // Any other use (including another initializer or a field drop) invalidates that argument.
+        let operation = func
+            .block(usage.site.block)
+            .operations()
+            .get(usage.site.index.as_index())?;
         if matches!(operation.kind, OperationKind::Drop { ty } if ty == cloned)
             && operation.operands[0] == mir::Value::Register(destination)
         {
-            drops.push(usage.site);
+            drops.insert(usage.site);
         } else {
             return None;
         }
     }
-    Some(drops)
+    Some(drops.into_iter().collect())
 }
 
 #[cfg(test)]
@@ -702,11 +733,109 @@ mod tests {
     }
 
     #[test]
-    fn rejects_cycles_and_scoped_accessors() {
+    fn borrows_read_only_loops_with_parameter_and_local_sources() {
         check(
             "fn view(x: string, n: int) -> int { let mut copy = x; let mut total = 0; for i in 0..n { total += len(copy); }; total }",
+            true,
+        );
+        check(
+            "fn view(n: int) -> int { let mut original = to_string(123); let mut copy = original; let mut total = 0; for i in 0..n { let s = to_string(i); total += len(copy) + len(s); }; total }",
+            true,
+        );
+        check(
+            "fn view(x: string, n: int, d: int) -> int { let mut copy = x; let mut total = 0; for i in 0..n { for j in 0..n { total += idiv(len(copy), d); }; }; total }",
+            true,
+        );
+        check(
+            "fn view(x: string, n: int) -> int { let mut total = 0; for i in 0..n { let mut copy = x; total += len(copy); }; total }",
+            true,
+        );
+    }
+
+    #[test]
+    fn borrows_a_local_source_across_loop_body_storage_restores() {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let body = session.emit_mir(
+            "local_loop_borrow",
+            "fn view(n: int) -> int { let mut original = to_string(123); let mut copy = original; let mut total = 0; for i in 0..n { let s = to_string(i); total += len(copy) + len(s); }; total }",
+        );
+        assert!(
+            body.contains("stack_restore"),
+            "fixture needs a restore: {body}"
+        );
+        assert!(
+            !body.contains("clone string"),
+            "the local copy must borrow: {body}"
+        );
+    }
+
+    #[test]
+    fn retains_loop_clones_when_the_copy_or_local_source_changes() {
+        check(
+            "fn view(x: string, n: int) -> int { let mut copy = x; for i in 0..n { string_push_str(copy, x); }; len(copy) }",
             false,
         );
+        check(
+            "fn view(n: int) -> int { let mut original = to_string(123); let mut copy = original; for i in 0..n { string_push_str(original, \"x\"); }; len(copy) }",
+            false,
+        );
+    }
+
+    #[test]
+    fn specialized_matrix_multiplication_borrows_its_inputs() {
+        let mut session = CompilerSession::new();
+        session.set_allow_experimental(true);
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let source = format!(
+            "{}\nfn view(a: Matrix<float>, b: Matrix<float>) -> Matrix<float> {{ matrix_mul(a, b) }}",
+            include_str!("../../../tests/modules/linalg.fer")
+        );
+        let module_id = session
+            .compile_for(
+                ExecutionTarget::Mir,
+                &source,
+                "matrix_borrow",
+                Path::single_str("matrix_borrow"),
+            )
+            .unwrap()
+            .module_id;
+        session.emit_mir_module(module_id);
+        let module = session.expect_fresh_module(module_id);
+        let original = module.get_local_function_id(ustr("matrix_mul")).unwrap();
+        let artifacts = session
+            .mir_artifacts_for(module_id, MirOptimization::Enabled)
+            .unwrap();
+        let bodies = artifacts
+            .specializations()
+            .iter()
+            .filter(|specialization| {
+                specialization.original
+                    == FunctionId {
+                        module: module_id,
+                        function: original,
+                    }
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !bodies.is_empty(),
+            "fixture must specialize matrix multiplication"
+        );
+        for specialization in bodies {
+            // The fresh output array still needs OM's separate ownership-transfer proof.
+            assert_eq!(
+                clones(&specialization.body),
+                1,
+                "{}",
+                specialization
+                    .body
+                    .format_with(&session.modules().env_for(module))
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_scoped_accessors() {
         check(
             "subscript held(value: string) -> string { ref { let mut local = value; yield local } }\n\
              fn view(x: string) -> int { let mut copy = x; len(copy->[held]) }",

@@ -132,8 +132,13 @@ roots rather than recognizing particular callees. CSE and clone borrowing share 
 analysis, including caller-rooted addressor results held in private, single-writer pointer slots.
 Caller-rooted provenance does not imply write permission: readers with mutable signatures require
 structural storage, retaining a copy when the source is an addressor referent with unproved permissions.
-For example, a local string copy used only by `len` can read the original instead. Unresolved
-aliases, consuming uses, storage reclamation and cycles inside the borrowed lifetime retain the copy.
+For example, a local string copy used only by `len` can read the original instead, including across
+read-only loops. A two-state CFG walk checks both absent and active lifetimes at joins, rejecting
+reconstruction while active and requiring cleanup before every finite exit. It does not require
+loops to terminate. Stack restores preserve parameter storage; local sources use a lazy, cached
+must-analysis of markers that protect the current allocation incarnation. Reallocation invalidates
+older marker facts, and joins intersect them. Unresolved aliases, consuming uses, unproved storage
+preservation and suspension inside the borrowed lifetime retain the copy.
 This runs after the semantic rounds settle, before DCE removes the unused destination storage.
 
 A source-fallible call is an `invoke` terminator, so its result place is deliberately outside this
