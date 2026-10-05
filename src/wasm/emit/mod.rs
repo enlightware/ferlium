@@ -966,7 +966,14 @@ fn emit_with_export_kind(
                     }
                     _ => (),
                 }
-                if wasm_intrinsic(session, operation).is_none()
+                let intrinsic = wasm_intrinsic(session, operation);
+                if matches!(intrinsic, Some(KnownCallee::IntDiv | KnownCallee::FloatDiv)) {
+                    // Conservative: constant or plain divisions may omit the guard during emission.
+                    imports
+                        .add_division_by_zero()
+                        .map_err(|error| format!("division failure linkage: {error:?}"))?;
+                }
+                if intrinsic.is_none()
                     && let Some(Value::Function(target)) = callee(operation)
                 {
                     pending.push(program.direct_entry(*target));
@@ -1719,6 +1726,11 @@ fn callee(op: &Operation) -> Option<&Value> {
     }
 }
 
+/// These initialize result storage only on success and leave a status for Invoke.
+fn is_fallible_intrinsic(intrinsic: KnownCallee) -> bool {
+    matches!(intrinsic, KnownCallee::IntDiv | KnownCallee::FloatDiv)
+}
+
 /// Resolve a direct MIR call for target-specific Wasm instruction selection.
 fn wasm_intrinsic(session: &CompilerSession, operation: &Operation) -> Option<KnownCallee> {
     if !matches!(operation.kind, OperationKind::Call { .. }) {
@@ -1752,6 +1764,7 @@ fn wasm_intrinsic(session: &CompilerSession, operation: &Operation) -> Option<Kn
             | KnownCallee::IntTestBit
             | KnownCallee::IntSub
             | KnownCallee::IntMul
+            | KnownCallee::IntDiv
             | KnownCallee::IntNeg
             | KnownCallee::IntFromInt
             | KnownCallee::IntCmp
@@ -1764,6 +1777,7 @@ fn wasm_intrinsic(session: &CompilerSession, operation: &Operation) -> Option<Kn
             | KnownCallee::FloatAdd
             | KnownCallee::FloatSub
             | KnownCallee::FloatMul
+            | KnownCallee::FloatDiv
             | KnownCallee::FloatNeg
             | KnownCallee::FloatCmp
             | KnownCallee::FloatLt

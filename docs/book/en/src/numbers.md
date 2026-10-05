@@ -4,7 +4,11 @@ Ferlium has two numeric types: `int` for whole numbers and `float` for floating-
 
 ## The two numeric types
 
-`int` is a signed integer using the machine word width (typically 64 bits).
+`int` is a signed integer using the machine word width.
+
+Integer addition, subtraction, multiplication, negation and division wrap on overflow rather than reporting an error.
+For example, adding one to the largest representable `int` produces the smallest representable `int`.
+
 `float` is a finite [IEEE 754](https://en.wikipedia.org/wiki/IEEE_754) double-precision number. It excludes `NaN` and infinities. Excluding `NaN` makes equality and ordering consistent.
 
 Floating-point arithmetic saturates on overflow: a result beyond the finite range becomes the
@@ -119,6 +123,8 @@ For integer division, use the dedicated functions:
 ```
 
 Both `/` on `float` and the integer division functions are fallible: dividing by zero produces a runtime error rather than `inf` or `NaN`. The chapter on effects explains how Ferlium tracks fallibility.
+
+Following the [integer wrapping rule](#the-two-numeric-types), `idiv` and `idiv_euclid` return the smallest representable `int` when dividing that value by `-1`.
 
 ## What comes next
 

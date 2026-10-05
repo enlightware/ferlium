@@ -27,7 +27,7 @@ use crate::{
 
 use super::{
     body::intrinsic_reads_input_repeatedly, control_flow::conditional_targets,
-    is_elided_stack_operation, layout_witness, scalar, wasm_intrinsic,
+    is_elided_stack_operation, is_fallible_intrinsic, layout_witness, scalar, wasm_intrinsic,
 };
 
 const MAX_EXPRESSION_DEPTH: usize = 128;
@@ -303,7 +303,8 @@ fn stack_return(
                 let direct = call_abi(operation, intrinsic, callees, program).is_some_and(|abi| {
                     !abi.fallible && matches!(abi.result, ResultKind::Direct(_))
                 });
-                (intrinsic.is_some() || direct).then_some(operation.operands.len() - 1)
+                (intrinsic.is_some_and(|intrinsic| !is_fallible_intrinsic(intrinsic)) || direct)
+                    .then_some(operation.operands.len() - 1)
             }
             _ => None,
         };
@@ -449,7 +450,8 @@ impl Plan {
                     OperationKind::Call { .. } => inputs
                         .intrinsic(layout, write.source)
                         .is_some_and(|callee| {
-                            !matches!(callee, KnownCallee::IntCmp | KnownCallee::FloatCmp)
+                            !is_fallible_intrinsic(callee)
+                                && !matches!(callee, KnownCallee::IntCmp | KnownCallee::FloatCmp)
                         }),
                     _ => false,
                 };
@@ -1004,6 +1006,8 @@ impl Inputs {
                     body,
                     &definitions,
                     &integer_constants,
+                    &scalar_constants,
+                    source.operation_id().as_index() == body.block(source.block).operations().len(),
                 ) {
                     scan.operand(operand, source, classify_access(operation, input + 1));
                 }
@@ -1392,7 +1396,7 @@ fn local_writes(
     parameter_count: usize,
     value_count: usize,
 ) -> Option<Vec<PlaceSlotId>> {
-    // In-block operations cannot fail, and intrinsics are emitted inline without traps.
+    // In-block calls promise success, including fallible intrinsics used as plain calls.
     let written = match operation.kind {
         OperationKind::Load | OperationKind::CompareEqual => None,
         OperationKind::Store | OperationKind::Memcpy => Some(1),

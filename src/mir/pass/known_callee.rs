@@ -48,7 +48,8 @@ use crate::{
     std::{
         STD_MODULE_ID,
         core_traits_names::{
-            BITS_TRAIT_NAME, ITERATOR_TRAIT_NAME, NUM_TRAIT_NAME, ORD_TRAIT_NAME, VALUE_TRAIT_NAME,
+            BITS_TRAIT_NAME, DIV_TRAIT_NAME, ITERATOR_TRAIT_NAME, NUM_TRAIT_NAME, ORD_TRAIT_NAME,
+            VALUE_TRAIT_NAME,
         },
         logic::bool_type,
         math::{
@@ -88,6 +89,8 @@ pub(crate) enum KnownCallee {
     IntSub,
     /// `Num<int>::mul(left, right)` — `left * right`.
     IntMul,
+    /// `idiv(left, right)` — wrapping truncating division, failing on zero.
+    IntDiv,
     // Integer bit operations on the target-width signed bit pattern.
     IntBitAnd,
     IntBitOr,
@@ -132,6 +135,8 @@ pub(crate) enum KnownCallee {
     FloatSub,
     /// `Num<float>::mul(left, right)` — finite, saturating `left * right`.
     FloatMul,
+    /// `Div<float>::div(left, right)` — saturating division, failing on either zero.
+    FloatDiv,
     /// `Num<float>::neg(value)` — `-value`.
     FloatNeg,
     /// `raw_float_add(left, right)` — IEEE `left + right`, which may overflow to an infinity.
@@ -434,6 +439,7 @@ impl KnownCallees {
             ),
             (int_sub, KnownCallee::IntSub),
             (int_mul, KnownCallee::IntMul),
+            (resolver.function("idiv"), KnownCallee::IntDiv),
             (int_neg, KnownCallee::IntNeg),
             (
                 resolver.method(NUM_TRAIT_NAME, int_type(), "from_int"),
@@ -455,6 +461,10 @@ impl KnownCallees {
                 KnownCallee::FloatMul,
             ),
             (float_neg, KnownCallee::FloatNeg),
+            (
+                resolver.method(DIV_TRAIT_NAME, float_type(), "div"),
+                KnownCallee::FloatDiv,
+            ),
             (
                 resolver.method(ORD_TRAIT_NAME, float_type(), "cmp"),
                 KnownCallee::FloatCmp,
@@ -879,7 +889,7 @@ mod tests {
         let session = CompilerSession::new();
         assert_eq!(
             known_callees(&session).by_id.len(),
-            70,
+            72,
             "two known callees resolved to the same function id"
         );
     }

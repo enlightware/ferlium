@@ -447,6 +447,192 @@ fn wasm_operator_count(bytes: &[u8], mut matches: impl FnMut(&Operator<'_>) -> b
         .sum()
 }
 
+#[wasm_bindgen_test]
+fn wasm_codegen_integer_division_wraps_and_reports_zero() {
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(optimization);
+        session.set_physical_mir_optimization(optimization);
+        let entry = compile(
+            &mut session,
+            "fn compute(x: int, y: int) -> int { idiv(x, y) }",
+        );
+        let code = CompiledProgram::compile(&session, entry).unwrap();
+        assert_eq!(
+            wasm_operator_count(code.bytes(), |op| matches!(op, Operator::I32DivS)),
+            1
+        );
+        assert_eq!(
+            Parser::new(0)
+                .parse_all(code.bytes())
+                .filter_map(|payload| {
+                    if let Payload::ImportSection(section) = payload.unwrap() {
+                        Some(
+                            section
+                                .into_imports()
+                                .filter(|import| {
+                                    import.as_ref().unwrap().name == "division_by_zero"
+                                })
+                                .count(),
+                        )
+                    } else {
+                        None
+                    }
+                })
+                .sum::<usize>(),
+            1
+        );
+        let mut instance = code.instantiate::<(isize, isize), isize>().unwrap();
+        for (x, y) in [
+            (7, 3),
+            (-7, 3),
+            (7, -3),
+            (-7, -3),
+            (isize::MIN, -1),
+            (isize::MIN, 1),
+            (isize::MAX, -1),
+            (0, -1),
+            (isize::MIN, 2),
+        ] {
+            assert_eq!(
+                instance.run((x, y), WasmLimits::default()).unwrap(),
+                x.wrapping_div(y)
+            );
+        }
+        let error = instance.run((7, 0), WasmLimits::default()).unwrap_err();
+        assert_eq!(
+            error.kind(),
+            RuntimeErrorKind::SourceFailure(SourceFailureKind::DivisionByZero)
+        );
+        assert_eq!(instance.run((9, 3), WasmLimits::default()).unwrap(), 3);
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_constant_divisors_omit_unneeded_guards() {
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        for (divisor, expected_divisions) in [(3, 1), (-1, 0)] {
+            let mut session = CompilerSession::new();
+            session.set_mir_optimization(optimization);
+            session.set_physical_mir_optimization(optimization);
+            let entry = compile(
+                &mut session,
+                &format!("fn compute(x: int) -> int {{ idiv(x + 1, {divisor}) }}"),
+            );
+            let code = CompiledProgram::compile(&session, entry).unwrap();
+            assert_eq!(
+                wasm_operator_count(code.bytes(), |op| matches!(op, Operator::I32DivS)),
+                expected_divisions
+            );
+            assert_eq!(
+                wasm_operator_count(code.bytes(), |op| matches!(op, Operator::I32Eq)),
+                0
+            );
+            let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+            for input in [isize::MIN, -7, 0, isize::MAX] {
+                assert_eq!(
+                    instance.run((input,), WasmLimits::default()).unwrap(),
+                    input.wrapping_add(1).wrapping_div(divisor)
+                );
+            }
+        }
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(optimization);
+        session.set_physical_mir_optimization(optimization);
+        let entry = compile(&mut session, "fn compute(x: float) -> float { x / 3.0 }");
+        let code = CompiledProgram::compile(&session, entry).unwrap();
+        assert_eq!(
+            wasm_operator_count(code.bytes(), |op| matches!(op, Operator::F64Div)),
+            1
+        );
+        assert_eq!(
+            wasm_operator_count(code.bytes(), |op| matches!(
+                op,
+                Operator::F64Eq | Operator::F64Min | Operator::F64Max
+            )),
+            0
+        );
+        let mut instance = code.instantiate::<(Float,), Float>().unwrap();
+        for input in [-f64::MAX, -0.0, 0.0, f64::MAX] {
+            assert_eq!(
+                instance
+                    .run((Float::new(input).unwrap(),), WasmLimits::default())
+                    .unwrap()
+                    .into_inner()
+                    .to_bits(),
+                (input / 3.0).to_bits()
+            );
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_float_division_preserves_saturation_zero_and_failures() {
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(optimization);
+        session.set_physical_mir_optimization(optimization);
+        let entry = compile(
+            &mut session,
+            "fn compute(x: float, y: float) -> float { x / y }",
+        );
+        let code = CompiledProgram::compile(&session, entry).unwrap();
+        assert_eq!(
+            wasm_operator_count(code.bytes(), |op| matches!(op, Operator::F64Div)),
+            1
+        );
+        let mut instance = code.instantiate::<(Float, Float), Float>().unwrap();
+        for (x, y) in [
+            (7.0, 3.0),
+            (-7.0, 3.0),
+            (7.0, -3.0),
+            (-7.0, -3.0),
+            (f64::MAX, 0.5),
+            (-f64::MAX, 0.5),
+            (f64::MAX, -0.5),
+            (f64::MIN_POSITIVE, f64::MAX),
+            (-f64::MIN_POSITIVE, f64::MAX),
+            (0.0, -3.0),
+            (-0.0, -3.0),
+            (-0.0, 3.0),
+        ] {
+            let actual = instance
+                .run(
+                    (Float::new(x).unwrap(), Float::new(y).unwrap()),
+                    WasmLimits::default(),
+                )
+                .unwrap();
+            assert_eq!(
+                actual.into_inner().to_bits(),
+                Float::new_saturating(x / y).into_inner().to_bits(),
+                "{x} / {y}"
+            );
+        }
+        for y in [0.0, -0.0] {
+            let error = instance
+                .run(
+                    (Float::new(1.0).unwrap(), Float::new(y).unwrap()),
+                    WasmLimits::default(),
+                )
+                .unwrap_err();
+            assert_eq!(
+                error.kind(),
+                RuntimeErrorKind::SourceFailure(SourceFailureKind::DivisionByZero)
+            );
+        }
+        assert_eq!(
+            instance
+                .run(
+                    (Float::new(9.0).unwrap(), Float::new(3.0).unwrap()),
+                    WasmLimits::default()
+                )
+                .unwrap()
+                .into_inner(),
+            3.0
+        );
+    }
+}
+
 /// Function signatures, bodies and names used by code-generation assertions.
 struct WasmFunctions<'a> {
     parameter_counts: Vec<u32>,

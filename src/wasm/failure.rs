@@ -6,7 +6,15 @@
 //! Trusted native entries must supply a diagnostic on failure, and generated code must use live
 //! handles. Violating these contracts can abort: these C ABI callbacks must not unwind.
 
-use crate::{eval::RuntimeError, hir::native_functions::NativeFailureState};
+use crate::{
+    compiler::error::SourceFailureKind, eval::RuntimeError,
+    hir::native_functions::NativeFailureState,
+};
+
+/// Supply the same diagnostic and status as the native division entries.
+pub(super) extern "C" fn division_by_zero(state: &mut NativeFailureState) -> u32 {
+    state.fail(SourceFailureKind::DivisionByZero)
+}
 
 #[derive(Default)]
 pub(super) struct Failures {

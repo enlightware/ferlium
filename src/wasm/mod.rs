@@ -198,6 +198,25 @@ impl Imports {
         Ok(index)
     }
 
+    /// Division's cold path needs a diagnostic writer only in modules that lower division.
+    pub(super) fn add_division_by_zero(&mut self) -> Result<(), JsValue> {
+        if !self
+            .functions
+            .iter()
+            .any(|function| function.name == "division_by_zero")
+        {
+            self.insert(
+                FunctionImport {
+                    name: "division_by_zero".into(),
+                    parameters: vec![ValType::I32],
+                    results: vec![ValType::I32],
+                },
+                failure::division_by_zero as *const (),
+            )?;
+        }
+        Ok(())
+    }
+
     /// The Wasm module's shared failure function, the first function it defines. Only a Wasm
     /// module with runtime globals has one, as only such a module has checks that can fail.
     pub(super) fn failure_function(&self) -> WasmFunctionId {

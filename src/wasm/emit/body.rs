@@ -2073,6 +2073,9 @@ impl<'a, 's> Body<'a, 's> {
         invoked: bool,
         checked: bool,
     ) -> Result<(), String> {
+        if matches!(intrinsic, KnownCallee::IntDiv | KnownCallee::FloatDiv) {
+            return self.call_division(intrinsic, inputs, output, invoked);
+        }
         let arity = match intrinsic {
             KnownCallee::IntAdd
             | KnownCallee::IntBitAnd
@@ -2385,6 +2388,98 @@ impl<'a, 's> Body<'a, 's> {
         }
         self.finish_store(output, ty, offset);
         self.call_status(invoked, false);
+        Ok(())
+    }
+
+    /// Return the usual fallible-call status; initialize the output only on success.
+    fn call_division(
+        &mut self,
+        intrinsic: KnownCallee,
+        inputs: &[&Value],
+        output: Option<&Value>,
+        invoked: bool,
+    ) -> Result<(), String> {
+        if inputs.len() != 2 {
+            return Err("wasm division argument count".into());
+        }
+        let output = output.ok_or("wasm division result storage")?;
+        let ty = self.pointee(output)?;
+        let nonzero = if intrinsic == KnownCallee::IntDiv {
+            self.analysis
+                .integer_constant(self.body, inputs[1])
+                .is_some_and(|value| value != 0)
+        } else {
+            self.analysis
+                .float_constant(self.body, inputs[1])
+                .is_some_and(|value| value != 0.0)
+        };
+        // A plain call promises success; only Invoke needs a source-failure branch.
+        let guarded = invoked && !nonzero;
+        if guarded {
+            self.read(inputs[1])?;
+            if intrinsic == KnownCallee::IntDiv {
+                self.i(I::I32Eqz);
+            } else {
+                self.i(I::F64Const(0.0.into()));
+                self.i(I::F64Eq);
+            }
+            self.i(I::If(BlockType::Result(ValType::I32)));
+            self.context_pointer(offset_of!(InvocationState, native_failure));
+            self.i(I::Call(
+                self.imports.function_index("division_by_zero").as_u32(),
+            ));
+            self.i(I::Else);
+        }
+        let offset = self.prepare_store(output)?;
+        if intrinsic == KnownCallee::IntDiv {
+            let divisor = self.analysis.integer_constant(self.body, inputs[1]);
+            if divisor == Some(-1) {
+                // A literal can arrive through a deferred load register.
+                self.read(inputs[1])?;
+                self.i(I::Drop);
+                self.i(I::I32Const(0));
+                self.read(inputs[0])?;
+                self.i(I::I32Sub);
+            } else {
+                if divisor.is_none() {
+                    // Wasm signed division traps on MIN / -1; wrapping negation does not.
+                    self.read(inputs[1])?;
+                    self.i(I::I32Const(-1));
+                    self.i(I::I32Eq);
+                    self.i(I::If(BlockType::Result(ValType::I32)));
+                    self.i(I::I32Const(0));
+                    self.read(inputs[0])?;
+                    self.i(I::I32Sub);
+                    self.i(I::Else);
+                }
+                self.read(inputs[0])?;
+                self.read(inputs[1])?;
+                self.i(I::I32DivS);
+                if divisor.is_none() {
+                    self.i(I::End);
+                }
+            }
+        } else {
+            self.read(inputs[0])?;
+            self.read(inputs[1])?;
+            self.i(I::F64Div);
+            if self
+                .analysis
+                .float_constant(self.body, inputs[1])
+                .is_none_or(|divisor| divisor.abs() < 1.0)
+            {
+                self.i(I::F64Const((-f64::MAX).into()));
+                self.i(I::F64Max);
+                self.i(I::F64Const(f64::MAX.into()));
+                self.i(I::F64Min);
+            }
+        }
+        self.finish_store(output, ty, offset);
+        self.i(I::I32Const(0));
+        if guarded {
+            self.i(I::End);
+        }
+        self.call_status(invoked, true);
         Ok(())
     }
 
@@ -4257,6 +4352,7 @@ pub(super) fn literal_constant<'a>(
 
 /// Emitted reads of a zero-based call input, including reads in distinct Wasm branches.
 /// Keep this contract alongside `call_intrinsic` whenever its emission changes.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn intrinsic_reads_input_repeatedly(
     intrinsic: KnownCallee,
     input: usize,
@@ -4264,8 +4360,22 @@ pub(super) fn intrinsic_reads_input_repeatedly(
     body: &Function,
     definitions: &[Option<ExpressionSource>],
     constants: &FxHashMap<ValueId, i32>,
+    scalar_constants: &FxHashMap<ValueId, ConstantId>,
+    invoked: bool,
 ) -> bool {
     match intrinsic {
+        KnownCallee::IntDiv => {
+            let divisor = integer_constant(body, &inputs[1], definitions, constants);
+            (input == 0 && divisor.is_none())
+                || (input == 1 && (divisor.is_none() || (invoked && divisor == Some(0))))
+        }
+        KnownCallee::FloatDiv => {
+            input == 1
+                && invoked
+                && literal_constant(body, &inputs[1], definitions, Some(scalar_constants))
+                    .and_then(|literal| literal.as_primitive_ty::<Float>())
+                    .is_none_or(|divisor| divisor.into_inner() == 0.0)
+        }
         KnownCallee::IntShiftLeft
         | KnownCallee::IntShiftRight
         | KnownCallee::IntShiftRightLogical => {
