@@ -1,5 +1,17 @@
 # Wasm generation: design decisions
 
+## Register subscript signatures from indirect uses
+
+Register subscript dispatch signatures from indirect call sites as well as concrete adapters.
+Whole-module inspection includes generic bodies that receive evidence from callers, so an
+indirect call can require a signature even when no concrete adapter is reachable.
+
+## Resolve closure capture layouts from derived evidence
+
+Derived dictionaries can retain field evidence without a complete layout witness for a captured
+aggregate. Resolve such captures with the shared `Value` layout formula, querying each distinct
+leaf once per construction and reusing formula results to keep generated code growth linear.
+
 ## Borrow immutable literal handles only at known readers
 
 The invocation's static-string table belongs to the instance and stays valid across native calls.

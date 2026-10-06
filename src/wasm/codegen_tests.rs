@@ -1241,6 +1241,185 @@ fn wasm_codegen_subscript_caller_failure_resumes_owned_evidence() {
 }
 
 #[wasm_bindgen_test]
+fn wasm_codegen_closure_capture_layout_from_derived_evidence() {
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(optimization);
+        let entry = compile(
+            &mut session,
+            r#"
+            struct Box<T> { value: T, n: int }
+            #[inline(never)] fn maker<T>(value: T, n: int) {
+                let boxed = Box { value: value, n: n };
+                || boxed.n + len(to_string(boxed.value))
+            }
+            #[inline(never)] fn twice(f) { let g = f; f() + g() }
+            fn compute(n: int) -> int {
+                let expected = 2 * (n + len(to_string(n)));
+                let actual = twice(maker(n, n));
+                if actual == expected { actual } else { -1 }
+            }
+            "#,
+        );
+        for code in [
+            compile_raw(&session, entry),
+            CompiledProgram::compile(&session, entry).unwrap(),
+        ] {
+            let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+            for n in [5, 42, -3] {
+                let live = LIVE_CALLABLE_ENVIRONMENTS.get();
+                let evidence = LIVE_ENVIRONMENTS.get();
+                assert_eq!(
+                    instance.run((n,), WasmLimits::default()).unwrap(),
+                    2 * (n + n.to_string().len() as isize),
+                    "{optimization:?}: {n}"
+                );
+                assert_eq!(LIVE_CALLABLE_ENVIRONMENTS.get(), live);
+                assert_eq!(LIVE_ENVIRONMENTS.get(), evidence);
+            }
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_closure_capture_layout_scales_with_generic_fields() {
+    let mut previous_size = None;
+    for count in [2, 5, 10] {
+        let parameters = (0..count)
+            .map(|i| format!("T{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let fields = (0..count)
+            .map(|i| format!("f{i}: T{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let arguments = (0..count)
+            .map(|i| format!("v{i}: T{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let initialization = (0..count)
+            .map(|i| format!("f{i}: v{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let reads = (0..count)
+            .map(|i| format!("len(to_string(captured.f{i}))"))
+            .collect::<Vec<_>>()
+            .join(" + ");
+        let values = (0..count)
+            .map(|i| match i % 3 {
+                0 => "n",
+                1 => "to_string(n)",
+                _ => "n > 0",
+            })
+            .collect::<Vec<_>>();
+        let expected = values
+            .iter()
+            .map(|value| format!("len(to_string({value}))"))
+            .collect::<Vec<_>>()
+            .join(" + ");
+        let source = format!(
+            r#"
+            struct Capture<{parameters}> {{ {fields} }}
+            #[inline(never)] fn maker<{parameters}>({arguments}) {{
+                let captured = Capture {{ {initialization} }};
+                || {reads}
+            }}
+            #[inline(never)] fn twice(f) {{ let g = f; f() + g() }}
+            fn compute(n: int) -> int {{
+                let expected = 2 * ({expected});
+                let actual = twice(maker({}));
+                if actual == expected {{ 1 }} else {{ 0 }}
+            }}
+        "#,
+            values.join(", ")
+        );
+        let mut session = CompilerSession::new();
+        // Preserve the generic maker so concrete specialization cannot hide layout queries.
+        session.set_mir_optimization(MirOptimization::Disabled);
+        let entry = compile(&mut session, &source);
+        let code = compile_raw(&session, entry);
+        let functions = WasmFunctions::new(code.bytes());
+        let (_, index) = functions
+            .names
+            .iter()
+            .find(|(name, _)| name.ends_with("::maker"))
+            .unwrap();
+        let (body, _) = functions.body(*index);
+        let body_size = body.range().end - body.range().start;
+        let getters = body
+            .get_operators_reader()
+            .unwrap()
+            .into_iter()
+            .map(Result::unwrap)
+            .filter(|op| matches!(op, Operator::CallIndirect { .. }))
+            .count();
+        assert!(
+            getters <= 20 * count + 20,
+            "{count} fields emitted {getters} indirect calls"
+        );
+        if let Some(previous) = previous_size {
+            assert!(
+                body_size < previous * 3,
+                "{count} fields grew from {previous} to {body_size} bytes"
+            );
+        }
+        previous_size = Some(body_size);
+        for code in [code, CompiledProgram::compile(&session, entry).unwrap()] {
+            let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+            for n in [5, 42, -3] {
+                let live = LIVE_CALLABLE_ENVIRONMENTS.get();
+                let evidence = LIVE_ENVIRONMENTS.get();
+                assert_eq!(instance.run((n,), WasmLimits::default()).unwrap(), 1);
+                assert_eq!(LIVE_CALLABLE_ENVIRONMENTS.get(), live);
+                assert_eq!(LIVE_ENVIRONMENTS.get(), evidence);
+            }
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_closure_capture_layout_with_variant_payloads() {
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(optimization);
+        let entry = compile(
+            &mut session,
+            r#"
+            enum Choice<T, U> { Left(T), Right(U) }
+            #[inline(never)] fn maker<T, U>(left: T, right: U, flag: bool) {
+                let captured = if flag { Choice::Left(left) } else { Choice::Right(right) };
+                || match captured {
+                    Choice::Left(value) => len(to_string(value)),
+                    Choice::Right(value) => len(to_string(value)),
+                }
+            }
+            #[inline(never)] fn twice(f) { let g = f; f() + g() }
+            fn compute(n: int) -> int {
+                let flag = n > 0;
+                let text = to_string(n);
+                let expected = 2 * (if flag { len(to_string(n)) } else { len(to_string(text)) });
+                let actual = twice(maker(n, text, flag));
+                if actual == expected { 1 } else { 0 }
+            }
+        "#,
+        );
+        for code in [
+            compile_raw(&session, entry),
+            CompiledProgram::compile(&session, entry).unwrap(),
+        ] {
+            let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+            for n in [5, 42, -3] {
+                let live = LIVE_CALLABLE_ENVIRONMENTS.get();
+                let evidence = LIVE_ENVIRONMENTS.get();
+                assert_eq!(instance.run((n,), WasmLimits::default()).unwrap(), 1);
+                assert_eq!(LIVE_CALLABLE_ENVIRONMENTS.get(), live);
+                assert_eq!(LIVE_ENVIRONMENTS.get(), evidence);
+            }
+        }
+    }
+}
+
+#[wasm_bindgen_test]
 fn wasm_codegen_compact_closure_captures_clone_and_drop() {
     for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
         let mut session = CompilerSession::new();

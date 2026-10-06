@@ -531,6 +531,7 @@ impl<'a, 's> Body<'a, 's> {
             }
         }
         let mut error_targets = DenseBitSet::empty();
+        let mut closure_operations = Vec::new();
         for block in body.blocks() {
             if let TerminatorKind::Invoke { error, .. } = body.block(block).terminator().kind {
                 error_targets.insert(error.as_index());
@@ -542,6 +543,7 @@ impl<'a, 's> Body<'a, 's> {
                     continue;
                 }
                 if matches!(operation.kind, OperationKind::BuildClosure { .. }) {
+                    closure_operations.push(operation);
                     let layout = this.plan_closure_captures(operation)?;
                     this.closure_layouts
                         .insert(operation.result_id().unwrap(), layout);
@@ -769,6 +771,9 @@ impl<'a, 's> Body<'a, 's> {
                     this.registers.insert(id, local);
                 }
             }
+        }
+        for operation in closure_operations {
+            this.plan_closure_layout_fallbacks(operation)?;
         }
         if !this.selections.is_empty() {
             this.reserve_scratch(Type::unit())?;
@@ -2569,7 +2574,7 @@ impl<'a, 's> Body<'a, 's> {
         self.i(I::F64Eq);
     }
 
-    fn local(&mut self, ty: ValType) -> WasmLocalId {
+    pub(super) fn local(&mut self, ty: ValType) -> WasmLocalId {
         let id = WasmLocalId::from_index(self.mode.local_base(self.signature) + self.locals.len());
         self.locals.push(ty);
         id

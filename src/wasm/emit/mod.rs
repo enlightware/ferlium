@@ -813,6 +813,7 @@ fn emit_with_export_kind(
     let mut needs_callable_glue = false;
     let mut adapters = Vec::new();
     let mut subscript_modes = Vec::new();
+    let mut subscript_arities = Vec::new();
     let mut subscript_adapters = Vec::new();
     let mut subscript_adapter_set = FxHashSet::default();
     loop {
@@ -865,6 +866,14 @@ fn emit_with_export_kind(
         .map_err(|reason| diagnostic(id, body, &reason))?;
         let selections = callable::selections(body);
         let constructed_subscripts = constructed_subscript_definitions(body);
+        let borrowed_subscripts = body
+            .blocks()
+            .flat_map(|block| operations(body.block(block)))
+            .filter(|operation| {
+                matches!(operation.kind, OperationKind::BorrowSubscriptMember { .. })
+            })
+            .filter_map(Operation::result_id)
+            .collect::<FxHashSet<_>>();
         for block in body.blocks() {
             let block = body.block(block);
             for operation in operations(block) {
@@ -903,6 +912,10 @@ fn emit_with_export_kind(
                         pending.push(program.direct_entry(*target));
                     }
                 }
+                let borrowed_subscript = matches!(
+                    callee(operation),
+                    Some(Value::Register(id)) if borrowed_subscripts.contains(id)
+                );
                 match operation.kind {
                     OperationKind::BuildClosure {
                         function,
@@ -920,6 +933,20 @@ fn emit_with_export_kind(
                         pending.push(program.direct_entry(function));
                         for (trait_id, entry) in layout_entries {
                             reachable.entry(trait_id, entry);
+                        }
+                    }
+                    OperationKind::Call { ref ty, .. } if borrowed_subscript => {
+                        let arity = operation.operands.len()
+                            - 1
+                            - usize::from(ty.result_convention.has_result_place());
+                        if !subscript_arities.contains(&arity) {
+                            subscript_arities.push(arity);
+                        }
+                    }
+                    OperationKind::Project { .. } if borrowed_subscript => {
+                        let arity = operation.operands.len() - 1;
+                        if !subscript_arities.contains(&arity) {
+                            subscript_arities.push(arity);
                         }
                     }
                     OperationKind::Call { ref ty, .. }
@@ -1199,6 +1226,14 @@ fn emit_with_export_kind(
         let target = program.direct_entry(definition.member(mut_member).unwrap().function());
         let arity =
             subscript::visible_arity(callees[&target].1, definition.capture_schema().len())?;
+        subscript_entries
+            .signatures_by_arity
+            .entry(arity)
+            .or_insert_with(|| types.intern(subscript::parameters(arity), subscript::results()));
+    }
+    // Generic module roots can dispatch through caller-supplied subscript evidence without
+    // reaching a concrete adapter. Their call sites still require the uniform signature.
+    for arity in subscript_arities {
         subscript_entries
             .signatures_by_arity
             .entry(arity)

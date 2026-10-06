@@ -18,7 +18,10 @@ use crate::{
     std::{
         core_traits_names::VALUE_TRAIT_NAME,
         logic::bool_type,
-        value::{ProductLayoutSpec, ProductMemberLayout, product_layout_spec},
+        value::{
+            ProductLayoutSpec, ProductMemberLayout, VALUE_SIZE_ASSOC_CONST_INDEX, ValueLayoutExpr,
+            product_layout_spec, value_layout_formula_for_type,
+        },
     },
     types::{r#trait::TraitDictionaryEntryIndex, r#type::Type},
     wasm::{
@@ -63,6 +66,22 @@ fn closure_value_captures(op: &Operation) -> &[Value] {
 pub(super) struct CaptureLayout {
     spec: ProductLayoutSpec,
     offsets: Option<Vec<usize>>,
+    fallbacks: CaptureFallbacks,
+}
+
+#[derive(Default)]
+struct CaptureFallbacks {
+    leaves: Vec<(Type, Value, WasmLocalId, WasmLocalId)>,
+    expressions: Vec<(ValueLayoutExpr, WasmLocalId)>,
+    layouts: FxHashMap<Type, (WasmLocalId, WasmLocalId)>,
+}
+
+impl CaptureFallbacks {
+    fn expression_local(&self, expr: &ValueLayoutExpr) -> Option<WasmLocalId> {
+        self.expressions
+            .iter()
+            .find_map(|(planned, local)| (planned == expr).then_some(*local))
+    }
 }
 
 impl CaptureLayout {
@@ -678,13 +697,86 @@ impl Body<'_, '_> {
                 .ok_or("expected capture tuple layout")?
         };
         let offsets = spec.static_field_offsets();
-        Ok(CaptureLayout { spec, offsets })
+        Ok(CaptureLayout {
+            spec,
+            offsets,
+            fallbacks: CaptureFallbacks::default(),
+        })
+    }
+
+    /// Run after dictionary definitions have been collected, and before local declarations.
+    pub(super) fn plan_closure_layout_fallbacks(&mut self, op: &Operation) -> Result<(), String> {
+        let id = op.result_id().unwrap();
+        let Some(mut layout) = self.closure_layouts.remove(&id) else {
+            return Ok(());
+        };
+        for member in &layout.spec.members {
+            if member.static_layout.is_some()
+                || self.capture_witness(member.ty, &op.operands).is_some()
+                || layout.fallbacks.layouts.contains_key(&member.ty)
+            {
+                continue;
+            }
+            let formula = value_layout_formula_for_type(member.ty, op.span.location, &self.env)
+                .map_err(|error| format!("closure capture layout: {error:?}"))?;
+            let size =
+                self.plan_capture_layout_expr(&formula.size, &op.operands, &mut layout.fallbacks)?;
+            let align =
+                self.plan_capture_layout_expr(&formula.align, &op.operands, &mut layout.fallbacks)?;
+            layout.fallbacks.layouts.insert(member.ty, (size, align));
+        }
+        self.closure_layouts.insert(id, layout);
+        Ok(())
+    }
+
+    fn plan_capture_layout_expr(
+        &mut self,
+        expr: &ValueLayoutExpr,
+        operands: &[Value],
+        plan: &mut CaptureFallbacks,
+    ) -> Result<WasmLocalId, String> {
+        if let Some(local) = plan.expression_local(expr) {
+            return Ok(local);
+        }
+        let local = match expr {
+            ValueLayoutExpr::AssociatedConst { ty, index } => {
+                let (size, align) = if let Some((_, _, size, align)) =
+                    plan.leaves.iter().find(|(leaf, ..)| leaf == ty)
+                {
+                    (*size, *align)
+                } else {
+                    let witness = self.capture_witness(*ty, operands).ok_or_else(|| {
+                        format!("missing explicit closure capture layout for {ty:?}")
+                    })?;
+                    let size = self.local(ValType::I32);
+                    let align = self.local(ValType::I32);
+                    plan.leaves.push((*ty, witness, size, align));
+                    (size, align)
+                };
+                if *index == VALUE_SIZE_ASSOC_CONST_INDEX {
+                    size
+                } else {
+                    align
+                }
+            }
+            ValueLayoutExpr::Constant(_) => self.local(ValType::I32),
+            ValueLayoutExpr::Add(left, right)
+            | ValueLayoutExpr::Max(left, right)
+            | ValueLayoutExpr::AlignTo(left, right) => {
+                self.plan_capture_layout_expr(left, operands, plan)?;
+                self.plan_capture_layout_expr(right, operands, plan)?;
+                self.local(ValType::I32)
+            }
+        };
+        plan.expressions.push((expr.clone(), local));
+        Ok(local)
     }
 
     fn closure_capture_layout(
         &mut self,
         member: ProductMemberLayout,
         operands: &[Value],
+        fallbacks: &CaptureFallbacks,
     ) -> Result<(), String> {
         let helpers = self.helper_locals();
         if let Some(layout) = member.static_layout {
@@ -693,15 +785,62 @@ impl Body<'_, '_> {
             self.i(I::I32Const(layout.align as i32));
             self.i(I::LocalSet(helpers.get(DynamicAlign).as_u32()));
             Ok(())
-        } else {
-            let witness = self.capture_witness(member.ty, operands).ok_or_else(|| {
-                format!(
-                    "missing explicit closure capture layout for {:?}",
-                    member.ty
-                )
-            })?;
+        } else if let Some(witness) = self.capture_witness(member.ty, operands) {
             self.dynamic_layout(&witness)
+        } else {
+            let (size, align) = fallbacks.layouts[&member.ty];
+            self.i(I::LocalGet(size.as_u32()));
+            self.i(I::LocalGet(align.as_u32()));
+            self.i(I::LocalSet(helpers.get(DynamicAlign).as_u32()));
+            self.i(I::LocalSet(helpers.get(DynamicSize).as_u32()));
+            Ok(())
         }
+    }
+
+    fn emit_capture_layout_fallbacks(&mut self, plan: &CaptureFallbacks) -> Result<(), String> {
+        let helpers = self.helper_locals();
+        for (_, witness, size, align) in &plan.leaves {
+            self.dynamic_layout(witness)?;
+            self.i(I::LocalGet(helpers.get(DynamicSize).as_u32()));
+            self.i(I::LocalSet(size.as_u32()));
+            self.i(I::LocalGet(helpers.get(DynamicAlign).as_u32()));
+            self.i(I::LocalSet(align.as_u32()));
+        }
+        // Postorder planning gives each expression already-computed operands. Shared
+        // subtrees and evidence leaves are evaluated once per closure construction.
+        for (expr, result) in &plan.expressions {
+            let operand = |expr| plan.expression_local(expr).unwrap().as_u32();
+            match expr {
+                ValueLayoutExpr::Constant(value) => self.i(I::I32Const(*value as i32)),
+                ValueLayoutExpr::AssociatedConst { .. } => continue,
+                ValueLayoutExpr::Add(left, right) => {
+                    self.i(I::LocalGet(operand(left)));
+                    self.i(I::LocalGet(operand(right)));
+                    self.i(I::I32Add);
+                }
+                ValueLayoutExpr::Max(left, right) => {
+                    self.i(I::LocalGet(operand(left)));
+                    self.i(I::LocalGet(operand(right)));
+                    self.i(I::LocalGet(operand(left)));
+                    self.i(I::LocalGet(operand(right)));
+                    self.i(I::I32GtU);
+                    self.i(I::Select);
+                }
+                ValueLayoutExpr::AlignTo(offset, align) => {
+                    self.i(I::LocalGet(operand(offset)));
+                    self.i(I::LocalGet(operand(align)));
+                    self.i(I::I32Const(1));
+                    self.i(I::I32Sub);
+                    self.i(I::I32Add);
+                    self.i(I::I32Const(0));
+                    self.i(I::LocalGet(operand(align)));
+                    self.i(I::I32Sub);
+                    self.i(I::I32And);
+                }
+            }
+            self.i(I::LocalSet(result.as_u32()));
+        }
+        Ok(())
     }
 
     pub(super) fn build_closure(&mut self, op: &Operation) -> Result<(), String> {
@@ -802,19 +941,20 @@ impl Body<'_, '_> {
             .expect("each closure is emitted once after layout planning");
         let spec = &layout.spec;
         let static_offsets = &layout.offsets;
+        self.emit_capture_layout_fallbacks(&layout.fallbacks)?;
         for (index, capture) in captures.iter().enumerate() {
             let target = ProjectionIndex::from_index(index);
             let member = spec.members[index];
             if let Some(offsets) = static_offsets {
                 self.i(I::I32Const(offsets[index] as i32));
                 self.i(I::LocalSet(cursor.as_u32()));
-                self.closure_capture_layout(member, &op.operands)?;
+                self.closure_capture_layout(member, &op.operands, &layout.fallbacks)?;
             } else {
                 self.i(I::I32Const(
                     spec.static_prefix_offset(target).unwrap_or(0) as i32
                 ));
                 self.i(I::LocalSet(cursor.as_u32()));
-                self.closure_capture_layout(member, &op.operands)?;
+                self.closure_capture_layout(member, &op.operands, &layout.fallbacks)?;
                 self.i(I::LocalGet(helpers.get(DynamicAlign).as_u32()));
                 self.i(I::LocalSet(helpers.get(Scratch).as_u32()));
                 // DynamicBase temporarily holds the target size; candidate layout queries
@@ -823,7 +963,7 @@ impl Body<'_, '_> {
                 self.i(I::LocalSet(helpers.get(DynamicBase).as_u32()));
                 for (candidate_index, equal_precedes) in spec.runtime_order_candidates(target) {
                     let candidate = spec.members[candidate_index.as_index()];
-                    self.closure_capture_layout(candidate, &op.operands)?;
+                    self.closure_capture_layout(candidate, &op.operands, &layout.fallbacks)?;
                     self.i(I::LocalGet(helpers.get(DynamicAlign).as_u32()));
                     self.i(I::LocalGet(helpers.get(Scratch).as_u32()));
                     self.i(if equal_precedes { I::I32GeU } else { I::I32GtU });

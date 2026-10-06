@@ -319,6 +319,7 @@ impl Print for LinePrinter {
 
 #[cfg(test)]
 mod tests {
+    use js_sys::{Uint8Array, WebAssembly};
     use wasm_bindgen_test::wasm_bindgen_test;
 
     use crate::{CompilerSession, Path};
@@ -331,6 +332,53 @@ mod tests {
         fn apply(x: int) -> int { let f = |y| y + 1; f(x) }\n\
         fn r#fn(x: int) -> int { x }\n\
         compute(2)";
+
+    #[wasm_bindgen_test]
+    fn module_text_caller_supplied_subscripts() {
+        // No concrete subscript implementation is reachable in these modules. Inspection
+        // must still emit valid dispatch signatures for their generic physical entries.
+        for source in [
+            "fn read(mut values, i: int) { values[i] }",
+            "fn write(mut values, i: int, value) { values[i] = value; values }",
+            "fn read_with(accessor) -> int { let mut value = 1; value->[accessor] }",
+            "fn write_with(accessor) -> int { let mut value = 1; value->[accessor] = 2; value }",
+        ] {
+            let mut session = CompilerSession::new();
+            session.set_allow_experimental(true);
+            let module = session
+                .compile(source, "wasm_text", Path::single_str("wasm_text"))
+                .unwrap()
+                .module_id;
+            let emitted = emit_module(&session, module, true).unwrap().unwrap();
+            assert_eq!(emitted.subscript_count, 0, "{source}");
+            WebAssembly::Module::new(&Uint8Array::from(emitted.bytes.as_slice())).unwrap();
+            let text = module_text(&session, module).unwrap();
+            assert!(
+                text.text.contains("call_indirect"),
+                "{source}\n{}",
+                text.text
+            );
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn module_text_linalg() {
+        let mut session = CompilerSession::new();
+        session.set_allow_experimental(true);
+        let module = session
+            .compile(
+                include_str!("../../tests/modules/linalg.fer"),
+                "linalg",
+                Path::single_str("linalg"),
+            )
+            .unwrap()
+            .module_id;
+        let emitted = emit_module(&session, module, true).unwrap().unwrap();
+        WebAssembly::Module::new(&Uint8Array::from(emitted.bytes.as_slice())).unwrap();
+        let text = module_text(&session, module).unwrap();
+        assert!(text.text.contains("(export \"linalg::transform_pipeline\""));
+        assert!(!text.source_map.is_empty());
+    }
 
     #[wasm_bindgen_test]
     fn module_text_exports_named_functions_and_links_source() {
