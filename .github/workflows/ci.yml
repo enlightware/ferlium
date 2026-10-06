@@ -221,7 +221,7 @@ jobs:
           path: wasm-tests
 
       - name: Install wasm-bindgen test runner
-        uses: taiki-e/install-action@dfae9bf3d6f6c6f20ef4ebb3486c01a51341ff12 # v2.87.18
+        uses: taiki-e/install-action@861a07ce7084f55488e375df125cdc99bba60eb7 # v2.87.23
         with:
           tool: wasm-bindgen@${{ needs.wasm_build_test.outputs.wasm_bindgen }}
 
@@ -250,7 +250,7 @@ jobs:
           path: wasm-tests
 
       - name: Install wasm-bindgen test runner
-        uses: taiki-e/install-action@dfae9bf3d6f6c6f20ef4ebb3486c01a51341ff12 # v2.87.18
+        uses: taiki-e/install-action@861a07ce7084f55488e375df125cdc99bba60eb7 # v2.87.23
         with:
           tool: wasm-bindgen@${{ needs.wasm_build_release.outputs.wasm_bindgen }}
 
