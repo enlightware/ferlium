@@ -1,7 +1,7 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-//! Hoisting of loop-invariant pure calls.
+//! Hoisting of loop-invariant pure calls and initialized copyable memory reads.
 //!
 //! An empty effect row excludes source-level effects and failure, while a separate `will_return`
 //! proof excludes divergence when the call moves onto a zero-trip path. The pass admits any direct
@@ -19,22 +19,36 @@
 //! insertion point is therefore before every outside-loop marker restored inside the loop. A marker
 //! defined before the preheader leaves no safe insertion point, and the candidate is rejected.
 //!
-//! The pass adds no operation and clones no expression: it only relocates an existing call and,
-//! when necessary, its allocation. Acyclic bodies return before scanning calls, and bodies without
-//! an eligible call return before CFG or dominance construction, keeping the corpus-wide cost
-//! proportional to actual candidates.
+//! Memory reads use the clone-borrowing pass's provenance and access classification. Only static
+//! product paths of initialized `Let` parameters or whole locals initialized in the preheader are
+//! admitted; rooted writes, escapes and storage invalidation block motion. `Load` moves its value
+//! definition; a `Memcpy` into a single-writer copyable local moves with its allocation when needed.
+//! Reads are planned together against one analysis and prefer the outermost eligible loop.
+//!
+//! The pass adds no operation and clones no expression. Acyclic bodies return before candidate
+//! scanning. Read candidates must have a syntactically available static product path before roles,
+//! provenance or access classification are derived; access indexing covers candidate roots only.
+
+use std::cell::OnceCell;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{
+    clone_borrow::{self, Access},
     dataflow::{self, Root},
+    provenance::{AddressorSummary, PlaceOrigins},
     site::{OperationIndex, OperationSite},
+    stack_region,
 };
 use crate::{
     hir::function::ArgConvention,
     mir::{
-        self, BlockId, Function, Operation, OperationKind, dominance::Dominance,
-        edit::FunctionEdit, terminator::TerminatorKind, value::ValueId,
+        self, BlockId, Function, Operation, OperationKind, ParameterKind,
+        dominance::Dominance,
+        edit::FunctionEdit,
+        role::{MirType, ValueRole, ValueRoles},
+        terminator::TerminatorKind,
+        value::ValueId,
     },
     module::{FunctionId, ModuleEnv, id::Id},
     types::{
@@ -47,6 +61,84 @@ use crate::{
 struct NaturalLoop {
     blocks: FxHashSet<BlockId>,
     preheader: BlockId,
+}
+
+struct LoopAnalysis {
+    dominance: Dominance,
+    /// Innermost first for calls; reads traverse this in reverse.
+    loops: Vec<NaturalLoop>,
+}
+
+impl LoopAnalysis {
+    fn of(func: &Function) -> Self {
+        let (successors, predecessors) = cfg(func);
+        let dominance = Dominance::of(&successors, func.entry().as_index());
+        let mut loops = natural_loops(func, &successors, &predecessors, &dominance);
+        // Canonical MIR requires definitions to precede uses in block-index order as well as
+        // dominate them. A moved allocation can be used in any loop block, so the preheader must
+        // precede the whole loop. Motion preserves block ids, making this a CFG-only restriction.
+        loops.retain(|natural| {
+            natural
+                .blocks
+                .iter()
+                .all(|block| natural.preheader.as_index() < block.as_index())
+        });
+        loops.sort_by_key(|natural| natural.blocks.len());
+        Self { dominance, loops }
+    }
+}
+
+struct LoopStorage {
+    restores: Vec<OperationSite>,
+    insertion_limit: Option<OperationIndex>,
+}
+
+impl LoopStorage {
+    fn of(
+        func: &Function,
+        natural: &NaturalLoop,
+        definitions: &FxHashMap<ValueId, OperationSite>,
+    ) -> Self {
+        let restores: Vec<_> = natural
+            .blocks
+            .iter()
+            .flat_map(|block| {
+                func.block(*block)
+                    .operations()
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, operation)| {
+                        matches!(operation.kind, OperationKind::StackRestore).then_some(
+                            OperationSite {
+                                block: *block,
+                                index: OperationIndex::from_index(index),
+                            },
+                        )
+                    })
+            })
+            .collect();
+        let insertion_limit = restores.iter().try_fold(
+            func.block(natural.preheader).operations().len(),
+            |latest, site| {
+                let operation = &func.block(site.block).operations()[site.index.as_index()];
+                let mir::Value::Register(marker) = operation.operands[0] else {
+                    return None;
+                };
+                let definition = definitions.get(&marker)?;
+                if natural.blocks.contains(&definition.block) {
+                    Some(latest)
+                } else if definition.block == natural.preheader {
+                    Some(latest.min(definition.index.as_index()))
+                } else {
+                    None
+                }
+            },
+        );
+        Self {
+            restores,
+            insertion_limit: insertion_limit.map(OperationIndex::from_index),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -124,16 +216,18 @@ impl PlaceRoots {
     }
 }
 
-/// Hoists every call admitted by the narrow LICM contract, returning `None` when nothing moved.
+/// Hoists initialized memory reads and calls admitted by LICM, returning `None` when nothing moved.
 ///
-/// One candidate is moved per analysis. This keeps edits simple and lets a call hoisted from an
-/// inner loop become a candidate for an enclosing loop on the next iteration. Every successful
-/// iteration moves a call across at least one loop boundary, so loop nesting bounds the repeats.
-pub(crate) fn hoist_loop_invariant_calls(
+/// Read candidates share one analysis. Calls move one at a time so a call hoisted from an inner
+/// loop can move through an enclosing loop on the next iteration. Only operation-dependent facts
+/// are rebuilt: motion preserves the CFG, dominance and natural loops. Every successful iteration
+/// moves a call across at least one loop boundary, so loop nesting bounds the repeats.
+pub(crate) fn hoist_loop_invariants(
     func: &Function,
     env: ModuleEnv<'_>,
     will_return: &impl Fn(FunctionId) -> bool,
     is_optimization_barrier: &impl Fn(FunctionId) -> bool,
+    summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
 ) -> Option<Function> {
     // Every directed cycle has an edge that does not increase an arbitrary total ordering of its
     // vertices. Block ids provide that order, making this an allocation-free rejection of acyclic
@@ -147,24 +241,449 @@ pub(crate) fn hoist_loop_invariant_calls(
     if !may_have_loop {
         return None;
     }
-    let has_eligible_call = func.blocks().any(|block| {
-        func.block(block).operations().iter().any(|operation| {
-            eligible_call(operation, env, will_return, is_optimization_barrier).is_some()
-        })
-    });
-    if !has_eligible_call {
+    let mut has_eligible_call = false;
+    let mut has_load = false;
+    for operation in func
+        .blocks()
+        .flat_map(|block| func.block(block).operations())
+    {
+        has_load |= matches!(operation.kind, OperationKind::Load | OperationKind::Memcpy);
+        if !has_eligible_call {
+            has_eligible_call =
+                eligible_call(operation, env, will_return, is_optimization_barrier).is_some();
+        }
+        if has_load && has_eligible_call {
+            break;
+        }
+    }
+    if !has_eligible_call && !has_load {
         return None;
     }
 
-    let mut current: Option<Function> = None;
+    let analysis = LoopAnalysis::of(func);
+    if analysis.loops.is_empty() {
+        return None;
+    }
+    let mut current = has_load
+        .then(|| hoist_invariant_loads(func, env, summary_of, &analysis))
+        .flatten();
+    if !has_eligible_call {
+        return current;
+    }
     loop {
         let source = current.as_ref().unwrap_or(func);
-        let Some(hoist) = find_hoist(source, env, will_return, is_optimization_barrier) else {
+        let Some(hoist) = find_hoist(source, env, will_return, is_optimization_barrier, &analysis)
+        else {
             break;
         };
         current = Some(apply_hoist(source, hoist));
     }
     current
+}
+
+/// Move existing copyable reads, their static product projections and any loop-local result storage.
+/// Plans share one analysis and prefer the outermost loop that admits each read.
+fn hoist_invariant_loads(
+    func: &Function,
+    env: ModuleEnv<'_>,
+    summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
+    analysis: &LoopAnalysis,
+) -> Option<Function> {
+    let dominance = &analysis.dominance;
+    let loops = &analysis.loops;
+    let (definitions, allocas) = definitions(func);
+    let mut candidates: Vec<_> = func
+        .blocks()
+        .flat_map(|block| {
+            func.block(block)
+                .operations()
+                .iter()
+                .enumerate()
+                .filter_map(move |(index, operation)| {
+                    matches!(operation.kind, OperationKind::Load | OperationKind::Memcpy).then_some(
+                        OperationSite {
+                            block,
+                            index: OperationIndex::from_index(index),
+                        },
+                    )
+                })
+        })
+        .filter(|site| {
+            let source = &func.block(site.block).operations()[site.index.as_index()].operands[0];
+            loops.iter().any(|natural| {
+                natural.blocks.contains(&site.block)
+                    && invariant_place(
+                        source,
+                        func,
+                        &definitions,
+                        dominance,
+                        natural,
+                        &mut Vec::new(),
+                    )
+            })
+        })
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    let roles = ValueRoles::derive(func);
+    candidates.retain(|site| {
+        let operation = &func.block(site.block).operations()[site.index.as_index()];
+        let ty = match operation.kind {
+            OperationKind::Memcpy => match roles
+                .get(&operation.operands[1], func.constants())
+                .as_deref()
+            {
+                Some(ValueRole::Place(MirType::Lowered(ty))) => Some(*ty),
+                _ => None,
+            },
+            OperationKind::Load => match roles
+                .get(
+                    &mir::Value::Register(operation.result_id().unwrap()),
+                    func.constants(),
+                )
+                .as_deref()
+            {
+                Some(ValueRole::Materialized(MirType::Lowered(ty))) => Some(*ty),
+                _ => None,
+            },
+            _ => unreachable!(),
+        };
+        ty.is_some_and(|ty| concrete_type_is_trivial_copy(ty, &env))
+    });
+    if candidates.is_empty() {
+        return None;
+    }
+    let origins = PlaceOrigins::of(func, summary_of);
+    let roots = OnceCell::new();
+    let tracked: FxHashSet<_> = candidates
+        .iter()
+        .flat_map(|site| {
+            let operation = &func.block(site.block).operations()[site.index.as_index()];
+            operation
+                .operands
+                .iter()
+                .filter_map(|operand| origins.origin_of(operand).map(|origin| origin.root))
+        })
+        .collect();
+    let mut escaped = FxHashSet::default();
+    let mut writes: FxHashMap<Root, Vec<OperationSite>> = FxHashMap::default();
+    let mut uses: FxHashMap<Root, FxHashSet<BlockId>> = FxHashMap::default();
+    for block in func.blocks() {
+        let basic = func.block(block);
+        for (index, operation) in basic
+            .operations()
+            .iter()
+            .chain(match &basic.terminator().kind {
+                TerminatorKind::Invoke { operation, .. } => Some(operation),
+                _ => None,
+            })
+            .enumerate()
+        {
+            let site = OperationSite {
+                block,
+                index: OperationIndex::from_index(index),
+            };
+            for (position, operand) in operation.operands.iter().enumerate() {
+                let Some(origin) = origins.origin_of(operand) else {
+                    continue;
+                };
+                if !tracked.contains(&origin.root) {
+                    continue;
+                }
+                uses.entry(origin.root).or_default().insert(block);
+                match clone_borrow::access(operation, position, &roles, func, &origins, summary_of)
+                {
+                    Access::Escape => {
+                        escaped.insert(origin.root);
+                    }
+                    Access::Write => {
+                        writes.entry(origin.root).or_default().push(site);
+                    }
+                    Access::Read | Access::ReadMutable => {}
+                }
+            }
+        }
+        if !matches!(basic.terminator().kind, TerminatorKind::Invoke { .. }) {
+            for operand in basic.terminator().operands() {
+                if let Some(origin) = origins.origin_of(operand) {
+                    if tracked.contains(&origin.root) {
+                        uses.entry(origin.root).or_default().insert(block);
+                        escaped.insert(origin.root);
+                    }
+                }
+            }
+        }
+    }
+    let mut preserving = FxHashMap::default();
+    let mut loop_storage = FxHashMap::default();
+    let mut preheader_writes = FxHashMap::default();
+    let mut moved: FxHashMap<OperationSite, BlockId> = FxHashMap::default();
+    let mut ordered = Vec::new();
+    for site in candidates {
+        let operation = &func.block(site.block).operations()[site.index.as_index()];
+        let source = &operation.operands[0];
+        let Some(origin) = origins.origin_of(source) else {
+            continue;
+        };
+        if !origin.structural || escaped.contains(&origin.root) {
+            continue;
+        }
+        for natural in loops
+            .iter()
+            .rev()
+            .filter(|natural| natural.blocks.contains(&site.block))
+        {
+            if writes.get(&origin.root).is_some_and(|sites| {
+                sites
+                    .iter()
+                    .any(|site| natural.blocks.contains(&site.block))
+            }) {
+                continue;
+            }
+            let mut storage = None;
+            let mut inputs = Vec::new();
+            if matches!(operation.kind, OperationKind::Memcpy) {
+                let mir::Value::Register(destination) = operation.operands[1] else {
+                    continue;
+                };
+                let Some(alloca) = allocas.get(&destination) else {
+                    continue;
+                };
+                let root = Root::Alloca(destination);
+                if !alloca.is_static
+                    || escaped.contains(&root)
+                    || writes
+                        .get(&root)
+                        .is_none_or(|writes| writes.as_slice() != [site])
+                    || uses.get(&root).is_some_and(|blocks| {
+                        blocks.iter().any(|block| !natural.blocks.contains(block))
+                    })
+                {
+                    continue;
+                }
+                if natural.blocks.contains(&alloca.site.block) {
+                    if !definition_dominates(alloca.site, site, dominance) {
+                        continue;
+                    }
+                    storage = Some(alloca.site);
+                } else {
+                    inputs.push(&operation.operands[1]);
+                }
+            }
+            match origin.root {
+                Root::Parameter(id)
+                    if matches!(
+                        func.parameters()[id.as_index()].kind,
+                        ParameterKind::Parameter(ArgConvention::Let)
+                    ) => {}
+                Root::Alloca(id) => {
+                    let Some(alloca) = allocas.get(&id) else {
+                        continue;
+                    };
+                    // A whole initialization in this straight-line preheader makes speculation
+                    // safe even when the loop takes zero iterations. Partial field stores do not.
+                    if alloca.site.block != natural.preheader || !alloca.is_static {
+                        continue;
+                    }
+                    let last = writes.get(&origin.root).and_then(|sites| {
+                        sites
+                            .iter()
+                            .filter(|site| site.block == natural.preheader)
+                            .max_by_key(|site| site.index.as_index())
+                    });
+                    let Some(last) = last else {
+                        continue;
+                    };
+                    let Some(initializer) = func
+                        .block(last.block)
+                        .operations()
+                        .get(last.index.as_index())
+                    else {
+                        continue;
+                    };
+                    if !initializes_whole(initializer, id) {
+                        continue;
+                    }
+                    let safe = preserving
+                        .entry(id)
+                        .or_insert_with(|| stack_region::restores_preserving_alloca(func, id));
+                    let storage = loop_storage
+                        .entry(natural.preheader)
+                        .or_insert_with(|| LoopStorage::of(func, natural, &definitions));
+                    if storage.restores.iter().any(|site| !safe.contains(site)) {
+                        continue;
+                    }
+                }
+                _ => continue,
+            }
+            let mut projections = Vec::new();
+            if !invariant_place(
+                source,
+                func,
+                &definitions,
+                dominance,
+                natural,
+                &mut projections,
+            ) {
+                continue;
+            }
+            let insertion = if storage.is_some() {
+                let base = projections.first().map_or(source, |site| {
+                    &func.block(site.block).operations()[site.index.as_index()].operands[0]
+                });
+                inputs.push(base);
+                let roots = roots.get_or_init(|| PlaceRoots::of(func));
+                let preheader_writes =
+                    preheader_writes
+                        .entry(natural.preheader)
+                        .or_insert_with(|| {
+                            writes_in(func, &FxHashSet::from_iter([natural.preheader]), roots)
+                        });
+                let storage = loop_storage
+                    .entry(natural.preheader)
+                    .or_insert_with(|| LoopStorage::of(func, natural, &definitions));
+                let Some(insertion) = insertion_point(
+                    natural,
+                    &definitions,
+                    dominance,
+                    &inputs,
+                    roots,
+                    preheader_writes,
+                    storage,
+                ) else {
+                    continue;
+                };
+                if let Root::Alloca(_) = origin.root {
+                    if writes.get(&origin.root).is_some_and(|sites| {
+                        sites.iter().any(|site| {
+                            site.block == natural.preheader
+                                && site.index.as_index() >= insertion.as_index()
+                        })
+                    }) {
+                        continue;
+                    }
+                }
+                insertion
+            } else {
+                OperationIndex::from_index(func.block(natural.preheader).operations().len())
+            };
+            if let Some(storage) = storage {
+                projections.push(storage);
+            }
+            projections.push(site);
+            // Shared projections may require a different insertion point. Keep plans independent.
+            if projections.iter().any(|site| moved.contains_key(site)) {
+                continue;
+            }
+            for site in projections {
+                moved.insert(site, natural.preheader);
+                ordered.push((site, natural.preheader, insertion));
+            }
+            break;
+        }
+    }
+    if ordered.is_empty() {
+        return None;
+    }
+    let mut insertions: FxHashMap<OperationSite, Vec<Operation>> = FxHashMap::default();
+    for (site, target, insertion) in ordered {
+        insertions
+            .entry(OperationSite {
+                block: target,
+                index: insertion,
+            })
+            .or_default()
+            .push(func.block(site.block).operations()[site.index.as_index()].clone());
+    }
+    let mut edit = FunctionEdit::new(func.clone());
+    for block in func.blocks() {
+        let basic = func.block(block);
+        let mut operations = Vec::new();
+        for index in 0..=basic.operations().len() {
+            let site = OperationSite {
+                block,
+                index: OperationIndex::from_index(index),
+            };
+            operations.extend(insertions.remove(&site).into_iter().flatten());
+            if index < basic.operations().len() && !moved.contains_key(&site) {
+                operations.push(basic.operations()[index].clone());
+            }
+        }
+        edit.block_mut(block).operations = operations;
+    }
+    Some(edit.finish_unverified())
+}
+
+fn initializes_whole(operation: &Operation, root: ValueId) -> bool {
+    let destination = match &operation.kind {
+        OperationKind::Store | OperationKind::Memcpy | OperationKind::Clone { .. } => {
+            operation.operands.get(1)
+        }
+        OperationKind::BuildArray { .. } => operation.operands.last(),
+        OperationKind::Call { ty, .. } => {
+            dataflow::call_operands(&operation.operands, ty).map(|call| call.result)
+        }
+        _ => None,
+    };
+    destination == Some(&mir::Value::Register(root))
+}
+
+/// Only static product paths may move with a load. Variant payloads can be absent on a zero-trip
+/// path; dynamic addresses and layout witnesses need independent availability proofs.
+fn invariant_place(
+    source: &mir::Value,
+    func: &Function,
+    definitions: &FxHashMap<ValueId, OperationSite>,
+    dominance: &Dominance,
+    natural: &NaturalLoop,
+    projections: &mut Vec<OperationSite>,
+) -> bool {
+    let mir::Value::Register(id) = source else {
+        return matches!(source, mir::Value::Parameter(id)
+            if matches!(func.parameters()[id.as_index()].kind,
+                ParameterKind::Parameter(ArgConvention::Let)));
+    };
+    let Some(site) = definitions.get(id).copied() else {
+        return false;
+    };
+    let inside = natural.blocks.contains(&site.block);
+    if !inside
+        && site.block != natural.preheader
+        && !dominance.dominates(site.block.as_index(), natural.preheader.as_index())
+    {
+        return false;
+    }
+    let operation = &func.block(site.block).operations()[site.index.as_index()];
+    if matches!(operation.kind, OperationKind::Alloca { .. }) {
+        // These are the same source-root restrictions checked by the full proof below. Reject
+        // them before deriving roles, provenance and accesses for a body with no other candidate.
+        return site.block == natural.preheader && operation.operands.is_empty();
+    }
+    if !matches!(
+        operation.kind,
+        OperationKind::Subfield {
+            variant_payload: false,
+            has_layout_witness: false,
+            ..
+        }
+    ) || operation.operands.len() != 2
+        || !matches!(operation.operands[1], mir::Value::Constant(_))
+        || !invariant_place(
+            &operation.operands[0],
+            func,
+            definitions,
+            dominance,
+            natural,
+            projections,
+        )
+    {
+        return false;
+    }
+    if inside {
+        projections.push(site);
+    }
+    true
 }
 
 fn eligible_call<'a>(
@@ -212,31 +731,15 @@ fn find_hoist(
     env: ModuleEnv<'_>,
     will_return: &impl Fn(FunctionId) -> bool,
     is_optimization_barrier: &impl Fn(FunctionId) -> bool,
+    analysis: &LoopAnalysis,
 ) -> Option<Hoist> {
-    let (successors, predecessors) = cfg(func);
-    let dominance = Dominance::of(&successors, func.entry().as_index());
-    let mut loops = natural_loops(func, &successors, &predecessors, &dominance);
-    // Prefer the innermost loop. A later analysis may move the same call through an enclosing one.
-    if loops.is_empty() {
-        return None;
-    }
-    loops.sort_by_key(|natural| natural.blocks.len());
-
+    let dominance = &analysis.dominance;
     let roots = PlaceRoots::of(func);
     let (definitions, allocas) = definitions(func);
-    for natural in loops {
-        // Canonical MIR's verifier currently requires definitions to precede uses in block-index
-        // order as well as dominate them. The moved allocation can still be used in any loop block,
-        // so require the preheader to precede the whole loop rather than only the call block.
-        if natural
-            .blocks
-            .iter()
-            .any(|block| natural.preheader.as_index() >= block.as_index())
-        {
-            continue;
-        }
+    for natural in &analysis.loops {
         let writes = writes_in(func, &natural.blocks, &roots);
         let preheader_writes = writes_in(func, &FxHashSet::from_iter([natural.preheader]), &roots);
+        let storage = OnceCell::new();
         for block in func.blocks().filter(|block| natural.blocks.contains(block)) {
             for (index, operation) in func.block(block).operations().iter().enumerate() {
                 let call_site = OperationSite {
@@ -268,7 +771,9 @@ fn find_hoist(
                 if writes
                     .get(&output_root)
                     .is_none_or(|sites| sites.as_slice() != [call_site])
-                    || root_used_outside(func, output_root, &natural.blocks, &roots)
+                    || root_used_outside(func, output_root, &natural.blocks, &|value| {
+                        roots.root_of(value)
+                    })
                 {
                     continue;
                 }
@@ -287,20 +792,20 @@ fn find_hoist(
                 }
 
                 let move_alloca = natural.blocks.contains(&alloca.site.block);
-                if move_alloca && !definition_dominates(alloca.site, call_site, &dominance) {
+                if move_alloca && !definition_dominates(alloca.site, call_site, dominance) {
                     continue;
                 }
                 if !move_alloca {
                     inputs.push(call.result);
                 }
                 let Some(insertion) = insertion_point(
-                    func,
-                    &natural,
+                    natural,
                     &definitions,
-                    &dominance,
+                    dominance,
                     &inputs,
                     &roots,
                     &preheader_writes,
+                    storage.get_or_init(|| LoopStorage::of(func, natural, &definitions)),
                 ) else {
                     continue;
                 };
@@ -545,7 +1050,7 @@ fn root_used_outside(
     func: &Function,
     root: Root,
     blocks: &FxHashSet<BlockId>,
-    roots: &PlaceRoots,
+    root_of: &impl Fn(&mir::Value) -> Option<Root>,
 ) -> bool {
     for block in func.blocks().filter(|block| !blocks.contains(block)) {
         let basic = func.block(block);
@@ -554,7 +1059,7 @@ fn root_used_outside(
             .iter()
             .flat_map(|operation| operation.operands.iter())
             .chain(basic.terminator().operands())
-            .any(|operand| roots.root_of(operand) == Some(root))
+            .any(|operand| root_of(operand) == Some(root))
         {
             return true;
         }
@@ -575,13 +1080,13 @@ fn definition_dominates(
 }
 
 fn insertion_point(
-    func: &Function,
     natural: &NaturalLoop,
     definitions: &FxHashMap<ValueId, OperationSite>,
     dominance: &Dominance,
     inputs: &[&mir::Value],
     roots: &PlaceRoots,
     preheader_writes: &FxHashMap<Root, Vec<OperationSite>>,
+    storage: &LoopStorage,
 ) -> Option<OperationIndex> {
     let mut earliest = 0usize;
     for &operand in inputs {
@@ -609,25 +1114,7 @@ fn insertion_point(
         }
     }
 
-    let mut latest = func.block(natural.preheader).operations().len();
-    for &block in &natural.blocks {
-        for operation in func.block(block).operations() {
-            if !matches!(operation.kind, OperationKind::StackRestore) {
-                continue;
-            }
-            let mir::Value::Register(marker) = operation.operands[0] else {
-                return None;
-            };
-            let definition = *definitions.get(&marker)?;
-            if natural.blocks.contains(&definition.block) {
-                continue;
-            }
-            if definition.block != natural.preheader {
-                return None;
-            }
-            latest = latest.min(definition.index.as_index());
-        }
-    }
+    let latest = storage.insertion_limit?.as_index();
     // Insert as late as possible. Besides shortening the allocation's lifetime, this retains every
     // preheader computation and possible source failure before the speculative call while still
     // placing its storage ahead of a marker restored on the loop backedge.
@@ -662,11 +1149,26 @@ fn apply_hoist(func: &Function, hoist: Hoist) -> Function {
 
 #[cfg(test)]
 mod tests {
+    use super::super::provenance::ResultProvenance;
     use super::*;
     use crate::{
         CompilerSession, Location, MirOptimization,
+        hir::value::LiteralValue,
         mir::{Operation, builder::FunctionBuilder, terminator::Terminator},
+        std::{logic::bool_type, math::int_type},
     };
+
+    fn hoist_reads(function: &Function, env: ModuleEnv<'_>) -> Option<Function> {
+        hoist_invariant_loads(
+            function,
+            env,
+            &|_| AddressorSummary {
+                provenance: ResultProvenance::Unknown,
+                repeatable: false,
+            },
+            &LoopAnalysis::of(function),
+        )
+    }
 
     fn optimized(src: &str) -> String {
         let mut session = CompilerSession::new();
@@ -704,6 +1206,398 @@ mod tests {
             })
             .unwrap_or_else(|| panic!("call result {result} has no allocation:\n{body}"));
         (call, alloca)
+    }
+
+    #[test]
+    fn hoists_an_initialized_scalar_load_and_preserves_local_restores() {
+        for (local, changing) in [(false, false), (true, false), (true, true)] {
+            let session = CompilerSession::new();
+            let env = session.module_env();
+            let span = Location::new_synthesized();
+            let mut builder = FunctionBuilder::new("scalar_read".into(), Default::default());
+            let int_ty = int_type();
+            let input = mir::Value::Parameter(
+                builder.add_parameter(int_ty, ParameterKind::Parameter(ArgConvention::Let)),
+            );
+            let entry = builder.add_block();
+            let head = builder.add_block();
+            let source = if local {
+                let source = builder
+                    .append_operation(entry, Operation::alloca(span, int_ty))
+                    .unwrap();
+                builder.append_operation(
+                    entry,
+                    Operation::memcpy(span, input.clone(), source.clone()),
+                );
+                source
+            } else {
+                input.clone()
+            };
+            let marker = builder
+                .append_operation(entry, Operation::stack_save(span))
+                .unwrap();
+            builder.set_terminator(entry, Terminator::goto(span, head));
+            if changing {
+                builder.append_operation(head, Operation::memcpy(span, input, source.clone()));
+            }
+            builder.append_operation(head, Operation::load(span, source));
+            builder.append_operation(head, Operation::stack_restore(span, marker));
+            builder.set_terminator(head, Terminator::goto(span, head));
+            let function = builder.finish(env);
+            let hoisted = hoist_reads(&function, env);
+            if changing {
+                assert!(hoisted.is_none());
+                continue;
+            }
+            let hoisted = hoisted.unwrap();
+            assert!(
+                hoisted
+                    .block(entry)
+                    .operations()
+                    .iter()
+                    .any(|op| matches!(op.kind, OperationKind::Load))
+            );
+            assert!(
+                !hoisted
+                    .block(head)
+                    .operations()
+                    .iter()
+                    .any(|op| matches!(op.kind, OperationKind::Load))
+            );
+            crate::mir::verify::verify_function(&hoisted, env);
+        }
+    }
+
+    /// Split at the first loop's block header, without assuming its numeric block id.
+    fn before_first_loop(body: &str) -> (&str, &str) {
+        let fuel = body.find("check_fuel").expect("the loop checks fuel");
+        let header = body[..fuel].rfind("\n  b").expect("the loop has a block");
+        body.split_at(header)
+    }
+
+    #[test]
+    fn call_motion_rebuilds_positions_after_read_motion_shifts_the_marker() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let int_ty = int_type();
+        let mut builder = FunctionBuilder::new("read_then_call".into(), Default::default());
+        let input = mir::Value::Parameter(
+            builder.add_parameter(int_ty, ParameterKind::Parameter(ArgConvention::Let)),
+        );
+        let entry = builder.add_block();
+        let head = builder.add_block();
+        let marker = builder
+            .append_operation(entry, Operation::stack_save(span))
+            .unwrap();
+        builder.set_terminator(entry, Terminator::goto(span, head));
+        let copy = builder
+            .append_operation(head, Operation::alloca(span, int_ty))
+            .unwrap();
+        builder.append_operation(head, Operation::memcpy(span, input.clone(), copy.clone()));
+        let result = builder
+            .append_operation(head, Operation::alloca(span, int_ty))
+            .unwrap();
+        let (callee, ty) = session.known_callees().int_add();
+        builder.append_operation(
+            head,
+            Operation::call(
+                span,
+                mir::Value::Function(callee),
+                [copy, input, result],
+                ty.clone(),
+            ),
+        );
+        builder.append_operation(head, Operation::stack_restore(span, marker));
+        builder.set_terminator(head, Terminator::goto(span, head));
+        let function = builder.finish(env);
+        let reads = hoist_reads(&function, env).unwrap();
+        assert!(matches!(
+            reads.block(entry).operations()[2].kind,
+            OperationKind::StackSave
+        ));
+        assert!(
+            reads
+                .block(head)
+                .operations()
+                .iter()
+                .any(|op| matches!(op.kind, OperationKind::Call { .. }))
+        );
+        let combined =
+            hoist_loop_invariants(&function, env, &|id| id == callee, &|_| false, &|_| {
+                AddressorSummary::UNKNOWN
+            })
+            .unwrap();
+        let operations = combined.block(entry).operations();
+        let call = operations
+            .iter()
+            .position(|op| matches!(op.kind, OperationKind::Call { .. }))
+            .unwrap();
+        let marker = operations
+            .iter()
+            .position(|op| matches!(op.kind, OperationKind::StackSave))
+            .unwrap();
+        assert!(
+            call < marker,
+            "the call and its storage must precede the shifted marker"
+        );
+        assert!(
+            !combined
+                .block(head)
+                .operations()
+                .iter()
+                .any(|op| matches!(op.kind, OperationKind::Call { .. }))
+        );
+        crate::mir::verify::verify_function(&combined, env);
+    }
+
+    #[test]
+    fn hoists_array_metadata_copies_with_their_storage() {
+        let module = optimized(
+            r#"
+            fn sum_lengths(values: [int], n: int) -> int {
+                let mut total = 0;
+                for i in 0..n { total += len(values) + i };
+                total
+            }
+            "#,
+        );
+        let body = body_of(&module, "sum_lengths")
+            .split("\n\nfn ")
+            .next()
+            .unwrap();
+        let (preheader, loop_body) = before_first_loop(body);
+        assert!(
+            preheader.contains("subfield") && preheader.contains("memcpy"),
+            "{body}"
+        );
+        // No projection of the immutable array parameter remains in any loop block.
+        assert!(
+            !loop_body
+                .lines()
+                .any(|line| line.contains("subfield") && line.contains("from %p0")),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn retains_guarded_variant_payload_reads() {
+        let module = optimized(
+            r#"
+            fn optional(value: Option<int>, n: int) -> int {
+                let mut total = 0;
+                for i in 0..n {
+                    match value { Some(x) => { total += x }, None => {} };
+                };
+                total
+            }
+            "#,
+        );
+        let body = body_of(&module, "optional")
+            .split("\n\nfn ")
+            .next()
+            .unwrap();
+        let (preheader, loop_body) = before_first_loop(body);
+        assert!(!preheader.contains("variant_payload from %p0"), "{body}");
+        assert!(loop_body.contains("variant_payload from %p0"), "{body}");
+    }
+
+    #[test]
+    fn retains_metadata_reads_of_a_mutated_array() {
+        let module = optimized(
+            r#"
+            fn growing(values: &mut [int], n: int) -> int {
+                let mut total = 0;
+                for i in 0..n { total += len(values); array_append(values, i); };
+                total
+            }
+            "#,
+        );
+        let body = body_of(&module, "growing").split("\n\nfn ").next().unwrap();
+        let (_, loop_body) = before_first_loop(body);
+        assert!(loop_body.contains("subfield"), "{body}");
+    }
+
+    enum LocalBoundary {
+        OlderRestore,
+        PartialInitialization,
+        EscapingPointer,
+    }
+
+    fn local_read_at_boundary(boundary: LocalBoundary, env: ModuleEnv<'_>) -> Function {
+        let span = Location::new_synthesized();
+        let int_ty = int_type();
+        let mut builder = FunctionBuilder::new("local_boundary".into(), Default::default());
+        let input = mir::Value::Parameter(
+            builder.add_parameter(int_ty, ParameterKind::Parameter(ArgConvention::Let)),
+        );
+        let entry = builder.add_block();
+        let head = builder.add_block();
+        let marker = matches!(boundary, LocalBoundary::OlderRestore).then(|| {
+            builder
+                .append_operation(entry, Operation::stack_save(span))
+                .unwrap()
+        });
+        let partial = matches!(boundary, LocalBoundary::PartialInitialization);
+        let source_ty = if partial {
+            Type::tuple([int_ty, int_ty])
+        } else {
+            int_ty
+        };
+        let root = builder
+            .append_operation(entry, Operation::alloca(span, source_ty))
+            .unwrap();
+        let source = if partial {
+            let index = mir::Value::Constant(builder.add_constant(
+                int_ty,
+                LiteralValue::new_native(0isize),
+                &env,
+            ));
+            builder
+                .append_operation(
+                    entry,
+                    Operation::product_subfield(span, root, index, int_ty, source_ty, []),
+                )
+                .unwrap()
+        } else {
+            root
+        };
+        builder.append_operation(entry, Operation::memcpy(span, input, source.clone()));
+        if matches!(boundary, LocalBoundary::EscapingPointer) {
+            let slot = builder
+                .append_operation(entry, Operation::alloca_place(span, int_ty))
+                .unwrap();
+            builder.append_operation(entry, Operation::store(span, source.clone(), slot));
+        }
+        builder.set_terminator(entry, Terminator::goto(span, head));
+        builder.append_operation(head, Operation::load(span, source));
+        if let Some(marker) = marker {
+            builder.append_operation(head, Operation::stack_restore(span, marker));
+        }
+        builder.set_terminator(head, Terminator::goto(span, head));
+        builder.finish(env)
+    }
+
+    #[test]
+    fn retains_a_local_read_invalidated_by_an_older_restore() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let function = local_read_at_boundary(LocalBoundary::OlderRestore, env);
+        assert!(hoist_reads(&function, env).is_none());
+    }
+
+    #[test]
+    fn retains_a_read_of_a_partially_initialized_local() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let function = local_read_at_boundary(LocalBoundary::PartialInitialization, env);
+        assert!(hoist_reads(&function, env).is_none());
+    }
+
+    #[test]
+    fn retains_a_read_of_an_escaping_local() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let function = local_read_at_boundary(LocalBoundary::EscapingPointer, env);
+        assert!(hoist_reads(&function, env).is_none());
+    }
+
+    #[test]
+    fn hoists_independent_reads_to_the_outermost_nested_preheader() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new("nested_reads".into(), Default::default());
+        let int_ty = int_type();
+        let input = mir::Value::Parameter(
+            builder.add_parameter(int_ty, ParameterKind::Parameter(ArgConvention::Let)),
+        );
+        let condition = mir::Value::Parameter(
+            builder.add_parameter(bool_type(), ParameterKind::Parameter(ArgConvention::Let)),
+        );
+        let entry = builder.add_block();
+        let outer = builder.add_block();
+        let inner_preheader = builder.add_block();
+        let inner = builder.add_block();
+        let backedge = builder.add_block();
+        let exit = builder.add_block();
+        builder.set_terminator(entry, Terminator::goto(span, outer));
+        let test = builder
+            .append_operation(outer, Operation::load(span, condition.clone()))
+            .unwrap();
+        builder.set_terminator(
+            outer,
+            Terminator::cond_br(span, test, inner_preheader, exit),
+        );
+        builder.set_terminator(inner_preheader, Terminator::goto(span, inner));
+        builder.append_operation(inner, Operation::load(span, input));
+        let test = builder
+            .append_operation(inner, Operation::load(span, condition))
+            .unwrap();
+        builder.set_terminator(inner, Terminator::cond_br(span, test, inner, backedge));
+        builder.set_terminator(backedge, Terminator::goto(span, outer));
+        builder.set_terminator(exit, Terminator::ret(span));
+        let function = builder.finish(env);
+        let hoisted = hoist_reads(&function, env).unwrap();
+        assert_eq!(
+            hoisted
+                .block(entry)
+                .operations()
+                .iter()
+                .filter(|op| matches!(op.kind, OperationKind::Load))
+                .count(),
+            3
+        );
+        assert!(hoisted.block(inner_preheader).operations().is_empty());
+        assert!(hoisted.block(inner).operations().is_empty());
+        crate::mir::verify::verify_function(&hoisted, env);
+    }
+
+    #[test]
+    fn retains_a_copy_whose_destination_is_used_after_the_loop() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let int_ty = int_type();
+        let mut builder = FunctionBuilder::new("copy_used_after_loop".into(), Default::default());
+        let input = mir::Value::Parameter(
+            builder.add_parameter(int_ty, ParameterKind::Parameter(ArgConvention::Let)),
+        );
+        let condition = mir::Value::Parameter(
+            builder.add_parameter(bool_type(), ParameterKind::Parameter(ArgConvention::Let)),
+        );
+        let entry = builder.add_block();
+        let head = builder.add_block();
+        let exit = builder.add_block();
+        let destination = builder
+            .append_operation(entry, Operation::alloca(span, int_ty))
+            .unwrap();
+        builder.set_terminator(entry, Terminator::goto(span, head));
+        builder.append_operation(head, Operation::memcpy(span, input, destination.clone()));
+        let test = builder
+            .append_operation(head, Operation::load(span, condition))
+            .unwrap();
+        builder.set_terminator(head, Terminator::cond_br(span, test, head, exit));
+        builder.append_operation(exit, Operation::load(span, destination));
+        builder.set_terminator(exit, Terminator::ret(span));
+        let function = builder.finish(env);
+        let hoisted = hoist_reads(&function, env).unwrap();
+        // The independent condition load can move; the copy and its post-loop use must remain.
+        assert!(
+            hoisted
+                .block(head)
+                .operations()
+                .iter()
+                .any(|op| matches!(op.kind, OperationKind::Memcpy))
+        );
+        assert!(
+            hoisted
+                .block(exit)
+                .operations()
+                .iter()
+                .any(|op| matches!(op.kind, OperationKind::Load))
+        );
+        crate::mir::verify::verify_function(&hoisted, env);
     }
 
     #[test]
@@ -897,13 +1791,13 @@ mod tests {
         };
         assert!(
             insertion_point(
-                &function,
                 &natural,
                 &definitions,
                 &dominance,
                 &[],
                 &PlaceRoots::of(&function),
                 &FxHashMap::default(),
+                &LoopStorage::of(&function, &natural, &definitions),
             )
             .is_none(),
             "storage cannot move below a marker defined before the preheader and restored in the loop"

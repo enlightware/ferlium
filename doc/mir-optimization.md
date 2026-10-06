@@ -48,7 +48,7 @@ boolean flow      // repeat while the body shrinks: store forward, negation, bra
 string rewrites   // fuse static construction into appends; forward self-prefixed builders
 devirtualize      // final dictionary-entry callees exposed too late for a fold round
 bounds checks     // prove array indices in range and remove checked access/failure edges
-LICM              // hoist invariant pure direct calls with passive inputs and copyable results
+LICM              // hoist initialized copyable reads and invariant terminating pure direct calls
 discarded results // remove unread TrivialCopy result places exposed by inlining
 dead proven calls // remove unused chains of known-total numeric or proved-returning script calls
 dead stores       // remove unread initialization overwritten on every following path
@@ -875,7 +875,7 @@ the proof; replay performs the rewrite. Refusing a proof retains the original ch
 after the final devirtualization because inlining may expose `array_resolve_index` and may leave a
 whole `array_index`, and immediately before DCE because removing either error edge strands cleanup.
 
-## Loop-invariant pure calls
+## Loop-invariant calls and memory reads
 
 `mir::pass::licm` moves an invariant direct call from a natural loop into its unique unconditional
 preheader. The call must have an empty effect row, excluding source-level failure, reads and writes.
@@ -906,11 +906,21 @@ and call are placed before any outside-loop `stack_save` whose marker is restore
 that marker predates the preheader, there is no safe point and the candidate is retained. This keeps
 the result alive across every iteration.
 
-Natural loops are recovered from dominance backedges and processed from inner to outer. After one
-successful move the analysis is rebuilt, allowing the same computation to move through nested
-preheaders without maintaining incrementally edited dominance state. An allocation-free
-descending-edge scan rejects acyclic bodies before the call census allocates its operand views; the
-census then rejects bodies with no eligible call before CFG or dominance construction.
+Memory reads use the same loops and preheaders. A concrete `TrivialCopy` `Load` may move, as may a
+semantic `Memcpy` into a whole static copyable local with one writer and no use outside the loop.
+Static product projections move with the read; variant payloads, dynamic addresses and layout
+witnesses are excluded. The source must be an initialized `Let` parameter or a whole local fully
+initialized in the straight-line preheader, making zero-trip reads safe. Shared clone-borrow and
+stack-region proofs reject mutation, escaping aliases and restores that invalidate source storage.
+Moved destinations follow the marker-aware insertion rule above; overlapping projection plans are
+retained. Reads embedded in place-taking primitive calls remain outside this rule.
+
+Natural loops come from dominance backedges. Reads are planned together, preferring the outermost
+eligible loop; calls move iteratively from inner to outer. CFG, dominance and loops are shared
+because motion preserves edges; operation-dependent call facts are rebuilt after each move.
+Syntactic filters reject acyclic bodies and impossible candidates before expensive analysis. Read
+analysis caches root uses, preheader writes and loop restores, deriving place roots only when
+storage must move.
 
 ## Dead code elimination
 

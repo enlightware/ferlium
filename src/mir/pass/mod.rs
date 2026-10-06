@@ -519,17 +519,24 @@ pub(crate) fn optimize_function(
         stats.bounds_checks_removed += removed;
         current = Some(rewritten);
     }
-    // Move terminating pure direct calls with invariant passive inputs and `TrivialCopy` value
-    // storage into a natural loop's unique preheader. Empty effects exclude source-visible failure
-    // and mutation; the raw-MIR summary separately proves that speculation preserves termination.
-    // The pass adds no operation while moving the call and any loop-local allocation.
+    // Hoist initialized copyable reads and terminating pure direct calls into a natural loop's
+    // unique preheader. Calls require invariant passive inputs and `TrivialCopy` result storage.
+    // Empty effects exclude source-visible failure and mutation; the raw-MIR summary separately
+    // proves that speculation preserves termination.
+    // Reads use the shared root-access and storage-lifetime proofs. No operation is added.
     let source = current.as_ref().unwrap_or(function);
-    if let Some(hoisted) = licm::hoist_loop_invariant_calls(source, env, &will_return, &|callee| {
-        context
-            .known_callees
-            .resolve(callee, callees.original_of())
-            .is_some_and(known_callee::KnownCallee::is_optimization_barrier)
-    }) {
+    if let Some(hoisted) = licm::hoist_loop_invariants(
+        source,
+        env,
+        &will_return,
+        &|callee| {
+            context
+                .known_callees
+                .resolve(callee, callees.original_of())
+                .is_some_and(known_callee::KnownCallee::is_optimization_barrier)
+        },
+        &|callee| callees.addressor_summary(callee),
+    ) {
         current = Some(hoisted);
     }
     // Inlining substitutes the caller's throwaway result allocation for the callee's `@ret`. For

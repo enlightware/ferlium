@@ -3674,3 +3674,91 @@ fn callback_specialization_preserves_generic_recursion() {
         expected_tuple([int(10), int(3)])
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn invariant_metadata_reads_preserve_zero_trip_mutation_and_failure() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+        #[inline(never)] fn lengths(values: [int], n: int) -> int {
+            let mut total = 0;
+            for i in 0..n {
+                let temporary = to_string(i);
+                total += len(values) + len(temporary) + i;
+            };
+            total
+        }
+        #[inline(never)] fn growing(values: &mut [int], n: int) -> int {
+            let mut total = 0;
+            for i in 0..n { total += len(values); array_append(values, i); };
+            total
+        }
+        #[inline(never)] fn fallible(values: [int], n: int, divisor: int) -> int {
+            let mut total = 0;
+            for i in 0..n { total += len(values) + idiv(i, divisor); };
+            total
+        }
+        let a = [4, 5];
+        let mut b = a;
+        let first = lengths(a, 4);
+        let changed = growing(b, 3);
+        let recovery = fallible(a, 2, 1);
+        (first, lengths(a, 0), changed, len(b), lengths(a, 1), recovery)
+    "#
+        ),
+        expected_tuple([int(18), int(0), int(9), int(5), int(3), int(5),])
+    );
+    let source = r#"
+        #[inline(never)] fn fallible(values: [int], n: int, divisor: int) -> int {
+            let mut total = 0;
+            for i in 0..n {
+                let temporary = to_string(i);
+                total += len(values) + len(temporary) + idiv(i, divisor);
+            };
+            total
+        }
+    "#;
+    assert_eq!(
+        session.fail_run(&format!("{source} fallible([4, 5], 2, 0)")),
+        SourceFailureKind::DivisionByZero
+    );
+    assert_val_eq!(
+        session.run(&format!("{source} fallible([4, 5], 2, 1)")),
+        int(7)
+    );
+    assert_val_eq!(
+        session.run(&format!("{source} fallible([4, 5], 0, 0)")),
+        int(0)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn invariant_array_length_reads_match_an_explicit_scalar_cache() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+            #[inline(never)] fn snapshot(value: int) -> int { black_box(value) }
+            #[inline(never)] fn reads(values: [int], n: int) -> int {
+                let mut total = 0;
+                for i in 0..n { total += len(values) * (rem(i, 7) + 1); };
+                total
+            }
+            #[inline(never)] fn cached(values: [int], n: int) -> int {
+                let bound = snapshot(len(values));
+                let mut total = 0;
+                for i in 0..n { total += bound * (rem(i, 7) + 1); };
+                total
+            }
+            let values = black_box([1,2,3,4,5,6,7,8,9,10,11,12,13]);
+            (reads(values, 0), cached(values, 0),
+             reads(values, 7), cached(values, 7),
+             reads(values, 100), cached(values, 100))
+            "#
+        ),
+        expected_tuple([int(0), int(0), int(364), int(364), int(5135), int(5135)])
+    );
+}
