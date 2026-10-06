@@ -1,8 +1,7 @@
 # MIR optimization
 
 How optimized MIR is produced: the passes, the order they run in, and the rules that decide where a
-pass belongs. It describes the optimizer as it is; `doc/plans/partial-evaluation.md` holds what is
-still missing.
+pass belongs. This document describes the implemented design.
 
 Related documents: [mir-ir.md](mir-ir.md) for the IR itself,
 [generic-instantiation.md](generic-instantiation.md) for how a call site records its callee's
@@ -119,9 +118,17 @@ Stores that consume a freshly constructed owned value are retained, even when th
 `TrivialCopy`, because removing them would orphan that value's required consuming use.
 Removing a dead store also prunes constants which it leaves unreferenced.
 
-Managed storage remains outside this store-liveness proof, but final DCE handles the ownership-safe
-subset separately. A semantic clone whose destination is never observed is removed together with
-the drops ending that cloned lifetime. This includes a complete dead local lifetime across cleanup
+A source-fallible call is an `invoke` terminator, so its result place is deliberately outside this
+first pass; the error edge and cleanup would need their own proof. DS has its own strict operand-role
+scan rather than reusing the broader escape analysis: that analysis admits `Let` call arguments,
+while DS permits only direct reads and whole-place writes of the local root. Any unmodelled use
+rejects the candidate, so a future MIR operation cannot silently broaden the rewrite.
+
+## Ownership-copy elimination
+
+Final DCE handles the ownership-safe subset of managed storage separately from store liveness.
+A semantic clone whose destination is never observed is removed together with the drops ending
+that cloned lifetime. This includes a complete dead local lifetime across cleanup
 edges and an exact same-block clone/drop pair before the cell is reused. The latter rejects any
 read, projection, call argument or other alias-producing use of the local root.
 
@@ -154,12 +161,6 @@ must-analysis of markers that protect the current allocation incarnation. Reallo
 older marker facts, and joins intersect them. Unresolved aliases, consuming uses, unproved storage
 preservation and suspension inside the borrowed lifetime retain the copy.
 This runs after the semantic rounds settle, before DCE removes the unused destination storage.
-
-A source-fallible call is an `invoke` terminator, so its result place is deliberately outside this
-first pass; the error edge and cleanup would need their own proof. DS has its own strict operand-role
-scan rather than reusing the broader escape analysis: that analysis admits `Let` call arguments,
-while DS permits only direct reads and whole-place writes of the local root. Any unmodelled use
-rejects the candidate, so a future MIR operation cannot silently broaden the rewrite.
 
 ## Discarded `TrivialCopy` results
 
