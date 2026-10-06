@@ -134,6 +134,24 @@ pub const fn callback_specialization_limit(declared_bodies: usize) -> usize {
     }
 }
 
+/// Absolute cost floor allowing several cheap versions in a small callback family.
+pub const MIN_CALLBACK_GROWTH: usize = 512;
+
+/// Source-cost multiple for larger callback families. The allowance is cumulative per family,
+/// not per copy.
+pub const CALLBACK_GROWTH_RATIO: usize = 3;
+
+/// Cumulative whole-body MIR cost allowed for callback copies of one type/evidence family.
+/// The source baseline is fixed on first creation; generated copies never enlarge it.
+pub const fn callback_growth_limit(source_cost: usize) -> usize {
+    let scaled = source_cost.saturating_mul(CALLBACK_GROWTH_RATIO);
+    if scaled > MIN_CALLBACK_GROWTH {
+        scaled
+    } else {
+        MIN_CALLBACK_GROWTH
+    }
+}
+
 /// How many specialized bodies one module's optimization may create.
 ///
 /// Based only on declared MIR bodies, before optimization creates any output. This keeps generated
@@ -194,6 +212,14 @@ mod tests {
             MIN_OWNED_ARGUMENT_VARIANTS
         );
         assert_eq!(owned_argument_variant_limit(129), 258);
+    }
+
+    #[test]
+    fn callback_growth_has_a_floor_and_saturates() {
+        assert_eq!(callback_growth_limit(0), MIN_CALLBACK_GROWTH);
+        assert_eq!(callback_growth_limit(41), MIN_CALLBACK_GROWTH);
+        assert_eq!(callback_growth_limit(745), 2235);
+        assert_eq!(callback_growth_limit(usize::MAX), usize::MAX);
     }
 
     #[test]

@@ -354,11 +354,18 @@ in a loop or a directly self-recursive callee. Binding preserves the visible ABI
 uses in private places and exposes direct calls to existing folding and inlining. Unknown callbacks
 and capturing closures are not bound.
 
-Callback copies have a smaller allowance within the module generation budget, fixed from the
-original body population to leave capacity for type/evidence specialization. Only unique new bodies
-consume it; publication does not renew it. Refused callback copies fall back to ordinary
-type/evidence admission, with cached copies reusable after exhaustion. The allowance bounds copy
-count, not cumulative size; size-weighted admission remains a follow-up.
+Callback copies have a smaller count allowance within the module generation budget, fixed from
+its original body population to leave capacity for type/evidence specialization. Each callee,
+type-instantiation and evidence family also has a cumulative whole-body cost allowance: the larger
+of a small absolute floor and a multiple of its first source body's cost. Charge unique residual
+bodies before further optimization, including cold paths and callback setup; equivalent bodies are
+free. Publication and pruning renew neither allowance, and generated output cannot fund more
+copies. Refusals fall back to ordinary type/evidence admission; cached bodies remain reusable.
+Novel callback keys may be declined using the last admitted copy's cost before constructing a
+body; admitted candidates still undergo exact cost and sharing checks. This estimate can miss a
+cheaper or equivalent copy. The first source body may be raw or already optimized, depending on
+publication order; its baseline stays fixed. Downstream inlining obeys its own growth limits.
+Admission follows call-site visit order rather than a hotness ranking.
 
 A caller that forwards its own quantifiers records a *variable* instantiation and is skipped —
 specializing that caller is what makes its inner call sites concrete on a later round. This is the
@@ -470,7 +477,8 @@ was used.
 
 The identity is the same throughout: the original plus the result convention, parameters, constants
 and code, with the generated name and the body's own id — the two properties of *which copy this
-is* — normalized away. A digest selects candidates and a derived comparison decides, so a collision
+is* — normalized away. Inline locations are rebased into the owning module before comparison.
+A digest selects candidates and a derived comparison decides, so a collision
 costs a sharing and can never merge two bodies that differ. Bodies are shared within one original
 and never across two, because a specialization's metadata is answered through
 `Specialization::original`: two originals with identical MIR can still declare different parameter

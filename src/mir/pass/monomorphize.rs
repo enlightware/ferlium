@@ -304,6 +304,15 @@ pub(crate) struct SpecializationKey {
     pub(crate) callbacks: Vec<(ParameterId, FunctionId)>,
 }
 
+/// Cumulative callback-copy cost for one type/evidence family. Neither publication nor
+/// generated output changes the allowance established from its first source body.
+#[derive(Default)]
+struct CallbackGrowth {
+    allowance: usize,
+    spent: usize,
+    last_admitted: Option<usize>,
+}
+
 /// The specializations one module's optimization has created, and the caches that keep them shared.
 ///
 /// Two call sites that instantiate a generic function the same way get the same body rather than a
@@ -378,6 +387,7 @@ pub(crate) struct Specializations {
     /// Unique callback-bound bodies created, including work later pruned or published.
     callback_created: usize,
     callback_limit: usize,
+    callback_growth: FxHashMap<SpecializationKey, CallbackGrowth>,
 }
 
 impl Specializations {
@@ -403,6 +413,7 @@ impl Specializations {
             limit: budget::specialization_limit(declared_body_count),
             callback_created: 0,
             callback_limit: budget::callback_specialization_limit(declared_body_count),
+            callback_growth: FxHashMap::default(),
         }
     }
 
@@ -630,8 +641,8 @@ impl Specializations {
     /// Two lookups, because a key is finer than the body it produces. The key cache answers a call
     /// site that has been seen before without substituting anything; the structural digest answers a
     /// *new* key whose residual MIR turns out to be one already created, which needs the body built
-    /// to be recognized. Both map to the retained copy, so every later call site takes the cheap
-    /// path.
+    /// to be recognized. Both lookups map to the retained copy, so later call sites take the cheap
+    /// path. Ordinary type/evidence construction cannot be refused.
     pub(crate) fn get_or_create<Ty: TypeLike>(
         &mut self,
         key: SpecializationKey,
@@ -639,8 +650,51 @@ impl Specializations {
         body: &Function,
         env: ModuleEnv<'_>,
     ) -> LocalFunctionId {
+        debug_assert!(key.callbacks.is_empty());
+        self.create(key, scheme, body, env)
+            .expect("type/evidence copies do not spend callback growth")
+    }
+
+    /// A conservative preflight for novel callback keys. A different binding or published body
+    /// can be cheaper than the last admitted copy; declining it only misses an optimization.
+    fn callback_growth_allows(&self, key: &SpecializationKey) -> bool {
+        let mut family = key.clone();
+        family.callbacks.clear();
+        self.callback_growth.get(&family).is_none_or(|growth| {
+            growth
+                .last_admitted
+                .is_none_or(|cost| cost <= growth.allowance.saturating_sub(growth.spent))
+        })
+    }
+
+    /// Callback-only admission retains an exact check after conservative preflight.
+    fn get_or_create_callback<Ty: TypeLike>(
+        &mut self,
+        key: SpecializationKey,
+        scheme: &TypeScheme<Ty>,
+        body: &Function,
+        env: ModuleEnv<'_>,
+    ) -> Option<LocalFunctionId> {
+        debug_assert!(!key.callbacks.is_empty());
+        if let Some(existing) = self.cached(&key) {
+            return Some(existing);
+        }
+        if !self.callback_growth_allows(&key) {
+            self.reject(key);
+            return None;
+        }
+        self.create(key, scheme, body, env)
+    }
+
+    fn create<Ty: TypeLike>(
+        &mut self,
+        key: SpecializationKey,
+        scheme: &TypeScheme<Ty>,
+        body: &Function,
+        env: ModuleEnv<'_>,
+    ) -> Option<LocalFunctionId> {
         if let Some(existing) = self.cache.get(&key) {
-            return *existing;
+            return Some(*existing);
         }
         // Allocated before the body is built, because a recursive callee has to be able to name
         // itself: see `resolve_recursion`. Nothing consumes it until the body proves to be new, so
@@ -651,6 +705,8 @@ impl Specializations {
             function: id,
         };
         let specialized = specialize(body, scheme, &key, own, env);
+        // Source locations participate in structural identity; candidates and retained copies
+        // must use the same inline-site table before comparing. Interning deduplicates moves.
         let specialized = move_inline_sites(specialized, key.callee.module, self.module, env);
 
         // Final exactly when the body read to create it was: a dependency's or a finished one.
@@ -660,8 +716,31 @@ impl Specializations {
         if let Some(existing) = self.identical_to(&specialized, key.callee, own, digest, from_final)
         {
             self.cache.insert(key, existing);
-            return existing;
+            return Some(existing);
         }
+
+        // Charge the complete residual body, including cold paths and callback materialization,
+        // before it enters the optimization worklist. Equivalent bodies above consume no growth.
+        let callback_charge = if key.callbacks.is_empty() {
+            None
+        } else {
+            let mut family = key.clone();
+            family.callbacks.clear();
+            let growth = self
+                .callback_growth
+                .entry(family.clone())
+                .or_insert_with(|| CallbackGrowth {
+                    allowance: budget::callback_growth_limit(cost::cost(body)),
+                    spent: 0,
+                    last_admitted: None,
+                });
+            let copied = cost::cost(&specialized);
+            if copied > growth.allowance.saturating_sub(growth.spent) {
+                self.reject(key);
+                return None;
+            }
+            Some((family, copied))
+        };
 
         // Named only now that there is a copy to name. `name_for` scans every name created so far
         // to keep generated names unique, which is work a duplicate should not pay for — and a name
@@ -684,12 +763,15 @@ impl Specializations {
             name,
             body: specialized,
         });
-        if !key.callbacks.is_empty() {
+        if let Some((family, copied)) = callback_charge {
             self.callback_created += 1;
+            let growth = self.callback_growth.get_mut(&family).unwrap();
+            growth.spent += copied;
+            growth.last_admitted = Some(copied);
         }
         self.structures.insert(digest, id);
         self.cache.insert(key, id);
-        id
+        Some(id)
     }
 
     /// The specialization already created that `specialized` duplicates, if there is one.
@@ -1891,8 +1973,6 @@ fn specialization_for(
         .get_function_by_id(callee.function)?
         .definition
         .ty_scheme;
-    let callees = SemanticCallees::new(session, Some(specializations));
-    let body = callees.body(callee)?;
     let invoked = if facts.is_some()
         && ty
             .fn_ty
@@ -1908,7 +1988,8 @@ fn specialization_for(
         .as_ref()
         .is_some_and(|parameters| !parameters.is_empty())
     {
-        visible_parameters(body.parameters())
+        let callees = SemanticCallees::new(session, Some(specializations));
+        visible_parameters(callees.body(callee)?.parameters())
     } else {
         Vec::new()
     };
@@ -1945,35 +2026,42 @@ fn specialization_for(
             .collect::<Option<Vec<_>>>()?,
         callbacks,
     };
-    if let Some(existing) = specializations.cached(&key) {
-        return Some(existing);
-    }
-    // Callback specialization is optional enrichment. If unavailable, retain the existing
-    // type/evidence specialization path, including cached copies after budget exhaustion.
-    if !key.callbacks.is_empty()
-        && (specializations.is_rejected(&key)
-            || specializations.is_full()
-            || specializations.callbacks_full())
-    {
-        key.callbacks.clear();
+    loop {
         if let Some(existing) = specializations.cached(&key) {
             return Some(existing);
         }
+        let callback = !key.callbacks.is_empty();
+        if specializations.is_rejected(&key)
+            || specializations.is_full()
+            || (callback
+                && (specializations.callbacks_full()
+                    || !specializations.callback_growth_allows(&key)))
+        {
+            if callback {
+                key.callbacks.clear();
+                continue;
+            }
+            return None;
+        }
+        // Read the body only after cheap admission checks. Reacquiring it each iteration keeps
+        // table borrows out of construction and allows callback refusals to use this same path.
+        let callees = SemanticCallees::new(session, Some(specializations));
+        let body = callees.body(callee)?;
+        if !callback && !worth_specializing(body, scheme, &instantiation, &key.dictionaries, env) {
+            specializations.reject(key);
+            return None;
+        }
+        // Substitution interns types; release borrowed inputs before constructing the copy.
+        let scheme = scheme.clone();
+        let body = body.clone();
+        if !callback {
+            return Some(specializations.get_or_create(key, &scheme, &body, env));
+        }
+        if let Some(id) = specializations.get_or_create_callback(key.clone(), &scheme, &body, env) {
+            return Some(id);
+        }
+        key.callbacks.clear();
     }
-    if specializations.is_rejected(&key) || specializations.is_full() {
-        return None;
-    }
-    if key.callbacks.is_empty()
-        && !worth_specializing(body, scheme, &instantiation, &key.dictionaries, env)
-    {
-        specializations.reject(key);
-        return None;
-    }
-    // Cloned out of the module borrow: substitution interns, and the type universe's lock is not
-    // reentrant, so nothing may hold a type guard across it.
-    let scheme = scheme.clone();
-    let body = body.clone();
-    Some(specializations.get_or_create(key, &scheme, &body, env))
 }
 
 /// Moves `body`'s inline chains from module `from`'s table into module `to`'s.
@@ -3164,6 +3252,103 @@ fn use_it(x: int) { with_zero(x) }",
         assert_eq!(specializations.len(), 1);
     }
 
+    #[test]
+    fn cross_module_erased_effect_keys_share_rebased_inline_locations() {
+        use crate::{Location, mir::debug_location::InlineSite};
+
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let dependency = session
+            .compile_for(
+                ExecutionTarget::Mir,
+                "fn helper(x) { x + x } \
+             pub fn callee(x: int) -> int { helper(x) }",
+                "dependency.fer",
+                Path::single_str("dependency"),
+            )
+            .unwrap()
+            .module_id;
+        session.prepare_execution_target(ExecutionTarget::Mir, dependency);
+        let function = session
+            .expect_fresh_module(dependency)
+            .get_local_function_id(ustr("callee"))
+            .unwrap();
+        let body = session
+            .mir_artifacts_for(dependency, MirOptimization::Enabled)
+            .unwrap()
+            .get(function)
+            .unwrap()
+            .clone();
+        let mut source_inline = None;
+        let mut inspect = FunctionEdit::new(body.clone());
+        inspect.visit_spans_mut(|span| source_inline = source_inline.or(span.inlined_at));
+        let source_inline = source_inline.unwrap_or_else(|| {
+            panic!(
+                "dependency must contain genuinely inlined code:\n{}",
+                body.format_with(&session.module_env())
+            )
+        });
+        let mut scheme = session
+            .expect_fresh_module(dependency)
+            .get_function_by_id(function)
+            .unwrap()
+            .definition
+            .ty_scheme
+            .clone();
+        assert!(scheme.eff_quantifiers.is_empty());
+        scheme.eff_quantifiers.insert(EffectVar::new(0));
+
+        let destination = compile(&mut session, "fn dummy(x: int) -> int { x }");
+        let env = session.module_env();
+        let source_sites = env.inline_sites(dependency).borrow().len();
+        // Ensure source ids cannot happen to equal their destination ids.
+        let mut sites = env.inline_sites(destination).borrow_mut();
+        let mut parent = None;
+        for _ in 0..=source_sites {
+            parent = Some(sites.intern(InlineSite {
+                call: Location::new_synthesized(),
+                parent,
+            }));
+        }
+        drop(sites);
+        let key = |effects| SpecializationKey {
+            callee: FunctionId::new(dependency, function),
+            instantiation: Instantiation {
+                ty_args: Vec::new(),
+                eff_args: vec![effects],
+            },
+            dictionaries: Vec::new(),
+            callbacks: Vec::new(),
+        };
+        let mut table = Specializations::new(
+            destination,
+            session.expect_fresh_module(destination).function_count(),
+            1,
+        );
+        let pure = table.get_or_create(key(EffType::empty()), &scheme, &body, env);
+        let moved_sites = env.inline_sites(destination).borrow().len();
+        let mut rebased = None;
+        let mut inspect = FunctionEdit::new(table.raw[0].clone());
+        inspect.visit_spans_mut(|span| rebased = rebased.or(span.inlined_at));
+        assert_ne!(rebased.unwrap(), source_inline);
+        let reading = table.get_or_create(
+            key(EffType::single_primitive(PrimitiveEffect::Read)),
+            &scheme,
+            &body,
+            env,
+        );
+        assert_eq!(
+            pure, reading,
+            "equivalent dependency bodies must share after relocation"
+        );
+        assert_eq!(table.len(), 1);
+        assert_eq!(
+            env.inline_sites(destination).borrow().len(),
+            moved_sites,
+            "duplicate relocation reuses interned inline sites"
+        );
+    }
+
     /// Publishing a callee ends what was decided from its raw body; the copy already made stays.
     #[test]
     fn publishing_a_callee_forgets_decisions_taken_from_its_raw_body() {
@@ -3590,6 +3775,211 @@ fn use_it(x: int) { with_zero(x) }",
             .is_none()
         );
         assert_eq!(table.len(), 2);
+    }
+
+    #[test]
+    fn callback_growth_prices_whole_bodies_and_survives_publication() {
+        for padding in [0, 64] {
+            let mut source = String::from(
+                "#[inline(never)] fn apply(f, x: int) -> int { let mut a = x; \
+                 for i in 0..x { a = f(a);",
+            );
+            for n in 0..padding {
+                source.push_str(&format!("a = rem(a * 17 + {n}, 100003);"));
+            }
+            source.push_str("}; a }\n");
+            for n in 0..129 {
+                source.push_str(&format!(
+                    "fn cb{n}(x: int) -> int {{ x + {n} }} \
+                     fn caller{n}(x: int) -> int {{ apply(cb{n}, x) }}\n"
+                ));
+            }
+            let mut session = CompilerSession::new();
+            let module = compile(&mut session, &source);
+            let mut table = Specializations::new(
+                module,
+                session.expect_fresh_module(module).function_count(),
+                20,
+            );
+            table.callback_limit = 256;
+            for n in 0..128 {
+                specialize_call_sites(
+                    body(&session, module, &format!("caller{n}")),
+                    session.module_env(),
+                    &session,
+                    module,
+                    &mut table,
+                );
+            }
+            if padding == 0 {
+                assert!(
+                    table.callback_created > 8,
+                    "cheap copies must exceed the count floor"
+                );
+            } else {
+                assert_eq!(table.callback_created, 2);
+            }
+            assert!(
+                !table.callbacks_full(),
+                "size, not count, must refuse the next copy"
+            );
+            let admitted = table.callback_created;
+            let family = table.callback_growth.keys().next().unwrap().clone();
+            let spent = table.callback_growth[&family].spent;
+            let allowance = table.callback_growth[&family].allowance;
+            assert!(spent <= allowance);
+            let last = table.callback_growth[&family].last_admitted.unwrap();
+            assert!(last > allowance - spent);
+            if padding == 0 {
+                assert_eq!(allowance, budget::MIN_CALLBACK_GROWTH);
+            }
+            let mut unseen = family.clone();
+            let parameter = visible_parameters(body(&session, module, "apply").parameters())[0];
+            let cb128 = session
+                .expect_fresh_module(module)
+                .get_local_function_id(ustr("cb128"))
+                .unwrap();
+            unseen
+                .callbacks
+                .push((parameter, FunctionId::new(module, cb128)));
+            assert!(!table.callback_growth_allows(&unseen));
+            // Repeated keys are free even after the family's allowance is exhausted.
+            assert!(
+                specialize_call_sites(
+                    body(&session, module, "caller0"),
+                    session.module_env(),
+                    &session,
+                    module,
+                    &mut table,
+                )
+                .is_some()
+            );
+            assert_eq!(table.callback_growth[&family].spent, spent);
+            table.finish(vec![(
+                family.callee.function,
+                body(&session, module, "apply").clone(),
+            )]);
+            assert_eq!(table.callback_growth[&family].spent, spent);
+            assert_eq!(table.callback_growth[&family].allowance, allowance);
+            assert!(
+                specialize_call_sites(
+                    body(&session, module, "caller128"),
+                    session.module_env(),
+                    &session,
+                    module,
+                    &mut table,
+                )
+                .is_none()
+            );
+            assert_eq!(table.callback_created, admitted);
+            assert!(!table.callback_growth_allows(&unseen));
+        }
+    }
+
+    #[test]
+    fn structurally_shared_callback_bodies_are_charged_once() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            r#"
+            fn apply(f: (int) -> int, x: int) -> int { x }
+            fn inc(x: int) -> int { x + 1 }
+            fn caller(x: int) -> int { apply(inc, x) }
+        "#,
+        );
+        let mut site = site(&session, module, "caller", "apply");
+        // An unused effect quantifier creates distinct keys with identical residual bodies.
+        site.scheme.eff_quantifiers.insert(EffectVar::new(100));
+        let parameter = visible_parameters(site.body.parameters())[0];
+        let inc = session
+            .expect_fresh_module(module)
+            .get_local_function_id(ustr("inc"))
+            .unwrap();
+        site.key
+            .callbacks
+            .push((parameter, FunctionId::new(module, inc)));
+        site.key.instantiation.eff_args.push(EffType::empty());
+        let mut table = Specializations::new(
+            module,
+            session.expect_fresh_module(module).function_count(),
+            3,
+        );
+        let first = table
+            .get_or_create_callback(
+                site.key.clone(),
+                &site.scheme,
+                &site.body,
+                session.module_env(),
+            )
+            .unwrap();
+        let spent = table.callback_growth.values().next().unwrap().spent;
+        *site.key.instantiation.eff_args.last_mut().unwrap() =
+            EffType::single_primitive(PrimitiveEffect::Read);
+        let second = table
+            .get_or_create_callback(site.key, &site.scheme, &site.body, session.module_env())
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(table.callback_created, 1);
+        assert_eq!(table.callback_growth.len(), 1);
+        assert_eq!(table.callback_growth.values().next().unwrap().spent, spent);
+    }
+
+    #[test]
+    fn callback_growth_refusal_can_create_a_new_type_copy() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            r#"
+            #[inline(never)] fn apply(f, x) {
+                let mut a = x;
+                for i in 0..3 { a = f(a) + x };
+                a
+            }
+            fn inc(x: int) -> int { x + 1 }
+            fn caller(x: int) -> int { apply(inc, x) }
+            fn inc_float(x: float) -> float { x + 1.0 }
+            fn float_caller(x: float) -> float { apply(inc_float, x) }
+        "#,
+        );
+        let site = site(&session, module, "caller", "apply");
+        let mut table = Specializations::new(
+            module,
+            session.expect_fresh_module(module).function_count(),
+            3,
+        );
+        table.callback_growth.insert(
+            site.key.clone(),
+            CallbackGrowth {
+                allowance: 0,
+                spent: 0,
+                last_admitted: None,
+            },
+        );
+        assert!(
+            specialize_call_sites(
+                body(&session, module, "caller"),
+                session.module_env(),
+                &session,
+                module,
+                &mut table,
+            )
+            .is_some()
+        );
+        assert_eq!(table.callback_created, 0);
+        assert_eq!(table.len(), 1);
+        assert!(table.cached(&site.key).is_some());
+        // A different type/evidence family has its own allowance.
+        assert!(
+            specialize_call_sites(
+                body(&session, module, "float_caller"),
+                session.module_env(),
+                &session,
+                module,
+                &mut table,
+            )
+            .is_some()
+        );
+        assert_eq!(table.callback_created, 1);
     }
 
     #[test]
