@@ -336,17 +336,29 @@ type. See [generic-instantiation.md](generic-instantiation.md).
 
 ### When a call site is specialized
 
-All of: the callee is statically known, generic or evidence-polymorphic, and has a body; it is not
-itself a specialization; the recorded instantiation is fully concrete (or empty for a callee with
-no quantifiers); every evidence operand is recursively static; the
-linear admission preflight finds a payoff that substitution can expose; and the budget allows
-another specialization unless one is already cached.
+All of: the callee is statically known, has a body and is not itself a specialization; the recorded
+instantiation is fully concrete (or empty for a callee with no quantifiers); every evidence operand
+is recursively static; the linear admission preflight finds a payoff; and the budget allows another
+specialization unless one is already cached.
 
 The admission preflight recognizes local devirtualization, trivial-copy clone/drop simplification,
-static-layout witness removal, making a small generic body inlinable, and propagation of concrete
-types or evidence into a direct generic callee. The last two matter because an apparently unchanged
-specialized body can enable work in its caller or callees. Accepted and rejected specialization keys
-are both memoized, so a distinct callee body is scanned at most once however many call sites request it.
+static-layout witness removal, binding a repeatedly invoked callback to a known function, making a
+small generic body inlinable, and propagation of concrete types or evidence into a direct generic
+callee. The last two matter because an apparently unchanged specialized body can enable work in
+its caller or callees. Admission results are memoized per complete specialization key, including
+callbacks. Callback-use summaries are shared across callers and rounds, and refreshed when a
+callee's raw body is replaced by its optimized body.
+
+Known captureless callbacks enter the specialization key when an immutable parameter invokes them
+in a loop or a directly self-recursive callee. Binding preserves the visible ABI, materializes other
+uses in private places and exposes direct calls to existing folding and inlining. Unknown callbacks
+and capturing closures are not bound.
+
+Callback copies have a smaller allowance within the module generation budget, fixed from the
+original body population to leave capacity for type/evidence specialization. Only unique new bodies
+consume it; publication does not renew it. Refused callback copies fall back to ordinary
+type/evidence admission, with cached copies reusable after exhaustion. The allowance bounds copy
+count, not cumulative size; size-weighted admission remains a follow-up.
 
 A caller that forwards its own quantifiers records a *variable* instantiation and is skipped —
 specializing that caller is what makes its inner call sites concrete on a later round. This is the
@@ -368,14 +380,13 @@ Substitution interns types, and the type universe's lock is not reentrant: nothi
 
 ### What specialization then removes
 
-Substitution answers questions the generic body could not, so four things follow immediately:
+Substitution and binding expose these simplifications:
 
-- **Recursive calls are redirected to the specialization.** A recursive call records no instantiation
-  — inference types a call within the defining group monomorphically rather than instantiating its
-  scheme — so nothing else can redirect it, and the specialization would otherwise recurse into the
-  generic original. Sound for the same reason the instantiation is missing: Hindley-Milner cannot
-  infer polymorphic recursion, so a self-call is necessarily at its caller's instantiation. Mutual
-  recursion is not covered.
+- **Self-calls reuse the specialization when bound callbacks are forwarded unchanged.**
+  Hindley-Milner inference makes self-calls monomorphic at the caller's instantiation, but records
+  no call-site instantiation, so ordinary specialization cannot redirect them. Calls changing a
+  bound callback instead record the containing body's concrete instantiation, retaining type
+  specialization while allowing a different callback copy. Mutual recursion is not covered.
 - **An `invoke` whose operation became infallible is demoted to a plain operation** plus a jump. A
   call whose effects are a *variable* is conservatively fallible, and instantiating that variable can
   make it infallible; MIR requires the form to agree. Only this direction is possible — a plain
@@ -440,13 +451,12 @@ This pass runs once after the specialization worklist, outside the fold/inline l
 needs the completed local call graph and changes an optimized-only ABI. DCE and stack-marker cleanup
 run on its results before dead-evidence removal and final verification.
 
-The table is keyed by `(callee, instantiation, evidence)`, where evidence is a recursive static
-dictionary/subscript/storage tree, so two call sites that instantiate a
-function the same way share one body. Identities index the *owning* module's table, which is not in
-general the callee's module.
+The table is keyed by `(callee, instantiation, evidence, callbacks)`, with recursive static
+evidence and known callback identities, so call sites with the same bindings share one body.
+Identities index the *owning* module's table, which is not in general the callee's module.
 
-**Sharing is decided three times, because a key is finer than the body it produces.** Type, effect
-and evidence arguments all enter the key, but only what survives substitution enters the body:
+**Sharing is decided three times, because a key is finer than the body it produces.** Type, effect,
+evidence and callback arguments enter the key, but only surviving bindings enter the body:
 effects are erased unless they changed a control-flow form, and a dictionary appears only where it
 was used.
 

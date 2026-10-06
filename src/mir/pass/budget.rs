@@ -115,6 +115,25 @@ pub const MIN_SPECIALIZATIONS: usize = 512;
 /// Additional specialization allowance per declared script body.
 pub const SPECIALIZATIONS_PER_BODY: usize = 4;
 
+/// Callback copies available to a small module, within its ordinary specialization allowance.
+///
+/// A handful preserves repeated-callback specialization without letting callback combinations
+/// consume the much larger allowance needed by type/evidence specialization cascades.
+pub const MIN_CALLBACK_SPECIALIZATIONS: usize = 8;
+
+/// Declared bodies needed for one additional callback-copy slot above the floor.
+pub const CALLBACK_SPECIALIZATION_BODY_RATIO: usize = 4;
+
+/// Callback copies are a sub-budget, fixed before generation and never renewed on publication.
+pub const fn callback_specialization_limit(declared_bodies: usize) -> usize {
+    let scaled = declared_bodies / CALLBACK_SPECIALIZATION_BODY_RATIO;
+    if scaled > MIN_CALLBACK_SPECIALIZATIONS {
+        scaled
+    } else {
+        MIN_CALLBACK_SPECIALIZATIONS
+    }
+}
+
 /// How many specialized bodies one module's optimization may create.
 ///
 /// Based only on declared MIR bodies, before optimization creates any output. This keeps generated
@@ -159,6 +178,15 @@ mod tests {
         assert_eq!(specialization_limit(0), MIN_SPECIALIZATIONS);
         assert_eq!(specialization_limit(128), MIN_SPECIALIZATIONS);
         assert_eq!(specialization_limit(129), 516);
+        assert_eq!(
+            callback_specialization_limit(0),
+            MIN_CALLBACK_SPECIALIZATIONS
+        );
+        assert_eq!(
+            callback_specialization_limit(32),
+            MIN_CALLBACK_SPECIALIZATIONS
+        );
+        assert_eq!(callback_specialization_limit(36), 9);
 
         assert_eq!(owned_argument_variant_limit(0), MIN_OWNED_ARGUMENT_VARIANTS);
         assert_eq!(
@@ -171,6 +199,10 @@ mod tests {
     #[test]
     fn module_generation_budgets_do_not_overflow() {
         assert_eq!(specialization_limit(usize::MAX), usize::MAX);
+        assert_eq!(
+            callback_specialization_limit(usize::MAX),
+            usize::MAX / CALLBACK_SPECIALIZATION_BODY_RATIO
+        );
         assert_eq!(owned_argument_variant_limit(usize::MAX), usize::MAX);
     }
 }

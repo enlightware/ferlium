@@ -3630,3 +3630,47 @@ fn role_annotation_distinguishes_a_place_slot_from_a_value_slot() {
 "#
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn callback_specialization_preserves_recursive_callback_changes_and_captures() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+        #[inline(never)] fn inc(x: int) -> int { x + 1 }
+        #[inline(never)] fn dec(x: int) -> int { x - 1 }
+        #[inline(never)] fn recursive(f, n: int, x: int) -> int {
+            if n == 0 { f(x) } else { recursive(dec, n - 1, f(x)) }
+        }
+        #[inline(never)] fn apply(f, x: int, n: int) -> int {
+            let mut result = x;
+            for i in (0..n) { result = f(x) };
+            result
+        }
+        let offset = 7;
+        (recursive(inc, 2, 10), apply(inc, 10, black_box(1)), apply(|x| x + offset, 10, black_box(1)))
+    "#
+        ),
+        expected_tuple([int(9), int(11), int(17)])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn callback_specialization_preserves_generic_recursion() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+        #[inline(never)] fn repeat(f, n: int, x) {
+            if n == 0 { x } else { repeat(f, n - 1, f(x)) }
+        }
+        #[inline(never)] fn inc(x: int) -> int { x + 1 }
+        #[inline(never)] fn identity(x: string) -> string { x }
+        (repeat(inc, 3, 7), len(repeat(identity, 3, "abc")))
+    "#
+        ),
+        expected_tuple([int(10), int(3)])
+    );
+}

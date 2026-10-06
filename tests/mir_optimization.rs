@@ -455,3 +455,107 @@ fn optimization_of_one_session_does_not_leak_into_another() {
     let fresh = CompilerSession::new();
     assert_eq!(fresh.mir_optimization(), MirOptimization::Disabled);
 }
+
+#[test]
+fn known_callback_arguments_specialize_without_inlining_the_caller() {
+    let optimized = emit(
+        "callback",
+        r#"
+        #[inline(never)] fn apply(f, x: int) -> int { let mut result = x; for i in (0..x) { result = f(result) }; result }
+        #[inline(never)] fn inc(x: int) -> int { x + 1 }
+        #[inline(never)] fn dec(x: int) -> int { x - 1 }
+        fn up(x: int) -> int { apply(inc, x) }
+        fn down(x: int) -> int { apply(dec, x) }
+        fn dynamic(f, x: int) -> int { apply(f, x) }
+    "#,
+        MirOptimization::Enabled,
+    );
+    let copies = optimized
+        .split("\nfn ")
+        .filter(|body| body.starts_with("apply#spec:"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        copies.len(),
+        2,
+        "distinct callbacks need distinct bodies: {optimized}"
+    );
+    assert!(
+        copies
+            .iter()
+            .any(|body| body.contains("call callback::inc(")),
+        "{optimized}"
+    );
+    assert!(
+        copies
+            .iter()
+            .any(|body| body.contains("call callback::dec(")),
+        "{optimized}"
+    );
+    assert!(
+        copies.iter().all(|body| !body.contains("call %")),
+        "{optimized}"
+    );
+    let dynamic = rendered_function_with_prefix(&optimized, "dynamic");
+    assert!(dynamic.contains("call callback::apply("), "{dynamic}");
+}
+
+#[test]
+fn callback_specializations_are_shared_across_call_sites() {
+    let optimized = emit(
+        "callback",
+        r#"
+        #[inline(never)] fn apply(f, x: int) -> int { let mut result = x; for i in (0..x) { result = f(result) }; result }
+        #[inline(never)] fn inc(x: int) -> int { x + 1 }
+        fn first(x: int) -> int { apply(inc, x) }
+        fn second(x: int) -> int { apply(inc, x + 1) }
+    "#,
+        MirOptimization::Enabled,
+    );
+    assert_eq!(
+        optimized.matches("\nfn apply#spec:").count(),
+        1,
+        "{optimized}"
+    );
+}
+
+#[test]
+fn generic_callback_recursion_retains_specialization_at_every_level() {
+    let optimized = emit(
+        "callback_recursion",
+        r#"
+        #[inline(never)] fn repeat(f, n: int, x) {
+            if n == 0 { x } else { repeat(f, n - 1, f(x)) }
+        }
+        #[inline(never)] fn swapped(f, g, n: int, x) {
+            if n == 0 { x } else { swapped(g, f, n - 1, f(x)) }
+        }
+        #[inline(never)] fn inc(x: int) -> int { x + 1 }
+        #[inline(never)] fn dec(x: int) -> int { x - 1 }
+        fn run(x: int) -> int { repeat(inc, 3, x) + swapped(inc, dec, 3, x) }
+    "#,
+        MirOptimization::Enabled,
+    );
+    for name in ["repeat", "swapped"] {
+        let copies = optimized
+            .split("\nfn ")
+            .filter(|body| body.starts_with(&format!("{name}#spec:")))
+            .collect::<Vec<_>>();
+        assert!(!copies.is_empty(), "{optimized}");
+        for body in copies {
+            assert!(
+                !body.contains(&format!("call callback_recursion::{name}(")),
+                "generic recursion survives: {body}"
+            );
+            if name == "repeat" {
+                assert!(
+                    !body.contains("call %"),
+                    "forwarded known callback must be direct: {body}"
+                );
+            }
+            assert!(
+                body.contains(&format!("call callback_recursion::{name}#spec:")),
+                "specialized recursion missing: {body}"
+            );
+        }
+    }
+}

@@ -5430,3 +5430,69 @@ fn wasm_codegen_sharing_stabilizes_recursive_components() {
         "different self references require a stronger equivalence proof"
     );
 }
+
+#[wasm_bindgen_test]
+fn wasm_codegen_known_callbacks_preserve_dispatch_and_failures() {
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(optimization);
+        let entry = compile(
+            &mut session,
+            r#"
+            #[inline(never)] fn apply(f, x: int, n: int) -> int {
+                let mut result = x;
+                for i in (0..n) { result = f(x) };
+                result
+            }
+            #[inline(never)] fn inc(x: int) -> int { x + 1 }
+            #[inline(never)] fn checked(x: int) -> int { [11, 22][x] }
+            #[inline(never)] fn recursive(f, n: int, x: int) -> int {
+                if n == 0 { f(x) } else { recursive(inc, n - 1, f(x)) }
+            }
+            #[inline(never)] fn generic_same(f, n: int, x) {
+                if n == 0 { x } else { generic_same(f, n - 1, f(x)) }
+            }
+            #[inline(never)] fn generic_changed(f, g, n: int, x) {
+                if n == 0 { x } else { generic_changed(g, f, n - 1, f(x)) }
+            }
+            #[inline(never)] fn dec(x: int) -> int { x - 1 }
+            fn compute(x: int, mode: int) -> int {
+                if mode == 0 { apply(inc, x, black_box(1)) }
+                else if mode == 1 { apply(checked, x, black_box(1)) }
+                else if mode == 2 { apply(|y| y + x, 7, black_box(1)) }
+                else if mode == 3 { recursive(inc, 1, x) }
+                else if mode == 4 { generic_same(inc, 3, x) }
+                else { generic_changed(inc, dec, 3, x) }
+            }
+        "#,
+        );
+        if optimization == MirOptimization::Enabled {
+            let report = session.optimization_report(entry.module);
+            assert!(
+                report
+                    .specializations
+                    .iter()
+                    .filter(|copy| copy.name.as_str().starts_with("apply#spec:"))
+                    .count()
+                    >= 2,
+                "exercise both the pure and fallible bound callback paths"
+            );
+        }
+        let code = CompiledProgram::compile(&session, entry).unwrap();
+        let mut instance = code.instantiate::<(isize, isize), isize>().unwrap();
+        for (x, mode, expected) in [
+            (4, 0, 5),
+            (1, 1, 22),
+            (4, 2, 11),
+            (0, 3, 2),
+            (4, 4, 7),
+            (4, 5, 5),
+        ] {
+            assert_eq!(
+                instance.run((x, mode), WasmLimits::default()).unwrap(),
+                expected
+            );
+        }
+        assert!(instance.run((2, 1), WasmLimits::default()).is_err());
+    }
+}

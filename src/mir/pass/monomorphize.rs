@@ -35,7 +35,8 @@
 #![allow(dead_code)]
 
 use std::{
-    cell::{Cell, RefCell},
+    borrow::Cow,
+    cell::{Cell, Ref, RefCell},
     hash::{Hash, Hasher},
     mem,
 };
@@ -45,6 +46,7 @@ use ustr::{Ustr, ustr};
 
 use super::{
     OptimizationStats, budget, cost,
+    dataflow::{self, Analysis, Const, State},
     site::{OperationIndex, OperationSite},
     stage::SemanticCallees,
 };
@@ -52,6 +54,7 @@ use crate::{
     CompilerSession,
     compiler::Specialization,
     format::FormatWith,
+    hir::function::ArgConvention,
     mir::{
         self, Function, Instantiation, Operation, OperationKind, ParameterId, ParameterKind,
         ValueId,
@@ -136,7 +139,7 @@ pub(super) fn self_reference(own: FunctionId) -> impl Fn(FunctionId) -> Function
 /// copy it is.
 ///
 /// Everything is hashed through its derived implementation except the operands, which are the one
-/// place `canonical` has anything to say: [`redirect_recursion`] writes a self-reference into call
+/// place `canonical` has anything to say: [`resolve_recursion`] writes a self-reference into call
 /// callee operands and nowhere else. So only calls are decomposed, and a block's other terminator
 /// forms hash whole.
 ///
@@ -297,6 +300,8 @@ pub(crate) struct SpecializationKey {
     pub(crate) callee: FunctionId,
     pub(crate) instantiation: Instantiation,
     pub(crate) dictionaries: Vec<StaticEvidence>,
+    /// Immutable visible parameters bound to bare function values.
+    pub(crate) callbacks: Vec<(ParameterId, FunctionId)>,
 }
 
 /// The specializations one module's optimization has created, and the caches that keep them shared.
@@ -341,6 +346,9 @@ pub(crate) struct Specializations {
     /// A rejected key can occur at many call sites. Remembering it keeps the admission scan linear
     /// in the number of distinct candidates rather than in candidate call sites times body size.
     rejected: FxHashSet<SpecializationKey>,
+    /// Callback descriptors for the callee body currently visible to this table. Publication
+    /// invalidates raw-body entries along with the other admission and substitution caches.
+    callback_parameters: RefCell<FxHashMap<FunctionId, FxHashSet<ParameterId>>>,
     /// Bodies produced by substituting a generic callee at a call site's instantiation, memoized
     /// for the duration of one module's optimization.
     ///
@@ -367,6 +375,9 @@ pub(crate) struct Specializations {
     first_index: usize,
     /// Fixed from the module's declared MIR-body population before any output is generated.
     limit: usize,
+    /// Unique callback-bound bodies created, including work later pruned or published.
+    callback_created: usize,
+    callback_limit: usize,
 }
 
 impl Specializations {
@@ -381,6 +392,7 @@ impl Specializations {
             cache: FxHashMap::default(),
             structures: FxHashMap::default(),
             rejected: FxHashSet::default(),
+            callback_parameters: RefCell::new(FxHashMap::default()),
             substituted: RefCell::new(FxHashMap::default()),
             progress: Vec::new(),
             ready: 0,
@@ -389,6 +401,8 @@ impl Specializations {
             kept_ahead_stats: OptimizationStats::default(),
             first_index: function_count,
             limit: budget::specialization_limit(declared_body_count),
+            callback_created: 0,
+            callback_limit: budget::callback_specialization_limit(declared_body_count),
         }
     }
 
@@ -415,6 +429,9 @@ impl Specializations {
             .retain(|(callee, _), _| !raw(callee));
         self.cache.retain(|key, _| !raw(&key.callee));
         self.rejected.retain(|key| !raw(&key.callee));
+        self.callback_parameters
+            .get_mut()
+            .retain(|callee, _| !raw(callee));
         for (id, body) in bodies {
             self.finished[id.as_index()] = Some(body);
         }
@@ -423,6 +440,28 @@ impl Specializations {
     /// The optimized declared bodies, aligned with the module's function table.
     pub(crate) fn take_finished(&mut self) -> Vec<Option<Function>> {
         mem::take(&mut self.finished)
+    }
+
+    /// Inspect each visible callee body once, shared across callers and optimization rounds.
+    fn invoked_callbacks(
+        &self,
+        callee: FunctionId,
+        session: &CompilerSession,
+    ) -> Option<Ref<'_, FxHashSet<ParameterId>>> {
+        // A cached raw summary is still a dependency on an unfinished callee, even when it
+        // finds no opportunity. Publication can expose an invocation through inlining.
+        if callee.module == self.module && self.finished_body(callee.function).is_none() {
+            self.note_unsettled();
+        }
+        if !self.callback_parameters.borrow().contains_key(&callee) {
+            let body = SemanticCallees::new(session, Some(self)).body(callee)?;
+            self.callback_parameters
+                .borrow_mut()
+                .insert(callee, repeated_callback_parameters(body, callee));
+        }
+        Some(Ref::map(self.callback_parameters.borrow(), |parameters| {
+            &parameters[&callee]
+        }))
     }
 
     pub(crate) fn into_created(self) -> Vec<Specialization> {
@@ -436,6 +475,10 @@ impl Specializations {
     /// Whether this module has consumed its input-relative specialization allowance.
     pub(crate) fn is_full(&self) -> bool {
         self.created.len() >= self.limit
+    }
+
+    fn callbacks_full(&self) -> bool {
+        self.callback_created >= self.callback_limit
     }
 
     /// Whether `id` names a specialization this table created.
@@ -600,7 +643,7 @@ impl Specializations {
             return *existing;
         }
         // Allocated before the body is built, because a recursive callee has to be able to name
-        // itself: see `redirect_recursion`. Nothing consumes it until the body proves to be new, so
+        // itself: see `resolve_recursion`. Nothing consumes it until the body proves to be new, so
         // a duplicate leaves the id to whichever specialization is created next.
         let id = LocalFunctionId::from_index(self.first_index + self.created.len());
         let own = FunctionId {
@@ -641,6 +684,9 @@ impl Specializations {
             name,
             body: specialized,
         });
+        if !key.callbacks.is_empty() {
+            self.callback_created += 1;
+        }
         self.structures.insert(digest, id);
         self.cache.insert(key, id);
         id
@@ -755,8 +801,21 @@ impl Specializations {
 
         // The canonical identity covers *every* part of the cache key. Hashing less than the key
         // would give two distinct specializations the same name.
-        let canonical =
-            format!("callee={qualified}; types=[{types}]; dictionaries=[{dictionaries}]");
+        let callbacks = key
+            .callbacks
+            .iter()
+            .map(|(parameter, function)| {
+                format!(
+                    "{}={}",
+                    parameter.as_index(),
+                    mir::Value::Function(*function).format_with(&env)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let canonical = format!(
+            "callee={qualified}; types=[{types}]; dictionaries=[{dictionaries}]; callbacks=[{callbacks}]"
+        );
         // `m0:i` is what `Display` falls back to when a dictionary cannot be rendered through the
         // module env; such a name would depend on id allocation order, so it is not readable.
         let readable = types.len() <= READABLE_LIMIT && !types.contains("m0:i");
@@ -806,9 +865,71 @@ pub(crate) fn specialize<Ty: TypeLike>(
     let mut edit = FunctionEdit::new(body.clone());
     map_types(&mut edit, &mut mapper);
     bind_dictionaries(&mut edit, &key.dictionaries);
-    redirect_recursion(&mut edit, key.callee, own);
+    // Check callback forwarding while operands still name the original parameters.
+    resolve_recursion(&mut edit, key, own);
+    bind_callbacks(&mut edit, &key.callbacks);
     simplify_after_substitution(&mut edit, env);
     edit.finish(env)
+}
+
+/// Materialize bound callable values in private places, preserving the visible call ABI.
+fn bind_callbacks(edit: &mut FunctionEdit, callbacks: &[(ParameterId, FunctionId)]) {
+    if callbacks.is_empty() {
+        return;
+    }
+    let mut setup = Vec::new();
+    let mut replacements = FxHashMap::default();
+    let span = edit.block(edit.entry()).terminator.span;
+    for &(parameter, function) in callbacks {
+        let mut alloca = Operation::alloca(span, edit.parameters()[parameter.as_index()].ty);
+        let place = edit.assign_new_result(&mut alloca).unwrap();
+        setup.push(alloca);
+        setup.push(Operation::store(
+            span,
+            mir::Value::Function(function),
+            place.clone(),
+        ));
+        replacements.insert(parameter, place);
+    }
+    // Passing the same callable place as an argument can prevent ordinary store forwarding.
+    // Its direct invocations are nevertheless known by the immutable parameter binding itself.
+    let bound: FxHashMap<_, _> = callbacks.iter().copied().collect();
+    let mut loaded = FxHashMap::default();
+    for block in edit.blocks() {
+        for operation in edit.block(block).operations.iter() {
+            if matches!(operation.kind, OperationKind::Load)
+                && let mir::Value::Parameter(parameter) = operation.operands[0]
+            {
+                loaded.insert(operation.result_id().unwrap(), parameter);
+            }
+        }
+    }
+    for block in edit.blocks().collect::<Vec<_>>() {
+        let block = edit.block_mut(block);
+        for operation in block
+            .operations
+            .iter_mut()
+            .chain(match &mut block.terminator.kind {
+                TerminatorKind::Invoke { operation, .. } => Some(operation),
+                _ => None,
+            })
+        {
+            if matches!(operation.kind, OperationKind::Call { .. }) {
+                let parameter = callback_parameter(&operation.operands[0], &loaded);
+                if let Some(function) = parameter.and_then(|parameter| bound.get(&parameter)) {
+                    operation.operands[0] = mir::Value::Function(*function);
+                }
+            }
+        }
+    }
+    edit.visit_operands_mut(|operand| {
+        if let mir::Value::Parameter(parameter) = operand
+            && let Some(place) = replacements.get(parameter)
+        {
+            *operand = place.clone();
+        }
+    });
+    edit.block_mut(edit.entry()).operations.splice(0..0, setup);
 }
 
 /// A generic body rewritten at one call site's instantiation, for a consumer that splices it rather
@@ -858,10 +979,15 @@ fn simplify_after_substitution(edit: &mut FunctionEdit, env: ModuleEnv<'_>) {
 /// that carries an explicit instantiation is an ordinary call site, and
 /// [`specialize_call_sites`] resolves it through the cache like any other.
 ///
+/// A bound callback is an additional condition: only self-calls forwarding every bound parameter
+/// unchanged reuse `own`. Other self-calls record the containing body's monomorphic instantiation,
+/// allowing ordinary call-site specialization to retain types while selecting another callback.
+///
 /// The specialization still carries its original's signature at this point, so the operands need no
 /// adjustment; [`dead_evidence`](super::dead_evidence) narrows this call with every other.
-fn redirect_recursion(edit: &mut FunctionEdit, original: FunctionId, own: FunctionId) {
+fn resolve_recursion(edit: &mut FunctionEdit, key: &SpecializationKey, own: FunctionId) {
     let own = mir::Value::Function(own);
+    let parameters = visible_parameters(edit.parameters());
     for block_id in edit.blocks().collect::<Vec<_>>() {
         let block = edit.block_mut(block_id);
         let operations = block
@@ -877,9 +1003,22 @@ fn redirect_recursion(edit: &mut FunctionEdit, original: FunctionId, own: Functi
                     .as_deref()
                     .and_then(|metadata| metadata.instantiation.as_ref())
                     .is_none()
-                && operation.operands[0] == mir::Value::Function(original)
+                && operation.operands[0] == mir::Value::Function(key.callee)
             {
-                operation.operands[0] = own.clone();
+                if key.callbacks.iter().all(|(parameter, _)| {
+                    visible_operand(operation, &parameters, *parameter)
+                        == Some(&mir::Value::Parameter(*parameter))
+                }) {
+                    operation.operands[0] = own.clone();
+                } else {
+                    // HM self-calls have the containing body's instantiation even when the
+                    // callback changes. Preserve that proof for type-only or new callback copies.
+                    let OperationKind::Call { metadata, .. } = &mut operation.kind else {
+                        unreachable!()
+                    };
+                    metadata.get_or_insert_with(Default::default).instantiation =
+                        Some(key.instantiation.clone());
+                }
             }
         }
     }
@@ -1417,7 +1556,7 @@ fn substitute_in_operation(operation: &mut Operation, mapper: &mut impl TypeMapp
 /// is deliberately conservative — a refusal costs an optimization, never correctness:
 ///
 /// - the callee is statically known and is not itself a specialization;
-/// - the callee is generic or evidence-polymorphic and has a body to copy;
+/// - the callee has a body and a concrete instantiation or known immutable callback;
 /// - the call records a fully concrete instantiation, or its callee has no quantifiers and therefore
 ///   has the equivalent empty instantiation. A caller that forwards its own quantifiers records
 ///   them here, and specializing *it* makes this site concrete on a later round;
@@ -1438,11 +1577,32 @@ pub(crate) fn specialize_call_sites(
     // Deciding a specialization mutates the cache and consumes the shared budget, so it cannot be
     // repeated after discovering that this body changes. Record the decisions while the body is
     // still borrowed, then pay for an editable copy only when there is something to apply.
+    // Avoid another dataflow analysis unless a call can bind a function argument.
+    // Callback descriptors are shared across callers and invalidated when a callee is published.
+    let needs_callbacks = func.blocks().any(|block| {
+        let block = func.block(block);
+        block
+            .operations()
+            .iter()
+            .chain(match &block.terminator().kind {
+                TerminatorKind::Invoke { operation, .. } => Some(operation),
+                _ => None,
+            })
+            .any(|operation| may_bind_callback(operation, session, specializations))
+    });
+    let analysis = needs_callbacks.then(|| dataflow::analyze(func, env));
     let mut rewrites = Vec::new();
     for block_id in func.blocks() {
         let block = func.block(block_id);
+        let mut state = analysis.as_ref().map(|a| a.entry_state(block_id));
         for (index, operation) in block.operations().iter().enumerate() {
-            if let Some(id) = specialization_for(operation, env, session, specializations) {
+            if let Some(id) = specialization_for(
+                operation,
+                analysis.as_ref().zip(state.as_ref()),
+                env,
+                session,
+                specializations,
+            ) {
                 rewrites.push((
                     OperationSite {
                         block: block_id,
@@ -1451,9 +1611,18 @@ pub(crate) fn specialize_call_sites(
                     id,
                 ));
             }
+            if let Some((analysis, state)) = analysis.as_ref().zip(state.as_mut()) {
+                analysis.step(func, env, operation, state);
+            }
         }
         if let TerminatorKind::Invoke { operation, .. } = &block.terminator().kind
-            && let Some(id) = specialization_for(operation, env, session, specializations)
+            && let Some(id) = specialization_for(
+                operation,
+                analysis.as_ref().zip(state.as_ref()),
+                env,
+                session,
+                specializations,
+            )
         {
             rewrites.push((
                 OperationSite {
@@ -1502,9 +1671,200 @@ fn operation_at_mut(edit: &mut FunctionEdit, site: OperationSite) -> &mut Operat
     }
 }
 
+/// Calls accept the parameter's place directly or a value loaded from it.
+fn callback_parameter(
+    callee: &mir::Value,
+    loads: &FxHashMap<ValueId, ParameterId>,
+) -> Option<ParameterId> {
+    match callee {
+        mir::Value::Parameter(parameter) => Some(*parameter),
+        mir::Value::Register(id) => loads.get(id).copied(),
+        _ => None,
+    }
+}
+
+/// Immutable callback parameters invoked in a loop or directly by a self-recursive function.
+/// A single isolated invocation does not justify copying the enclosing body.
+fn repeated_callback_parameters(body: &Function, identity: FunctionId) -> FxHashSet<ParameterId> {
+    let mut loads = FxHashMap::default();
+    let mut callees = Vec::new();
+    for block_id in body.blocks() {
+        let block = body.block(block_id);
+        for operation in block
+            .operations()
+            .iter()
+            .chain(match &block.terminator().kind {
+                TerminatorKind::Invoke { operation, .. } => Some(operation),
+                _ => None,
+            })
+        {
+            match operation.kind {
+                OperationKind::Load => {
+                    if let mir::Value::Parameter(parameter) = operation.operands[0] {
+                        loads.insert(operation.result_id().unwrap(), parameter);
+                    }
+                }
+                OperationKind::Call { .. } => callees.push((block_id, &operation.operands[0])),
+                _ => {}
+            }
+        }
+    }
+    let self_recursive = callees
+        .iter()
+        .any(|(_, callee)| **callee == mir::Value::Function(identity));
+    let invoked = callees
+        .into_iter()
+        .filter_map(|(block, callee)| {
+            let parameter = callback_parameter(callee, &loads)?;
+            let definition = &body.parameters()[parameter.as_index()];
+            (definition.kind == ParameterKind::Parameter(ArgConvention::Let)
+                && definition.ty.is_function())
+            .then_some((block, parameter))
+        })
+        .collect::<Vec<_>>();
+    if invoked.is_empty() {
+        return FxHashSet::default();
+    }
+    let cyclic = (!self_recursive).then(|| cost::cyclic_blocks(body));
+    invoked
+        .into_iter()
+        .filter(|(block, _)| {
+            cyclic
+                .as_ref()
+                .is_none_or(|cyclic| cyclic[block.as_index()])
+        })
+        .map(|(_, parameter)| parameter)
+        .collect()
+}
+
+/// Eligibility shared by the callback preflight and specialization admission.
+struct Candidate<'a> {
+    callee: FunctionId,
+    instantiation: Cow<'a, Instantiation>,
+    dictionaries: &'a [mir::Value],
+}
+
+fn visible_start(operation: &Operation) -> Option<usize> {
+    let OperationKind::Call { ty, .. } = &operation.kind else {
+        return None;
+    };
+    operation
+        .operands
+        .len()
+        .checked_sub(ty.fn_ty.args.len() + usize::from(ty.result_convention.has_result_place()))
+        .filter(|start| *start >= 1)
+}
+
+/// Visible positions exclude dictionary and result parameters, even after evidence narrowing.
+fn visible_parameters(parameters: &[mir::Parameter]) -> Vec<ParameterId> {
+    parameters
+        .iter()
+        .enumerate()
+        .filter(|(_, parameter)| {
+            matches!(
+                parameter.kind,
+                ParameterKind::Parameter(_) | ParameterKind::Owned
+            )
+        })
+        .map(|(index, _)| ParameterId::from_index(index))
+        .collect()
+}
+
+fn visible_operand<'a>(
+    operation: &'a Operation,
+    parameters: &[ParameterId],
+    parameter: ParameterId,
+) -> Option<&'a mir::Value> {
+    let position = parameters
+        .iter()
+        .position(|candidate| *candidate == parameter)?;
+    operation.operands.get(visible_start(operation)? + position)
+}
+
+fn candidate<'a>(
+    operation: &'a Operation,
+    session: &CompilerSession,
+    specializations: &Specializations,
+) -> Option<Candidate<'a>> {
+    let OperationKind::Call { metadata, .. } = &operation.kind else {
+        return None;
+    };
+    let mir::Value::Function(callee) = operation.operands[0] else {
+        return None;
+    };
+    if specializations.is_specialization(callee) {
+        return None;
+    }
+    if callee.module == specializations.module()
+        && specializations.finished_body(callee.function).is_none()
+    {
+        specializations.note_unsettled();
+    }
+    let module = session.expect_fresh_module(callee.module);
+    let scheme = &module
+        .get_function_by_id(callee.function)?
+        .definition
+        .ty_scheme;
+    // Hidden-evidence variables need the complete recorded instantiation; visible types alone
+    // cannot prove them. A non-generic callee has the equivalent empty instantiation.
+    let instantiation = match metadata
+        .as_deref()
+        .and_then(|metadata| metadata.instantiation.as_ref())
+    {
+        Some(instantiation) => Cow::Borrowed(instantiation),
+        None if scheme.ty_quantifiers.is_empty() && scheme.eff_quantifiers.is_empty() => {
+            Cow::Owned(Instantiation {
+                ty_args: Vec::new(),
+                eff_args: Vec::new(),
+            })
+        }
+        None => return None,
+    };
+    if instantiation.ty_args.iter().any(Type::is_variable) {
+        return None;
+    }
+    let dictionaries = &operation.operands[1..visible_start(operation)?];
+    if dictionaries
+        .iter()
+        .any(|operand| static_evidence_operand(operand).is_none())
+    {
+        return None;
+    }
+    Some(Candidate {
+        callee,
+        instantiation,
+        dictionaries,
+    })
+}
+
+/// Reject impossible callback sites before paying for caller dataflow.
+fn may_bind_callback(
+    operation: &Operation,
+    session: &CompilerSession,
+    specializations: &Specializations,
+) -> bool {
+    let OperationKind::Call { ty, .. } = &operation.kind else {
+        return false;
+    };
+    if !ty
+        .fn_ty
+        .args
+        .iter()
+        .any(|argument| argument.ty.is_function())
+    {
+        return false;
+    }
+    candidate(operation, session, specializations).is_some_and(|candidate| {
+        specializations
+            .invoked_callbacks(candidate.callee, session)
+            .is_some_and(|parameters| !parameters.is_empty())
+    })
+}
+
 /// The specialization this call site should be pointed at, creating it if needed.
 fn specialization_for(
     operation: &Operation,
+    facts: Option<(&Analysis, &State)>,
     env: ModuleEnv<'_>,
     session: &CompilerSession,
     specializations: &mut Specializations,
@@ -1515,63 +1875,97 @@ fn specialization_for(
     let recorded_instantiation = metadata
         .as_deref()
         .and_then(|metadata| metadata.instantiation.as_ref());
-    let mir::Value::Function(callee) = &operation.operands[0] else {
-        return None;
-    };
-    // A specialization is never a callee to specialize again. A dependency's own specializations,
-    // which its optimized bodies call, have no HIR record and are refused just below.
-    if specializations.is_specialization(*callee) {
-        return None;
-    }
-    // Which specialization a key names depends on whether its callee's component is finished.
-    if callee.module == specializations.module()
-        && specializations.finished_body(callee.function).is_none()
+    // Ordinary calls with neither type arguments nor callback facts need no metadata lookup.
+    if recorded_instantiation.is_none()
+        && (facts.is_none() || !ty.fn_ty.args.iter().any(|arg| arg.ty.is_function()))
     {
-        specializations.note_unsettled();
+        return None;
     }
-    // The callee's own module, which need not be the one being optimized: a user module calling a
-    // generic `std` helper is the case that matters, since otherwise every std generic stays generic
-    // and uninlinable in every module but its own. Safe for the same reason cross-module *inlining*
-    // is: a dependency's revision is immutable, so its optimized body cannot change under us.
+    let Candidate {
+        callee,
+        instantiation,
+        dictionaries,
+    } = candidate(operation, session, specializations)?;
     let module = session.expect_fresh_module(callee.module);
     let scheme = &module
         .get_function_by_id(callee.function)?
         .definition
         .ty_scheme;
-    // Specialization substitutes the callee's complete scheme, including variables that occur only
-    // in hidden-evidence constraints. Never infer those arguments from the visible call type: a
-    // missing instantiation gives this pass no local proof of their values.
-    let instantiation = recorded_instantiation?;
-    // A caller that still names its own quantifiers here would produce a specialization as generic.
-    if instantiation.ty_args.iter().any(Type::is_variable) {
+    let callees = SemanticCallees::new(session, Some(specializations));
+    let body = callees.body(callee)?;
+    let invoked = if facts.is_some()
+        && ty
+            .fn_ty
+            .args
+            .iter()
+            .any(|argument| argument.ty.is_function())
+    {
+        specializations.invoked_callbacks(callee, session)
+    } else {
+        None
+    };
+    let parameters = if invoked
+        .as_ref()
+        .is_some_and(|parameters| !parameters.is_empty())
+    {
+        visible_parameters(body.parameters())
+    } else {
+        Vec::new()
+    };
+    let callbacks = parameters
+        .iter()
+        .filter_map(|parameter| {
+            if !invoked
+                .as_ref()
+                .is_some_and(|invoked| invoked.contains(parameter))
+            {
+                return None;
+            }
+            let operand = visible_operand(operation, &parameters, *parameter)?;
+            // Visible arguments are places, not materialized Function operands.
+            let (analysis, state) = facts?;
+            let fact = state.place(analysis.tracked_place_of(operand)?);
+            let Const::Function(function) = fact.known()? else {
+                return None;
+            };
+            let function = *function;
+            Some((*parameter, function))
+        })
+        .collect::<Vec<_>>();
+    drop(invoked);
+    if recorded_instantiation.is_none() && callbacks.is_empty() {
         return None;
     }
-    let visible_start = operation
-        .operands
-        .len()
-        .checked_sub(ty.fn_ty.args.len() + 1)?;
-    let dictionaries = operation.operands[1..visible_start]
-        .iter()
-        .map(static_evidence_operand)
-        .collect::<Option<Vec<_>>>()?;
-    let key = SpecializationKey {
-        callee: *callee,
-        instantiation: instantiation.clone(),
-        dictionaries,
+    let mut key = SpecializationKey {
+        callee,
+        instantiation: instantiation.clone().into_owned(),
+        dictionaries: dictionaries
+            .iter()
+            .map(static_evidence_operand)
+            .collect::<Option<Vec<_>>>()?,
+        callbacks,
     };
     if let Some(existing) = specializations.cached(&key) {
         return Some(existing);
     }
-    if specializations.is_rejected(&key) {
+    // Callback specialization is optional enrichment. If unavailable, retain the existing
+    // type/evidence specialization path, including cached copies after budget exhaustion.
+    if !key.callbacks.is_empty()
+        && (specializations.is_rejected(&key)
+            || specializations.is_full()
+            || specializations.callbacks_full())
+    {
+        key.callbacks.clear();
+        if let Some(existing) = specializations.cached(&key) {
+            return Some(existing);
+        }
+    }
+    if specializations.is_rejected(&key) || specializations.is_full() {
         return None;
     }
-    if specializations.is_full() {
-        return None;
-    }
-    // The body inlining reads, so a specialization copies what the call site would have spliced.
-    let callees = SemanticCallees::new(session, Some(specializations));
-    let body = callees.body(*callee)?;
-    if !worth_specializing(body, scheme, instantiation, &key.dictionaries, env) {
+    if key.callbacks.is_empty()
+        && !worth_specializing(body, scheme, &instantiation, &key.dictionaries, env)
+    {
         specializations.reject(key);
         return None;
     }
@@ -2097,6 +2491,7 @@ mod tests {
                         callee: *callee,
                         instantiation,
                         dictionaries,
+                        callbacks: Vec::new(),
                     },
                 };
             }
@@ -2749,6 +3144,7 @@ fn use_it(x: int) { with_zero(x) }",
                 eff_args: vec![effects],
             },
             dictionaries: Vec::new(),
+            callbacks: Vec::new(),
         };
         let mut specializations = Specializations::new(module_id, function_count, 1);
         let pure = specializations.get_or_create(
@@ -2796,6 +3192,7 @@ fn use_it(x: int) { with_zero(x) }",
                 eff_args: vec![effects],
             },
             dictionaries: Vec::new(),
+            callbacks: Vec::new(),
         };
         let mut specializations = Specializations::new(module_id, function_count, 1);
         let created = key(EffType::empty());
@@ -2849,6 +3246,7 @@ fn use_it(x: int) { with_zero(x) }",
                 eff_args: Vec::new(),
             },
             dictionaries: Vec::new(),
+            callbacks: Vec::new(),
         };
         let env = session.module_env();
         let mut specializations = Specializations::new(module_id, function_count, 3);
@@ -3018,6 +3416,7 @@ fn use_it(x: int) { with_zero(x) }",
                         callee: *callee,
                         instantiation: instantiation.clone(),
                         dictionaries,
+                        callbacks: Vec::new(),
                     };
                     let own = FunctionId {
                         module: std_id,
@@ -3071,6 +3470,322 @@ fn use_it(x: int) { with_zero(x) }",
                 specialization.original_size,
             );
         }
+    }
+
+    #[test]
+    fn callback_descriptors_are_shared_until_callee_publication() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            r#"
+            #[inline(never)] fn apply(f, x: int) -> int { let mut result = x; for i in (0..x) { result = f(result) }; result }
+            #[inline(never)] fn forwarding(f, x: int) -> int { apply(f, x) }
+            "#,
+        );
+        let callee = FunctionId::new(
+            module,
+            session
+                .expect_fresh_module(module)
+                .get_local_function_id(ustr("apply"))
+                .unwrap(),
+        );
+        let mut table = Specializations::new(
+            module,
+            session.expect_fresh_module(module).function_count(),
+            2,
+        );
+        assert_eq!(table.invoked_callbacks(callee, &session).unwrap().len(), 1);
+        table.read_unsettled.set(false);
+        assert_eq!(table.invoked_callbacks(callee, &session).unwrap().len(), 1);
+        assert!(
+            table.read_unsettled.get(),
+            "cached raw summaries remain dependencies"
+        );
+        assert_eq!(table.callback_parameters.borrow().len(), 1);
+        table.finish(vec![(
+            callee.function,
+            body(&session, module, "forwarding").clone(),
+        )]);
+        assert!(table.callback_parameters.borrow().is_empty());
+        assert!(
+            table
+                .invoked_callbacks(callee, &session)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn callback_sub_budget_preserves_type_capacity_and_survives_publication() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            r#"
+            #[inline(never)] fn apply(f, x: int) -> int {
+                let mut result = x;
+                for i in (0..x) { result = f(result) };
+                result
+            }
+            fn inc(x: int) -> int { x + 1 }
+            fn dec(x: int) -> int { x - 1 }
+            fn first(x: int) -> int { apply(inc, x) }
+            fn same(x: int) -> int { apply(inc, x) }
+            fn other(x: int) -> int { apply(dec, x) }
+            #[inline(never)] fn late(x) { x + x }
+            fn typed(x: int) -> int { late(x) }
+            "#,
+        );
+        let mut table = Specializations::new(
+            module,
+            session.expect_fresh_module(module).function_count(),
+            8,
+        );
+        table.limit = 3;
+        table.callback_limit = 1;
+        for name in ["first", "same"] {
+            assert!(
+                specialize_call_sites(
+                    body(&session, module, name),
+                    session.module_env(),
+                    &session,
+                    module,
+                    &mut table,
+                )
+                .is_some()
+            );
+        }
+        assert_eq!(table.callback_created, 1);
+        assert!(table.callbacks_full());
+        assert!(!table.is_full());
+        let late = site(&session, module, "typed", "late");
+        assert!(
+            specialize_call_sites(
+                body(&session, module, "typed"),
+                session.module_env(),
+                &session,
+                module,
+                &mut table,
+            )
+            .is_some()
+        );
+        assert!(table.cached(&late.key).is_some());
+        assert_eq!(table.len(), 2);
+        let apply = session
+            .expect_fresh_module(module)
+            .get_local_function_id(ustr("apply"))
+            .unwrap();
+        table.finish(vec![(apply, body(&session, module, "apply").clone())]);
+        assert!(
+            table.callbacks_full(),
+            "publication must not renew the allowance"
+        );
+        assert!(
+            specialize_call_sites(
+                body(&session, module, "other"),
+                session.module_env(),
+                &session,
+                module,
+                &mut table,
+            )
+            .is_none()
+        );
+        assert_eq!(table.len(), 2);
+    }
+
+    #[test]
+    fn callback_admission_requires_repeated_invocation_of_the_bound_parameter() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            r#"
+            fn once(f, x: int) -> int { f(x) }
+            fn mixed(f, g, n: int, x: int) -> int {
+                let mut result = g(x);
+                for i in (0..n) { result = f(result) };
+                result
+            }
+            "#,
+        );
+        for (name, expected) in [
+            ("once", vec![]),
+            ("mixed", vec![ParameterId::from_index(0)]),
+        ] {
+            let id = session
+                .expect_fresh_module(module)
+                .get_local_function_id(ustr(name))
+                .unwrap();
+            let parameters = repeated_callback_parameters(
+                body(&session, module, name),
+                FunctionId::new(module, id),
+            );
+            assert_eq!(parameters, expected.into_iter().collect());
+        }
+    }
+
+    #[test]
+    fn callback_specialization_obeys_the_shared_budget_and_reuses_cached_keys() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            r#"
+            #[inline(never)] fn apply(f, x: int) -> int { let mut result = x; for i in (0..x) { result = f(result) }; result }
+            fn inc(x: int) -> int { x + 1 }
+            fn dec(x: int) -> int { x - 1 }
+            fn first(x: int) -> int { apply(inc, x) }
+            fn same(x: int) -> int { apply(inc, x) }
+            fn other(x: int) -> int { apply(dec, x) }
+        "#,
+        );
+        let mut table = Specializations::new(
+            module,
+            session.expect_fresh_module(module).function_count(),
+            3,
+        );
+        table.limit = 1;
+        let first = body(&session, module, "first");
+        assert!(
+            specialize_call_sites(first, session.module_env(), &session, module, &mut table)
+                .is_some()
+        );
+        assert!(table.is_full());
+        let same = body(&session, module, "same");
+        assert!(
+            specialize_call_sites(same, session.module_env(), &session, module, &mut table)
+                .is_some()
+        );
+        let other = body(&session, module, "other");
+        assert!(
+            specialize_call_sites(other, session.module_env(), &session, module, &mut table)
+                .is_none()
+        );
+        assert_eq!(table.len(), 1);
+    }
+
+    #[test]
+    fn callback_specialization_falls_back_to_cached_type_only_copies() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            r#"
+            #[inline(never)] fn apply(f, x) { let mut result = x; for i in (0..3) { result = f(result) + x }; result }
+            fn inc(x: int) -> int { x + 1 }
+            fn run(x: int) -> int { apply(inc, x) }
+        "#,
+        );
+        let site = site(&session, module, "run", "apply");
+        assert!(
+            !site.key.dictionaries.is_empty(),
+            "exercise dictionary-bearing specialization"
+        );
+        assert!(worth_specializing(
+            &site.body,
+            &site.scheme,
+            &site.key.instantiation,
+            &site.key.dictionaries,
+            session.module_env()
+        ));
+        let mut table = Specializations::new(
+            module,
+            session.expect_fresh_module(module).function_count(),
+            2,
+        );
+        table.limit = 1;
+        let base = table.get_or_create(
+            site.key.clone(),
+            &site.scheme,
+            &site.body,
+            session.module_env(),
+        );
+        let check_fallback = |table: &mut Specializations| {
+            let result = specialize_call_sites(
+                body(&session, module, "run"),
+                session.module_env(),
+                &session,
+                module,
+                table,
+            )
+            .unwrap();
+            assert!(result.blocks().any(|block| {
+                result
+                    .block(block)
+                    .operations()
+                    .iter()
+                    .chain(match &result.block(block).terminator().kind {
+                        TerminatorKind::Invoke { operation, .. } => Some(operation),
+                        _ => None,
+                    })
+                    .any(|operation| {
+                        matches!(operation.kind, OperationKind::Call { .. })
+                            && operation.operands[0]
+                                == mir::Value::Function(FunctionId::new(module, base))
+                    })
+            }));
+            assert_eq!(table.len(), 1);
+        };
+        check_fallback(&mut table);
+        table.limit = 2;
+        table.callback_limit = 0;
+        check_fallback(&mut table);
+        table.callback_limit = budget::callback_specialization_limit(2);
+        let mut rejected = site.key.clone();
+        let parameter = site
+            .body
+            .parameters()
+            .iter()
+            .position(|parameter| {
+                parameter.kind == ParameterKind::Parameter(ArgConvention::Let)
+                    && parameter.ty.is_function()
+            })
+            .unwrap();
+        let inc = session
+            .expect_fresh_module(module)
+            .get_local_function_id(ustr("inc"))
+            .unwrap();
+        rejected.callbacks.push((
+            ParameterId::from_index(parameter),
+            FunctionId::new(module, inc),
+        ));
+        table.reject(rejected);
+        check_fallback(&mut table);
+    }
+
+    #[test]
+    fn callback_binding_does_not_admit_a_body_that_only_forwards_it() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            r#"
+            fn forwarding(f, x: int) -> int { apply(f, x) }
+            fn apply(f, x: int) -> int { let mut result = x; for i in (0..x) { result = f(result) }; result }
+        "#,
+        );
+        assert!(
+            repeated_callback_parameters(
+                body(&session, module, "forwarding"),
+                FunctionId::new(
+                    module,
+                    session
+                        .expect_fresh_module(module)
+                        .get_local_function_id(ustr("forwarding"))
+                        .unwrap()
+                )
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            repeated_callback_parameters(
+                body(&session, module, "apply"),
+                FunctionId::new(
+                    module,
+                    session
+                        .expect_fresh_module(module)
+                        .get_local_function_id(ustr("apply"))
+                        .unwrap()
+                )
+            )
+            .len(),
+            1
+        );
     }
 
     /// Whether any operand of `func` names one of `parameters`.

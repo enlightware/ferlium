@@ -225,7 +225,7 @@ fn cost_outside_loops(func: &Function, cyclic: &[bool]) -> usize {
 
 /// The blocks that lie on a cycle of the control-flow graph, by block index: a call there runs once
 /// per iteration.
-fn cyclic_blocks(func: &Function) -> Vec<bool> {
+pub(crate) fn cyclic_blocks(func: &Function) -> Vec<bool> {
     struct Block(Vec<usize>);
     impl graph::Node for Block {
         type Index = usize;
