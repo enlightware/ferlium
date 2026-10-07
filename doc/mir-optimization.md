@@ -661,6 +661,7 @@ On top of it, `mir::pass::value_cells` recognizes the cells that behave as value
 `SsaLocals`: one definition fills the cell whole and dominates every other use, and every other use
 only observes it, including as a `let` call argument, which the callee can neither mutate nor
 retain. A pass may then treat each read of such a cell as the value its definition produced.
+Store forwarding and LICM consume this verdict.
 
 ## Storage forwarding
 
@@ -904,7 +905,8 @@ answer merely declines an optimization and avoids invalidation inside the per-fu
 
 The initial proof is deliberately conservative. Every visible argument must use the `Let`
 convention, its place definition must dominate the preheader, and its storage root must not be
-written anywhere in the loop. The call must use the value-result convention, have no owned
+written anywhere in the loop, unless it is a value cell defined in the loop by a value available
+before it, such as a constant operand; that definition then moves with the call. The call must use the value-result convention, have no owned
 arguments, and write a concrete `TrivialCopy` value to a whole static local allocation. That result
 allocation has no other writer and none of its uses may escape the loop. These conditions are
 generic over all direct callees satisfying the effect contract; they are implementation limits that

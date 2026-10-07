@@ -10,9 +10,11 @@
 //! The first implementation is deliberately narrow but generic over those calls. It recognizes
 //! natural loops from dominance backedges, requires one unconditional preheader, and moves a call
 //! only when every input place is defined before that preheader and its storage root is unchanged
-//! throughout the loop. The result must be a whole local `alloca`; no other write may reach it and
-//! every use of its root must stay in the loop. When that allocation is loop-local it moves with
-//! the call.
+//! throughout the loop. An input may instead be a [value cell](super::value_cells) whose definition
+//! in the loop stores a constant, a bare function or a register defined before the loop, and whose
+//! every use stays in the loop: the definition, with any loop-local allocation, moves with the call.
+//! The result must be a whole local `alloca`; no other write may reach it and every use of its root
+//! must stay in the loop. When that allocation is loop-local it moves with the call.
 //!
 //! Stack regions are part of correctness, not cleanup decoration. A loop-local result moved after a
 //! preheader's `stack_save` would be popped by the matching per-iteration `stack_restore`. The
@@ -36,9 +38,11 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::{
     clone_borrow::{self, Access},
     dataflow::{self, Root},
+    local_cells::{self, Allocation, LocalCells},
     provenance::{AddressorSummary, PlaceOrigins},
     site::{OperationIndex, OperationSite},
     stack_region,
+    value_cells::{self, Definition, ValueCells},
 };
 use crate::{
     hir::function::ArgConvention,
@@ -148,10 +152,10 @@ struct Alloca {
     is_static: bool,
 }
 
-#[derive(Clone, Copy)]
 struct Hoist {
-    call: OperationSite,
-    alloca: Option<OperationSite>,
+    /// The operations to move, in their new order: the definitions of input value cells and the
+    /// cells' loop-local allocations, then the call's loop-local result allocation, then the call.
+    operations: Vec<OperationSite>,
     preheader: BlockId,
     insertion: OperationIndex,
 }
@@ -736,6 +740,9 @@ fn find_hoist(
     let dominance = &analysis.dominance;
     let roots = PlaceRoots::of(func);
     let (definitions, allocas) = definitions(func);
+    let root_blocks = OnceCell::new();
+    let local = OnceCell::new();
+    let values = OnceCell::new();
     for natural in &analysis.loops {
         let writes = writes_in(func, &natural.blocks, &roots);
         let preheader_writes = writes_in(func, &FxHashSet::from_iter([natural.preheader]), &roots);
@@ -771,33 +778,71 @@ fn find_hoist(
                 if writes
                     .get(&output_root)
                     .is_none_or(|sites| sites.as_slice() != [call_site])
-                    || root_used_outside(func, output_root, &natural.blocks, &|value| {
-                        roots.root_of(value)
-                    })
+                    || root_blocks
+                        .get_or_init(|| RootBlocks::of(func, &roots))
+                        .used_outside(output_root, &natural.blocks)
                 {
                     continue;
                 }
 
-                let mut inputs = call
+                let mut inputs = Vec::new();
+                let mut operations = Vec::new();
+                let admitted = call
                     .extras
                     .iter()
                     .chain(call.arguments.iter().map(|(argument, _)| *argument))
-                    .collect::<Vec<_>>();
-                if inputs.iter().any(|input| {
-                    roots
-                        .root_of(input)
-                        .is_none_or(|root| writes.contains_key(&root) || root == output_root)
-                }) {
+                    .all(|input| match roots.root_of(input) {
+                        None => false,
+                        Some(root) if root == output_root => false,
+                        Some(root) if !writes.contains_key(&root) => {
+                            inputs.push(input);
+                            true
+                        }
+                        Some(_) => {
+                            let values = values.get_or_init(|| {
+                                ValueCells::of_matching(
+                                    func,
+                                    env,
+                                    local.get_or_init(|| {
+                                        LocalCells::of_matching(func, |_, allocation| {
+                                            matches!(
+                                                allocation,
+                                                Allocation::Value {
+                                                    witnessed: false,
+                                                    ..
+                                                }
+                                            )
+                                        })
+                                    }),
+                                    invariant_cell_access,
+                                    || dominance,
+                                )
+                            });
+                            invariant_cell(
+                                func,
+                                input,
+                                values,
+                                &allocas,
+                                natural,
+                                &mut inputs,
+                                &mut operations,
+                            )
+                        }
+                    });
+                if !admitted {
                     continue;
                 }
 
                 let move_alloca = natural.blocks.contains(&alloca.site.block);
-                if move_alloca && !definition_dominates(alloca.site, call_site, dominance) {
-                    continue;
-                }
-                if !move_alloca {
+                if move_alloca {
+                    if !definition_dominates(alloca.site, call_site, dominance) {
+                        continue;
+                    }
+                    operations.push(alloca.site);
+                } else {
                     inputs.push(call.result);
                 }
+                operations.push(call_site);
                 let Some(insertion) = insertion_point(
                     natural,
                     &definitions,
@@ -810,8 +855,7 @@ fn find_hoist(
                     continue;
                 };
                 return Some(Hoist {
-                    call: call_site,
-                    alloca: move_alloca.then_some(alloca.site),
+                    operations,
                     preheader: natural.preheader,
                     insertion,
                 });
@@ -819,6 +863,69 @@ fn find_hoist(
         }
     }
     None
+}
+
+/// Accesses a hoisted definition preserves: one store or copy, then reads in every iteration. A
+/// `move` out leaves the cell uninitialized for the next iteration, whatever the type.
+fn invariant_cell_access(access: local_cells::Access) -> bool {
+    !matches!(
+        access,
+        local_cells::Access::Write(local_cells::Write::CallResult)
+            | local_cells::Access::MoveOut(_)
+            | local_cells::Access::Callee
+            | local_cells::Access::Drop
+    )
+}
+
+/// Whether `input`, written in `natural`, is a value cell whose definition can move ahead of the
+/// call, recording that definition and any loop-local allocation in `operations` and the inputs
+/// the insertion point must follow in `inputs`.
+///
+/// The definition dominates every use and stores a value available before the loop, so executing
+/// it once in the preheader leaves each read unchanged; a zero-trip loop reads nothing. All uses
+/// stay in the loop, whose stack regions the insertion point respects as for a call's result.
+fn invariant_cell<'f>(
+    func: &'f Function,
+    input: &'f mir::Value,
+    values: &ValueCells<'_>,
+    allocas: &FxHashMap<ValueId, Alloca>,
+    natural: &NaturalLoop,
+    inputs: &mut Vec<&'f mir::Value>,
+    operations: &mut Vec<OperationSite>,
+) -> bool {
+    let mir::Value::Register(id) = input else {
+        return false;
+    };
+    let (Some(cell), Some(alloca)) = (values.get(*id), allocas.get(id)) else {
+        return false;
+    };
+    if !natural.blocks.contains(&cell.site.block) || !alloca.is_static {
+        return false;
+    }
+    if operations.contains(&cell.site) {
+        return true;
+    }
+    match cell.definition {
+        Definition::Constant(_) | Definition::Function(_) => {}
+        Definition::Register(_) => {
+            inputs.push(&value_cells::operation_at(func, cell.site).operands[0])
+        }
+        Definition::Copy(_) | Definition::CallResult => return false,
+    }
+    if values
+        .uses(cell)
+        .iter()
+        .any(|cell_use| !natural.blocks.contains(&cell_use.site.block))
+    {
+        return false;
+    }
+    if natural.blocks.contains(&alloca.site.block) {
+        operations.push(alloca.site);
+    } else {
+        inputs.push(input);
+    }
+    operations.push(cell.site);
+    true
 }
 
 fn cfg(func: &Function) -> (Vec<Vec<usize>>, Vec<Vec<BlockId>>) {
@@ -1046,25 +1153,36 @@ fn record_writes(
     }
 }
 
-fn root_used_outside(
-    func: &Function,
-    root: Root,
-    blocks: &FxHashSet<BlockId>,
-    root_of: &impl Fn(&mir::Value) -> Option<Root>,
-) -> bool {
-    for block in func.blocks().filter(|block| !blocks.contains(block)) {
-        let basic = func.block(block);
-        if basic
-            .operations()
-            .iter()
-            .flat_map(|operation| operation.operands.iter())
-            .chain(basic.terminator().operands())
-            .any(|operand| root_of(operand) == Some(root))
-        {
-            return true;
+/// The blocks using each storage root, in block order.
+struct RootBlocks(FxHashMap<Root, Vec<BlockId>>);
+
+impl RootBlocks {
+    fn of(func: &Function, roots: &PlaceRoots) -> Self {
+        let mut blocks = FxHashMap::<Root, Vec<BlockId>>::default();
+        for block in func.blocks() {
+            let basic = func.block(block);
+            for operand in basic
+                .operations()
+                .iter()
+                .flat_map(|operation| operation.operands.iter())
+                .chain(basic.terminator().operands())
+            {
+                if let Some(root) = roots.root_of(operand) {
+                    let using = blocks.entry(root).or_default();
+                    if using.last() != Some(&block) {
+                        using.push(block);
+                    }
+                }
+            }
         }
+        Self(blocks)
     }
-    false
+
+    fn used_outside(&self, root: Root, blocks: &FxHashSet<BlockId>) -> bool {
+        self.0
+            .get(&root)
+            .is_some_and(|using| using.iter().any(|block| !blocks.contains(block)))
+    }
 }
 
 fn definition_dominates(
@@ -1123,27 +1241,23 @@ fn insertion_point(
 
 fn apply_hoist(func: &Function, hoist: Hoist) -> Function {
     let mut edit = FunctionEdit::new(func.clone());
-    let call = edit
-        .block_mut(hoist.call.block)
+    let operations: Vec<_> = hoist
         .operations
-        .remove(hoist.call.index.as_index());
-    let alloca = hoist.alloca.map(|site| {
-        let index = site.index.as_index()
-            - usize::from(
-                site.block == hoist.call.block
-                    && site.index.as_index() > hoist.call.index.as_index(),
-            );
-        edit.block_mut(site.block).operations.remove(index)
-    });
-
-    let insertion = hoist.insertion.as_index();
-    let operations = &mut edit.block_mut(hoist.preheader).operations;
-    if let Some(alloca) = alloca {
-        operations.insert(insertion, alloca);
-        operations.insert(insertion + 1, call);
-    } else {
-        operations.insert(insertion, call);
+        .iter()
+        .map(|site| func.block(site.block).operations()[site.index.as_index()].clone())
+        .collect();
+    // Every moved operation is in the loop, so removals leave the preheader's indices intact.
+    let mut removed = hoist.operations;
+    removed.sort_by_key(|site| (site.block.as_index(), site.index.as_index()));
+    for site in removed.into_iter().rev() {
+        edit.block_mut(site.block)
+            .operations
+            .remove(site.index.as_index());
     }
+    edit.block_mut(hoist.preheader).operations.splice(
+        hoist.insertion.as_index()..hoist.insertion.as_index(),
+        operations,
+    );
     edit.finish_unverified()
 }
 
@@ -1154,8 +1268,13 @@ mod tests {
     use crate::{
         CompilerSession, Location, MirOptimization,
         hir::value::LiteralValue,
-        mir::{Operation, builder::FunctionBuilder, terminator::Terminator},
+        mir::{Operation, Value, builder::FunctionBuilder, terminator::Terminator},
+        module::{LocalFunctionId, ModuleId},
         std::{logic::bool_type, math::int_type},
+        types::{
+            effects::no_effects,
+            r#type::{CallImplType, FnType},
+        },
     };
 
     fn hoist_reads(function: &Function, env: ModuleEnv<'_>) -> Option<Function> {
@@ -1632,6 +1751,92 @@ mod tests {
             result_alloca < marker,
             "a loop-local result allocation must move with the call:\n{body}"
         );
+    }
+
+    #[test]
+    fn a_cell_moved_out_in_the_loop_keeps_its_definition_there() {
+        // `move` leaves its source uninitialized, so the cell must be filled again each iteration.
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new("moved_cell".into(), Default::default());
+        let preheader = builder.add_block();
+        let body = builder.add_block();
+        let constant = Value::Constant(builder.add_constant(
+            int_type(),
+            LiteralValue::new_native(3isize),
+            &env,
+        ));
+        let callee = FunctionId::new(ModuleId::default(), LocalFunctionId::default());
+        builder.set_terminator(preheader, Terminator::goto(span, body));
+        let mut alloca = || {
+            builder
+                .append_operation(body, Operation::alloca(span, int_type()))
+                .expect("an alloca has a result")
+        };
+        let (cell, result, destination) = (alloca(), alloca(), alloca());
+        builder.append_operation(body, Operation::store(span, constant, cell.clone()));
+        builder.append_operation(
+            body,
+            Operation::call(
+                span,
+                Value::Function(callee),
+                [cell.clone(), result],
+                CallImplType::value(FnType::new_mut_resolved(
+                    [(int_type(), false)],
+                    int_type(),
+                    no_effects(),
+                )),
+            ),
+        );
+        builder.append_operation(body, Operation::move_value(span, cell, destination));
+        builder.set_terminator(body, Terminator::goto(span, body));
+        let function = builder.finish_unverified();
+
+        let hoisted = hoist_loop_invariants(&function, env, &|_| true, &|_| false, &|_| {
+            AddressorSummary {
+                provenance: ResultProvenance::Unknown,
+                repeatable: false,
+            }
+        });
+        assert!(
+            hoisted.is_none(),
+            "the store refilling a moved-out cell must stay in the loop"
+        );
+    }
+
+    #[test]
+    fn hoists_a_call_with_its_constant_operand_cell_through_nested_loops() {
+        // The constant `3` reaches the call through a cell stored in the inner loop; that store
+        // is a value-cell definition and moves with the call, one loop at a time.
+        let source = "fn constant_operand(a: int, n: int) {\n\
+                          let mut total = 0;\n\
+                          for i in 0..n {\n\
+                              for j in 0..n { total = total + (a * 3) * j }\n\
+                          };\n\
+                          total\n\
+                      }\n\
+                      fn main() { constant_operand(2, 4) + constant_operand(2, 0) }";
+        let module = optimized(source);
+        let body = body_of(&module, "constant_operand");
+        // Of the two multiplications, only the invariant one reads `a`.
+        let (call, result_alloca) = call_and_result_alloca(body, "(%p0, ");
+        let outer_marker = body.find("stack_save").expect("both loops have markers");
+        assert!(
+            call < outer_marker && result_alloca < call,
+            "the call and its storage must move out of both loops:\n{body}"
+        );
+        let operand = body[..call]
+            .rfind("store @c")
+            .expect("the constant operand is stored before the call");
+        assert!(
+            body[operand..call].lines().count() <= 3,
+            "the constant's definition must move with the call:\n{body}"
+        );
+
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        assert_eq!(session.eval_mir("licm_run", source), "144");
     }
 
     #[test]

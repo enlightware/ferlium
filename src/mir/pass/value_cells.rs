@@ -14,12 +14,13 @@
 //! call arguments, which the callee may neither mutate nor retain. A cell defined by storing a
 //! bare function may also be called through and dropped: it holds no environment. Any other value
 //! must be `TrivialCopy`, so a read never transfers ownership and the cell carries no drop
-//! obligation.
+//! obligation. A `move` out still leaves the cell uninitialized, making it the cell's last use until
+//! the definition runs again.
 //!
 //! Dominance is per block, and in program order within one; a use before the definition in its
 //! block belongs to an earlier iteration and disqualifies the cell. A cell allocated inside a loop
 //! is a value within each iteration; moving its definition across iterations is the consumer's
-//! proof, which must also respect the stack region releasing it.
+//! proof, which must also respect the stack region releasing it and exclude moves out.
 //!
 //! An invoked call's result is available only on its success edge, which block dominance does not
 //! distinguish, so a result place of an `invoke` is not a definition.
@@ -132,13 +133,18 @@ impl<'a> ValueCells<'a> {
         Some(&self.cells[index])
     }
 
-    /// The uses of `cell` other than its definition.
-    pub(crate) fn reads(&self, cell: &ValueCell) -> usize {
+    /// Every use of `cell`, its definition included.
+    pub(crate) fn uses(&self, cell: &ValueCell) -> &[CellUse] {
         let local = self
             .local
             .get(cell.id)
             .expect("a value cell is a local cell");
-        self.local.uses(local).len() - 1
+        self.local.uses(local)
+    }
+
+    /// The uses of `cell` other than its definition.
+    pub(crate) fn reads(&self, cell: &ValueCell) -> usize {
+        self.uses(cell).len() - 1
     }
 }
 
