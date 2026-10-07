@@ -355,10 +355,12 @@ impl LocalCells {
 
     /// The cell `id` allocates, if it is one.
     pub(crate) fn get(&self, id: ValueId) -> Option<&Cell> {
-        match self.index.get(id.as_index()) {
-            Some(&Some(cell)) => Some(&self.cells[cell.as_index()]),
-            _ => None,
-        }
+        self.position(id).map(|cell| &self.cells[cell.as_index()])
+    }
+
+    /// The position of the cell `id` allocates in [`iter`](Self::iter), if it is one.
+    pub(crate) fn position(&self, id: ValueId) -> Option<CellId> {
+        self.index.get(id.as_index()).copied().flatten()
     }
 
     /// The direct uses of `cell`, in block and operation order.

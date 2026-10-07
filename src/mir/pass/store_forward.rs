@@ -8,9 +8,9 @@
 //! leaves copies between cells, `memcpy %a to %b` or, for a `TrivialCopy` value, `move %a to %b`,
 //! where a callee's parameter or temporary received the caller's value.
 //!
-//! A cell is a local `TrivialCopy` `alloca`, or a pointer slot, written exactly once and otherwise
-//! only read directly: loaded, compared, or copied from. Like rustc's `SsaLocals`, such a cell is a
-//! value, and a read its write dominates sees:
+//! The cells are the [value cells](super::value_cells) defined by a store or a copy whose every
+//! read this pass can forward: a load, a comparison, a copy out or, for a bare function, a call
+//! through it or its drop. Each read sees:
 //! - the stored register, when the write stores a materialized register: a `load`'s uses are
 //!   rewritten to it, a `comp_eq` scrutinee reads it, and a copy from the cell stores it;
 //! - the stored constant, when the write stores one: a load's uses or a comparison name the
@@ -34,16 +34,19 @@
 //! copy dominates a read of `%b`, every path from `%a`'s last write to the read passes the copy, so
 //! `%a` still holds what `%b` received.
 
+use std::cell::OnceCell;
+
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{
-    local_cells::{self, Access, Allocation, LocalCells, Transfer},
+    local_cells::{self, Access, LocalCells, Transfer},
     site::{OperationIndex, OperationSite},
+    value_cells::{Definition, ValueCell, ValueCells, operation_at},
 };
 use crate::{
     hir::function::ArgConvention,
     mir::{
-        self, Function, Operation, OperationKind, ParameterKind,
+        self, Function, OperationKind, ParameterKind,
         dominance::Dominance,
         edit::FunctionEdit,
         role::{ValueRole, ValueRoles},
@@ -51,7 +54,6 @@ use crate::{
         value::{ConstantId, ValueId},
     },
     module::{FunctionId, ModuleEnv, id::Id},
-    types::type_properties::concrete_type_is_trivial_copy,
 };
 
 /// Rewrites reads of single-assignment cells to what they hold, returning `None` when there is
@@ -61,30 +63,30 @@ pub(crate) fn forward_stored_values(func: &Function, env: ModuleEnv<'_>) -> Opti
     if local.is_empty() {
         return None;
     }
-    let census = census(func, env, &local);
-    if census.cells.is_empty() {
+    let dominance = OnceCell::new();
+    let values = ValueCells::of_matching(func, env, &local, forwardable, || {
+        dominance.get_or_init(|| {
+            let successors: Vec<Vec<usize>> = func
+                .blocks()
+                .map(|block| {
+                    func.block(block)
+                        .terminator()
+                        .successors()
+                        .map(|target| target.as_index())
+                        .collect()
+                })
+                .collect();
+            Dominance::of(&successors, func.entry().as_index())
+        })
+    });
+    if values.is_empty() {
         return None;
     }
-    let successors: Vec<Vec<usize>> = func
-        .blocks()
-        .map(|block| {
-            func.block(block)
-                .terminator()
-                .successors()
-                .map(|target| target.as_index())
-                .collect()
-        })
-        .collect();
-    let dominance = Dominance::of(&successors, func.entry().as_index());
-    let dominates = |write: OperationSite, at: OperationSite| {
-        // Within one block, a read before the write belongs to an earlier loop iteration.
-        if write.block == at.block {
-            write.index.as_index() < at.index.as_index()
-        } else {
-            dominance.dominates(write.block.as_index(), at.block.as_index())
-        }
+    let census = Census {
+        local: &local,
+        values: &values,
     };
-    let targets = targets(func, &census, &dominates);
+    let targets = targets(func, &census);
     if targets.is_empty() {
         return None;
     }
@@ -96,7 +98,6 @@ pub(crate) fn forward_stored_values(func: &Function, env: ModuleEnv<'_>) -> Opti
     // Drops of cells holding a bare function, which release nothing.
     let mut empty_drops: FxHashSet<OperationSite> = FxHashSet::default();
     for (&cell, target) in &targets {
-        let write = census.cells[&cell].write;
         let local_cell = local.get(cell).expect("a census cell is a local cell");
         for cell_use in local.uses(local_cell) {
             let at = cell_use.site;
@@ -113,7 +114,7 @@ pub(crate) fn forward_stored_values(func: &Function, env: ModuleEnv<'_>) -> Opti
                 (Some(Read::Drop), Target::Function(_)) => !cell_use.in_terminator(func),
                 _ => false,
             };
-            if !forwardable || !dominates(write, at) {
+            if !forwardable {
                 continue;
             }
             *forwarded_reads.entry(cell).or_default() += 1;
@@ -168,12 +169,12 @@ pub(crate) fn forward_stored_values(func: &Function, env: ModuleEnv<'_>) -> Opti
 
     let removed_cells: FxHashSet<ValueId> = forwarded_reads
         .into_iter()
-        .filter(|(cell, forwarded)| census.cells[cell].reads == *forwarded)
+        .filter(|(cell, forwarded)| values.reads(census.cell(*cell)) == *forwarded)
         .map(|(cell, _)| cell)
         .collect();
     let mut removed: FxHashSet<OperationSite> = removed_cells
         .iter()
-        .map(|cell| census.cells[cell].write)
+        .map(|cell| census.cell(*cell).site)
         .collect();
     removed.extend(empty_drops);
 
@@ -249,18 +250,6 @@ pub(crate) fn forward_stored_values(func: &Function, env: ModuleEnv<'_>) -> Opti
     Some(edit.finish_unverified())
 }
 
-/// The operation at `site`, an `invoke`'s operation taking the index past the block's operations.
-fn operation_at(func: &Function, site: OperationSite) -> &Operation {
-    let block = func.block(site.block);
-    match block.operations().get(site.index.as_index()) {
-        Some(operation) => operation,
-        None => match &block.terminator().kind {
-            TerminatorKind::Invoke { operation, .. } => operation,
-            _ => unreachable!("a forwarded read past the operations is the invoked one"),
-        },
-    }
-}
-
 /// What the reads of a cell are forwarded to.
 #[derive(Clone)]
 enum Target {
@@ -275,18 +264,6 @@ enum Target {
     Constant(ConstantId),
 }
 
-/// How a cell's single write fills it.
-enum Write {
-    /// `store %register to %cell`.
-    Register(ValueId),
-    /// `store <function> to %cell`.
-    Function(FunctionId),
-    /// `store @constant to %cell`.
-    Constant(ConstantId),
-    /// `memcpy`/`move %source to %cell`, from a register or a parameter.
-    Copy(mir::Value),
-}
-
 /// How a forwardable access reads a cell named by its first operand.
 enum Read {
     /// A load, a comparison or a copy out of it.
@@ -297,25 +274,22 @@ enum Read {
     Drop,
 }
 
-/// A local cell written once and otherwise only read directly.
-struct Cell {
-    write: OperationSite,
-    how: Write,
-    reads: usize,
-}
-
+/// The value cells whose reads this pass forwards.
 struct Census<'a> {
     local: &'a LocalCells,
-    cells: FxHashMap<ValueId, Cell>,
+    values: &'a ValueCells<'a>,
 }
 
 impl Census<'_> {
+    fn cell(&self, id: ValueId) -> &ValueCell {
+        self.values
+            .get(id)
+            .expect("a forwarded cell is a value cell")
+    }
+
     /// The allocation of `id`, if it is a census cell.
     fn allocation(&self, id: ValueId) -> Option<&local_cells::Cell> {
-        self.cells
-            .contains_key(&id)
-            .then(|| self.local.get(id))
-            .flatten()
+        self.values.get(id).and_then(|_| self.local.get(id))
     }
 
     /// Whether `place` holds its value while `cell` lives.
@@ -354,84 +328,22 @@ fn read_kind(access: Access) -> Option<Read> {
     }
 }
 
-/// The single-assignment cells of `func`.
-///
-/// A whitelist over every direct use, so an unforeseen use excludes the cell rather than being
-/// assumed harmless.
-fn census<'a>(func: &Function, env: ModuleEnv<'_>, local: &'a LocalCells) -> Census<'a> {
-    let mut cells = FxHashMap::default();
-    'cells: for local_cell in local.iter() {
-        let ty = match local_cell.allocation {
-            Allocation::Value {
-                ty,
-                witnessed: false,
-            } => Some(ty),
-            // A pointer slot is always trivially copied.
-            Allocation::Place => None,
-            Allocation::Value {
-                witnessed: true, ..
-            } => continue,
-        };
-        let mut write = None;
-        let mut writes = 0;
-        let mut reads = 0;
-        // Calls through and drops of the cell, which need it to hold a bare function.
-        let mut function_reads = 0;
-        for cell_use in local.uses(local_cell) {
-            match cell_use.access {
-                Access::Write(local_cells::Write::Store | local_cells::Write::Copy)
-                | Access::MoveIn(Transfer::Sized) => {
-                    writes += 1;
-                    write = Some(cell_use.site);
-                }
-                access => match read_kind(access) {
-                    Some(Read::Value) => reads += 1,
-                    Some(Read::Callee | Read::Drop) => {
-                        reads += 1;
-                        function_reads += 1;
-                    }
-                    None => continue 'cells,
-                },
-            }
-        }
-        let Some(write) = write.filter(|_| writes == 1) else {
-            continue;
-        };
-        let operation = operation_at(func, write);
-        let how = match (&operation.kind, &operation.operands[0]) {
-            (OperationKind::Store, mir::Value::Register(stored)) => Write::Register(*stored),
-            (OperationKind::Store, mir::Value::Function(function)) => Write::Function(*function),
-            (OperationKind::Store, mir::Value::Constant(constant)) => Write::Constant(*constant),
-            (
-                OperationKind::Memcpy | OperationKind::Move,
-                source @ (mir::Value::Register(_) | mir::Value::Parameter(_)),
-            ) => Write::Copy(source.clone()),
-            _ => continue,
-        };
-        // A bare function carries no environment to copy or drop; any other value must be
-        // representation-copyable, and neither called through nor dropped.
-        let valid = match how {
-            Write::Function(_) => true,
-            _ => function_reads == 0 && ty.is_none_or(|ty| concrete_type_is_trivial_copy(ty, &env)),
-        };
-        if valid {
-            cells.insert(local_cell.id, Cell { write, how, reads });
-        }
-    }
-    Census { local, cells }
+/// Whether this pass admits `access` to one of its cells: a call result is not a value it can name,
+/// and a cell passed as a call argument keeps its storage, so its other reads stay too.
+fn forwardable(access: Access) -> bool {
+    !matches!(
+        access,
+        Access::Write(local_cells::Write::CallResult) | Access::Read(local_cells::Read::Argument)
+    )
 }
 
 /// What the reads of each forwardable cell are forwarded to.
-fn targets(
-    func: &Function,
-    census: &Census<'_>,
-    dominates: &impl Fn(OperationSite, OperationSite) -> bool,
-) -> FxHashMap<ValueId, Target> {
+fn targets(func: &Function, census: &Census<'_>) -> FxHashMap<ValueId, Target> {
     // A store bridges a place register to a pointer value, which the register itself is not.
     let stores_register = census
-        .cells
-        .values()
-        .any(|cell| matches!(cell.how, Write::Register(_)));
+        .values
+        .iter()
+        .any(|cell| matches!(cell.definition, Definition::Register(_)));
     let roles = stores_register.then(|| ValueRoles::derive(func));
     let materialized = |stored: ValueId| {
         roles.as_ref().is_some_and(|roles| {
@@ -441,34 +353,33 @@ fn targets(
         })
     };
 
-    struct Resolver<'a, D, M> {
+    struct Resolver<'a, M> {
         func: &'a Function,
         census: &'a Census<'a>,
-        dominates: &'a D,
         materialized: M,
         targets: FxHashMap<ValueId, Option<Target>>,
     }
-    impl<D, M> Resolver<'_, D, M>
+    impl<M> Resolver<'_, M>
     where
-        D: Fn(OperationSite, OperationSite) -> bool,
         M: Fn(ValueId) -> bool,
     {
-        /// `cell`'s target, through the chain of copies it was written by. The chain is finite: each
-        /// source's write strictly dominates the next copy.
+        /// `cell`'s target, through the chain of copies it was written by. The chain is finite: a
+        /// value cell's definition strictly dominates its copy into the next one.
         fn resolve(&mut self, cell: ValueId) -> Option<Target> {
             if let Some(target) = self.targets.get(&cell) {
                 return target.clone();
             }
             // Provisional, so that a malformed cycle ends.
             self.targets.insert(cell, None);
-            let this = &self.census.cells[&cell];
-            let target = match &this.how {
-                Write::Register(stored) => {
+            let this = self.census.cell(cell);
+            let target = match &this.definition {
+                Definition::Register(stored) => {
                     (self.materialized)(*stored).then_some(Target::Register(*stored))
                 }
-                Write::Function(function) => Some(Target::Function(*function)),
-                Write::Constant(constant) => Some(Target::Constant(*constant)),
-                Write::Copy(source) => self.copied(cell, source),
+                Definition::Function(function) => Some(Target::Function(*function)),
+                Definition::Constant(constant) => Some(Target::Constant(*constant)),
+                Definition::Copy(source) => self.copied(cell, source),
+                Definition::CallResult => unreachable!("a census cell is not a call result"),
             };
             self.targets.insert(cell, target.clone());
             target
@@ -481,10 +392,7 @@ fn targets(
                 // A `let` parameter holds its value for the whole call.
                 return outlives(source).then(|| Target::Place(source.clone()));
             };
-            let write = self.census.cells.get(source_id)?.write;
-            if !(self.dominates)(write, self.census.cells[&cell].write) {
-                return None;
-            }
+            self.census.values.get(*source_id)?;
             match self.resolve(*source_id) {
                 Some(Target::Register(stored)) => Some(Target::Register(stored)),
                 Some(Target::Constant(constant)) => Some(Target::Constant(constant)),
@@ -504,12 +412,11 @@ fn targets(
     let mut resolver = Resolver {
         func,
         census,
-        dominates,
         materialized,
         targets: FxHashMap::default(),
     };
-    for &cell in census.cells.keys() {
-        resolver.resolve(cell);
+    for cell in census.values.iter() {
+        resolver.resolve(cell.id);
     }
     resolver
         .targets
@@ -780,7 +687,8 @@ mod tests {
             builder.set_terminator(body, Terminator::cond_br(span, read, then_target, exit));
             builder.append_operation(exit, Operation::load(span, cell));
             builder.set_terminator(exit, Terminator::ret(span));
-            // The undominated cases intentionally model invalid/uninitialized reads.
+            // The undominated cases intentionally model invalid/uninitialized reads. A cell with
+            // such a read is not a value, so even its dominated reads stay.
             let source = builder.finish_unverified();
             let forwarded = forward_stored_values(&source, env);
             if case == "loop" {
@@ -790,25 +698,6 @@ mod tests {
                 assert!(matches!(&forwarded.block(body).terminator().kind,
                     TerminatorKind::CondBr { condition, .. } if *condition == literal));
                 verify_function(&forwarded, env);
-            } else if case == "branch write" || case == "read before write" {
-                let forwarded = forwarded.expect("the dominated read can still forward");
-                assert!(matches!(&forwarded.block(body).terminator().kind,
-                    TerminatorKind::CondBr { condition, .. } if *condition == literal));
-                let retained = if case == "branch write" { exit } else { entry };
-                assert!(
-                    forwarded
-                        .block(retained)
-                        .operations()
-                        .iter()
-                        .any(|op| op.kind == OperationKind::Load)
-                );
-                assert!(
-                    forwarded
-                        .block(entry)
-                        .operations()
-                        .iter()
-                        .any(|op| matches!(op.kind, OperationKind::Alloca { .. }))
-                );
             } else {
                 assert!(forwarded.is_none(), "{case}");
             }

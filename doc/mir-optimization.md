@@ -657,6 +657,11 @@ asking how each local allocation is used. `mir::pass::local_cells` answers that 
 shared, fail-safe classification of direct uses; each pass then decides which uses it admits. Like
 other analyses, it is rebuilt after a rewrite rather than maintained through one.
 
+On top of it, `mir::pass::value_cells` recognizes the cells that behave as values, like rustc's
+`SsaLocals`: one definition fills the cell whole and dominates every other use, and every other use
+only observes it, including as a `let` call argument, which the callee can neither mutate nor
+retain. A pass may then treat each read of such a cell as the value its definition produced.
+
 ## Storage forwarding
 
 `mir::pass::copy_forward` is deliberately separate from call CSE. CSE proves that two computations
@@ -694,10 +699,10 @@ more before final DCE. The use analysis runs only when that scan finds a viable 
 
 MIR has no φ: a value meeting a join, or leaving an inlined callee through its `@ret`, travels
 through a cell, so its reader sees `store %v to %cell; …; %x = load %cell`; inlining also leaves
-copies between cells. `mir::pass::store_forward` treats a local `TrivialCopy` cell written exactly
-once, and otherwise only loaded, compared or copied from, as a value, like rustc's `SsaLocals`. A
-read its write dominates sees what the write stored: a materialized register, a constant, or, for a
-copy from another such cell whose write dominates the copy, what that cell holds. A copy from a
+copies between cells. `mir::pass::store_forward` forwards the reads of value cells defined by a
+store or a copy and otherwise only loaded, compared or copied from. Each read sees what the
+definition stored: a materialized register, a constant, or, for a copy from another such cell,
+what that cell holds. A copy from a
 `let` parameter reads the parameter in place. A cell holding a non-capturing closure's function is
 one too: calls through it become direct, and its drop, which releases nothing, goes. A cell whose
 every read was forwarded is removed with its write.

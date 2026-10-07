@@ -70,6 +70,7 @@ mod stage;
 pub(crate) mod store_forward;
 pub(crate) mod string_accumulate;
 pub(crate) mod tail_merge;
+pub(crate) mod value_cells;
 pub(crate) mod will_return;
 
 pub(crate) use monomorphize::Specializations;
