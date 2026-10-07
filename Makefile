@@ -69,7 +69,7 @@ test-wasm-codegen:
 test-wasm-release:
 	CARGO_PROFILE_TEST_DEBUG=0 wasm-pack test --release --node --test language
 
-test: test-local test-wasm
+test: test-local test-wasm test-wasm-repl
 
 test-miri:
 	# Focus on provenance and ownership; native fixtures avoid compiling std under Miri.
@@ -132,14 +132,20 @@ fuzz-cmin-optimization:
 
 fuzz-cmin: fuzz-cmin-ide fuzz-cmin-grammar fuzz-cmin-optimization
 
-repl:
-	RUST_BACKTRACE=1 RUST_LOG=ferlium=debug cargo run --example ferlium
+repl-hir:
+	RUST_BACKTRACE=1 cargo run --example ferlium -- --hir $(ARGS)
 
 repl-mir:
-	RUST_BACKTRACE=1 RUST_LOG=ferlium=debug cargo run --example ferlium -- --mir
+	RUST_BACKTRACE=1 cargo run --example ferlium -- $(ARGS)
 
-repl-opt:
-	RUST_BACKTRACE=1 RUST_LOG=ferlium=debug cargo run --example ferlium -- --optimize
+build-wasm-repl:
+	wasm-pack build examples/wasm-repl --target nodejs --release --out-dir ../../target/wasm-repl
+
+repl-wasm: build-wasm-repl
+	node examples/wasm-repl/run.mjs $(ARGS)
+
+test-wasm-repl: build-wasm-repl
+	node --test examples/wasm-repl/repl.test.mjs
 
 profile-mir:
 	cargo run --release --example mir_profile -- $(WORKLOADS)
@@ -159,3 +165,38 @@ validate-book:
 
 update-license-headers:
 	git ls-files --cached --others --exclude-standard -z -- '*.rs' '*.ts' | xargs -0 -r licensure --in-place
+
+.PHONY: install-deps
+.PHONY: lint
+.PHONY: test-local
+.PHONY: test-native-abi
+.PHONY: test-wasm
+.PHONY: test-wasm-linkage
+.PHONY: test-wasm-codegen
+.PHONY: test-wasm-release
+.PHONY: test
+.PHONY: test-miri
+.PHONY: check-valgrind
+.PHONY: bench
+.PHONY: bench-wasm
+.PHONY: bench-wasm-callgrind
+.PHONY: fuzz-ide
+.PHONY: fuzz-grammar
+.PHONY: fuzz-optimization
+.PHONY: fuzz-optimization-leaks
+.PHONY: fuzz
+.PHONY: fuzz-cmin-ide
+.PHONY: fuzz-cmin-grammar
+.PHONY: fuzz-cmin-optimization
+.PHONY: fuzz-cmin
+.PHONY: repl-hir
+.PHONY: repl-mir
+.PHONY: build-wasm-repl
+.PHONY: repl-wasm
+.PHONY: test-wasm-repl
+.PHONY: profile-mir
+.PHONY: profile-physical-mir
+.PHONY: print-std
+.PHONY: book-devel
+.PHONY: validate-book
+.PHONY: update-license-headers

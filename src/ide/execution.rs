@@ -53,6 +53,14 @@ pub struct ExecutionResult(ExecutionResultInner);
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 impl ExecutionResult {
+    /// Plain text for terminal and other non-HTML clients.
+    pub fn text_message(&self) -> String {
+        match &self.0 {
+            ExecutionResultInner::Success(output) => output.clone(),
+            ExecutionResultInner::Error(data) => data.complete.clone(),
+        }
+    }
+
     pub fn html_message(&self) -> String {
         use ExecutionResultInner::*;
         match &self.0 {

@@ -1,0 +1,17 @@
+[package]
+name = "wasm-repl"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+ferlium = { path = "../..", default-features = false, features = ["wasm-text"] }
+wasm-bindgen = "0.2.128"
+console_error_panic_hook = "0.1.7"
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false

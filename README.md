@@ -109,6 +109,12 @@ Its inspirations are:
 
 ## Developing Ferlium
 
+### Terminal REPLs
+
+Run `make repl-hir` or `make repl-mir` for the native REPL, or `make repl-wasm`
+for the Node/Wasm flavour. See the [REPL guide](doc/repl.md) for shared commands and
+scripted Wasm sessions.
+
 ### Running tests
 
 `make test-local` runs the suite via [`nextest`](https://nexte.st/), which is significantly faster than `cargo test`.

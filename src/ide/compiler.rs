@@ -6,8 +6,8 @@ use std::sync::LazyLock;
 #[cfg(all(target_arch = "wasm32", feature = "wasm-text"))]
 use crate::wasm::text::module_text;
 use crate::{
-    CompilationError, CompilationOutput, CompilerSession, DiagnosticSeverity, FxHashMap, FxHashSet,
-    MirOptimization, ModuleEnv, Path, SourceId, call_fn,
+    CompilationOutput, CompilerSession, DiagnosticSeverity, FxHashMap, FxHashSet, MirOptimization,
+    ModuleEnv, Path, SourceId, call_fn,
     emit_mir::MirText,
     eval::RuntimeError,
     execution::{DEFAULT_INTERACTIVE_FUEL_LIMIT, ExecutionTarget, ReferenceInterpreterLimits},
@@ -46,6 +46,9 @@ pub struct Compiler {
     position_encoding: PositionEncoding,
     position_index_lookup: FxHashMap<SourceId, PositionIndexLookup>,
     execution_fuel_limit: Option<usize>,
+    source_name: String,
+    repl_counter: usize,
+    repl_module: Option<ModuleId>,
 }
 
 const SRC_NAME: &str = "<ide>";
@@ -72,16 +75,6 @@ impl Compiler {
         }
     }
 
-    fn compile_internal(&mut self, src: &str) -> Result<(), CompilationError> {
-        self.user_module = self.session.compile_to(
-            src,
-            SRC_NAME,
-            Path::single_str(MODULE_NAME),
-            self.uses.clone(),
-        )?;
-        Ok(())
-    }
-
     pub fn compile(&mut self, src: &str) -> Option<Vec<ErrorData>> {
         let report = self.compile_report(src);
         if report.succeeded {
@@ -100,9 +93,46 @@ impl Compiler {
     /// Compile source and return every warning or error from this attempt. Warnings do not make
     /// the report unsuccessful and therefore do not disable execution in IDE clients.
     pub fn compile_report(&mut self, src: &str) -> CompilationReport {
-        let result = self.compile_internal(src);
+        self.compile_report_at(
+            src,
+            SRC_NAME,
+            Path::single_str(MODULE_NAME),
+            self.uses.clone(),
+        )
+    }
+
+    /// Compile a persistent REPL submission, importing earlier definitions with local shadowing.
+    pub fn compile_repl_report(&mut self, src: &str) -> CompilationReport {
+        let parsed =
+            crate::parse_module_and_expr(src, self.session.source_table().next_id(), false);
+        let local_symbols = parsed.as_ref().map_or_else(
+            |_| FxHashSet::default(),
+            |(module, _, _)| module.own_symbols().map(|(sym, _)| sym).collect(),
+        );
+        let uses = crate::repl::submission_uses(
+            &self.session,
+            &local_symbols,
+            self.repl_counter,
+            self.uses.clone(),
+        );
+        let name = format!("repl{}", self.repl_counter);
+        self.repl_counter += 1;
+        let report = self.compile_report_at(src, &name, Path::single_str(&name), uses);
+        if report.succeeded {
+            self.repl_module = Some(self.user_module.module_id);
+        }
+        report
+    }
+
+    fn compile_report_at(
+        &mut self,
+        src: &str,
+        name: &str,
+        path: Path,
+        uses: Uses,
+    ) -> CompilationReport {
+        let result = self.session.compile_to(src, name, path.clone(), uses);
         let succeeded = result.is_ok();
-        let path = Path::single_str(MODULE_NAME);
         let warning_diagnostics = self
             .session
             .modules()
@@ -127,11 +157,15 @@ impl Compiler {
                 )
             })
             .collect::<Vec<_>>();
-        if let Err(error) = result {
-            diagnostics.extend(compilation_error_to_data(
+        match result {
+            Ok(output) => {
+                self.user_module = output;
+                self.source_name = name.to_string();
+            }
+            Err(error) => diagnostics.extend(compilation_error_to_data(
                 &error,
                 &self.session.source_table,
-            ));
+            )),
         }
         let diagnostics = diagnostics
             .into_iter()
@@ -193,14 +227,7 @@ impl Compiler {
 
     /// Runs the current expression through the raw or optimized MIR interpreter.
     pub fn run_expr_mir(&mut self, optimized: bool) -> Option<ExecutionResult> {
-        self.run_expr_with_target(
-            ExecutionTarget::Mir,
-            if optimized {
-                MirOptimization::Enabled
-            } else {
-                MirOptimization::Disabled
-            },
-        )
+        self.run_expr_with_target(ExecutionTarget::Mir, MirOptimization::from(optimized))
     }
 
     /// Physical execution currently reports an explicit backend-unavailable error.
@@ -211,21 +238,32 @@ impl Compiler {
     /// Runs the current expression as generated Wasm, linked into this instance.
     #[cfg(target_arch = "wasm32")]
     pub fn run_expr_wasm(&mut self) -> Option<ExecutionResult> {
-        self.run_expr_with(
-            MirOptimization::Enabled,
-            |session, module_id, expr, limits| {
+        self.run_expr_wasm_optimized(true)
+    }
+
+    /// Runs Wasm with the selected MIR optimization setting.
+    #[cfg(target_arch = "wasm32")]
+    pub fn run_expr_wasm_optimized(&mut self, optimized: bool) -> Option<ExecutionResult> {
+        let optimization = MirOptimization::from(optimized);
+        self.with_optimization(optimization, true, |compiler| {
+            compiler.run_expr_with(optimization, |session, module_id, expr, limits| {
                 let limits = WasmLimits {
                     execution: limits.execution,
                     ..WasmLimits::default()
                 };
                 run_boxed_entry(session, FunctionId::new(module_id, expr), limits)
-            },
-        )
+            })
+        })
     }
 
     /// Returns verified, host-matched physical MIR with source-link metadata.
     pub fn physical_mir_text(&mut self) -> Result<IrText, String> {
-        self.mir_text_at(true, true)
+        self.physical_mir_text_optimized(true)
+    }
+
+    /// Returns physical MIR with the selected MIR optimization setting.
+    pub fn physical_mir_text_optimized(&mut self, optimized: bool) -> Result<IrText, String> {
+        self.mir_text_at(optimized, true)
     }
 
     /// Returns the MIR for the current successfully compiled source, with source-link metadata.
@@ -238,33 +276,38 @@ impl Compiler {
     /// metadata. Every function is compiled; named functions with a scalar signature are exported.
     #[cfg(all(target_arch = "wasm32", feature = "wasm-text"))]
     pub fn wasm_text(&mut self) -> Result<IrText, String> {
+        self.wasm_text_optimized(true)
+    }
+
+    /// Returns complete module Wasm text with the selected MIR optimization setting.
+    #[cfg(all(target_arch = "wasm32", feature = "wasm-text"))]
+    pub fn wasm_text_optimized(&mut self, optimized: bool) -> Result<IrText, String> {
         let Some(source_id) = self.compiled_source_id() else {
             return Ok(empty_ir_text());
         };
-        self.session.set_mir_optimization(MirOptimization::Enabled);
-        let text = module_text(&self.session, self.user_module.module_id)
-            .map_err(|error| self.format_runtime_error(error))?;
-        Ok(self.ir_text(text, source_id))
+        self.with_optimization(MirOptimization::from(optimized), true, |compiler| {
+            let text = module_text(&compiler.session, compiler.user_module.module_id)
+                .map_err(|error| compiler.format_runtime_error(error))?;
+            Ok(compiler.ir_text(text, source_id))
+        })
     }
 
     fn mir_text_at(&mut self, optimized: bool, physical: bool) -> Result<IrText, String> {
         let Some(source_id) = self.compiled_source_id() else {
             return Ok(empty_ir_text());
         };
-        let module_id = self.user_module.module_id;
-        self.session.set_mir_optimization(if optimized {
-            MirOptimization::Enabled
-        } else {
-            MirOptimization::Disabled
-        });
-        let text = if physical {
-            self.session
-                .emit_physical_mir_module_with_source_map(module_id)
-                .map_err(|error| self.format_runtime_error(error))?
-        } else {
-            self.session.emit_mir_module_with_source_map(module_id)
-        };
-        Ok(self.ir_text(text, source_id))
+        self.with_optimization(MirOptimization::from(optimized), physical, |compiler| {
+            let module_id = compiler.user_module.module_id;
+            let text = if physical {
+                compiler
+                    .session
+                    .emit_physical_mir_module_with_source_map(module_id)
+                    .map_err(|error| compiler.format_runtime_error(error))?
+            } else {
+                compiler.session.emit_mir_module_with_source_map(module_id)
+            };
+            Ok(compiler.ir_text(text, source_id))
+        })
     }
 
     /// The source of the user module, if it is compiled and up to date.
@@ -275,7 +318,7 @@ impl Compiler {
         }
         self.session
             .source_table()
-            .get_latest_source_by_name(SRC_NAME)
+            .get_latest_source_by_name(&self.source_name)
             .map(|(source_id, _)| source_id)
     }
 
@@ -335,13 +378,17 @@ impl Compiler {
             ReferenceInterpreterLimits,
         ) -> Result<Value, RuntimeError>,
     ) -> Option<ExecutionResult> {
-        self.session.set_mir_optimization(optimization);
         let expr = self.user_module.expr?;
-        Some((|| {
-            let module_id = self.user_module.module_id;
-            let is_stale = self.session.modules().info(module_id).unwrap().is_stale();
+        Some(self.with_optimization(optimization, false, |compiler| {
+            let module_id = compiler.user_module.module_id;
+            let is_stale = compiler
+                .session
+                .modules()
+                .info(module_id)
+                .unwrap()
+                .is_stale();
             if is_stale {
-                let module_name = self
+                let module_name = compiler
                     .session
                     .modules()
                     .path(module_id)
@@ -353,20 +400,20 @@ impl Compiler {
                 ));
             }
             let (value, ty) = {
-                let module = self.session.expect_fresh_module(module_id);
+                let module = compiler.session.expect_fresh_module(module_id);
                 let function = module.get_function_by_id(expr).unwrap();
                 let ty = function.definition.ty_scheme.ty.ret;
                 let limits = ReferenceInterpreterLimits::default()
-                    .with_fuel_limit(self.execution_fuel_limit);
-                (run(&mut self.session, module_id, expr, limits), ty)
+                    .with_fuel_limit(compiler.execution_fuel_limit);
+                (run(&mut compiler.session, module_id, expr, limits), ty)
             };
             match value {
                 Ok(value) => {
-                    let rendered = match self.session.value_to_inspect_text_with_fuel(
+                    let rendered = match compiler.session.value_to_inspect_text_with_fuel(
                         module_id,
                         value,
                         ty,
-                        self.execution_fuel_limit,
+                        compiler.execution_fuel_limit,
                     ) {
                         Ok(rendered) => rendered,
                         Err(error) => {
@@ -376,8 +423,8 @@ impl Compiler {
                             ));
                         }
                     };
-                    let module = self.session.expect_fresh_module(module_id);
-                    let module_env = ModuleEnv::new(module, self.session.raw_modules());
+                    let module = compiler.session.expect_fresh_module(module_id);
+                    let module_env = ModuleEnv::new(module, compiler.session.raw_modules());
                     let output = format!("{}: {}", rendered, ty.format_with(&module_env));
                     ExecutionResult::success(output)
                 }
@@ -386,20 +433,24 @@ impl Compiler {
                     let complete = format!(
                         "{}",
                         error.format_with(&(
-                            self.session.source_table(),
-                            self.session.raw_modules()
+                            compiler.session.source_table(),
+                            compiler.session.raw_modules()
                         ))
                     );
-                    let source_id = self
+                    let source_id = compiler
                         .session
                         .source_table()
-                        .get_latest_source_by_name(SRC_NAME)
+                        .get_latest_source_by_name(&compiler.source_name)
                         .unwrap()
                         .0;
                     let data = error.top_most_location_in(source_id).map(|loc| {
-                        ErrorData::from_location(loc, self.session.source_table(), summary.clone())
+                        ErrorData::from_location(
+                            loc,
+                            compiler.session.source_table(),
+                            summary.clone(),
+                        )
                     });
-                    let data = data.map(|data| self.encode_error_data_positions(data));
+                    let data = data.map(|data| compiler.encode_error_data_positions(data));
                     let data = ExecutionErrorData {
                         summary: summary.clone(),
                         complete,
@@ -408,7 +459,7 @@ impl Compiler {
                     ExecutionResult::error(data)
                 }
             }
-        })())
+        }))
     }
 
     pub fn get_annotations(&mut self) -> Vec<AnnotationData> {
@@ -426,7 +477,7 @@ impl Compiler {
         let (source_id, source_entry) = match self
             .session
             .source_table()
-            .get_latest_source_by_name(SRC_NAME)
+            .get_latest_source_by_name(&self.source_name)
         {
             Some(source) => source,
             None => return Vec::new(),
@@ -554,7 +605,80 @@ impl Compiler {
             position_encoding: PositionEncoding::default(),
             position_index_lookup: FxHashMap::default(),
             execution_fuel_limit: Some(DEFAULT_INTERACTIVE_FUEL_LIMIT),
+            source_name: SRC_NAME.to_string(),
+            repl_counter: 0,
+            repl_module: None,
         }
+    }
+
+    pub fn repl_has_submission(&self) -> bool {
+        self.repl_module.is_some()
+    }
+
+    /// REPL module inspection, independent of the terminal frontend.
+    pub fn repl_module_text(&self, name: Option<&str>) -> Result<String, String> {
+        crate::repl::module_text(&self.session, self.repl_current_module_id(), name)
+    }
+
+    pub fn repl_function_text(
+        &self,
+        function: &str,
+        module: Option<&str>,
+    ) -> Result<String, String> {
+        crate::repl::function_text(
+            &self.session,
+            self.repl_current_module_id(),
+            function,
+            module,
+        )
+    }
+
+    fn repl_current_module_id(&self) -> ModuleId {
+        self.repl_module.unwrap_or(self.user_module.module_id)
+    }
+
+    /// Inspect a retained submission or named module without changing execution settings.
+    pub fn repl_mir_text(
+        &mut self,
+        name: Option<&str>,
+        optimized: bool,
+        physical: bool,
+    ) -> Result<String, String> {
+        if name.is_none() && self.repl_module.is_none() {
+            return Err("no successfully compiled submission".to_string());
+        }
+        let module =
+            crate::repl::selected_module(&self.session, self.repl_current_module_id(), name)?;
+        self.with_optimization(optimized.into(), physical, |compiler| {
+            if physical {
+                crate::repl::physical_mir_text(&compiler.session, module)
+            } else {
+                Ok(compiler.session.emit_mir_module(module))
+            }
+        })
+    }
+
+    pub fn repl_history_text(&self) -> String {
+        crate::repl::history_text(&self.session, self.repl_counter)
+    }
+
+    /// Select stages for one operation, preserving the caller's session configuration.
+    fn with_optimization<T>(
+        &mut self,
+        optimization: MirOptimization,
+        physical: bool,
+        operation: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let semantic_before = self.session.mir_optimization();
+        let physical_before = self.session.physical_mir_optimization();
+        self.session.set_mir_optimization(optimization);
+        if physical {
+            self.session.set_physical_mir_optimization(optimization);
+        }
+        let result = operation(self);
+        self.session.set_mir_optimization(semantic_before);
+        self.session.set_physical_mir_optimization(physical_before);
+        result
     }
 
     fn position_index_lookup(&mut self, source_id: SourceId) -> &mut PositionIndexLookup {
@@ -662,6 +786,213 @@ mod tests {
             panic!("Compilation errors: {}", iterable_to_string(&errors, ", "));
         }
         compiler
+    }
+
+    #[test]
+    fn repl_submissions_preserve_bindings_and_recover_from_errors() {
+        let mut compiler = Compiler::new();
+        for source in [
+            "pub fn answer() -> int { 1 }",
+            "pub fn old() -> int { answer() }",
+            "pub fn answer() -> int { 42 }",
+            "(answer(), old())",
+        ] {
+            let report = compiler.compile_repl_report(source);
+            assert!(report.succeeded, "{source}: {:?}", report.diagnostics);
+        }
+        assert_eq!(
+            compiler.run_expr().unwrap().text_message(),
+            "(42, 1): (int, int)"
+        );
+        assert!(
+            !compiler
+                .compile_repl_report("fn broken() -> bool { 1 }")
+                .succeeded
+        );
+        assert_eq!(
+            compiler.run_expr().unwrap().text_message(),
+            "(42, 1): (int, int)"
+        );
+        assert!(compiler.compile_repl_report("answer()").succeeded);
+        assert_eq!(compiler.run_expr().unwrap().text_message(), "42: int");
+    }
+
+    #[test]
+    fn repl_inspection_supports_native_command_forms() {
+        let mut compiler = Compiler::new();
+        assert!(
+            compiler
+                .repl_module_text(Some("std"))
+                .unwrap()
+                .contains("string_len")
+        );
+        assert!(
+            compiler
+                .compile_repl_report("fn hidden(x: int) -> int { x + 1 }")
+                .succeeded
+        );
+        let function = compiler.repl_function_text("hidden", None).unwrap();
+        assert_eq!(
+            function,
+            compiler.repl_function_text("repl0::hidden", None).unwrap()
+        );
+        assert_eq!(
+            function,
+            compiler
+                .repl_function_text("hidden", Some("repl0"))
+                .unwrap()
+        );
+        assert_eq!(
+            function,
+            compiler.repl_function_text("0", Some("repl0")).unwrap()
+        );
+        assert!(
+            compiler
+                .repl_module_text(Some("repl0"))
+                .unwrap()
+                .contains("hidden")
+        );
+        assert!(compiler.repl_history_text().starts_with("repl0:"));
+        assert_eq!(
+            compiler.repl_module_text(Some("missing")).unwrap_err(),
+            "Module missing not found."
+        );
+    }
+
+    #[test]
+    fn repl_inspection_tracks_submissions_independently_of_ide_source_names() {
+        let mut compiler = build("fn ide_function() -> int { 1 }");
+        assert!(!compiler.repl_has_submission());
+        assert!(
+            compiler
+                .repl_module_text(None)
+                .unwrap()
+                .contains("ide_function")
+        );
+        assert!(
+            compiler
+                .compile_repl_report("fn repl_function() -> int { 2 }")
+                .succeeded
+        );
+        assert!(compiler.repl_has_submission());
+        assert!(
+            compiler
+                .compile_report("fn replacement() -> int { 3 }")
+                .succeeded
+        );
+        assert!(
+            compiler
+                .repl_module_text(None)
+                .unwrap()
+                .contains("repl_function")
+        );
+        assert!(
+            !compiler
+                .compile_repl_report("fn broken() -> bool { 1 }")
+                .succeeded
+        );
+        assert!(
+            compiler
+                .repl_module_text(None)
+                .unwrap()
+                .contains("repl_function")
+        );
+    }
+
+    #[test]
+    fn repl_mir_inspection_selects_retained_modules() {
+        let mut compiler = Compiler::new();
+        assert_eq!(
+            compiler.repl_mir_text(None, true, false).unwrap_err(),
+            "no successfully compiled submission"
+        );
+        assert_eq!(
+            compiler
+                .repl_mir_text(Some("missing"), true, false)
+                .unwrap_err(),
+            "Module missing not found."
+        );
+        assert!(
+            compiler
+                .compile_repl_report("pub fn earlier(x: int) -> int { x + 1 }")
+                .succeeded
+        );
+        assert!(
+            compiler
+                .compile_repl_report("pub fn latest(x: int) -> int { x * 2 }")
+                .succeeded
+        );
+        for physical in [false, true] {
+            for optimized in [false, true] {
+                let text = compiler
+                    .repl_mir_text(Some("repl0"), optimized, physical)
+                    .unwrap();
+                assert!(text.contains("earlier"));
+                assert!(!text.contains("latest"));
+                assert!(
+                    compiler
+                        .repl_mir_text(None, optimized, physical)
+                        .unwrap()
+                        .contains("latest")
+                );
+            }
+        }
+        assert!(compiler.repl_module_text(None).unwrap().contains("latest"));
+        assert!(
+            !compiler
+                .compile_repl_report("fn broken() -> bool { 1 }")
+                .succeeded
+        );
+        assert!(compiler.repl_mir_text(Some("repl2"), true, false).is_err());
+        assert!(compiler.repl_mir_text(Some("repl2"), true, true).is_err());
+    }
+
+    #[test]
+    fn inspection_and_execution_preserve_session_optimization_on_success_and_error() {
+        let mut compiler = build("fn next(x: int) -> int { x + 1 } next(1)");
+        compiler
+            .session
+            .set_mir_optimization(MirOptimization::Disabled);
+        compiler
+            .session
+            .set_physical_mir_optimization(MirOptimization::Disabled);
+        assert!(!compiler.mir_text(true).text.is_empty());
+        assert!(
+            !compiler
+                .physical_mir_text_optimized(true)
+                .unwrap()
+                .text
+                .is_empty()
+        );
+        assert_eq!(
+            compiler.run_expr_mir(true).unwrap().text_message(),
+            "2: int"
+        );
+        assert_eq!(
+            compiler.session.mir_optimization(),
+            MirOptimization::Disabled
+        );
+        assert_eq!(
+            compiler.session.physical_mir_optimization(),
+            MirOptimization::Disabled
+        );
+        assert!(compiler.compile_report("loop {}").succeeded);
+        compiler.set_execution_fuel_limit(3);
+        assert!(
+            compiler
+                .run_expr_mir(true)
+                .unwrap()
+                .error_content()
+                .is_some()
+        );
+        assert_eq!(
+            compiler.session.mir_optimization(),
+            MirOptimization::Disabled
+        );
+        assert_eq!(
+            compiler.session.physical_mir_optimization(),
+            MirOptimization::Disabled
+        );
     }
 
     #[test]

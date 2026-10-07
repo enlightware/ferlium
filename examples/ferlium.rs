@@ -1,34 +1,27 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-use ferlium::hir;
+use ferlium::repl;
 use ferlium::{FxHashMap, FxHashSet};
-use std::env;
 use std::io::{self, IsTerminal, Read};
 use std::ops::Deref;
+use std::{env, fs};
 
 use ariadne::{Label, Source};
-use ferlium::ast;
 use ferlium::compiler::error::{
     CompilationError, CompilationErrorImpl, LocatedError, MutabilityMustBeWhat,
 };
 use ferlium::format::FormatWith;
-use ferlium::hir::native_functions::NativeFnR;
 use ferlium::ide::{AnnotationData, Compiler as IdeCompiler};
 use ferlium::module::id::Id;
-use ferlium::module::{
-    LocalFunctionId, Module, ModuleId, Path, ShowModuleWithOptions, UseData, Uses,
-};
-use ferlium::std::new_module_using_std;
+use ferlium::module::{LocalFunctionId, ModuleId, Path, ShowModuleWithOptions, UseData, Uses};
 use ferlium::std::string::String as FerliumString;
-use ferlium::types::effects::{PrimitiveEffect, effect};
 use ferlium::{
     CompilationOutput, CompilerSession, ExecutionTarget, Location, MirOptimization, SourceId,
     SourceTable, SubOrSameType, parse_module_and_expr,
 };
 use rustyline::DefaultEditor;
 use rustyline::{config::Configurer, error::ReadlineError};
-use ustr::ustr;
 
 use ferlium::execution::{DEFAULT_INTERACTIVE_FUEL_LIMIT, ReferenceInterpreterLimits};
 
@@ -461,64 +454,29 @@ fn print_help() {
         "\\opt on|off: Shows or sets MIR optimization (partial evaluation). With MIR enabled, both the raw and the optimized MIR are shown."
     );
     println!("\\history: Shows the modules in this session's history.");
-    println!("CTRL-D: Exits the REPL.");
+    println!(
+        "\\mir [MODULE] [raw]: Shows semantic MIR using the current optimization setting, or raw MIR."
+    );
+    println!(
+        "\\physical-mir [MODULE] [raw]: Shows physical MIR using the current optimization setting, or raw MIR."
+    );
+    println!("\\load FILE: Compiles and runs a file as a submission.");
+    println!("\\run: Runs the last successfully compiled expression again.");
+    println!("\\reset: Clears the session.");
+    println!("\\quit or CTRL-D: Exits the REPL.");
     println!("\nNote: expression locals do not persist across REPL inputs.");
-}
-
-/// Prints the module's MIR — both stages when the session optimizes, so the effect of the
-/// partial-evaluation passes is visible side by side.
-///
-/// Rendering a stage means asking the session for it, so this flips the setting around each render
-/// and restores it. Optimized bodies are built on demand beside the raw ones, so nothing already
-/// compiled is invalidated.
-fn print_mir(session: &mut CompilerSession, module_id: ModuleId) {
-    let optimization = session.mir_optimization();
-    if optimization == MirOptimization::Disabled {
-        println!("Module MIR:\n{}", session.emit_mir_module(module_id));
-        return;
-    }
-    session.set_mir_optimization(MirOptimization::Disabled);
-    let raw = session.emit_mir_module(module_id);
-    session.set_mir_optimization(MirOptimization::Enabled);
-    let optimized = session.emit_mir_module(module_id);
-    session.set_mir_optimization(optimization);
-    println!("Module MIR (raw):\n{raw}");
-    println!("Module MIR (optimized):\n{optimized}");
 }
 
 extern "C" fn console_print(message: &FerliumString) {
     println!("{}", message.as_ref());
 }
 
-fn console_module(module_id: ModuleId) -> Module {
-    let mut module = new_module_using_std(module_id, Path::single_str("$console"));
-    module.add_function(
-        ustr("print"),
-        NativeFnR::new(console_print).description(
-            ["message"],
-            "Prints `message` to the REPL console.",
-            effect(PrimitiveEffect::Write),
-        ),
-    );
-    module
-}
-
-fn repl_show_module_options(session: &CompilerSession) -> ShowModuleWithOptions<'_> {
-    ShowModuleWithOptions {
-        modules: session.modules(),
-        show_details: false,
-        show_all_functions: true,
-        show_private_items: true,
-    }
-}
-
-fn parse_repl_module_path(name: &str) -> Path {
-    Path::new(name.split("::").map(ustr).collect())
-}
-
-fn split_qualified_function_name(name: &str) -> Option<(Path, &str)> {
-    let (module, function) = name.rsplit_once("::")?;
-    (!module.is_empty() && !function.is_empty()).then(|| (parse_repl_module_path(module), function))
+#[derive(Clone, Copy)]
+struct InspectionOptions {
+    module: bool,
+    mir: bool,
+    physical_mir: bool,
+    optimization_report: bool,
 }
 
 /// Process a single input: parse, compile module, and evaluate expression if present.
@@ -532,8 +490,8 @@ fn process_input(
     is_repl: bool,
     target: ExecutionTarget,
     fuel_limit: Option<usize>,
-    print_optimization_report: bool,
-) -> Result<ModuleId, i32> {
+    inspection: InspectionOptions,
+) -> Result<CompilationOutput, i32> {
     // Parse the input once to get the list of symbols this module defines.
     let source_id = session.source_table().next_id();
     let parsed = parse_module_and_expr(input, source_id, false);
@@ -542,27 +500,6 @@ fn process_input(
         |(module, _, _)| module.own_symbols().map(|(sym, _)| sym).collect(),
     );
 
-    // Build use directives to import last modules as repl<counter>
-    let mut reverse_uses = FxHashMap::default();
-    for i in 0..fill_use_until {
-        let index = fill_use_until - i - 1;
-        let mod_name = format!("repl{index}");
-        if let Some((_, module)) = session.modules().get_by_path(&Path::single_str(&mod_name)) {
-            for sym in module.own_symbols() {
-                if !local_symbols.contains(&sym)
-                    && !reverse_uses.contains_key(&sym)
-                    // exclude lambda functions
-                    && !sym.starts_with("$")
-                    // exclude trait implementations
-                    && !sym.contains("::")
-                {
-                    reverse_uses.insert(sym, Path::single_str(&mod_name));
-                }
-            }
-        }
-    }
-
-    // Initialize module with use directives
     let mut uses = Uses::new_with_std();
     if is_repl {
         uses.wildcards.push(UseData::new(
@@ -570,31 +507,7 @@ fn process_input(
             Location::new_synthesized(),
         ));
     }
-    for (sym, path) in reverse_uses {
-        uses.explicits
-            .insert(sym, UseData::new(path, Location::new_synthesized()));
-    }
-
-    // AST debug output for REPL
-    if is_repl {
-        if let Ok((module_ast, expr_ast, arena)) = &parsed {
-            let dbg_module =
-                new_module_using_std(session.modules().next_id(), Path::single_str("$debug"));
-            let module_env = session.modules().env_for(&dbg_module);
-            if !module_ast.is_empty() {
-                println!(
-                    "Module AST:\n{}",
-                    ast::ModuleDisplay::new(module_ast, arena).format_with(&module_env)
-                );
-            }
-            if let Some(expr_ast) = expr_ast {
-                println!(
-                    "Expr AST:\n{}",
-                    ast::ExprDisplay::new(*expr_ast, arena).format_with(&module_env)
-                );
-            }
-        }
-    }
+    let uses = repl::submission_uses(session, &local_symbols, fill_use_until, uses);
 
     // Compile the input to a module and an expression (if any)
     let CompilationOutput { module_id, expr } = session
@@ -605,81 +518,98 @@ fn process_input(
             1
         })?;
 
-    // Show HIR
-    if is_repl {
-        let module = session.expect_fresh_module(module_id);
-        println!(
-            "Module HIR:\n{}",
-            module.format_with(&repl_show_module_options(session))
-        );
-        if let Some(expr) = expr.as_ref() {
-            let module_env = session.modules().env_for(module);
-            let function = module.get_function_by_id(*expr).unwrap();
-            let script = function.code.as_script().unwrap();
-            println!(
-                "Expr HIR:\n{}",
-                hir::ExprDisplay::new(script.entry_node_id, &function.locals)
-                    .format_with(&module_env)
-            );
+    // Inspection remains available after a runtime error, as in the Wasm frontend.
+    let execution = if let Some(expr) = expr {
+        run_expression(session, module_id, expr, target, fuel_limit)
+    } else {
+        Ok(())
+    };
+
+    if inspection.module {
+        match repl::module_text(session, module_id, None) {
+            Ok(text) => println!("{text}"),
+            Err(error) => {
+                eprintln!("Inspection error: {error}");
+                if !is_repl {
+                    return Err(2);
+                }
+            }
         }
     }
-
-    if target == ExecutionTarget::Mir {
-        print_mir(session, module_id);
+    if inspection.mir {
+        println!("{}", session.emit_mir_module(module_id));
     }
-    if print_optimization_report {
+    if inspection.physical_mir {
+        let before = session.physical_mir_optimization();
+        session.set_physical_mir_optimization(session.mir_optimization());
+        let text = repl::physical_mir_text(session, module_id);
+        session.set_physical_mir_optimization(before);
+        match text {
+            Ok(text) => println!("{text}"),
+            Err(error) => {
+                eprintln!("Inspection error: {error}");
+                if !is_repl {
+                    return Err(2);
+                }
+            }
+        }
+    }
+    if inspection.optimization_report {
         let report = session.optimization_report(module_id);
         let module = session.expect_fresh_module(module_id);
         let module_env = session.modules().env_for(module);
         println!("Optimization report:\n{}", report.format_with(&module_env));
     }
 
-    // If there's an expression, evaluate it
-    if let Some(expr) = expr {
-        let ty = session
-            .expect_fresh_module(module_id)
-            .get_function_by_id(expr)
-            .unwrap()
-            .definition
-            .ty_scheme
-            .ty
-            .ret;
-        // Evaluate expression
-        let result = {
-            let limits = ReferenceInterpreterLimits::default().with_fuel_limit(fuel_limit);
-            session.run_entry_with_limits(target, module_id, expr, vec![], limits)
-        };
-        match result {
-            Ok(value) => {
-                let rendered = match session
-                    .value_to_inspect_text_with_fuel(module_id, value, ty, fuel_limit)
-                {
+    if !is_repl {
+        execution?;
+    }
+    Ok(CompilationOutput { module_id, expr })
+}
+
+fn run_expression(
+    session: &mut CompilerSession,
+    module_id: ModuleId,
+    expr: LocalFunctionId,
+    target: ExecutionTarget,
+    fuel_limit: Option<usize>,
+) -> Result<(), i32> {
+    let ty = session
+        .expect_fresh_module(module_id)
+        .get_function_by_id(expr)
+        .unwrap()
+        .definition
+        .ty_scheme
+        .ty
+        .ret;
+    // Evaluate expression
+    let result = {
+        let limits = ReferenceInterpreterLimits::default().with_fuel_limit(fuel_limit);
+        session.run_entry_with_limits(target, module_id, expr, vec![], limits)
+    };
+    match result {
+        Ok(value) => {
+            let rendered =
+                match session.value_to_inspect_text_with_fuel(module_id, value, ty, fuel_limit) {
                     Ok(rendered) => rendered,
                     Err(error) => {
                         eprintln!("Formatting error:\n{error}");
                         return Err(2);
                     }
                 };
-                let module = session.expect_fresh_module(module_id);
-                let module_env = session.modules().env_for(module);
-                println!("{}: {}", rendered, ty.format_with(&module_env));
-            }
-            Err(error) => {
-                eprintln!(
-                    "{}",
-                    error.format_with(&(session.source_table(), session.modules()))
-                );
-                return Err(2);
-            }
+            let module = session.expect_fresh_module(module_id);
+            let module_env = session.modules().env_for(module);
+            println!("{}: {}", rendered, ty.format_with(&module_env));
         }
-    } else {
-        // No expression, just module definitions - that's successful
-        if !is_repl {
-            println!("No expression to evaluate.");
+        Err(error) => {
+            eprintln!(
+                "{}",
+                error.format_with(&(session.source_table(), session.modules()))
+            );
+            return Err(2);
         }
     }
-
-    Ok(module_id)
+    Ok(())
 }
 
 fn annotated_source(input: &str, annotations: &[AnnotationData]) -> String {
@@ -720,12 +650,11 @@ fn print_pipe_annotations(input: &str, allow_experimental: bool) -> i32 {
 }
 
 fn process_pipe_input(
-    print_module: bool,
+    inspection: InspectionOptions,
     print_annotations: bool,
     allow_experimental: bool,
     target: ExecutionTarget,
     optimization: MirOptimization,
-    optimization_report: bool,
 ) -> i32 {
     // Read all input from stdin
     let mut input = String::new();
@@ -757,18 +686,9 @@ fn process_pipe_input(
         false,
         target,
         None,
-        optimization_report,
+        inspection,
     )
-    .map_or_else(
-        |code| code,
-        |module_id| {
-            if print_module {
-                let module = session.expect_fresh_module(module_id);
-                println!("{}", module.format_with(&session.modules()));
-            }
-            0
-        },
-    )
+    .map_or_else(|code| code, |_| 0)
 }
 
 /// Prints the optimization report for the standard library.
@@ -794,8 +714,7 @@ fn print_std_optimization_report() {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    // Optimization only applies to MIR, so asking for it selects that target.
-    // Reporting is about what optimization did, so asking for it turns optimization on.
+    // Both REPLs default to optimized MIR. Reporting explicitly selects that mode.
     let optimization_report = args.iter().any(|arg| arg == "--optimization-report");
     // The same question about the standard library, which is where most of the code a program
     // calls actually lives — and the corpus the optimizer's budgets were sized against. It is a
@@ -804,33 +723,29 @@ fn main() {
         print_std_optimization_report();
         return;
     }
-    let optimize = optimization_report || args.iter().any(|arg| arg == "--optimize");
-    let target = if optimize || args.iter().any(|arg| arg == "--mir") {
-        ExecutionTarget::Mir
-    } else {
-        ExecutionTarget::Hir
-    };
-    let optimization = if optimize {
-        MirOptimization::Enabled
-    } else {
-        MirOptimization::Disabled
-    };
-
-    // Check if we're being used in pipe mode (stdin is not a terminal)
-    if !io::stdin().is_terminal() {
-        // Pipe mode: read from stdin, process, and exit
-        let print_module = args.iter().any(|arg| arg == "--print-module");
-        let print_annotations = args.iter().any(|arg| arg == "--print-annotations");
-        let allow_experimental = args.iter().any(|arg| arg == "--allow-experimental");
-        std::process::exit(process_pipe_input(
-            print_module,
-            print_annotations,
-            allow_experimental,
-            target,
-            optimization,
-            optimization_report,
-        ));
+    let mut optimized = true;
+    let mut target = ExecutionTarget::Mir;
+    let mut options = args.iter().skip(1);
+    while let Some(option) = options.next() {
+        if option == "--opt" {
+            optimized = match options.next().map(String::as_str) {
+                Some("on" | "yes") => true,
+                Some("off" | "no") => false,
+                _ => {
+                    eprintln!("Usage: --opt on|off");
+                    std::process::exit(1);
+                }
+            };
+        } else if option == "--optimize" {
+            optimized = true;
+        } else if option == "--hir" {
+            target = ExecutionTarget::Hir;
+        }
     }
+    if optimization_report {
+        target = ExecutionTarget::Mir;
+    }
+    let optimization = MirOptimization::from(optimized || optimization_report);
 
     // Check for help flag
     let allow_experimental = args.iter().any(|arg| arg == "--allow-experimental");
@@ -840,11 +755,20 @@ fn main() {
         println!("Usage:");
         println!("  {} [--help|-h]        Show the help.", args[0]);
         println!(
-            "  {} [--mir]            Compile to MIR, print it, and execute it with the MIR interpreter.",
+            "  {} [--mir]            Inspect semantic MIR after execution.",
             args[0]
         );
         println!(
-            "  {} [--optimize]       Enable MIR partial evaluation, and print raw and optimized MIR (implies --mir).",
+            "  {} [--hir]            Execute HIR instead of MIR.",
+            args[0]
+        );
+        println!(
+            "  {} [--opt on|off]     Select MIR optimization (default: on).",
+            args[0]
+        );
+        println!("  {} [--optimize]       Alias for --opt on.", args[0]);
+        println!(
+            "  {} [--physical-mir]   Inspect physical MIR after execution.",
             args[0]
         );
         println!(
@@ -864,7 +788,7 @@ fn main() {
             args[0]
         );
         println!(
-            "  {} [--print-module]   Print the provided-code module (pipe mode only).",
+            "  {} [--print-module]   Inspect the provided-code module (HIR).",
             args[0]
         );
         println!(
@@ -888,6 +812,27 @@ fn main() {
             args[0]
         );
         return;
+    }
+
+    let inspection = InspectionOptions {
+        module: args.iter().any(|arg| arg == "--print-module"),
+        mir: args.iter().any(|arg| arg == "--mir"),
+        physical_mir: args.iter().any(|arg| arg == "--physical-mir"),
+        optimization_report,
+    };
+
+    // Check if we're being used in pipe mode (stdin is not a terminal)
+    if !io::stdin().is_terminal() {
+        // Pipe mode: read from stdin, process, and exit
+        let print_annotations = args.iter().any(|arg| arg == "--print-annotations");
+        let allow_experimental = args.iter().any(|arg| arg == "--allow-experimental");
+        std::process::exit(process_pipe_input(
+            inspection,
+            print_annotations,
+            allow_experimental,
+            target,
+            optimization,
+        ));
     }
 
     // Check for print-std flags
@@ -925,19 +870,26 @@ fn main() {
     }
 
     // Interactive REPL mode
-    run_interactive_repl(
-        allow_experimental,
-        target,
-        optimization,
-        optimization_report,
-    );
+    run_interactive_repl(allow_experimental, target, optimization, inspection);
+}
+
+fn record_history(editor: &mut DefaultEditor, line: &str, filename: &str) {
+    if line.trim().is_empty() {
+        return;
+    }
+    if let Err(error) = editor
+        .add_history_entry(line)
+        .and_then(|_| editor.save_history(filename))
+    {
+        println!("Failed to save history: {error:?}");
+    }
 }
 
 fn run_interactive_repl(
     allow_experimental: bool,
     target: ExecutionTarget,
     optimization: MirOptimization,
-    optimization_report: bool,
+    inspection: InspectionOptions,
 ) {
     // Logging
     env_logger::init();
@@ -948,10 +900,11 @@ fn run_interactive_repl(
     session.set_mir_optimization(optimization);
     session.register_module(
         Path::single_str("console"),
-        console_module(session.modules().next_id()),
+        repl::console_module(session.modules().next_id(), console_print),
     );
     // Last module that compiled successfully, start with the std module.
     let mut last_module = ModuleId::from_index(0);
+    let mut last_expr = None;
     let mut counter: usize = 0;
     let mut fuel_limit = Some(DEFAULT_INTERACTIVE_FUEL_LIMIT);
 
@@ -969,23 +922,46 @@ fn run_interactive_repl(
         // Read input
         let readline = rl.readline(&format!("repl{counter} >> "));
         let src = match readline {
-            Ok(line) => {
-                if line.is_empty() {
+            Ok(mut line) => {
+                record_history(&mut rl, &line, history_filename);
+                let mut source_input = false;
+                if let Some(path) = line
+                    .trim()
+                    .strip_prefix("\\load")
+                    .filter(|suffix| suffix.is_empty() || suffix.starts_with(char::is_whitespace))
+                {
+                    if path.trim().is_empty() {
+                        println!("Usage: \\load FILE");
+                        continue;
+                    }
+                    source_input = true;
+                    match fs::read_to_string(path.trim()) {
+                        Ok(source) => line = source,
+                        Err(error) => {
+                            eprintln!("{error}");
+                            continue;
+                        }
+                    }
+                }
+                if line.trim().is_empty() {
                     continue;
                 }
-                if let Some(command) = line.strip_prefix('\\') {
+                if let Some(command) = line.trim().strip_prefix('\\').filter(|_| !source_input) {
                     // a meta command
                     let args: Vec<_> = command.split_whitespace().collect();
                     if args.is_empty() {
                         println!("Unknown command \"{command}\". Type \\help for help.");
                         continue;
                     }
-                    let store = match args[0] {
+                    match args[0] {
                         "help" => {
                             print_help();
-                            true
                         }
                         "opt" => {
+                            if args.len() > 2 {
+                                println!("Usage: \\opt [on|off]");
+                                continue;
+                            }
                             let setting = match args.get(1).copied() {
                                 None => Some(session.mir_optimization()),
                                 Some("on" | "yes") => Some(MirOptimization::Enabled),
@@ -1006,156 +982,144 @@ fn run_interactive_repl(
                                     && target != ExecutionTarget::Mir
                                 {
                                     println!(
-                                        "Note: optimization applies to MIR only; restart with --mir to use it."
+                                        "Note: HIR execution is unaffected; optimization applies to MIR inspection and execution."
                                     );
                                 }
                             }
-                            true
+                        }
+                        "fuel" if args.len() > 2 => {
+                            println!("Usage: \\fuel [N|off]");
                         }
                         "fuel" => match args.get(1).copied() {
-                            None => {
-                                match fuel_limit {
-                                    Some(limit) => println!("Execution fuel limit: {limit}"),
-                                    None => println!("Execution fuel limit: off"),
-                                }
-                                true
-                            }
+                            None => match fuel_limit {
+                                Some(limit) => println!("Execution fuel limit: {limit}"),
+                                None => println!("Execution fuel limit: off"),
+                            },
                             Some("off" | "none" | "unlimited") => {
                                 fuel_limit = None;
                                 println!("Execution fuel limit disabled.");
-                                true
                             }
                             Some(value) => match value.parse::<usize>() {
                                 Ok(limit) => {
                                     fuel_limit = Some(limit);
                                     println!("Execution fuel limit: {limit}");
-                                    true
                                 }
                                 _ => {
                                     println!(
                                         "Invalid fuel limit \"{value}\". Use a non-negative integer or off."
                                     );
-                                    false
                                 }
                             },
                         },
                         "module" => {
-                            let module_id = if let Some(arg) = args.get(1) {
-                                if let Some(module_id) =
-                                    session.modules().id_by_path(&Path::single_str(arg))
-                                {
-                                    module_id
-                                } else {
-                                    println!("Module {arg} not found.");
-                                    continue;
-                                }
-                            } else {
-                                last_module
-                            };
-                            let module = session.modules().get(module_id);
-                            if let Some(module) = module {
-                                println!(
-                                    "\n{}",
-                                    module.format_with(&repl_show_module_options(&session))
-                                );
-                            } else {
-                                println!(
-                                    "Module never compiled succesfully and is thus not available for inspection."
-                                );
+                            if args.len() > 2 {
+                                println!("Usage: \\module [MODULE]");
+                                continue;
                             }
-                            true
+                            match repl::module_text(&session, last_module, args.get(1).copied()) {
+                                Ok(text) => println!("{text}"),
+                                Err(error) => println!("{error}"),
+                            }
                         }
                         "function" => {
-                            let Some(function_arg) = args.get(1).copied() else {
+                            if args.len() > 3 {
+                                println!("Usage: \\function FN_NAME_OR_INDEX [MOD_NAME]");
+                                continue;
+                            }
+                            let Some(function) = args.get(1) else {
                                 println!("Function id or name is required.");
                                 continue;
                             };
-                            let qualified = split_qualified_function_name(function_arg);
-                            let (module_id, module_name, function_name): (ModuleId, String, &str) =
-                                if let Some(module_arg) = args.get(2) {
-                                    let module_path = parse_repl_module_path(module_arg);
-                                    if let Some(module_id) =
-                                        session.modules().id_by_path(&module_path)
-                                    {
-                                        (module_id, module_arg.to_string(), function_arg)
-                                    } else {
-                                        println!("Module {module_arg} not found.");
-                                        continue;
-                                    }
-                                } else if let Some((module_path, function_name)) = qualified {
-                                    let module_name = module_path.to_string();
-                                    if let Some(module_id) =
-                                        session.modules().id_by_path(&module_path)
-                                    {
-                                        (module_id, module_name, function_name)
-                                    } else {
-                                        println!("Module {module_name} not found.");
-                                        continue;
-                                    }
-                                } else {
-                                    (last_module, String::from("current"), function_arg)
-                                };
-                            let module = session.modules().get(module_id);
-                            let module = match module {
-                                None => {
-                                    println!(
-                                        "Module never compiled succesfully and is thus not available for inspection."
-                                    );
-                                    continue;
-                                }
-                                Some(module) => module,
-                            };
-                            let fn_id = match function_name.parse::<usize>() {
-                                Ok(index) => LocalFunctionId::from_index(index),
-                                Err(_) => {
-                                    // not a number, attempt to find by name
-                                    match module.get_local_function_id(ustr(function_name)) {
-                                        Some(id) => id,
-                                        None => {
-                                            println!(
-                                                "Function name {function_name} not found in module {module_name}."
-                                            );
-                                            continue;
-                                        }
-                                    }
-                                }
-                            };
-                            let function = if let Some(function) = module.get_function_by_id(fn_id)
-                            {
-                                function
-                            } else {
-                                println!("Function id {fn_id} not found in module {module_name}.");
-                                continue;
-                            };
-                            let env = session.modules().env_for(module);
-                            let fn_name = module
-                                .get_function_name_by_id(fn_id)
-                                .unwrap_or_else(|| ustr("<anonymous function>"));
-                            println!("{}", (function, fn_name).format_with(&env));
-                            true
+                            match repl::function_text(
+                                &session,
+                                last_module,
+                                function,
+                                args.get(2).copied(),
+                            ) {
+                                Ok(text) => println!("{text}"),
+                                Err(error) => println!("{error}"),
+                            }
                         }
                         "history" => {
-                            for i in 0..counter {
-                                let name = format!("repl{i}");
-                                if let Some((_, module)) =
-                                    session.modules().get_by_path(&Path::single_str(&name))
-                                {
-                                    println!("{}: {}", name, module.list_stats());
-                                }
-                            }
-                            true
+                            println!("{}", repl::history_text(&session, counter));
                         }
+                        "mir" | "physical-mir" => {
+                            let names: Vec<_> = args[1..]
+                                .iter()
+                                .copied()
+                                .filter(|arg| *arg != "raw")
+                                .collect();
+                            let raw_count = args[1..].iter().filter(|arg| **arg == "raw").count();
+                            if names.len() > 1 || raw_count > 1 {
+                                println!("Usage: \\{} [MODULE] [raw]", args[0]);
+                                continue;
+                            }
+                            if names.is_empty() && last_module == ModuleId::from_index(0) {
+                                println!("no successfully compiled submission");
+                                continue;
+                            }
+                            let module = match repl::selected_module(
+                                &session,
+                                last_module,
+                                names.first().copied(),
+                            ) {
+                                Ok(module) => module,
+                                Err(error) => {
+                                    println!("{error}");
+                                    continue;
+                                }
+                            };
+                            let optimization = session.mir_optimization();
+                            if raw_count == 1 {
+                                session.set_mir_optimization(MirOptimization::Disabled);
+                            }
+                            if args[0] == "mir" {
+                                println!("{}", session.emit_mir_module(module));
+                            } else {
+                                let physical_optimization = session.physical_mir_optimization();
+                                session.set_physical_mir_optimization(session.mir_optimization());
+                                match repl::physical_mir_text(&session, module) {
+                                    Ok(text) => println!("{text}"),
+                                    Err(error) => println!("{error}"),
+                                }
+                                session.set_physical_mir_optimization(physical_optimization);
+                            }
+                            session.set_mir_optimization(optimization);
+                        }
+                        "run" => {
+                            if last_module == ModuleId::from_index(0) {
+                                println!("no successfully compiled submission");
+                            } else if let Some(expr) = last_expr {
+                                let _ = run_expression(
+                                    &mut session,
+                                    last_module,
+                                    expr,
+                                    target,
+                                    fuel_limit,
+                                );
+                            }
+                        }
+                        "reset" => {
+                            let optimization = session.mir_optimization();
+                            session = CompilerSession::new();
+                            session.set_allow_experimental(allow_experimental);
+                            session.set_mir_optimization(optimization);
+                            session.register_module(
+                                Path::single_str("console"),
+                                repl::console_module(session.modules().next_id(), console_print),
+                            );
+                            last_module = ModuleId::from_index(0);
+                            last_expr = None;
+                            counter = 0;
+                            println!("Session reset.");
+                        }
+                        "quit" => return,
                         _ => {
                             println!("Unknown command \"{command}\". Type \\help for help.");
-                            false
                         }
                     };
-                    if store {
-                        rl.add_history_entry(line.as_str()).unwrap();
-                    }
                     continue;
                 }
-                rl.add_history_entry(line.as_str()).unwrap();
                 line
             }
             Err(ReadlineError::Interrupted) => {
@@ -1182,14 +1146,12 @@ fn run_interactive_repl(
             true,
             target,
             fuel_limit,
-            optimization_report,
+            inspection,
         );
-        if let Ok(module) = result {
-            last_module = module;
+        if let Ok(output) = result {
+            last_module = output.module_id;
+            last_expr = output.expr;
         }
         counter += 1;
-        if let Err(e) = rl.save_history(history_filename) {
-            println!("Failed to save history: {e:?}");
-        }
     }
 }

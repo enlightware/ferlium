@@ -262,6 +262,43 @@ jobs:
       - name: Run optimized WASM language tests
         run: wasm-bindgen-test-runner wasm-tests/release/language.wasm
 
+  wasm_repl:
+    name: Wasm REPL integration tests (Node)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - name: Resolve dependencies
+        # No lockfile is tracked; resolving one before the cache step keys the cache on the
+        # dependency versions this run actually builds.
+        run: cargo generate-lockfile
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ runner.os }}-cargo
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: lts/*
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@861a07ce7084f55488e375df125cdc99bba60eb7 # v2.87.23
+        with:
+          tool: wasm-pack
+
+      - name: Run Wasm REPL integration tests
+        run: make test-wasm-repl
+
   build_site:
     name: Build and upload playground and book
     runs-on: ubuntu-latest

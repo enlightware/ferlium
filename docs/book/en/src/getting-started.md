@@ -7,7 +7,7 @@ In this chapter you will run Ferlium code for the first time, evaluate a few exp
 You can interact with Ferlium in three common ways:
 
 - **Online playground**: visit the [Ferlium playground](https://enlightware.github.io/ferlium/playground/) and type code in the editor; results appear on the bottom.
-- **REPL**: start the interactive prompt with `cargo run --example ferlium`, then type expressions and see their results.
+- **REPL**: start the native interactive prompt with `cargo run --example ferlium`, or use `make repl-wasm` to execute generated Wasm in Node, as in the playground. Type expressions and see their results.
 - **Local execution**: put code in a file and run it locally with `cat FILENAME | cargo run --example ferlium` (Unix shell).
 
 This chapter focuses on what to type once you are able to run Ferlium code using one of these methods.

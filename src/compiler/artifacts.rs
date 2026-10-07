@@ -60,6 +60,16 @@ pub enum MirOptimization {
     Enabled,
 }
 
+impl From<bool> for MirOptimization {
+    fn from(enabled: bool) -> Self {
+        if enabled {
+            Self::Enabled
+        } else {
+            Self::Disabled
+        }
+    }
+}
+
 /// Backend output derived from one completed semantic module revision.
 ///
 /// Stages are monotone: once installed, a stage is never replaced, so references handed out
