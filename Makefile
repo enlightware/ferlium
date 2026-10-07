@@ -153,6 +153,12 @@ profile-mir:
 profile-physical-mir:
 	cargo run --release --example mir_profile -- --physical $(WORKLOADS)
 
+profile-compile: check-valgrind
+	@test -n "$(WORKLOAD)" || { echo "usage: make profile-compile WORKLOAD=name [REPEATS=n]" >&2; exit 1; }
+	CARGO_PROFILE_RELEASE_DEBUG=true cargo build --release --example compile_profile
+	mkdir -p target/compile-profile
+	"$(VALGRIND)" --tool=callgrind --toggle-collect='*compile_profile::measured*' --callgrind-out-file=target/compile-profile/callgrind.$(WORKLOAD).out target/release/examples/compile_profile $(WORKLOAD) $(REPEATS)
+
 print-std:
 	cargo run --example ferlium -- --print-std
 
@@ -165,6 +171,7 @@ validate-book:
 
 update-license-headers:
 	git ls-files --cached --others --exclude-standard -z -- '*.rs' '*.ts' | xargs -0 -r licensure --in-place
+
 
 .PHONY: install-deps
 .PHONY: lint
@@ -196,6 +203,7 @@ update-license-headers:
 .PHONY: test-wasm-repl
 .PHONY: profile-mir
 .PHONY: profile-physical-mir
+.PHONY: profile-compile
 .PHONY: print-std
 .PHONY: book-devel
 .PHONY: validate-book

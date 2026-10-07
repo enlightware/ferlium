@@ -14,6 +14,11 @@ For faster optimizer iteration, `make profile-mir` compares unweighted instructi
 and optimized MIR through the MIR interpreter. Use `make profile-mir WORKLOADS="fibonacci sieve"`
 to select workloads. This runner does not require Valgrind.
 
+To see where compilation time goes, `make profile-compile WORKLOAD=sudoku REPEATS=3` compiles one
+workload under Callgrind, collecting only the repeated user compilation after a warm-up that builds
+the standard library. It writes `target/compile-profile/callgrind.<workload>.out`, to be read with
+`callgrind_annotate --inclusive=yes`. Compare two compiler versions by profiling each.
+
 ## WebAssembly benchmarks
 
 `make bench-wasm` reports wall-clock times under normal Node behaviour. `make bench-wasm-callgrind`
