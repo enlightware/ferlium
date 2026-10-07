@@ -12,7 +12,10 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::{dataflow, site::OperationIndex};
+use super::{
+    local_cells::{Access, Allocation, LocalCells, Read, Write, access},
+    site::OperationIndex,
+};
 use crate::{
     mir::{self, BlockId, Function, Operation, OperationKind, ValueId, edit::FunctionEdit},
     module::{ModuleEnv, id::Id},
@@ -24,17 +27,29 @@ pub(crate) fn remove_overwritten_trivial_copy_stores(
     func: &Function,
     env: ModuleEnv<'_>,
 ) -> Option<Function> {
-    let mut candidates = FxHashSet::default();
-    for block in func.blocks() {
-        for operation in func.block(block).operations() {
-            let OperationKind::Alloca { ty } = operation.kind else {
-                continue;
-            };
-            if concrete_type_is_trivial_copy(ty, &env) {
-                candidates.insert(operation.result_id().expect("alloca has a result"));
-            }
-        }
-    }
+    // We intentionally do not reason through aliases. The access whitelist is fail-safe: an
+    // operand in a new or unmodelled operation kind rejects the root rather than broadening this
+    // proof. Unlike dataflow's escape census, call arguments are not admitted by convention: this
+    // pass admits only the exact direct roles listed above. A source-fallible call is an `Invoke`
+    // terminator. Its result place is deliberately not a DS write: the error edge needs a separate
+    // control-flow/cleanup proof.
+    let cells = LocalCells::of_matching(func, |_, allocation| {
+        let &Allocation::Value { ty, .. } = allocation else {
+            return false;
+        };
+        concrete_type_is_trivial_copy(ty, &env)
+    });
+    let candidates: FxHashSet<ValueId> = cells
+        .iter()
+        .filter(|cell| {
+            cells.uses(cell).iter().all(|cell_use| {
+                !cell_use.in_terminator(func)
+                    && (is_whole_place_write(cell_use.access)
+                        || is_exact_place_read(cell_use.access))
+            })
+        })
+        .map(|cell| cell.id)
+        .collect();
     if candidates.is_empty() {
         return None;
     }
@@ -45,39 +60,6 @@ pub(crate) fn remove_overwritten_trivial_copy_stores(
         .filter(|operation| operation.result_requires_consuming_use())
         .filter_map(Operation::result_id)
         .collect::<FxHashSet<_>>();
-
-    // We intentionally do not reason through aliases. The role whitelist below is fail-safe: an
-    // operand in a new or unmodelled operation kind rejects the root rather than broadening this
-    // proof. This cannot reuse dataflow's escape census: it permits call arguments according to
-    // their source convention, whereas this pass admits only the exact direct roles listed above.
-    for block in func.blocks() {
-        let basic_block = func.block(block);
-        for operation in basic_block.operations() {
-            for (position, operand) in operation.operands.iter().enumerate() {
-                let mir::Value::Register(root) = operand else {
-                    continue;
-                };
-                if !candidates.contains(root) {
-                    continue;
-                }
-                let allowed = whole_place_write_index(operation) == Some(position)
-                    || is_exact_place_read(operation, position);
-                if !allowed {
-                    candidates.remove(root);
-                }
-            }
-        }
-        for operand in basic_block.terminator().operands() {
-            if let mir::Value::Register(root) = operand {
-                // A source-fallible call is an `Invoke` terminator. Its result place is deliberately
-                // not a DS write: the error edge needs a separate control-flow/cleanup proof.
-                candidates.remove(root);
-            }
-        }
-    }
-    if candidates.is_empty() {
-        return None;
-    }
 
     let block_count = func.blocks().count();
     let mut predecessors = vec![Vec::new(); block_count];
@@ -154,29 +136,32 @@ fn transfer_block(
     mut removed: Option<&mut FxHashMap<BlockId, FxHashSet<OperationIndex>>>,
 ) {
     for (index, operation) in func.block(block).operations().iter().enumerate().rev() {
-        if let Some(write_index) = whole_place_write_index(operation)
-            && let Some(mir::Value::Register(root)) = operation.operands.get(write_index)
-            && candidates.contains(root)
-        {
-            if matches!(operation.kind, OperationKind::Store)
-                && !store_source_requires_consuming_use(operation, consuming_results)
-                && !live.contains(root)
+        let candidate = |operand: &mir::Value| match operand {
+            mir::Value::Register(root) if candidates.contains(root) => Some(*root),
+            _ => None,
+        };
+        for (position, operand) in operation.operands.iter().enumerate() {
+            if let Some(root) = candidate(operand)
+                && is_whole_place_write(access(operation, position))
             {
-                if let Some(removed) = &mut removed {
+                if matches!(operation.kind, OperationKind::Store)
+                    && !store_source_requires_consuming_use(operation, consuming_results)
+                    && !live.contains(&root)
+                    && let Some(removed) = &mut removed
+                {
                     removed
                         .entry(block)
                         .or_default()
                         .insert(OperationIndex::from_index(index));
                 }
+                live.remove(&root);
             }
-            live.remove(root);
         }
         for (position, operand) in operation.operands.iter().enumerate() {
-            if is_exact_place_read(operation, position)
-                && let mir::Value::Register(root) = operand
-                && candidates.contains(root)
+            if let Some(root) = candidate(operand)
+                && is_exact_place_read(access(operation, position))
             {
-                live.insert(*root);
+                live.insert(root);
             }
         }
     }
@@ -193,35 +178,27 @@ fn store_source_requires_consuming_use(
     )
 }
 
-/// Whether `position` is a whole-place result write that replaces the old contents.
+/// Whether `access` is a whole-place result write that replaces the old contents.
 ///
-/// `memcpy` is a representation copy, not an ownership action. A call's final result place is
-/// recovered through the shared, allocation-free call-layout helper rather than duplicated here;
-/// any candidate in another call operand is rejected by the scan above.
-fn whole_place_write_index(operation: &Operation) -> Option<usize> {
-    match &operation.kind {
-        OperationKind::Store | OperationKind::Memcpy => Some(1),
-        OperationKind::Call { ty, .. } => {
-            dataflow::call_result_operand_index(&operation.operands, ty)
-        }
-        _ => None,
-    }
+/// `memcpy` is a representation copy, not an ownership action.
+fn is_whole_place_write(access: Access) -> bool {
+    matches!(
+        access,
+        Access::Write(Write::Store | Write::Copy | Write::CallResult)
+    )
 }
 
-/// Whether `position` reads a candidate's complete `TrivialCopy` representation.
+/// Whether `access` reads a candidate's complete `TrivialCopy` representation.
 ///
 /// A representation copy and a move out to the caller both observe the stored value. They do not
 /// leave an ownership obligation for a `TrivialCopy` root, unlike an arbitrary move. We do not
 /// model a move-out's later absence: retaining a store longer is conservative, and recognizing the
 /// read is necessary for the ordinary final `move local to return` shape.
-fn is_exact_place_read(operation: &Operation, position: usize) -> bool {
+fn is_exact_place_read(access: Access) -> bool {
     matches!(
-        operation.kind,
-        OperationKind::Load
-            | OperationKind::Memcpy
-            | OperationKind::Move
-            | OperationKind::MoveBytes { .. }
-    ) && position == 0
+        access,
+        Access::Read(Read::Load | Read::Copy) | Access::MoveOut(_)
+    )
 }
 
 #[cfg(test)]

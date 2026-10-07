@@ -507,7 +507,7 @@ impl CallArgConventionMetadata for ArgConvention {
     }
 }
 
-fn arg_convention_for_arg(arg: &FnArgType) -> ArgConvention {
+pub(crate) fn arg_convention_for_arg(arg: &FnArgType) -> ArgConvention {
     if arg
         .mut_ty
         .as_resolved()

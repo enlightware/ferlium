@@ -650,6 +650,13 @@ Dominance itself is `mir::dominance`, shared with the verifier, which dominates 
 than blocks because an invoked operation's result is anchored at the normal successor and must not
 reach the error one. It therefore takes bare successor lists rather than a `Function`.
 
+## Local cells
+
+Storage forwarding, single-assignment forwarding and overwritten-store elimination all start by
+asking how each local allocation is used. `mir::pass::local_cells` answers that once, with one
+shared, fail-safe classification of direct uses; each pass then decides which uses it admits. Like
+other analyses, it is rebuilt after a rewrite rather than maintained through one.
+
 ## Storage forwarding
 
 `mir::pass::copy_forward` is deliberately separate from call CSE. CSE proves that two computations
@@ -681,8 +688,7 @@ stores it, so its result may safely reuse an input place. This permits arithmeti
 such as `call add(%x, %y, %x)` without weakening the fresh-result contract for script calls.
 
 Its cheap structural scan runs each optimization round before the inliner prices the body, and once
-more before final DCE. The linear whole-function use census runs only when that scan finds a viable
-candidate, and tracks only participating allocations.
+more before final DCE. The use analysis runs only when that scan finds a viable candidate.
 
 ## Forwarding through single-assignment cells
 
@@ -703,8 +709,7 @@ the body shrinks because each of the three produces shapes another reads: negati
 diamond that branch forwarding dissolves, which leaves a single-store cell. Boolean flow runs after
 boolean materialization, so the analyses that read branch conditions, such as bounds-check
 elimination, see its canonical form, and again in each final cleanup sweep, where outcome
-simplification stores computed predicates. Structural gates restrict type queries to the cells the
-use census keeps.
+simplification stores computed predicates.
 
 Loads and comparisons of constant cells read the pool constant directly, preserving its
 representation. Ordinary call arguments still require places; this does not substitute scalar

@@ -29,12 +29,12 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{
     OptimizationStage,
-    dataflow::{call_operands, field_index},
+    dataflow::field_index,
+    local_cells::{Access, LocalCells},
     site::{OperationIndex, OperationSite},
 };
 use crate::{
     containers::SVec2,
-    hir::function::ArgConvention,
     mir::{
         self, BlockId, Function, Operation, OperationKind,
         edit::FunctionEdit,
@@ -46,12 +46,6 @@ use crate::{
     types::type_properties::concrete_type_is_trivial_copy,
 };
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Site {
-    Operation(OperationSite),
-    Terminator(BlockId),
-}
-
 #[derive(Clone, Copy)]
 struct Definition {
     site: OperationSite,
@@ -61,24 +55,34 @@ struct Definition {
 struct Uses {
     references: usize,
     writes: usize,
-    sole_write: Option<Site>,
+    sole_write: Option<OperationSite>,
     unsafe_use: bool,
 }
 
 impl Uses {
-    fn read(&mut self) {
-        self.references += 1;
-    }
-
-    fn write(&mut self, site: Site) {
-        self.references += 1;
-        self.writes += 1;
-        self.sole_write = (self.writes == 1).then_some(site);
-    }
-
-    fn unsafe_use(&mut self) {
-        self.references += 1;
-        self.unsafe_use = true;
+    /// Summarizes the direct uses of the local `id`. Ownership transfers and in-place changes are
+    /// writes; a call through the cell and an unmodelled use are unsafe.
+    fn of(cells: &LocalCells, id: ValueId) -> Self {
+        let mut uses = Self::default();
+        let cell = cells
+            .get(id)
+            .expect("a forwarding candidate is a local allocation");
+        for cell_use in cells.uses(cell) {
+            uses.references += 1;
+            match cell_use.access {
+                Access::Read(_) => {}
+                Access::Write(_)
+                | Access::MoveOut(_)
+                | Access::MoveIn(_)
+                | Access::Modify
+                | Access::Drop => {
+                    uses.writes += 1;
+                    uses.sole_write = (uses.writes == 1).then_some(cell_use.site);
+                }
+                Access::Callee | Access::Opaque => uses.unsafe_use = true,
+            }
+        }
+        uses
     }
 
     fn is_stable(&self) -> bool {
@@ -227,8 +231,8 @@ pub(crate) fn forward_redundant_storage(
             .collect()
     };
 
-    // Only places participating in a structurally viable copy need a whole-function use census.
-    let mut uses: FxHashMap<ValueId, Uses> = copies
+    // Only places participating in a structurally viable copy need their uses summarized.
+    let participants: FxHashSet<ValueId> = copies
         .iter()
         .flat_map(|copy| [copy.source, copy.destination])
         .chain(
@@ -236,32 +240,12 @@ pub(crate) fn forward_redundant_storage(
                 .iter()
                 .map(|forwarded| forwarded.temporary),
         )
-        .map(|id| (id, Uses::default()))
         .collect();
-    for block in func.blocks() {
-        let basic_block = func.block(block);
-        for (index, operation) in basic_block.operations().iter().enumerate() {
-            let site = OperationSite {
-                block,
-                index: OperationIndex::from_index(index),
-            };
-            note_operation(operation, Site::Operation(site), &mut uses);
-        }
-        if let TerminatorKind::Invoke { operation, .. } = &basic_block.terminator().kind {
-            note_operation(operation, Site::Terminator(block), &mut uses);
-        }
-        match &basic_block.terminator().kind {
-            TerminatorKind::CondBr { condition, .. } => note_unsafe(condition, &mut uses),
-            TerminatorKind::SwitchVariant { tag, .. } => note_unsafe(tag, &mut uses),
-            TerminatorKind::Yield { place, .. } => note_unsafe(place, &mut uses),
-            TerminatorKind::Goto { .. }
-            | TerminatorKind::Invoke { .. }
-            | TerminatorKind::Return
-            | TerminatorKind::PropagateError
-            | TerminatorKind::FailureDuringCleanup
-            | TerminatorKind::InvariantFailure { .. } => {}
-        }
-    }
+    let cells = LocalCells::of_matching(func, |id, _| participants.contains(&id));
+    let uses: FxHashMap<ValueId, Uses> = participants
+        .iter()
+        .map(|&id| (id, Uses::of(&cells, id)))
+        .collect();
 
     let mut replacements: FxHashMap<ValueId, ValueId> = FxHashMap::default();
     let mut removed: FxHashMap<BlockId, FxHashSet<OperationIndex>> = FxHashMap::default();
@@ -394,7 +378,7 @@ pub(crate) fn forward_redundant_storage(
         let destination_uses = &uses[&copy.destination];
         if !source_uses.is_stable()
             || !destination_uses.is_stable()
-            || destination_uses.sole_write != Some(Site::Operation(copy.site))
+            || destination_uses.sole_write != Some(copy.site)
         {
             continue;
         }
@@ -763,151 +747,6 @@ fn operand_storage(
         | mir::Value::Subscript(_)
         | mir::Value::Evidence(_)
         | mir::Value::Pattern(_) => OperandStorage::None,
-    }
-}
-
-fn note_operation(operation: &Operation, site: Site, uses: &mut FxHashMap<ValueId, Uses>) {
-    let read = |operand: &mir::Value, uses: &mut FxHashMap<ValueId, Uses>| {
-        if let mir::Value::Register(id) = operand
-            && let Some(summary) = uses.get_mut(id)
-        {
-            summary.read();
-        }
-    };
-    let write = |operand: &mir::Value, uses: &mut FxHashMap<ValueId, Uses>| {
-        if let mir::Value::Register(id) = operand
-            && let Some(summary) = uses.get_mut(id)
-        {
-            summary.write(site);
-        }
-    };
-    let unsafe_use = |operand: &mir::Value, uses: &mut FxHashMap<ValueId, Uses>| {
-        if let mir::Value::Register(id) = operand
-            && let Some(summary) = uses.get_mut(id)
-        {
-            summary.unsafe_use();
-        }
-    };
-
-    match &operation.kind {
-        OperationKind::Call { ty, .. } => {
-            let Some(call) = call_operands(&operation.operands, ty) else {
-                operation
-                    .operands
-                    .iter()
-                    .for_each(|operand| unsafe_use(operand, uses));
-                return;
-            };
-            unsafe_use(call.callee, uses);
-            call.extras
-                .iter()
-                .for_each(|operand| unsafe_use(operand, uses));
-            for (argument, convention) in call.arguments {
-                match convention {
-                    ArgConvention::Let => read(argument, uses),
-                    ArgConvention::MutableRef => write(argument, uses),
-                }
-            }
-            write(call.result, uses);
-        }
-        OperationKind::Load
-        | OperationKind::CompareEqual
-        | OperationKind::ExtractTag
-        | OperationKind::ExtractPayloadIndirection
-        | OperationKind::RuntimeAlloc { .. } => {
-            operation
-                .operands
-                .iter()
-                .for_each(|operand| read(operand, uses));
-        }
-        OperationKind::RuntimeDealloc => unsafe_use(&operation.operands[0], uses),
-        OperationKind::Store => {
-            unsafe_use(&operation.operands[0], uses);
-            write(&operation.operands[1], uses);
-        }
-        OperationKind::BuildArray { .. } => {
-            let (destination, elements) = operation
-                .operands
-                .split_last()
-                .expect("build_array has a trailing destination");
-            elements.iter().for_each(|operand| read(operand, uses));
-            write(destination, uses);
-        }
-        OperationKind::Clear => write(&operation.operands[0], uses),
-        OperationKind::Memcpy => {
-            read(&operation.operands[0], uses);
-            write(&operation.operands[1], uses);
-        }
-        OperationKind::Move | OperationKind::Replace => {
-            write(&operation.operands[0], uses);
-            write(&operation.operands[1], uses);
-            operation
-                .operands
-                .iter()
-                .skip(2)
-                .for_each(|operand| unsafe_use(operand, uses));
-        }
-        OperationKind::MoveBytes { .. } => {
-            write(&operation.operands[0], uses);
-            write(&operation.operands[1], uses);
-            read(&operation.operands[2], uses);
-        }
-        OperationKind::Clone { .. } => {
-            read(&operation.operands[0], uses);
-            write(&operation.operands[1], uses);
-            operation
-                .operands
-                .iter()
-                .skip(2)
-                .for_each(|operand| unsafe_use(operand, uses));
-        }
-        OperationKind::Drop { .. } | OperationKind::DropInitialized { .. } => {
-            write(&operation.operands[0], uses);
-            operation
-                .operands
-                .iter()
-                .skip(1)
-                .for_each(|operand| unsafe_use(operand, uses));
-        }
-        OperationKind::DropSubscriptEnv | OperationKind::DropClosureEnv => {
-            write(&operation.operands[0], uses)
-        }
-        OperationKind::Alloca { .. }
-        | OperationKind::BlackBox { .. }
-        // Unlike a value read, an initialization query may legally observe a destination before
-        // its sole write. Substituting the source would expose the source's initialization state.
-        | OperationKind::IsInitialized
-        | OperationKind::Project { .. }
-        | OperationKind::EndProject
-        | OperationKind::Subfield { .. }
-        | OperationKind::AddressOffset { .. }
-        | OperationKind::AddressOffsetPlace { .. }
-        | OperationKind::DictEntry { .. }
-        | OperationKind::BuildDictionary { .. }
-        | OperationKind::SubscriptMember { .. }
-        | OperationKind::BuildSubscriptEvidence { .. }
-        | OperationKind::BuildSubscript { .. }
-        | OperationKind::CloneSubscriptEnv { .. }
-        | OperationKind::BorrowSubscriptMember { .. }
-        | OperationKind::Variant { .. }
-        | OperationKind::BuildClosure { .. }
-        | OperationKind::CloneClosureEnv { .. } => operation
-            .operands
-            .iter()
-            .for_each(|operand| unsafe_use(operand, uses)),
-        OperationKind::AllocaPlace { .. }
-        | OperationKind::StackSave
-        | OperationKind::StackRestore
-        | OperationKind::CheckCallDepth
-        | OperationKind::CheckFuel => {}
-    }
-}
-
-fn note_unsafe(operand: &mir::Value, uses: &mut FxHashMap<ValueId, Uses>) {
-    if let mir::Value::Register(id) = operand
-        && let Some(summary) = uses.get_mut(id)
-    {
-        summary.unsafe_use();
     }
 }
 
