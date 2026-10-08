@@ -11,9 +11,10 @@ It achieves so by borrowing the type system from Haskell, the syntax from Rust, 
 - Also run test subsets with `nextest`: `cargo nextest run <substring>`
 - Run the Rust linter: `cargo clippy`
 - Validate IDE Lezer grammar: `make validate-grammar` in `playground/`
+- Format the code: `cargo fmt`
 - Print content of std: `cargo run --example ferlium -- --print-std`
-- Measure optimizations: `make bench-wasm-callgrind ARGS="--optimized-only --no-mir <workloads>"` (diffs against the previous run: run the base first). Interpreter speed (`make bench`) is not a goal.
 - Compile and run an expression: `echo "1 + 1" | cargo run --example ferlium` where `1 + 1 ` is your expression.
+- Measure optimizations: `make bench-wasm-callgrind ARGS="--optimized-only --no-mir <workloads>"` (diffs against the previous run: run the base first). Interpreter speed (`make bench`) is not a goal.
 
 ## Workflow Rules
 - Follow the surrounding code's style; prefer Rust `use` imports over fully qualified paths.
