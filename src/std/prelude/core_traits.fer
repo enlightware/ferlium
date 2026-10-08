@@ -6,166 +6,166 @@ pub type Ordering = Less | Equal | Greater;
 
 /// A type that has a total ordering.
 pub trait Ord<Self> {
-    /// Returns an `Ordering` between `left` and `right`.
-    fn cmp(left: Self, right: Self) -> Ordering;
+	/// Returns an `Ordering` between `left` and `right`.
+	fn cmp(left: Self, right: Self) -> Ordering;
 
-    /// Tests whether `left` is less than `right`.
-    fn lt(left: Self, right: Self) -> bool {
-        match cmp(left, right) { Less => true, _ => false }
-    }
+	/// Tests whether `left` is less than `right`.
+	fn lt(left: Self, right: Self) -> bool {
+		match cmp(left, right) { Less => true, _ => false }
+	}
 
-    /// Tests whether `left` is less than or equal to `right`.
-    fn le(left: Self, right: Self) -> bool {
-        match cmp(left, right) { Greater => false, _ => true }
-    }
+	/// Tests whether `left` is less than or equal to `right`.
+	fn le(left: Self, right: Self) -> bool {
+		match cmp(left, right) { Greater => false, _ => true }
+	}
 
-    /// Tests whether `left` is greater than `right`.
-    fn gt(left: Self, right: Self) -> bool {
-        match cmp(left, right) { Greater => true, _ => false }
-    }
+	/// Tests whether `left` is greater than `right`.
+	fn gt(left: Self, right: Self) -> bool {
+		match cmp(left, right) { Greater => true, _ => false }
+	}
 
-    /// Tests whether `left` is greater than or equal to `right`.
-    fn ge(left: Self, right: Self) -> bool {
-        match cmp(left, right) { Less => false, _ => true }
-    }
+	/// Tests whether `left` is greater than or equal to `right`.
+	fn ge(left: Self, right: Self) -> bool {
+		match cmp(left, right) { Less => false, _ => true }
+	}
 }
 
 /// A numeric type supporting basic arithmetic operations.
 pub trait Num<Self> {
-    /// Adds two numbers.
-    fn add(left: Self, right: Self) -> Self;
+	/// Adds two numbers.
+	fn add(left: Self, right: Self) -> Self;
 
-    /// Subtracts `right` from `left`.
-    fn sub(left: Self, right: Self) -> Self;
+	/// Subtracts `right` from `left`.
+	fn sub(left: Self, right: Self) -> Self;
 
-    /// Multiplies two numbers.
-    fn mul(left: Self, right: Self) -> Self;
+	/// Multiplies two numbers.
+	fn mul(left: Self, right: Self) -> Self;
 
-    /// Negates a number.
-    fn neg(value: Self) -> Self;
+	/// Negates a number.
+	fn neg(value: Self) -> Self;
 
-    /// Returns the absolute value of a number.
-    fn abs(value: Self) -> Self;
+	/// Returns the absolute value of a number.
+	fn abs(value: Self) -> Self;
 
-    /// Returns the sign of a number.
-    fn signum(value: Self) -> Self;
+	/// Returns the sign of a number.
+	fn signum(value: Self) -> Self;
 
-    /// Converts an integer to a number.
-    fn from_int(value: int) -> Self;
+	/// Converts an integer to a number.
+	fn from_int(value: int) -> Self;
 }
 
 /// A type that supports division.
 pub trait Div<Self>: Num<Self> {
-    /// Divides `left` by `right`.
-    fn div(left: Self, right: Self) -> Self ! fallible;
+	/// Divides `left` by `right`.
+	fn div(left: Self, right: Self) -> Self ! fallible;
 }
 
 /// A real-valued numeric type supporting elementary mathematical functions.
 pub trait Real<Self>: Div<Self> {
-    /// The circle constant π.
-    const PI: Self;
+	/// The circle constant π.
+	const PI: Self;
 
-    /// The full-turn circle constant τ, equal to 2π.
-    const TAU: Self;
+	/// The full-turn circle constant τ, equal to 2π.
+	const TAU: Self;
 
-    /// Euler's number.
-    const E: Self;
+	/// Euler's number.
+	const E: Self;
 
-    /// Returns the sine of `value`, in radians.
-    fn sin(value: Self) -> Self;
+	/// Returns the sine of `value`, in radians.
+	fn sin(value: Self) -> Self;
 
-    /// Returns the cosine of `value`, in radians.
-    fn cos(value: Self) -> Self;
+	/// Returns the cosine of `value`, in radians.
+	fn cos(value: Self) -> Self;
 
-    /// Returns the tangent of `value`, in radians.
-    fn tan(value: Self) -> Self;
+	/// Returns the tangent of `value`, in radians.
+	fn tan(value: Self) -> Self;
 
-    /// Returns the arcsine of `value`, in radians.
-    fn asin(value: Self) -> Self ! fallible;
+	/// Returns the arcsine of `value`, in radians.
+	fn asin(value: Self) -> Self ! fallible;
 
-    /// Returns the arccosine of `value`, in radians.
-    fn acos(value: Self) -> Self ! fallible;
+	/// Returns the arccosine of `value`, in radians.
+	fn acos(value: Self) -> Self ! fallible;
 
-    /// Returns the arctangent of `value`, in radians.
-    fn atan(value: Self) -> Self;
+	/// Returns the arctangent of `value`, in radians.
+	fn atan(value: Self) -> Self;
 
-    /// Returns the four-quadrant arctangent of `y` and `x`, in radians.
-    fn atan2(y: Self, x: Self) -> Self;
+	/// Returns the four-quadrant arctangent of `y` and `x`, in radians.
+	fn atan2(y: Self, x: Self) -> Self;
 
-    /// Returns the hyperbolic sine of `value`.
-    fn sinh(value: Self) -> Self;
+	/// Returns the hyperbolic sine of `value`.
+	fn sinh(value: Self) -> Self;
 
-    /// Returns the hyperbolic cosine of `value`.
-    fn cosh(value: Self) -> Self;
+	/// Returns the hyperbolic cosine of `value`.
+	fn cosh(value: Self) -> Self;
 
-    /// Returns the hyperbolic tangent of `value`.
-    fn tanh(value: Self) -> Self;
+	/// Returns the hyperbolic tangent of `value`.
+	fn tanh(value: Self) -> Self;
 
-    /// Returns the inverse hyperbolic sine of `value`.
-    fn asinh(value: Self) -> Self;
+	/// Returns the inverse hyperbolic sine of `value`.
+	fn asinh(value: Self) -> Self;
 
-    /// Returns the inverse hyperbolic cosine of `value`.
-    fn acosh(value: Self) -> Self ! fallible;
+	/// Returns the inverse hyperbolic cosine of `value`.
+	fn acosh(value: Self) -> Self ! fallible;
 
-    /// Returns the inverse hyperbolic tangent of `value`.
-    fn atanh(value: Self) -> Self ! fallible;
+	/// Returns the inverse hyperbolic tangent of `value`.
+	fn atanh(value: Self) -> Self ! fallible;
 
-    /// Returns e raised to `value`.
-    fn exp(value: Self) -> Self;
+	/// Returns e raised to `value`.
+	fn exp(value: Self) -> Self;
 
-    /// Returns the natural logarithm of `value`.
-    fn log(value: Self) -> Self ! fallible;
+	/// Returns the natural logarithm of `value`.
+	fn log(value: Self) -> Self ! fallible;
 
-    /// Returns `base` raised to `exponent`.
-    fn pow(base: Self, exponent: Self) -> Self ! fallible;
+	/// Returns `base` raised to `exponent`.
+	fn pow(base: Self, exponent: Self) -> Self ! fallible;
 
-    /// Returns the square root of `value`.
-    fn sqrt(value: Self) -> Self ! fallible;
+	/// Returns the square root of `value`.
+	fn sqrt(value: Self) -> Self ! fallible;
 }
 
 /// A type that has bitwise operations.
 pub trait Bits<Self> {
-    /// Returns the bitwise AND of `left` and `right`.
-    fn bit_and(left: Self, right: Self) -> Self;
+	/// Returns the bitwise AND of `left` and `right`.
+	fn bit_and(left: Self, right: Self) -> Self;
 
-    /// Returns the bitwise OR of `left` and `right`.
-    fn bit_or(left: Self, right: Self) -> Self;
+	/// Returns the bitwise OR of `left` and `right`.
+	fn bit_or(left: Self, right: Self) -> Self;
 
-    /// Returns the bitwise XOR of `left` and `right`.
-    fn bit_xor(left: Self, right: Self) -> Self;
+	/// Returns the bitwise XOR of `left` and `right`.
+	fn bit_xor(left: Self, right: Self) -> Self;
 
-    /// Returns the bitwise NOT of `value`.
-    fn bit_not(value: Self) -> Self;
+	/// Returns the bitwise NOT of `value`.
+	fn bit_not(value: Self) -> Self;
 
-    /// Returns `value` shifted left by `shift` bits.
-    fn shift_left(value: Self, shift: int) -> Self;
+	/// Returns `value` shifted left by `shift` bits.
+	fn shift_left(value: Self, shift: int) -> Self;
 
-    /// Returns `value` shifted right by `shift` bits.
-    fn shift_right(value: Self, shift: int) -> Self;
+	/// Returns `value` shifted right by `shift` bits.
+	fn shift_right(value: Self, shift: int) -> Self;
 
-    /// Returns `value` rotated left by `rotate` bits.
-    fn rotate_left(value: Self, rotate: int) -> Self;
+	/// Returns `value` rotated left by `rotate` bits.
+	fn rotate_left(value: Self, rotate: int) -> Self;
 
-    /// Returns `value` rotated right by `rotate` bits.
-    fn rotate_right(value: Self, rotate: int) -> Self;
+	/// Returns `value` rotated right by `rotate` bits.
+	fn rotate_right(value: Self, rotate: int) -> Self;
 
-    /// Returns the number of one bits in `value`.
-    fn count_ones(value: Self) -> int;
+	/// Returns the number of one bits in `value`.
+	fn count_ones(value: Self) -> int;
 
-    /// Returns the number of zero bits in `value`.
-    fn count_zeros(value: Self) -> int;
+	/// Returns the number of zero bits in `value`.
+	fn count_zeros(value: Self) -> int;
 
-    /// Returns a value with only the bit at `position` set.
-    fn bit(position: int) -> Self;
+	/// Returns a value with only the bit at `position` set.
+	fn bit(position: int) -> Self;
 
-    /// Returns `value` with the bit at `position` set to 1.
-    fn set_bit(value: Self, position: int) -> Self;
+	/// Returns `value` with the bit at `position` set to 1.
+	fn set_bit(value: Self, position: int) -> Self;
 
-    /// Returns `value` with the bit at `position` cleared to 0.
-    fn clear_bit(value: Self, position: int) -> Self;
+	/// Returns `value` with the bit at `position` cleared to 0.
+	fn clear_bit(value: Self, position: int) -> Self;
 
-    /// Returns `true` if the bit at `position` in `value` is set, otherwise `false`.
-    fn test_bit(value: Self, position: int) -> bool;
+	/// Returns `true` if the bit at `position` in `value` is set, otherwise `false`.
+	fn test_bit(value: Self, position: int) -> bool;
 }
 
 /// An iterator that can produce a sequence of values.
@@ -176,20 +176,20 @@ pub trait Iterator<Self |-> Item ! NextEffect> {
 
 /// A sequence of elements that can produce an iterator over its elements.
 pub trait Seq<Self |-> Item, Iter ! IterEffect>
-    where Iter: Iterator<Item = Item ! NextEffect = IterEffect>
+	where Iter: Iterator<Item = Item ! NextEffect = IterEffect>
 {
-    /// Gets an iterator over the elements of this sequence.
-    fn iter(seq: Self) -> Iter;
+	/// Gets an iterator over the elements of this sequence.
+	fn iter(seq: Self) -> Iter;
 }
 
 /// A collection that can be built from an iterator.
 pub trait FromIterator<Self, Iter |-> Item ! IterEffect, FromIterEffect>
-    where
-        Iter: Iterator<Item = Item ! NextEffect = IterEffect>,
-        Iter: Value
+	where
+		Iter: Iterator<Item = Item ! NextEffect = IterEffect>,
+		Iter: Value
 {
-    /// Creates a collection from an iterator.
-    fn from_iter(iterator: Iter) -> Self ! FromIterEffect;
+	/// Creates a collection from an iterator.
+	fn from_iter(iterator: Iter) -> Self ! FromIterEffect;
 }
 
 /// Marker trait that relates a collection family to the collection obtained by replacing its element type.
@@ -197,62 +197,62 @@ pub trait RebindItem<Self, Item |-> Output> {}
 
 /// Maps a function over a value, producing either a lazy iterator adaptor or an eagerly rebuilt collection depending on the input type.
 pub trait Map<Self, Mapped |-> Item, Output ! MapperEffect, MapEffect> {
-    /// Maps `mapper` over `value`.
-    fn map(value: Self, mapper: (Item) -> Mapped ! MapperEffect) -> Output ! MapEffect;
+	/// Maps `mapper` over `value`.
+	fn map(value: Self, mapper: (Item) -> Mapped ! MapperEffect) -> Output ! MapEffect;
 }
 
 /// Filters a value with a predicate, producing either a lazy iterator adaptor or an eagerly rebuilt collection depending on the input type.
 pub trait Filter<Self |-> Item, Output ! PredicateEffect, FilterEffect> {
-    /// Keeps only the elements of `value` that satisfy `predicate`.
-    fn filter(value: Self, predicate: (Item) -> bool ! PredicateEffect) -> Output ! FilterEffect;
+	/// Keeps only the elements of `value` that satisfy `predicate`.
+	fn filter(value: Self, predicate: (Item) -> bool ! PredicateEffect) -> Output ! FilterEffect;
 }
 
 /// Filters and maps a value in one pass, producing either a lazy iterator adaptor or an eagerly rebuilt collection depending on the input type.
 pub trait FilterMap<Self, Mapped |-> Item, Output ! MapperEffect, FilterMapEffect> {
-    /// Applies `mapper` to each element, keeping only `Some` results.
-    fn filter_map(value: Self, mapper: (Item) -> Option<Mapped> ! MapperEffect) -> Output ! FilterMapEffect;
+	/// Applies `mapper` to each element, keeping only `Some` results.
+	fn filter_map(value: Self, mapper: (Item) -> Option<Mapped> ! MapperEffect) -> Output ! FilterMapEffect;
 }
 
 /// A sequence with a known, fixed size.
 pub trait SizedSeq<Self> {
-    /// Returns the number of elements in this sequence.
-    fn len(seq: Self) -> int;
+	/// Returns the number of elements in this sequence.
+	fn len(seq: Self) -> int;
 }
 
 /// A value that can be concatenated.
 pub trait Concat<Self> {
-    /// Concatenates `left` and `right`.
-    fn concat(left: Self, right: Self) -> Self ! fallible;
+	/// Concatenates `left` and `right`.
+	fn concat(left: Self, right: Self) -> Self ! fallible;
 }
 
 /// A sequence-like value that can be split around a non-empty separator, yielding parts lazily.
 pub trait Split<Self, Separator |-> Part, Iter, Output ! SplitIterEffect>
-    where Iterator<Self = Iter |-> Item = Part ! NextEffect = SplitIterEffect>
+	where Iterator<Self = Iter |-> Item = Part ! NextEffect = SplitIterEffect>
 {
-    /// Returns an iterator that yields the parts of `value` split around `separator`.
-    fn split_iterator(value: Self, separator: Separator) -> Iter ! fallible;
+	/// Returns an iterator that yields the parts of `value` split around `separator`.
+	fn split_iterator(value: Self, separator: Separator) -> Iter ! fallible;
 }
 
 /// A sequence-like value that can extract a subrange.
 pub trait Slice<Self |-> Output> {
-    /// Returns the slice of `value` from `start` to `end` (end-exclusive). Negative indices count from the end.
-    fn slice(value: Self, start: int, end: int) -> Output ! fallible;
+	/// Returns the slice of `value` from `start` to `end` (end-exclusive). Negative indices count from the end.
+	fn slice(value: Self, start: int, end: int) -> Output ! fallible;
 }
 
 /// A type that can be checked for the presence of an element.
 pub trait Contains<Self |-> Element> {
-    /// Returns true if `container` contains `element`.
-    fn contains(container: Self, element: Element) -> bool ! fallible;
+	/// Returns true if `container` contains `element`.
+	fn contains(container: Self, element: Element) -> bool ! fallible;
 }
 
 /// A container whose elements can be reversed in place.
 pub trait Reverse<Self> {
-    /// Reverses the elements of `value` in place.
-    fn reverse(value: &mut Self) -> () ! fallible;
+	/// Reverses the elements of `value` in place.
+	fn reverse(value: &mut Self) -> () ! fallible;
 }
 
 /// A container that can be sorted in place with a custom comparator.
 pub trait SortBy<Self |-> Item> {
-    /// Sorts `value` in place using `compare`.
-    fn sort_by(self: &mut Self, comparator: (Item, Item) -> Ordering ! fallible) ! fallible;
+	/// Sorts `value` in place using `compare`.
+	fn sort_by(self: &mut Self, comparator: (Item, Item) -> Ordering ! fallible) ! fallible;
 }

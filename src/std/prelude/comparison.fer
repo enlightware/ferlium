@@ -1,19 +1,19 @@
 impl Ord {
-    fn cmp(left: int, right: int) -> Ordering { compare_int(left, right) }
-    fn lt(left: int, right: int) -> bool { lt_int(left, right) }
-    fn le(left: int, right: int) -> bool { le_int(left, right) }
-    fn gt(left: int, right: int) -> bool { gt_int(left, right) }
-    fn ge(left: int, right: int) -> bool { ge_int(left, right) }
+	fn cmp(left: int, right: int) -> Ordering { compare_int(left, right) }
+	fn lt(left: int, right: int) -> bool { lt_int(left, right) }
+	fn le(left: int, right: int) -> bool { le_int(left, right) }
+	fn gt(left: int, right: int) -> bool { gt_int(left, right) }
+	fn ge(left: int, right: int) -> bool { ge_int(left, right) }
 }
 impl Ord {
-    fn cmp(left: float, right: float) -> Ordering { compare_float(left, right) }
-    fn lt(left: float, right: float) -> bool { lt_float(left, right) }
-    fn le(left: float, right: float) -> bool { le_float(left, right) }
-    fn gt(left: float, right: float) -> bool { gt_float(left, right) }
-    fn ge(left: float, right: float) -> bool { ge_float(left, right) }
+	fn cmp(left: float, right: float) -> Ordering { compare_float(left, right) }
+	fn lt(left: float, right: float) -> bool { lt_float(left, right) }
+	fn le(left: float, right: float) -> bool { le_float(left, right) }
+	fn gt(left: float, right: float) -> bool { gt_float(left, right) }
+	fn ge(left: float, right: float) -> bool { ge_float(left, right) }
 }
 impl Ord {
-    fn cmp(left: string, right: string) -> Ordering { compare_string(left, right) }
+	fn cmp(left: string, right: string) -> Ordering { compare_string(left, right) }
 }
 
 /// Returns the minimum of two values.

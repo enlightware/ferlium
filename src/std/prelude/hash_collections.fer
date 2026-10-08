@@ -51,7 +51,7 @@ pub fn set_insert<V>(collection: &mut HashSet<V>, value: V) -> bool
 where
 	V: Value
 {
-    let key_getter = |slot| slot.value;
+	let key_getter = |slot| slot.value;
 	let slot_hash = value_hash(value);
 	if hash_collection_find_index_with_hash(collection, slot_hash, value, key_getter) != None {
 		return false;
@@ -69,7 +69,7 @@ pub fn set_contains<V>(collection: HashSet<V>, value: V) -> bool
 where
 	V: Value
 {
-    let key_getter = |slot| slot.value;
+	let key_getter = |slot| slot.value;
 	hash_collection_find_index_with_hash(collection, value_hash(value), value, key_getter) != None
 }
 
@@ -159,17 +159,17 @@ where
 {
 	#[no_fuel_check]
 	fn eq(left: HashSet<V>, right: HashSet<V>) -> bool {
-	    effects_unsafe { hash_collection_eq(left, right, set_contains) }
+		effects_unsafe { hash_collection_eq(left, right, set_contains) }
 	}
 
 	#[no_fuel_check]
 	fn to_string(value: HashSet<V>) -> string {
-	    effects_unsafe { hash_collection_to_string(value) }
+		effects_unsafe { hash_collection_to_string(value) }
 	}
 
 	#[no_fuel_check]
 	fn hash(value: HashSet<V>, state: &mut hasher) {
-	    effects_unsafe { hash_collection_hash(value, "hash_set", state) }
+		effects_unsafe { hash_collection_hash(value, "hash_set", state) }
 	}
 
 	fn clone(source: HashSet<V>) -> HashSet<V> {
@@ -255,7 +255,7 @@ where
 	K: Value,
 	V: Value
 {
-    let key_getter = |entry| entry.key;
+	let key_getter = |entry| entry.key;
 	let key_hash = value_hash(key);
 	let existing_index = hash_collection_find_index_with_hash(collection, key_hash, key, key_getter);
 	if existing_index == None {
@@ -287,7 +287,7 @@ where
 	K: Value,
 	V: Value
 {
-    let key_getter = |entry| entry.key;
+	let key_getter = |entry| entry.key;
 	let key_hash = value_hash(key);
 	match hash_collection_find_index_with_hash(collection, key_hash, key, key_getter) {
 		Some(index) => match effects_unsafe { collection.buckets[index] } {
@@ -316,21 +316,21 @@ where
 /// Returns `true` if `collection` contains an entry with the given `key` and `value`, otherwise `false`.
 pub fn map_contains_key_value<K, V>(collection: HashMap<K, V>, key: K, value: V) -> bool
 where
-    K: Value,
-    V: Value
+	K: Value,
+	V: Value
 {
-    match map_get(collection, key) {
-        Some(existing) => existing == value,
-        None => false,
-    }
+	match map_get(collection, key) {
+		Some(existing) => existing == value,
+		None => false,
+	}
 }
 
 fn hash_map_contains_entry<K, V>(collection: HashMap<K, V>, entry: HashMapEntry<K, V>) -> bool
 where
-    K: Value,
-    V: Value
+	K: Value,
+	V: Value
 {
-    map_contains_key_value(collection, entry.key, entry.value)
+	map_contains_key_value(collection, entry.key, entry.value)
 }
 
 impl<K, V> Iterator for <Self = HashMapIterator<K, V> |-> Item = (K, V)>
@@ -411,7 +411,7 @@ where
 		loop {
 			match next(iterator) {
 				Some(entry) => {
-				    map_insert(result, entry.0, entry.1);
+					map_insert(result, entry.0, entry.1);
 				},
 				None => return result,
 			}
@@ -426,17 +426,17 @@ where
 {
 	#[no_fuel_check]
 	fn eq(left: HashMap<K, V>, right: HashMap<K, V>) -> bool {
-	    effects_unsafe { hash_collection_eq(left, right, hash_map_contains_entry) }
+		effects_unsafe { hash_collection_eq(left, right, hash_map_contains_entry) }
 	}
 
 	#[no_fuel_check]
 	fn to_string(value: HashMap<K, V>) -> string {
-	    effects_unsafe { hash_collection_to_string(value) }
+		effects_unsafe { hash_collection_to_string(value) }
 	}
 
 	#[no_fuel_check]
 	fn hash(value: HashMap<K, V>, state: &mut hasher) {
-	    effects_unsafe { hash_collection_hash(value, "hash_map", state) }
+		effects_unsafe { hash_collection_hash(value, "hash_map", state) }
 	}
 
 	fn clone(source: HashMap<K, V>) -> HashMap<K, V> {
@@ -502,7 +502,7 @@ fn hash_collection_rehash(collection, key_getter, new_capacity) {
 	for bucket in old_buckets {
 		match bucket {
 			Some(entry) => {
-			    hash_collection_insert_entry(new_buckets, entry, key_getter);
+				hash_collection_insert_entry(new_buckets, entry, key_getter);
 			},
 			None => (),
 		}
@@ -547,7 +547,7 @@ fn hash_collection_find_index_with_hash(collection, entry_hash: hash, value, key
 }
 
 fn hash_collection_eq(left, right, contain_fn) -> bool {
-    if left.len != right.len {
+	if left.len != right.len {
 		return false;
 	};
 
@@ -560,7 +560,7 @@ fn hash_collection_eq(left, right, contain_fn) -> bool {
 }
 
 fn hash_collection_to_string(collection) -> string {
-    let mut rendered = "{ ";
+	let mut rendered = "{ ";
 	let mut first = true;
 	for element in collection {
 		if not first {
@@ -575,7 +575,7 @@ fn hash_collection_to_string(collection) -> string {
 }
 
 fn hash_collection_inspect(collection) -> string {
-    let mut rendered = "{ ";
+	let mut rendered = "{ ";
 	let mut first = true;
 	for element in collection {
 		if not first {
@@ -590,7 +590,7 @@ fn hash_collection_inspect(collection) -> string {
 }
 
 fn hash_collection_hash(collection, tag, state: &mut hasher) {
-    hasher_write_string(state, tag);
+	hasher_write_string(state, tag);
 	let mut acc = unordered_hasher_new();
 	for entry in collection {
 		unordered_hasher_add(acc, value_hash(entry));
