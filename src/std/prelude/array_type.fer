@@ -12,14 +12,6 @@ fn array_len<A>(array: [A]) -> int {
 	array.len
 }
 
-fn array_wrap_index(capacity: int, index: int) -> int {
-	if index >= capacity {
-		index - capacity
-	} else {
-		index
-	}
-}
-
 fn array_signed_index_to_offset(index: int, len: int) -> int {
 	if index < 0 {
 		len + index
@@ -90,14 +82,14 @@ fn array_loop_indices_check(base: int, stride: int, start: int, end: int, inclus
 
 fn array_physical_index<A>(array: [A], index: int) -> int {
 	let resolved = array_resolve_index(index, array.len);
-	array_wrap_index(array.capacity, array.start + resolved)
+	array.start + resolved
 }
 
 /// Returns the physical slot for a logical offset already proved to be in the array.
 ///
 /// Internal precondition: `0 <= offset < array.len`.
 fn array_physical_offset_unchecked<A>(array: [A], offset: int) -> int {
-	array_wrap_index(array.capacity, array.start + offset)
+	array.start + offset
 }
 
 /// Projects the element at a logical offset already proved to be in the array.
@@ -106,10 +98,7 @@ fn array_physical_offset_unchecked<A>(array: [A], offset: int) -> int {
 subscript array_offset_unchecked<A>(array: [A], offset: int) -> A {
 	ref mut {
 		return effects_unsafe {
-			array.data->[buffer_slot](
-				array_wrap_index(array.capacity, array.start + offset),
-				Value::<A>::SIZE,
-			)
+			array.data->[buffer_slot](array.start + offset, Value::<A>::SIZE)
 		};
 	}
 }
@@ -119,10 +108,7 @@ subscript array_index<A>(array: [A], index: int) -> A {
 		let len = array_len(array);
 		let resolved = array_resolve_index(index, len);
 		return effects_unsafe {
-			array.data->[buffer_slot](
-				array_wrap_index(array.capacity, array.start + resolved),
-				Value::<A>::SIZE,
-			)
+			array.data->[buffer_slot](array.start + resolved, Value::<A>::SIZE)
 		};
 	}
 }
@@ -137,39 +123,80 @@ fn array_with_capacity<A>(capacity: int) -> [A] {
 	}
 }
 
-fn array_ensure_capacity<A>(array: &mut [A], len: int)
+/// Makes room for one element after the last one.
+fn array_reserve_back<A>(array: &mut [A])
 {
-	if array.capacity < len {
-		array_grow(array, len)
+	if array.start + array.len >= array.capacity {
+		array_grow_back(array)
 	}
 }
 
-// Kept out of line: callers inline the capacity check, and growth runs rarely.
-#[inline(never)]
-fn array_grow<A>(array: &mut [A], len: int)
+/// Makes room for one element before the first one.
+fn array_reserve_front<A>(array: &mut [A])
 {
-	let new_capacity = if array.capacity <= 0 {
-		1
-	} else {
-		array.capacity * 2
+	if array.start <= 0 {
+		array_grow_front(array)
+	}
+}
+
+// Kept out of line: callers inline the room check, and growth runs rarely.
+#[inline(never)]
+fn array_grow_back<A>(array: &mut [A])
+{
+	// An empty array can reuse its buffer without moving any elements.
+	if array.len <= 0 and array.capacity > 0 {
+		array.start = 0;
+		return;
 	};
-	let new_capacity = if new_capacity < len {
+	let front = array_kept_room(array.start, array.len);
+	array_reallocate(array, front, array_added_room(array.len))
+}
+
+// Kept out of line: callers inline the room check, and growth runs rarely.
+#[inline(never)]
+fn array_grow_front<A>(array: &mut [A])
+{
+	// An empty array can reuse its buffer without moving any elements.
+	if array.len <= 0 and array.capacity > 0 {
+		array.start = array.capacity;
+		return;
+	};
+	let back = array_kept_room(array.capacity - array.start - array.len, array.len);
+	array_reallocate(array, array_added_room(array.len), back)
+}
+
+// The free slots the full end gets: as many as there are elements, so that pure growth at one end
+// doubles the capacity. Sized from the length rather than the capacity, so that a queue of steady
+// length (`append` and `pop_front`) keeps a bounded buffer.
+fn array_added_room(len: int) -> int {
+	if len > 0 {
 		len
 	} else {
-		new_capacity
-	};
+		1
+	}
+}
+
+// The free slots the other end keeps: dropping them would make an array growing at both ends in
+// turn reallocate on every operation, while capping them at the length bounds what a queue's
+// abandoned front costs.
+fn array_kept_room(room: int, len: int) -> int {
+	if room < len {
+		room
+	} else {
+		len
+	}
+}
+
+/// Moves the elements into a new buffer with `front` free slots before them and `back` after them.
+fn array_reallocate<A>(array: &mut [A], front: int, back: int)
+{
+	let new_capacity = front + array.len + back;
 	let element_size = Value::<A>::SIZE;
 	let mut new_data = buffer_with_capacity(new_capacity, element_size, Value::<A>::ALIGN);
 	let mut i = 0;
 	loop {
 		if i < array.len {
-			buffer_move_into(
-				array.data,
-				array_physical_offset_unchecked(array, i),
-				new_data,
-				i,
-				element_size,
-			);
+			buffer_move_into(array.data, array.start + i, new_data, front + i, element_size);
 			i += 1;
 		} else {
 			break;
@@ -177,5 +204,5 @@ fn array_grow<A>(array: &mut [A], len: int)
 	};
 	buffer_move(new_data, array.data);
 	array.capacity = new_capacity;
-	array.start = 0;
+	array.start = front;
 }

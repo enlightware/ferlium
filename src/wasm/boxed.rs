@@ -247,10 +247,7 @@ pub(super) fn export(
                         let allocation = read_usize(unsafe { address.add(fields[1].1) }) as *mut u8;
                         let len = read_usize(unsafe { address.add(fields[2].1) });
                         let start = read_usize(unsafe { address.add(fields[3].1) });
-                        if len > capacity
-                            || (capacity == 0 && (len != 0 || start != 0))
-                            || (capacity != 0 && start >= capacity)
-                        {
+                        if start.checked_add(len).is_none_or(|end| end > capacity) {
                             return Err(error("invalid boxed Wasm Array bounds"));
                         }
                         if allocation.is_null() {
@@ -282,7 +279,7 @@ pub(super) fn export(
                             allocation,
                         });
                         for offset in (0..len).rev() {
-                            let index = (start + offset) % capacity;
+                            let index = start + offset;
                             tasks.push(DecodeTask::Visit {
                                 ty: element,
                                 // SAFETY: the allocation check above covers every capacity slot.
@@ -413,7 +410,7 @@ pub(super) fn export(
                     let elements = values.split_off(values.len() - len);
                     let mut buffer = Buffer::with_capacity(capacity);
                     for (offset, value) in elements.into_iter().enumerate() {
-                        *buffer.get_mut((start + offset) % capacity).unwrap() = value;
+                        *buffer.get_mut(start + offset).unwrap() = value;
                     }
                     // SAFETY: every initialized element was moved out and all remaining slots were
                     // absent; the raw backing allocation no longer owns source values.

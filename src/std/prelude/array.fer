@@ -145,9 +145,8 @@ pub fn array_append<A>(array: &mut [A], value: A)
 where
 	A: Value
 {
-	array_ensure_capacity(array, array.len + 1);
-	let index = array_wrap_index(array.capacity, array.start + array.len);
-	builtin::init_place(array.data->[buffer_slot](index, Value::<A>::SIZE), value);
+	array_reserve_back(array);
+	builtin::init_place(array.data->[buffer_slot](array.start + array.len, Value::<A>::SIZE), value);
 	array.len += 1;
 }
 
@@ -156,14 +155,8 @@ pub fn array_prepend<A>(array: &mut [A], value: A)
 where
 	A: Value
 {
-	array_ensure_capacity(array, array.len + 1);
-	if array.capacity > 0 {
-		array.start = if array.start <= 0 {
-			array.capacity - 1
-		} else {
-			array.start - 1
-		};
-	};
+	array_reserve_front(array);
+	array.start -= 1;
 	builtin::init_place(array.data->[buffer_slot](array.start, Value::<A>::SIZE), value);
 	array.len += 1;
 }
@@ -194,14 +187,7 @@ where
 	} else {
 		let index = array.start;
 		array.len -= 1;
-		if array.len <= 0 {
-			array.start = 0;
-		} else {
-			array.start += 1;
-			if array.start >= array.capacity {
-				array.start = 0;
-			};
-		};
+		array.start += 1;
 		Some(buffer_take(array.data, index, Value::<A>::SIZE))
 	}
 }

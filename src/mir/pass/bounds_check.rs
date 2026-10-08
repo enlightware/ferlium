@@ -654,6 +654,8 @@ mod tests {
                      if 3 + i >= 0 {\n\
                          work[0]; work[1]; work[2]; work[3];\n\
                          work[4]; work[5]; work[6]; work[7];\n\
+                         work[8]; work[9]; work[10]; work[11];\n\
+                         work[12]; work[13]; work[14]; work[15];\n\
                          a[i]\n\
                      } else { panic(\"bad index\") }\n\
                  } else {\n\

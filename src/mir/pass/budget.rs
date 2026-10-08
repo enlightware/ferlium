@@ -46,7 +46,8 @@ pub const MAX_ROUNDS: usize = 4;
 ///
 /// Callees are judged at their final size, the body inlining copies, so the cap must admit what the
 /// small callees above cost once their own callees are inlined: a function touching two array
-/// elements, each access checked and resolved in its ring buffer, costs about 47.
+/// elements, each access checked, cost about 47 when arrays were ring buffers, and costs less now
+/// that they are contiguous.
 pub const INLINE_CALLEE_COST: usize = 48;
 
 /// How much inlining may grow the [`cost`](super::cost) of one function's code outside loops beyond

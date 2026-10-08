@@ -236,9 +236,19 @@ fn ferlium_array_parts(value: &Value) -> Option<(&Buffer, usize, usize)> {
     if fields.len() != 4 {
         return None;
     }
+    let capacity = usize::try_from(*fields[0].as_primitive_ty::<isize>()?).ok()?;
     let buffer = fields[1].as_primitive_ty::<Buffer>()?;
     let len = usize::try_from(*fields[2].as_primitive_ty::<isize>()?).ok()?;
     let start = usize::try_from(*fields[3].as_primitive_ty::<isize>()?).ok()?;
+    assert_eq!(
+        capacity,
+        buffer.capacity(),
+        "array capacity must match its buffer"
+    );
+    assert!(
+        start.checked_add(len).is_some_and(|end| end <= capacity),
+        "array elements must fit contiguously within its buffer"
+    );
     Some((buffer, len, start))
 }
 
@@ -256,21 +266,9 @@ fn compare_ferlium_arrays(
             ));
         }
         for index in 0..actual_len {
-            let actual_capacity = actual_buffer.capacity();
-            let expected_capacity = expected_buffer.capacity();
-            let actual_physical = if actual_capacity == 0 {
-                0
-            } else {
-                (actual_start + index) % actual_capacity
-            };
-            let expected_physical = if expected_capacity == 0 {
-                0
-            } else {
-                (expected_start + index) % expected_capacity
-            };
             compare_values(
-                actual_buffer.get(actual_physical).unwrap(),
-                expected_buffer.get(expected_physical).unwrap(),
+                actual_buffer.get(actual_start + index).unwrap(),
+                expected_buffer.get(expected_start + index).unwrap(),
                 &format!("{path}[{index}]"),
             )?;
         }
@@ -1287,13 +1285,8 @@ fn int_vec_from_array_value(value: &Value) -> Vec<isize> {
         ferlium_array_parts(value).expect("test property my_array only stores arrays");
     let mut result = Vec::with_capacity(len);
     for index in 0..len {
-        let physical = if buffer.capacity() == 0 {
-            0
-        } else {
-            (start + index) % buffer.capacity()
-        };
         let item = *buffer
-            .get(physical)
+            .get(start + index)
             .unwrap()
             .as_primitive_ty::<isize>()
             .expect("test property my_array only stores ints");

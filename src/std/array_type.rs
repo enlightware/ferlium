@@ -47,15 +47,11 @@ pub(crate) fn array_value_elements(value: &Value) -> Option<Vec<&Value>> {
     let buffer = fields[1].as_primitive_ty::<Buffer>()?;
     let len = usize::try_from(*fields[2].as_primitive_ty::<isize>()?).ok()?;
     let start = usize::try_from(*fields[3].as_primitive_ty::<isize>()?).ok()?;
-    if capacity != buffer.capacity()
-        || len > capacity
-        || (capacity == 0 && (len != 0 || start != 0))
-        || (capacity != 0 && start >= capacity)
-    {
+    if capacity != buffer.capacity() || start.checked_add(len)? > capacity {
         return None;
     }
-    (0..len)
-        .map(|offset| buffer.get((start + offset) % capacity))
+    (start..start + len)
+        .map(|index| buffer.get(index))
         .collect()
 }
 

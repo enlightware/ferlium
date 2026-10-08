@@ -7,8 +7,8 @@ use ustr::ustr;
 use crate::effects::test_mod as test_mod_for_effects;
 
 use crate::harness::{
-    TestSession, assert_some_value_eq, bool, float, int, none, some, string, unit, variant_0,
-    variant_t1,
+    TestSession, assert_some_value_eq, bool, expected_array, expected_tuple, float, int, none,
+    some, string, unit, variant_0, variant_t1,
 };
 use ferlium::{
     SourceTable,
@@ -1047,6 +1047,146 @@ fn array_pop_back() {
         session.run("let mut a = [1, 2, 3]; array_pop_back(a)"),
         some(int(3))
     );
+}
+
+/// Deque operations against `VecDeque`, in sequences that make arrays reallocate from each end:
+/// random mixes, a queue of steady length drifting towards the back, growth at both ends in turn,
+/// and refilling an emptied array. String elements check that moves keep ownership intact.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_deque_operations_match_a_model() {
+    #[derive(Clone, Copy)]
+    enum Op {
+        Append,
+        Prepend,
+        PopFront,
+        PopBack,
+    }
+    let mut ops = Vec::new();
+    let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+    for _ in 0..160 {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ops.push(match (state >> 33) % 6 {
+            0 | 1 => Op::Append,
+            2 | 3 => Op::Prepend,
+            4 => Op::PopFront,
+            _ => Op::PopBack,
+        });
+    }
+    for _ in 0..40 {
+        ops.extend([Op::Append, Op::PopFront]);
+    }
+    for _ in 0..30 {
+        ops.extend([Op::Prepend, Op::Append]);
+    }
+    ops.extend([Op::PopBack; 80]);
+    ops.extend([Op::Append, Op::Append, Op::Prepend]);
+
+    let mut model = std::collections::VecDeque::new();
+    let mut popped = Vec::new();
+    let mut src = String::from("let mut a: [string] = [];\nlet mut popped: [string] = [];\n");
+    for (k, op) in ops.into_iter().enumerate() {
+        let element = format!("s{k}");
+        let statement = match op {
+            Op::Append => {
+                model.push_back(element.clone());
+                format!("array_append(a, \"{element}\");")
+            }
+            Op::Prepend => {
+                model.push_front(element.clone());
+                format!("array_prepend(a, \"{element}\");")
+            }
+            Op::PopFront => {
+                popped.extend(model.pop_front());
+                "match array_pop_front(a) { Some(v) => array_append(popped, v), None => () };"
+                    .to_string()
+            }
+            Op::PopBack => {
+                popped.extend(model.pop_back());
+                "match array_pop_back(a) { Some(v) => array_append(popped, v), None => () };"
+                    .to_string()
+            }
+        };
+        src.push_str(&statement);
+        src.push('\n');
+    }
+    src.push_str(
+        "let mut b = a;\n\
+         array_prepend(b, \"front\");\n\
+         array_append(b, \"back\");\n\
+         let mut joined = \"\";\n\
+         for s in a { string_push_str(joined, s); };\n\
+         (a, popped, (a[0], a[-1]), b, array_slice(a, 1, -1), a == b, joined)",
+    );
+
+    let model: Vec<_> = model.into_iter().collect();
+    let strings =
+        |values: &[String]| expected_array(string_type(), values.iter().map(|value| string(value)));
+    let mut cloned = vec!["front".to_string()];
+    cloned.extend(model.iter().cloned());
+    cloned.push("back".to_string());
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(&src),
+        expected_tuple([
+            strings(&model),
+            strings(&popped),
+            expected_tuple([string(&model[0]), string(&model[model.len() - 1])]),
+            strings(&cloned),
+            strings(&model[1..model.len() - 1]),
+            bool(false),
+            string(&model.concat()),
+        ])
+    );
+}
+
+/// Reallocation sizes the full end from the length: pure growth at one end doubles like a vector,
+/// and a queue of steady length or growth at both ends in turn keeps capacity within three times
+/// the length.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_reallocation_keeps_capacity_bounded() {
+    let mut session = TestSession::new();
+    // The array record's fields in their normalized order: capacity, data, len, start.
+    let mut layout = |src: &str| {
+        let value = session.run(src);
+        let fields = value.as_tuple().expect("an array is a record");
+        let int = |index: usize| *fields[index].as_primitive_ty::<isize>().unwrap();
+        (int(0), int(2), int(3))
+    };
+    assert_eq!(
+        layout("let mut a = []; for i in 0..100 { array_append(a, i) }; a"),
+        (128, 100, 0)
+    );
+    assert_eq!(
+        layout("let mut a = []; for i in 0..100 { array_prepend(a, i) }; a"),
+        (128, 100, 28)
+    );
+    let (capacity, len, _) = layout(
+        "let mut a = [0, 1, 2, 3]; for i in 0..1000 { array_append(a, i); array_pop_front(a); }; a",
+    );
+    assert!(len == 4 && capacity <= 3 * len, "queue capacity {capacity}");
+    let (capacity, len, _) =
+        layout("let mut a = []; for i in 0..100 { array_prepend(a, i); array_append(a, i) }; a");
+    assert!(
+        len == 200 && capacity <= 3 * len,
+        "two-ended capacity {capacity}"
+    );
+    // Draining preserves the position; refilling at either end reuses the existing capacity.
+    for (pop, start) in [("array_pop_back", 0), ("array_pop_front", 4)] {
+        let drained = format!("let mut a = [0, 1, 2, 3]; for i in 0..4 {{ {pop}(a); }};");
+        assert_eq!(layout(&format!("{drained} a")), (4, 0, start));
+        for push in ["array_append", "array_prepend"] {
+            for pop in ["array_pop_back", "array_pop_front"] {
+                let (capacity, len, _) = layout(&format!(
+                    "{drained} for i in 0..100 {{ {push}(a, i); {pop}(a); }}; a"
+                ));
+                assert_eq!((capacity, len), (4, 0), "{push} followed by {pop}");
+            }
+        }
+    }
 }
 
 #[test]

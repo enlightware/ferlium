@@ -193,12 +193,6 @@ pub(crate) enum KnownCallee {
     /// The mutable member of `array_offset_unchecked(array, offset)` — projects the element at an
     /// offset whose `0 <= offset < len(array)` precondition the caller has established.
     ArrayOffsetUnchecked,
-    /// `array_wrap_index(capacity, index)` — `index - capacity` when `index >= capacity`, and
-    /// `index` otherwise.
-    ///
-    /// The circular-buffer step. Proving an index in range says nothing about this: it wraps a
-    /// *physical* slot, and dropping it needs its own proof that `start + offset < capacity`.
-    ArrayWrapIndex,
     /// `Iterator<RangeIterator>::next(iterator)` — advances `iterator.next` by one step towards
     /// `iterator.range.end` and yields the value before the step, or `None` at the end.
     ///
@@ -570,10 +564,6 @@ impl KnownCallees {
             ),
             (array_index, KnownCallee::ArrayIndex),
             (array_offset_unchecked, KnownCallee::ArrayOffsetUnchecked),
-            (
-                resolver.function("array_wrap_index"),
-                KnownCallee::ArrayWrapIndex,
-            ),
             (
                 resolver.method(ITERATOR_TRAIT_NAME, range_iterator, "next"),
                 KnownCallee::RangeNext,
@@ -959,7 +949,7 @@ mod tests {
         let session = CompilerSession::new();
         assert_eq!(
             known_callees(&session).by_id.len(),
-            79,
+            78,
             "two known callees resolved to the same function id"
         );
     }

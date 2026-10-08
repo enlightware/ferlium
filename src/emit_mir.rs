@@ -1435,7 +1435,7 @@ impl<'a> Emitter<'a> {
         let capacity_arg = self.int_constant_place(span, len as isize);
         // An empty Buffer allocates no backing storage, so its element layout is unobserved. Avoid
         // demanding a synthesized witness for composite generic element types solely to construct
-        // `[]`; later growth goes through `array_ensure_capacity`, which passes its `Value<A>`
+        // `[]`; later growth goes through `array_reserve_back`, which passes its `Value<A>`
         // layout evidence normally.
         let (element_size, element_align) = if len == 0 {
             (

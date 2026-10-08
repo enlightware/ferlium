@@ -451,13 +451,22 @@ Arrays in Ferlium are actually double-ended queues (deques) to allow efficient a
 ```
 struct Deque<T> {
    data_ptr : *T,    // pointer to backing buffer of `cap` elements
-   head     : usize, // index of first logical element in [0..cap)
-   len      : usize, // number of elements currently stored (≤ cap)
+   head     : usize, // index of the first element
+   len      : usize, // number of elements currently stored (head + len ≤ cap)
    cap      : usize, // capacity (number of T slots)
 }
 ```
 
-with elements stored in a ring buffer of `cap` T values, and logical index `i` mapping to physical slot `(head + i) mod cap`.
+The elements are contiguous: logical index `i` maps to physical slot `head + i`, and the free slots
+before `head` and after the last element let both ends grow. Elements never move within a buffer.
+When the end an operation needs is full, they move once into a new buffer, where that end gets as
+many free slots as there are elements and the other end keeps its free slots up to that many. Growth
+at one end therefore doubles the capacity as a vector does, and a queue of steady length keeps a
+bounded buffer.
+
+Popping preserves the remaining elements' position, including when the array becomes empty.
+If an insertion into an empty array needs room at its end, the head moves within the existing
+buffer to reuse its slots without allocating.
 
 This leads to:
 

@@ -1188,10 +1188,11 @@ mod tests {
         );
     }
 
-    /// An array iterator's inlined `next` stores `Some` before its ring-buffer wrap test.
+    /// An array iterator's inlined `next` stores `Some` before it reads the element.
     #[test]
     fn a_for_loop_over_an_array_needs_no_tag_dispatch() {
-        let module = optimized("fn sum(x: [int]) { let mut sum = 0; for a in x { sum += a }; sum }");
+        let module =
+            optimized("fn sum(x: [int]) { let mut sum = 0; for a in x { sum += a }; sum }");
         let body = body_of(&module, "sum");
 
         assert!(
