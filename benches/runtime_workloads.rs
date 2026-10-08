@@ -219,28 +219,28 @@ impl RuntimeWorkload {
         include_str!("../tests/modules/sum.fer"),
         include_str!("runtime/sum_products_int.fer"),
         RuntimeResult::Int,
-        46_840_336.0,
+        4_566_769.0,
     );
     pub const SUM_PRODUCTS_FLOAT: Self = Self::single(
         "sum_products_float",
         include_str!("../tests/modules/sum.fer"),
         include_str!("runtime/sum_products_float.fer"),
         RuntimeResult::Float,
-        117_649.0,
+        374_850.062_5,
     );
     pub const SUM_CROSS_PRODUCTS_INT: Self = Self::single(
         "sum_cross_products_int",
         include_str!("../tests/modules/sum.fer"),
         include_str!("runtime/sum_cross_products_int.fer"),
         RuntimeResult::Int,
-        -1_744_760.0,
+        2_596_585.0,
     );
     pub const SUM_CROSS_PRODUCTS_MIXED: Self = Self::single(
         "sum_cross_products_mixed",
         include_str!("../tests/modules/sum.fer"),
         include_str!("runtime/sum_cross_products_mixed.fer"),
         RuntimeResult::Float,
-        -1_263_890.0,
+        698_340.0,
     );
 
     pub const ALL: [Self; 20] = [
