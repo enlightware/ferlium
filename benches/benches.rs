@@ -317,6 +317,48 @@ runtime_benchmark!(
     isize,
     run_int
 );
+runtime_benchmark!(
+    bench_sum_int,
+    setup_sum_int,
+    RuntimeWorkload::SUM_INT,
+    isize,
+    run_int
+);
+runtime_benchmark!(
+    bench_sum_float,
+    setup_sum_float,
+    RuntimeWorkload::SUM_FLOAT,
+    Float,
+    run_float
+);
+runtime_benchmark!(
+    bench_sum_products_int,
+    setup_sum_products_int,
+    RuntimeWorkload::SUM_PRODUCTS_INT,
+    isize,
+    run_int
+);
+runtime_benchmark!(
+    bench_sum_products_float,
+    setup_sum_products_float,
+    RuntimeWorkload::SUM_PRODUCTS_FLOAT,
+    Float,
+    run_float
+);
+runtime_benchmark!(
+    bench_sum_cross_products_int,
+    setup_sum_cross_products_int,
+    RuntimeWorkload::SUM_CROSS_PRODUCTS_INT,
+    isize,
+    run_int
+);
+runtime_benchmark!(
+    bench_sum_cross_products_mixed,
+    setup_sum_cross_products_mixed,
+    RuntimeWorkload::SUM_CROSS_PRODUCTS_MIXED,
+    Float,
+    run_float
+);
 
 // --- Gungraun setup ---
 
@@ -348,7 +390,13 @@ library_benchmark_group!(
         bench_iter_pipeline,
         bench_data_text_roundtrip,
         bench_float_kernel,
-        bench_image_adjust
+        bench_image_adjust,
+        bench_sum_int,
+        bench_sum_float,
+        bench_sum_products_int,
+        bench_sum_products_float,
+        bench_sum_cross_products_int,
+        bench_sum_cross_products_mixed
     ]
 );
 

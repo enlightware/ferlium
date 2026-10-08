@@ -5,7 +5,7 @@ use test_log::test;
 
 use indoc::indoc;
 
-use crate::harness::{TestSession, int, raw_value, string};
+use crate::harness::{TestSession, float, int, raw_value, string};
 
 use ferlium::{
     call_fn,
@@ -13,7 +13,7 @@ use ferlium::{
     run_fn_native,
     std::{
         array::array_type,
-        math::{Float, int_type},
+        math::{Float, float_type, int_type},
         string::String as Str,
     },
 };
@@ -69,6 +69,61 @@ fn quicksort() {
             .unwrap(),
         int_a![0, 1, 2, 3, 4, 5, 7, 8, 11],
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn sum() {
+    let mut session = TestSession::new();
+    let module_id = session
+        .compile(include_str!("../modules/sum.fer"))
+        .module_id;
+    let ints = array_type(int_type());
+    let floats = array_type(float_type());
+    let call = |name: &str, input, ty| {
+        call_fn!(session.session(), module_id, name, [input => ty] -> int_type()).unwrap()
+    };
+    assert_val_eq!(call("sum_int", raw_value(int_a![]), ints), int(0));
+    assert_val_eq!(call("sum_int", raw_value(int_a![5, -3, 8]), ints), int(10));
+    assert_val_eq!(
+        call("sum_products_int", raw_value(int_a![1, 2, 3]), ints),
+        int(36)
+    );
+    assert_val_eq!(
+        call_fn!(session.session(), module_id, "sum_float", [raw_value(float_a![0.5, -2.25]) => floats] -> float_type())
+            .unwrap(),
+        float(-1.75)
+    );
+    assert_val_eq!(
+        call_fn!(session.session(), module_id, "sum_products_float", [raw_value(float_a![0.5, 1.5]) => floats] -> float_type())
+            .unwrap(),
+        float(4.0)
+    );
+    assert_val_eq!(
+        call_fn!(
+            session.session(),
+            module_id,
+            "sum_cross_products_int",
+            [raw_value(int_a![1, 2]) => ints, raw_value(int_a![3, 4, 5]) => ints] -> int_type()
+        )
+        .unwrap(),
+        int(36)
+    );
+    for name in [
+        "sum_cross_products_float_outer",
+        "sum_cross_products_int_outer",
+    ] {
+        assert_val_eq!(
+            call_fn!(
+                session.session(),
+                module_id,
+                name,
+                [raw_value(float_a![0.5, 1.5]) => floats, raw_value(int_a![3, 4]) => ints] -> float_type()
+            )
+            .unwrap(),
+            float(14.0)
+        );
+    }
 }
 
 #[test]

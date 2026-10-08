@@ -200,7 +200,50 @@ impl RuntimeWorkload {
     )
     .experimental();
 
-    pub const ALL: [Self; 14] = [
+    pub const SUM_INT: Self = Self::single(
+        "sum_int",
+        include_str!("../tests/modules/sum.fer"),
+        include_str!("runtime/sum_int.fer"),
+        RuntimeResult::Int,
+        -4_195.0,
+    );
+    pub const SUM_FLOAT: Self = Self::single(
+        "sum_float",
+        include_str!("../tests/modules/sum.fer"),
+        include_str!("runtime/sum_float.fer"),
+        RuntimeResult::Float,
+        -1_398.75,
+    );
+    pub const SUM_PRODUCTS_INT: Self = Self::single(
+        "sum_products_int",
+        include_str!("../tests/modules/sum.fer"),
+        include_str!("runtime/sum_products_int.fer"),
+        RuntimeResult::Int,
+        46_840_336.0,
+    );
+    pub const SUM_PRODUCTS_FLOAT: Self = Self::single(
+        "sum_products_float",
+        include_str!("../tests/modules/sum.fer"),
+        include_str!("runtime/sum_products_float.fer"),
+        RuntimeResult::Float,
+        117_649.0,
+    );
+    pub const SUM_CROSS_PRODUCTS_INT: Self = Self::single(
+        "sum_cross_products_int",
+        include_str!("../tests/modules/sum.fer"),
+        include_str!("runtime/sum_cross_products_int.fer"),
+        RuntimeResult::Int,
+        -1_744_760.0,
+    );
+    pub const SUM_CROSS_PRODUCTS_MIXED: Self = Self::single(
+        "sum_cross_products_mixed",
+        include_str!("../tests/modules/sum.fer"),
+        include_str!("runtime/sum_cross_products_mixed.fer"),
+        RuntimeResult::Float,
+        -1_263_890.0,
+    );
+
+    pub const ALL: [Self; 20] = [
         Self::QUICKSORT,
         Self::FIBONACCI,
         Self::SIEVE,
@@ -215,6 +258,12 @@ impl RuntimeWorkload {
         Self::DATA_TEXT_ROUNDTRIP,
         Self::FLOAT_KERNEL,
         Self::IMAGE_ADJUST,
+        Self::SUM_INT,
+        Self::SUM_FLOAT,
+        Self::SUM_PRODUCTS_INT,
+        Self::SUM_PRODUCTS_FLOAT,
+        Self::SUM_CROSS_PRODUCTS_INT,
+        Self::SUM_CROSS_PRODUCTS_MIXED,
     ];
 
     pub const fn name(self) -> &'static str {

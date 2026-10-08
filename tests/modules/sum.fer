@@ -1,0 +1,65 @@
+fn sum_int(x: [int]) -> int {
+	let mut sum = 0;
+	for a in x {
+		sum += a;
+	};
+	sum
+}
+
+fn sum_float(x: [float]) -> float {
+	let mut sum = 0.0;
+	for a in x {
+		sum += a;
+	};
+	sum
+}
+
+fn sum_products_int(x: [int]) -> int {
+	let mut sum = 0;
+	for a in x {
+		for b in x {
+			sum += a * b;
+		}
+	};
+	sum
+}
+
+fn sum_products_float(x: [float]) -> float {
+	let mut sum = 0.0;
+	for a in x {
+		for b in x {
+			sum += a * b;
+		}
+	};
+	sum
+}
+
+fn sum_cross_products_int(x: [int], y: [int]) -> int {
+	let mut sum = 0;
+	for a in x {
+		for b in y {
+			sum += a * b;
+		}
+	};
+	sum
+}
+
+fn sum_cross_products_float_outer(x: [float], y: [int]) -> float {
+	let mut sum = 0.0;
+	for a in x {
+		for b in y {
+			sum += a * (b as float);
+		}
+	};
+	sum
+}
+
+fn sum_cross_products_int_outer(x: [float], y: [int]) -> float {
+	let mut sum = 0.0;
+	for b in y {
+		for a in x {
+			sum += a * (b as float);
+		}
+	};
+	sum
+}
