@@ -756,6 +756,20 @@ fn comparison_operators() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn float_literals_with_leading_zeros_in_fraction() {
+    let mut session = TestSession::new();
+    assert_val_eq!(session.run("1.05"), float(1.05));
+    assert_val_eq!(session.run("0.05"), float(0.05));
+    assert_val_eq!(session.run("1.005"), float(1.005));
+    assert_val_eq!(session.run("-2.0625"), float(-2.0625));
+    assert_val_eq!(
+        session.run("[0.25, 1.05]"),
+        expected_array(float_type(), [float(0.25), float(1.05)])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn expression_grouping() {
     let mut session = TestSession::new();
     assert_val_eq!(session.run("(1)"), int(1));
@@ -1183,6 +1197,14 @@ fn tuple_projection() {
         unit()
     );
     assert_val_eq!(session.run("fn f(v) { v.1.2.3 } ()"), unit());
+    for src in ["(1, 2).01", "let a = (1, 2); a.00"] {
+        match session.fail_compilation(src).into_inner() {
+            CompilationErrorImpl::ParsingFailed(errors) => {
+                assert!(errors[0].0.contains("leading zeros"), "{errors:?}")
+            }
+            other => panic!("expected a parsing failure for {src}, got {other:?}"),
+        }
+    }
     assert_val_eq!(
         session.run("fn a(x) { x.0 } fn b(x) { x.1 } fn c(x) { (a(x), b(x)) } c((1,2))"),
         int_tuple!(1, 2)

@@ -353,7 +353,7 @@ where
 /// Create a projection, or a float literal if the lhs is a number
 pub(crate) fn proj_or_float<L, T>(
     lhs: PExprId,
-    rhs: (usize, Location),
+    rhs: &(String, Location),
     arena: &PExprArena,
 ) -> Result<PExprKind, ParseError<L, T, LocatedError>> {
     use ExprKind::*;
@@ -363,23 +363,33 @@ pub(crate) fn proj_or_float<L, T>(
     } else {
         None
     };
+    let (digits, span) = rhs;
     if let Some(value) = int_val {
-        let index = rhs.0;
-        let float_value = format!("{value}.{index}");
-        return parse_num_literal::<Float, L, T>(&float_value, rhs.1);
+        let float_value = format!("{value}.{digits}");
+        return parse_num_literal::<Float, L, T>(&float_value, *span);
     }
-    if ProjectionIndex::try_from(rhs.0).is_err() {
+    if digits.len() > 1 && digits.starts_with('0') {
         return error(
-            format!("tuple projection index {} is too large", rhs.0),
-            rhs.1,
+            format!("tuple projection index {digits} cannot have leading zeros"),
+            *span,
         );
     }
-    Ok(ExprKind::project(lhs, rhs))
+    let Some(index) = digits
+        .parse::<usize>()
+        .ok()
+        .filter(|index| ProjectionIndex::try_from(*index).is_ok())
+    else {
+        return error(
+            format!("tuple projection index {digits} is too large"),
+            *span,
+        );
+    };
+    Ok(ExprKind::project(lhs, (index, *span)))
 }
 
 pub(crate) enum PExprSuffixTail {
     Field(UstrSpan),
-    TupleIndex((usize, Location)),
+    TupleIndex((String, Location)),
     Index(PExprId, Location),
     Apply(Vec<PExprId>, Location),
     NamedSubscript(UstrSpan, Vec<PExprId>, Location),
@@ -428,7 +438,7 @@ fn suffix_tail_kind<L, T>(
 ) -> Result<PExprKind, ParseError<L, T, LocatedError>> {
     match tail {
         PExprSuffixTail::Field(field) => Ok(ExprKind::field_access(receiver, *field)),
-        PExprSuffixTail::TupleIndex(index) => proj_or_float(receiver, *index, arena),
+        PExprSuffixTail::TupleIndex(index) => proj_or_float(receiver, index, arena),
         PExprSuffixTail::Index(index, _) => Ok(ExprKind::index(receiver, *index)),
         PExprSuffixTail::Apply(args, _) => {
             Ok(ExprKind::apply(receiver, args.clone(), UnnamedArg::None))
@@ -782,6 +792,7 @@ fn resolve_token_names(names: Vec<String>) -> Vec<String> {
     static NAME_MAP: LazyLock<FxHashMap<&'static str, &'static str>> = LazyLock::new(|| {
         let mut m = FxHashMap::default();
         m.insert(r##"r#"[1-9][0-9]*|0"#"##, "natural number");
+        m.insert(r##"r#"0[0-9]+"#"##, "digits");
         m.insert(r##"r#"[\\p{L}_][\\p{L}\\p{Nd}_]*"#"##, "identifier");
         m.insert(r##"r#"\\\"([^\\\\\\\"]|\\\\.)*\\\""#"##, "string literal");
         m.insert(
