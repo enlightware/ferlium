@@ -458,6 +458,10 @@ Return {
     kw<'return'> expr
 }
 
+ReturnNoValue {
+    kw<'return'>
+}
+
 Yield {
     kw<'yield'> expr
 }
@@ -714,6 +718,8 @@ matchArgs {
 }
 
 MatchBranch {
+    Pattern '=>' ReturnNoValue
+    |
     Pattern '=>' BreakNoValue
     |
     Pattern '=>' expr
@@ -785,6 +791,8 @@ Literal {
 }
 
 Block {
+    "{" stmt* ReturnNoValue "}"
+    |
     "{" stmt* BreakNoValue "}"
     |
     "{" stmt* expr "}"
@@ -795,6 +803,7 @@ Block {
 
 stmt {
     Let
+    | ReturnStmt
     | BreakStmt
     | exprStmt
 }
@@ -805,6 +814,10 @@ Let {
 
 BreakStmt {
     BreakNoValue ';'
+}
+
+ReturnStmt {
+    ReturnNoValue ';'
 }
 
 letPattern {

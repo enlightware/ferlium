@@ -869,6 +869,10 @@ ReturnExpr<NoStruct>: ExprKind = {
     "return" <e:Es<TopExpr<NoStruct>>> => ExprKind::return_(e),
 }
 
+ReturnNoValueExpr: ExprKind = {
+    <l:@L> "return" <r:@R> => ExprKind::return_(unit_literal_expr(span(l, r, source_id), arena)),
+}
+
 YieldExpr<NoStruct>: ExprKind = {
     "yield" <e:Es<TopExpr<NoStruct>>> => ExprKind::yield_(e),
 }
@@ -1087,6 +1091,7 @@ MatchExpr: ExprKind = {
 }
 
 MatchArg: (Pattern, PExprId) = {
+    <p:Pattern> "=>" <e:Es<ReturnNoValueExpr>> => (p, e),
     <p:Pattern> "=>" <e:Es<BreakNoValueExpr>> => (p, e),
     <p:Pattern> "=>" <e:Expr> => (p, e),
 }
@@ -1257,6 +1262,7 @@ BranchBlock: ExprKind = {
 }
 
 Block: ExprKind = {
+    "{" <e:Stmts> <r:Es<ReturnNoValueExpr>> "}" => ExprKind::block(ext_b(e, r)),
     "{" <e:Stmts> <r:Es<BreakNoValueExpr>> "}" => ExprKind::block(ext_b(e, r)),
     "{" <e:Stmts> <r:Expr> "}" => ExprKind::block(ext_b(e, r)),
     "{" <e:Stmts> "}" => ExprKind::block(ext_b(
@@ -1270,6 +1276,7 @@ Stmts = { Stmt* }
 
 Stmt = {
     Es<LetStmt>,
+    ReturnStmt,
     BreakStmt,
     ExprStmt,
 }
@@ -1291,6 +1298,10 @@ LetStmt: ExprKind = {
 
 BreakStmt: PExprId = {
     <e:Es<BreakNoValueExpr>> ";" => e,
+}
+
+ReturnStmt: PExprId = {
+    <e:Es<ReturnNoValueExpr>> ";" => e,
 }
 
 BindingLetPattern<Id>: LetPattern = {

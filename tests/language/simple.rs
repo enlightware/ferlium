@@ -3833,6 +3833,23 @@ fn early_returns() {
 
     // Return without value (unit)
     assert_val_eq!(session.run("fn f() { return () } f()"), unit());
+    assert_val_eq!(session.run("fn f() { return; } f()"), unit());
+    assert_val_eq!(session.run("fn f() { return } f()"), unit());
+    assert_val_eq!(session.run("let f = || { return; }; f()"), unit());
+    assert_val_eq!(
+        session.run("fn f() { if true { return; }; panic(\"unreachable\") } f()"),
+        unit()
+    );
+    assert_val_eq!(
+        session.run("fn f() { match true { true => return, false => () } } f()"),
+        unit()
+    );
+    session
+        .fail_compilation("fn f() -> int { return; } f()")
+        .expect_type_mismatch("()", "int");
+    session
+        .fail_compilation("return;")
+        .expect_return_outside_function();
     // Note: this creates a compilation error because the compiler is not able to infer
     // that the last expression is dead.
     //assert_val_eq!(session.run("fn f() { return (); 1 } f()"), unit());
