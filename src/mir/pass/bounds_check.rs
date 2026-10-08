@@ -513,6 +513,27 @@ mod tests {
         );
     }
 
+    /// A range's direction test `start <= end` is answered by a guard on the end that is tighter
+    /// than the start, as in `if n < 2 { … } else { for i in 0..=n { … } }`; without the guard it
+    /// stays.
+    #[test]
+    fn a_guard_tighter_than_the_range_start_decides_its_direction() {
+        let loop_over = |guard: &str| {
+            optimized(&format!(
+                "fn sum(n: int) -> int {{ if n < {guard} {{ 0 }} else {{ let mut t = 0; for i in 0..=n {{ t = t + i }}; t }} }}"
+            ))
+        };
+        let guarded = loop_over("2");
+        let body = body_of(&guarded, "sum");
+        assert!(!body.contains("ge_int"), "`2 <= n` gives `0 <= n`:\n{body}");
+        let unguarded = loop_over("-2");
+        let body = body_of(&unguarded, "sum");
+        assert!(
+            body.contains("ge_int"),
+            "`-2 <= n` decides nothing about `0 <= n`:\n{body}"
+        );
+    }
+
     /// Knowing an exact length must not turn a false bound into a proof.
     #[test]
     fn an_out_of_range_build_array_access_stays_checked() {

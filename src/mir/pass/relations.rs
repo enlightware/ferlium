@@ -565,8 +565,9 @@ impl Predicate {
     /// **Deliberately syntactic.** Shifting both sides of an order by one offset is unsound on a
     /// wrapping `int`. The one shift allowed is the strictness step: `l < r` puts `l` below the
     /// maximum and `r` above the minimum, so `l + 1 <= r` and `l <= r - 1` cannot have wrapped.
+    /// Beyond that, a constant bound gives its looser constants, which shifts nothing.
     fn entails(&self, goal: &Predicate) -> bool {
-        if self == goal {
+        if self == goal || self.loosens_a_constant_bound(goal) {
             return true;
         }
         if self.comparison != Comparison::Less {
@@ -587,6 +588,35 @@ impl Predicate {
             }
             Comparison::Less | Comparison::Equal => false,
         }
+    }
+
+    /// `a ⋈ x` gives `b ⋈ x` for a constant `b < a`, and `x ⋈ a` gives `x ⋈ b` for `b > a`: two
+    /// constants are exact machine values, so ordering them shifts nothing that could wrap. This is
+    /// how a guard `2 <= n` answers a range's direction test `0 <= n`. Equal constants are the
+    /// strictness cases of [`entails`](Self::entails).
+    fn loosens_a_constant_bound(&self, goal: &Predicate) -> bool {
+        let is_order = |predicate: &Predicate| {
+            matches!(
+                predicate.comparison,
+                Comparison::Less | Comparison::LessOrEqual
+            )
+        };
+        if !is_order(self) || !is_order(goal) {
+            return false;
+        }
+        let constants =
+            |ours: &Affine, theirs: &Affine| ours.as_constant().zip(theirs.as_constant());
+        if self.right == goal.right
+            && let Some((ours, theirs)) = constants(&self.left, &goal.left)
+        {
+            return theirs < ours;
+        }
+        if self.left == goal.left
+            && let Some((ours, theirs)) = constants(&self.right, &goal.right)
+        {
+            return theirs > ours;
+        }
+        false
     }
 }
 
@@ -3286,6 +3316,36 @@ mod tests {
         );
     }
 
+    /// A constant bound gives every looser constant bound, in both directions and across
+    /// strictness, but never a tighter one nor a bound on another form.
+    #[test]
+    fn a_constant_bound_gives_its_looser_bounds() {
+        let n = Affine::symbol(SymbolId::new(0));
+        let constant = Affine::constant;
+        let order = |left: &Affine, comparison, right: &Affine| {
+            Predicate::between(left, comparison, right).unwrap()
+        };
+        use Comparison::{Less, LessOrEqual};
+        let mut state = State::default();
+        state.assume(order(&constant(2), LessOrEqual, &n));
+        assert!(state.implies(&order(&constant(0), LessOrEqual, &n)));
+        assert!(state.implies(&order(&constant(1), Less, &n)));
+        assert!(state.implies(&order(&constant(Int::MIN), Less, &n)));
+        assert!(!state.implies(&order(&constant(2), Less, &n)));
+        assert!(!state.implies(&order(&constant(3), LessOrEqual, &n)));
+        let shifted = n.add(&constant(1)).unwrap();
+        assert!(
+            !state.implies(&order(&constant(0), LessOrEqual, &shifted)),
+            "`n + 1` wraps at the maximum"
+        );
+
+        let mut state = State::default();
+        state.assume(order(&n, Less, &constant(-4)));
+        assert!(state.implies(&order(&n, Less, &constant(0))));
+        assert!(state.implies(&order(&n, LessOrEqual, &constant(-5))));
+        assert!(!state.implies(&order(&n, LessOrEqual, &constant(-6))));
+    }
+
     /// `len + i < len` needs both `i < 0` and `0 <= len`: without the second, the sum can wrap.
     #[test]
     fn a_negative_offset_stays_below_a_non_negative_base() {
@@ -3483,8 +3543,19 @@ mod tests {
             Predicate::between(&Affine::constant(1), Comparison::LessOrEqual, &len).unwrap();
         assert!(strict.entails(&stepped), "`0 < len` must give `1 <= len`");
         assert!(
-            !stepped.entails(&strict),
-            "the weaker bound must not give back the strict one"
+            stepped.entails(&strict),
+            "with a constant below, `1 <= len` and `0 < len` are one bound"
+        );
+        let x = Affine::symbol(SymbolId::new(1));
+        let successor = Predicate::between(
+            &x.add(&Affine::constant(1)).unwrap(),
+            Comparison::LessOrEqual,
+            &len,
+        )
+        .unwrap();
+        assert!(
+            !successor.entails(&Predicate::between(&x, Comparison::Less, &len).unwrap()),
+            "`x + 1 <= len` must not give `x < len` alone, as `x + 1` wraps at the maximum"
         );
         assert!(
             !strict.entails(
