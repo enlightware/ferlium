@@ -42,9 +42,12 @@ use crate::{
     std::{math::int_type, value::dynamic_product_member_layouts},
 };
 
+use rustc_hash::FxHashSet;
+
 use super::{
     dataflow::call_operands,
     known_callee::{KnownCallee, KnownCallees},
+    loop_checks,
     relations::{self, Affine, Comparison, Predicate},
 };
 
@@ -294,11 +297,14 @@ pub(crate) fn eliminate_bounds_checks(
             _ => {}
         }
     }
-    if proved.is_empty() && decided.is_empty() {
+    // What the relational proof leaves in a range loop, a check before the loop may settle.
+    let settled: FxHashSet<BlockId> = decided.iter().map(|(block, _)| *block).collect();
+    let guards = loop_checks::plan(func, &mut analysis, known, original_of, &settled);
+    if proved.is_empty() && decided.is_empty() && guards.is_empty() {
         return None;
     }
 
-    let removed = proved.len() + decided.len();
+    let removed = proved.len() + decided.len() + guards.len();
     let mut edit = FunctionEdit::new(func.clone());
     for (block, target) in decided {
         let span = func.block(block).terminator().span;
@@ -410,6 +416,7 @@ pub(crate) fn eliminate_bounds_checks(
             }
         }
     }
+    loop_checks::apply(&mut edit, guards, known, env);
     // A dead error edge strands its cleanup pad, and the surviving successor is left with one
     // predecessor. Both are this pass's own doing, so both are cleaned up here.
     edit.remove_unreachable_blocks();

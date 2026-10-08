@@ -329,49 +329,43 @@ fn step(
     }
 }
 
-/// Restores proved to preserve the current incarnation of one local allocation on every path.
-///
-/// A marker protects the allocation only if saved while it is live. Reexecuting the allocation
-/// invalidates all older snapshots: static allocation identities alone cannot distinguish loop
-/// iterations. Intersecting facts at joins keeps this a small must-analysis, without the
-/// verifier's relational allocation-frontier alternatives. Unknown histories lose the proof.
-pub(crate) fn restores_preserving_alloca(
-    func: &Function,
-    allocation: ValueId,
-) -> FxHashSet<OperationSite> {
-    #[derive(Clone, Default, PartialEq, Eq)]
-    struct State {
-        live: bool,
-        markers: Frontier,
-    }
+/// Whether one local allocation is live, and which markers saved while it was protect it.
+#[derive(Clone, Default, PartialEq, Eq)]
+struct AllocationState {
+    live: bool,
+    markers: Frontier,
+}
 
-    fn step_allocation(operation: &Operation, allocation: ValueId, state: &mut State) {
-        match operation.kind {
-            OperationKind::Alloca { .. } if operation.result_id() == Some(allocation) => {
-                state.live = true;
+fn step_allocation(operation: &Operation, allocation: ValueId, state: &mut AllocationState) {
+    match operation.kind {
+        OperationKind::Alloca { .. } if operation.result_id() == Some(allocation) => {
+            state.live = true;
+            state.markers.clear();
+        }
+        OperationKind::StackSave => {
+            let marker = operation.result_id().unwrap();
+            if state.live {
+                record(&mut state.markers, marker);
+            } else {
+                state.markers.retain(|&saved| saved != marker);
+            }
+        }
+        OperationKind::StackRestore => {
+            state.live &= matches!(operation.operands.first(), Some(mir::Value::Register(marker))
+                if holds(&state.markers, *marker));
+            if !state.live {
                 state.markers.clear();
             }
-            OperationKind::StackSave => {
-                let marker = operation.result_id().unwrap();
-                if state.live {
-                    record(&mut state.markers, marker);
-                } else {
-                    state.markers.retain(|&saved| saved != marker);
-                }
-            }
-            OperationKind::StackRestore => {
-                state.live &= matches!(operation.operands.first(), Some(mir::Value::Register(marker))
-                    if holds(&state.markers, *marker));
-                if !state.live {
-                    state.markers.clear();
-                }
-            }
-            _ => {}
         }
+        _ => {}
     }
+}
 
+/// The allocation's state on entry to every block, as a must-analysis: live only if live on every
+/// path. `None` for a block no path reaches.
+fn allocation_states(func: &Function, allocation: ValueId) -> Vec<Option<AllocationState>> {
     let mut inputs = vec![None; func.blocks().count()];
-    inputs[func.entry().as_index()] = Some(State::default());
+    inputs[func.entry().as_index()] = Some(AllocationState::default());
     let mut pending = VecDeque::from([func.entry()]);
     let mut queued = vec![false; inputs.len()];
     queued[func.entry().as_index()] = true;
@@ -386,13 +380,13 @@ pub(crate) fn restores_preserving_alloca(
             step_allocation(operation, allocation, &mut state);
         }
         if matches!(basic.terminator().kind, TerminatorKind::Yield { .. }) {
-            state = State::default();
+            state = AllocationState::default();
         }
         for successor in basic.terminator().successors() {
             let slot = &mut inputs[successor.as_index()];
             let updated = slot.as_ref().map_or_else(
                 || state.clone(),
-                |existing| State {
+                |existing| AllocationState {
                     live: existing.live && state.live,
                     markers: intersect(&existing.markers, &state.markers),
                 },
@@ -406,7 +400,20 @@ pub(crate) fn restores_preserving_alloca(
             }
         }
     }
+    inputs
+}
 
+/// Restores proved to preserve the current incarnation of one local allocation on every path.
+///
+/// A marker protects the allocation only if saved while it is live. Reexecuting the allocation
+/// invalidates all older snapshots: static allocation identities alone cannot distinguish loop
+/// iterations. Intersecting facts at joins keeps this a small must-analysis, without the
+/// verifier's relational allocation-frontier alternatives. Unknown histories lose the proof.
+pub(crate) fn restores_preserving_alloca(
+    func: &Function,
+    allocation: ValueId,
+) -> FxHashSet<OperationSite> {
+    let inputs = allocation_states(func, allocation);
     let mut preserving = FxHashSet::default();
     for block in func.blocks() {
         let Some(mut state) = inputs[block.as_index()].clone() else {
@@ -427,6 +434,18 @@ pub(crate) fn restores_preserving_alloca(
         }
     }
     preserving
+}
+
+/// Whether a local allocation is live after the operations of `block`, on every path reaching it:
+/// allocated, and not popped since by a restore to a marker saved before it.
+pub(crate) fn alloca_live_after(func: &Function, allocation: ValueId, block: BlockId) -> bool {
+    let Some(mut state) = allocation_states(func, allocation)[block.as_index()].clone() else {
+        return false;
+    };
+    for operation in func.block(block).operations() {
+        step_allocation(operation, allocation, &mut state);
+    }
+    state.live
 }
 
 #[cfg(test)]

@@ -45,6 +45,49 @@ fn array_index_out_of_bounds(index: int, len: int) {
 	panic(f"Array access out of bounds: index {index} for length {len}")
 }
 
+// The check a range loop's accesses `base + stride * i` need, made once before the loop for every
+// `i` the range yields, with `stride` 0 or 1. Fails exactly when one of those accesses would, and
+// with the error the first failing one would raise: the loop is then certain to fail, so the
+// language lets that error be raised before it runs.
+//
+// The indices form one run of consecutive integers. One that wraps passes `int::MAX`, which no
+// length exceeds, so it fails like any other run with an index out of range.
+fn array_loop_indices_check(base: int, stride: int, start: int, end: int, inclusive: bool, len: int) {
+	let ascending = end >= start;
+	let last = if inclusive {
+		end
+	} else if ascending {
+		end - 1
+	} else {
+		end + 1
+	};
+	if not inclusive and start == end {
+		// The range is empty: no access runs.
+	} else {
+		let first_index = base + stride * start;
+		let last_index = base + stride * last;
+		let (low, high) = if ascending {
+			(first_index, last_index)
+		} else {
+			(last_index, first_index)
+		};
+		let valid = low <= high and -len <= low and high < len;
+		if not valid {
+			// Iteration order visits `first_index` first, then moves towards `last_index`.
+			let index = if -len <= first_index and first_index < len {
+				if ascending {
+					len
+				} else {
+					-len - 1
+				}
+			} else {
+				first_index
+			};
+			array_index_out_of_bounds(index, len)
+		}
+	}
+}
+
 fn array_physical_index<A>(array: [A], index: int) -> int {
 	let resolved = array_resolve_index(index, array.len);
 	array_wrap_index(array.capacity, array.start + resolved)

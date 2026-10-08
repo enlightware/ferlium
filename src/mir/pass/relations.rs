@@ -955,6 +955,15 @@ impl RootTypes {
 }
 
 /// The result of analysing a function.
+/// A MIR value holding a quantity the analysis names.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Holder {
+    /// A place whose contents are the quantity.
+    Place(mir::Value),
+    /// A register that is the quantity.
+    Value(ValueId),
+}
+
 pub(crate) struct Analysis {
     entry_states: FxHashMap<BlockId, State>,
     exit_states: FxHashMap<BlockId, State>,
@@ -962,6 +971,8 @@ pub(crate) struct Analysis {
     escaped: FxHashSet<Root>,
     types: RootTypes,
     inductions: FxHashMap<Root, Induction>,
+    iterations: FxHashMap<Root, Iteration>,
+    cursors: FxHashMap<PlaceId, Root>,
 }
 
 impl Analysis {
@@ -1040,6 +1051,92 @@ impl Analysis {
         self.interner.symbols()
     }
 
+    /// Whether any range iterator was recognized as an [`Iteration`].
+    pub(crate) fn has_iterations(&self) -> bool {
+        !self.iterations.is_empty()
+    }
+
+    /// The iteration whose cursor `symbol` is on entry to a loop header, with that header.
+    ///
+    /// A loop header joins the cursor from the loop's entry and from its back edges, so the
+    /// symbol a header mints for the cursor is the value each iteration of that loop starts from:
+    /// the value its step yields.
+    pub(crate) fn header_cursor(&self, symbol: SymbolId) -> Option<(&Iteration, BlockId)> {
+        let Symbol::Stored(place, DefSite::Join(header)) = *self.interner.symbols().name(symbol)
+        else {
+            return None;
+        };
+        let root = self.cursors.get(&place)?;
+        Some((&self.iterations[root], header))
+    }
+
+    /// The forms of the range bounds of the iteration whose cursor `cursor` names, after `block`.
+    pub(crate) fn range_bounds(&mut self, cursor: SymbolId, block: BlockId) -> Option<[Affine; 2]> {
+        let Symbol::Stored(place, _) = *self.interner.symbols().name(cursor) else {
+            return None;
+        };
+        let root = *self.cursors.get(&place)?;
+        let layout = self.iterations[&root].layout;
+        let state = self.exit_states.get(&block)?;
+        let iterator = self.interner.place_root(root);
+        let range = self.interner.place_field(iterator, layout.range);
+        Some([layout.start, layout.end].map(|field| {
+            let bound = self.interner.place_field(range, field);
+            state.place_affine(bound, &mut self.interner)
+        }))
+    }
+
+    /// The values that hold `symbol` after `block`: the parameters and place registers whose place
+    /// contains it there, or the register it is.
+    ///
+    /// Candidates only: a register may be defined anywhere, and the caller must check that it is
+    /// available where it is used.
+    pub(crate) fn holders(&self, symbol: SymbolId, block: BlockId) -> Vec<Holder> {
+        let Some(state) = self.exit_states.get(&block) else {
+            return Vec::new();
+        };
+        // The places holding the symbol itself or a copy of it: a loop's yielded value lives on in
+        // the payload it was copied into after the cursor has moved past it.
+        let copy = Fact::Value(Affine::symbol(symbol));
+        let mut places: Vec<PlaceId> = state
+            .current
+            .iter()
+            .filter(|(_, current)| **current == symbol || state.fact(**current) == Some(&copy))
+            .map(|(place, _)| *place)
+            .collect();
+        match *self.interner.symbols().name(symbol) {
+            Symbol::Register(register) => return vec![Holder::Value(register)],
+            Symbol::Stored(place, DefSite::Entry) if !state.current.contains_key(&place) => {
+                places.push(place);
+            }
+            Symbol::Stored(..) => {}
+        }
+        places.sort_by_key(|place| place.as_index());
+        let tree = self.interner.places();
+        let mut holders: Vec<Holder> = places
+            .iter()
+            .filter(|place| tree.is_root(**place))
+            .filter_map(|place| match tree.root_of(*place) {
+                Root::Parameter(parameter) => Some(Holder::Place(mir::Value::Parameter(parameter))),
+                _ => None,
+            })
+            .collect();
+        let mut registers: Vec<(ValueId, PlaceId)> = self
+            .interner
+            .register_places
+            .iter()
+            .filter(|(_, bound)| places.contains(bound))
+            .map(|(register, bound)| (*register, *bound))
+            .collect();
+        registers.sort_by_key(|(register, _)| register.as_index());
+        holders.extend(
+            registers
+                .into_iter()
+                .map(|(register, _)| Holder::Place(mir::Value::Register(register))),
+        );
+        holders
+    }
+
     pub(crate) fn is_escaped(&self, root: &Root) -> bool {
         self.escaped.contains(root)
     }
@@ -1056,6 +1153,25 @@ struct Induction {
     start: Int,
     /// The one block writing the iterator outside its steps, which dominates every step.
     construction: BlockId,
+}
+
+/// A range iterator that only its construction and its own `next` write, whatever its start.
+///
+/// Weaker than an [`Induction`]: nothing is assumed about the cursor's sign, so the flow states
+/// claim nothing from it. What it supports is std's own guarantee, which a consumer may rely on
+/// outside the flow: the cursor starts at the range's start, and a step yields it only while it
+/// lies within the range, in the range's direction.
+#[derive(Clone, Debug)]
+pub(crate) struct Iteration {
+    pub(crate) layout: RangeLayout,
+    pub(crate) inclusive: bool,
+    /// The one block writing the iterator outside its steps. It may run again after them, as an
+    /// inner loop's iterator is rebuilt by its outer loop: the guarantee then holds for the cursor
+    /// in the loop the iterator drives, which excludes this block.
+    pub(crate) construction: BlockId,
+    /// The blocks where the iterator advances: its `next` calls, its inlined steps, and an
+    /// inclusive iterator's yielding of its end. A loop body runs only after one of them.
+    pub(crate) advances: Vec<BlockId>,
 }
 
 /// Everything one analysis run reads and never changes.
@@ -1228,6 +1344,8 @@ pub(crate) fn analyze(
                 escaped,
                 types,
                 inductions: recognized.inductions,
+                iterations: recognized.iterations,
+                cursors: recognized.cursors,
             };
         }
         refuted.extend(unproved);
@@ -1636,14 +1754,20 @@ fn recognize(
                 .exhausted
                 .map(|field| interner.place_field(iterator, field)),
         };
-        let Some((construction, steps)) = construction_block(
+        let Some(Construction {
+            block: construction,
+            steps,
+            advances,
+            rebuilt,
+        }) = construction_block(
             context,
             register_places,
             places,
             interner,
             &dominance,
             &successor_lists,
-        ) else {
+        )
+        else {
             continue;
         };
         // The shape above proves this one block contains every non-step write to the iterator. A
@@ -1672,13 +1796,27 @@ fn recognize(
         }
         let range = interner.place_field(iterator, layout.range);
         let lower = interner.place_field(range, layout.start);
-        let constant =
-            |place, interner: &mut Interner| state.place_affine(place, interner).as_constant();
-        let (Some(cursor), Some(lower)) = (constant(cursor, interner), constant(lower, interner))
-        else {
+        let cursor_form = state.place_affine(cursor, interner);
+        if cursor_form != state.place_affine(lower, interner) {
+            continue;
+        }
+        recognized.cursors.insert(places.cursor, root);
+        recognized.iterations.insert(
+            root,
+            Iteration {
+                layout,
+                inclusive,
+                construction,
+                advances,
+            },
+        );
+        if rebuilt {
+            continue;
+        }
+        let Some(cursor) = cursor_form.as_constant() else {
             continue;
         };
-        if cursor == lower && cursor >= 0 {
+        if cursor >= 0 {
             recognized.inductions.insert(
                 root,
                 Induction {
@@ -1706,6 +1844,9 @@ struct Recognized {
     inductions: FxHashMap<Root, Induction>,
     steps: Vec<(Root, OperationSite)>,
     dominance: Option<Dominance>,
+    iterations: FxHashMap<Root, Iteration>,
+    /// Each iteration's cursor place, so that a symbol naming one finds its iterator.
+    cursors: FxHashMap<PlaceId, Root>,
 }
 
 /// A range iterator's storage and the fields of it a step may write.
@@ -1730,7 +1871,7 @@ fn construction_block(
     interner: &Interner,
     dominance: &Dominance,
     successor_lists: &[Vec<usize>],
-) -> Option<(BlockId, Vec<OperationSite>)> {
+) -> Option<Construction> {
     let IteratorPlaces {
         root,
         cursor,
@@ -1740,6 +1881,7 @@ fn construction_block(
     let mut construction: Option<BlockId> = None;
     let mut calls = Vec::new();
     let mut cursor_writes = Vec::new();
+    let mut ends = Vec::new();
     for block in func.blocks() {
         let operations = func.block(block).operations().iter();
         let invoked = match &func.block(block).terminator().kind {
@@ -1766,7 +1908,7 @@ fn construction_block(
                 writes_only(operation, exhausted, root, register_places, interner)
             }) {
                 // Ending an inclusive iteration leaves the cursor and the range as they were.
-                continue;
+                ends.push(block);
             } else {
                 match construction {
                     Some(existing) if existing != block => return None,
@@ -1776,10 +1918,11 @@ fn construction_block(
         }
     }
 
-    // A cursor write in the construction block is part of the construction, which the local
-    // interpretation in `recognize` reads.
+    // A cursor or flag write in the construction block is part of the construction, which the
+    // local interpretation in `recognize` reads.
     let construction = construction?;
     cursor_writes.retain(|site| site.block != construction);
+    ends.retain(|block| *block != construction);
     let steps: Vec<BlockId> = calls
         .into_iter()
         .chain(cursor_writes.iter().map(|site| site.block))
@@ -1792,8 +1935,28 @@ fn construction_block(
         .iter()
         .all(|step| dominance.dominates(construction.as_index(), step.as_index()))
         .then_some(())?;
-    (!reaches_construction.contains(&construction.as_index()))
-        .then_some((construction, cursor_writes))
+    let mut advances = steps;
+    advances.extend(ends);
+    Some(Construction {
+        block: construction,
+        steps: cursor_writes,
+        advances,
+        rebuilt: reaches_construction.contains(&construction.as_index()),
+    })
+}
+
+/// What [`construction_block`] found about one iterator.
+struct Construction {
+    /// The one block writing the iterator outside its steps.
+    block: BlockId,
+    /// The inlined steps, each owing a proof that it keeps an induction's invariant.
+    steps: Vec<OperationSite>,
+    /// Every block where the iterator advances: [`Iteration::advances`].
+    advances: Vec<BlockId>,
+    /// Whether a step reaches the construction again, as an inner loop's iterator is rebuilt on
+    /// every iteration of the outer one. An enclosing loop's header then joins the cursor with
+    /// whatever it held before the first construction, so it states no induction.
+    rebuilt: bool,
 }
 
 /// Whether `operation` writes `place` and nothing else inside `root`.
@@ -2122,10 +2285,20 @@ fn site(block: BlockId, index: usize) -> DefSite {
 /// predecessor was walked last and facts from one arm would leak into the other.
 fn rejoin(existing: &State, incoming: &State, block: BlockId, interner: &mut Interner) -> State {
     let mut current = FxHashMap::default();
+    // Places the edges fill with different symbols holding one value: the join's own symbol for
+    // the place inherits that value, or a copy made on each path would lose what both copied.
+    let mut agreed = Vec::new();
     for (place, symbol) in &existing.current {
         let symbol = match incoming.current.get(place) {
             Some(incoming) if incoming == symbol => *symbol,
-            _ => interner.symbol(Symbol::Stored(*place, DefSite::Join(block))),
+            Some(incoming_symbol) => {
+                let joined = interner.symbol(Symbol::Stored(*place, DefSite::Join(block)));
+                if let Some(fact) = common_value(existing, *symbol, incoming, *incoming_symbol) {
+                    agreed.push((joined, fact));
+                }
+                joined
+            }
+            None => interner.symbol(Symbol::Stored(*place, DefSite::Join(block))),
         };
         current.insert(*place, symbol);
     }
@@ -2139,11 +2312,42 @@ fn rejoin(existing: &State, incoming: &State, block: BlockId, interner: &mut Int
         let symbol = interner.symbol(Symbol::Stored(*place, DefSite::Join(block)));
         current.insert(*place, symbol);
     }
-    let (facts, known) = existing.common_facts_and_predicates(incoming);
+    let (mut facts, known) = existing.common_facts_and_predicates(incoming);
+    facts.extend(agreed);
     State {
         current,
         facts,
         known,
+    }
+}
+
+/// What two differently named symbols are both known to be, if it is the same on both edges.
+///
+/// A symbol without a value fact is its own value, so a copy of `s` on one edge and `s` itself on
+/// the other agree. The forms are read in their own edge's state; that their symbols mean the same
+/// values on both edges is the invariant every fact a join keeps already relies on.
+fn common_value(
+    existing: &State,
+    existing_symbol: SymbolId,
+    incoming: &State,
+    incoming_symbol: SymbolId,
+) -> Option<Fact> {
+    let value = |state: &State, symbol| match state.fact(symbol) {
+        Some(Fact::Value(form)) => Some(*form),
+        Some(_) => None,
+        None => Some(Affine::symbol(symbol)),
+    };
+    match (
+        existing.fact(existing_symbol),
+        incoming.fact(incoming_symbol),
+    ) {
+        (Some(ours), Some(theirs)) if ours == theirs && !matches!(ours, Fact::Value(_)) => {
+            Some(ours.clone())
+        }
+        _ => {
+            let form = value(existing, existing_symbol)?;
+            (value(incoming, incoming_symbol)? == form).then_some(Fact::Value(form))
+        }
     }
 }
 
@@ -3519,13 +3723,19 @@ mod tests {
             );
         });
         // The same loop without the seed: nothing says `n` is above the start, so the range may
-        // count down and the access keeps its check.
+        // count down. The access keeps a check, either its own or one made before the loop.
         with_analysis(
             "fn total(mut a: [int], n: int) -> int { let mut t = 0; for i in 1..n { t = t + a[i] }; t }",
             "total",
             |function, _, known| {
+                let (guard, _) = known.array_loop_indices_check();
+                let guarded = function.blocks().any(|block| {
+                    matches!(&function.block(block).terminator().kind,
+                        TerminatorKind::Invoke { operation, .. }
+                            if operation.operands.first() == Some(&mir::Value::Function(guard)))
+                });
                 assert!(
-                    checked_accesses(function, known) > 0,
+                    checked_accesses(function, known) > 0 || guarded,
                     "a range from one to an unknown end must not be assumed ascending"
                 );
             },

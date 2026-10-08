@@ -1578,6 +1578,63 @@ fn for_loops_with_runtime_range_bounds() {
     );
 }
 
+/// A range loop indexing an array on every iteration may check all its indices before it runs. A
+/// loop certain to fail reports the access that fails first, a valid one runs whatever the signs of
+/// its indices, and one that can stop before its failing access runs as far as it gets.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn range_loops_fail_at_their_first_failing_access() {
+    let mut session = TestSession::new();
+    let prelude = "fn sum(a: [int], start: int, end: int) -> int { let mut t = 0; for i in start..end { t = t * 10 + a[i] }; t } \
+        fn sum_inclusive(a: [int], start: int, end: int) -> int { let mut t = 0; for i in start..=end { t = t * 10 + a[i] }; t } \
+        fn shifted(a: [int], base: int, end: int) -> int { let mut t = 0; for i in 0..end { t = t * 10 + a[base + i] }; t } \
+        fn after_check(a: [int], lo: int, hi: int) -> int { let last = a[hi]; let mut t = 0; for i in lo..hi { t = t * 10 + a[i] }; t * 10 + last } \
+        fn find(a: [int], x: int, end: int) -> int { for i in 0..end { if a[i] == x { return i } }; -1 } \
+        fn until(a: [int], x: int, end: int) -> int { let mut t = 0; for i in 0..end { if t >= x { break }; t = t + a[i] }; t } \
+        let a = [1, 2, 3];";
+    let call = |call: &str| {
+        let (name, args) = call.split_once('(').unwrap();
+        let args = args
+            .trim_end_matches(')')
+            .split(", ")
+            .map(|arg| format!("black_box({arg})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{prelude} {name}(a, {args})")
+    };
+    for (valid, expected) in [
+        ("sum(0, 3)", 123),
+        ("sum(-3, 3)", 123123),
+        ("sum(2, -4)", 321321),
+        ("sum(5, 5)", 0),
+        ("sum_inclusive(-1, -3)", 321),
+        ("shifted(1, 2)", 23),
+        ("after_check(0, 2)", 123),
+        ("find(2, 10)", 1),
+        ("until(3, 10)", 3),
+    ] {
+        assert_val_eq!(session.run(&call(valid)), int(expected), "{valid}");
+    }
+    for (failing, index) in [
+        ("sum(0, 5)", 3),
+        ("sum(-5, 1)", -5),
+        ("sum(1, -6)", -4),
+        ("sum_inclusive(0, 3)", 3),
+        ("sum_inclusive(3, 0)", 3),
+        ("shifted(2, 3)", 3),
+        ("after_check(1, 3)", 3),
+        ("find(5, 4)", 3),
+    ] {
+        assert_eq!(
+            session.fail_run(&call(failing)),
+            SourceFailureKind::Aborted(Some(format!(
+                "Array access out of bounds: index {index} for length 3"
+            ))),
+            "{failing}"
+        );
+    }
+}
+
 /// Ranges reaching the integer bounds of the target end there rather than wrapping around. The
 /// loops stop after four elements, so wrapping fails the test instead of hanging it.
 #[test]

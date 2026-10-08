@@ -39,6 +39,7 @@ use super::{
     clone_borrow::{self, Access},
     dataflow::{self, Root},
     local_cells::{self, Allocation, LocalCells},
+    loops::{NaturalLoop, cfg, natural_loops},
     provenance::{AddressorSummary, PlaceOrigins},
     site::{OperationIndex, OperationSite},
     stack_region,
@@ -60,12 +61,6 @@ use crate::{
         type_properties::concrete_type_is_trivial_copy,
     },
 };
-
-#[derive(Clone)]
-struct NaturalLoop {
-    blocks: FxHashSet<BlockId>,
-    preheader: BlockId,
-}
 
 struct LoopAnalysis {
     dominance: Dominance,
@@ -926,75 +921,6 @@ fn invariant_cell<'f>(
     }
     operations.push(cell.site);
     true
-}
-
-fn cfg(func: &Function) -> (Vec<Vec<usize>>, Vec<Vec<BlockId>>) {
-    let count = func.blocks().count();
-    let mut successors = vec![Vec::new(); count];
-    let mut predecessors = vec![Vec::new(); count];
-    for block in func.blocks() {
-        for successor in func.block(block).terminator().successors() {
-            successors[block.as_index()].push(successor.as_index());
-            if !predecessors[successor.as_index()].contains(&block) {
-                predecessors[successor.as_index()].push(block);
-            }
-        }
-    }
-    (successors, predecessors)
-}
-
-fn natural_loops(
-    func: &Function,
-    successors: &[Vec<usize>],
-    predecessors: &[Vec<BlockId>],
-    dominance: &Dominance,
-) -> Vec<NaturalLoop> {
-    let mut by_header = FxHashMap::<BlockId, FxHashSet<BlockId>>::default();
-    for tail in func.blocks() {
-        if !dominance.is_reachable(tail.as_index()) {
-            continue;
-        }
-        for &header in &successors[tail.as_index()] {
-            if !dominance.dominates(header, tail.as_index()) {
-                continue;
-            }
-            let header = BlockId::from_index(header);
-            let natural = by_header.entry(header).or_default();
-            natural.insert(header);
-            if natural.insert(tail) {
-                let mut pending = vec![tail];
-                while let Some(block) = pending.pop() {
-                    for &predecessor in &predecessors[block.as_index()] {
-                        if natural.insert(predecessor) && predecessor != header {
-                            pending.push(predecessor);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    by_header
-        .into_iter()
-        .filter_map(|(header, blocks)| {
-            let outside = predecessors[header.as_index()]
-                .iter()
-                .copied()
-                .filter(|predecessor| !blocks.contains(predecessor))
-                .collect::<Vec<_>>();
-            let [preheader] = outside.as_slice() else {
-                return None;
-            };
-            matches!(
-                func.block(*preheader).terminator().kind,
-                TerminatorKind::Goto { target } if target == header
-            )
-            .then_some(NaturalLoop {
-                blocks,
-                preheader: *preheader,
-            })
-        })
-        .collect()
 }
 
 fn definitions(
@@ -1992,6 +1918,7 @@ mod tests {
         let (definitions, _) = definitions(&function);
         let natural = NaturalLoop {
             blocks: FxHashSet::from_iter([head, backedge]),
+            header: head,
             preheader,
         };
         assert!(

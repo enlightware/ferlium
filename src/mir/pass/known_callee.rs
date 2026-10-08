@@ -185,6 +185,8 @@ pub(crate) enum KnownCallee {
     /// The panic is why this is fallible, and removing it once the index is proved in range is the
     /// point of proving it.
     ArrayResolveIndex,
+    /// `array_index_out_of_bounds(index, len)` — the diverging failure of an inlined bounds check.
+    ArrayIndexOutOfBounds,
     /// The mutable member of `array_index(array, index)` — projects the element selected by a
     /// signed index, or panics when that index is out of range.
     ArrayIndex,
@@ -331,6 +333,8 @@ pub(crate) struct KnownCallees {
     int_cmp_ty: CallImplType,
     array_offset_unchecked: FunctionId,
     array_offset_unchecked_effects: EffType,
+    array_loop_indices_check: FunctionId,
+    array_loop_indices_check_ty: CallImplType,
     /// The compiler-internal raw float operations float speculation emits, with their call types.
     raw_float: Vec<(KnownCallee, FunctionId, CallImplType)>,
     nonzero_arithmetic: Vec<(KnownCallee, FunctionId, CallImplType)>,
@@ -370,6 +374,7 @@ impl KnownCallees {
         let float_neg = resolver.method(NUM_TRAIT_NAME, float_type(), "neg");
         let int_bit_and = resolver.method(BITS_TRAIT_NAME, int_type(), "bit_and");
         let int_cmp = resolver.method(ORD_TRAIT_NAME, int_type(), "cmp");
+        let array_loop_indices_check = resolver.function("array_loop_indices_check");
         let array_index = resolver.subscript_mut_member("array_index");
         let array_offset_unchecked = resolver.subscript_mut_member("array_offset_unchecked");
         resolver.assert_retargetable(array_index, array_offset_unchecked);
@@ -559,6 +564,10 @@ impl KnownCallees {
                 resolver.function("array_resolve_index"),
                 KnownCallee::ArrayResolveIndex,
             ),
+            (
+                resolver.function("array_index_out_of_bounds"),
+                KnownCallee::ArrayIndexOutOfBounds,
+            ),
             (array_index, KnownCallee::ArrayIndex),
             (array_offset_unchecked, KnownCallee::ArrayOffsetUnchecked),
             (
@@ -617,6 +626,8 @@ impl KnownCallees {
             int_cmp_ty: resolver.call_impl_type(int_cmp),
             array_offset_unchecked,
             array_offset_unchecked_effects: resolver.effects(array_offset_unchecked),
+            array_loop_indices_check,
+            array_loop_indices_check_ty: resolver.call_impl_type(array_loop_indices_check),
             raw_float,
             nonzero_arithmetic,
             layouts: Layouts {
@@ -675,6 +686,15 @@ impl KnownCallees {
 
     pub(crate) fn int_cmp(&self) -> (FunctionId, &CallImplType) {
         (self.int_cmp, &self.int_cmp_ty)
+    }
+
+    /// The check a range loop's accesses need, made once before the loop, with its complete call
+    /// type.
+    pub(crate) fn array_loop_indices_check(&self) -> (FunctionId, &CallImplType) {
+        (
+            self.array_loop_indices_check,
+            &self.array_loop_indices_check_ty,
+        )
     }
 
     /// The unchecked array accessor and the effects its call-site type must carry.
@@ -939,7 +959,7 @@ mod tests {
         let session = CompilerSession::new();
         assert_eq!(
             known_callees(&session).by_id.len(),
-            78,
+            79,
             "two known callees resolved to the same function id"
         );
     }

@@ -47,7 +47,8 @@ peephole          // collapse small local CFG/value patterns
 boolean flow      // repeat while the body shrinks: store forward, negation, branch forward
 string rewrites   // fuse static construction into appends; forward self-prefixed builders
 devirtualize      // final dictionary-entry callees exposed too late for a fold round
-bounds checks     // prove array indices in range and remove checked access/failure edges
+bounds checks     // prove array indices in range and remove checked access/failure edges;
+                  // check a range loop's remaining indices once, before the loop
 LICM              // hoist initialized copyable reads and invariant terminating pure direct calls
 discarded results // remove unread TrivialCopy result places exposed by inlining
 dead proven calls // remove unused chains of known-total numeric or proved-returning script calls
@@ -877,14 +878,40 @@ dropped. An edge whose condition contradicts what is known, or that follows a ca
 `never`, is dead: nothing flows along it, and the pass turns a branch with a dead edge into a jump.
 That is how an inlined check, and an inlined range step's direction test, disappear.
 Place contents receive fresh symbols after writes and distinct incoming values receive join symbols,
-so a predicate cannot silently survive mutation. Registers that name places are structural SSA
-facts kept outside the flow state.
+so a predicate cannot silently survive mutation. A join symbol inherits the value both edges agree on,
+as when each path into the join copies the same cursor. Registers that name places are structural
+SSA facts kept outside the flow state.
 
 Only functions containing a relevant known call, a call returning `never` or a range iterator are
 admitted. Induction recognition locally interprets a loop's construction block, then one reverse-postorder-prioritized fixed point computes
 the proof; replay performs the rewrite. Refusing a proof retains the original check. The pass runs
 after the final devirtualization because inlining may expose `array_resolve_index` and may leave a
 whole `array_index`, and immediately before DCE because removing either error edge strands cleanup.
+
+### Range-check hoisting
+
+A check the proof leaves in a range loop, such as `a[j]` for `j in lo..hi` with nothing tying `hi`
+to `len(a)`, repeats on every iteration a question the loop's bounds decide once: the indices
+`base + cursor` form one run of consecutive integers. `mir::pass::loop_checks` asks it once, by
+invoking std's `array_loop_indices_check` in the loop's preheader, and turns the in-loop check into
+a jump; the negative-index fixup stays, since a valid run may mix signs. A failing guard raises the
+error the first failing iteration of its access would, before the loop runs, and there is no checked
+copy of the loop. A loop with several guarded accesses runs them in turn, so the error reported may
+belong to an access that would have failed later than another; the rule allows it.
+This relies on the language rule that a loop certain to fail with an index error may raise it before
+running its iterations (book, *Arrays, Ranges, and Iteration*), in the spirit of Ada's permission to
+raise a failing check early.
+
+Certainty is what the stage proves. The iterator must be one only its construction and its own
+`next` write, built before the loop and advanced only in it, so that std guarantees each yielded
+value lies in the range. The check must dominate every back edge, and once the iterator has advanced
+the loop may leave only through error edges, which excludes `break`, `return` and `continue` before
+the access. Nothing in the loop may write the environment; reads and failures are allowed, as a
+skipped read is unobservable and an earlier failure is one the rule lets the index error replace.
+The base, the length and the range bounds must be available unchanged before the loop: held by live
+storage there, rebuilt by projecting a field again, or recomputed as the integer operation the loop
+performs on invariant operands, as `y * width` in a loop over `x`. The guard's failure runs the
+cleanup the in-loop check ran, without restoring markers the loop saved.
 
 ## Loop-invariant calls and memory reads
 

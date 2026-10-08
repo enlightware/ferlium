@@ -50,6 +50,8 @@ pub(crate) mod inline;
 pub(crate) mod known_callee;
 pub(crate) mod licm;
 pub(crate) mod local_cells;
+pub(crate) mod loop_checks;
+pub(crate) mod loops;
 pub(crate) mod monomorphize;
 pub(crate) mod negation;
 pub(crate) mod outcome_branch;
