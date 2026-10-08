@@ -1142,6 +1142,29 @@ fn array_deque_operations_match_a_model() {
     );
 }
 
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_reallocation_moves_managed_ranges_between_offsets() {
+    let mut session = TestSession::new();
+    let source = r#"
+        #[inline(never)] fn push<A>(values: &mut [A], value: A) where A: Value {
+            array_append(values, value);
+        }
+        let mut values = [["a"], ["b"], ["c"], ["d"]];
+        array_pop_front(values); array_pop_front(values); array_pop_front(values);
+        push(values, ["e"]); push(values, ["f"]);
+        array_prepend(values, ["g"]); array_prepend(values, ["h"]);
+        let mut result = "";
+        for row in values {
+            for value in row { string_push_str(result, value); };
+        };
+        result
+    "#;
+    // Back growth reallocates from start 3 to 1, then 1 to 1; front growth shifts 0 to 4.
+    // Nested managed elements exercise byte offsets and preserve ownership through all transfers.
+    assert_val_eq!(session.run(source), string("hgdef"));
+}
+
 /// Reallocation sizes the full end from the length: pure growth at one end doubles like a vector,
 /// and a queue of steady length or growth at both ends in turn keeps capacity within three times
 /// the length.

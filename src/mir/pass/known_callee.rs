@@ -949,7 +949,7 @@ mod tests {
         let session = CompilerSession::new();
         assert_eq!(
             known_callees(&session).by_id.len(),
-            78,
+            77,
             "two known callees resolved to the same function id"
         );
     }

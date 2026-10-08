@@ -854,6 +854,11 @@ fn transfer(
                     .expect("build_array has a trailing destination"),
             );
         }
+        OperationKind::MoveRange { .. } => {
+            for operand in &operation.operands[..2] {
+                forget_write(state, calls, origins, operand);
+            }
+        }
         OperationKind::Clear => forget_write(state, calls, origins, &operation.operands[0]),
         OperationKind::Memcpy
         | OperationKind::Move

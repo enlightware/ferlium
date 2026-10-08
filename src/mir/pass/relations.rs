@@ -2026,6 +2026,7 @@ fn writes_into(operation: &Operation, root: Root, register_places: &PlaceBinding
         | OperationKind::AddressOffsetPlace { .. }
         | OperationKind::DictEntry { .. } => false,
         OperationKind::Store => rooted(&operation.operands[1]),
+        OperationKind::MoveRange { .. } => operation.operands[..2].iter().any(rooted),
         OperationKind::Memcpy | OperationKind::Move | OperationKind::MoveBytes { .. } => {
             rooted(&operation.operands[1]) || operation.operands.iter().skip(2).any(rooted)
         }
@@ -2476,6 +2477,14 @@ fn transfer(
             }
         }
         OperationKind::AddressOffset { .. } | OperationKind::AddressOffsetPlace { .. } => {}
+        OperationKind::MoveRange { .. } => {
+            // Range ownership cannot be described by copying a single value's field facts.
+            for operand in &operation.operands[..2] {
+                if let Some(place) = tracked_place(state, operand, escaped, interner) {
+                    state.define(place, def, interner, None);
+                }
+            }
+        }
         OperationKind::Memcpy | OperationKind::Move | OperationKind::MoveBytes { .. } => {
             let source = tracked_place(state, &operation.operands[0], escaped, interner);
             let destination = tracked_place(state, &operation.operands[1], escaped, interner);
@@ -2941,7 +2950,7 @@ mod tests {
                 let operation = match transfer {
                     OperationKind::Memcpy => Operation::memcpy(span, source, destination),
                     OperationKind::Move => Operation::move_value(span, source, destination),
-                    OperationKind::MoveBytes { ty } => {
+                    OperationKind::MoveBytes { ty, .. } => {
                         let size = builder.add_constant(
                             int_type(),
                             LiteralValue::new_native(size_of::<isize>() as isize),

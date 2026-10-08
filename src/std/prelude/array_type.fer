@@ -191,18 +191,10 @@ fn array_kept_room(room: int, len: int) -> int {
 fn array_reallocate<A>(array: &mut [A], front: int, back: int)
 {
 	let new_capacity = front + array.len + back;
-	let element_size = Value::<A>::SIZE;
-	let mut new_data = buffer_with_capacity(new_capacity, element_size, Value::<A>::ALIGN);
-	let mut i = 0;
-	loop {
-		if i < array.len {
-			buffer_move_into(array.data, array.start + i, new_data, front + i, element_size);
-			i += 1;
-		} else {
-			break;
-		};
-	};
-	buffer_move(new_data, array.data);
+	buffer_reallocate(
+		array.data, array.start, array.len, new_capacity, front,
+		Value::<A>::SIZE, Value::<A>::ALIGN,
+	);
 	array.capacity = new_capacity;
 	array.start = front;
 }

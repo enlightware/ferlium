@@ -692,6 +692,14 @@ fn derive_repeatable(
                         return false;
                     }
                 }
+                OperationKind::MoveRange { .. } => {
+                    if operation.operands[..2]
+                        .iter()
+                        .any(|operand| root_of(operand, &roots).is_some())
+                    {
+                        return false;
+                    }
+                }
                 OperationKind::Replace => {
                     if operation
                         .operands

@@ -297,7 +297,7 @@ impl Operation {
     ///
     /// The target runtime recovers the allocation's byte extent and alignment from the address;
     /// neither is repeated in MIR. The allocation's initialized values must already have been
-    /// dropped and its owning storage must be cleared separately.
+    /// dropped or moved out and its owning storage must be cleared or replaced separately.
     pub fn runtime_dealloc(span: impl Into<DebugLocation>, address: mir::Value) -> Self {
         Operation {
             result_id: None,
@@ -997,6 +997,40 @@ impl Operation {
         }
     }
 
+    /// Transfers a contiguous initialized range between distinct allocation bases.
+    /// Byte offsets and extent drive compiled execution; element indices and count retain
+    /// interpreter provenance, including distinct zero-sized elements. Source elements become
+    /// absent and destination elements must be absent before the transfer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn move_range(
+        span: impl Into<DebugLocation>,
+        ty: Type,
+        source: mir::Value,
+        destination: mir::Value,
+        source_offset: mir::Value,
+        destination_offset: mir::Value,
+        size: mir::Value,
+        source_index: mir::Value,
+        destination_index: mir::Value,
+        count: mir::Value,
+    ) -> Self {
+        Operation {
+            result_id: None,
+            span: span.into(),
+            operands: Box::new([
+                source,
+                destination,
+                size,
+                source_offset,
+                destination_offset,
+                source_index,
+                destination_index,
+                count,
+            ]),
+            kind: OperationKind::MoveRange { ty },
+        }
+    }
+
     /// Creates a 'drop' operation.
     ///
     /// Drops the pointee of `target` (a place) by invoking the `Value::drop` implementation named by
@@ -1321,8 +1355,12 @@ pub enum OperationKind {
     Move,
     /// Install a replacement, retaining the displaced value without an initialization gap.
     Replace,
-    /// Transfer ownership between places using an explicit physical byte extent.
+    /// Transfer one value using an explicit physical byte extent.
     MoveBytes { ty: Type },
+    /// Transfer an initialized range between disjoint allocations. Operands are allocation bases,
+    /// byte extent, byte offsets, and interpreter-only element indices/count. Neither allocation
+    /// is a single value: initialization and contents change only within the specified ranges.
+    MoveRange { ty: Type },
     /// Save the current stack top.
     StackSave,
     /// Restore a previously saved stack top.
@@ -1398,6 +1436,7 @@ impl OperationKind {
             | Move
             | Replace
             | MoveBytes { .. }
+            | MoveRange { .. }
             | StackSave
             | StackRestore
             | CheckCallDepth
@@ -1452,6 +1491,7 @@ impl OperationKind {
             | Move
             | Replace
             | MoveBytes { .. }
+            | MoveRange { .. }
             | StackSave
             | StackRestore
             | CheckCallDepth
@@ -1568,6 +1608,7 @@ impl OperationKind {
             | Move
             | Replace
             | MoveBytes { .. }
+            | MoveRange { .. }
             | RuntimeDealloc
             | StackRestore
             | CheckCallDepth
@@ -1759,6 +1800,11 @@ impl OperationKind {
                 whole.operands.len(),
                 3,
                 "move_bytes takes source, destination and byte size"
+            ),
+            MoveRange { .. } => assert_eq!(
+                whole.operands.len(),
+                8,
+                "move_range takes source, destination, byte size, byte offsets, element indices and count"
             ),
             StackSave => {
                 assert!(whole.operands.is_empty(), "stack_save takes no operands")
@@ -2051,6 +2097,19 @@ impl OperationKind {
                 ty.format_with(env),
                 whole.operands[0].format_with(env),
                 whole.operands[1].format_with(env),
+                whole.operands[2].format_with(env)
+            ),
+            MoveRange { ty } => write!(
+                f,
+                "move_range {} {} offset {} index {} to {} offset {} index {} count {} size {}",
+                ty.format_with(env),
+                whole.operands[0].format_with(env),
+                whole.operands[3].format_with(env),
+                whole.operands[5].format_with(env),
+                whole.operands[1].format_with(env),
+                whole.operands[4].format_with(env),
+                whole.operands[6].format_with(env),
+                whole.operands[7].format_with(env),
                 whole.operands[2].format_with(env)
             ),
             StackSave => write!(f, "stack_save"),

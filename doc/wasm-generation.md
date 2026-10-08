@@ -44,6 +44,9 @@ storage or prevent stackification at a real consumer. Scalar loads used only to 
 can be omitted, provided their removal does not discard deferred source work. Other producers retain
 their effects and ownership work. The shared MIR keeps the logical index.
 
+Wasm emits `move_range` as `memory.copy`, including for scalar elements. Its logical element
+indices and count remain interpreter-only metadata and do not contribute Wasm uses.
+
 ## Keep single-use addresses on the stack
 
 Expression planning defers single-use addresses to memory operations, tag reads and plain scalar

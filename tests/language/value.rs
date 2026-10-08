@@ -3496,6 +3496,34 @@ fn zero_sized_call_results_keep_drop_obligations() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_reallocation_preserves_zero_sized_drop_obligations() {
+    let source = format!(
+        "{EMPTY_VALUE_STRUCT}
+         #[inline(never)] fn push<A>(values: &mut [A], value: A) where A: Value {{
+             array_append(values, value);
+         }}
+         fn exercise() {{
+             let mut values = [E{{}}, E{{}}, E{{}}, E{{}}];
+             array_pop_front(values); array_pop_front(values); array_pop_front(values);
+             push(values, E{{}}); push(values, E{{}});
+             array_prepend(values, E{{}}); array_prepend(values, E{{}});
+             let before_drop = testing::tracked_drop_log();
+             testing::reset_tracked_drops();
+             before_drop
+         }}
+         testing::reset_tracked_drops();
+         let before_drop = exercise();
+         (before_drop, testing::tracked_drop_log())"
+    );
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    // Back growth reallocates from start 3 to 1, then 1 to 1; front growth shifts 0 to 4.
+    // Three removed elements and four insertion temporaries drop before five retained elements.
+    assert_val_eq!(session.run(&source), int_tuple!(1111111, 11111));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn owned_empty_struct_is_dropped_once_at_scope_exit() {
     let mut session = TestSession::new();
     session.allow_unsafe();

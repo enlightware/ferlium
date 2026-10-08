@@ -492,11 +492,11 @@ slot to address and no storage to align. Its zero-byte allocation is valid and r
 placeholder arguments do not describe the element layout. Growth to non-zero capacity must use
 the true `Value<T>` layout, so no slot is addressed with the placeholder.
 
-Array cleanup destroys its live elements before releasing the backing buffer. Buffer destruction
-deallocates the backing storage and clears its owning pointer. The runtime exposes pointer-only
+Array cleanup destroys its live elements before releasing the backing buffer. Storage may be
+released once every live element has been dropped or moved out. Buffer destruction deallocates
+the backing storage and clears its owning pointer. The runtime exposes pointer-only
 deallocation and retains any allocator-specific layout metadata internally; a capacity-0 buffer is
-deallocated by the same path as any other. Whole-buffer moves must release an existing target
-allocation before replacing its pointer, so every allocation is reclaimed exactly once.
+deallocated by the same path as any other.
 
 # Dictionary evidence
 

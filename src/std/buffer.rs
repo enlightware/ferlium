@@ -155,45 +155,35 @@ fn buffer_with_capacity_descr() -> ModuleFunction {
     )
 }
 
-fn buffer_move_into_descr() -> ModuleFunction {
+fn buffer_reallocate_descr() -> ModuleFunction {
     let gen0 = Type::variable_id(0);
+    let int = super::math::int_type();
     primitive_function(
         FnType::new_mut_resolved(
             [
                 (buffer_type(gen0), true),
-                (super::math::int_type(), false),
-                (buffer_type(gen0), true),
-                (super::math::int_type(), false),
-                (super::math::int_type(), false),
+                (int, false),
+                (int, false),
+                (int, false),
+                (int, false),
+                (int, false),
+                (int, false),
             ],
             Type::unit(),
             no_effects(),
         ),
         [],
         [
-            "source",
-            "source_index",
-            "target",
-            "target_index",
+            "buffer",
+            "old_start",
+            "len",
+            "new_capacity",
+            "new_start",
             "element_size",
+            "element_align",
         ],
-        "Moves a buffer slot into an uninitialized slot of another buffer.",
-        BufferPrimitive::MoveInto,
-    )
-}
-
-fn buffer_move_descr() -> ModuleFunction {
-    let gen0 = Type::variable_id(0);
-    primitive_function(
-        FnType::new_mut_resolved(
-            [(buffer_type(gen0), true), (buffer_type(gen0), true)],
-            Type::unit(),
-            no_effects(),
-        ),
-        [],
-        ["source", "target"],
-        "Moves a whole buffer into another buffer.",
-        BufferPrimitive::Move,
+        "Replaces storage, moving its complete live range without element drops. Both ranges must fit their capacities; size and alignment describe the true element layout, including for capacity zero.",
+        BufferPrimitive::Reallocate,
     )
 }
 
@@ -286,8 +276,7 @@ pub fn add_to_module(to: &mut Module) {
     set_impl_origins(to, inspect_trait_id, &inspect_primitives);
     to.add_private_unsafe_addressor_subscript(ustr("buffer_slot"), buffer_slot_descr());
     to.add_private_unsafe_function(ustr("buffer_with_capacity"), buffer_with_capacity_descr());
-    to.add_private_unsafe_function(ustr("buffer_move"), buffer_move_descr());
-    to.add_private_unsafe_function(ustr("buffer_move_into"), buffer_move_into_descr());
+    to.add_private_unsafe_function(ustr("buffer_reallocate"), buffer_reallocate_descr());
     to.add_private_unsafe_function(ustr("buffer_take"), buffer_take_descr());
     to.add_private_unsafe_function(
         ustr("buffer_drop"),
@@ -315,8 +304,7 @@ pub(crate) fn expected_primitives(to: &Module) -> Vec<(LocalFunctionId, BufferPr
     )];
     for (name, primitive) in [
         ("buffer_with_capacity", BufferPrimitive::WithCapacity),
-        ("buffer_move_into", BufferPrimitive::MoveInto),
-        ("buffer_move", BufferPrimitive::Move),
+        ("buffer_reallocate", BufferPrimitive::Reallocate),
         ("buffer_take", BufferPrimitive::Take),
         ("buffer_drop", BufferPrimitive::Drop),
     ] {

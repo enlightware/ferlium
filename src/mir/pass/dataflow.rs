@@ -1035,6 +1035,14 @@ fn transfer(
         OperationKind::Subfield { .. }
         | OperationKind::AddressOffset { .. }
         | OperationKind::AddressOffsetPlace { .. } => {}
+        OperationKind::MoveRange { .. } => {
+            // A range changes part of each allocation, not one complete pointee value.
+            for operand in &operation.operands[..2] {
+                if let Some(place) = place_of(operand).filter(|place| tracked(*place)) {
+                    state.set_place(place, Fact::Unknown, register_places);
+                }
+            }
+        }
         OperationKind::Memcpy | OperationKind::Move | OperationKind::MoveBytes { .. } => {
             let source = place_of(&operation.operands[0]);
             let destination = place_of(&operation.operands[1]);
@@ -1406,7 +1414,7 @@ pub(crate) fn escaping_roots(
             }
             // Source and destination ownership are modelled above; the remaining operand is a
             // materialized integer extent, not evidence or a place that can escape.
-            OperationKind::MoveBytes { .. } => {}
+            OperationKind::MoveBytes { .. } | OperationKind::MoveRange { .. } => {}
             OperationKind::Call { ty, .. } => match call_operands(&operation.operands, ty) {
                 // A `Let` argument is immutable and non-escaping by the language's own convention,
                 // and the callee reads its function value and evidence by reference. What a call

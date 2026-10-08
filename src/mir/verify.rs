@@ -1074,7 +1074,7 @@ impl<'a> Verifier<'a> {
                     );
                 }
             }
-            OperationKind::MoveBytes { ty } => {
+            OperationKind::MoveBytes { ty } | OperationKind::MoveRange { ty } => {
                 self.verify_place_representation(node, 0, &operands[0], MirType::Lowered(*ty));
                 self.verify_place_representation(node, 1, &operands[1], MirType::Lowered(*ty));
             }
@@ -1551,6 +1551,15 @@ impl<'a> Verifier<'a> {
                 }
                 OperationKind::MoveBytes { .. } => {
                     self.transfer_copy_or_move(&operands[0], &operands[1], true, &mut normal);
+                }
+                OperationKind::MoveRange { .. } => {
+                    // Ranges address external sequence allocations, never one tracked local value.
+                    for operand in &operands[..2] {
+                        assert!(
+                            matches!(self.local_place(operand), LocalPlace::External),
+                            "move_range requires sequence allocation bases, not local value places"
+                        );
+                    }
                 }
                 OperationKind::Clear => {
                     self.transfer_clear(&operands[0], &mut normal);

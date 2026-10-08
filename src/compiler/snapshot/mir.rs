@@ -356,6 +356,9 @@ enum SnapshotOperationKind {
     MoveBytes {
         ty: SnapshotTypeId,
     },
+    MoveRange {
+        ty: SnapshotTypeId,
+    },
     StackSave,
     StackRestore,
     CheckCallDepth,
@@ -957,6 +960,9 @@ impl SnapshotOperationKind {
             Source::MoveBytes { ty } => Stored::MoveBytes {
                 ty: graph.capture(*ty)?,
             },
+            Source::MoveRange { ty } => Stored::MoveRange {
+                ty: graph.capture(*ty)?,
+            },
             Source::StackSave => Stored::StackSave,
             Source::StackRestore => Stored::StackRestore,
             Source::CheckCallDepth => Stored::CheckCallDepth,
@@ -1108,6 +1114,9 @@ impl SnapshotOperationKind {
             Stored::Move => Runtime::Move,
             Stored::Replace => Runtime::Replace,
             Stored::MoveBytes { ty } => Runtime::MoveBytes {
+                ty: resolve_type(types, *ty)?,
+            },
+            Stored::MoveRange { ty } => Runtime::MoveRange {
                 ty: resolve_type(types, *ty)?,
             },
             Stored::StackSave => Runtime::StackSave,

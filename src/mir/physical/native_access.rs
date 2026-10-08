@@ -214,7 +214,9 @@ pub(super) fn verify(
             | OperationKind::DropInitialized { .. }
             | OperationKind::DropSubscriptEnv
             | OperationKind::RuntimeDealloc => consume(&operands[0])?,
-            OperationKind::Move | OperationKind::MoveBytes { .. } => {
+            OperationKind::Move
+            | OperationKind::MoveBytes { .. }
+            | OperationKind::MoveRange { .. } => {
                 consume(&operands[0])?;
                 write(&operands[1], false)?;
             }

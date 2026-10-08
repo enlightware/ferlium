@@ -378,6 +378,7 @@ fn operation_types(kind: &OperationKind, types: &mut Vec<Type>) {
         | CloneSubscriptEnv { ty }
         | BorrowSubscriptMember { ty, .. }
         | MoveBytes { ty }
+        | MoveRange { ty }
         | Clone { ty }
         | Drop { ty }
         | DropInitialized { ty }

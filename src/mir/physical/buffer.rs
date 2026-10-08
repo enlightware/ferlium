@@ -82,8 +82,7 @@ impl PhysicalLowerer<'_> {
         match kind {
             BufferPrimitive::Slot
             | BufferPrimitive::WithCapacity
-            | BufferPrimitive::MoveInto
-            | BufferPrimitive::Move
+            | BufferPrimitive::Reallocate
             | BufferPrimitive::Take
             | BufferPrimitive::Drop => {
                 builder.append_operation(

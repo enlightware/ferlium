@@ -801,14 +801,16 @@ pub(crate) fn check_operand_roles(
                 evidence(1);
             }
         }
-        OperationKind::MoveBytes { .. } => {
+        OperationKind::MoveBytes { .. } | OperationKind::MoveRange { .. } => {
             place(0);
             place(1);
-            let size = role(2);
-            assert!(
-                matches!(&*size, ValueRole::Materialized(MirType::Lowered(ty)) if *ty == int_type()),
-                "MIR function `{func_name}` {at}: move_bytes size must be a materialized int, got {size:?}"
-            );
+            for index in 2..operands.len() {
+                let value = role(index);
+                assert!(
+                    matches!(&*value, ValueRole::Materialized(MirType::Lowered(ty)) if *ty == int_type()),
+                    "MIR function `{func_name}` {at}: byte transfer layout must be a materialized int, got {value:?}"
+                );
+            }
         }
         OperationKind::StackRestore => {
             let role = role(0);

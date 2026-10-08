@@ -148,7 +148,7 @@ itself leaves it unchanged. The main groups are:
 
 | Group | Operations | Contract |
 |---|---|---|
-| storage | `alloca`, `alloca_place`, `runtime_alloc`, `runtime_dealloc`, `is_initialized`, `load`, `store`, `clear`, `memcpy`, `move`, `move_bytes`, `replace` | Stack storage follows stack regions; runtime storage has an explicit lifetime. `is_initialized` exposes a physical drop flag without fixing its storage layout. `store` never drops; `memcpy` requires a concrete `TrivialCopy` pointee; moves leave their source absent. `move_bytes` carries an already-materialized byte extent instead of a layout dictionary. `replace` installs a fully initialized whole owned value without an observable initialization gap, retaining the displaced state for cleanup. Its destination may be a projection, absent, or partially initialized. |
+| storage | `alloca`, `alloca_place`, `runtime_alloc`, `runtime_dealloc`, `is_initialized`, `load`, `store`, `clear`, `memcpy`, `move`, `move_bytes`, `move_range`, `replace` | Stack storage follows stack regions; runtime storage has an explicit lifetime. `is_initialized` exposes a physical drop flag without fixing its storage layout. `store` never drops; `memcpy` requires a concrete `TrivialCopy` pointee; moves leave their source absent. `move_bytes` carries an already-materialized byte extent instead of a layout dictionary. `move_range` transfers initialized elements between disjoint sequence allocations, making only the source range absent and initializing only the destination range; it carries byte offsets and extent plus interpreter-only element indices and count. `replace` installs a fully initialized whole owned value without an observable initialization gap, retaining the displaced state for cleanup. Its destination may be a projection, absent, or partially initialized. |
 | aggregates | `subfield`, `variant`, `extract_tag`, `extract_payload_indirection`, `build_array` | Aggregate construction and ownership remain field-addressable. Product `subfield` records its aggregate type and carries `Value` witnesses for direct members with open inline layouts. A variant operation first builds an uninitialized payload shell. Generic variant construction and payload-marked `subfield` operations carry the selected payload's `Value<B>` layout witness; projection reads inline/indirect classification from the stored tag. `extract_tag` yields an opaque semantic tag, while physical `extract_payload_indirection` yields the representation bit as `bool`. `build_array` initializes fresh canonical array storage from borrowed `TrivialCopy` elements. |
 | evidence | `dict_entry`, `build_dictionary`, `subscript_member`, `build_subscript_evidence` | Evidence remains symbolic. Construction closes a definition over evidence operands; dictionary entries are closed function places. |
 | calls/projections | `call`, `project`, `end_project` | Proven source-infallible forms are ordinary operations. Potentially source-fallible forms occur only inside `invoke`. |
@@ -411,10 +411,15 @@ addressors, dictionaries and first-class references. Snapshots preserve these id
 without native callable rebinding.
 
 Physical `Buffer<A>` storage is one owning `*A` slot, with the backing layout specified in
-[abi.md](abi.md#arrays). Taking and transferring elements use `move_bytes<A>`; a slot-to-slot
-transfer requires an absent destination. Whole-buffer movement releases the target allocation,
-transfers the source pointer, and leaves a valid zero-byte allocation in the source. Buffer
-destruction releases the allocation and clears the pointer slot.
+[abi.md](abi.md#arrays). Taking an element uses `move_bytes<A>`. Reallocation allocates new
+repeated storage, transfers the complete live range with `move_range<A>`, releases the old
+allocation, and replaces the owning pointer. The distinct `MoveRange` operation changes both
+allocations without treating either as one initialized value or forwarding whole-value contents.
+It carries byte offsets and extent, plus source and destination element indices and count for
+interpreter provenance. The latter distinguish individual zero-sized elements despite their
+identical byte addresses. Every moved source slot must be initialized and every moved destination
+slot must be absent; the transfer makes the source slots absent. Buffer destruction releases the
+allocation and clears the pointer slot.
 Boxed Buffer destruction likewise releases storage immediately and clears its owning value slot.
 Normal boxed destruction checks in debug builds that every element slot was consumed.
 Its Rust storage destructor also reclaims any remaining payload storage during poisoning, without

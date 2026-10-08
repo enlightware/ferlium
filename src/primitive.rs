@@ -25,10 +25,8 @@ pub(crate) enum BufferPrimitive {
     Slot,
     /// Allocate fixed-capacity storage with all element slots uninitialized.
     WithCapacity,
-    /// Transfer one element into an uninitialized slot, leaving its source uninitialized.
-    MoveInto,
-    /// Release the target storage, transfer ownership, and leave an empty buffer in the source.
-    Move,
+    /// Replace storage, transferring its complete live range without cloning or dropping elements.
+    Reallocate,
     /// Transfer an element to the result, leaving its slot uninitialized.
     Take,
     Equal,
@@ -44,7 +42,7 @@ impl BufferPrimitive {
     pub(crate) fn is_storage(self) -> bool {
         matches!(
             self,
-            Self::Slot | Self::WithCapacity | Self::MoveInto | Self::Move | Self::Take | Self::Drop
+            Self::Slot | Self::WithCapacity | Self::Reallocate | Self::Take | Self::Drop
         )
     }
 }
@@ -57,8 +55,7 @@ impl Callable for BufferPrimitive {
         Some(match self {
             Self::Slot | Self::Take => &[MUTABLE_REF, LET, LET],
             Self::WithCapacity => &[LET, LET, LET],
-            Self::MoveInto => &[MUTABLE_REF, LET, MUTABLE_REF, LET, LET],
-            Self::Move => &[MUTABLE_REF, MUTABLE_REF],
+            Self::Reallocate => &[MUTABLE_REF, LET, LET, LET, LET, LET, LET],
             Self::Equal => &[LET, LET],
             Self::ToString | Self::Clone => &[LET],
             Self::Hash => &[LET, MUTABLE_REF],

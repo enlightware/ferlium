@@ -1278,6 +1278,7 @@ fn observes_address(
         | OperationKind::Memcpy
         | OperationKind::Move
         | OperationKind::MoveBytes { .. }
+        | OperationKind::MoveRange { .. }
         | OperationKind::CompareEqual => false,
         OperationKind::Store if index == 1 => false,
         // Scalar elements are read by value; the destination is the last operand.
@@ -1351,7 +1352,8 @@ fn metadata_loads(
 
 /// The logical index accompanies an indexed byte address for interpreter provenance only.
 fn is_metadata_operand(operation: &Operation, index: usize) -> bool {
-    matches!(operation.kind, OperationKind::AddressOffset { .. }) && index == 2
+    (matches!(operation.kind, OperationKind::AddressOffset { .. }) && index == 2)
+        || (matches!(operation.kind, OperationKind::MoveRange { .. }) && index >= 5)
 }
 
 /// Whether emission may skip reading an operand.
@@ -1378,6 +1380,7 @@ fn classify_access(op: &Operation, index: usize) -> Option<AccessKind> {
         {
             AccessKind::Unsupported
         }
+        OperationKind::MoveRange { .. } if index < 2 => AccessKind::Unsupported,
         OperationKind::Clone { .. } if index == 1 => AccessKind::Unsupported,
         _ => AccessKind::Read,
     })

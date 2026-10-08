@@ -111,6 +111,7 @@ impl MirInstructionKind {
                 | Op::Move
                 | Op::Replace
                 | Op::MoveBytes
+                | Op::MoveRange
                 | Op::BuildSubscript
                 | Op::BuildClosure
                 | Op::Variant

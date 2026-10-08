@@ -505,6 +505,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     | OperationKind::DropInitialized { ty }
                     | OperationKind::BlackBox { ty }
                     | OperationKind::MoveBytes { ty }
+                    | OperationKind::MoveRange { ty }
                     | OperationKind::BuildClosure { ty, .. }
                     | OperationKind::BuildSubscript { ty }
                     | OperationKind::CloneSubscriptEnv { ty }
@@ -1190,6 +1191,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             | ExtractTag
             | ExtractPayloadIndirection
             | MoveBytes { .. }
+            | MoveRange { .. }
             | BlackBox { .. }
             | Load
             | Store
@@ -1821,13 +1823,13 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         // A symbolic callable has no source allocation; its destination carries the storage
         // layout against which transfer witnesses and byte counts must still be checked.
         let transfer_storage = match &operation.kind {
-            Memcpy | Move | MoveBytes { .. } => Some(match operand(0)? {
+            Memcpy | Move | MoveBytes { .. } | MoveRange { .. } => Some(match operand(0)? {
                 Binding::Callable(_) => place(1)?,
                 source => source.place()?,
             }),
             _ => None,
         };
-        if let MoveBytes { ty } = &operation.kind {
+        if let MoveBytes { ty } | MoveRange { ty } = &operation.kind {
             if !same_storage_type(transfer_storage.unwrap().ty, self.types.resolve(*ty)) {
                 return Err(invalid("operation type differs from storage type"));
             }
@@ -2108,6 +2110,66 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             }
             IsInitialized | Drop { .. } => {
                 panic!("physical lowering error: implicit destruction state")
+            }
+            MoveRange { ty } => {
+                let source = place(0)?;
+                let destination = place(1)?;
+                if self.memory.overlaps(source, destination)? {
+                    return Err(invalid("overlapping range transfer"));
+                }
+                let integer = |index| -> Result<usize, RuntimeError> {
+                    let Scalar::Int(value) = operand(index)?.scalar(&self.memory)? else {
+                        return Err(invalid("non-integer range transfer layout"));
+                    };
+                    usize::try_from(value).map_err(|_| invalid("negative range transfer layout"))
+                };
+                let size = integer(2)?;
+                let source_offset = integer(3)?;
+                let destination_offset = integer(4)?;
+                let source_index = integer(5)?;
+                let destination_index = integer(6)?;
+                let count = integer(7)?;
+                if count == 0 {
+                    if size != 0 {
+                        return Err(invalid("nonempty byte extent for empty range"));
+                    }
+                    return Ok(None);
+                }
+                if size % count != 0 {
+                    return Err(invalid("invalid range transfer byte extent"));
+                }
+                let element_size = size / count;
+                let ty = self.types.resolve(*ty);
+                for index in 0..count {
+                    let source = self.memory.sequence_element(
+                        source,
+                        source_offset + index * element_size,
+                        source_index + index,
+                        ty,
+                    )?;
+                    let destination = self.memory.sequence_element(
+                        destination,
+                        destination_offset + index * element_size,
+                        destination_index + index,
+                        ty,
+                    )?;
+                    if self.memory.size(source)? != element_size {
+                        return Err(invalid("range transfer size differs from value layout"));
+                    }
+                    assert!(
+                        self.memory.fully_initialized(source)?,
+                        "range move requires initialized source"
+                    );
+                    assert!(
+                        !self.memory.any_initialized(destination)?,
+                        "range move requires absent destination"
+                    );
+                    self.memory.check_consume(source)?;
+                    let value = self.memory.read_value(source, false)?;
+                    self.memory.write_value(destination, &value)?;
+                    self.memory.clear(source)?;
+                }
+                None
             }
             Memcpy | Move | MoveBytes { .. } => {
                 let storage = transfer_storage.unwrap();

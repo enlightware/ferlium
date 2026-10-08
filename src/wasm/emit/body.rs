@@ -1054,6 +1054,7 @@ impl<'a, 's> Body<'a, 's> {
                     | Move
                     | Replace
                     | MoveBytes { .. }
+                    | MoveRange { .. }
                     | StackSave
                     | StackRestore
                     | CheckCallDepth
@@ -3800,6 +3801,19 @@ impl<'a, 's> Body<'a, 's> {
                 } else {
                     self.copy_bytes(&args[0], &args[1], self.size(&ty)?)?;
                 }
+            }
+            MoveRange { .. } => {
+                self.address(&args[1])?;
+                self.read(&args[4])?;
+                self.i(I::I32Add);
+                self.address(&args[0])?;
+                self.read(&args[3])?;
+                self.i(I::I32Add);
+                self.read(&args[2])?;
+                self.i(I::MemoryCopy {
+                    src_mem: 0,
+                    dst_mem: 0,
+                });
             }
             Memcpy | Move | MoveBytes { .. } => {
                 let ty = self.pointee_type(&args[1])?;

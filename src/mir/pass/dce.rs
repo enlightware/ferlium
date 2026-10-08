@@ -724,6 +724,7 @@ pub(super) fn may_leave_frame_storage(
         | OperationKind::Move
         | OperationKind::Replace
         | OperationKind::MoveBytes { .. }
+        | OperationKind::MoveRange { .. }
         | OperationKind::StackSave
         | OperationKind::StackRestore
         | OperationKind::CheckCallDepth
@@ -1173,6 +1174,7 @@ impl DceCensus {
 /// projection, call argument, or unmodelled role rejects every pair for the root.
 fn is_exact_clone_lifetime_role(operation: &Operation, position: usize) -> bool {
     match &operation.kind {
+        OperationKind::MoveRange { .. } => false,
         OperationKind::Clone { .. } => position == 1,
         OperationKind::Drop { .. }
         | OperationKind::DropInitialized { .. }

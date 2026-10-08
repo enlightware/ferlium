@@ -109,8 +109,7 @@ pub(super) fn eval_buffer_primitive(
                 capacity.max(0) as usize
             )))
         }
-        BufferPrimitive::MoveInto => buffer_move_into(args, ctx),
-        BufferPrimitive::Move => buffer_move(args, ctx),
+        BufferPrimitive::Reallocate => buffer_reallocate(args, ctx),
         BufferPrimitive::Take => buffer_take(args, ctx),
         BufferPrimitive::Equal => Ok(Value::native(false)),
         BufferPrimitive::ToString => Ok(Value::native(FerliumString::new("<buffer>"))),
@@ -179,48 +178,43 @@ fn buffer_slot(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalResult {
     )?)))
 }
 
-fn buffer_move_into(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalResult {
-    let mut source = place_from_arg(args.next().unwrap())?;
-    let source_index = int_from_arg(
-        args.next().unwrap(),
-        ctx,
-        "buffer source index should be an int",
-    );
-    let mut target = place_from_arg(args.next().unwrap())?;
-    let target_index = int_from_arg(
-        args.next().unwrap(),
-        ctx,
-        "buffer target index should be an int",
-    );
-    let _element_size = int_from_arg(
-        args.next().unwrap(),
-        ctx,
-        "buffer element size should be an int",
-    );
-    source.push_index(source_index);
-    target.push_index(target_index);
-    let value = {
-        let source = source.boxed_mut(ctx).map_err(RuntimeError::new_native)?;
-        mem::replace(source, Value::uninit())
-    };
-    let target = target.boxed_mut(ctx).map_err(RuntimeError::new_native)?;
-    assert!(
-        matches!(target, Value::Uninit),
-        "buffer_move_into target slot must be uninitialized"
-    );
-    *target = value;
-    Ok(Value::unit())
-}
-
-fn buffer_move(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalResult {
-    let source = place_from_arg(args.next().unwrap())?;
+fn buffer_reallocate(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalResult {
     let target = place_from_arg(args.next().unwrap())?;
-    let value = {
-        let source = source.boxed_mut(ctx).map_err(RuntimeError::new_native)?;
-        mem::replace(source, Value::native(Buffer::with_capacity(0)))
-    };
+    let mut integer = || int_from_arg(args.next().unwrap(), ctx, "buffer layout should be an int");
+    let old_start = usize::try_from(integer()).expect("negative buffer start");
+    let len = usize::try_from(integer()).expect("negative buffer length");
+    let new_capacity = usize::try_from(integer()).expect("negative buffer capacity");
+    let new_start = usize::try_from(integer()).expect("negative new buffer start");
+    let _element_size = integer();
+    let _element_align = integer();
     let target = target.boxed_mut(ctx).map_err(RuntimeError::new_native)?;
-    let old = mem::replace(target, value);
+    let old = target
+        .as_primitive_ty_mut::<Buffer>()
+        .expect("expected buffer storage");
+    assert!(
+        old_start
+            .checked_add(len)
+            .is_some_and(|end| end <= old.capacity()),
+        "reallocation source range exceeds buffer capacity"
+    );
+    assert!(
+        new_start
+            .checked_add(len)
+            .is_some_and(|end| end <= new_capacity),
+        "reallocation destination range exceeds new capacity"
+    );
+    debug_assert!(
+        old.slots[..old_start]
+            .iter()
+            .chain(&old.slots[old_start + len..])
+            .all(|slot| matches!(slot, Value::Uninit)),
+        "reallocation must consume all live elements"
+    );
+    let mut new = Buffer::with_capacity(new_capacity);
+    for index in 0..len {
+        new.slots[new_start + index] = old.take(old_start + index).unwrap();
+    }
+    let old = mem::replace(target, Value::native(new));
     old.discard_storage();
     Ok(Value::unit())
 }
@@ -328,6 +322,58 @@ mod reclamation_tests {
             3,
             "the moved payload remains independently owned"
         );
+        assert_eq!(Rc::strong_count(&count), 1);
+    }
+
+    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    fn reallocation_transfers_managed_payloads_without_reclaiming_them() {
+        let session = CompilerSession::new();
+        let mut ctx = EvalCtx::new(STD_MODULE_ID, &session);
+        let count = Rc::new(Cell::new(0));
+        let mut buffer = Buffer::with_capacity(4);
+        for index in 2..4 {
+            *buffer.get_mut(index).unwrap() = Value::native(DropTracked(count.clone()));
+        }
+        ctx.environment.push(ValOrMut::Val(Value::native(buffer)));
+        let function = FunctionId::new(
+            STD_MODULE_ID,
+            session
+                .std_module()
+                .get_local_function_id(ustr("buffer_reallocate"))
+                .unwrap(),
+        );
+        let mut args = vec![ValOrMut::Mut(Place::boxed(0))];
+        args.extend(
+            [
+                2isize,
+                2,
+                8,
+                3,
+                mem::size_of::<DropTracked>() as isize,
+                mem::align_of::<DropTracked>() as isize,
+            ]
+            .map(ValOrMut::from_primitive),
+        );
+        ctx.call_native(function, Vec::new(), args, Location::new_synthesized())
+            .unwrap()
+            .discard_storage();
+        assert_eq!(count.get(), 0);
+        let ValOrMut::Val(buffer) = &ctx.environment[0] else {
+            panic!("expected owned buffer")
+        };
+        let buffer = buffer.as_primitive_ty::<Buffer>().unwrap();
+        assert_eq!(buffer.capacity(), 8);
+        for index in 0..8 {
+            let slot = buffer.get(index).unwrap();
+            if (3..5).contains(&index) {
+                assert!(slot.as_primitive_ty::<DropTracked>().is_some());
+            } else {
+                assert!(matches!(slot, Value::Uninit));
+            }
+        }
+        ctx.environment.pop().unwrap().discard_storage();
+        assert_eq!(count.get(), 2);
         assert_eq!(Rc::strong_count(&count), 1);
     }
 }

@@ -853,8 +853,8 @@ impl<'a> Interpreter<'a> {
                     .replace_from_owned_slot(&mut self.ctx, &replacement)
                     .map_err(|error| RuntimeError::new(error, Some(span.location)))?;
             }
-            OperationKind::MoveBytes { .. } => {
-                panic!("move_bytes requires the physical MIR interpreter")
+            OperationKind::MoveBytes { .. } | OperationKind::MoveRange { .. } => {
+                panic!("byte transfers require the physical MIR interpreter")
             }
             OperationKind::CompareEqual => {
                 self.exec_compare_equal(func, slots, &operation.operands, def.unwrap());

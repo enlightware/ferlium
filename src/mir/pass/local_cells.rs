@@ -119,6 +119,9 @@ pub(crate) fn access(operation: &Operation, position: usize) -> Access {
         (OperationKind::MoveBytes { .. }, 0) => Access::MoveOut(Transfer::Bytes),
         (OperationKind::MoveBytes { .. }, 1) => Access::MoveIn(Transfer::Bytes),
         (OperationKind::MoveBytes { .. }, 2) => Access::Read(Read::Other),
+        // Preserve allocation identities: these are partial ownership transfers, not cell moves.
+        (OperationKind::MoveRange { .. }, 0 | 1) => Access::Opaque,
+        (OperationKind::MoveRange { .. }, 2..=7) => Access::Read(Read::Other),
         (OperationKind::Load, 0) => Access::Read(Read::Load),
         (OperationKind::CompareEqual, 0) => Access::Read(Read::Compare),
         (

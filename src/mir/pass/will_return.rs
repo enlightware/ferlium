@@ -192,6 +192,7 @@ pub(super) fn operation_calls_only(
         | OperationKind::Move
         | OperationKind::Replace
         | OperationKind::MoveBytes { .. }
+        | OperationKind::MoveRange { .. }
         | OperationKind::StackSave
         | OperationKind::StackRestore
         | OperationKind::CheckCallDepth

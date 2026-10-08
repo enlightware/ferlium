@@ -461,6 +461,12 @@ impl Places {
                     effect(&op.operands[0], Update::Set(Absent));
                 }
             }
+            MoveRange { .. } => {
+                // Sequence elements are tracked by their allocation; neither base describes a
+                // complete single value after a partial transfer.
+                effect(&op.operands[0], Update::Set(MaybeLive));
+                effect(&op.operands[1], Update::Set(MaybeLive));
+            }
             Replace => {
                 // The semantic verifier requires a complete owned replacement. Only the
                 // displaced destination may be partial; this is not a symmetric state swap.

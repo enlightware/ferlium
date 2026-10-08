@@ -1168,8 +1168,7 @@ impl<'a> PhysicalLowerer<'a> {
     ) -> Result<Vec<Operation>, BackendReadinessError> {
         let expected = match callee {
             BufferPrimitive::Slot | BufferPrimitive::WithCapacity => 3,
-            BufferPrimitive::Move => 2,
-            BufferPrimitive::MoveInto => 5,
+            BufferPrimitive::Reallocate => 7,
             BufferPrimitive::Take => 3,
             BufferPrimitive::Drop => unreachable!(),
             _ => unreachable!("only Buffer callees reach Buffer expansion"),
@@ -1188,20 +1187,7 @@ impl<'a> PhysicalLowerer<'a> {
             }
             BufferPrimitive::WithCapacity => buffer_element_type(call_ty.ret())
                 .ok_or(BackendReadinessError::InvalidBufferCall { function })?,
-            BufferPrimitive::Move => {
-                let element_ty = buffer_argument_element_type(call_ty, 0, function)?;
-                if buffer_argument_element_type(call_ty, 1, function)? != element_ty {
-                    return Err(BackendReadinessError::InvalidBufferCall { function });
-                }
-                element_ty
-            }
-            BufferPrimitive::MoveInto => {
-                let element_ty = buffer_argument_element_type(call_ty, 0, function)?;
-                if buffer_argument_element_type(call_ty, 2, function)? != element_ty {
-                    return Err(BackendReadinessError::InvalidBufferCall { function });
-                }
-                element_ty
-            }
+            BufferPrimitive::Reallocate => buffer_argument_element_type(call_ty, 0, function)?,
             BufferPrimitive::Drop => unreachable!(),
             _ => unreachable!("only Buffer callees reach Buffer expansion"),
         };
@@ -1281,78 +1267,63 @@ impl<'a> PhysicalLowerer<'a> {
                     size,
                 ));
             }
-            BufferPrimitive::MoveInto => {
-                let source_element = edit_buffer_element_address(
+            BufferPrimitive::Reallocate => {
+                // Keep the layout arithmetic in MIR so constant layouts fold after expansion.
+                let mut multiply = |left: Value, right: Value| {
+                    let product = edit_int_binary(
+                        edit,
+                        &mut replacement,
+                        self.known.int_mul(),
+                        left,
+                        right,
+                        span,
+                    );
+                    edit_result(edit, &mut replacement, Operation::load(span, product))
+                };
+                let total = multiply(arguments[3].clone(), arguments[5].clone());
+                let size = multiply(arguments[2].clone(), arguments[5].clone());
+                let source_offset = multiply(arguments[1].clone(), arguments[5].clone());
+                let target_offset = multiply(arguments[4].clone(), arguments[5].clone());
+                let mut load = |index: usize| {
+                    edit_result(
+                        edit,
+                        &mut replacement,
+                        Operation::load(span, arguments[index].clone()),
+                    )
+                };
+                let align = load(6);
+                let capacity = load(3);
+                let source_index = load(1);
+                let target_index = load(4);
+                let count = load(2);
+                let allocation = edit_result(
+                    edit,
+                    &mut replacement,
+                    Operation::runtime_alloc_array(span, element_ty, total, align, capacity),
+                );
+                let slot = edit_buffer_pointer_slot(
                     edit,
                     &mut replacement,
                     arguments[0].clone(),
-                    arguments[1].clone(),
-                    arguments[4].clone(),
                     element_ty,
-                    self.known,
                     span,
                     self.env,
                 );
-                let target_element = edit_buffer_element_address(
-                    edit,
-                    &mut replacement,
-                    arguments[2].clone(),
-                    arguments[3].clone(),
-                    arguments[4].clone(),
-                    element_ty,
-                    self.known,
-                    span,
-                    self.env,
-                );
-                let size = edit_result(
-                    edit,
-                    &mut replacement,
-                    Operation::load(span, arguments[4].clone()),
-                );
-                replacement.push(Operation::move_bytes(
+                let old = edit_result(edit, &mut replacement, Operation::load(span, slot.clone()));
+                replacement.push(Operation::move_range(
                     span,
                     element_ty,
-                    source_element,
-                    target_element,
+                    old.clone(),
+                    allocation.clone(),
+                    source_offset,
+                    target_offset,
                     size,
+                    source_index,
+                    target_index,
+                    count,
                 ));
-                edit_store_unit(edit, &mut replacement, destination, span, self.env);
-            }
-            BufferPrimitive::Move => {
-                let source = edit_buffer_pointer_slot(
-                    edit,
-                    &mut replacement,
-                    arguments[0].clone(),
-                    element_ty,
-                    span,
-                    self.env,
-                );
-                let target = edit_buffer_pointer_slot(
-                    edit,
-                    &mut replacement,
-                    arguments[1].clone(),
-                    element_ty,
-                    span,
-                    self.env,
-                );
-                let old = edit_result(
-                    edit,
-                    &mut replacement,
-                    Operation::load(span, target.clone()),
-                );
                 replacement.push(Operation::runtime_dealloc(span, old));
-                replacement.push(Operation::clear(span, target.clone()));
-                replacement.push(Operation::move_value(span, source.clone(), target));
-                // A capacity-zero Buffer has no addressable slot, so the ABI deliberately uses
-                // the canonical zero-byte placeholder layout instead of `A`'s alignment.
-                let zero = edit_int_constant(edit, 0, self.env);
-                let one = edit_int_constant(edit, 1, self.env);
-                let empty = edit_result(
-                    edit,
-                    &mut replacement,
-                    Operation::runtime_alloc_array(span, element_ty, zero.clone(), one, zero),
-                );
-                replacement.push(Operation::store(span, empty, source));
+                replacement.push(Operation::store(span, allocation, slot));
                 edit_store_unit(edit, &mut replacement, destination, span, self.env);
             }
             BufferPrimitive::Drop => unreachable!(),
@@ -2988,6 +2959,7 @@ fn verify_physical_operation(
         | OperationKind::Move
         | OperationKind::Replace
         | OperationKind::MoveBytes { .. }
+        | OperationKind::MoveRange { .. }
         | OperationKind::StackSave
         | OperationKind::StackRestore
         | OperationKind::CheckCallDepth
@@ -5414,7 +5386,8 @@ mod tests {
             "fn append_and_pop(array: &mut [int], value: int) -> Option<int> {\n\
                  array_append(array, value);\n\
                  array_pop_back(array)\n\
-             }",
+             }\n\
+             fn create() { let mut array = []; array_append(array, 1); }",
             "physical_buffer",
         );
         let (physical, first_helper) = lower(&mut session, module).unwrap();
@@ -5513,7 +5486,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(operations.iter().any(|operation| {
-            matches!(operation.kind, OperationKind::MoveBytes { ty } if !ty.is_constant())
+            matches!(operation.kind, OperationKind::MoveBytes { ty, .. } if !ty.is_constant())
         }));
         assert!(!operations.iter().any(|operation| {
             let Some(Value::Function(callee)) = operation.operands.first() else {
