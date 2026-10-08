@@ -954,7 +954,7 @@ PipeCalleeExpr<NoStruct>: ExprKind = {
     <e:Es<AtomExpr<NoStruct>>> <tails:PipeCalleeSuffixTail*> =>? fold_suffix_expr(e, tails, arena),
 }
 
-SuffixTailList: Vec<PExprSuffixTail> = {
+SuffixTailList: Vec<PExprSuffixTail<'input>> = {
     => vec![],
     <tail:NonNamedSuffixTail> <mut rest:SuffixTailList> => {
         rest.insert(0, tail);
@@ -966,7 +966,7 @@ SuffixTailList: Vec<PExprSuffixTail> = {
     },
 }
 
-SuffixTailListAfterNamedSubscript: Vec<PExprSuffixTail> = {
+SuffixTailListAfterNamedSubscript: Vec<PExprSuffixTail<'input>> = {
     => vec![],
     <tail:NonApplyNonNamedSuffixTail> <mut rest:SuffixTailList> => {
         rest.insert(0, tail);
@@ -978,31 +978,31 @@ SuffixTailListAfterNamedSubscript: Vec<PExprSuffixTail> = {
     },
 }
 
-NonNamedSuffixTail: PExprSuffixTail = {
+NonNamedSuffixTail: PExprSuffixTail<'input> = {
     "." <f:Sp<FieldIdentifier>> => PExprSuffixTail::Field(f),
     "." <i:Sp<TupleIndexDigits>> => PExprSuffixTail::TupleIndex(i),
     <l:@L> "[" <i:Expr> "]" <r:@R> => PExprSuffixTail::Index(i, span(l, r, source_id)),
     <l:@L> "(" <a:Sep<Es<TopExpr<"">>, ",">> ")" <r:@R> => PExprSuffixTail::Apply(a, span(l, r, source_id)),
 }
 
-NonApplyNonNamedSuffixTail: PExprSuffixTail = {
+NonApplyNonNamedSuffixTail: PExprSuffixTail<'input> = {
     "." <f:Sp<FieldIdentifier>> => PExprSuffixTail::Field(f),
     "." <i:Sp<TupleIndexDigits>> => PExprSuffixTail::TupleIndex(i),
     <l:@L> "[" <i:Expr> "]" <r:@R> => PExprSuffixTail::Index(i, span(l, r, source_id)),
 }
 
-SuffixTail: PExprSuffixTail = {
+SuffixTail: PExprSuffixTail<'input> = {
     NonNamedSuffixTail,
     NamedSubscriptTail,
 }
 
-PipeCalleeSuffixTail: PExprSuffixTail = {
+PipeCalleeSuffixTail: PExprSuffixTail<'input> = {
     "." <f:Sp<FieldIdentifier>> => PExprSuffixTail::Field(f),
     "." <i:Sp<TupleIndexDigits>> => PExprSuffixTail::TupleIndex(i),
     <l:@L> "[" <i:Expr> "]" <r:@R> => PExprSuffixTail::Index(i, span(l, r, source_id)),
 }
 
-NamedSubscriptTail: PExprSuffixTail = {
+NamedSubscriptTail: PExprSuffixTail<'input> = {
     <l:@L> "->" "[" <name:Sp<UIdentifier>> "]" <args:NamedSubscriptArgs?> <r:@R> => {
         PExprSuffixTail::NamedSubscript(name, args.unwrap_or_default(), span(l, r, source_id))
     },
@@ -1509,9 +1509,9 @@ UIntValue: usize = <l:@L> <s:r"[1-9][0-9]*|0"> <r:@R> =>? match parse_num::<usiz
 
 // The digits after a dot: a tuple index, or the fraction of a float literal, which may start with
 // zeros.
-TupleIndexDigits: String = {
-    r"[1-9][0-9]*|0" => <>.to_string(),
-    r"0[0-9]+" => <>.to_string(),
+TupleIndexDigits: &'input str = {
+    r"[1-9][0-9]*|0",
+    r"0[0-9]+",
 };
 
 StringLiteral: (LiteralValue, IrType) = StringToken => (string_literal(<>), string_type());

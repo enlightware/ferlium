@@ -353,7 +353,7 @@ where
 /// Create a projection, or a float literal if the lhs is a number
 pub(crate) fn proj_or_float<L, T>(
     lhs: PExprId,
-    rhs: &(String, Location),
+    rhs: (&str, Location),
     arena: &PExprArena,
 ) -> Result<PExprKind, ParseError<L, T, LocatedError>> {
     use ExprKind::*;
@@ -366,12 +366,12 @@ pub(crate) fn proj_or_float<L, T>(
     let (digits, span) = rhs;
     if let Some(value) = int_val {
         let float_value = format!("{value}.{digits}");
-        return parse_num_literal::<Float, L, T>(&float_value, *span);
+        return parse_num_literal::<Float, L, T>(&float_value, span);
     }
     if digits.len() > 1 && digits.starts_with('0') {
         return error(
             format!("tuple projection index {digits} cannot have leading zeros"),
-            *span,
+            span,
         );
     }
     let Some(index) = digits
@@ -381,21 +381,21 @@ pub(crate) fn proj_or_float<L, T>(
     else {
         return error(
             format!("tuple projection index {digits} is too large"),
-            *span,
+            span,
         );
     };
-    Ok(ExprKind::project(lhs, (index, *span)))
+    Ok(ExprKind::project(lhs, (index, span)))
 }
 
-pub(crate) enum PExprSuffixTail {
+pub(crate) enum PExprSuffixTail<'input> {
     Field(UstrSpan),
-    TupleIndex((String, Location)),
+    TupleIndex((&'input str, Location)),
     Index(PExprId, Location),
     Apply(Vec<PExprId>, Location),
     NamedSubscript(UstrSpan, Vec<PExprId>, Location),
 }
 
-impl PExprSuffixTail {
+impl PExprSuffixTail<'_> {
     fn span(&self) -> Location {
         match self {
             Self::Field((_, span)) | Self::TupleIndex((_, span)) => *span,
@@ -406,7 +406,7 @@ impl PExprSuffixTail {
 
 pub(crate) fn fold_suffix_expr<L, T>(
     base: PExprId,
-    tails: Vec<PExprSuffixTail>,
+    tails: Vec<PExprSuffixTail<'_>>,
     arena: &mut PExprArena,
 ) -> Result<PExprKind, ParseError<L, T, LocatedError>> {
     let Some((last, prefix)) = tails.split_last() else {
@@ -422,7 +422,7 @@ pub(crate) fn fold_suffix_expr<L, T>(
 
 fn alloc_suffix_tail<L, T>(
     receiver: PExprId,
-    tail: &PExprSuffixTail,
+    tail: &PExprSuffixTail<'_>,
     arena: &mut PExprArena,
 ) -> Result<PExprId, ParseError<L, T, LocatedError>> {
     let span = Location::fuse([arena[receiver].span, tail.span()])
@@ -433,12 +433,12 @@ fn alloc_suffix_tail<L, T>(
 
 fn suffix_tail_kind<L, T>(
     receiver: PExprId,
-    tail: &PExprSuffixTail,
+    tail: &PExprSuffixTail<'_>,
     arena: &mut PExprArena,
 ) -> Result<PExprKind, ParseError<L, T, LocatedError>> {
     match tail {
         PExprSuffixTail::Field(field) => Ok(ExprKind::field_access(receiver, *field)),
-        PExprSuffixTail::TupleIndex(index) => proj_or_float(receiver, index, arena),
+        PExprSuffixTail::TupleIndex(index) => proj_or_float(receiver, *index, arena),
         PExprSuffixTail::Index(index, _) => Ok(ExprKind::index(receiver, *index)),
         PExprSuffixTail::Apply(args, _) => {
             Ok(ExprKind::apply(receiver, args.clone(), UnnamedArg::None))
