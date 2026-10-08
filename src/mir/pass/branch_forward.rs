@@ -25,7 +25,10 @@
 //! A concrete `TrivialCopy` variant follows the same control shape. Each incoming path stores a
 //! statically tagged shell, and the join extracts that tag only to feed `switch_variant`. The pass
 //! redirects each construction path to the selected consumer while retaining payload storage for
-//! projections in that consumer. Escaping storage and managed payloads are outside this rule. A
+//! projections in that consumer. A path may store its shell well above the join, and other paths
+//! may meet it on the way, as in an inlined iterator `next` that stores `Some` before computing its
+//! payload: a forward analysis gives the tag each block leaves, and the join's predecessors that
+//! leave a known tag are redirected. Escaping storage and managed payloads are outside this rule. A
 //! one-case `comp_eq` tag test is instead replaced by a boolean shadow of the variant's stores,
 //! which leaves the flag shape above.
 //!
@@ -52,7 +55,8 @@
 //! `stack_restore`s; the join may contain only `stack_restore`s besides the read; and the
 //! stores found must be exactly those the use census saw, which is what proves no other definition
 //! reaches the join. Two paths may not meet at one block, since rewriting it would mean duplicating
-//! it.
+//! it. For a variant, the forward analysis takes the place of the store census: a block where
+//! paths storing one tag meet leaves that tag and is redirected itself.
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use ustr::Ustr;
@@ -405,7 +409,17 @@ fn plan_variant_join(
 
     let join_prefix = &block.operations()[..read_index];
     let mut arms = Vec::with_capacity(summary.stores.len());
-    for reaching in reaching_stores(func, join, &summary.stores, incoming)? {
+    // The tag each path leaves decides its consumer, however far up it was stored: paths that
+    // meet before the join with one tag need no duplication, and the join's predecessors are
+    // redirected rather than the storing blocks. A path that does not agree on one tag is crossed
+    // only through edge cleanup, as the store trees of nested constructors require.
+    let tags = exit_tags(func, &summary.stores, incoming);
+    let reaching = reaching_sources(func, join, incoming, |block| match tags[block.as_index()] {
+        ExitTag::Known(tag) => Step::Source(tag),
+        ExitTag::Unknown => Step::Cross,
+        ExitTag::Unreached => Step::Refuse,
+    })?;
+    for reaching in reaching {
         let target = cases
             .iter()
             .find_map(|(case, target)| (*case == reaching.value).then_some(*target))
@@ -801,11 +815,22 @@ fn plan_join(
     Some(Forward { arms })
 }
 
-/// One store found by the backward walk, with the cleanup between it and the join.
+/// One block found by the backward walk to decide the value the join sees, with the cleanup between
+/// it and the join.
 struct Reaching<T> {
     source: BlockId,
     value: T,
     replay: Vec<Operation>,
+}
+
+/// What the backward walk does with one block on a path to the join.
+enum Step<T> {
+    /// The block leaves `T` in the storage: redirect it.
+    Source(T),
+    /// The block does not decide the value: walk through it to its predecessors.
+    Cross,
+    /// Give up on this join.
+    Refuse,
 }
 
 /// The stores that reach `join`, walking back through blocks that only carry edge cleanup.
@@ -818,6 +843,25 @@ fn reaching_stores<T: Copy>(
     join: BlockId,
     stores: &[Stored<T>],
     incoming: &[Vec<BlockId>],
+) -> Option<Vec<Reaching<T>>> {
+    let found = reaching_sources(func, join, incoming, |block| {
+        let mut block_stores = stores.iter().filter(|store| store.block == block);
+        match (block_stores.next(), block_stores.next()) {
+            (Some(store), None) => Step::Source(store.value),
+            (None, _) => Step::Cross,
+            (Some(_), Some(_)) => Step::Refuse,
+        }
+    })?;
+    (found.len() == stores.len()).then_some(found)
+}
+
+/// The blocks that decide the value seen at `join`, as `step` classifies them, walking back through
+/// blocks that only carry edge cleanup.
+fn reaching_sources<T>(
+    func: &Function,
+    join: BlockId,
+    incoming: &[Vec<BlockId>],
+    step: impl Fn(BlockId) -> Step<T>,
 ) -> Option<Vec<Reaching<T>>> {
     let mut found: Vec<Reaching<T>> = Vec::new();
     let mut visited: FxHashSet<BlockId> = FxHashSet::default();
@@ -840,21 +884,22 @@ fn reaching_stores<T: Copy>(
             return None;
         }
 
-        let mut block_stores = stores.iter().filter(|store| store.block == block);
-        if let Some(store) = block_stores.next() {
-            if block_stores.next().is_some() {
-                return None;
+        match step(block) {
+            Step::Source(value) => {
+                found.push(Reaching {
+                    source: block,
+                    value,
+                    replay,
+                });
+                continue;
             }
-            found.push(Reaching {
-                source: block,
-                value: store.value,
-                replay,
-            });
-            continue;
+            Step::Cross => {}
+            Step::Refuse => return None,
         }
 
-        // A store-free block on the path is only passed through if it does nothing an arm cannot
-        // replay. Its operations run before whatever the path below it already carries.
+        // A block on the path that does not decide the value is only passed through if it does
+        // nothing an arm cannot replay. Its operations run before whatever the path below it
+        // already carries.
         let operations = func.block(block).operations();
         if !operations
             .iter()
@@ -876,7 +921,58 @@ fn reaching_stores<T: Copy>(
         }
     }
 
-    (found.len() == stores.len()).then_some(found)
+    Some(found)
+}
+
+/// The tag a block leaves in a variant storage, when every path to its end agrees on it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExitTag {
+    /// No path reaches the block's end yet: the identity of the meet.
+    Unreached,
+    Known(Ustr),
+    Unknown,
+}
+
+impl ExitTag {
+    fn meet(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Unreached, tag) | (tag, Self::Unreached) => tag,
+            (Self::Known(left), Self::Known(right)) if left == right => self,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// The tag each block leaves in a storage whose only writes are `stores`, whole statically tagged
+/// shells. Payload writes keep the tag, so a block without a store leaves what all its
+/// predecessors agree on.
+fn exit_tags(func: &Function, stores: &[Stored<Ustr>], incoming: &[Vec<BlockId>]) -> Vec<ExitTag> {
+    // Stores are listed in operation order, so the last one in a block is the one it leaves.
+    let mut stored = vec![None; incoming.len()];
+    for store in stores {
+        stored[store.block.as_index()] = Some(store.value);
+    }
+    let mut tags = vec![ExitTag::Unreached; incoming.len()];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in func.blocks() {
+            let tag = match stored[block.as_index()] {
+                Some(tag) => ExitTag::Known(tag),
+                None if block == func.entry() => ExitTag::Unknown,
+                None => incoming[block.as_index()]
+                    .iter()
+                    .fold(ExitTag::Unreached, |tag, predecessor| {
+                        tag.meet(tags[predecessor.as_index()])
+                    }),
+            };
+            if tag != tags[block.as_index()] {
+                tags[block.as_index()] = tag;
+                changed = true;
+            }
+        }
+    }
+    tags
 }
 
 /// The flag `operation` reads, and the stored value that sends control to the `condbr`'s *then*
@@ -1069,6 +1165,38 @@ mod tests {
         assert!(
             body.contains("stack_restore"),
             "cleanup between a nested constructor and the join must be replayed:\n{body}"
+        );
+    }
+
+    /// A path may store its shell before more control flow, here the diamond computing the payload,
+    /// whose arms meet again before the join. The tag that path leaves still selects its consumer.
+    #[test]
+    fn a_variant_tag_stored_before_a_diamond_is_forwarded() {
+        let module = optimized(
+            "fn choose(flag: bool, wide: bool, value: int) {\
+                 if flag { Some(if wide { value * 2 } else { value + 1 }) } else { None }\
+             }\
+             fn consume(flag: bool, wide: bool, value: int) -> int {\
+                 match choose(flag, wide, value) { Some(v) => v + 3, _ => 0 }\
+             }",
+        );
+        let body = body_of(&module, "consume");
+
+        assert!(
+            !body.contains("switch_variant") && !body.contains("extract_tag"),
+            "the constructor paths must select their consumers directly:\n{body}"
+        );
+    }
+
+    /// An array iterator's inlined `next` stores `Some` before its ring-buffer wrap test.
+    #[test]
+    fn a_for_loop_over_an_array_needs_no_tag_dispatch() {
+        let module = optimized("fn sum(x: [int]) { let mut sum = 0; for a in x { sum += a }; sum }");
+        let body = body_of(&module, "sum");
+
+        assert!(
+            !body.contains("switch_variant") && !body.contains("extract_tag"),
+            "the loop must branch on the iterator's bound only:\n{body}"
         );
     }
 
