@@ -8,7 +8,7 @@ use indoc::indoc;
 #[cfg(target_arch = "wasm32")]
 use crate::harness::RunMode;
 use crate::harness::{
-    TestSession, bool, float, get_array_property_value, get_property_value, int,
+    TestSession, bool, expected_array, float, get_array_property_value, get_property_value, int,
     set_array_property_value, set_property_value, string, unit, variant_0, variant_t1, variant_tn,
 };
 use ferlium::{
@@ -1512,6 +1512,121 @@ fn for_loops_with_inclusive_range() {
     assert_val_eq!(
         session.run("let mut a = []; for i in 1..=0 { array_append(a, i) }; a"),
         int_a![1, 0]
+    );
+}
+
+/// Bounds only known at run time keep both directions of a range in the compiled loop.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn for_loops_with_runtime_range_bounds() {
+    let mut session = TestSession::new();
+    let collect = "fn collect(start, end) { let mut a = []; for i in start..end { array_append(a, i) }; a } \
+        fn collect_inclusive(start, end) { let mut a = []; for i in start..=end { array_append(a, i) }; a }";
+    for (call, expected) in [
+        ("collect(5, 2)", int_a![5, 4, 3]),
+        ("collect(2, 5)", int_a![2, 3, 4]),
+        ("collect(0, -3)", int_a![0, -1, -2]),
+        ("collect(3, 2)", int_a![3]),
+        ("collect(2, 2)", int_a![]),
+        ("collect_inclusive(5, 2)", int_a![5, 4, 3, 2]),
+        ("collect_inclusive(2, 5)", int_a![2, 3, 4, 5]),
+        ("collect_inclusive(-1, -3)", int_a![-1, -2, -3]),
+        ("collect_inclusive(3, 2)", int_a![3, 2]),
+        ("collect_inclusive(3, 3)", int_a![3]),
+    ] {
+        let (name, args) = call.split_once('(').unwrap();
+        let (start, end) = args.trim_end_matches(')').split_once(", ").unwrap();
+        assert_val_eq!(
+            session.run(&format!(
+                "{collect} {name}(black_box({start}), black_box({end}))"
+            )),
+            expected
+        );
+    }
+    // One body runs in both directions.
+    assert_val_eq!(
+        session.run(&format!(
+            "{collect} let a = collect(black_box(1), black_box(4)); let b = collect_inclusive(black_box(4), black_box(1)); (a, b)"
+        )),
+        tuple!(int_a![1, 2, 3], int_a![4, 3, 2, 1])
+    );
+    // Indexing inside descending loops, with non-negative and negative indices.
+    let sum = "fn weighted(a, start, end) { let mut s = 0; let mut w = 1; for i in start..=end { s = s + w * a[i]; w = w * 10 }; s }";
+    assert_val_eq!(
+        session.run(&format!(
+            "{sum} weighted([1, 2, 3, 4], black_box(3), black_box(0))"
+        )),
+        int(1234)
+    );
+    assert_val_eq!(
+        session.run(&format!(
+            "{sum} weighted([1, 2, 3, 4], black_box(-1), black_box(-4))"
+        )),
+        int(1234)
+    );
+    assert_val_eq!(
+        session.run(&format!(
+            "{sum} weighted([1, 2, 3, 4], black_box(2), black_box(1))"
+        )),
+        int(23)
+    );
+    assert_val_eq!(
+        session.run(
+            "fn last_down(a, n) { let mut s = 0; for i in n..0 { s = s * 10 + a[i] }; s } last_down([1, 2, 3, 4], black_box(len([1, 2, 3, 4]) - 1))"
+        ),
+        int(432)
+    );
+}
+
+/// Ranges reaching the integer bounds of the target end there rather than wrapping around. The
+/// loops stop after four elements, so wrapping fails the test instead of hanging it.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn for_loops_with_ranges_at_the_integer_bounds() {
+    let mut session = TestSession::new();
+    let prelude = "fn collect(start, end) { let mut a = []; for i in start..end { array_append(a, i); if len(a) > 3 { break } }; a } \
+        fn collect_inclusive(start, end) { let mut a = []; for i in start..=end { array_append(a, i); if len(a) > 3 { break } }; a } \
+        let bits = count_zeros(0); let min: int = bit(bits - 1); let max = bit_not(min);";
+    let (min, max) = (isize::MIN, isize::MAX);
+    for (bounds, expected) in [
+        ("max - 2, max", vec![max - 2, max - 1, max]),
+        ("max, max", vec![max]),
+        ("max, max - 2", vec![max, max - 1, max - 2]),
+        ("min + 2, min", vec![min + 2, min + 1, min]),
+        ("min, min", vec![min]),
+        ("min, min + 2", vec![min, min + 1, min + 2]),
+    ] {
+        let (start, end) = bounds.split_once(", ").unwrap();
+        // Constant bounds may be folded, runtime ones are not.
+        for call in [
+            format!("collect_inclusive({start}, {end})"),
+            format!("collect_inclusive(black_box({start}), black_box({end}))"),
+            format!(
+                "let mut a = []; for i in ({start})..=({end}) {{ array_append(a, i); if len(a) > 3 {{ break }} }}; a"
+            ),
+        ] {
+            let expected = expected_array(int_type(), expected.iter().map(|&i| int(i)));
+            assert_val_eq!(session.run(&format!("{prelude} {call}")), expected);
+        }
+    }
+    for (bounds, expected) in [
+        ("max - 2, max", int_a![max - 2, max - 1]),
+        ("min + 2, min", int_a![min + 2, min + 1]),
+    ] {
+        let (start, end) = bounds.split_once(", ").unwrap();
+        assert_val_eq!(
+            session.run(&format!(
+                "{prelude} collect(black_box({start}), black_box({end}))"
+            )),
+            expected
+        );
+    }
+    // An exhausted iterator stays exhausted.
+    assert_val_eq!(
+        session.run(&format!(
+            "{prelude} let mut it = iter(black_box(max)..=black_box(max)); let a = next(it); let b = next(it); let c = next(it); (a, b, c)"
+        )),
+        tuple!(variant_t1("Some", int(max)), variant_0("None"), variant_0("None"))
     );
 }
 

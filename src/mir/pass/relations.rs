@@ -82,8 +82,9 @@ const MAX_TERMS: usize = 4;
 ///
 /// The same kind of bound as [`MAX_TERMS`], for the same reason: this set is compared on every edge
 /// the fixpoint walks, and a body of nested conditions would otherwise make each comparison cost
-/// the depth it sits at.
-const MAX_KNOWN: usize = 8;
+/// the depth it sits at. Eviction keeps the smallest in sorted order, not the longest-lived, so too
+/// tight a bound loses a guard on a parameter to facts about temporaries in the loops below it.
+const MAX_KNOWN: usize = 16;
 
 /// Which definition put the current contents in a place.
 ///
@@ -866,7 +867,7 @@ impl State {
                 facts.insert(*symbol, fact.clone());
             }
         }
-        // Both inputs are sorted. Intersect them as such instead of doing up to eight linear
+        // Both inputs are sorted. Intersect them as such instead of doing up to [`MAX_KNOWN`] linear
         // `contains` scans for every join.
         let mut known = Vec::with_capacity(self.known.len().min(other.known.len()));
         let (mut ours, mut theirs) = (0, 0);
@@ -1286,7 +1287,7 @@ struct Run {
 /// The rounds one run may take before it is abandoned.
 ///
 /// Generous: bodies are small and each round is one walk. It exists because the state is not
-/// provably monotone — bounding [`MAX_KNOWN`] means a smaller input can keep a *different* eight
+/// provably monotone — bounding [`MAX_KNOWN`] means a smaller input can keep a *different* set of
 /// predicates, so two rounds could in principle alternate. Rather than reason about that, a run
 /// that has not settled by here reports nothing at all, which is always sound.
 const MAX_ROUNDS: usize = 64;
@@ -1598,11 +1599,17 @@ fn recognize(
     for (root, layout, inclusive) in candidates {
         let iterator = interner.place_root(root);
         let cursor = interner.place_field(iterator, layout.next);
+        let places = IteratorPlaces {
+            root,
+            cursor,
+            exhausted: layout
+                .exhausted
+                .map(|field| interner.place_field(iterator, field)),
+        };
         let Some((construction, steps)) = construction_block(
             context,
             register_places,
-            root,
-            cursor,
+            places,
             interner,
             &dominance,
             &successor_lists,
@@ -1671,20 +1678,34 @@ struct Recognized {
     dominance: Option<Dominance>,
 }
 
+/// A range iterator's storage and the fields of it a step may write.
+#[derive(Clone, Copy)]
+struct IteratorPlaces {
+    root: Root,
+    cursor: PlaceId,
+    /// An inclusive iterator's flag for having yielded its end.
+    exhausted: Option<PlaceId>,
+}
+
 /// The one block that writes an iterator outside its steps, if the shape [`recognize`] requires
 /// holds, and the inlined steps among those.
 ///
 /// A step is a call to the iterator's `next`, or what inlining leaves of one: a write of the cursor
-/// alone, outside the construction, which [`unproved_steps`] later checks.
+/// alone, outside the construction, which [`unproved_steps`] later checks. A write of an inclusive
+/// iterator's `exhausted` flag alone is neither: it leaves the cursor and the range unchanged.
 fn construction_block(
     context: &Context<'_>,
     register_places: &PlaceBindings,
-    root: Root,
-    cursor: PlaceId,
+    places: IteratorPlaces,
     interner: &Interner,
     dominance: &Dominance,
     successor_lists: &[Vec<usize>],
 ) -> Option<(BlockId, Vec<OperationSite>)> {
+    let IteratorPlaces {
+        root,
+        cursor,
+        exhausted,
+    } = places;
     let func = context.func;
     let mut construction: Option<BlockId> = None;
     let mut calls = Vec::new();
@@ -1711,6 +1732,11 @@ fn construction_block(
                     block,
                     index: OperationIndex::from_index(index),
                 });
+            } else if exhausted.is_some_and(|exhausted| {
+                writes_only(operation, exhausted, root, register_places, interner)
+            }) {
+                // Ending an inclusive iteration leaves the cursor and the range as they were.
+                continue;
             } else {
                 match construction {
                     Some(existing) if existing != block => return None,
@@ -2307,17 +2333,23 @@ fn transfer(
                 if matches!(convention, ArgConvention::MutableRef)
                     && let Some(place) = tracked_place(state, operand, escaped, interner)
                 {
-                    // A range step writes the cursor and nothing else, so forgetting the whole
-                    // iterator would throw away the very bounds the loop is being read for. This is
-                    // the precision a resolved callee buys: an unknown one still loses everything.
+                    // A range step writes the cursor, and an inclusive one its `exhausted` flag,
+                    // and nothing else, so forgetting the whole iterator would throw away the very
+                    // bounds the loop is being read for. This is the precision a resolved callee
+                    // buys: an unknown one still loses everything.
                     match known {
                         // These addressors receive a mutable receiver so the place they return can
                         // be written through; computing that place does not itself mutate the
                         // array. Forgetting the receiver here would discard its length immediately
                         // before the successful-access edge tries to record the bound it proved.
                         Some(KnownCallee::ArrayIndex | KnownCallee::ArrayOffsetUnchecked) => {}
-                        _ => match stepped_cursor(known, place, types, semantics, interner) {
-                            Some(cursor) => state.define(cursor, def, interner, None),
+                        _ => match stepped_fields(known, place, types, semantics, interner) {
+                            Some((cursor, exhausted)) => {
+                                state.define(cursor, def, interner, None);
+                                if let Some(exhausted) = exhausted {
+                                    state.define(exhausted, def, interner, None);
+                                }
+                            }
                             None => state.define(place, def, interner, None),
                         },
                     }
@@ -2442,18 +2474,19 @@ fn result_fact(
     }
 }
 
-/// The cursor a range step writes, for a call that is one.
+/// The cursor a range step writes, and the `exhausted` flag an inclusive one may set, for a call
+/// that is one.
 ///
 /// `None` for every other call, including one on an iterator whose induction was not recognized:
 /// the layout is what makes the narrower write expressible, and it comes from the iterator's type
 /// rather than from the loop's shape.
-fn stepped_cursor(
+fn stepped_fields(
     known: Option<KnownCallee>,
     place: PlaceId,
     types: &RootTypes,
     semantics: &Semantics<'_>,
     interner: &mut Interner,
-) -> Option<PlaceId> {
+) -> Option<(PlaceId, Option<PlaceId>)> {
     if !matches!(
         known?,
         KnownCallee::RangeNext | KnownCallee::RangeInclusiveNext
@@ -2463,7 +2496,10 @@ fn stepped_cursor(
     }
     let root = interner.places().root_of(place);
     let (_, layout) = semantics.known.range_iterator(types.of(root)?)?;
-    Some(interner.place_field(place, layout.next))
+    let exhausted = layout
+        .exhausted
+        .map(|field| interner.place_field(place, field));
+    Some((interner.place_field(place, layout.next), exhausted))
 }
 
 /// The iterator a range step is walking.
@@ -3332,6 +3368,25 @@ mod tests {
                 "the loop body must be entered knowing `0 <= i < len`"
             );
         });
+    }
+
+    /// An inclusive range yields its end without stepping past it, so its inlined step runs only
+    /// below the end, cannot wrap, and keeps the induction's invariant.
+    #[test]
+    fn an_inclusive_range_loop_keeps_its_induction() {
+        with_analysis(
+            "fn total(mut a: [int], n: int) -> int { let mut t = 0; for i in 0..=n { t = t + a[i] }; t }",
+            "total",
+            |_, analysis, _| {
+                assert!(
+                    analysis
+                        .inductions
+                        .values()
+                        .any(|induction| induction.inclusive),
+                    "the inclusive range's induction must be recognized and not refuted"
+                );
+            },
+        );
     }
 
     /// The analysis is two walks to a fixpoint, so a consumer has to be able to skip it. The

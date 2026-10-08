@@ -64,36 +64,44 @@ pub struct RangeInclusive {
 }
 
 /// An iterator over an inclusive range.
+///
+/// The cursor stops at the end rather than stepping past it, which could wrap around at the
+/// integer bounds; `exhausted` records that the end was yielded.
 #[private_repr]
 pub struct RangeInclusiveIterator {
 	range: RangeInclusive,
 	next: int,
+	exhausted: bool,
 }
 
 impl Iterator {
 	fn next(it: &mut RangeInclusiveIterator) {
+		// One yield for every path, so that what the paths prove about `next` meets at it.
 		let next = it.next;
 		if it.range.end >= it.range.start {
-			if next <= it.range.end {
-				it.next += 1;
-				Some(next)
+			if next < it.range.end {
+				it.next += 1
+			} else if next == it.range.end and not it.exhausted {
+				it.exhausted = true
 			} else {
-				None
+				return None
 			}
 		} else {
-			if next >= it.range.end {
-				it.next -= 1;
-				Some(next)
+			if next > it.range.end {
+				it.next -= 1
+			} else if next == it.range.end and not it.exhausted {
+				it.exhausted = true
 			} else {
-				None
+				return None
 			}
-		}
+		};
+		Some(next)
 	}
 }
 
 impl Seq {
 	fn iter(r: RangeInclusive) {
-		RangeInclusiveIterator { range: r, next: r.start }
+		RangeInclusiveIterator { range: r, next: r.start, exhausted: false }
 	}
 }
 

@@ -205,7 +205,8 @@ pub(crate) enum KnownCallee {
     /// must be understood rather than waited on to be inlined.
     RangeNext,
     /// `Iterator<RangeInclusiveIterator>::next(iterator)` — as [`RangeNext`](Self::RangeNext), with
-    /// an inclusive bound.
+    /// an inclusive bound. The cursor stops at the end, and yielding the end sets the iterator's
+    /// `exhausted` flag instead.
     RangeInclusiveNext,
     /// Compiler-owned buffer storage operations do not capture their argument places.
     /// `relations::analyze` uses known-callee membership to exclude these calls from escaping
@@ -292,6 +293,9 @@ pub(crate) struct RangeLayout {
     pub(crate) start: ProjectionIndex,
     /// The range's upper bound, exclusive for `Range` and inclusive for `RangeInclusive`.
     pub(crate) end: ProjectionIndex,
+    /// The flag an inclusive iterator sets instead of stepping past its end; `None` for `Range`,
+    /// whose cursor reaches the exclusive end without wrapping.
+    pub(crate) exhausted: Option<ProjectionIndex>,
 }
 
 /// The std field positions the optimizer reads.
@@ -617,8 +621,12 @@ impl KnownCallees {
             nonzero_arithmetic,
             layouts: Layouts {
                 array_len: resolver.field("array", "len"),
-                range: resolver.range_layout("RangeIterator", "Range"),
-                range_inclusive: resolver.range_layout("RangeInclusiveIterator", "RangeInclusive"),
+                range: resolver.range_layout("RangeIterator", "Range", false),
+                range_inclusive: resolver.range_layout(
+                    "RangeInclusiveIterator",
+                    "RangeInclusive",
+                    true,
+                ),
             },
             array: resolver.type_def("array"),
             range_iterator: resolver.type_def("RangeIterator"),
@@ -847,12 +855,13 @@ impl Resolver<'_> {
     }
 
     /// The field positions of an iterator and the range it walks.
-    fn range_layout(&self, iterator: &str, range: &str) -> RangeLayout {
+    fn range_layout(&self, iterator: &str, range: &str, inclusive: bool) -> RangeLayout {
         RangeLayout {
             next: self.field(iterator, "next"),
             range: self.field(iterator, "range"),
             start: self.field(range, "start"),
             end: self.field(range, "end"),
+            exhausted: inclusive.then(|| self.field(iterator, "exhausted")),
         }
     }
 
@@ -1030,6 +1039,13 @@ mod tests {
         );
         assert_ne!(range.start, range.end);
         assert_ne!(range.next, range.range);
+        assert!(range.exhausted.is_none());
+        let inclusive = table.layouts().range_inclusive;
+        assert!(
+            inclusive
+                .exhausted
+                .is_some_and(|field| field != inclusive.next && field != inclusive.range)
+        );
         assert!(
             table.layouts().array_len.as_index() < 4,
             "`array` has four fields, so `len` is one of them"
