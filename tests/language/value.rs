@@ -3515,11 +3515,22 @@ fn array_reallocation_preserves_zero_sized_drop_obligations() {
          let before_drop = exercise();
          (before_drop, testing::tracked_drop_log())"
     );
-    let mut session = TestSession::new();
-    session.allow_unsafe();
     // Back growth reallocates from start 3 to 1, then 1 to 1; front growth shifts 0 to 4.
     // Three removed elements and four insertion temporaries drop before five retained elements.
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    session.run_modes(RunMode::UNOPTIMIZED_INTERPRETERS);
     assert_val_eq!(session.run(&source), int_tuple!(1111111, 11111));
+    // Optimization may move an insertion temporary into the array instead of cloning and dropping
+    // it, so optimized modes count the retained elements only.
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    session.run_modes(
+        RunMode::ALL
+            .into_iter()
+            .filter(|mode| !matches!(mode, RunMode::Hir | RunMode::Mir)),
+    );
+    assert_val_eq!(session.run(&format!("{source}.1")), int(11111));
 }
 
 #[test]
@@ -3738,6 +3749,37 @@ fn partial_product_construction_drops_fields_on_early_return() {
         tracked_probe_value_impl()
     );
     assert_val_eq!(session.run(&source), int(1));
+}
+
+/// Optimization splits a local product owning managed fields into one local per field. A failure
+/// in a loop reading them must still drop each field once, in field order. The success path is not
+/// counted: optimization may elide a drop the `Value` laws make unobservable.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn split_managed_product_drops_each_field_once_on_failure() {
+    let source = |divisor: i32| {
+        format!(
+            "{} fn sum(x: int) -> int {{
+                let p = (Probe(1), Probe(2), 3);
+                let mut s = 0;
+                for i in 0..3 {{ s += idiv(p.0.0 + p.1.0 + p.2, x) }};
+                s
+            }}
+            testing::reset_tracked_drops(); sum({divisor})",
+            tracked_probe_value_impl()
+        )
+    };
+    for mode in RunMode::ALL {
+        let mut session = TestSession::new();
+        session.allow_unsafe();
+        session.run_modes([mode]);
+        assert_val_eq!(session.run(&source(2)), int(9));
+        assert_eq!(
+            session.fail_run(&source(0)),
+            SourceFailureKind::DivisionByZero
+        );
+        assert_val_eq!(session.run("testing::tracked_drop_log()"), int(12));
+    }
 }
 
 #[test]

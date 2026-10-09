@@ -8,14 +8,11 @@ use std::mem;
 use crate::{
     FxHashMap, FxHashSet,
     compiler::{MirArtifacts, MirOptimization},
-    hir::{elaboration::bind_call_type_instantiation, value::LiteralValue},
+    hir::value::LiteralValue,
     mir::{
-        BlockId, Function, Operation, OperationKind, ParameterKind, Value,
+        BlockId, Function, Operation, OperationKind, Value,
         edit::FunctionEdit,
-        pass::{
-            inline::expand_cleanup,
-            monomorphize::{drop_redundant_layout_witnesses, map_types},
-        },
+        pass::inline::{cleanup_template, expand_cleanup},
         terminator::{Terminator, TerminatorKind},
         value::StaticEvidence,
     },
@@ -24,7 +21,6 @@ use crate::{
     types::{
         effects::no_effects,
         r#type::{CallImplType, FnType, Type},
-        type_mapper::SimpleInstantiationMapper,
     },
 };
 
@@ -102,37 +98,8 @@ pub(super) fn elaborate(
                 .and_then(|m| m.get(callee.function))
         }
         .expect("partial cleanup needs a script destructor");
-        assert!(
-            source.blocks().all(|block| source
-                .block(block)
-                .operations()
-                .iter()
-                .all(|op| !matches!(op.kind, OperationKind::DropInitialized { .. }))),
-            "partial cleanup requires a semantic destructor template"
-        );
-        let receiver = source
-            .parameters()
-            .iter()
-            .find(|p| matches!(p.kind, ParameterKind::Parameter(_)))
-            .unwrap();
-        let mut substitution = FxHashMap::default();
-        assert!(
-            bind_call_type_instantiation(
-                receiver.ty,
-                ty,
-                &mut substitution,
-                &mut FxHashMap::default(),
-                &mut FxHashSet::default()
-            ),
-            "cleanup type instantiation"
-        );
-        let mut template = FunctionEdit::new(source.clone());
-        map_types(
-            &mut template,
-            &mut SimpleInstantiationMapper::new(&(substitution, FxHashMap::default())),
-        );
-        drop_redundant_layout_witnesses(&mut template, env);
-        let template = template.finish_unverified();
+        let template = cleanup_template(source, ty, env)
+            .expect("partial cleanup requires a semantic destructor template");
 
         let mut edit = FunctionEdit::new(body);
         let tail = edit.block_mut(block).operations.split_off(index + 1);
@@ -594,7 +561,7 @@ mod tests {
     use crate::{
         CompilerSession, ExecutionTarget, Location,
         hir::{function::ArgConvention, value::VariantPayloadStorage},
-        mir::{builder::FunctionBuilder, verify::verify_physical_function},
+        mir::{ParameterKind, builder::FunctionBuilder, verify::verify_physical_function},
         module::Path,
         std::math::int_type,
         types::r#type::CallResultConvention,

@@ -19,8 +19,9 @@
 
 use crate::{
     graph::{self, Node},
-    mir::{self, Function, terminator::TerminatorKind},
-    module::{LocalFunctionId, ModuleId, id::Id},
+    mir::{self, Function, terminator::TerminatorKind, value::StaticEvidence},
+    module::{LocalFunctionId, Module, ModuleId, TraitDictionaryEntry, TraitDictionaryId, id::Id},
+    types::r#trait::TraitDictionaryEntryIndex,
 };
 
 /// One function's outgoing edges, as positions in [`CallGraph::nodes`], which is the module's
@@ -58,13 +59,17 @@ impl CallGraph {
     /// merge more functions into one component, which makes a summary more conservative, never
     /// less.
     ///
+    /// A dictionary of this module names its methods, so it contributes an edge to each, as do the
+    /// dictionaries it captures. Without them, a function passing a dictionary to a generic callee
+    /// could be optimized before the methods that callee's specialization calls.
+    ///
     /// `build_closure` stores its target in the operation kind rather than an operand and therefore
     /// contributes no edge here. Constructing a closure does not invoke that target; a consumer
     /// concerned with a later indirect call must reject that call independently.
     ///
     /// A call with no statically known callee contributes no edge, which is why this graph alone
     /// cannot answer reachability. A consumer needing that has to add its own conservatism.
-    pub(crate) fn of_module(functions: &[Option<Function>], module: ModuleId) -> Self {
+    pub(crate) fn of_module(functions: &[Option<Function>], module: &Module) -> Self {
         let nodes = functions
             .iter()
             .map(|function| CallNode {
@@ -74,7 +79,10 @@ impl CallGraph {
                 },
             })
             .collect();
-        Self { module, nodes }
+        Self {
+            module: module.module_id(),
+            nodes,
+        }
     }
 
     /// The module these function ids address.
@@ -117,17 +125,8 @@ impl CallGraph {
 }
 
 /// Every function of `module` that `function` names.
-fn callees_within(function: &Function, module: ModuleId) -> Vec<LocalFunctionId> {
+fn callees_within(function: &Function, module: &Module) -> Vec<LocalFunctionId> {
     let mut callees = Vec::new();
-    let mut record = |operand: &mir::Value| {
-        if let mir::Value::Function(callee) = operand
-            && callee.module == module
-        {
-            if !callees.contains(&callee.function) {
-                callees.push(callee.function);
-            }
-        }
-    };
     for block in function.blocks() {
         let block = function.block(block);
         let operations = block
@@ -139,11 +138,58 @@ fn callees_within(function: &Function, module: ModuleId) -> Vec<LocalFunctionId>
             });
         for operation in operations {
             for operand in operation.operands.iter() {
-                record(operand);
+                match operand {
+                    mir::Value::Function(callee) if callee.module == module.module_id() => {
+                        record(&mut callees, callee.function);
+                    }
+                    mir::Value::Dictionary(definition) => {
+                        record_dictionary(&mut callees, *definition, module);
+                    }
+                    mir::Value::Evidence(evidence) => {
+                        let mut pending = vec![&**evidence];
+                        while let Some(evidence) = pending.pop() {
+                            if let StaticEvidence::Dictionary {
+                                definition,
+                                captures,
+                            } = evidence
+                            {
+                                record_dictionary(&mut callees, *definition, module);
+                                pending.extend(captures.iter());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
     }
     callees
+}
+
+fn record(callees: &mut Vec<LocalFunctionId>, callee: LocalFunctionId) {
+    if !callees.contains(&callee) {
+        callees.push(callee);
+    }
+}
+
+/// Records the methods of `definition` when it is a dictionary of `module`.
+fn record_dictionary(
+    callees: &mut Vec<LocalFunctionId>,
+    definition: TraitDictionaryId,
+    module: &Module,
+) {
+    if definition.module_id != module.module_id() {
+        return;
+    }
+    let Some(implementation) = module.get_impl_data(definition.impl_id) else {
+        return;
+    };
+    let dictionary = &implementation.dictionary_value;
+    for index in 0..dictionary.entry_count() {
+        let TraitDictionaryEntry::Function(callee) =
+            dictionary.entry(TraitDictionaryEntryIndex::from_index(index));
+        record(callees, callee);
+    }
 }
 
 #[cfg(test)]
@@ -168,7 +214,7 @@ mod tests {
             let artifacts = session
                 .mir_artifacts_for(module_id, MirOptimization::Disabled)
                 .expect("raw MIR must be prepared");
-            CallGraph::of_module(artifacts.bodies(), module_id)
+            CallGraph::of_module(artifacts.bodies(), session.expect_fresh_module(module_id))
         };
         let lookup = move |name: &str| {
             session

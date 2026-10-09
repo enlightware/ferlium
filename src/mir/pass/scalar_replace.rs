@@ -8,6 +8,10 @@
 //! clears may observe a split product. Scalar fields retain their own identity and typed readers.
 //! Whole-value readers, address arithmetic, opaque projections and managed products are excluded.
 //!
+//! A separate mode splits local products owning managed fields, without variants. Their fields keep
+//! their clones, drops and projections, and a whole product's drop is spliced into field drops
+//! first; see [`split_managed_local_products`].
+//!
 //! A variant splits into a tag place, of the unit-only variant with the same cases, and one place
 //! per distinct inline payload type. Storage is a function of the payload type rather than the
 //! case, as in the variant's own union layout: a payload projection selects the active case, so
@@ -20,17 +24,23 @@ use std::{collections::VecDeque, mem, ops::Range, rc::Rc};
 use rustc_hash::FxHashMap;
 use ustr::Ustr;
 
-use super::{dataflow::field_index, dce};
+use super::{
+    OptimizationStage,
+    dataflow::{dictionary_entry, field_index, static_evidence_operand},
+    dce, inline,
+    site::{OperationIndex, OperationSite},
+};
 use crate::{
     hir::value::{LiteralValue, VariantPayloadStorage},
     mir::{
         self, BlockId, Function, Operation, OperationKind, ValueId, edit::FunctionEdit,
         terminator::TerminatorKind, value::ConstantId,
     },
-    module::{ModuleEnv, id::Id},
+    module::{FunctionId, ModuleEnv, id::Id},
     std::value::{structural_variant, variant_payload_storage_for_payload_type},
     types::{
-        r#type::{Type, TypeKind},
+        effects::no_effects,
+        r#type::{CallImplType, FnType, Type, TypeKind},
         type_properties::{TypePropertyEnv, concrete_type_is_trivial_copy},
     },
 };
@@ -64,14 +74,14 @@ struct Shape {
 const MAX_LEAVES: usize = 64;
 const MAX_NODES: usize = 256;
 
-pub(super) enum Parts {
+enum Parts {
     Product(Vec<Type>),
     Variant { tag: Type, payloads: Vec<Type> },
 }
 
 /// Explicit ownership and native `TrivialCopy` contracts stay opaque: an opt-in promises that
 /// the whole representation is copyable, not that each field is independently copyable.
-pub(super) fn parts(mut ty: Type, env: ModuleEnv<'_>) -> Option<Parts> {
+fn parts(mut ty: Type, env: ModuleEnv<'_>) -> Option<Parts> {
     let root = ty;
     loop {
         let kind = ty.data().clone();
@@ -132,7 +142,8 @@ fn variant_parts(ty: Type, env: ModuleEnv<'_>) -> Option<Parts> {
 }
 
 impl Shape {
-    fn of(ty: Type, env: ModuleEnv<'_>) -> Option<Self> {
+    /// A `TrivialCopy` shape, or with `managed`, a shape owning managed fields and no variant.
+    fn of(ty: Type, env: ModuleEnv<'_>, managed: bool) -> Option<Self> {
         let mut root_parts = Some(parts(ty, env)?);
         let mut shape = Self {
             nodes: Vec::new(),
@@ -212,7 +223,13 @@ impl Shape {
         }
         // Reject oversized shapes before the recursive ownership query: compact named types
         // can otherwise describe exponentially many structural fields.
-        concrete_type_is_trivial_copy(ty, &env).then_some(shape)
+        let trivial_copy = concrete_type_is_trivial_copy(ty, &env);
+        let accepted = if managed {
+            !trivial_copy && !shape.nodes[0].has_variant
+        } else {
+            trivial_copy
+        };
+        accepted.then_some(shape)
     }
 }
 
@@ -292,6 +309,136 @@ fn literal_fields<'a>(
 /// rewriting is additionally proportional to the fieldwise copies it emits. Copy dependencies
 /// propagate rejection once per root/edge, rather than rescanning the function to a fixed point.
 pub(crate) fn split_local_products(func: &Function, env: ModuleEnv<'_>) -> Option<Function> {
+    match split(func, env, None) {
+        Split::Done(split) => Some(split),
+        Split::Unchanged | Split::Expand(_) => None,
+    }
+}
+
+/// Splits local products owning managed fields, such as an iterator holding a copy of the array
+/// it reads, so that each field's lifetime is a whole local.
+///
+/// A whole product is only dropped through its structural destructor, which is spliced first:
+/// the drop becomes one initialization-aware drop per field, which the split then gives to each
+/// field's local, as physical drop elaboration does for a partially initialized product. Each
+/// splice removes one level of nesting, so the number of splices is bounded by the shape depth.
+pub(crate) fn split_managed_local_products(
+    func: &Function,
+    env: ModuleEnv<'_>,
+    stage: OptimizationStage<'_>,
+) -> Option<Function> {
+    let mut current: Option<Function> = None;
+    for _ in 0..MAX_NODES {
+        let source = current.as_ref().unwrap_or(func);
+        match split(source, env, Some(stage)) {
+            Split::Done(split) => return Some(split),
+            // Splices are made only for products otherwise accepted; discard them if the split
+            // still fails, as they only grow the body.
+            Split::Unchanged => return None,
+            Split::Expand(drops) => current = Some(expand_drops(source, &drops, env, stage)?),
+        }
+    }
+    None
+}
+
+enum Split {
+    Unchanged,
+    /// Whole-product drops to splice before the products they drop can split.
+    Expand(Vec<OperationSite>),
+    Done(Function),
+}
+
+/// The structural destructor a drop names, and its hidden evidence operands: a function, or a
+/// method of a static dictionary.
+fn destructor(
+    operation: &Operation,
+    definitions: &FxHashMap<ValueId, &Operation>,
+    env: ModuleEnv<'_>,
+) -> Option<(FunctionId, Vec<mir::Value>)> {
+    let (callee, mut evidence) = match &operation.operands[1] {
+        mir::Value::Function(callee) => (*callee, Vec::new()),
+        mir::Value::Register(entry) => {
+            let entry = definitions.get(entry)?;
+            let OperationKind::DictEntry { entry_index, .. } = entry.kind else {
+                return None;
+            };
+            let dictionary = static_evidence_operand(&entry.operands[0])?;
+            let (callee, hidden) = dictionary_entry(&dictionary, entry_index, env)?;
+            let hidden = hidden
+                .into_iter()
+                .map(|evidence| mir::Value::Evidence(Box::new(evidence)))
+                .collect();
+            (callee, hidden)
+        }
+        _ => return None,
+    };
+    evidence.extend_from_slice(&operation.operands[2..]);
+    Some((callee, evidence))
+}
+
+/// Splices the structural destructor of each drop at `drops`. Its field drops leave every managed
+/// field uninitialized, as the whole drop did; the `TrivialCopy` fields keep their state, which only
+/// an initialization query could observe, and the managed split admits none.
+fn expand_drops(
+    func: &Function,
+    drops: &[OperationSite],
+    env: ModuleEnv<'_>,
+    stage: OptimizationStage<'_>,
+) -> Option<Function> {
+    let definitions = definitions(func);
+    let mut expansions = Vec::with_capacity(drops.len());
+    for &site in drops {
+        let operation = &func.block(site.block).operations()[site.index.as_index()];
+        let OperationKind::Drop { ty } = operation.kind else {
+            unreachable!("only drops are expanded")
+        };
+        let (callee, evidence) = destructor(operation, &definitions, env)?;
+        let template = inline::cleanup_template(stage.body(callee)?, ty, env)?;
+        expansions.push((site, callee, evidence, template));
+    }
+    let mut edit = FunctionEdit::new(func.clone());
+    // Later sites of a block first: a splice moves the operations after it to a new block,
+    // leaving the earlier ones in place. Sites arrive in operation order.
+    for (site, callee, mut arguments, template) in expansions.into_iter().rev() {
+        let (block, index) = (site.block, site.index.as_index());
+        let operation = edit.block_mut(block).operations[index].clone();
+        let OperationKind::Drop { ty } = operation.kind else {
+            unreachable!("only drops are expanded")
+        };
+        let span = operation.span;
+        let target = operation.operands[0].clone();
+        let result = edit.new_value();
+        let mut allocation = Operation::alloca(span, Type::unit());
+        allocation.assign_result_id(Some(result));
+        arguments.extend([target.clone(), mir::Value::Register(result)]);
+        let call = Operation::call(
+            span,
+            mir::Value::Function(callee),
+            arguments,
+            CallImplType::value(FnType::new_mut_resolved(
+                [(ty, true)],
+                Type::unit(),
+                no_effects(),
+            )),
+        );
+        edit.block_mut(block)
+            .operations
+            .splice(index..=index, [allocation, call]);
+        inline::expand_cleanup(&mut edit, &template, callee.module, block, index + 1, env);
+    }
+    edit.merge_blocks_into_predecessors();
+    edit.reorder_blocks_in_reverse_postorder();
+    Some(edit.finish_unverified())
+}
+
+fn definitions(func: &Function) -> FxHashMap<ValueId, &Operation> {
+    func.blocks()
+        .flat_map(|block| func.block(block).operations())
+        .filter_map(|operation| Some((operation.result_id()?, operation)))
+        .collect()
+}
+
+fn split(func: &Function, env: ModuleEnv<'_>, managed: Option<OptimizationStage<'_>>) -> Split {
     let mut shapes = FxHashMap::<Type, Option<Rc<Shape>>>::default();
     let mut candidates = FxHashMap::<ValueId, Candidate>::default();
     let mut projections = FxHashMap::<ValueId, Projection>::default();
@@ -307,7 +454,7 @@ pub(crate) fn split_local_products(func: &Function, env: ModuleEnv<'_>) -> Optio
                 OperationKind::Alloca { ty } => {
                     let shape = shapes
                         .entry(ty)
-                        .or_insert_with(|| Shape::of(ty, env).map(Rc::new));
+                        .or_insert_with(|| Shape::of(ty, env, managed.is_some()).map(Rc::new));
                     if let Some(shape) = shape {
                         candidates.insert(
                             result,
@@ -367,7 +514,7 @@ pub(crate) fn split_local_products(func: &Function, env: ModuleEnv<'_>) -> Optio
         }
     }
     if candidates.is_empty() {
-        return None;
+        return Split::Unchanged;
     }
 
     // Definitions need not follow block order. Memoize an iterative walk so a long projection
@@ -409,13 +556,44 @@ pub(crate) fn split_local_products(func: &Function, env: ModuleEnv<'_>) -> Optio
         }
     }
 
+    let definitions = managed.map(|_| definitions(func));
+    // A whole managed product is dropped only through a structural destructor whose body is known.
+    let expandable = |operation: &Operation| {
+        let (Some(stage), Some(definitions)) = (managed, &definitions) else {
+            return false;
+        };
+        destructor(operation, definitions, env)
+            .is_some_and(|(callee, _)| stage.body(callee).is_some())
+    };
+    let mut expanded = Vec::new();
     for block in func.blocks() {
         let basic = func.block(block);
-        for operation in basic.operations() {
-            check_operation(operation, func, &bindings, &mut candidates, &mut shells);
+        for (index, operation) in basic.operations().iter().enumerate() {
+            if check_operation(
+                operation,
+                func,
+                &bindings,
+                &mut candidates,
+                &mut shells,
+                managed.is_some(),
+                &expandable,
+            ) {
+                expanded.push(OperationSite {
+                    block,
+                    index: OperationIndex::from_index(index),
+                });
+            }
         }
         if let TerminatorKind::Invoke { operation, .. } = &basic.terminator().kind {
-            check_operation(operation, func, &bindings, &mut candidates, &mut shells);
+            check_operation(
+                operation,
+                func,
+                &bindings,
+                &mut candidates,
+                &mut shells,
+                managed.is_some(),
+                &expandable,
+            );
             // Invoke operations are not expanded by the rewrite. Even if future MIR admits
             // fallible product operations, only their already-independent leaves may survive.
             for operand in &operation.operands {
@@ -464,7 +642,17 @@ pub(crate) fn split_local_products(func: &Function, env: ModuleEnv<'_>) -> Optio
         reject_families(&mut candidates);
     }
     if candidates.is_empty() {
-        return None;
+        return Split::Unchanged;
+    }
+    expanded.retain(|site| {
+        binding(
+            &func.block(site.block).operations()[site.index.as_index()].operands[0],
+            &bindings,
+        )
+        .is_some_and(|place| candidates.contains_key(&place.root))
+    });
+    if !expanded.is_empty() {
+        return Split::Expand(expanded);
     }
     // Shared shells were rejected together, so a shell's first root decides for all of them.
     let tag_shells: FxHashMap<ValueId, (Ustr, Type)> = shells
@@ -642,9 +830,11 @@ pub(crate) fn split_local_products(func: &Function, env: ModuleEnv<'_>) -> Optio
         .values()
         .any(|candidate| candidate.shape.nodes[0].has_variant)
     {
-        return Some(dce::remove_discarded_trivial_copy_results(&split, env).unwrap_or(split));
+        return Split::Done(
+            dce::remove_discarded_trivial_copy_results(&split, env).unwrap_or(split),
+        );
     }
-    Some(split)
+    Split::Done(split)
 }
 
 /// Rejects invalid candidates together with every candidate linked to them by a copy or shell.
@@ -843,13 +1033,18 @@ fn meet(predecessors: &[BlockId], outputs: &[Vec<u64>], words: usize) -> Vec<u64
     state
 }
 
+/// Rejects the candidates `operation` observes other than as admitted, and returns whether it is
+/// a whole-product drop of a `managed` candidate, admitted on condition of being `expandable`.
 fn check_operation(
     operation: &Operation,
     func: &Function,
     bindings: &Bindings,
     candidates: &mut FxHashMap<ValueId, Candidate>,
     shells: &mut FxHashMap<ValueId, Shell>,
-) {
+    managed: bool,
+    expandable: &dyn Fn(&Operation) -> bool,
+) -> bool {
+    let mut expands = false;
     let source = operation
         .operands
         .first()
@@ -902,11 +1097,19 @@ fn check_operation(
                 | OperationKind::ExtractTag => index == 0,
                 // Storing a shell resets its payload's initialization, but a split shell store
                 // writes only the tag; valid MIR reads no payload before rewriting it, so only
-                // this query could observe the difference.
-                OperationKind::IsInitialized => index == 0 && !node.in_payload,
+                // this query could observe the difference. A spliced destructor leaves the
+                // `TrivialCopy` fields of a managed product initialized, which it would observe.
+                OperationKind::IsInitialized => !managed && index == 0 && !node.in_payload,
                 OperationKind::Store => index == 1,
                 OperationKind::Memcpy | OperationKind::Move => copy,
                 OperationKind::Call { .. } => index > 0,
+                // A managed field keeps its ownership operations and its own representation.
+                OperationKind::Clone { .. } => managed && index <= 1,
+                OperationKind::Drop { .. } => managed && index == 0,
+                OperationKind::Subfield {
+                    variant_payload: false,
+                    ..
+                } => managed && index == 0,
                 _ => false,
             }
         } else {
@@ -929,6 +1132,10 @@ fn check_operation(
                 }
                 OperationKind::Clear => index == 0 && !node.has_variant,
                 OperationKind::ExtractTag => index == 0 && node.tag.is_some(),
+                OperationKind::Drop { .. } if managed && index == 0 && expandable(operation) => {
+                    expands = true;
+                    true
+                }
                 _ => false,
             }
         };
@@ -936,6 +1143,7 @@ fn check_operation(
             candidates.get_mut(&place.root).unwrap().invalid = true;
         }
     }
+    expands
 }
 
 #[cfg(test)]
@@ -1494,19 +1702,19 @@ mod tests {
         builder.set_terminator(entry, Terminator::ret(span));
         let original = builder.finish(env);
         assert!(split_local_products(&original, env).is_none());
-        assert!(Shape::of(Type::tuple(vec![int_type(); MAX_LEAVES]), env).is_some());
-        assert!(Shape::of(Type::tuple(vec![int_type(); MAX_LEAVES + 1]), env).is_none());
+        assert!(Shape::of(Type::tuple(vec![int_type(); MAX_LEAVES]), env, false).is_some());
+        assert!(Shape::of(Type::tuple(vec![int_type(); MAX_LEAVES + 1]), env, false).is_none());
         // Interned types can describe exponentially many fields without an equally large source.
         let mut exponentially_nested = int_type();
         for _ in 0..20 {
             exponentially_nested = Type::tuple(vec![exponentially_nested; 2]);
         }
-        assert!(Shape::of(exponentially_nested, env).is_none());
+        assert!(Shape::of(exponentially_nested, env, false).is_none());
         let mut deeply_nested = int_type();
         for _ in 0..MAX_NODES {
             deeply_nested = Type::tuple(vec![deeply_nested]);
         }
-        assert!(Shape::of(deeply_nested, env).is_none());
+        assert!(Shape::of(deeply_nested, env, false).is_none());
     }
 
     #[test]

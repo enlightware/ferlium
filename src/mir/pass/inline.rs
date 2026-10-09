@@ -52,6 +52,7 @@ use super::{
 use crate::{
     CompilerSession, Location,
     containers::DenseBitSet,
+    hir::elaboration::bind_call_type_instantiation,
     mir::{
         self, BlockId, DebugLocation, Function, InlineSites, Instantiation, Operation,
         OperationKind, ParameterKind, ValueId,
@@ -60,7 +61,7 @@ use crate::{
         terminator::{Terminator, TerminatorKind},
     },
     module::{FunctionId, ModuleEnv, ModuleId, id::Id},
-    types::{r#type::Type, type_like::TypeLike},
+    types::{r#type::Type, type_like::TypeLike, type_mapper::SimpleInstantiationMapper},
 };
 
 /// Where the call to inline sits in the caller.
@@ -730,6 +731,53 @@ pub(crate) fn expand_cleanup(
         },
         env,
     );
+}
+
+/// The script destructor `source` instantiated for the dropped type `ty`, for [`expand_cleanup`].
+///
+/// `None` when `source` is not a semantic destructor template: its receiver does not match `ty`,
+/// it already holds physical drops, or it has control flow cleanup cannot splice.
+pub(crate) fn cleanup_template(
+    source: &Function,
+    ty: Type,
+    env: ModuleEnv<'_>,
+) -> Option<Function> {
+    if source.blocks().any(|block| {
+        let block = source.block(block);
+        matches!(
+            block.terminator().kind,
+            TerminatorKind::Invoke { .. }
+                | TerminatorKind::PropagateError
+                | TerminatorKind::FailureDuringCleanup
+                | TerminatorKind::Yield { .. }
+        ) || block
+            .operations()
+            .iter()
+            .any(|op| matches!(op.kind, OperationKind::DropInitialized { .. }))
+    }) {
+        return None;
+    }
+    let receiver = source
+        .parameters()
+        .iter()
+        .find(|p| matches!(p.kind, ParameterKind::Parameter(_)))?;
+    let mut substitution = FxHashMap::default();
+    if !bind_call_type_instantiation(
+        receiver.ty,
+        ty,
+        &mut substitution,
+        &mut FxHashMap::default(),
+        &mut FxHashSet::default(),
+    ) {
+        return None;
+    }
+    let mut template = FunctionEdit::new(source.clone());
+    monomorphize::map_types(
+        &mut template,
+        &mut SimpleInstantiationMapper::new(&(substitution, FxHashMap::default())),
+    );
+    monomorphize::drop_redundant_layout_witnesses(&mut template, env);
+    Some(template.finish_unverified())
 }
 
 /// The state of one splice: what the callee's identities become in the caller.

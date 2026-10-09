@@ -34,7 +34,7 @@ pub(crate) fn optimize(
         semantic,
     };
     // Expansion adds edges the raw graph lacks, such as calls to generated helpers.
-    let components = CallGraph::of_module(bodies, module).components_callees_first();
+    let components = CallGraph::of_module(bodies, env.current).components_callees_first();
     let summaries = AddressorSummaries::of_module(bodies, &components, module, env, &|_| {
         AddressorSummary::UNKNOWN
     });

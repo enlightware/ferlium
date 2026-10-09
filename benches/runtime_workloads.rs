@@ -243,7 +243,15 @@ impl RuntimeWorkload {
         698_340.0,
     );
 
-    pub const ALL: [Self; 20] = [
+    pub const SUM_ZIP_PRODUCTS_INT: Self = Self::single(
+        "sum_zip_products_int",
+        include_str!("../tests/modules/sum.fer"),
+        include_str!("runtime/sum_zip_products_int.fer"),
+        RuntimeResult::Int,
+        6_538_894.0,
+    );
+
+    pub const ALL: [Self; 21] = [
         Self::QUICKSORT,
         Self::FIBONACCI,
         Self::SIEVE,
@@ -264,6 +272,7 @@ impl RuntimeWorkload {
         Self::SUM_PRODUCTS_FLOAT,
         Self::SUM_CROSS_PRODUCTS_INT,
         Self::SUM_CROSS_PRODUCTS_MIXED,
+        Self::SUM_ZIP_PRODUCTS_INT,
     ];
 
     pub const fn name(self) -> &'static str {

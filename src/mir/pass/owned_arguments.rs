@@ -16,7 +16,8 @@
 //! aggregate field. It shares the terminal-cleanup proof and rewrite with forwarding into owned
 //! calls, and the alias/access proof with read-only clone borrowing. Earlier failure cleanup is
 //! retained. Plain moves require statically sized source values, as for owned-ABI variants.
-//! Uses and escapes are indexed once; each candidate scans only its return-block suffix.
+//! Uses and escapes are indexed once; each candidate scans its block's suffix, and outside a
+//! return block, the blocks reachable from it.
 
 use std::iter::once;
 
@@ -212,9 +213,10 @@ pub(crate) fn forward_owned_arguments(
 /// returned aggregate field. The existing clone establishes destination initialization; only
 /// the source lifetime changes. Earlier failure paths keep their cleanup unchanged.
 ///
-/// This form requires a clone and its sole subsequent source drop in a return block.
-/// Consequently the removed drop cannot be reached without executing the clone, even when
-/// earlier error exits bypass that block. No exit-dominance requirement is needed.
+/// This form requires a clone and its sole subsequent source drop in one block. Consequently the
+/// removed drop cannot be reached without executing the clone, even when earlier error exits
+/// bypass that block. No exit-dominance requirement is needed. Outside a return block, no block
+/// reachable from it may use the source, such as a temporary built only to be cloned.
 pub(crate) fn forward_terminal_clones(
     source: &Function,
     env: ModuleEnv<'_>,
@@ -316,6 +318,11 @@ pub(crate) fn forward_terminal_clones(
         ) else {
             continue;
         };
+        if !matches!(basic.terminator().kind, TerminatorKind::Return)
+            && used_after(source, block, root, &origins)
+        {
+            continue;
+        }
         let drop = Site::Operation { block, index };
         if !removed.insert(drop) {
             continue;
@@ -331,15 +338,12 @@ pub(crate) fn forward_terminal_clones(
 }
 
 /// Syntactic admission only: a whole alloca source must have a later matching drop in the
-/// same return block. Reverse scanning indexes later drops without walking a suffix per clone.
+/// same block. Reverse scanning indexes later drops without walking a suffix per clone.
 /// Bodies without such a candidate never pay for provenance, roles or escape classification.
 fn terminal_clone_candidates(source: &Function) -> Vec<(Site, ValueId)> {
     let mut candidates = Vec::new();
     for block in source.blocks() {
         let basic = source.block(block);
-        if !matches!(basic.terminator().kind, TerminatorKind::Return) {
-            continue;
-        }
         let mut dropped = FxHashSet::default();
         for (index, operation) in basic.operations().iter().enumerate().rev() {
             match operation.kind {
@@ -863,12 +867,6 @@ fn terminal_drops(
 ) -> Option<Vec<Site>> {
     match call {
         Site::Operation { block, index } => {
-            if !matches!(
-                function.block(block).terminator().kind,
-                TerminatorKind::Return
-            ) {
-                return None;
-            }
             let drop = sole_drop_in_operations(
                 function.block(block).operations(),
                 index.as_index() + 1,
@@ -876,6 +874,13 @@ fn terminal_drops(
                 root,
                 origins,
             )?;
+            if !matches!(
+                function.block(block).terminator().kind,
+                TerminatorKind::Return
+            ) && used_after(function, block, root, origins)
+            {
+                return None;
+            }
             Some(vec![Site::Operation { block, index: drop }])
         }
         Site::Terminator { block } => {
@@ -936,6 +941,37 @@ fn sole_drop_in_operations(
         }
     }
     found
+}
+
+/// Whether a block reachable from `block`, including `block` itself through a loop, uses `root`.
+fn used_after(
+    function: &Function,
+    block: BlockId,
+    root: ValueId,
+    origins: &FxHashMap<ValueId, ValueId>,
+) -> bool {
+    let mut visited = FxHashSet::default();
+    let mut pending: Vec<_> = function.block(block).terminator().successors().collect();
+    while let Some(block) = pending.pop() {
+        if !visited.insert(block) {
+            continue;
+        }
+        let basic = function.block(block);
+        let terminator = basic.terminator();
+        let operations = basic.operations().iter().chain(match &terminator.kind {
+            TerminatorKind::Invoke { operation, .. } => Some(operation),
+            _ => None,
+        });
+        if operations
+            .flat_map(|operation| operation.operands.iter())
+            .chain(terminator.operands())
+            .any(|operand| operand_root(operand, origins) == Some(root))
+        {
+            return true;
+        }
+        pending.extend(terminator.successors());
+    }
+    false
 }
 
 fn sole_use(function: &Function, value: &mir::Value) -> Option<(Site, usize)> {

@@ -563,9 +563,9 @@ pub(crate) fn optimize_function(
     // Borrow read-only clone lifetimes only after the semantic rounds settle. Preserve the
     // source through every normal/error cleanup path; DCE then collects the unused local.
     let source = current.as_ref().unwrap_or(function);
-    if let Some(borrowed) = clone_borrow::borrow_read_only_clones(source, env, &|callee| {
-        callees.addressor_summary(callee)
-    }) {
+    if let Some(borrowed) =
+        clone_borrow::borrow_read_only_clones(source, &|callee| callees.addressor_summary(callee))
+    {
         current = Some(borrowed);
     }
     // Transfer a private local's final ownership into its clone destination, including fields
@@ -576,6 +576,27 @@ pub(crate) fn optimize_function(
         callees.addressor_summary(callee)
     }) {
         current = Some(moved);
+    }
+    // Split local products owning managed fields, such as an inlined iterator holding copies of
+    // the arrays it reads, into one local per field. Forwarding, borrowing and moving then see
+    // each field's storage and lifetime on its own: run them again on what the split exposed.
+    let source = current.as_ref().unwrap_or(function);
+    if let Some(split) = scalar_replace::split_managed_local_products(
+        source,
+        env,
+        OptimizationStage::Semantic(callees),
+    ) {
+        let summary_of = |callee| callees.addressor_summary(callee);
+        let split = copy_forward::forward_redundant_storage(
+            &split,
+            env,
+            OptimizationStage::Semantic(callees),
+        )
+        .unwrap_or(split);
+        let split = clone_borrow::borrow_read_only_clones(&split, &summary_of).unwrap_or(split);
+        let split =
+            owned_arguments::forward_terminal_clones(&split, env, &summary_of).unwrap_or(split);
+        current = Some(split);
     }
     // Hoist initialized copyable reads and terminating pure direct calls into a natural loop's
     // unique preheader. Calls require invariant passive inputs and `TrivialCopy` result storage.
@@ -787,6 +808,46 @@ mod tests {
         assert!(
             entry.contains("from %p0\n") && entry.contains("memcpy"),
             "the length of the borrowed array must be copied in the entry block:\n{body}"
+        );
+    }
+
+    /// The caller instantiates `zip` for arrays after `dot`, so the thunks follow `dot` in the
+    /// module's function table.
+    const ZIP_SUM: &str = "fn dot(x: [int], y: [int]) -> int { let mut s = 0; for (a, b) in zip(x, y) { s += a * b }; s }\nfn main() -> int { dot([1], [2]) }";
+
+    /// `zip` reaches `iter` through a dictionary of a blanket impl, whose methods are thunks in the
+    /// caller's module. The call graph orders them before the caller, which inlines their bodies.
+    #[test]
+    fn a_zip_loop_inlines_the_iterators_of_its_arrays() {
+        let module = optimized(ZIP_SUM);
+        let body = body_of(&module, "dot").split("\nfn ").next().unwrap();
+        assert!(
+            !body.contains("-thunk("),
+            "the array iterators must be inlined:\n{body}"
+        );
+    }
+
+    /// The zip iterator is built in a temporary and cloned into the loop's iterator. The temporary
+    /// is dropped right after, in the entry block, so it moves instead.
+    #[test]
+    fn a_temporary_dropped_after_its_clone_moves() {
+        let module = optimized(ZIP_SUM);
+        let body = body_of(&module, "dot").split("\nfn ").next().unwrap();
+        assert!(
+            !body.contains("clone ZipIterator"),
+            "the zip iterator must move into the loop:\n{body}"
+        );
+    }
+
+    /// The zip iterator and its array iterators split into one local per field: each array clone
+    /// then borrows its parameter, and each cursor is a local of its own.
+    #[test]
+    fn a_zip_loop_borrows_its_arrays_and_keeps_its_cursors_in_locals() {
+        let module = optimized(ZIP_SUM);
+        let body = body_of(&module, "dot").split("\nfn ").next().unwrap();
+        assert!(
+            !body.contains("clone ") && !body.contains("drop ") && !body.contains("Iterator"),
+            "the iterators must be split and their arrays borrowed:\n{body}"
         );
     }
 

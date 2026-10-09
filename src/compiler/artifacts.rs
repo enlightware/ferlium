@@ -344,8 +344,7 @@ impl MirArtifacts {
     fn raw(functions: Vec<Option<mir::Function>>, module: &Module, modules: &Modules) -> Self {
         let env = ModuleEnv::new(module, modules);
         let module_id = module.module_id();
-        let call_components =
-            CallGraph::of_module(&functions, module_id).components_callees_first();
+        let call_components = CallGraph::of_module(&functions, module).components_callees_first();
         // Every dependency's artifacts are built before this module's, so a cross-module callee's
         // summary is already installed and can simply be read.
         let external = |callee: FunctionId| {

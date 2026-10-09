@@ -274,7 +274,8 @@ mod tests {
                 .mir_artifacts_for(module_id, MirOptimization::Disabled)
                 .expect("raw MIR must be prepared");
             let components =
-                CallGraph::of_module(artifacts.bodies(), module_id).components_callees_first();
+                CallGraph::of_module(artifacts.bodies(), session.expect_fresh_module(module_id))
+                    .components_callees_first();
             WillReturnSummaries::of_module(artifacts.bodies(), &components, module_id, &|callee| {
                 session
                     .mir_artifacts_for(callee.module, MirOptimization::Disabled)

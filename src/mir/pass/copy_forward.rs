@@ -104,6 +104,13 @@ struct ForwardedInitialization {
     destination: mir::Value,
 }
 
+impl ForwardedInitialization {
+    /// The operations between the producer and the transfer, in their block.
+    fn between(&self) -> std::ops::Range<usize> {
+        self.producer_site.index.as_index() + 1..self.transfer_site.index.as_index()
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum PlaceRoot {
     Constant(ConstantId),
@@ -161,10 +168,19 @@ pub(crate) fn forward_redundant_storage(
     let mut forwarded_initializations = Vec::new();
     for block in func.blocks() {
         let operations = func.block(block).operations();
-        for (index, pair) in operations.windows(2).enumerate() {
-            let [producer, transfer] = pair else {
-                unreachable!()
+        // The latest operation of this block referencing each register, so that a transfer finds
+        // its temporary's producer in one forward sweep.
+        let mut last_reference = FxHashMap::default();
+        for (index, transfer) in operations.iter().enumerate() {
+            let previous = match transfer.operands.first() {
+                Some(mir::Value::Register(source)) => last_reference.get(source).copied(),
+                _ => None,
             };
+            for operand in transfer.operands.iter() {
+                if let mir::Value::Register(id) = operand {
+                    last_reference.insert(*id, index);
+                }
+            }
             if !matches!(
                 transfer.kind,
                 OperationKind::Move | OperationKind::MoveBytes { .. } | OperationKind::Memcpy
@@ -176,6 +192,10 @@ pub(crate) fn forward_redundant_storage(
             else {
                 continue;
             };
+            let Some(producer_index) = previous else {
+                continue;
+            };
+            let producer = &operations[producer_index];
             let Some(destination_index) = initialization_destination_index(producer) else {
                 continue;
             };
@@ -187,7 +207,7 @@ pub(crate) fn forward_redundant_storage(
             }
             let producer_site = OperationSite {
                 block,
-                index: OperationIndex::from_index(index),
+                index: OperationIndex::from_index(producer_index),
             };
             // The alloca may be in a dominating block. The existing transfer proves its final
             // destination is available at this exact point; the use census below is what removes
@@ -196,7 +216,7 @@ pub(crate) fn forward_redundant_storage(
                 producer_site,
                 transfer_site: OperationSite {
                     block,
-                    index: OperationIndex::from_index(index + 1),
+                    index: OperationIndex::from_index(index),
                 },
                 temporary: *temporary,
                 destination: destination.clone(),
@@ -299,8 +319,10 @@ pub(crate) fn forward_redundant_storage(
         let producer = operation_at(func, first.producer_site);
         let mut current = start;
         let mut last_safe = None;
+        let mut chain = Vec::new();
         loop {
             let forwarded = &forwarded_initializations[current];
+            chain.push(current);
             if !can_retarget_initialization(
                 producer,
                 &forwarded.destination,
@@ -310,6 +332,16 @@ pub(crate) fn forward_redundant_storage(
                 &private,
                 env,
                 stage,
+            ) || !initializing_early_is_unobserved(
+                chain
+                    .iter()
+                    .flat_map(|&link| forwarded_initializations[link].between()),
+                &forwarded.destination,
+                first.producer_site,
+                func,
+                &operation_definitions,
+                &mut storage_cache,
+                &private,
             ) {
                 break;
             }
@@ -538,6 +570,34 @@ fn can_retarget_initialization(
                 private,
             )
         })
+}
+
+/// Whether the operations at `between`, in the producer's block, can neither observe nor define
+/// `destination`, which the producer would then initialize before them.
+fn initializing_early_is_unobserved(
+    mut between: impl Iterator<Item = usize>,
+    destination: &mir::Value,
+    producer: OperationSite,
+    func: &Function,
+    definitions: &FxHashMap<ValueId, &Operation>,
+    storage_cache: &mut FxHashMap<ValueId, OperandStorage>,
+    private: &OnceCell<FxHashSet<ValueId>>,
+) -> bool {
+    let operations = func.block(producer.block).operations();
+    between.all(|index| {
+        let operation = &operations[index];
+        operation.result_id().map(mir::Value::Register).as_ref() != Some(destination)
+            && operation.operands.iter().all(|operand| {
+                operands_are_disjoint(
+                    operand,
+                    destination,
+                    func,
+                    definitions,
+                    storage_cache,
+                    private,
+                )
+            })
+    })
 }
 
 fn initialization_is_trivial_copy(producer: &Operation, env: ModuleEnv<'_>) -> bool {
@@ -1357,10 +1417,11 @@ mod tests {
              }",
         );
         let body = body_of(&module, "preserve");
-
+        let snapshot = body.find(" to %p2").expect("the snapshot is returned");
+        let write = body.find("memcpy %p1").expect("the source is replaced");
         assert!(
-            body.contains("memcpy") && body.matches("alloca int").count() >= 2,
-            "the independent snapshot must retain its own storage:\n{body}"
+            snapshot < write,
+            "the snapshot must be copied out before the source is replaced:\n{body}"
         );
     }
 

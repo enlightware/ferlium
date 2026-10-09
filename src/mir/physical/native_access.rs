@@ -401,7 +401,7 @@ mod tests {
                     )
                 };
                 check(&body).unwrap();
-                let rewritten = borrow_read_only_clones(&body, env, &summary);
+                let rewritten = borrow_read_only_clones(&body, &summary);
                 let rewritten = rewritten.as_ref().unwrap_or(&body);
                 check(rewritten).unwrap();
                 let clones = rewritten

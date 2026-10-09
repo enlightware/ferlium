@@ -820,6 +820,39 @@ fn temporary_tuple_projection_moves_a_last_use_owned_value() {
     );
 }
 
+/// A temporary argument, dropped right after the call, moves into an owned-ABI variant of the
+/// callee, even when a loop rather than a return follows the call.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_temporary_argument_moves_into_a_callee_before_a_loop() {
+    use crate::harness::RunMode;
+
+    let mut session = TestSession::new();
+    // This counter deliberately observes ownership optimizations, so compare only optimized
+    // execution modes.
+    session.run_modes(
+        RunMode::ALL
+            .into_iter()
+            .filter(|mode| !matches!(mode, RunMode::Hir | RunMode::Mir)),
+    );
+    assert_val_eq!(
+        session.run(
+            r#"
+        #[inline(never)]
+        fn wrap(value) { (value, 0) }
+        testing::reset_clone_tracked_clones();
+        let pair = wrap(testing::make_clone_tracked());
+        let mut total = 0;
+        for i in 0..2 {
+            total += testing::clone_tracked_payload(pair.0)
+        };
+        total * 10 + testing::clone_tracked_clone_count()
+    "#
+        ),
+        int(140)
+    );
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_append_and_concat_use_value_clone() {

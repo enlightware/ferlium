@@ -165,7 +165,6 @@ pub(crate) struct PlaceOrigins {
     /// Out-slots an addressor call filled, before the following `load` materializes the place.
     returned: FxHashMap<ValueId, PlaceOrigin>,
     single_writer_slots: FxHashSet<ValueId>,
-    field_roots: FxHashSet<ValueId>,
 }
 
 impl PlaceOrigins {
@@ -173,23 +172,8 @@ impl PlaceOrigins {
         func: &Function,
         summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
     ) -> PlaceOrigins {
-        Self::with_field_roots(func, summary_of, FxHashSet::default())
-    }
-
-    /// As [`Self::of`], with the places these `subfield` results name treated as roots of their
-    /// own, distinct from the rest of their aggregate's storage.
-    ///
-    /// Precondition: the caller proves each such field is reached only through its `subfield`
-    /// result. No other projection may overlap it, and nothing may observe its aggregate as a
-    /// whole. Otherwise uses through those other places would escape the field's root.
-    pub(crate) fn with_field_roots(
-        func: &Function,
-        summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
-        field_roots: FxHashSet<ValueId>,
-    ) -> PlaceOrigins {
         let mut origins = PlaceOrigins {
             single_writer_slots: single_writer_addressor_slots(func),
-            field_roots,
             ..Self::default()
         };
         // Canonical block order normally defines every operand before it is seen. Iterating to a
@@ -251,12 +235,6 @@ impl PlaceOrigins {
                 root: Root::Alloca(result),
                 structural: true,
             }),
-            OperationKind::Subfield { .. } if self.field_roots.contains(&result) => {
-                Some(PlaceOrigin {
-                    root: Root::Alloca(result),
-                    structural: true,
-                })
-            }
             OperationKind::Subfield { .. }
             | OperationKind::AddressOffset { .. }
             | OperationKind::AddressOffsetPlace { .. } => self.origin_of(&operation.operands[0]),
@@ -903,7 +881,7 @@ mod tests {
                 .mir_artifacts_for(module_id, MirOptimization::Disabled)
                 .expect("raw MIR must be prepared");
             let components =
-                CallGraph::of_module(artifacts.bodies(), module_id).components_callees_first();
+                CallGraph::of_module(artifacts.bodies(), module).components_callees_first();
             AddressorSummaries::of_module(
                 artifacts.bodies(),
                 &components,
@@ -961,7 +939,7 @@ mod tests {
             .mir_artifacts_for(std_id, MirOptimization::Disabled)
             .expect("std raw MIR must be prepared");
         let components =
-            CallGraph::of_module(artifacts.bodies(), std_id).components_callees_first();
+            CallGraph::of_module(artifacts.bodies(), module).components_callees_first();
         let provenances = AddressorSummaries::of_module(
             artifacts.bodies(),
             &components,

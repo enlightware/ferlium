@@ -63,3 +63,11 @@ fn sum_cross_products_int_outer(x: [float], y: [int]) -> float {
 	};
 	sum
 }
+
+fn sum_zip_products_int(x: [int], y: [int]) -> int {
+	let mut sum = 0;
+	for (a, b) in zip(x, y) {
+		sum += a * b;
+	};
+	sum
+}

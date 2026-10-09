@@ -359,6 +359,13 @@ runtime_benchmark!(
     Float,
     run_float
 );
+runtime_benchmark!(
+    bench_sum_zip_products_int,
+    setup_sum_zip_products_int,
+    RuntimeWorkload::SUM_ZIP_PRODUCTS_INT,
+    isize,
+    run_int
+);
 
 // --- Gungraun setup ---
 
@@ -396,7 +403,8 @@ library_benchmark_group!(
         bench_sum_products_int,
         bench_sum_products_float,
         bench_sum_cross_products_int,
-        bench_sum_cross_products_mixed
+        bench_sum_cross_products_mixed,
+        bench_sum_zip_products_int
     ]
 );
 

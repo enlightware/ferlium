@@ -1189,7 +1189,7 @@ fn transfer(
 
 /// Resolves one entry of a dictionary, from module metadata alone — exactly as the interpreter
 /// does when it executes a `dict_entry`.
-fn dictionary_entry(
+pub(super) fn dictionary_entry(
     dictionary: &StaticEvidence,
     entry: TraitDictionaryEntryIndex,
     env: ModuleEnv<'_>,
@@ -1215,7 +1215,7 @@ fn dictionary_entry(
     ))
 }
 
-fn static_evidence_operand(value: &mir::Value) -> Option<StaticEvidence> {
+pub(super) fn static_evidence_operand(value: &mir::Value) -> Option<StaticEvidence> {
     match value {
         mir::Value::Dictionary(definition) => Some(StaticEvidence::bare_dictionary(*definition)),
         mir::Value::Subscript(definition) => Some(StaticEvidence::bare_subscript(*definition)),

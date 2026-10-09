@@ -53,6 +53,7 @@ discarded results // remove unread TrivialCopy result places exposed by inlining
 dead proven calls // remove unused chains of known-total numeric or proved-returning script calls
 dead stores       // remove unread initialization overwritten on every following path
 clone borrowing   // redirect read-only clone lifetimes to a source that outlives them
+managed split     // split local products owning managed fields; forward, borrow and move again
 LICM              // hoist initialized copyable reads and invariant terminating pure direct calls
 dce               // on every body, not only a changed one
 stack markers     // drop a mark duplicating one already held, and restores that pop nothing
@@ -80,7 +81,9 @@ function before the inliner measures it against the growth budget.
 
 **Callees are optimized before their callers.** `MirArtifacts::optimize` walks the module's call
 graph (`mir::pass::call_graph`) in strongly connected components, callees first, and publishes a
-component's bodies only once all its members are done. Inlining and specialization read a
+component's bodies only once all its members are done. A dictionary of the module names its
+methods, so passing one is an edge to them: a blanket impl's thunks are then optimized before the
+caller whose specialized callee reaches them. Inlining and specialization read a
 finished callee optimized and any other body of the module raw, so members of a recursive component
 read each other raw and no decision depends on the order within one. A dependency is optimized
 before its dependents and immutable, so its bodies are always read optimized. This is LLVM's CGSCC
@@ -136,15 +139,15 @@ read, projection, call argument or other alias-producing use of the local root.
 A private local's last ownership can also move into its clone destination, including another
 local or a field of a returned aggregate. Read-only borrowing runs first because it can eliminate
 the destination storage entirely. The terminal ownership-forwarding rule requires the clone and
-exactly one subsequent source drop in the same return block, with no other source or derived-place use
-between the clone and return. Shared place provenance and access classification reject escaping
+exactly one subsequent source drop in the same block, with no other source or derived-place use
+after the clone, in that block or, unless it returns, in any block reachable from it. Shared place provenance and access classification reject escaping
 aliases and scoped accessors. The source must be a whole local allocation with a static layout;
 borrowed parameters and managed source fields remain outside this rule. Values needing a run-time
 layout witness retain their clone, as in owned-ABI forwarding. Restores after the clone are conservative
 proof boundaries. Rewriting the clone to `move` removes only that block's source drop, retaining
 cleanup on earlier failure paths. The destination retains its original ownership obligations;
 ordinary DCE collects the unused clone/drop dispatch evidence. A syntactic scan admits only
-whole alloca sources with a later matching drop in the same return block, before deriving
+whole alloca sources with a later matching drop in the same block, before deriving
 provenance and value roles. Escape classification is limited to those candidate roots.
 
 Read-only clones have a separate lifetime proof: readers borrow the source while its value and
@@ -161,9 +164,8 @@ loops to terminate. Stack restores preserve parameter storage; local sources use
 must-analysis of markers that protect the current allocation incarnation. Reallocation invalidates
 older marker facts, and joins intersect them. Unresolved aliases, consuming uses, unproved storage
 preservation and suspension inside the borrowed lifetime retain the copy.
-The copy may also be a field of a fresh product whose other fields are `TrivialCopy` and whose
-drop is structural, such as an inlined array iterator holding the array it reads: the product's
-drop then ends the lifetime, provided the product is otherwise only projected to other fields.
+A copy into a field of a local product, such as an inlined array iterator holding the array it
+reads, is borrowed once the managed split below has made the field a local of its own.
 This runs after the semantic rounds settle, before DCE removes the unused destination storage.
 
 ## Discarded `TrivialCopy` results
@@ -452,7 +454,8 @@ be forwarded. The latter carries ownership through generated trait-method thunks
 bodies.
 
 Admission is conservative. The caller operand must be a whole local allocation, unaliased at the
-call, and used afterwards only by its terminal cleanup drop. A fallible call requires equivalent
+call, and used afterwards only by its cleanup drop in the call's block; outside a return block, no
+block reachable from it may use the operand. A fallible call requires equivalent
 drops on its unique normal and error successors. The callee parameter must have exactly one use,
 and ordinary generic bodies with live dictionaries are not copied; their concrete specializations
 are. Type-monomorphic generated thunks may be copied with their evidence prefix unchanged. Variants
@@ -684,8 +687,9 @@ Allocating the source first proves it outlives the destination across any `stack
 The same pass more generally retargets `producer → temporary; transfer temporary → destination` so
 the producer initializes the final destination directly. Producers are `store`, `memcpy`, `move`,
 `clone` and `call`; the final transfer may be `move` or, for a `TrivialCopy`, `memcpy`. The operations
-must be adjacent, the temporary must be a local `alloca`, and its complete operand-use count must
-consist of exactly the producer destination and transfer source. Contiguous transfer chains are
+are in one block, those between them may neither define nor observe the destination, the temporary
+must be a local `alloca`, and its complete operand-use count must consist of exactly the producer
+destination and transfer source. Contiguous transfer chains are
 collapsed in one traversal rather than requiring another optimization round.
 
 Retargeting must not make a producer overwrite storage it also reads. A small place-identity model
@@ -1131,13 +1135,23 @@ including named and nested products, into independent field places. Static proje
 the same field; literal stores, copies between eligible products and clears become fieldwise
 operations.
 Whole-value reads, escaping aggregate addresses, dynamic projections, managed products and native
-`TrivialCopy` opt-ins retain their storage. An opt-in guarantees copying the whole representation,
-not its fields independently. Field allocations keep the original lifetime boundary. The pass runs
-on final bodies after float speculation, preserving the aggregate structure used by semantic range
-analysis and inlining; unoptimized physical preparation skips it. A bounded shape-expansion budget
-prevents deeply nested products from causing excessive compilation growth, independently of byte
-size. Existing forwarding and cleanup then simplify the fields and let scalar backends keep them
-in locals.
+`TrivialCopy` opt-ins retain their storage in this run. An opt-in guarantees copying the whole
+representation, not its fields independently. Field allocations keep the original lifetime boundary.
+The pass runs on final bodies after float speculation, preserving the aggregate structure used by
+semantic range analysis and inlining; unoptimized physical preparation skips it. A bounded
+shape-expansion budget prevents deeply nested products from causing excessive compilation growth,
+independently of byte size. Existing forwarding and cleanup then simplify the fields and let scalar
+backends keep them in locals.
+
+A separate run of the same module, during semantic optimization (the managed split in the pipeline
+above), splits local products owning managed fields, after clone borrowing, so that each field's
+lifetime becomes a local of its own: an iterator over two arrays then borrows each array and keeps
+each cursor in a local. Such a product is dropped whole only through its structural destructor,
+which is spliced first, as physical drop elaboration does for a partially initialized product; its
+field drops remain initialization-aware. Products with a variant, or whose initialization is
+queried, keep their storage. Storage forwarding, clone borrowing and terminal moves then run again
+on what the split exposed. LLVM similarly runs SROA before the passes that remove copies and move
+code.
 
 ## Post-expansion optimization
 
