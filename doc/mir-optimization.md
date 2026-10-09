@@ -161,6 +161,9 @@ loops to terminate. Stack restores preserve parameter storage; local sources use
 must-analysis of markers that protect the current allocation incarnation. Reallocation invalidates
 older marker facts, and joins intersect them. Unresolved aliases, consuming uses, unproved storage
 preservation and suspension inside the borrowed lifetime retain the copy.
+The copy may also be a field of a fresh product whose other fields are `TrivialCopy` and whose
+drop is structural, such as an inlined array iterator holding the array it reads: the product's
+drop then ends the lifetime, provided the product is otherwise only projected to other fields.
 This runs after the semantic rounds settle, before DCE removes the unused destination storage.
 
 ## Discarded `TrivialCopy` results

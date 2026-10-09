@@ -1487,7 +1487,9 @@ impl TestSession {
     /// eligible for compile-time evaluation, which runs those drops while compiling instead of at
     /// run time. A test counting the drops of a pure function's locals therefore cannot also assert
     /// on the optimized run. That is the compile-time execution contract working as documented (see
-    /// `doc/runtime-sandboxing.md`), not a divergence.
+    /// `doc/runtime-sandboxing.md`), not a divergence. Likewise, clone/drop pairs are not
+    /// observable under the ownership contract, so optimization may borrow instead of cloning: a
+    /// test counting clones cannot assert on the optimized run either.
     pub fn without_optimized_mode(&mut self) -> &mut Self {
         self.run_modes(RunMode::UNOPTIMIZED_INTERPRETERS)
     }

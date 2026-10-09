@@ -712,6 +712,8 @@ fn temporary_array_index_let_uses_value_clone() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn temporary_tuple_projection_shared_ref_call_does_not_clone() {
     let mut session = TestSession::new();
+    // Optimization may borrow instead of cloning, so only the interpreters count clones.
+    session.without_optimized_mode();
     // Read the original after the temporary so its construction requires an independent clone.
     assert_val_eq!(
         session.run(
@@ -731,6 +733,8 @@ fn temporary_tuple_projection_shared_ref_call_does_not_clone() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn temporary_tuple_projection_let_uses_value_clone() {
     let mut session = TestSession::new();
+    // Optimization may borrow instead of cloning, so only the interpreters count clones.
+    session.without_optimized_mode();
     // Read the original after the temporary so its construction requires an independent clone.
     assert_val_eq!(
         session.run(
@@ -751,6 +755,8 @@ fn temporary_tuple_projection_let_uses_value_clone() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn temporary_record_projection_shared_ref_call_does_not_clone() {
     let mut session = TestSession::new();
+    // Optimization may borrow instead of cloning, so only the interpreters count clones.
+    session.without_optimized_mode();
     // Read the original after the temporary so its construction requires an independent clone.
     assert_val_eq!(
         session.run(
@@ -770,6 +776,8 @@ fn temporary_record_projection_shared_ref_call_does_not_clone() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn temporary_record_projection_let_uses_value_clone() {
     let mut session = TestSession::new();
+    // Optimization may borrow instead of cloning, so only the interpreters count clones.
+    session.without_optimized_mode();
     // Read the original after the temporary so its construction requires an independent clone.
     assert_val_eq!(
         session.run(

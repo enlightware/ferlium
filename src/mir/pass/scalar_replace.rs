@@ -64,14 +64,14 @@ struct Shape {
 const MAX_LEAVES: usize = 64;
 const MAX_NODES: usize = 256;
 
-enum Parts {
+pub(super) enum Parts {
     Product(Vec<Type>),
     Variant { tag: Type, payloads: Vec<Type> },
 }
 
 /// Explicit ownership and native `TrivialCopy` contracts stay opaque: an opt-in promises that
 /// the whole representation is copyable, not that each field is independently copyable.
-fn parts(mut ty: Type, env: ModuleEnv<'_>) -> Option<Parts> {
+pub(super) fn parts(mut ty: Type, env: ModuleEnv<'_>) -> Option<Parts> {
     let root = ty;
     loop {
         let kind = ty.data().clone();
