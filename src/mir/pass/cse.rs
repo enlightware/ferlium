@@ -1548,10 +1548,9 @@ mod tests {
             1,
             "the two immutable cells holding 1 denote the same call input:\n{body}"
         );
-        assert_eq!(
-            body.matches("store @c0").count(),
-            1,
-            "DCE should remove the duplicate literal cell:\n{body}"
+        assert!(
+            !body.contains("store @c0") && body.contains(", @c0, "),
+            "the literal is passed as a value, with no cell to duplicate:\n{body}"
         );
     }
 

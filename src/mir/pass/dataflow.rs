@@ -43,7 +43,7 @@ use crate::{
     mir::{
         self, BlockId, Function, Operation, OperationKind, ParameterKind,
         terminator::TerminatorKind,
-        value::{ParameterId, StaticEvidence, ValueId, same_literal_representation},
+        value::{Constant, ParameterId, StaticEvidence, ValueId, same_literal_representation},
     },
     module::{
         FunctionId, ModuleEnv, ProjectionIndex, TraitDictionaryEntry, TraitDictionaryId, id::Id,
@@ -441,6 +441,37 @@ impl Analysis {
     /// The slot an operand names, independent of flow state.
     pub(crate) fn place_of(&self, operand: &mir::Value) -> Option<PlaceId> {
         self.register_places.place_of(operand)
+    }
+
+    /// What reading `operand` yields: the contents of the slot a place names, or the value an
+    /// operand carries itself, such as a scalar call argument passed by value.
+    pub(crate) fn read_fact(
+        &self,
+        operand: &mir::Value,
+        constants: &[Constant],
+        state: &State,
+    ) -> Fact {
+        match self.place_of(operand) {
+            Some(place) if !self.is_escaped(self.root_of_place(place)) => state.place(place),
+            Some(_) => Fact::Unknown,
+            None => value_operand_fact(operand, constants, state),
+        }
+    }
+
+    /// Whether [`Self::read_fact`] is known, without materializing the fact.
+    pub(crate) fn read_is_known(&self, operand: &mir::Value, state: &State) -> bool {
+        match self.place_of(operand) {
+            Some(place) => {
+                !self.is_escaped(self.root_of_place(place)) && state.place_is_known(place)
+            }
+            None => match operand {
+                mir::Value::Register(id) => state
+                    .register(*id)
+                    .is_some_and(|fact| fact.known().is_some()),
+                mir::Value::Constant(_) => true,
+                _ => false,
+            },
+        }
     }
 
     /// The slot an operand names when its contents remain within the analysis model.
@@ -949,7 +980,7 @@ fn transfer(
             if !tracked(place) {
                 return;
             }
-            let fact = value_operand_fact(&operation.operands[0], func, state);
+            let fact = value_operand_fact(&operation.operands[0], func.constants(), state);
             state.set_place(place, fact, register_places);
         }
         OperationKind::BuildArray { element_ty } => {
@@ -968,7 +999,7 @@ fn transfer(
                     let fact = match place_of(operand) {
                         Some(place) if tracked(place) => state.place(place),
                         Some(_) => Fact::Unknown,
-                        None => value_operand_fact(operand, func, state),
+                        None => value_operand_fact(operand, func.constants(), state),
                     };
                     match fact {
                         Fact::Known(Const::Literal(literal)) => Some(Rc::unwrap_or_clone(literal)),
@@ -1094,7 +1125,7 @@ fn transfer(
             let scrutinee = match place_of(&operation.operands[0]) {
                 Some(place) if tracked(place) => state.place(place),
                 Some(_) => Fact::Unknown,
-                None => value_operand_fact(&operation.operands[0], func, state),
+                None => value_operand_fact(&operation.operands[0], func.constants(), state),
             };
             let outcomes = state.compare_outcomes(result, operation, &scrutinee, register_places);
             let fact =
@@ -1225,14 +1256,14 @@ pub(super) fn static_evidence_operand(value: &mir::Value) -> Option<StaticEviden
 }
 
 /// The fact for an operand used as a materialized value.
-fn value_operand_fact(operand: &mir::Value, func: &Function, state: &State) -> Fact {
+fn value_operand_fact(operand: &mir::Value, constants: &[Constant], state: &State) -> Fact {
     match operand {
         mir::Value::Register(id) => state.registers.get(id).cloned().unwrap_or_default(),
         // A pool constant is the base case of the whole analysis: `let x = 5` lowers to a store of
         // one, and everything folding knows grows from there.
-        mir::Value::Constant(id) => {
-            Fact::Known(Const::literal(func.constant(*id).representation.clone()))
-        }
+        mir::Value::Constant(id) => Fact::Known(Const::literal(
+            constants[id.as_index()].representation.clone(),
+        )),
         mir::Value::Function(id) => Fact::Known(Const::Function(*id)),
         mir::Value::Dictionary(id) => Fact::Known(Const::Dictionary(*id)),
         mir::Value::Evidence(evidence) => {

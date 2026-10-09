@@ -74,6 +74,14 @@ struct DeadResultCandidate {
 /// A direct result-producing operation is dead at zero uses. A value-returning call writes through
 /// an alloca operand, so its one self-use is the dead state. In either case, removing one candidate
 /// decrements its operands and can expose another candidate in the same backwards walk.
+fn count_operands(uses: &mut FxHashMap<ValueId, usize>, operands: &[mir::Value]) {
+    for operand in operands {
+        if let mir::Value::Register(id) = operand {
+            *uses.entry(*id).or_default() += 1;
+        }
+    }
+}
+
 fn remove_dead_results(
     func: &Function,
     candidates: FxHashMap<ValueId, DeadResultCandidate>,
@@ -84,19 +92,26 @@ fn remove_dead_results(
     }
 
     let mut uses = FxHashMap::<ValueId, usize>::default();
-    let mut count_operands = |operands: &[mir::Value]| {
-        for operand in operands {
-            if let mir::Value::Register(id) = operand {
-                *uses.entry(*id).or_default() += 1;
-            }
-        }
-    };
+    // A load's value passed to a removed call is read by nothing else once its count drops to
+    // zero; removing the load then releases the place it read, which may be a candidate's result.
+    let mut loads = FxHashMap::<ValueId, DeadResultCandidate>::default();
     for block in func.blocks() {
         let basic_block = func.block(block);
-        for operation in basic_block.operations() {
-            count_operands(&operation.operands);
+        for (index, operation) in basic_block.operations().iter().enumerate() {
+            count_operands(&mut uses, &operation.operands);
+            if matches!(operation.kind, OperationKind::Load)
+                && let Some(result) = operation.result_id()
+            {
+                loads.insert(
+                    result,
+                    DeadResultCandidate {
+                        block,
+                        operation: OperationIndex::from_index(index),
+                    },
+                );
+            }
         }
-        count_operands(basic_block.terminator().operands());
+        count_operands(&mut uses, basic_block.terminator().operands());
     }
 
     let remaining_uses =
@@ -112,26 +127,35 @@ fn remove_dead_results(
         if !removed_results.insert(result) || remaining_uses(&uses, &result) != dead_at {
             continue;
         }
-        let candidate = candidates[&result];
-        removed
-            .entry(candidate.block)
-            .or_default()
-            .insert(candidate.operation);
-        for operand in
-            &func.block(candidate.block).operations()[candidate.operation.as_index()].operands
-        {
-            let mir::Value::Register(operand) = operand else {
-                continue;
-            };
-            let count = uses
-                .get_mut(operand)
-                .expect("every register operand was counted");
-            *count -= 1;
-            if *count == 0 {
-                uses.remove(operand);
-            }
-            if remaining_uses(&uses, operand) == dead_at && candidates.contains_key(operand) {
-                pending.push(*operand);
+        let mut released = vec![candidates[&result]];
+        while let Some(definition) = released.pop() {
+            removed
+                .entry(definition.block)
+                .or_default()
+                .insert(definition.operation);
+            for operand in
+                &func.block(definition.block).operations()[definition.operation.as_index()].operands
+            {
+                let mir::Value::Register(operand) = operand else {
+                    continue;
+                };
+                let count = uses
+                    .get_mut(operand)
+                    .expect("every register operand was counted");
+                *count -= 1;
+                if *count == 0 {
+                    uses.remove(operand);
+                    // Marked removed so that the walk over candidates, which a load also is,
+                    // does not release it a second time.
+                    if let Some(load) = loads.get(operand)
+                        && removed_results.insert(*operand)
+                    {
+                        released.push(*load);
+                    }
+                }
+                if remaining_uses(&uses, operand) == dead_at && candidates.contains_key(operand) {
+                    pending.push(*operand);
+                }
             }
         }
     }
@@ -1202,13 +1226,15 @@ mod tests {
     };
     use crate::{
         CompilerSession, ExecutionTarget, Location, MirOptimization, Path,
+        containers::b,
         format::FormatWith,
+        hir::value::LiteralValue,
         mir::{
             Operation, OperationKind, ParameterKind, Value, builder::FunctionBuilder,
             edit::FunctionEdit, role::ValueRoles, terminator::Terminator,
         },
         module::{FunctionId, LocalFunctionId, LocalSubscriptId, ModuleId, SubscriptId, id::Id},
-        std::math::int_type,
+        std::{logic::bool_type, math::int_type},
         types::{
             effects::no_effects,
             r#type::{CallImplType, CallResultConvention, FnType, SubscriptType, Type},
@@ -1581,6 +1607,45 @@ mod tests {
         let cleaned = remove_dead_trivial_results(&canonical).unwrap();
         let cleaned = FunctionEdit::new(cleaned).finish(env);
         assert!(cleaned.block(cleaned.entry()).operations().is_empty());
+    }
+
+    /// Removing an unused comparison leaves the load it read unused too. Both the release of that
+    /// load and the walk over dead candidates reach it, and only one may remove it.
+    #[test]
+    fn a_load_released_by_a_removed_reader_is_removed_once() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new("unused_comparison".into(), Default::default());
+        let block = builder.add_block();
+        let cell = builder
+            .append_operation(block, Operation::alloca(span, bool_type()))
+            .unwrap();
+        let value = builder
+            .append_operation(block, Operation::load(span, cell))
+            .unwrap();
+        builder.append_operation(
+            block,
+            Operation::compare_eq(
+                span,
+                value,
+                Value::Pattern(b(LiteralValue::new_native(false))),
+            ),
+        );
+        builder.set_terminator(block, Terminator::ret(span));
+        let function = builder.finish_unverified();
+        let cleaned = remove_dead_trivial_results(&function).expect("the comparison is dead");
+        let kinds = cleaned
+            .block(cleaned.entry())
+            .operations()
+            .iter()
+            .map(|operation| &operation.kind)
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(kinds.as_slice(), [OperationKind::Alloca { .. }]),
+            "only the cell may remain:\n{}",
+            cleaned.format_with(&env)
+        );
     }
 
     /// A normal call owns and reclaims its own frame. It does not make an otherwise empty inline

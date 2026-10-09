@@ -33,7 +33,10 @@ use crate::{
     },
     mir::{
         self, BlockId, Function, Operation, OperationKind, ParameterId, ParameterKind,
-        profile::MirExecutionProfile, terminator::TerminatorKind, value::StaticEvidence,
+        operation::{CallMetadata, accepts_value_argument},
+        profile::MirExecutionProfile,
+        terminator::TerminatorKind,
+        value::StaticEvidence,
     },
     module::{
         FunctionId, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, TraitDictionaryEntry,
@@ -46,7 +49,7 @@ use crate::{
     },
     types::{
         r#trait::TraitDictionaryEntryIndex,
-        r#type::{Type, TypeKind},
+        r#type::{CallImplType, Type, TypeKind},
     },
 };
 
@@ -888,8 +891,24 @@ impl<'a> Interpreter<'a> {
             OperationKind::ExtractTag => {
                 self.exec_extract_tag(slots, &operation.operands, def.unwrap());
             }
-            OperationKind::Call { .. } => {
-                self.exec_call(slots, &operation.operands, span.location)?;
+            OperationKind::Call { ty, metadata } => {
+                let frame_top = self.ctx.environment.len();
+                let rebound = self.bind_value_arguments(
+                    func,
+                    slots,
+                    &operation.operands,
+                    ty,
+                    metadata.as_deref(),
+                    span.location,
+                )?;
+                if rebound.is_empty() {
+                    self.exec_call(slots, &operation.operands, span.location)?;
+                } else {
+                    let result = self.exec_call(slots, &operation.operands, span.location);
+                    Self::unbind_value_arguments(slots, rebound);
+                    self.reclaim_frame_storage(frame_top);
+                    result?;
+                }
             }
             OperationKind::Project { yielded, .. } => {
                 // Enter a scoped subscript: run the accessor to its `yield`, bind the exposed place
@@ -1441,6 +1460,68 @@ impl<'a> Interpreter<'a> {
             self.exec_closure_call(slots, &place, arg_ops, span)
         } else {
             self.exec_resolved_call(slots, module_id, function_id, Vec::new(), 0, arg_ops, span)
+        }
+    }
+
+    /// Binds each scalar argument passed as a value to a fresh cell holding a copy, for the
+    /// duration of the call, since a callee binds every visible argument to a place. Returns the
+    /// bindings to restore; the cells sit above the environment the caller saw before the call,
+    /// which reclaims them afterwards.
+    fn bind_value_arguments(
+        &mut self,
+        func: &Function,
+        slots: &mut FxHashMap<mir::Value, Binding>,
+        operands: &[mir::Value],
+        ty: &CallImplType,
+        metadata: Option<&CallMetadata>,
+        span: Location,
+    ) -> Result<Vec<(mir::Value, Option<Binding>)>, RuntimeError> {
+        let frame_top = self.ctx.environment.len();
+        let visible_start = operands.len()
+            - ty.fn_ty.args.len()
+            - usize::from(ty.result_convention.has_result_place());
+        let mut rebound = Vec::new();
+        for offset in 0..ty.fn_ty.args.len() {
+            let operand = &operands[visible_start + offset];
+            if !accepts_value_argument(ty, metadata, offset)
+                || rebound.iter().any(|(bound, _)| bound == operand)
+            {
+                continue;
+            }
+            let value = match operand {
+                mir::Value::Constant(_) => self.constant_value(func, operand),
+                _ => match slots.get(operand) {
+                    Some(Binding::Value(value))
+                        if value.as_primitive_ty::<PlaceResult>().is_none() =>
+                    {
+                        read_copy(value).expect("a scalar value argument is copyable")
+                    }
+                    _ => continue,
+                },
+            };
+            let cell = match self.alloc_cell(value, span) {
+                Ok(cell) => cell,
+                Err(error) => {
+                    Self::unbind_value_arguments(slots, rebound);
+                    self.reclaim_frame_storage(frame_top);
+                    return Err(error);
+                }
+            };
+            let previous = slots.insert(operand.clone(), Binding::Place(cell));
+            rebound.push((operand.clone(), previous));
+        }
+        Ok(rebound)
+    }
+
+    fn unbind_value_arguments(
+        slots: &mut FxHashMap<mir::Value, Binding>,
+        rebound: Vec<(mir::Value, Option<Binding>)>,
+    ) {
+        for (operand, previous) in rebound {
+            match previous {
+                Some(binding) => slots.insert(operand, binding),
+                None => slots.remove(&operand),
+            };
         }
     }
 
@@ -2743,29 +2824,33 @@ impl<'a> Interpreter<'a> {
     /// Resolves a place-typed operand to its `Place`.
     fn place_operand(&self, slots: &FxHashMap<mir::Value, Binding>, v: &mir::Value) -> Place {
         match v {
-            mir::Value::Register(_) | mir::Value::Parameter(_) => match slots.get(v) {
-                Some(Binding::Place(p)) => p.clone(),
-                // An open scoped projection (a `project` result) is used as the place it exposes,
-                // exactly like a `Place` binding, until its `end_project` removes it.
-                Some(Binding::Projected { place, .. }) => place.clone(),
-                // A place produced by an `AddressorPlace` function (e.g. `buffer_slot`) is bridged
-                // through an ordinary value cell as a `PlaceResult` native; unwrap it back to the
-                // place it denotes so it can be projected/loaded/stored like any other place.
-                Some(Binding::Value(val)) => val
-                    .as_primitive_ty::<PlaceResult>()
-                    .map(|pr| pr.place().clone())
-                    .unwrap_or_else(|| panic!("expected a place but {v} is bound to a value")),
-                Some(Binding::StackMarker(_)) => {
-                    panic!("expected a place but {v} is bound to a stack marker")
+            // A constant is bound only while it is a call's value argument; see
+            // `bind_value_arguments`.
+            mir::Value::Register(_) | mir::Value::Parameter(_) | mir::Value::Constant(_) => {
+                match slots.get(v) {
+                    Some(Binding::Place(p)) => p.clone(),
+                    // An open scoped projection (a `project` result) is used as the place it exposes,
+                    // exactly like a `Place` binding, until its `end_project` removes it.
+                    Some(Binding::Projected { place, .. }) => place.clone(),
+                    // A place produced by an `AddressorPlace` function (e.g. `buffer_slot`) is bridged
+                    // through an ordinary value cell as a `PlaceResult` native; unwrap it back to the
+                    // place it denotes so it can be projected/loaded/stored like any other place.
+                    Some(Binding::Value(val)) => val
+                        .as_primitive_ty::<PlaceResult>()
+                        .map(|pr| pr.place().clone())
+                        .unwrap_or_else(|| panic!("expected a place but {v} is bound to a value")),
+                    Some(Binding::StackMarker(_)) => {
+                        panic!("expected a place but {v} is bound to a stack marker")
+                    }
+                    Some(Binding::Dictionary(_)) => {
+                        panic!("expected a place but {v} is bound to a symbolic dictionary")
+                    }
+                    Some(Binding::VariantTag(_)) => {
+                        panic!("expected a place but {v} is bound to an opaque variant tag")
+                    }
+                    None => panic!("unbound place operand {v}"),
                 }
-                Some(Binding::Dictionary(_)) => {
-                    panic!("expected a place but {v} is bound to a symbolic dictionary")
-                }
-                Some(Binding::VariantTag(_)) => {
-                    panic!("expected a place but {v} is bound to an opaque variant tag")
-                }
-                None => panic!("unbound place operand {v}"),
-            },
+            }
             other => panic!("operand {other:?} is not a place"),
         }
     }

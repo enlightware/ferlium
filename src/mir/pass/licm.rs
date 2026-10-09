@@ -527,46 +527,69 @@ fn hoist_invariant_loads(
             ) {
                 continue;
             }
-            let insertion = if storage.is_some() {
-                let base = projections.first().map_or(source, |site| {
-                    &func.block(site.block).operations()[site.index.as_index()].operands[0]
-                });
-                inputs.push(base);
-                let roots = roots.get_or_init(|| PlaceRoots::of(func));
-                let preheader_writes =
-                    preheader_writes
+            let insertion =
+                if storage.is_some() {
+                    let base = projections.first().map_or(source, |site| {
+                        &func.block(site.block).operations()[site.index.as_index()].operands[0]
+                    });
+                    inputs.push(base);
+                    let roots = roots.get_or_init(|| PlaceRoots::of(func));
+                    let preheader_writes = preheader_writes
                         .entry(natural.preheader)
                         .or_insert_with(|| {
                             writes_in(func, &FxHashSet::from_iter([natural.preheader]), roots)
                         });
-                let storage = loop_storage
-                    .entry(natural.preheader)
-                    .or_insert_with(|| LoopStorage::of(func, natural, &definitions));
-                let Some(insertion) = insertion_point(
-                    natural,
-                    &definitions,
-                    dominance,
-                    &inputs,
-                    roots,
-                    preheader_writes,
-                    storage,
-                ) else {
-                    continue;
-                };
-                if let Root::Alloca(_) = origin.root {
-                    if writes.get(&origin.root).is_some_and(|sites| {
-                        sites.iter().any(|site| {
-                            site.block == natural.preheader
-                                && site.index.as_index() >= insertion.as_index()
-                        })
-                    }) {
+                    let storage = loop_storage
+                        .entry(natural.preheader)
+                        .or_insert_with(|| LoopStorage::of(func, natural, &definitions));
+                    let Some(insertion) = insertion_point(
+                        natural,
+                        &definitions,
+                        dominance,
+                        &inputs,
+                        roots,
+                        preheader_writes,
+                        storage,
+                    ) else {
                         continue;
+                    };
+                    if let Root::Alloca(_) = origin.root {
+                        if writes.get(&origin.root).is_some_and(|sites| {
+                            sites.iter().any(|site| {
+                                site.block == natural.preheader
+                                    && site.index.as_index() >= insertion.as_index()
+                            })
+                        }) {
+                            continue;
+                        }
                     }
-                }
-                insertion
-            } else {
-                OperationIndex::from_index(func.block(natural.preheader).operations().len())
-            };
+                    insertion
+                } else {
+                    // A read without storage defines only a value. Place it as early as its source
+                    // allows, ahead of any marker the loop restores, where a call hoisted after it can
+                    // take it.
+                    let base = projections.first().map_or(source, |site| {
+                        &func.block(site.block).operations()[site.index.as_index()].operands[0]
+                    });
+                    inputs.push(base);
+                    let roots = roots.get_or_init(|| PlaceRoots::of(func));
+                    let preheader_writes = preheader_writes
+                        .entry(natural.preheader)
+                        .or_insert_with(|| {
+                            writes_in(func, &FxHashSet::from_iter([natural.preheader]), roots)
+                        });
+                    let Some(earliest) = earliest_insertion(
+                        natural,
+                        &definitions,
+                        dominance,
+                        &inputs,
+                        roots,
+                        preheader_writes,
+                    ) else {
+                        continue;
+                    };
+                    OperationIndex::from_index(earliest)
+                };
             if let Some(storage) = storage {
                 projections.push(storage);
             }
@@ -738,6 +761,7 @@ fn find_hoist(
     let root_blocks = OnceCell::new();
     let local = OnceCell::new();
     let values = OnceCell::new();
+    let roles = OnceCell::new();
     for natural in &analysis.loops {
         let writes = writes_in(func, &natural.blocks, &roots);
         let preheader_writes = writes_in(func, &FxHashSet::from_iter([natural.preheader]), &roots);
@@ -782,48 +806,68 @@ fn find_hoist(
 
                 let mut inputs = Vec::new();
                 let mut operations = Vec::new();
-                let admitted = call
-                    .extras
-                    .iter()
-                    .chain(call.arguments.iter().map(|(argument, _)| *argument))
-                    .all(|input| match roots.root_of(input) {
-                        None => false,
-                        Some(root) if root == output_root => false,
-                        Some(root) if !writes.contains_key(&root) => {
-                            inputs.push(input);
-                            true
-                        }
-                        Some(_) => {
-                            let values = values.get_or_init(|| {
-                                ValueCells::of_matching(
-                                    func,
-                                    env,
-                                    local.get_or_init(|| {
-                                        LocalCells::of_matching(func, |_, allocation| {
+                let admitted =
+                    call.extras
+                        .iter()
+                        .chain(call.arguments.iter().map(|(argument, _)| *argument))
+                        .all(|input| match roots.root_of(input) {
+                            // A scalar passed as a value is invariant when the loop does not define it.
+                            None => match input {
+                                mir::Value::Constant(_) => true,
+                                mir::Value::Register(id)
+                                    if definitions.get(id).is_some_and(|site| {
+                                        !natural.blocks.contains(&site.block)
+                                    }) && roles
+                                        .get_or_init(|| ValueRoles::derive(func))
+                                        .get(input, func.constants())
+                                        .is_some_and(|role| {
                                             matches!(
-                                                allocation,
-                                                Allocation::Value {
-                                                    witnessed: false,
-                                                    ..
-                                                }
+                                                *role,
+                                                ValueRole::Materialized(MirType::Lowered(_))
                                             )
-                                        })
-                                    }),
-                                    invariant_cell_access,
-                                    || dominance,
+                                        }) =>
+                                {
+                                    inputs.push(input);
+                                    true
+                                }
+                                _ => false,
+                            },
+                            Some(root) if root == output_root => false,
+                            Some(root) if !writes.contains_key(&root) => {
+                                inputs.push(input);
+                                true
+                            }
+                            Some(_) => {
+                                let values = values.get_or_init(|| {
+                                    ValueCells::of_matching(
+                                        func,
+                                        env,
+                                        local.get_or_init(|| {
+                                            LocalCells::of_matching(func, |_, allocation| {
+                                                matches!(
+                                                    allocation,
+                                                    Allocation::Value {
+                                                        witnessed: false,
+                                                        ..
+                                                    }
+                                                )
+                                            })
+                                        }),
+                                        invariant_cell_access,
+                                        || dominance,
+                                    )
+                                });
+                                invariant_cell(
+                                    func,
+                                    input,
+                                    values,
+                                    &allocas,
+                                    natural,
+                                    &mut inputs,
+                                    &mut operations,
                                 )
-                            });
-                            invariant_cell(
-                                func,
-                                input,
-                                values,
-                                &allocas,
-                                natural,
-                                &mut inputs,
-                                &mut operations,
-                            )
-                        }
-                    });
+                            }
+                        });
                 if !admitted {
                     continue;
                 }
@@ -1135,6 +1179,31 @@ fn insertion_point(
     preheader_writes: &FxHashMap<Root, Vec<OperationSite>>,
     storage: &LoopStorage,
 ) -> Option<OperationIndex> {
+    let earliest = earliest_insertion(
+        natural,
+        definitions,
+        dominance,
+        inputs,
+        roots,
+        preheader_writes,
+    )?;
+    let latest = storage.insertion_limit?.as_index();
+    // Insert as late as possible. Besides shortening the allocation's lifetime, this retains every
+    // preheader computation and possible source failure before the speculative call while still
+    // placing its storage ahead of a marker restored on the loop backedge.
+    (earliest <= latest).then(|| OperationIndex::from_index(latest))
+}
+
+/// The first preheader position after every definition of `inputs` and every preheader write to
+/// their roots, or `None` if an input is defined where the preheader cannot see it.
+fn earliest_insertion(
+    natural: &NaturalLoop,
+    definitions: &FxHashMap<ValueId, OperationSite>,
+    dominance: &Dominance,
+    inputs: &[&mir::Value],
+    roots: &PlaceRoots,
+    preheader_writes: &FxHashMap<Root, Vec<OperationSite>>,
+) -> Option<usize> {
     let mut earliest = 0usize;
     for &operand in inputs {
         if let mir::Value::Register(register) = operand {
@@ -1160,12 +1229,7 @@ fn insertion_point(
             );
         }
     }
-
-    let latest = storage.insertion_limit?.as_index();
-    // Insert as late as possible. Besides shortening the allocation's lifetime, this retains every
-    // preheader computation and possible source failure before the speculative call while still
-    // placing its storage ahead of a marker restored on the loop backedge.
-    (earliest <= latest).then(|| OperationIndex::from_index(latest))
+    Some(earliest)
 }
 
 fn apply_hoist(func: &Function, hoist: Hoist) -> Function {
@@ -1735,9 +1799,9 @@ mod tests {
     }
 
     #[test]
-    fn hoists_a_call_with_its_constant_operand_cell_through_nested_loops() {
-        // The constant `3` reaches the call through a cell stored in the inner loop; that store
-        // is a value-cell definition and moves with the call, one loop at a time.
+    fn hoists_a_call_with_a_constant_operand_through_nested_loops() {
+        // The constant `3` reaches the call as a value, and `a` as a load LICM hoists first, so the
+        // call moves out of both loops, one loop at a time.
         let source = "fn constant_operand(a: int, n: int) {\n\
                           let mut total = 0;\n\
                           for i in 0..n {\n\
@@ -1748,19 +1812,12 @@ mod tests {
                       fn main() { constant_operand(2, 4) + constant_operand(2, 0) }";
         let module = optimized(source);
         let body = body_of(&module, "constant_operand");
-        // Of the two multiplications, only the invariant one reads `a`.
-        let (call, result_alloca) = call_and_result_alloca(body, "(%p0, ");
+        // Of the two multiplications, only the invariant one takes the constant.
+        let (call, result_alloca) = call_and_result_alloca(body, ", @c2, ");
         let outer_marker = body.find("stack_save").expect("both loops have markers");
         assert!(
             call < outer_marker && result_alloca < call,
             "the call and its storage must move out of both loops:\n{body}"
-        );
-        let operand = body[..call]
-            .rfind("store @c")
-            .expect("the constant operand is stored before the call");
-        assert!(
-            body[operand..call].lines().count() <= 3,
-            "the constant's definition must move with the call:\n{body}"
         );
 
         let mut session = CompilerSession::new();

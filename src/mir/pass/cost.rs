@@ -9,13 +9,17 @@
 //! emitting no instruction of its own. Everything else costs one unit. LLVM's `InlineCost` draws the
 //! same line, treating static allocas, constant GEPs and lifetime markers as free.
 //!
+//! A scalar argument read just before its call, as [scalar argument
+//! normalization](super::scalar_arguments) writes it, is part of passing the argument: lowering
+//! passes the place it reads again, as it did before the read was made explicit.
+//!
 //! A failure path, which ends in a call that [diverges](Operation::diverges), runs at most once: a
 //! callee is judged by its [`hot_cost`], but grows its caller by its whole [`cost`].
 
 use super::budget::{INLINE_FUNCTION_GROWTH, INLINE_LOOP_GROWTH};
 use crate::{
     graph,
-    mir::{BlockId, Function, Operation, OperationKind, terminator::TerminatorKind},
+    mir::{self, BlockId, Function, Operation, OperationKind, terminator::TerminatorKind},
     module::id::Id,
 };
 
@@ -55,19 +59,36 @@ pub(crate) fn hot_cost_exceeds(func: &Function, limit: usize) -> bool {
     cost(func) > limit && hot_cost(func) > limit
 }
 
-/// A block's operations, including the call an `invoke` terminator makes.
+/// A block's operations, including the call an `invoke` terminator makes, except the loads that
+/// only pass an argument: read by the call that follows them, with nothing but loads between.
+/// Lowering passes the place such a load reads instead. A value read again elsewhere keeps its
+/// load, which this does not see: the estimate stays local to the block.
 fn block_cost(func: &Function, block: BlockId) -> usize {
     let block = func.block(block);
     let invoked = match &block.terminator().kind {
         TerminatorKind::Invoke { operation, .. } => Some(operation),
         _ => None,
     };
-    block
-        .operations()
-        .iter()
-        .chain(invoked)
-        .map(operation_cost)
-        .sum()
+    let mut total = 0;
+    let mut loads = Vec::new();
+    for operation in block.operations().iter().chain(invoked) {
+        match operation.kind {
+            OperationKind::Load => {
+                loads.extend(operation.result_id());
+                continue;
+            }
+            OperationKind::Call { .. } => {
+                total += loads
+                    .iter()
+                    .filter(|&&id| !operation.operands.contains(&mir::Value::Register(id)))
+                    .count();
+            }
+            _ => total += loads.len(),
+        }
+        loads.clear();
+        total += operation_cost(operation);
+    }
+    total + loads.len()
 }
 
 /// The blocks reachable from entry without passing through a cold one, by block index.
@@ -261,6 +282,7 @@ pub(crate) fn cyclic_blocks(func: &Function) -> Vec<bool> {
 #[cfg(test)]
 mod tests {
     use super::{Growth, cost};
+    use crate::mir::pass::scalar_arguments::read_scalar_arguments;
     use crate::{
         CompilerSession, ExecutionTarget,
         compiler::MirOptimization,
@@ -303,6 +325,33 @@ mod tests {
         assert!(!growth.reserve(OUTSIDE, 1, 2));
         assert!(growth.reserve(OUTSIDE, 1, 1));
         assert!(growth.reserve(IN_LOOP, 2, 1));
+    }
+
+    /// Reading scalar arguments before their calls makes explicit what passing their places did,
+    /// so it must not make a callee look larger to inlining.
+    #[test]
+    fn scalar_argument_reads_cost_nothing() {
+        let mut session = CompilerSession::new();
+        let module = session
+            .compile_for(
+                ExecutionTarget::Mir,
+                include_str!("../../../tests/modules/float_kernel.fer"),
+                "float_kernel",
+                Path::single_str("float_kernel"),
+            )
+            .expect("`float_kernel` compiles")
+            .module_id;
+        let raw = session
+            .mir_artifacts_for(module, MirOptimization::Disabled)
+            .expect("raw artifacts were built");
+        let body = raw
+            .bodies()
+            .iter()
+            .flatten()
+            .find(|body| body.name.ends_with("float_kernel"))
+            .expect("`float_kernel` has a body");
+        let read = read_scalar_arguments(body).expect("`float_kernel` passes scalar places");
+        assert_eq!(cost(&read), cost(body));
     }
 
     const CORPUS: &[(&str, &str)] = include!("../../../tests/harness/mir_corpus.rs");

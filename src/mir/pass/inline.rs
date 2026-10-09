@@ -39,7 +39,7 @@
 
 #![allow(dead_code)]
 
-use std::borrow::Cow;
+use std::{borrow::Cow, cell::OnceCell};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -58,6 +58,8 @@ use crate::{
         OperationKind, ParameterKind, ValueId,
         debug_location::InlineRebase,
         edit::FunctionEdit,
+        operation::accepts_value_argument,
+        role::{MirType, ValueRole, ValueRoles},
         terminator::{Terminator, TerminatorKind},
     },
     module::{FunctionId, ModuleEnv, ModuleId, id::Id},
@@ -189,6 +191,7 @@ pub(crate) fn inline_function(
     }
 
     let mut edit = FunctionEdit::new(func.clone());
+    let roles = OnceCell::new();
     // Later sites first, so splicing one does not move the ones still to be done: within a block
     // that is the terminator before the operations, and the operations in decreasing index — which
     // is the reverse of the order they were planned in.
@@ -199,6 +202,7 @@ pub(crate) fn inline_function(
             inlining.callee.module,
             inlining.site,
             env,
+            &roles,
         );
     }
     // Splicing always splits the call site's block and joins the pieces with jumps, so a callee
@@ -632,12 +636,16 @@ fn check_inlinable(
 /// Replaces the call at `site` with `body`, rewired into the caller.
 ///
 /// `body` was read from module `from`, whose table its inline chains index.
+///
+/// `roles` holds the roles of the caller's registers as they were before any splice of this edit,
+/// derived on first need: a splice keeps the registers it does not define.
 fn inline_at(
     edit: &mut FunctionEdit,
     body: &Function,
     from: ModuleId,
     site: Site,
     env: ModuleEnv<'_>,
+    roles: &OnceCell<ValueRoles>,
 ) {
     // Take the call apart, and decide where the callee's exits lead.
     let (call, normal, error) = match site {
@@ -672,7 +680,7 @@ fn inline_at(
     marker.assign_result_id(Some(marker_id));
     edit.block_mut(site.block()).operations.push(marker);
 
-    let arguments = call.operands[1..].to_vec();
+    let arguments = spill_value_arguments(edit, site.block(), &call, roles);
     assert_eq!(
         arguments.len(),
         body.parameters().len(),
@@ -704,6 +712,55 @@ fn inline_at(
     edit.block_mut(site.block()).terminator = Terminator::goto(span, entry);
 }
 
+/// The call's arguments as the callee's parameters, which are places: a scalar passed as a value
+/// is stored into a fresh `alloca` first. They follow the inline marker, so the callee's exits
+/// reclaim them with its own storage.
+fn spill_value_arguments(
+    edit: &mut FunctionEdit,
+    block: BlockId,
+    call: &Operation,
+    roles: &OnceCell<ValueRoles>,
+) -> Vec<mir::Value> {
+    let mut arguments = call.operands[1..].to_vec();
+    let OperationKind::Call { ty, metadata } = &call.kind else {
+        return arguments;
+    };
+    let visible_start = call.operands.len()
+        - ty.fn_ty.args.len()
+        - usize::from(ty.result_convention.has_result_place());
+    let candidates = (0..ty.fn_ty.args.len())
+        .filter(|&offset| {
+            accepts_value_argument(ty, metadata.as_deref(), offset)
+                && matches!(
+                    call.operands[visible_start + offset],
+                    mir::Value::Register(_) | mir::Value::Constant(_)
+                )
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return arguments;
+    }
+    let roles = roles.get_or_init(|| edit.value_roles());
+    for offset in candidates {
+        let operand = call.operands[visible_start + offset].clone();
+        if !roles
+            .get(&operand, edit.constants())
+            .is_some_and(|role| matches!(*role, ValueRole::Materialized(MirType::Lowered(_))))
+        {
+            continue;
+        }
+        let slot = edit.new_value();
+        let mut alloca = Operation::alloca(call.span, ty.fn_ty.args[offset].ty);
+        alloca.assign_result_id(Some(slot));
+        let slot = mir::Value::Register(slot);
+        let operations = &mut edit.block_mut(block).operations;
+        operations.push(alloca);
+        operations.push(Operation::store(call.span, operand, slot.clone()));
+        arguments[visible_start + offset - 1] = slot;
+    }
+    arguments
+}
+
 /// Splice compiler-generated cleanup at an ordinary call site. Unlike optional inlining, this
 /// expansion preserves the caller's partial-place identities for drop elaboration.
 pub(crate) fn expand_cleanup(
@@ -730,6 +787,7 @@ pub(crate) fn expand_cleanup(
             index: OperationIndex::from_index(index),
         },
         env,
+        &OnceCell::new(),
     );
 }
 
@@ -1117,6 +1175,7 @@ mod tests {
                 index: OperationIndex::from_index(0),
             },
             env,
+            &OnceCell::new(),
         );
         edit.remove_unreachable_blocks();
         let body = edit.finish(env);

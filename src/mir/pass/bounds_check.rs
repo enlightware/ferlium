@@ -36,11 +36,14 @@ use crate::{
         self, BlockId, DebugLocation, Function, Operation, OperationKind,
         edit::FunctionEdit,
         pass::site::OperationIndex,
+        role::{MirType, ValueRole, ValueRoles},
         terminator::{Terminator, TerminatorKind},
     },
     module::{FunctionId, ModuleEnv, id::Id},
     std::{math::int_type, value::dynamic_product_member_layouts},
 };
+
+use std::cell::OnceCell;
 
 use rustc_hash::FxHashSet;
 
@@ -305,6 +308,16 @@ pub(crate) fn eliminate_bounds_checks(
     }
 
     let removed = proved.len() + decided.len() + guards.len();
+    let roles = OnceCell::new();
+    // A scalar argument may be passed as a value: a resolved index then takes it by a store.
+    let is_value = |operand: &mir::Value| match operand {
+        mir::Value::Constant(_) => true,
+        mir::Value::Register(_) => roles
+            .get_or_init(|| ValueRoles::derive(func))
+            .get(operand, func.constants())
+            .is_some_and(|role| matches!(*role, ValueRole::Materialized(MirType::Lowered(_)))),
+        _ => false,
+    };
     let mut edit = FunctionEdit::new(func.clone());
     for (block, target) in decided {
         let span = func.block(block).terminator().span;
@@ -332,6 +345,9 @@ pub(crate) fn eliminate_bounds_checks(
                 destination,
                 normalization,
             } => vec![match normalization {
+                Normalization::NonNegative if is_value(&index) => {
+                    Operation::store(check.span, index, destination)
+                }
                 Normalization::NonNegative => Operation::memcpy(check.span, index, destination),
                 Normalization::Negative => {
                     add_offset(check.span, known, length, index, destination)
@@ -656,6 +672,9 @@ mod tests {
                          work[4]; work[5]; work[6]; work[7];\n\
                          work[8]; work[9]; work[10]; work[11];\n\
                          work[12]; work[13]; work[14]; work[15];\n\
+                         work[16]; work[17]; work[18]; work[19];\n\
+                         work[20]; work[21]; work[22]; work[23];\n\
+                         work[24]; work[25]; work[26]; work[27];\n\
                          a[i]\n\
                      } else { panic(\"bad index\") }\n\
                  } else {\n\

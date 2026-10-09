@@ -22,7 +22,7 @@ use crate::{
         self, BlockId, Function, Instantiation, Operation, OperationKind, OperationResult,
         ParameterId, ParameterKind, ValueId,
         dominance::Dominance,
-        operation::SourceFallibility,
+        operation::{SourceFallibility, accepts_value_argument},
         physical::is_zero_sized_result,
         role::{self, MirType, ValueRole, ValueRoles},
         terminator::TerminatorKind,
@@ -964,6 +964,22 @@ impl<'a> Verifier<'a> {
                             .is_some_and(|metadata| metadata.owned_arguments.contains(offset));
                     let expected = MirType::Lowered(argument.ty);
                     if read_only && self.readable_as(&operands[index], &expected) {
+                        continue;
+                    }
+                    if let Some(role) = self.roles.get(&operands[index], self.func.constants())
+                        && let ValueRole::Materialized(MirType::Lowered(actual)) = &*role
+                    {
+                        assert!(
+                            accepts_value_argument(ty, metadata.as_deref(), offset)
+                                && *actual == argument.ty,
+                            "MIR function `{}` node {}: value argument {} of type {} where {} \
+                             is passed",
+                            self.func.name,
+                            node,
+                            offset,
+                            actual.format_with(&self.env),
+                            argument.ty.format_with(&self.env),
+                        );
                         continue;
                     }
                     self.verify_place_representation(node, index, &operands[index], expected);

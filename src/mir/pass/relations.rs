@@ -274,6 +274,8 @@ pub(crate) struct Interner {
     /// place. Keeping that structural map here avoids cloning, joining and comparing it in every
     /// block state.
     register_places: FxHashMap<ValueId, PlaceId>,
+    /// The integer value of each pool constant, for one passed as a call argument.
+    constants: Vec<Option<Int>>,
 }
 
 impl Interner {
@@ -1624,6 +1626,11 @@ fn state_cursor_invariants(
 /// every state. The small fixed point only accommodates block order not being dominance order;
 /// each successful round binds at least one of the finite register set.
 fn seed_register_places(func: &Function, escaped: &FxHashSet<Root>, interner: &mut Interner) {
+    interner.constants = func
+        .constants()
+        .iter()
+        .map(|constant| constant.representation.as_primitive_ty::<Int>().copied())
+        .collect();
     for block in func.blocks() {
         for operation in func.block(block).operations() {
             if !matches!(
@@ -2815,9 +2822,30 @@ fn yield_fact(
 ///
 /// An argument is always a place: MIR has no immediate operands at a call, so a literal reaches one
 /// through a slot it was stored into, and that store is where its form was recorded.
+/// The affine form of a call argument: the contents of the place it names, or the value it is.
+///
+/// A register passed as a value is known only through its fact, which a load of a tracked place
+/// always records; any other register, such as a pointer the analysis does not model, is unknown.
 fn argument_affine(operand: &mir::Value, interner: &mut Interner, state: &State) -> Option<Affine> {
-    let place = state.place_of(operand, interner)?;
-    Some(state.place_affine(place, interner))
+    if let Some(place) = state.place_of(operand, interner) {
+        return Some(state.place_affine(place, interner));
+    }
+    match operand {
+        mir::Value::Constant(id) => interner
+            .constants
+            .get(id.as_index())
+            .copied()
+            .flatten()
+            .map(Affine::constant),
+        mir::Value::Register(id) => {
+            let symbol = interner.symbol(Symbol::Register(*id));
+            match state.fact(symbol) {
+                Some(Fact::Value(affine)) => Some(*affine),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 /// The fact for an operand used as a materialized value.

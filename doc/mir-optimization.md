@@ -38,6 +38,7 @@ for round in 0..MAX_ROUNDS:
     place CSE     // merge repeated subfield and dictionary-entry places
     inline        // budget-limited; block merging inside its own edit
     stop if nothing warranted another round
+scalar arguments  // read scalar `Let` call arguments into values before their calls
 place CSE          // merge places which inlining exposes
 copy forward      // catch trivial-copy storage exposed after the last round
 store forward     // likewise for single-store cells
@@ -533,7 +534,8 @@ Either an ordinary `call` operation or an `invoke` terminator. The call site's b
 callee's blocks and registers are renumbered and its constants merged into the caller's pool, every
 exit is rewired (`return` to the continuation, `propagate_error` to the site's error successor), and
 the body is bracketed with `stack_save`/`stack_restore` since the callee's `alloca`s now live in the
-caller's frame.
+caller's frame. A scalar argument passed as a value is stored into a fresh `alloca` inside that
+bracket, since the callee's body uses its parameter as a place.
 
 Refused when: the callee is not statically known, has no body, uses an unsupported result convention,
 is **generic** — meaning any parameter type is not constant — belongs to a known call-graph cycle,
@@ -548,7 +550,8 @@ buffer storage primitives and structural field addressors cannot re-enter script
 treats them as leaves.
 
 **Cost is what the backend emits.** Frame bookkeeping (static slots, stack marks, static field
-offsets) lowers to no instruction, so it is free. A failure path — code that can only end in a call
+offsets) lowers to no instruction, so it is free, and so is a scalar argument read just before its
+call, which is part of passing the argument. A failure path — code that can only end in a call
 returning `never`, such as `panic` — runs at most once: a callee is judged by the cost of its other
 paths, and a call on a failure path is not inlined. Growth still counts everything copied.
 
@@ -943,9 +946,10 @@ rewrites. Optimization may make an unknown body newly provable, but retaining th
 answer merely declines an optimization and avoids invalidation inside the per-function pipeline.
 
 The initial proof is deliberately conservative. Every visible argument must use the `Let`
-convention, its place definition must dominate the preheader, and its storage root must not be
-written anywhere in the loop, unless it is a value cell defined in the loop by a value available
-before it, such as a constant operand; that definition then moves with the call. The call must use the value-result convention, have no owned
+convention. A place argument's definition must dominate the preheader and its storage root must not
+be written anywhere in the loop, unless it is a value cell defined in the loop by a value available
+before it; that definition then moves with the call. A value argument must be a constant or defined
+outside the loop, such as by a read hoisted first. The call must use the value-result convention, have no owned
 arguments, and write a concrete `TrivialCopy` value to a whole static local allocation. That result
 allocation has no other writer and none of its uses may escape the loop. These conditions are
 generic over all direct callees satisfying the effect contract; they are implementation limits that
@@ -964,7 +968,9 @@ witnesses are excluded. The source must be an initialized `Let` parameter or a w
 initialized in the straight-line preheader, making zero-trip reads safe. Shared clone-borrow and
 stack-region proofs reject mutation, escaping aliases and restores that invalidate source storage.
 Moved destinations follow the marker-aware insertion rule above; overlapping projection plans are
-retained. Reads embedded in place-taking primitive calls remain outside this rule.
+retained. A `Load` defines only a value, so it moves as early in the preheader as its source allows,
+ahead of the markers a call's storage must precede. A read a callee made through a place argument
+is covered once it is the caller's own `load`; see [Scalar call arguments](#scalar-call-arguments).
 
 Natural loops come from dominance backedges. Reads are planned together, preferring the outermost
 eligible loop; calls move iteratively from inner to outer. CFG, dominance and loops are shared
@@ -972,6 +978,27 @@ because motion preserves edges; operation-dependent call facts are rebuilt after
 Syntactic filters reject acyclic bodies and impossible candidates before expensive analysis. Read
 analysis caches root uses, preheader writes and loop restores, deriving place roots only when
 storage must move.
+
+## Scalar call arguments
+
+The ABI passes a read-only argument of a concrete scalar type by value, and semantic MIR may too.
+After the rounds, `mir::pass::scalar_arguments` reads each such argument passed as a place into a
+value just before its call. The read the callee made through the place becomes a `load` in the
+caller, which the caller's passes see: store forwarding turns the load of a known cell into the
+constant itself, so a literal argument needs no cell, and LICM hoists a load the loop does not
+change. An array loop thus reads the array's `start` once, where the read sat inside an addition
+that also took the cursor.
+
+The value form then flows wherever the optimized body goes, including into callers that inline it,
+so the passes read through it: folding and the integer relations take a value argument's fact as
+they take a place's, LICM admits a value defined outside the loop, and dead-call removal releases a
+load whose value only a removed call read. Inlining stores a value bound to a parameter into a
+fresh `alloca` after the inline marker. Physical lowering, whose interpreter and passes bind every
+argument to a place, first passes a value loaded right before its call as the place it was loaded
+from, and stores any other value, such as a hoisted load, into a frame slot of its own.
+
+This is the first step of bringing the ABI's scalar values into semantic MIR. Results and
+physical MIR still use places.
 
 ## Dead code elimination
 

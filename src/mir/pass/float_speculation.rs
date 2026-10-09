@@ -517,7 +517,7 @@ mod tests {
     use crate::{
         CompilerSession, MirOptimization,
         format::FormatWith,
-        mir::{Operation, OperationKind, edit::FunctionEdit},
+        mir::{Operation, OperationKind, edit::FunctionEdit, pass::scalar_arguments},
         module::Path,
         std::math::float_type,
     };
@@ -618,6 +618,10 @@ mod tests {
         let env = session
             .modules()
             .env_for(session.expect_fresh_module(module));
+        // Speculation runs in physical lowering, after scalar value arguments are passed as places
+        // again.
+        let source =
+            scalar_arguments::spill_value_arguments(source).unwrap_or_else(|| source.clone());
         // Give the tuple an explicit scoped lifetime, as inlining does. Keep arithmetic result
         // cells outside that region so the original body remains valid after its restoration.
         let mut edit = FunctionEdit::new(source.clone());

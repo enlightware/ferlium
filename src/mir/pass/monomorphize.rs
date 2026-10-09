@@ -3127,8 +3127,26 @@ fn use_it(x: int) { with_zero(x) }",
                 .unwrap()
                 .trim()
         };
+        // Registers are named in order of first appearance: the two bodies mint their values on
+        // different paths.
+        let renumbered = |body: &str| {
+            let mut names = FxHashMap::default();
+            let mut renumbered = String::new();
+            let mut rest = body;
+            while let Some(start) = rest.find("%r") {
+                renumbered.push_str(&rest[..start]);
+                let digits = rest[start + 2..]
+                    .find(|c: char| !c.is_ascii_digit())
+                    .unwrap_or(rest.len() - start - 2);
+                let id = &rest[start + 2..start + 2 + digits];
+                let count = names.len();
+                renumbered.push_str(&format!("%r{}", names.entry(id).or_insert(count)));
+                rest = &rest[start + 2 + digits..];
+            }
+            renumbered + rest
+        };
         assert!(!body("ints").contains("replace "), "{}", body("ints"));
-        assert_eq!(body("ints"), body("direct"));
+        assert_eq!(renumbered(body("ints")), renumbered(body("direct")));
     }
 
     #[test]

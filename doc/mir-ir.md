@@ -119,6 +119,13 @@ All argument conventions are represented as places. `Let` is immutable non-escap
 variant which must consume it on every exit. Raw semantic MIR uses only the first two conventions;
 an optimized `owned` argument requires proof that the caller relinquishes ownership.
 
+At a call site, a `Let` argument of a concrete scalar type (`int`, `float` or `bool`) may instead be
+a materialized value, as the ABI passes it. This changes the call site only: inside the callee's body
+the parameter remains a place (`%pN`), whatever the caller passed. Reading the argument just before
+the call is equivalent to letting the callee read it through the place, since overlapping mutable
+arguments are invalid. Whatever needs a place for such a value, such as inlining a body that reads
+its parameter as a place, stores it into one. Raw semantic MIR passes places only.
+
 `CallResultConvention` determines the result storage shape:
 
 - `Value`: the callee initializes `*T` through `@ret`;
@@ -137,7 +144,7 @@ Every `Call` and `Project` retains its instantiated `CallImplType`. It is the so
 result types, the result convention, and source fallibility. A native entry's machine return form
 does not change this MIR result-storage contract.
 
-Call operands are `[callee, hidden evidence..., visible places..., ret-out]`. Project operands omit
+Call operands are `[callee, hidden evidence..., visible arguments..., ret-out]`. Project operands omit
 the trailing result place because the operation itself yields the scoped place. A dynamic callee is
 read through the place of its function value, so calling a closure never moves its environment.
 

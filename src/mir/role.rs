@@ -39,6 +39,7 @@ use crate::{
     mir::{
         self, Function, Operation, OperationKind, OperationResult, Parameter, ParameterKind,
         ValueId,
+        operation::accepts_value_argument,
         site::{OperationIndex, OperationSite},
         terminator::TerminatorKind,
         value::{Constant, ConstantId, StaticEvidence},
@@ -683,8 +684,19 @@ pub(crate) fn check_operand_roles(
             for index in 1..visible_start {
                 evidence(index);
             }
+            let metadata = match &operation.kind {
+                OperationKind::Call { metadata, .. } => Some(metadata.as_deref()),
+                _ => None,
+            };
             for offset in 0..ty.fn_ty.args.len() {
-                place(visible_start + offset);
+                let index = visible_start + offset;
+                if let Some(metadata) = metadata
+                    && accepts_value_argument(ty, metadata, offset)
+                    && matches!(*role(index), ValueRole::Materialized(MirType::Lowered(_)))
+                {
+                    continue;
+                }
+                place(index);
             }
             if matches!(operation.kind, OperationKind::Call { .. })
                 && ty.result_convention.has_result_place()

@@ -1144,7 +1144,7 @@ mod tests {
     fn a_nested_multiway_variant_dispatch_is_forwarded() {
         let module = optimized(
             "fn choose(first: bool, second: bool, value: int) {\
-                 if first { First(value) } else if second { Second(value + 1) } else { None }\
+                 if first { First(value) } else if second { Second(value * value + 1) } else { None }\
              }\
              fn consume(first: bool, second: bool, value: int) -> int {\
                  match choose(first, second, value) {\

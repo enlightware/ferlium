@@ -30,7 +30,7 @@
 
 #![allow(dead_code)]
 
-use std::rc::Rc;
+use std::{cell::OnceCell, rc::Rc};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use ustr::{Ustr, ustr};
@@ -58,6 +58,7 @@ use crate::{
         edit::FunctionEdit,
         interpreter::static_evidence_value,
         reify::{Reification, reify},
+        role::{MirType, ValueRole, ValueRoles},
         terminator::{Terminator, TerminatorKind},
         value::{Constant, StaticEvidence},
     },
@@ -78,6 +79,8 @@ enum CallRewrite {
     Reification(Reification),
     /// A known identity says the result is one of the call's input places.
     Copy(mir::Value),
+    /// A known identity says the result is one of the call's inputs passed as a value.
+    Store(mir::Value),
     /// A reflexive comparison returns the payload-free `Equal` case.
     EqualOrdering,
     /// A boolean negation, expressed as the comparison MIR already has.
@@ -215,6 +218,9 @@ impl Plan {
 /// The evaluator, environment, and dataflow analysis decide whether a call folds. Refusal-only
 /// provenance is absent from normal optimization and constructed only for an optimization report.
 struct FoldContext<'a> {
+    func: &'a Function,
+    /// Derived only when a rewrite must tell a value argument from a place.
+    roles: OnceCell<ValueRoles>,
     evaluator: Option<ConstEvaluator<'a>>,
     env: ModuleEnv<'a>,
     analysis: Analysis,
@@ -288,6 +294,8 @@ impl<'m, 's> FoldResources<'m, 's> {
 struct RefusalContext {
     /// The `alloca`s a call writes its result into. See [`call_destinations`].
     call_destinations: FxHashSet<ValueId>,
+    /// The place each `load` read, so that a value argument is explained by its place.
+    loaded_from: FxHashMap<ValueId, mir::Value>,
 }
 
 /// Why one call site was not folded, and where it is.
@@ -485,6 +493,7 @@ fn materialize_call_rewrite(
             string_materializer,
         ),
         CallRewrite::Copy(source) => vec![Operation::memcpy(span, source, destination)],
+        CallRewrite::Store(source) => vec![Operation::store(span, source, destination)],
         CallRewrite::ArithmeticNegation { source, callee, ty } => vec![Operation::call(
             span,
             mir::Value::Function(callee),
@@ -598,7 +607,7 @@ fn reification_operation_count(reification: &Reification) -> usize {
 fn call_rewrite_operation_count(rewrite: &CallRewrite) -> usize {
     match rewrite {
         CallRewrite::Reification(reification) => reification_operation_count(reification),
-        CallRewrite::Copy(_) | CallRewrite::ArithmeticNegation { .. } => 1,
+        CallRewrite::Copy(_) | CallRewrite::Store(_) | CallRewrite::ArithmeticNegation { .. } => 1,
         CallRewrite::EqualOrdering | CallRewrite::Negate(_) => 2,
     }
 }
@@ -818,8 +827,11 @@ fn plan_folds_with(
     // provenance and does not classify unknown arguments it will not report.
     let refusal = refusals.is_some().then(|| RefusalContext {
         call_destinations: call_destinations(func),
+        loaded_from: loaded_from(func),
     });
     let context = FoldContext {
+        func,
+        roles: OnceCell::new(),
         evaluator: session.map(|session| ConstEvaluator::new(module_id, session)),
         env,
         analysis: dataflow::analyze(func, env),
@@ -864,7 +876,8 @@ fn plan_folds_with(
                     plan.warrants_another_round |=
                         warrants_another_fold_round(&result, &state, analysis);
                     if let Some(place) = analysis.tracked_place_of(&destination) {
-                        let fact = fact_for_call_rewrite(&result, &state, analysis);
+                        let fact =
+                            fact_for_call_rewrite(&result, &state, analysis, func.constants());
                         analysis.set_place_known(&mut state, place, fact);
                     }
                     plan.calls.push(Fold {
@@ -1017,19 +1030,23 @@ fn warrants_another_fold_round(rewrite: &CallRewrite, state: &State, analysis: &
         CallRewrite::Negate(_) => false,
         // A binary operation rewritten to negation can expose a double negation next round.
         CallRewrite::ArithmeticNegation { .. } => true,
-        CallRewrite::Copy(source) => analysis
-            .tracked_place_of(source)
-            .is_some_and(|place| state.place_is_known(place)),
+        CallRewrite::Copy(source) | CallRewrite::Store(source) => {
+            analysis.read_is_known(source, state)
+        }
     }
 }
 
-fn fact_for_call_rewrite(rewrite: &CallRewrite, state: &State, analysis: &Analysis) -> Fact {
+fn fact_for_call_rewrite(
+    rewrite: &CallRewrite,
+    state: &State,
+    analysis: &Analysis,
+    constants: &[Constant],
+) -> Fact {
     match rewrite {
         CallRewrite::Reification(reification) => fact_for_reification(reification),
-        CallRewrite::Copy(source) => analysis
-            .tracked_place_of(source)
-            .map(|place| state.place(place))
-            .unwrap_or_default(),
+        CallRewrite::Copy(source) | CallRewrite::Store(source) => {
+            analysis.read_fact(source, constants, state)
+        }
         CallRewrite::EqualOrdering => Fact::Known(Const::VariantTag(ustr(ORDERING_EQUAL))),
         // Negation does not establish a literal fact here; the next fold can evaluate the native.
         CallRewrite::Negate(_) | CallRewrite::ArithmeticNegation { .. } => Fact::Unknown,
@@ -1094,7 +1111,7 @@ impl ArithmeticNegations {
         let first = self
             .places
             .get(&context.analysis.tracked_place_of(source)?)?;
-        (first.kind == kind).then(|| CallRewrite::Copy(first.source.clone()))
+        (first.kind == kind).then(|| context.copy_of(first.source.clone()))
     }
 
     fn forget_write(&mut self, destination: &mir::Value, analysis: &Analysis) {
@@ -1196,7 +1213,7 @@ fn proven_nonzero_arithmetic(
         return None;
     }
     let (divisor, _) = call.arguments.get(1)?;
-    let fact = state.place(context.analysis.tracked_place_of(divisor)?);
+    let fact = context.argument_fact(divisor, state);
     let nonzero = match fact {
         Fact::Known(Const::Literal(value)) if known == KnownCallee::FloatDiv => value
             .as_primitive_ty::<Float>()
@@ -1254,8 +1271,7 @@ fn partial_call_outcome(
     let known = context.known_calls.resolve(callee)?;
     let argument = |index: usize| call.arguments.get(index).map(|(operand, _)| *operand);
     let literal = |index: usize| -> Option<LiteralValue> {
-        let place = context.analysis.tracked_place_of(argument(index)?)?;
-        match state.place(place) {
+        match context.argument_fact(argument(index)?, state) {
             Fact::Known(Const::Literal(literal)) => Some(Rc::unwrap_or_clone(literal)),
             _ => None,
         }
@@ -1263,13 +1279,7 @@ fn partial_call_outcome(
     // Deliberately not `literal(index).is_some()`: reading a fact clones what it holds, and the
     // callees below that ask only whether an argument is known are the most common calls in a body.
     let is_known = |index: usize| {
-        context
-            .analysis
-            .tracked_place_of(match argument(index) {
-                Some(argument) => argument,
-                None => return false,
-            })
-            .is_some_and(|place| state.place_is_known(place))
+        argument(index).is_some_and(|argument| context.argument_is_known(argument, state))
     };
     let same_argument = |left: usize, right: usize| {
         let (Some(left), Some(right)) = (argument(left), argument(right)) else {
@@ -1281,7 +1291,11 @@ fn partial_call_outcome(
                 .place_of(left)
                 .is_some_and(|left_place| context.analysis.place_of(right) == Some(left_place))
     };
-    let copy = |index| argument(index).cloned().map(CallRewrite::Copy);
+    let copy = |index| {
+        argument(index)
+            .cloned()
+            .map(|source| context.copy_of(source))
+    };
     let negate = |index, float| {
         let (callee, ty) = if float {
             context.known_calls.callees.float_neg()
@@ -1528,6 +1542,11 @@ fn why_argument_unknown(
     analysis: &Analysis,
     refusal: &RefusalContext,
 ) -> NotFoldable {
+    if let mir::Value::Register(id) = operand
+        && let Some(source) = refusal.loaded_from.get(id)
+    {
+        return why_argument_unknown(source, state, analysis, refusal);
+    }
     let Some(place) = analysis.place_of(operand) else {
         return why_operand_names_no_place(operand, state, analysis);
     };
@@ -1609,6 +1628,15 @@ fn call_destinations(func: &Function) -> FxHashSet<ValueId> {
     destinations
 }
 
+/// The place each `load` of the function read.
+fn loaded_from(func: &Function) -> FxHashMap<ValueId, mir::Value> {
+    func.blocks()
+        .flat_map(|block| func.block(block).operations())
+        .filter(|operation| matches!(operation.kind, OperationKind::Load))
+        .filter_map(|operation| Some((operation.result_id()?, operation.operands[0].clone())))
+        .collect()
+}
+
 /// The value of a branch condition, when the analysis knows it.
 fn known_condition(condition: &mir::Value, state: &State, func: &Function) -> Option<bool> {
     let literal = match condition {
@@ -1641,6 +1669,37 @@ fn known_variant_target(
     });
     let first = targets.next()?;
     targets.all(|target| target == first).then_some(first)
+}
+
+impl FoldContext<'_> {
+    /// What the analysis knows of a call argument, whether it is a place or a value.
+    fn argument_fact(&self, operand: &mir::Value, state: &State) -> Fact {
+        self.analysis
+            .read_fact(operand, self.func.constants(), state)
+    }
+
+    /// Whether [`Self::argument_fact`] is known, without materializing it.
+    fn argument_is_known(&self, operand: &mir::Value, state: &State) -> bool {
+        self.analysis.read_is_known(operand, state)
+    }
+
+    /// The rewrite making a call's result a copy of its argument `source`.
+    fn copy_of(&self, source: mir::Value) -> CallRewrite {
+        let is_value = match &source {
+            mir::Value::Constant(_) => true,
+            mir::Value::Register(_) if self.analysis.place_of(&source).is_none() => self
+                .roles
+                .get_or_init(|| ValueRoles::derive(self.func))
+                .get(&source, self.func.constants())
+                .is_some_and(|role| matches!(*role, ValueRole::Materialized(MirType::Lowered(_)))),
+            _ => false,
+        };
+        if is_value {
+            CallRewrite::Store(source)
+        } else {
+            CallRewrite::Copy(source)
+        }
+    }
 }
 
 /// Evaluates one call site at compile time and expresses the result as a constant, or explains why
@@ -1714,10 +1773,7 @@ fn try_fold_call(
             arguments.push(ConstArgument::Value(Value::unit()));
             continue;
         }
-        let known = context
-            .analysis
-            .tracked_place_of(operand)
-            .map(|place| state.place(place));
+        let known = Some(context.argument_fact(operand, state));
         match known {
             Some(Fact::Known(Const::Literal(literal)))
                 if literal.has_representation_type_in(parameter.ty, &context.env) =>
@@ -2211,6 +2267,8 @@ mod tests {
             builder.set_terminator(block, Terminator::ret(span));
             let body = builder.finish_physical(env);
             let context = FoldContext {
+                func: &body,
+                roles: OnceCell::new(),
                 evaluator: None,
                 env,
                 analysis: dataflow::analyze(&body, env),
@@ -2300,7 +2358,10 @@ mod tests {
             !body.contains("from_int"),
             "converting an int to an int must become a copy:\n{body}"
         );
-        assert!(body.contains("memcpy %p0 to %p1"), "{body}");
+        assert!(
+            body.contains("= load %p0") && body.contains(" to %p1"),
+            "{body}"
+        );
     }
 
     /// `not` has no MIR operation of its own, but `comp_eq value false` is exactly it, so naming

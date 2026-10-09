@@ -62,6 +62,7 @@ pub(crate) mod provenance;
 pub(crate) mod prune_specializations;
 pub(crate) mod relations;
 pub mod report;
+pub(crate) mod scalar_arguments;
 pub(crate) mod scalar_replace;
 pub(crate) mod share_specializations;
 pub(crate) use crate::mir::site;
@@ -410,6 +411,13 @@ pub(crate) fn optimize_function(
     }
     // The specialization table is final from here.
     let callees = SemanticCallees::new(session, Some(specializations));
+    // Read scalar arguments into values at their calls, so that a read the callee made through a
+    // place becomes the caller's own `load`: store forwarding below turns one of a known cell into
+    // the constant itself, and LICM hoists one a loop does not change.
+    let source = current.as_ref().unwrap_or(function);
+    if let Some(read) = scalar_arguments::read_scalar_arguments(source) {
+        current = Some(read);
+    }
     if rounds_exhausted {
         // The last changing round may have exposed place computations and storage transfers after
         // their pre-inline placements. When a no-change round ended the loop, those placements have
@@ -725,7 +733,7 @@ pub(crate) fn optimize_function(
 
 #[cfg(test)]
 mod tests {
-    use crate::{CompilerSession, MirOptimization};
+    use crate::{CompilerSession, MirOptimization, Path};
 
     fn optimized(src: &str) -> String {
         let mut session = CompilerSession::new();
@@ -848,6 +856,69 @@ mod tests {
         assert!(
             !body.contains("clone ") && !body.contains("drop ") && !body.contains("Iterator"),
             "the iterators must be split and their arrays borrowed:\n{body}"
+        );
+    }
+
+    /// Indexing reads the array's `start` inside an addition that also takes the loop's cursor.
+    /// Passed as a value, that read is the caller's own `load`, which LICM hoists before the loop.
+    #[test]
+    fn an_array_loop_reads_its_start_once() {
+        let module = optimized(
+            "fn sum(x: [int]) -> int { let mut s = 0; for a in x { s += a }; s }\n\
+             fn main() -> int { sum([1, 2]) }",
+        );
+        let body = body_of(&module, "sum").split("\nfn ").next().unwrap();
+        let header = body.find("check_fuel").expect("the loop checks fuel");
+        let fields = body
+            .lines()
+            .filter(|line| line.contains("= subfield ") && line.ends_with(" from %p0"))
+            .filter_map(|line| line.trim().split(':').next())
+            .collect::<Vec<_>>();
+        let reads = fields
+            .iter()
+            .filter_map(|field| body.find(&format!("= load {field}\n")))
+            .collect::<Vec<_>>();
+        assert!(
+            !reads.is_empty() && reads.iter().all(|read| *read < header),
+            "every scalar field of the array must be read once, before the loop:\n{body}"
+        );
+    }
+
+    /// A comparison's result passed to a retained call is a value no `load` defines. Physical
+    /// lowering must still bind it to a place.
+    #[test]
+    fn a_computed_boolean_argument_is_passed_as_a_place_after_lowering() {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        session.set_physical_mir_optimization(MirOptimization::Enabled);
+        let module = session
+            .compile(
+                "#[inline(never)]\n\
+                 fn pick(b: bool) -> int { if b { 1 } else { 2 } }\n\
+                 pub fn negated(x: bool) -> int { pick(not x) }",
+                "computed_boolean",
+                Path::single_str("computed_boolean"),
+            )
+            .unwrap()
+            .module_id;
+        let physical = session.emit_physical_mir_module(module).unwrap();
+        let body = body_of(&physical, "negated").split("\nfn ").next().unwrap();
+        assert!(
+            body.contains("comp_eq") && body.contains("call computed_boolean::pick(%r"),
+            "the test needs `not x` computed by a comparison and the call retained:\n{body}"
+        );
+        let call = body
+            .lines()
+            .find(|line| line.contains("call computed_boolean::pick("))
+            .unwrap();
+        let argument = call
+            .split("pick(")
+            .nth(1)
+            .and_then(|rest| rest.split(',').next())
+            .unwrap();
+        assert!(
+            body.contains(&format!("{argument}: place bool")),
+            "the argument must be a place:\n{body}"
         );
     }
 

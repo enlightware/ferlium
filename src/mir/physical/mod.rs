@@ -43,7 +43,7 @@ use crate::{
             dce, float_speculation,
             known_callee::{KnownCallee, KnownCallees},
             physical::optimize,
-            scalar_replace,
+            scalar_arguments, scalar_replace,
         },
         role::{MirType, ValueRoles},
         terminator::{Terminator, TerminatorKind},
@@ -648,6 +648,8 @@ fn expand_physical_mir(
             let original = semantic
                 .specialization(local)
                 .map_or(function, |specialization| specialization.original);
+            // Physical MIR still binds every call argument to a place.
+            let body = scalar_arguments::spill_value_arguments(&body).unwrap_or(body);
             let body = if optimize_pre_expansion {
                 float_speculation::speculate_float_trees(
                     &body,

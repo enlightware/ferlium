@@ -41,6 +41,7 @@ use crate::{
     mir,
     mir::{DebugLocation, ValueId},
     module::{FunctionId, ModuleEnv, ProjectionIndex, TraitDictionaryId, TraitId},
+    std::{logic::bool_type, math::float_type, math::int_type},
     types::{
         effects::{EffType, Effect, PrimitiveEffect},
         r#trait::TraitDictionaryEntryIndex,
@@ -1192,6 +1193,31 @@ pub struct Instantiation {
 pub struct CallMetadata {
     pub(crate) instantiation: Option<Instantiation>,
     pub(crate) owned_arguments: DenseBitSet,
+}
+
+/// Whether visible argument `offset` of a `call` may be a materialized value instead of a place.
+///
+/// The ABI passes a read-only argument of a concrete scalar type directly, so semantic MIR may too:
+/// the callee observes the argument's value at the call, which a read just before it produces.
+/// Mutable and owned arguments stay places. The type is the call site's, so a generic callee may
+/// receive a value too; whatever needs a place for it, such as inlining, spills it into one.
+pub(crate) fn accepts_value_argument(
+    ty: &CallImplType,
+    metadata: Option<&CallMetadata>,
+    offset: usize,
+) -> bool {
+    let argument = &ty.fn_ty.args[offset];
+    argument
+        .mut_ty
+        .as_resolved()
+        .is_some_and(|mutability| !mutability.is_mutable())
+        && !metadata.is_some_and(|metadata| metadata.owned_arguments.contains(offset))
+        && is_scalar_value_type(argument.ty)
+}
+
+/// Whether `ty` is a concrete scalar that call boundaries may carry as a value.
+pub(crate) fn is_scalar_value_type(ty: Type) -> bool {
+    ty == int_type() || ty == float_type() || ty == bool_type()
 }
 
 /// Static types needed to lower a variant shell and its selected payload.
