@@ -49,11 +49,11 @@ string rewrites   // fuse static construction into appends; forward self-prefixe
 devirtualize      // final dictionary-entry callees exposed too late for a fold round
 bounds checks     // prove array indices in range and remove checked access/failure edges;
                   // check a range loop's remaining indices once, before the loop
-LICM              // hoist initialized copyable reads and invariant terminating pure direct calls
 discarded results // remove unread TrivialCopy result places exposed by inlining
 dead proven calls // remove unused chains of known-total numeric or proved-returning script calls
 dead stores       // remove unread initialization overwritten on every following path
 clone borrowing   // redirect read-only clone lifetimes to a source that outlives them
+LICM              // hoist initialized copyable reads and invariant terminating pure direct calls
 dce               // on every body, not only a changed one
 stack markers     // drop a mark duplicating one already held, and restores that pop nothing
 dead snapshots    // collect stack saves whose last restore disappeared
@@ -924,6 +924,11 @@ Motion into a path on which the source call might not execute additionally requi
 callee returns: purity alone does not make a call safe to move out of a zero-trip loop. This
 termination proof is generic callee metadata rather than an arithmetic or function-name condition
 owned by LICM.
+
+LICM runs after the passes that remove stores and copies, as LLVM runs it after DSE and MemCpyOpt:
+each removed write or copy can make a read invariant. An iterator holding a clone of its array reads
+the length from its own storage, which the loop writes through the cursor; once the clone is
+borrowed, it reads the unchanged source instead.
 
 `mir::pass::will_return` derives that metadata once from raw MIR and caches it with the module's
 artifacts. Its initial proof is intentionally small: a script body is proved only when its reachable

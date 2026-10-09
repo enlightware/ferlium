@@ -523,26 +523,6 @@ pub(crate) fn optimize_function(
         stats.bounds_checks_removed += removed;
         current = Some(rewritten);
     }
-    // Hoist initialized copyable reads and terminating pure direct calls into a natural loop's
-    // unique preheader. Calls require invariant passive inputs and `TrivialCopy` result storage.
-    // Empty effects exclude source-visible failure and mutation; the raw-MIR summary separately
-    // proves that speculation preserves termination.
-    // Reads use the shared root-access and storage-lifetime proofs. No operation is added.
-    let source = current.as_ref().unwrap_or(function);
-    if let Some(hoisted) = licm::hoist_loop_invariants(
-        source,
-        env,
-        &will_return,
-        &|callee| {
-            context
-                .known_callees
-                .resolve(callee, callees.original_of())
-                .is_some_and(known_callee::KnownCallee::is_optimization_barrier)
-        },
-        &|callee| callees.addressor_summary(callee),
-    ) {
-        current = Some(hoisted);
-    }
     // Inlining substitutes the caller's throwaway result allocation for the callee's `@ret`. For
     // an unread `TrivialCopy` result, remove that complete write-only place tree while retaining
     // the inlined body's effects. Representation cleanup then collects the variant shells, loads
@@ -596,6 +576,28 @@ pub(crate) fn optimize_function(
         callees.addressor_summary(callee)
     }) {
         current = Some(moved);
+    }
+    // Hoist initialized copyable reads and terminating pure direct calls into a natural loop's
+    // unique preheader. Calls require invariant passive inputs and `TrivialCopy` result storage.
+    // Empty effects exclude source-visible failure and mutation; the raw-MIR summary separately
+    // proves that speculation preserves termination.
+    // Reads use the shared root-access and storage-lifetime proofs. No operation is added.
+    // Run after the passes that remove writes and copies: a loop reading a borrowed clone reads
+    // its unchanged source, while the clone's destination shared its product with written fields.
+    let source = current.as_ref().unwrap_or(function);
+    if let Some(hoisted) = licm::hoist_loop_invariants(
+        source,
+        env,
+        &will_return,
+        &|callee| {
+            context
+                .known_callees
+                .resolve(callee, callees.original_of())
+                .is_some_and(known_callee::KnownCallee::is_optimization_barrier)
+        },
+        &|callee| callees.addressor_summary(callee),
+    ) {
+        current = Some(hoisted);
     }
     // Cleanup runs once, after the rounds have settled, and on every body rather than only on one a
     // pass changed. A specialization arrives already carrying dead code — substitution turns its
@@ -771,6 +773,20 @@ mod tests {
         assert!(
             !caller.contains("br b"),
             "the spliced pieces must be merged back into one block:\n{caller}"
+        );
+    }
+
+    /// LICM runs after clone borrowing. Before it, the iterator reads the length from its clone of
+    /// the array, in the product whose cursor the loop writes, so the read stays in the loop.
+    #[test]
+    fn an_array_loop_reads_the_borrowed_length_before_the_loop() {
+        let module =
+            optimized("fn sum(x: [int]) -> int { let mut s = 0; for a in x { s += a }; s }");
+        let body = body_of(&module, "sum").split("\nfn ").next().unwrap();
+        let entry = body.split("\n  b1:").next().unwrap();
+        assert!(
+            entry.contains("from %p0\n") && entry.contains("memcpy"),
+            "the length of the borrowed array must be copied in the entry block:\n{body}"
         );
     }
 
