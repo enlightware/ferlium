@@ -4615,7 +4615,9 @@ fn wasm_codegen_stackifies_across_elided_stack_markers() {
     let mut session = CompilerSession::new();
     let entry = compile(
         &mut session,
-        "fn add_one(x: int) -> int { x + 1 }
+        // The inlined body's mutable local keeps it bracketed by stack markers; a scalar argument
+        // alone no longer needs a scoped temporary.
+        "fn add_one(x: int) -> int { let mut r = x; r += 1; r }
          fn compute(x: int, y: int) -> bool {
              let sum = add_one(x); let scaled = sum * 2; scaled == y
          }",
