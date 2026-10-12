@@ -50,20 +50,25 @@
 //! may change or release storage. A write is harmless only to an unaliased `float` cell that no
 //! earlier tree operation reads, since those that read it later saw the new value in the original
 //! too. Otherwise each tree operation copies its inputs to snapshots where it stood, and both paths
-//! read those. The rewrite allocates its cells in the entry block, below every stack region a tree
-//! spans, such as an inlined callee's.
+//! read those. An input passed as a value was read where it stood, so it needs no snapshot; but a
+//! raw operation reads a `float` only through a place, so the fast path stores it into a cell there.
+//! When the value is a load only the tree reads, from a place nothing changes before the root, the
+//! load moves to the slow path instead and the fast path reads the place. The rewrite allocates its
+//! cells in the entry block, below every stack region a tree spans, such as an inlined callee's.
 //!
 //! **Final bodies only.** Physical expansion runs the pass on optimized bodies. Semantic MIR, which
 //! callers inline, keeps its saturating trees, so an inlined tree joins its caller's.
 
-use std::mem;
+use std::{cell::OnceCell, mem};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     mir::{
         self, BlockId, DebugLocation, Function, Operation, OperationKind, ValueId,
-        edit::FunctionEdit, terminator::Terminator,
+        edit::FunctionEdit,
+        role::{MirType, ValueRole, ValueRoles},
+        terminator::Terminator,
     },
     module::{FunctionId, ModuleEnv},
     std::{
@@ -94,7 +99,8 @@ impl Arithmetic {
 }
 
 /// Function-wide facts about registers, which the tree conditions are phrased in.
-struct Registers {
+struct Registers<'a> {
+    func: &'a Function,
     /// How many times each register appears as an operand, anywhere in the function.
     uses: FxHashMap<ValueId, usize>,
     /// The type each `alloca` register allocates.
@@ -103,24 +109,33 @@ struct Registers {
     /// projection, a call argument other than float arithmetic's, and so on. Only through such a
     /// use can an alias of an allocation come to exist.
     escaped: FxHashSet<ValueId>,
+    /// The place each `load` register was read from.
+    loads: FxHashMap<ValueId, mir::Value>,
+    /// The roles of `func`'s registers, derived once a tree needs to tell a value from a place.
+    roles: OnceCell<ValueRoles>,
 }
 
-impl Registers {
+impl<'a> Registers<'a> {
     fn of(
-        edit: &FunctionEdit,
+        func: &'a Function,
         known: &KnownCallees,
         original_of: &impl Fn(FunctionId) -> Option<FunctionId>,
     ) -> Self {
         let mut uses = FxHashMap::default();
         let mut allocas = FxHashMap::default();
         let mut escaped = FxHashSet::default();
-        for block in edit.blocks() {
-            let block = edit.block(block);
-            for operation in &block.operations {
-                if let (OperationKind::Alloca { ty }, Some(id)) =
-                    (&operation.kind, operation.result_id())
-                {
-                    allocas.insert(id, *ty);
+        let mut loads = FxHashMap::default();
+        for block in func.blocks() {
+            let block = func.block(block);
+            for operation in block.operations() {
+                match (&operation.kind, operation.result_id()) {
+                    (OperationKind::Alloca { ty }, Some(id)) => {
+                        allocas.insert(id, *ty);
+                    }
+                    (OperationKind::Load, Some(id)) => {
+                        loads.insert(id, operation.operands[0].clone());
+                    }
+                    _ => {}
                 }
                 count_uses(&mut uses, &operation.operands);
                 let is_arithmetic = arithmetic(operation, known, original_of).is_some();
@@ -135,17 +150,44 @@ impl Registers {
                     }
                 }
             }
-            count_uses(&mut uses, block.terminator.operands());
-            for operand in block.terminator.operands() {
+            count_uses(&mut uses, block.terminator().operands());
+            for operand in block.terminator().operands() {
                 if let mir::Value::Register(id) = operand {
                     escaped.insert(*id);
                 }
             }
         }
         Self {
+            func,
             uses,
             allocas,
             escaped,
+            loads,
+            roles: OnceCell::new(),
+        }
+    }
+
+    /// Whether `value` is a value rather than a place.
+    fn is_value(&self, value: &mir::Value) -> bool {
+        match value {
+            mir::Value::Register(_) => self
+                .roles
+                .get_or_init(|| ValueRoles::derive(self.func))
+                .get(value, self.func.constants())
+                .is_some_and(|role| matches!(*role, ValueRole::Materialized(MirType::Lowered(_)))),
+            mir::Value::Constant(_) => true,
+            _ => false,
+        }
+    }
+
+    /// The intermediate `input` reads: the cell itself, or the cell a `load` used only by `input`'s
+    /// reader read.
+    fn read_cell(&self, input: &mir::Value) -> mir::Value {
+        match input {
+            mir::Value::Register(id) if self.uses.get(id) == Some(&1) => {
+                self.loads.get(id).cloned().unwrap_or_else(|| input.clone())
+            }
+            _ => input.clone(),
         }
     }
 
@@ -162,7 +204,8 @@ impl Registers {
     }
 
     /// Whether `value` can be a tree intermediate: a whole `float` allocation used exactly twice,
-    /// by the operation writing it and the one reading it, which therefore nothing aliases.
+    /// by the operation writing it and the one reading it, either an operation or a `load` whose
+    /// value only that operation reads. Nothing therefore aliases it.
     fn is_intermediate_candidate(&self, value: &mir::Value) -> bool {
         self.is_float_alloca(value)
             && matches!(value, mir::Value::Register(id) if self.uses.get(id) == Some(&2))
@@ -207,7 +250,8 @@ fn arithmetic(
     })
 }
 
-/// A tree found in one block, in operation order, its root last.
+/// A tree found in one block, in operation order, its root last. Its members are its arithmetic
+/// and the loads that read its intermediates.
 struct Tree {
     members: Vec<usize>,
 }
@@ -226,6 +270,13 @@ fn find_tree(
     // An intermediate is produced and consumed by arithmetic in this block, in that order. Its use
     // count makes both unique.
     let mut producers = FxHashMap::default();
+    // The position of each load, by its register.
+    let positions: FxHashMap<_, _> = operations
+        .iter()
+        .enumerate()
+        .filter(|(_, operation)| operation.kind == OperationKind::Load)
+        .filter_map(|(index, operation)| Some((operation.result_id()?, index)))
+        .collect();
     let mut children: Vec<Vec<usize>> = vec![Vec::new(); operations.len()];
     let mut consumed = vec![false; operations.len()];
     for (index, operation) in arithmetic.iter().enumerate() {
@@ -233,10 +284,21 @@ fn find_tree(
             continue;
         };
         for input in &operation.inputs {
-            if let Some(&producer) = producers.get(input) {
-                children[index].push(producer);
-                consumed[producer] = true;
-            }
+            let cell = registers.read_cell(input);
+            let Some(&producer) = producers.get(&cell) else {
+                continue;
+            };
+            // A value read from the intermediate brings its load, which lies between the two.
+            let load = match input {
+                mir::Value::Register(id) if cell != *input => match positions.get(id) {
+                    Some(&load) if load > producer => Some(load),
+                    _ => continue,
+                },
+                _ => None,
+            };
+            children[index].push(producer);
+            children[index].extend(load);
+            consumed[producer] = true;
         }
         if registers.is_intermediate_candidate(&operation.output) {
             producers.insert(operation.output.clone(), index);
@@ -254,7 +316,11 @@ fn find_tree(
             members.sort_unstable();
             let overflowing = members
                 .iter()
-                .filter(|&&index| arithmetic[index].as_ref().unwrap().overflows())
+                .filter(|&&index| {
+                    arithmetic[index]
+                        .as_ref()
+                        .is_some_and(Arithmetic::overflows)
+                })
                 .count();
             (overflowing >= MIN_OVERFLOWING_OPERATIONS).then_some(Tree { members })
         })
@@ -280,9 +346,7 @@ fn needs_snapshots(
             .take_while(|&&member| member < index)
             .any(|&member| {
                 arithmetic(&operations[member], known, original_of)
-                    .unwrap()
-                    .inputs
-                    .contains(place)
+                    .is_some_and(|arithmetic| arithmetic.inputs.contains(place))
             })
     };
     (members[0]..root)
@@ -358,6 +422,63 @@ fn speculate(
     let original: Vec<_> = operations.by_ref().take(root + 1).collect();
     let rest: Vec<_> = operations.collect();
     let span = original[root].span;
+    // An input read by a load that only the tree reads, from a place nothing changes before the
+    // root, is read from that place: the load moves to the slow path, and the fast path reads the
+    // place, as both did when the tree took the place itself.
+    // Before the root, an operation writes nothing, writes only an unaliased `float` cell, or may
+    // change anything. A place is unchanged after a position if neither the last of the latter nor
+    // the last write to it follow that position.
+    let mut barrier = None;
+    let mut last_writes = FxHashMap::default();
+    let mut positions = FxHashMap::default();
+    for (index, operation) in original[..root].iter().enumerate() {
+        let written = match operation.kind {
+            OperationKind::Alloca { .. }
+            | OperationKind::CompareEqual
+            | OperationKind::Subfield { .. }
+            | OperationKind::StackSave => None,
+            OperationKind::Load => {
+                positions.extend(operation.result_id().map(|id| (id, index)));
+                None
+            }
+            OperationKind::Store | OperationKind::Memcpy => Some(operation.operands[1].clone()),
+            _ => match arithmetic(operation, known, original_of) {
+                Some(arithmetic) => Some(arithmetic.output),
+                None => {
+                    barrier = Some(index);
+                    None
+                }
+            },
+        };
+        if let Some(written) = written {
+            if registers.is_unaliased_float_cell(&written) {
+                last_writes.insert(written, index);
+            } else {
+                barrier = Some(index);
+            }
+        }
+    }
+    let unchanged_after = |place: &mir::Value, at: usize| {
+        barrier.is_none_or(|barrier| barrier < at)
+            && last_writes.get(place).is_none_or(|&write| write < at)
+    };
+    let deferred: FxHashMap<mir::Value, mir::Value> = tree
+        .members
+        .iter()
+        .filter_map(|&member| arithmetic(&original[member], known, original_of))
+        .flat_map(|arithmetic| arithmetic.inputs)
+        .filter_map(|input| {
+            let mir::Value::Register(id) = input else {
+                return None;
+            };
+            let place = registers.loads.get(&id)?;
+            let at = *positions.get(&id)?;
+            (registers.uses.get(&id) == Some(&1)
+                && tree.members.binary_search(&at).is_err()
+                && unchanged_after(place, at))
+            .then(|| (input, place.clone()))
+        })
+        .collect();
 
     // The tree leaves the head, where only its snapshots remain, and both paths run at the root.
     // The fast path reads its `float` inputs as raw floats, which they refine.
@@ -370,15 +491,45 @@ fn speculate(
     let mut members = tree.members.iter().peekable();
     for (index, mut operation) in original.into_iter().enumerate() {
         if members.next_if(|&&member| member == index).is_none() {
-            head.push(operation);
+            if operation
+                .result_id()
+                .is_some_and(|id| deferred.contains_key(&mir::Value::Register(id)))
+            {
+                slow.push(operation);
+            } else {
+                head.push(operation);
+            }
             continue;
         }
-        let arithmetic = arithmetic(&operation, known, original_of).unwrap();
+        // A read of an intermediate stays with its reader on the slow path; the fast path reads
+        // the raw intermediate instead.
+        let Some(arithmetic) = arithmetic(&operation, known, original_of) else {
+            let intermediate = raw[&operation.operands[0]].clone();
+            raw.insert(
+                mir::Value::Register(operation.result_id().unwrap()),
+                intermediate,
+            );
+            slow.push(operation);
+            continue;
+        };
         let mut arguments = Vec::with_capacity(arithmetic.inputs.len());
         for (position, input) in arithmetic.inputs.into_iter().enumerate() {
-            // A later tree operation names an intermediate by its saturating place.
+            // A later tree operation names an intermediate by its saturating place, or by the
+            // value read from it.
             if let Some(intermediate) = raw.get(&input) {
                 arguments.push(intermediate.clone());
+                continue;
+            }
+            if let Some(place) = deferred.get(&input) {
+                arguments.push(place.clone());
+                continue;
+            }
+            // A raw operation reads a `float` as a `raw_float` only through a place, which a value
+            // is stored into where the tree stood: that is a snapshot already.
+            if registers.is_value(&input) {
+                let cell = fresh_cell(edit, cells, span, float_type());
+                head.push(Operation::store(span, input, cell.clone()));
+                arguments.push(cell);
                 continue;
             }
             if snapshots && matches!(input, mir::Value::Register(_) | mir::Value::Parameter(_)) {
@@ -436,6 +587,9 @@ fn speculate(
     // The slow path writes its intermediates to fresh cells: their original ones may lie in a
     // stack region released before the root, and nothing else reads them.
     for index in 0..slow.len() - 1 {
+        if slow[index].kind == OperationKind::Load {
+            continue;
+        }
         let output = slow[index].operands.last().unwrap().clone();
         let fresh = fresh_cell(edit, cells, span, float_type());
         for operation in &mut slow[index..] {
@@ -477,7 +631,7 @@ pub(crate) fn speculate_float_trees(
     // The original use counts describe the trees of the blocks still to scan: a rewrite leaves the
     // operations after its root untouched, and its own operations use only fresh registers besides
     // the tree's inputs, which are no intermediates there.
-    let registers = Registers::of(&edit, known, original_of);
+    let registers = Registers::of(func, known, original_of);
     let mut cells = Vec::new();
     let mut pending: Vec<_> = edit.blocks().collect();
     while let Some(block) = pending.pop() {
@@ -517,7 +671,10 @@ mod tests {
     use crate::{
         CompilerSession, MirOptimization,
         format::FormatWith,
-        mir::{Operation, OperationKind, edit::FunctionEdit, pass::scalar_arguments},
+        mir::{
+            Operation, OperationKind, edit::FunctionEdit, pass::scalar_arguments,
+            physical::transport::Transports,
+        },
         module::Path,
         std::math::float_type,
     };
@@ -610,18 +767,20 @@ mod tests {
             .expect_fresh_module(module)
             .get_local_function_id("f".into())
             .unwrap();
-        let source = session
+        let artifacts = session
             .mir_artifacts_for(module, MirOptimization::Enabled)
-            .unwrap()
-            .get(entry)
             .unwrap();
+        let source = artifacts.get(entry).unwrap();
         let env = session
             .modules()
             .env_for(session.expect_fresh_module(module));
-        // Speculation runs in physical lowering, after scalar value arguments are passed as places
-        // again.
-        let source =
-            scalar_arguments::spill_value_arguments(source).unwrap_or_else(|| source.clone());
+        // Speculation runs in physical lowering, after scalar value arguments the callee takes
+        // through a pointer are passed as places again.
+        let transports = Transports::of(source, artifacts, env);
+        let source = scalar_arguments::spill_value_arguments(source, |call, offset| {
+            transports.takes_value(call, offset)
+        })
+        .unwrap_or_else(|| source.clone());
         // Give the tuple an explicit scoped lifetime, as inlining does. Keep arithmetic result
         // cells outside that region so the original body remains valid after its restoration.
         let mut edit = FunctionEdit::new(source.clone());
@@ -655,13 +814,15 @@ mod tests {
         let rendered = speculated.format_with(&env).to_string();
         let body = rendered.as_str();
         assert_eq!(count(body, "raw_float_is_finite"), 1, "{body}");
+        // The two inputs read from the released tuple are kept in cells before its release; the
+        // parameters stay where they are.
         let restore = body.find("stack_restore").expect(body);
-        let snapshots = body[..restore].matches("memcpy").count();
-        assert_eq!(snapshots, 4, "{body}");
+        let snapshots = body[..restore].matches("store %r").count();
+        assert_eq!(snapshots, 2, "{body}");
     }
 
     /// A write between the tree's operations to an input an earlier one read changes what the
-    /// root would read: the tree reads the input through a snapshot taken before the write.
+    /// root would read: the tree reads the value read before the write, kept in a cell.
     #[test]
     fn inputs_written_before_the_root_are_snapshotted() {
         let module = optimized(
@@ -671,8 +832,13 @@ mod tests {
         assert_eq!(count(body, "raw_float_is_finite"), 1, "{body}");
         let store = body.find("store @").expect(body);
         let written = body[store..].split_whitespace().nth(3).unwrap();
+        let read = body[..store]
+            .lines()
+            .find(|line| line.ends_with(&format!("= load {written}")))
+            .expect(body);
+        let value = read.split(':').next().unwrap().trim();
         assert!(
-            body[..store].contains(&format!("memcpy {written} to")),
+            body[..store].contains(&format!("store {value} to")),
             "{body}"
         );
     }

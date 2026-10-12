@@ -884,38 +884,63 @@ mod tests {
         );
     }
 
-    /// A comparison's result passed to a retained call is a value no `load` defines. Physical
-    /// lowering must still bind it to a place.
-    #[test]
-    fn a_computed_boolean_argument_is_passed_as_a_place_after_lowering() {
+    /// The physical MIR of `source`'s `negated`, which passes a comparison's result, a value no
+    /// `load` defines, to a retained call; and that call's argument.
+    fn computed_boolean_argument(source: &str, callee: &str) -> (String, String) {
         let mut session = CompilerSession::new();
         session.set_mir_optimization(MirOptimization::Enabled);
         session.set_physical_mir_optimization(MirOptimization::Enabled);
         let module = session
             .compile(
-                "#[inline(never)]\n\
-                 fn pick(b: bool) -> int { if b { 1 } else { 2 } }\n\
-                 pub fn negated(x: bool) -> int { pick(not x) }",
+                source,
                 "computed_boolean",
                 Path::single_str("computed_boolean"),
             )
             .unwrap()
             .module_id;
         let physical = session.emit_physical_mir_module(module).unwrap();
-        let body = body_of(&physical, "negated").split("\nfn ").next().unwrap();
+        let body = body_of(&physical, "negated")
+            .split("\nfn ")
+            .next()
+            .unwrap()
+            .to_string();
+        let call = format!("call {callee}(");
         assert!(
-            body.contains("comp_eq") && body.contains("call computed_boolean::pick(%r"),
+            body.contains("comp_eq") && body.contains(&call),
             "the test needs `not x` computed by a comparison and the call retained:\n{body}"
         );
-        let call = body
+        let argument = body
             .lines()
-            .find(|line| line.contains("call computed_boolean::pick("))
-            .unwrap();
-        let argument = call
-            .split("pick(")
-            .nth(1)
-            .and_then(|rest| rest.split(',').next())
-            .unwrap();
+            .find_map(|line| line.split(&call).nth(1))
+            .and_then(|rest| rest.split([',', ')']).next())
+            .unwrap()
+            .to_string();
+        (body, argument)
+    }
+
+    /// A direct entry takes a scalar as a value, so physical MIR passes it one.
+    #[test]
+    fn a_computed_boolean_argument_stays_a_value_for_a_direct_entry() {
+        let (body, argument) = computed_boolean_argument(
+            "#[inline(never)]\n\
+             fn pick(b: bool) -> int { if b { 1 } else { 2 } }\n\
+             pub fn negated(x: bool) -> int { pick(not x) }",
+            "computed_boolean::pick",
+        );
+        assert!(
+            body.contains(&format!("{argument}: bool")),
+            "the argument must be a value:\n{body}"
+        );
+    }
+
+    /// A stored callable's uniform entry takes every argument through a pointer, so physical
+    /// lowering binds the value to a place.
+    #[test]
+    fn a_computed_boolean_argument_is_passed_as_a_place_to_a_callable() {
+        let (body, argument) = computed_boolean_argument(
+            "pub fn negated(f: (bool) -> int, x: bool) -> int { f(not x) }",
+            "%p0",
+        );
         assert!(
             body.contains(&format!("{argument}: place bool")),
             "the argument must be a place:\n{body}"

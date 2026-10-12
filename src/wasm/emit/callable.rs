@@ -630,7 +630,7 @@ impl Body<'_, '_> {
             ..memarg(2)
         }));
         for input in inputs {
-            self.address(input)?;
+            self.argument_address(input)?;
         }
         self.address(output.ok_or("stored callable requires result storage")?)?;
         self.address(selected)?;

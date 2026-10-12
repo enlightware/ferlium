@@ -2852,34 +2852,29 @@ fn wasm_codegen_rematerializes_immutable_scalar_literals() {
         );
         let physical = session.prepare_physical_program(entry.module).unwrap();
         let body = physical.function(entry).unwrap();
+        // Physical MIR passes each literal itself to the direct arithmetic entry, which the
+        // emitter must then materialize where it is read, not park in frame storage or a local.
         for coefficient in [0.75_f64, 0.25, 0.125] {
             assert!(
                 body.blocks().any(|block| {
-                    body.block(block).operations().iter().any(|store| {
-                        let [MirValue::Constant(id), place] = &*store.operands else {
+                    body.block(block).operations().iter().any(|call| {
+                        let OperationKind::Call { ty, .. } = &call.kind else {
                             return false;
                         };
-                        matches!(store.kind, OperationKind::Store)
-                            && body
-                                .constant(*id)
-                                .representation
-                                .as_primitive_ty::<Float>()
-                                .is_some_and(|value| {
-                                    value.into_inner().to_bits() == coefficient.to_bits()
-                                })
-                            && body.blocks().any(|block| {
-                                body.block(block).operations().iter().any(|call| {
-                                    let OperationKind::Call { ty, .. } = &call.kind else {
-                                        return false;
-                                    };
-                                    let end = call.operands.len()
-                                        - usize::from(ty.result_convention.has_result_place());
-                                    call.operands[1..end].contains(place)
-                                })
-                            })
+                        let end = call.operands.len()
+                            - usize::from(ty.result_convention.has_result_place());
+                        call.operands[1..end].iter().any(|operand| {
+                            matches!(operand, MirValue::Constant(id) if body
+                            .constant(*id)
+                            .representation
+                            .as_primitive_ty::<Float>()
+                            .is_some_and(|value| {
+                                value.into_inner().to_bits() == coefficient.to_bits()
+                            }))
+                        })
                     })
                 }),
-                "{optimization:?}: fixture must retain a coefficient place for {coefficient}"
+                "{optimization:?}: fixture must pass coefficient {coefficient} to a call"
             );
         }
         let code = CompiledProgram::compile(&session, entry).unwrap();
@@ -2953,7 +2948,7 @@ fn wasm_codegen_keeps_mutated_and_addressed_scalar_literals() {
 #[wasm_bindgen_test]
 fn wasm_codegen_integer_bits_specialize_literal_counts_and_positions() {
     let mut session = CompilerSession::new();
-    // Normal optimization leaves literal arguments in single-store temporary places.
+    // Physical optimization passes literal arguments of direct entries as constants.
     for (expression, expected, mask) in [
         ("shift_left(x + 1, 0)", -8, false),
         ("shift_left(x + 1, 3)", -64, false),
@@ -2990,20 +2985,13 @@ fn wasm_codegen_integer_bits_specialize_literal_counts_and_positions() {
         if expression == "shift_left(x + 1, 3)" {
             let program = session.prepare_physical_program(entry.module).unwrap();
             let body = program.function(entry).unwrap();
-            // Confirm that this case exercises a literal stored in a place, rather than a
-            // constant passed directly to the shift.
+            // Confirm that this case exercises a literal count passed to the shift.
             assert!(body.blocks().any(|block| {
-                let operations = body.block(block).operations();
-                operations.iter().enumerate().any(|(index, store)| {
-                    let Some(MirValue::Constant(id)) = store.operands.first() else {
-                        return false;
-                    };
-                    matches!(store.kind, OperationKind::Store)
-                        && body.constant(*id).representation.as_primitive_ty::<isize>() == Some(&3)
-                        && operations[index + 1..].iter().any(|call| {
-                            matches!(call.kind, OperationKind::Call { .. })
-                                && call.operands.get(2) == store.operands.get(1)
-                        })
+                body.block(block).operations().iter().any(|call| {
+                    matches!(call.kind, OperationKind::Call { .. })
+                        && matches!(call.operands.get(2), Some(MirValue::Constant(id))
+                            if body.constant(*id).representation.as_primitive_ty::<isize>()
+                                == Some(&3))
                 })
             }));
         }

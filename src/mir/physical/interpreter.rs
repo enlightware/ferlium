@@ -1618,12 +1618,25 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 if ty.result_convention == CallResultConvention::NoValue {
                     callable.function = self.program.direct_entry(callable.function);
                 }
-                let values = operation.operands[1..]
+                let mut values = operation.operands[1..]
                     .iter()
                     .map(|value| self.operand(body, args, registers, value))
                     .collect::<Result<Vec<_>, _>>()?;
-                self.invoke(callable, values)
-                    .map_err(|error| error.with_frame(id, operation.span.location))?;
+                // The callee binds every parameter to a place: a scalar passed as a value gets a
+                // cell of its own for the call.
+                let marker = self.memory.len();
+                for value in &mut values {
+                    if let Binding::Scalar(scalar) = *value {
+                        let cell = self
+                            .memory
+                            .allocate(scalar.kind().ty(), Some(operation.span.location))?;
+                        self.memory.write(cell, scalar)?;
+                        *value = Binding::Place(cell);
+                    }
+                }
+                let result = self.invoke(callable, values);
+                self.memory.restore(marker);
+                result.map_err(|error| error.with_frame(id, operation.span.location))?;
                 None
             }
             DropInitialized { ty } => {

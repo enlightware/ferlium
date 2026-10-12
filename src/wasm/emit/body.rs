@@ -1365,7 +1365,7 @@ impl<'a, 's> Body<'a, 's> {
             self.i(I::LocalGet(helpers.get(DynamicBase).as_u32()));
             self.i(I::I32Const(i32::from(selected.materialized)));
             for input in inputs {
-                self.address(input)?;
+                self.argument_address(input)?;
             }
             self.i(I::LocalGet(helpers.get(DynamicSize).as_u32()));
             self.i(I::CallIndirect {
@@ -1449,7 +1449,7 @@ impl<'a, 's> Body<'a, 's> {
         self.i(I::LocalGet(helpers.get(DynamicBase).as_u32()));
         self.i(I::I32Const(i32::from(selected.materialized)));
         for input in inputs {
-            self.address(input)?;
+            self.argument_address(input)?;
         }
         self.i(I::LocalGet(helpers.get(Scratch).as_u32()));
         self.i(I::CallIndirect {
@@ -1674,7 +1674,7 @@ impl<'a, 's> Body<'a, 's> {
                 ParameterTransport::Direct(_) => {
                     self.read(input)?;
                 }
-                ParameterTransport::Indirect => self.address(input)?,
+                ParameterTransport::Indirect => self.argument_address(input)?,
             }
         }
         Ok(())
@@ -2633,6 +2633,19 @@ impl<'a, 's> Body<'a, 's> {
 
     fn fail(&mut self, code: FailureCode) {
         emit_failure(&mut self.code, self.imports.failure_function(), code);
+    }
+
+    /// Pushes the address of an argument its callee's entry takes through a pointer. Physical
+    /// lowering passes such an argument as a place, never as a value.
+    pub(super) fn argument_address(&mut self, value: &Value) -> Result<(), String> {
+        if self
+            .roles
+            .get(value, self.body.constants())
+            .is_some_and(|role| matches!(*role, ValueRole::Materialized(MirType::Lowered(_))))
+        {
+            return Err("value argument to an indirect parameter".into());
+        }
+        self.address(value)
     }
 
     pub(super) fn address(&mut self, value: &Value) -> Result<(), String> {

@@ -16,8 +16,9 @@ pub(crate) mod program;
 mod results;
 mod subscript;
 mod subscript_lifecycle;
+pub(crate) mod transport;
 
-use std::{cmp::Reverse, error::Error, fmt, slice::from_ref};
+use std::{cell::OnceCell, cmp::Reverse, error::Error, fmt, slice::from_ref};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use ustr::Ustr;
@@ -45,7 +46,7 @@ use crate::{
             physical::optimize,
             scalar_arguments, scalar_replace,
         },
-        role::{MirType, ValueRoles},
+        role::{MirType, ValueRole, ValueRoles},
         terminator::{Terminator, TerminatorKind},
         value::{ConstantId, StaticEvidence},
         verify::verify_physical_function,
@@ -89,6 +90,7 @@ use native::{NativeRequirementError, NativeRequirements};
 pub(crate) use results::{DirectEntries, is_zero_sized_result};
 use subscript::PhysicalSubscriptCatalog;
 pub(crate) use subscript::{PhysicalSubscriptDefinition, PhysicalSubscriptMember};
+use transport::Transports;
 
 /// Effect annotations do not distinguish stored values, including nested callable signatures.
 pub(super) fn same_storage_type(left: Type, right: Type) -> bool {
@@ -648,8 +650,12 @@ fn expand_physical_mir(
             let original = semantic
                 .specialization(local)
                 .map_or(function, |specialization| specialization.original);
-            // Physical MIR still binds every call argument to a place.
-            let body = scalar_arguments::spill_value_arguments(&body).unwrap_or(body);
+            // Physical MIR keeps a scalar value only where the callee's entry takes it directly.
+            let transports = Transports::of(&body, semantic, env);
+            let body = scalar_arguments::spill_value_arguments(&body, |call, offset| {
+                transports.takes_value(call, offset)
+            })
+            .unwrap_or(body);
             let body = if optimize_pre_expansion {
                 float_speculation::speculate_float_trees(
                     &body,
@@ -1119,6 +1125,9 @@ impl<'a> PhysicalLowerer<'a> {
             }
         }
 
+        // Only an expanded call reads its arguments' roles, which replacing a later candidate first
+        // leaves unchanged.
+        let roles = OnceCell::new();
         for (block, index, candidate) in candidates.into_iter().rev() {
             match candidate {
                 Candidate::Call(BufferPrimitive::Drop, mut operation) => {
@@ -1130,7 +1139,9 @@ impl<'a> PhysicalLowerer<'a> {
                     edit.replace_operation_sequence(block, index, [operation]);
                 }
                 Candidate::Call(callee, operation) => {
-                    let replacement = self.expand_buffer_call(function, callee, operation, edit)?;
+                    let roles = roles.get_or_init(|| edit.value_roles());
+                    let replacement =
+                        self.expand_buffer_call(function, callee, operation, edit, roles)?;
                     edit.replace_operation_sequence(block, index, replacement);
                 }
                 Candidate::Drop(mut operation) => {
@@ -1167,6 +1178,7 @@ impl<'a> PhysicalLowerer<'a> {
         callee: BufferPrimitive,
         operation: Operation,
         edit: &mut FunctionEdit,
+        roles: &ValueRoles,
     ) -> Result<Vec<Operation>, BackendReadinessError> {
         let expected = match callee {
             BufferPrimitive::Slot | BufferPrimitive::WithCapacity => 3,
@@ -1194,6 +1206,19 @@ impl<'a> PhysicalLowerer<'a> {
             _ => unreachable!("only Buffer callees reach Buffer expansion"),
         };
         let mut replacement = Vec::new();
+        // A scalar argument is passed as a value or, if the caller passed it through storage, read
+        // from its place.
+        let read = |edit: &mut FunctionEdit, replacement: &mut Vec<Operation>, index: usize| {
+            let argument = arguments[index].clone();
+            if roles
+                .get(&argument, edit.constants())
+                .is_some_and(|role| matches!(*role, ValueRole::Materialized(MirType::Lowered(_))))
+            {
+                argument
+            } else {
+                edit_result(edit, replacement, Operation::load(span, argument))
+            }
+        };
         match callee {
             BufferPrimitive::WithCapacity => {
                 let total = edit_int_binary(
@@ -1205,16 +1230,8 @@ impl<'a> PhysicalLowerer<'a> {
                     span,
                 );
                 let total = edit_result(edit, &mut replacement, Operation::load(span, total));
-                let align = edit_result(
-                    edit,
-                    &mut replacement,
-                    Operation::load(span, arguments[2].clone()),
-                );
-                let count = edit_result(
-                    edit,
-                    &mut replacement,
-                    Operation::load(span, arguments[0].clone()),
-                );
+                let align = read(edit, &mut replacement, 2);
+                let count = read(edit, &mut replacement, 0);
                 let allocation = edit_result(
                     edit,
                     &mut replacement,
@@ -1231,11 +1248,12 @@ impl<'a> PhysicalLowerer<'a> {
                 replacement.push(Operation::store(span, allocation, slot));
             }
             BufferPrimitive::Slot => {
+                let index = read(edit, &mut replacement, 1);
                 let address = edit_buffer_element_address(
                     edit,
                     &mut replacement,
                     arguments[0].clone(),
-                    arguments[1].clone(),
+                    index,
                     arguments[2].clone(),
                     element_ty,
                     self.known,
@@ -1245,22 +1263,19 @@ impl<'a> PhysicalLowerer<'a> {
                 replacement.push(Operation::store(span, address, destination));
             }
             BufferPrimitive::Take => {
+                let index = read(edit, &mut replacement, 1);
                 let address = edit_buffer_element_address(
                     edit,
                     &mut replacement,
                     arguments[0].clone(),
-                    arguments[1].clone(),
+                    index,
                     arguments[2].clone(),
                     element_ty,
                     self.known,
                     span,
                     self.env,
                 );
-                let size = edit_result(
-                    edit,
-                    &mut replacement,
-                    Operation::load(span, arguments[2].clone()),
-                );
+                let size = read(edit, &mut replacement, 2);
                 replacement.push(Operation::move_bytes(
                     span,
                     element_ty,
@@ -1286,13 +1301,7 @@ impl<'a> PhysicalLowerer<'a> {
                 let size = multiply(arguments[2].clone(), arguments[5].clone());
                 let source_offset = multiply(arguments[1].clone(), arguments[5].clone());
                 let target_offset = multiply(arguments[4].clone(), arguments[5].clone());
-                let mut load = |index: usize| {
-                    edit_result(
-                        edit,
-                        &mut replacement,
-                        Operation::load(span, arguments[index].clone()),
-                    )
-                };
+                let mut load = |index: usize| read(edit, &mut replacement, index);
                 let align = load(6);
                 let capacity = load(3);
                 let source_index = load(1);
@@ -1929,6 +1938,7 @@ fn edit_buffer_pointer_slot(
     )
 }
 
+/// The address of element `index`, a value, of `buffer`.
 #[allow(clippy::too_many_arguments)]
 fn edit_buffer_element_address(
     edit: &mut FunctionEdit,
@@ -1952,7 +1962,6 @@ fn edit_buffer_element_address(
         span,
     );
     let offset = edit_result(edit, operations, Operation::load(span, offset));
-    let index = edit_result(edit, operations, Operation::load(span, index));
     edit_result(
         edit,
         operations,

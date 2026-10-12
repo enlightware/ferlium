@@ -993,12 +993,13 @@ The value form then flows wherever the optimized body goes, including into calle
 so the passes read through it: folding and the integer relations take a value argument's fact as
 they take a place's, LICM admits a value defined outside the loop, and dead-call removal releases a
 load whose value only a removed call read. Inlining stores a value bound to a parameter into a
-fresh `alloca` after the inline marker. Physical lowering, whose interpreter and passes bind every
-argument to a place, first passes a value loaded right before its call as the place it was loaded
-from, and stores any other value, such as a hoisted load, into a frame slot of its own.
+fresh `alloca` after the inline marker. Physical lowering keeps a value where the callee's entry
+takes the argument directly, as the ABI does. Where the entry takes it through a pointer, such as
+a generic parameter or a stored callable, it passes a value loaded right before the call as the
+place it was loaded from, and stores any other value into a frame slot of its own.
 
-This is the first step of bringing the ABI's scalar values into semantic MIR. Results and
-physical MIR still use places.
+This is the first step of bringing the ABI's scalar values into MIR. Results and callee parameters
+still use places.
 
 ## Dead code elimination
 
@@ -1218,7 +1219,9 @@ fallback where the check provably guards it.
 **Decisions not to revisit.** The pass once ran in semantic MIR, but callers then inlined an already
 speculated body and speculated its slow path again. The raw operations read their `float` inputs
 directly, through the read-only refinement in `doc/mir-ir.md`: a separate widening operation was
-shared by CSE and kept the fast path off the Wasm stack. Merging the check and the conversion into
+shared by CSE and kept the fast path off the Wasm stack. The refinement applies to places, so an
+input passed as a value is read from the place it was loaded from when nothing changes that place
+before the root, and from a cell holding it otherwise. Merging the check and the conversion into
 one operation has no cheap MIR encoding: a mutable output must already be initialized, an optional
 result lives in memory on Wasm, and an `invoke` error edge may not rejoin. The backend's elision
 instead saves about 5% of the bytes of float-bound code. One check per block rather than per tree

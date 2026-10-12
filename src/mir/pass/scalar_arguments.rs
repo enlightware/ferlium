@@ -110,16 +110,20 @@ fn read_before(
     }
 }
 
-/// Passes every scalar value argument of a `call` as a place again, the inverse of
-/// [`read_scalar_arguments`], for consumers that bind every argument to a place, such as
-/// physical lowering. `None` if no call passes a value.
+/// Passes each scalar value argument of a `call` as a place again where `takes_value` says its
+/// callee's entry takes that argument through a pointer, the inverse of [`read_scalar_arguments`]
+/// there. `takes_value` is given the call and the argument's offset among the visible ones.
+/// `None` if no such argument is a value.
 ///
 /// A value loaded in the call's block, with nothing but other loads in between, is replaced by the
 /// place it was loaded from, and the load is dropped when nothing else reads it: the call reads
 /// that place as it did before normalization. Any other value, such as a load LICM hoisted, is
 /// stored into a frame slot of its own in the entry block, just before the call, which the Wasm
 /// emitter keeps in a local.
-pub(crate) fn spill_value_arguments(func: &Function) -> Option<Function> {
+pub(crate) fn spill_value_arguments(
+    func: &Function,
+    takes_value: impl Fn(&Operation, usize) -> bool,
+) -> Option<Function> {
     if !may_pass_values(func) {
         return None;
     }
@@ -132,7 +136,10 @@ pub(crate) fn spill_value_arguments(func: &Function) -> Option<Function> {
             - ty.fn_ty.args.len()
             - usize::from(ty.result_convention.has_result_place());
         (0..ty.fn_ty.args.len())
-            .filter(|&offset| accepts_value_argument(ty, metadata.as_deref(), offset))
+            .filter(|&offset| {
+                accepts_value_argument(ty, metadata.as_deref(), offset)
+                    && !takes_value(operation, offset)
+            })
             .map(|offset| visible_start + offset)
             .filter(|&index| {
                 roles

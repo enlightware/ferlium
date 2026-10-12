@@ -126,6 +126,11 @@ the call is equivalent to letting the callee read it through the place, since ov
 arguments are invalid. Whatever needs a place for such a value, such as inlining a body that reads
 its parameter as a place, stores it into one. Raw semantic MIR passes places only.
 
+Physical MIR keeps such a value only where the callee's entry takes the argument directly, as the
+ABI does: a static callee whose own parameter has that scalar type, or a trait method declared with
+it. An entry that takes the argument through a pointer, such as a generic parameter or a stored
+callable, receives a place, which physical lowering provides.
+
 `CallResultConvention` determines the result storage shape:
 
 - `Value`: the callee initializes `*T` through `@ret`;
