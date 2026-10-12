@@ -7,8 +7,9 @@ It aims at bringing the convenience of writing of Python, the safety of Rust, an
 It achieves so by borrowing the type system from Haskell, the syntax from Rust, and a simple mutable value semantics.
 
 ## Preferred Commands
-- Run all tests efficiently: `cargo nextest run`
+- Run all native tests efficiently: `cargo nextest run`
 - Also run test subsets with `nextest`: `cargo nextest run <substring>`
+- Run language tests under Wasm in Node: `make test-wasm-release`
 - Run the Rust linter: `cargo clippy`
 - Validate IDE Lezer grammar: `make validate-grammar` in `playground/`
 - Format the code: `cargo fmt`
@@ -18,6 +19,7 @@ It achieves so by borrowing the type system from Haskell, the syntax from Rust, 
 
 ## Workflow Rules
 - Follow the surrounding code's style; prefer Rust `use` imports over fully qualified paths.
+- **IF** you modify compiler behaviour, optimizations, runtime behaviour, or language tests, **THEN** run the relevant native tests and `make test-wasm-release`; native tests alone do not exercise the Wasm backend.
 - **IF** you modify the main parser file `src/parser.lalrpop`, **THEN** you must also update the IDE Lezer grammar file `playground/src/language/language.grammar` and validate it.
 - **IF** we agree to remove a feature, **THEN** you must **NOT** add a unit test to make sure that this feature is removed.
 - **IF** you modify compiler behaviour or language features, **THEN** update the documentation in `doc/` if necessary.
