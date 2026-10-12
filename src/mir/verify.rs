@@ -492,6 +492,9 @@ struct Verifier<'a> {
     roots: Vec<RootInfo>,
     root_index: FxHashMap<mir::Value, usize>,
     trivial_copy: FxHashMap<Type, bool>,
+    /// Semantic MIR passes a read-only concrete scalar argument as a value; physical MIR passes it
+    /// as a place where the callee's entry takes it through a pointer.
+    semantic: bool,
 }
 
 impl<'a> Verifier<'a> {
@@ -509,10 +512,12 @@ impl<'a> Verifier<'a> {
             roots: vec![],
             root_index: FxHashMap::default(),
             trivial_copy: FxHashMap::default(),
+            semantic: false,
         }
     }
 
     fn verify(mut self, semantic_storage: bool, roles: Option<ValueRoles>) {
+        self.semantic = semantic_storage;
         if semantic_storage {
             assert_ne!(
                 self.func.result_convention(),
@@ -964,6 +969,21 @@ impl<'a> Verifier<'a> {
                             .is_some_and(|metadata| metadata.owned_arguments.contains(offset));
                     let expected = MirType::Lowered(argument.ty);
                     if read_only && self.readable_as(&operands[index], &expected) {
+                        // A place of a refined type, such as `raw_float` read as `float`, is not
+                        // the value form's place: its value would not have the argument's type.
+                        assert!(
+                            !(self.semantic
+                                && accepts_value_argument(ty, metadata.as_deref(), offset)
+                                && self.place_pointee_type(&operands[index]) == Some(expected)),
+                            "MIR function `{}` node {}: scalar argument {} ({}) of type {} is \
+                             passed as a place instead of a value\n{}",
+                            self.func.name,
+                            node,
+                            offset,
+                            operands[index].format_with(&self.env),
+                            argument.ty.format_with(&self.env),
+                            self.func.format_with(&self.env)
+                        );
                         continue;
                     }
                     if let Some(role) = self.roles.get(&operands[index], self.func.constants())

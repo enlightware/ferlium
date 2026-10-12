@@ -650,12 +650,6 @@ fn expand_physical_mir(
             let original = semantic
                 .specialization(local)
                 .map_or(function, |specialization| specialization.original);
-            // Physical MIR keeps a scalar value only where the callee's entry takes it directly.
-            let transports = Transports::of(&body, semantic, env);
-            let body = scalar_arguments::spill_value_arguments(&body, |call, offset| {
-                transports.takes_value(call, offset)
-            })
-            .unwrap_or(body);
             let body = if optimize_pre_expansion {
                 float_speculation::speculate_float_trees(
                     &body,
@@ -680,6 +674,12 @@ fn expand_physical_mir(
             let body = drop_elaboration::elaborate(body, semantic, env, |variant, payload| {
                 lowerer.intern_variant_payload_release(variant, payload)
             });
+            // Physical MIR keeps a scalar value only where the callee's entry takes it directly.
+            let transports = Transports::of(&body, semantic, env);
+            let body = scalar_arguments::spill_value_arguments(&body, |call, offset| {
+                transports.takes_value(call, offset)
+            })
+            .unwrap_or(body);
             let body = lowerer.lower_body(function, original, body)?;
             *entry = Some(
                 if lowerer.known.resolve(original, |_| None) == Some(KnownCallee::BlackBox) {

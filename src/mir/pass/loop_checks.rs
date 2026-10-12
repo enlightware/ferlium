@@ -56,7 +56,7 @@ use crate::{
     },
     types::{
         effects::{Effect, PrimitiveEffect},
-        r#type::Type,
+        r#type::{CallImplType, Type},
     },
 };
 
@@ -749,38 +749,72 @@ impl Emitter<'_, '_> {
             .expect("an alloca has a result")
     }
 
-    fn store(&mut self, ty: Type, value: LiteralValue) -> mir::Value {
-        let place = self.place(ty);
-        let constant = self.edit.add_constant(ty, value, &self.env);
-        self.edit.append_operation(
-            self.block,
-            Operation::store(self.span, mir::Value::Constant(constant), place.clone()),
-        );
-        place
+    fn literal(&mut self, ty: Type, value: LiteralValue) -> mir::Value {
+        mir::Value::Constant(self.edit.add_constant(ty, value, &self.env))
     }
 
     fn constant(&mut self, value: Int) -> mir::Value {
-        self.store(int_type(), LiteralValue::new_native(value))
+        self.literal(int_type(), LiteralValue::new_native(value))
     }
 
     fn boolean(&mut self, value: bool) -> mir::Value {
-        self.store(bool_type(), LiteralValue::new_native(value))
+        self.literal(bool_type(), LiteralValue::new_native(value))
     }
 
-    /// A place holding `source`'s quantity.
+    fn load(&mut self, place: mir::Value) -> mir::Value {
+        self.edit
+            .append_operation(self.block, Operation::load(self.span, place))
+            .expect("a load defines its value")
+    }
+
+    /// Calls the known `int` operation `(callee, ty)` on `left` and `right`, returning its result.
+    fn call(
+        &mut self,
+        (callee, ty): (FunctionId, &CallImplType),
+        left: mir::Value,
+        right: mir::Value,
+    ) -> mir::Value {
+        let result = self.place(int_type());
+        self.edit.append_operation(
+            self.block,
+            Operation::call(
+                self.span,
+                mir::Value::Function(callee),
+                [left, right, result.clone()],
+                ty.clone(),
+            ),
+        );
+        self.load(result)
+    }
+
+    /// `source`'s quantity.
     fn source(&mut self, source: &Source) -> mir::Value {
         match source {
-            Source::Holder(Holder::Place(place)) => place.clone(),
-            Source::Holder(Holder::Value(value)) => {
-                let place = self.place(int_type());
-                self.edit.append_operation(
-                    self.block,
-                    Operation::store(self.span, value.clone(), place.clone()),
-                );
-                place
+            Source::Holder(Holder::Value(value)) => value.clone(),
+            Source::Holder(Holder::Place(_)) | Source::Field(..) => {
+                let place = self.source_place(source);
+                self.load(place)
             }
+            Source::Computed(known, operands) => {
+                let [left, right] = &**operands;
+                let left = self.quantity(left);
+                let right = self.quantity(right);
+                let callee = match known {
+                    KnownCallee::IntAdd => self.known.int_add(),
+                    KnownCallee::IntSub => self.known.int_sub(),
+                    _ => self.known.int_mul(),
+                };
+                self.call(callee, left, right)
+            }
+        }
+    }
+
+    /// A place holding `source`, which a field projects from.
+    fn source_place(&mut self, source: &Source) -> mir::Value {
+        match source {
+            Source::Holder(Holder::Place(place)) => place.clone(),
             Source::Field(operation, base) => {
-                let base = self.source(base);
+                let base = self.source_place(base);
                 let (kind, operands) = operation.kind_and_operands();
                 let mut operands: Box<[mir::Value]> = operands.into();
                 operands[0] = base;
@@ -789,65 +823,33 @@ impl Emitter<'_, '_> {
                     .append_operation(self.block, projection)
                     .expect("a projection has a result")
             }
-            Source::Computed(known, operands) => {
-                let [left, right] = &**operands;
-                let left = self.quantity(left);
-                let right = self.quantity(right);
-                let (callee, ty) = match known {
-                    KnownCallee::IntAdd => self.known.int_add(),
-                    KnownCallee::IntSub => self.known.int_sub(),
-                    _ => self.known.int_mul(),
-                };
-                let result = self.place(int_type());
+            Source::Holder(Holder::Value(_)) | Source::Computed(..) => {
+                let value = self.source(source);
+                let place = self.place(int_type());
                 self.edit.append_operation(
                     self.block,
-                    Operation::call(
-                        self.span,
-                        mir::Value::Function(callee),
-                        [left, right, result.clone()],
-                        ty.clone(),
-                    ),
+                    Operation::store(self.span, value, place.clone()),
                 );
-                result
+                place
             }
         }
     }
 
-    /// A place holding `quantity`, reusing a source's place when the quantity is exactly it.
+    /// `quantity`'s value, reusing a source's value when the quantity is exactly it.
     fn quantity(&mut self, quantity: &Materialized) -> mir::Value {
         if let [(source, 1)] = quantity.terms.as_slice()
             && quantity.constant == 0
         {
             return self.source(source);
         }
-        let sum = self.constant(quantity.constant);
+        let mut sum = self.constant(quantity.constant);
         for (source, coefficient) in &quantity.terms {
             let mut term = self.source(source);
             if *coefficient != 1 {
                 let factor = self.constant(*coefficient);
-                let product = self.place(int_type());
-                let (callee, ty) = self.known.int_mul();
-                self.edit.append_operation(
-                    self.block,
-                    Operation::call(
-                        self.span,
-                        mir::Value::Function(callee),
-                        [term, factor, product.clone()],
-                        ty.clone(),
-                    ),
-                );
-                term = product;
+                term = self.call(self.known.int_mul(), term, factor);
             }
-            let (callee, ty) = self.known.int_add();
-            self.edit.append_operation(
-                self.block,
-                Operation::call(
-                    self.span,
-                    mir::Value::Function(callee),
-                    [sum.clone(), term, sum.clone()],
-                    ty.clone(),
-                ),
-            );
+            sum = self.call(self.known.int_add(), sum, term);
         }
         sum
     }

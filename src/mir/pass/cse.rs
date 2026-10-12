@@ -1688,10 +1688,8 @@ mod tests {
 
     #[test]
     fn calls_with_distinct_result_slots_have_the_same_fingerprint() {
-        let body = raw_body(
-            "fn repeated(x: int, y: int) -> int { (x - y) * (x - y) }",
-            "repeated",
-        );
+        // Literal arguments: raw MIR reads a variable into a fresh value for each call.
+        let body = raw_body("fn repeated() -> int { (3 - 2) * (3 - 2) }", "repeated");
         assert!(has_duplicate_call_fingerprint(&body, &Default::default()));
     }
 

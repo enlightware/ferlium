@@ -17,8 +17,10 @@ use crate::{
         value::LiteralValue,
     },
     mir::{
-        self, BlockId, Instantiation, Operation, builder::FunctionBuilder,
-        operation::SourceFallibility, terminator::Terminator,
+        self, BlockId, Instantiation, Operation,
+        builder::FunctionBuilder,
+        operation::{SourceFallibility, accepts_value_argument},
+        terminator::Terminator,
     },
     module::{
         self, EvidenceBindingId, ExtraParameterId, FunctionId, LocalDeclId, LocalFunctionId,
@@ -1451,18 +1453,15 @@ impl<'a> Emitter<'a> {
         );
         let data_place = self.insert(data_projection).unwrap();
         let with_capacity = mir::Value::Function(self.demand_std_function("buffer_with_capacity"));
-        let capacity_arg = self.int_constant_place(span, len as isize);
+        let capacity_arg = self.int_constant(len as isize);
         // An empty Buffer allocates no backing storage, so its element layout is unobserved. Avoid
         // demanding a synthesized witness for composite generic element types solely to construct
         // `[]`; later growth goes through `array_reserve_back`, which passes its `Value<A>`
         // layout evidence normally.
         let (element_size, element_align) = if len == 0 {
-            (
-                self.int_constant_place(span, 0),
-                self.int_constant_place(span, 1),
-            )
+            (self.int_constant(0), self.int_constant(1))
         } else {
-            self.value_layout_argument_places(span, element_ty)
+            self.value_layout_arguments(span, element_ty)
         };
         self.insert(Operation::call(
             span,
@@ -1486,7 +1485,7 @@ impl<'a> Emitter<'a> {
             let buffer_slot =
                 mir::Value::Function(self.demand_std_subscript_mut_member("buffer_slot"));
             for (i, id) in ids.iter().enumerate() {
-                let index_arg = self.int_constant_place(span, i as isize);
+                let index_arg = self.int_constant(i as isize);
                 let slot_out = self
                     .insert(Operation::alloca_place(span, element_ty))
                     .unwrap();
@@ -1570,31 +1569,15 @@ impl<'a> Emitter<'a> {
         self.demand_function(member.function, STD_MODULE_ID)
     }
 
-    /// Allocates a fresh `int` slot, stores the constant `value` into it, and returns its place.
-    /// Used to materialize the by-pointer integer arguments of synthesized `buffer_*` calls.
-    fn int_constant_place(&mut self, span: Location, value: isize) -> mir::Value {
-        let place = self.insert(Operation::alloca(span, int_type())).unwrap();
-        let value = self.int_constant(value);
-        self.insert(Operation::store(span, value, place.clone()));
-        place
-    }
-
     /// Materializes the physical `Value` layout arguments used by Buffer operations.
     ///
     /// Concrete layouts become ordinary integer constants. A generic element type obtains the
     /// same values by calling the `SIZE` and `ALIGN` getters in its forwarded `Value` dictionary.
-    fn value_layout_argument_places(
-        &mut self,
-        span: Location,
-        ty: Type,
-    ) -> (mir::Value, mir::Value) {
+    fn value_layout_arguments(&mut self, span: Location, ty: Type) -> (mir::Value, mir::Value) {
         if self.is_statically_sized(ty) {
             let [size, align] = value_layout_associated_const_values(ty, span, &self.env)
                 .expect("a statically sized type must have a resolvable Value layout");
-            return (
-                self.int_constant_place(span, size),
-                self.int_constant_place(span, align),
-            );
+            return (self.int_constant(size), self.int_constant(align));
         }
 
         let dictionary = self.value_dictionary(ty).unwrap_or_else(|| {
@@ -1618,7 +1601,7 @@ impl<'a> Emitter<'a> {
     }
 
     /// Calls one zero-argument `Value` associated-constant getter through `dictionary` and returns
-    /// the place containing its `int` result.
+    /// its `int` result.
     fn value_layout_argument_via_dictionary(
         &mut self,
         span: Location,
@@ -1643,7 +1626,7 @@ impl<'a> Emitter<'a> {
             [result.clone()],
             CallImplType::value(getter_fn_ty),
         ));
-        result
+        self.insert(Operation::load(span, result)).unwrap()
     }
 
     /// Interns a typed Ferlium `int` in the function-local constant pool.
@@ -1786,11 +1769,7 @@ impl<'a> Emitter<'a> {
                 // (`f() + f()`) and is dropped once by its scope cleanup — mirroring the HIR
                 // interpreter's `eval_apply`, which calls through a borrow of the function value.
                 let f = self.lower_as_place(&self.hir_arena[n.function]);
-                let arguments: Vec<mir::Value> = n
-                    .arguments
-                    .iter()
-                    .map(|arg| self.lower_argument(arg))
-                    .collect();
+                let arguments = self.lower_arguments(&n.arguments, &n.ty);
                 self.emit_call_as_place(node, f, arguments, &n.ty, None)
             }
 
@@ -1800,9 +1779,7 @@ impl<'a> Emitter<'a> {
                 for x in &n.extra_arguments {
                     arguments.push(self.lower_extra_argument(&self.hir_arena[*x]));
                 }
-                for arg in &n.arguments {
-                    arguments.push(self.lower_as_place(&self.hir_arena[arg.value]));
-                }
+                arguments.extend(self.lower_arguments(&n.arguments, &n.ty));
                 self.emit_call_as_place(
                     node,
                     f,
@@ -1818,11 +1795,7 @@ impl<'a> Emitter<'a> {
                 // The member function value carries the subscript's captured hidden evidence, so
                 // no extra arguments are passed here.
                 let f = self.lower_subscript_member(node, n);
-                let arguments: Vec<mir::Value> = n
-                    .arguments
-                    .iter()
-                    .map(|arg| self.lower_argument(arg))
-                    .collect();
+                let arguments = self.lower_arguments(&n.arguments, &n.ty);
                 self.emit_call_as_place(node, f, arguments, &n.ty, None)
             }
 
@@ -2043,11 +2016,47 @@ impl<'a> Emitter<'a> {
         mir::Value::Pattern(containers::b(pattern.clone()))
     }
 
-    /// Lowers `arg` to its call operand: a pointer to the argument's storage.
+    /// Lowers the visible `arguments` of a call of type `ty` to their call operands.
     ///
-    /// All arguments are represented indirectly in MIR.
-    fn lower_argument(&mut self, arg: &CallArgument<Elaborated>) -> mir::Value {
-        self.lower_as_place(&self.hir_arena[arg.value])
+    /// A read-only argument of a concrete scalar type is a value: a literal is a constant, and an
+    /// existing place is read where the argument is evaluated, since a later argument may write it.
+    /// A value materialized into a temporary is read just before the call, as nothing else writes
+    /// it. Any other argument is a pointer to its storage.
+    fn lower_arguments(
+        &mut self,
+        arguments: &[CallArgument<Elaborated>],
+        ty: &CallImplType,
+    ) -> Vec<mir::Value> {
+        let mut operands = Vec::with_capacity(arguments.len());
+        let mut temporaries = Vec::new();
+        for (offset, argument) in arguments.iter().enumerate() {
+            let node = &self.hir_arena[argument.value];
+            if !accepts_value_argument(ty, None, offset) {
+                operands.push(self.lower_as_place(node));
+                continue;
+            }
+            if let hir::NodeKind::Immediate(value) = &node.kind {
+                operands.push(self.immediate_constant(node.ty, value.clone()));
+                continue;
+            }
+            let place = self.lower_as_place(node);
+            if self.node_yields_place(node) {
+                operands.push(
+                    self.insert(Operation::load(node.span, place))
+                        .expect("a load defines its value"),
+                );
+            } else {
+                temporaries.push((operands.len(), node.span));
+                operands.push(place);
+            }
+        }
+        for (index, span) in temporaries {
+            let place = operands[index].clone();
+            operands[index] = self
+                .insert(Operation::load(span, place))
+                .expect("a load defines its value");
+        }
+        operands
     }
 
     /// Returns the blocks created for `n`.
@@ -2309,15 +2318,11 @@ impl<'a> Emitter<'a> {
             && let Some((function, hidden_evidence)) =
                 self.static_dictionary_entry(&evidence, n.entry_index)
         {
-            let arguments = hidden_evidence
+            let mut arguments: Vec<mir::Value> = hidden_evidence
                 .into_iter()
                 .map(|evidence| mir::Value::Evidence(Box::new(evidence)))
-                .chain(
-                    n.arguments
-                        .iter()
-                        .map(|argument| self.lower_argument(argument)),
-                )
                 .collect();
+            arguments.extend(self.lower_arguments(&n.arguments, &n.ty));
             return (mir::Value::Function(function), arguments);
         }
         let dictionary = self.lower_dictionary_operand(&self.hir_arena[n.dictionary]);
@@ -2333,7 +2338,7 @@ impl<'a> Emitter<'a> {
                 function_ty,
             ))
             .unwrap();
-        let arguments = n.arguments.iter().map(|a| self.lower_argument(a)).collect();
+        let arguments = self.lower_arguments(&n.arguments, &n.ty);
         (function_place, arguments)
     }
 
@@ -2760,9 +2765,7 @@ impl<'a> Emitter<'a> {
                 for x in &n.extra_arguments {
                     arguments.push(self.lower_extra_argument(&self.hir_arena[*x]));
                 }
-                for arg in &n.arguments {
-                    arguments.push(self.lower_argument(arg));
-                }
+                arguments.extend(self.lower_arguments(&n.arguments, &n.ty));
 
                 assert_eq!(node.ty, n.ty.ret());
                 self.emit_call_into(
@@ -2829,11 +2832,7 @@ impl<'a> Emitter<'a> {
                 // value carries the subscript's captured hidden evidence, so the call passes only
                 // the visible arguments (plus the result out-pointer).
                 let f = self.lower_subscript_member(node, n);
-                let arguments: Vec<mir::Value> = n
-                    .arguments
-                    .iter()
-                    .map(|arg| self.lower_argument(arg))
-                    .collect();
+                let arguments = self.lower_arguments(&n.arguments, &n.ty);
                 self.emit_call_into(node, f, arguments, &n.ty, destination, None);
             }
 
@@ -2937,11 +2936,7 @@ impl<'a> Emitter<'a> {
                 // (`f() + f()`) and is dropped once by its scope cleanup — mirroring the HIR
                 // interpreter's `eval_apply`, which calls through a borrow of the function value.
                 let f = self.lower_as_place(&self.hir_arena[n.function]);
-                let arguments: Vec<mir::Value> = n
-                    .arguments
-                    .iter()
-                    .map(|arg| self.lower_argument(arg))
-                    .collect();
+                let arguments = self.lower_arguments(&n.arguments, &n.ty);
                 self.emit_call_into(node, f, arguments, &n.ty, destination, None);
             }
 

@@ -628,22 +628,15 @@ mod tests {
         let marker = body
             .append_operation(start, Operation::stack_save(span))
             .unwrap();
-        let argument = body
-            .append_operation(start, Operation::alloca(span, int_type()))
-            .unwrap();
         for (block, stage, normal, error) in [
             (start, 1_isize, returned, cleanup),
             (cleanup, 2, propagated, poisoned),
         ] {
             let constant = body.add_constant(int_type(), LiteralValue::new_native(stage), &env);
-            body.append_operation(
-                block,
-                Operation::store(span, Value::Constant(constant), argument.clone()),
-            );
             let call = Operation::call(
                 span,
                 Value::Function(native),
-                [argument.clone(), output.clone()],
+                [Value::Constant(constant), output.clone()],
                 CallImplType::value(FnType::new_by_val(
                     [int_type()],
                     int_type(),

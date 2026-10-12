@@ -30,7 +30,6 @@ Per function (`mir::pass::optimize_function`):
 
 ```text
 for round in 0..MAX_ROUNDS:
-    scalar arguments // read scalar `Let` call arguments into values before their calls
     load CSE      // read a place nothing wrote since an earlier load as that load's value
     fold          // constant/semantic folding, devirtualization; block merging in its own edit
     specialize    // point generic calls at concrete copies
@@ -40,7 +39,6 @@ for round in 0..MAX_ROUNDS:
     place CSE     // merge repeated subfield and dictionary-entry places
     inline        // budget-limited; block merging inside its own edit
     stop if nothing warranted another round
-scalar arguments  // if the rounds ran out: arguments the last inlining passed as places
 place CSE          // merge places which inlining exposes
 copy forward      // catch trivial-copy storage exposed after the last round
 store forward     // likewise for single-store cells
@@ -631,11 +629,10 @@ Writing a value through an addressor-produced leaf does not reallocate its conta
 is why `swap` can reuse `a[j]`'s address across the assignment to `a[i]`. The same write does
 invalidate a cached value call that read that leaf or its containing root.
 
-The same analysis merges loads, at the start of each round, right after scalar arguments are read
-into values: a `load` is keyed by its place and invalidated by any write to that place's root, so
-`x - x` reads `x` once and folding sees one value on both sides, and two calls reading the same
-argument compare equal. A loaded register outlives a `stack_restore`; only allocating its place
-again, in the next iteration of a loop, invalidates it.
+The same analysis merges loads at the start of each round: a `load` is keyed by its place and
+invalidated by any write to that place's root, so `x - x` reads `x` once and folding sees one value
+on both sides, and two calls reading the same argument compare equal. A loaded register outlives a
+`stack_restore`; only allocating its place again, in the next iteration of a loop, invalidates it.
 
 Call CSE runs inside each optimization round after specialization and before inlining. On
 `swap#spec:[int]`, four `array_index::ref_mut` calls become two before the accessor is copied, so the
@@ -993,14 +990,13 @@ storage must move.
 
 ## Scalar call arguments
 
-The ABI passes a read-only argument of a concrete scalar type by value, and semantic MIR may too.
-At the start of each round, `mir::pass::scalar_arguments` reads each such argument passed as a
-place into a value just before its call, so every pass of the round sees the read the callee made
-through the place as a `load` of the caller. Load CSE then reads a place read twice once: two calls
-taking the same argument compare equal, and folding's identities see `x - x` as one value on both
-sides. Store forwarding turns the load of a known cell into the constant itself, so a literal
-argument needs no cell, and LICM hoists a load the loop does not change. An array loop thus reads
-the array's `start` once, where the read sat inside an addition that also took the cursor.
+The ABI passes a read-only argument of a concrete scalar type by value, and semantic MIR does too
+(see `doc/mir-ir.md`), so every pass sees the read the callee would make through a place as a `load`
+of the caller. Load CSE reads a place read twice once: two calls taking the same argument compare
+equal, and folding's identities see `x - x` as one value on both sides. Store forwarding turns the
+load of a known cell into the constant itself, so a literal argument needs no cell, and LICM hoists
+a load the loop does not change. An array loop thus reads the array's `start` once, where the read
+sat inside an addition that also took the cursor.
 
 The passes read through values: folding and the integer relations take a value argument's fact as
 they take a place's, folding follows a negation through the value loaded from its result, LICM

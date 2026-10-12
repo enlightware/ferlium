@@ -393,22 +393,27 @@ pub(crate) fn eliminate_bounds_checks(
                         [],
                     );
                     length_operation.assign_result_id(Some(length_id));
+                    let mut length_load =
+                        Operation::load(check.span, mir::Value::Register(length_id));
+                    let length = edit
+                        .assign_new_result(&mut length_load)
+                        .expect("a load defines its value");
 
                     let offset_id = edit.new_value();
                     let mut offset = Operation::alloca(check.span, int_type());
                     offset.assign_result_id(Some(offset_id));
                     let offset_place = mir::Value::Register(offset_id);
+                    let mut offset_load = Operation::load(check.span, offset_place.clone());
+                    let offset_value = edit
+                        .assign_new_result(&mut offset_load)
+                        .expect("a load defines its value");
                     vec![
                         length_operation,
+                        length_load,
                         offset,
-                        add_offset(
-                            check.span,
-                            known,
-                            mir::Value::Register(length_id),
-                            index,
-                            offset_place.clone(),
-                        ),
-                        unchecked_array_index(&operation, known, Some(offset_place)),
+                        add_offset(check.span, known, length, index, offset_place),
+                        offset_load,
+                        unchecked_array_index(&operation, known, Some(offset_value)),
                     ]
                 }
             },

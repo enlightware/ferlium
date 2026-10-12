@@ -47,6 +47,7 @@ use ustr::{Ustr, ustr};
 use super::{
     OptimizationStats, budget, cost,
     dataflow::{self, Analysis, Const, State},
+    scalar_arguments,
     site::{OperationIndex, OperationSite},
     stage::SemanticCallees,
 };
@@ -60,7 +61,7 @@ use crate::{
         ValueId,
         debug_location::InlineRebase,
         edit::FunctionEdit,
-        operation::SourceFallibility,
+        operation::{SourceFallibility, accepts_value_argument},
         role::MirType,
         terminator::{Terminator, TerminatorKind, TerminatorKindDiscriminant},
         value::StaticEvidence,
@@ -1547,14 +1548,54 @@ pub(crate) fn map_types(edit: &mut FunctionEdit, mapper: &mut impl TypeMapper) {
         constant.ty = constant.ty.map(mapper);
     }
     for block in edit.blocks().collect::<Vec<_>>() {
+        let operations = mem::take(&mut edit.block_mut(block).operations);
+        let mut rewritten = Vec::with_capacity(operations.len());
+        for mut operation in operations {
+            substitute_reading_arguments(edit, &mut operation, mapper, &mut rewritten);
+            rewritten.push(operation);
+        }
+        let mut terminator = edit.block(block).terminator.clone();
+        if let TerminatorKind::Invoke { operation, .. } = &mut terminator.kind {
+            substitute_reading_arguments(edit, operation, mapper, &mut rewritten);
+        }
         let block = edit.block_mut(block);
-        for operation in &mut block.operations {
-            substitute_in_operation(operation, mapper);
-        }
-        if let TerminatorKind::Invoke { operation, .. } = &mut block.terminator.kind {
-            substitute_in_operation(operation, mapper);
-        }
+        block.operations = rewritten;
+        block.terminator = terminator;
     }
+}
+
+/// Rewrites the types `operation` carries. An argument of a call that the substitution makes a
+/// read-only concrete scalar was a place, and is read into a value appended to `operations`, as the
+/// canonical form requires.
+fn substitute_reading_arguments(
+    edit: &mut FunctionEdit,
+    operation: &mut Operation,
+    mapper: &mut impl TypeMapper,
+    operations: &mut Vec<Operation>,
+) {
+    let OperationKind::Call { ty, metadata } = &operation.kind else {
+        substitute_in_operation(operation, mapper);
+        return;
+    };
+    let accepted_before: Vec<bool> = (0..ty.fn_ty.args.len())
+        .map(|offset| accepts_value_argument(ty, metadata.as_deref(), offset))
+        .collect();
+    substitute_in_operation(operation, mapper);
+    let OperationKind::Call { ty, metadata } = &operation.kind else {
+        unreachable!("substitution keeps the operation kind");
+    };
+    let visible_start = operation.operands.len()
+        - ty.fn_ty.args.len()
+        - usize::from(ty.result_convention.has_result_place());
+    let reads: Vec<usize> = accepted_before
+        .iter()
+        .enumerate()
+        .filter(|&(offset, &before)| {
+            !before && accepts_value_argument(ty, metadata.as_deref(), offset)
+        })
+        .map(|(offset, _)| visible_start + offset)
+        .collect();
+    scalar_arguments::read_before(edit, operation, &reads, operations);
 }
 
 /// Replaces every use of a dictionary parameter by the constant dictionary bound to it.

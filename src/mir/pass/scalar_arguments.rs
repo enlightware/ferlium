@@ -1,179 +1,32 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-//! Scalar call arguments read at the call.
+//! Scalar call arguments.
 //!
-//! The ABI passes a read-only argument of a concrete scalar type by value, and semantic MIR may
-//! too (see [`accepts_value_argument`]). This pass reads each such argument passed as a place into
-//! a value just before its call. The read the callee made through the place becomes an ordinary
-//! `load` of the caller, which the caller's passes see: LICM hoists one that a loop does not
-//! change, where a read inside a call that also takes the loop's cursor was invisible to it.
+//! The ABI passes a read-only argument of a concrete scalar type by value, and semantic MIR does
+//! too (see [`accepts_value_argument`]): HIR emission reads it where the argument is evaluated, and
+//! a substitution that makes an argument such a scalar reads it with [`read_before`]. The read is
+//! an ordinary `load` of the caller, which the caller's passes see: LICM hoists one that a loop does
+//! not change, where a read inside a call was invisible to it.
 //!
-//! The rewrite preserves meaning because a `Let` argument cannot change during the call:
-//! overlapping mutable arguments are invalid, so the callee observes the value the place holds at
-//! the call.
+//! Physical MIR passes such an argument as a place where the callee's entry takes it through a
+//! pointer ([`spill_value_arguments`]).
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     mir::{
-        self, Function, Operation, OperationKind, ParameterKind, ValueId,
+        self, Function, Operation, OperationKind, ValueId,
         edit::FunctionEdit,
         operation::{OperationResult, accepts_value_argument},
         role::{MirType, ValueRole, ValueRoles},
         terminator::TerminatorKind,
     },
     module::id::Id,
-    types::r#type::Type,
 };
 
-/// Reads every scalar place argument of a `call` into a value before it, or `None` if there is
-/// none.
-pub(crate) fn read_scalar_arguments(func: &Function) -> Option<Function> {
-    if !may_pass_scalar_places(func) {
-        return None;
-    }
-    let roles = ValueRoles::derive(func);
-    // A place of a refined type, such as `raw_float` read as `float`, keeps passing as a place: its
-    // value would not have the argument's type.
-    let holds = |operand: &mir::Value, ty: Type| {
-        roles.get(operand, func.constants()).is_some_and(|role| {
-            role.is_place_operand() && role.place_pointee_type() == Some(MirType::Lowered(ty))
-        })
-    };
-    let reads_of = |operation: &Operation| -> Vec<usize> {
-        let OperationKind::Call { ty, metadata } = &operation.kind else {
-            return Vec::new();
-        };
-        let visible_start = operation.operands.len()
-            - ty.fn_ty.args.len()
-            - usize::from(ty.result_convention.has_result_place());
-        (0..ty.fn_ty.args.len())
-            .filter(|&offset| {
-                accepts_value_argument(ty, metadata.as_deref(), offset)
-                    && holds(
-                        &operation.operands[visible_start + offset],
-                        ty.fn_ty.args[offset].ty,
-                    )
-            })
-            .map(|offset| visible_start + offset)
-            .collect()
-    };
-    let changed = func.blocks().any(|block| {
-        let block = func.block(block);
-        let invoked = match &block.terminator().kind {
-            TerminatorKind::Invoke { operation, .. } => Some(operation),
-            _ => None,
-        };
-        block
-            .operations()
-            .iter()
-            .chain(invoked)
-            .any(|operation| !reads_of(operation).is_empty())
-    });
-    if !changed {
-        return None;
-    }
-
-    let mut edit = FunctionEdit::new(func.clone());
-    let blocks = edit.blocks().collect::<Vec<_>>();
-    for block in blocks {
-        let operations = std::mem::take(&mut edit.block_mut(block).operations);
-        let mut rewritten = Vec::with_capacity(operations.len());
-        for mut operation in operations {
-            let reads = reads_of(&operation);
-            read_before(&mut edit, &mut operation, &reads, &mut rewritten);
-            rewritten.push(operation);
-        }
-        let mut terminator = edit.block(block).terminator.clone();
-        if let TerminatorKind::Invoke { operation, .. } = &mut terminator.kind {
-            let reads = reads_of(operation);
-            read_before(&mut edit, operation, &reads, &mut rewritten);
-        }
-        let block = edit.block_mut(block);
-        block.operations = rewritten;
-        block.terminator = terminator;
-    }
-    Some(edit.finish_unverified())
-}
-
-/// Whether a scalar argument may be passed as a place, before deriving roles to know: one that is a
-/// constant, a value parameter, a register a `comp_eq` defines, or one a `load` of a place of a
-/// Ferlium type defines, is a value already. After the first round, nearly every body has only
-/// those. A `load` of a pointer slot yields a place, so it does not count.
-fn may_pass_scalar_places(func: &Function) -> bool {
-    let calls = || {
-        func.blocks().flat_map(|block| {
-            let block = func.block(block);
-            let invoked = match &block.terminator().kind {
-                TerminatorKind::Invoke { operation, .. } => Some(operation),
-                _ => None,
-            };
-            block.operations().iter().chain(invoked)
-        })
-    };
-    let operations = || {
-        func.blocks()
-            .flat_map(|block| func.block(block).operations())
-    };
-    let loaded: FxHashSet<ValueId> = operations()
-        .filter_map(|operation| match (&operation.kind, &*operation.operands) {
-            (OperationKind::Load, [mir::Value::Register(source)]) => Some(*source),
-            _ => None,
-        })
-        .collect();
-    // Places of a Ferlium type, whose loads yield values rather than pointers.
-    let value_places: FxHashSet<ValueId> = operations()
-        .filter_map(|operation| {
-            let place = operation
-                .result_id()
-                .filter(|place| loaded.contains(place))?;
-            matches!(
-                operation.result(),
-                OperationResult::Pointer(pointee)
-                    if matches!(*pointee, OperationResult::Lowered(_))
-            )
-            .then_some(place)
-        })
-        .collect();
-    let values: FxHashSet<ValueId> = operations()
-        .filter_map(|operation| {
-            let is_value = match operation.kind {
-                OperationKind::CompareEqual => true,
-                OperationKind::Load => match &operation.operands[0] {
-                    mir::Value::Register(source) => value_places.contains(source),
-                    mir::Value::Parameter(id) => matches!(
-                        func.parameters()[id.as_index()].kind,
-                        ParameterKind::Parameter(_) | ParameterKind::Owned
-                    ),
-                    _ => false,
-                },
-                _ => false,
-            };
-            operation.result_id().filter(|_| is_value)
-        })
-        .collect();
-    calls().any(|operation| {
-        let OperationKind::Call { ty, metadata } = &operation.kind else {
-            return false;
-        };
-        let visible_start = operation.operands.len()
-            - ty.fn_ty.args.len()
-            - usize::from(ty.result_convention.has_result_place());
-        (0..ty.fn_ty.args.len()).any(|offset| {
-            accepts_value_argument(ty, metadata.as_deref(), offset)
-                && match &operation.operands[visible_start + offset] {
-                    mir::Value::Constant(_) => false,
-                    mir::Value::Register(id) => !values.contains(id),
-                    mir::Value::Parameter(id) => !func.parameters()[id.as_index()].is_value(),
-                    _ => true,
-                }
-        })
-    })
-}
-
 /// Appends a `load` of each operand at `reads` to `operations`, and passes its value instead.
-fn read_before(
+pub(crate) fn read_before(
     edit: &mut FunctionEdit,
     call: &mut Operation,
     reads: &[usize],
@@ -189,16 +42,15 @@ fn read_before(
     }
 }
 
-/// Passes each scalar value argument of a `call` as a place again where `takes_value` says its
-/// callee's entry takes that argument through a pointer, the inverse of [`read_scalar_arguments`]
-/// there. `takes_value` is given the call and the argument's offset among the visible ones.
-/// `None` if no such argument is a value.
+/// Passes each scalar value argument of a `call` as a place where `takes_value` says its callee's
+/// entry takes that argument through a pointer. `takes_value` is given the call and the argument's
+/// offset among the visible ones. `None` if no such argument is a value.
 ///
-/// A value loaded in the call's block, with nothing but other loads in between, is replaced by the
-/// place it was loaded from, and the load is dropped when nothing else reads it: the call reads
-/// that place as it did before normalization. Any other value, such as a load LICM hoisted, is
-/// stored into a frame slot of its own in the entry block, just before the call, which the Wasm
-/// emitter keeps in a local.
+/// A value loaded in the call's block, with nothing but other loads and `alloca`s in between, is
+/// replaced by the place it was loaded from, and the load is dropped when nothing else reads it:
+/// the call reads that place directly. Any other value, such as a load LICM hoisted, is stored into
+/// a frame slot of its own in the entry block, just before the call, which the Wasm emitter keeps
+/// in a local.
 pub(crate) fn spill_value_arguments(
     func: &Function,
     takes_value: impl Fn(&Operation, usize) -> bool,
@@ -398,80 +250,22 @@ fn spill_before(
     }
 }
 
-/// The position of the load defining `value` among the loads that end `operations`, if it is one
-/// of them. Nothing but loads runs between it and what follows, so its place still holds the value.
+/// The position of the load defining `value` among the loads and `alloca`s that end `operations`,
+/// if it is one of them. Nothing between it and what follows writes an existing place, so its place
+/// still holds the value.
 fn trailing_load(operations: &[Option<Operation>], value: ValueId) -> Option<usize> {
     for (position, operation) in operations.iter().enumerate().rev() {
         let Some(operation) = operation else {
             continue;
         };
-        if !matches!(operation.kind, OperationKind::Load) {
-            return None;
+        match operation.kind {
+            OperationKind::Alloca { .. } => continue,
+            OperationKind::Load => {}
+            _ => return None,
         }
         if operation.result_id() == Some(value) {
             return Some(position);
         }
     }
     None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::read_scalar_arguments;
-    use crate::{
-        CompilerSession, Location,
-        hir::value::LiteralValue,
-        mir::{
-            self, Operation, OperationKind, ParameterKind, builder::FunctionBuilder,
-            terminator::Terminator,
-        },
-        std::math::int_type,
-    };
-
-    /// A pointer loaded from a pointer slot is a place, so the scalar argument it names is read
-    /// although the body's only other argument is a value.
-    #[test]
-    fn an_argument_loaded_from_a_pointer_slot_is_still_read() {
-        let session = CompilerSession::new();
-        let env = session.module_env();
-        let span = Location::new_synthesized();
-        let mut builder = FunctionBuilder::new("pointer_slot".into(), Default::default());
-        let result =
-            mir::Value::Parameter(builder.add_parameter(int_type(), ParameterKind::Return));
-        let block = builder.add_block();
-        let one = mir::Value::Constant(builder.add_constant(
-            int_type(),
-            LiteralValue::new_native(1isize),
-            &env,
-        ));
-        let cell = builder
-            .append_operation(block, Operation::alloca(span, int_type()))
-            .unwrap();
-        builder.append_operation(block, Operation::store(span, one.clone(), cell.clone()));
-        let slot = builder
-            .append_operation(block, Operation::alloca_place(span, int_type()))
-            .unwrap();
-        builder.append_operation(block, Operation::store(span, cell, slot.clone()));
-        let pointer = builder
-            .append_operation(block, Operation::load(span, slot))
-            .unwrap();
-        let (callee, ty) = session.known_callees().int_add();
-        builder.append_operation(
-            block,
-            Operation::call(
-                span,
-                mir::Value::Function(callee),
-                [pointer.clone(), one, result],
-                ty.clone(),
-            ),
-        );
-        builder.set_terminator(block, Terminator::ret(span));
-        let body = builder.finish(env);
-
-        let read = read_scalar_arguments(&body).expect("the pointer's pointee must be read");
-        let operations = read.block(read.entry()).operations();
-        assert!(operations.iter().any(|operation| {
-            operation.kind == OperationKind::Load && operation.operands[0] == pointer
-        }));
-    }
 }

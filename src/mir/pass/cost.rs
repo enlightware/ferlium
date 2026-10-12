@@ -60,8 +60,9 @@ pub(crate) fn hot_cost_exceeds(func: &Function, limit: usize) -> bool {
 }
 
 /// A block's operations, including the call an `invoke` terminator makes, except the loads that
-/// only pass an argument: read by the call that follows them, with nothing but loads between.
-/// Lowering passes the place such a load reads instead. A value read again elsewhere keeps its
+/// only pass an argument: read by the call that follows them, with nothing but loads and
+/// `alloca`s, such as the call's result slot, between. Lowering passes the place such a load reads
+/// instead. A value read again elsewhere keeps its
 /// load, which this does not see: the estimate stays local to the block.
 fn block_cost(func: &Function, block: BlockId) -> usize {
     let block = func.block(block);
@@ -75,6 +76,10 @@ fn block_cost(func: &Function, block: BlockId) -> usize {
         match operation.kind {
             OperationKind::Load => {
                 loads.extend(operation.result_id());
+                continue;
+            }
+            OperationKind::Alloca { .. } => {
+                total += operation_cost(operation);
                 continue;
             }
             OperationKind::Call { .. } => {
@@ -282,12 +287,12 @@ pub(crate) fn cyclic_blocks(func: &Function) -> Vec<bool> {
 #[cfg(test)]
 mod tests {
     use super::{Growth, cost};
-    use crate::mir::pass::scalar_arguments::read_scalar_arguments;
+    use crate::mir::pass::scalar_arguments::spill_value_arguments;
     use crate::{
         CompilerSession, ExecutionTarget,
         compiler::MirOptimization,
         mir::{
-            BlockId,
+            self, BlockId, OperationKind,
             pass::budget::{INLINE_FUNCTION_GROWTH, INLINE_LOOP_GROWTH},
         },
         module::{LocalFunctionId, ModuleId, Path, id::Id},
@@ -327,8 +332,8 @@ mod tests {
         assert!(growth.reserve(IN_LOOP, 2, 1));
     }
 
-    /// Reading scalar arguments before their calls makes explicit what passing their places did,
-    /// so it must not make a callee look larger to inlining.
+    /// Reading scalar arguments into values makes explicit what passing their places did, so it
+    /// must not make a callee look larger to inlining than passing the places does.
     #[test]
     fn scalar_argument_reads_cost_nothing() {
         let mut session = CompilerSession::new();
@@ -350,8 +355,23 @@ mod tests {
             .flatten()
             .find(|body| body.name.ends_with("float_kernel"))
             .expect("`float_kernel` has a body");
-        let read = read_scalar_arguments(body).expect("`float_kernel` passes scalar places");
-        assert_eq!(cost(&read), cost(body));
+        // Constants stay values: a literal argument was never a read.
+        let places = spill_value_arguments(body, |call, offset| {
+            let OperationKind::Call { ty, .. } = &call.kind else {
+                unreachable!("only calls take arguments")
+            };
+            let visible_start = call.operands.len()
+                - ty.fn_ty.args.len()
+                - usize::from(ty.result_convention.has_result_place());
+            matches!(
+                call.operands[visible_start + offset],
+                mir::Value::Constant(_)
+            )
+        })
+        .expect("`float_kernel` reads scalar arguments");
+        // A local read before a later argument's call, as the evaluation order requires, costs
+        // its load; passing the place instead stores it into a slot.
+        assert!(cost(body) <= cost(&places));
     }
 
     const CORPUS: &[(&str, &str)] = include!("../../../tests/harness/mir_corpus.rs");
