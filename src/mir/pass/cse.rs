@@ -1592,9 +1592,7 @@ mod tests {
         );
         let entry = builder.add_block();
         let next = builder.add_block();
-        let offset = builder
-            .append_operation(entry, Operation::load(span, offset))
-            .unwrap();
+        let offset = offset.clone();
         let address = |member| {
             Operation::address_offset(
                 span,

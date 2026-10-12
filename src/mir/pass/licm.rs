@@ -946,7 +946,7 @@ fn invariant_cell<'f>(
     }
     match cell.definition {
         Definition::Constant(_) | Definition::Function(_) => {}
-        Definition::Register(_) => {
+        Definition::Value(_) => {
             inputs.push(&value_cells::operation_at(func, cell.site).operands[0])
         }
         Definition::Copy(_) | Definition::CallResult => return false,
@@ -1256,19 +1256,28 @@ fn apply_hoist(func: &Function, hoist: Hoist) -> Function {
 
 #[cfg(test)]
 mod tests {
-    use super::super::provenance::ResultProvenance;
+    use super::super::{known_callee::KnownCallee, provenance::ResultProvenance};
     use super::*;
     use crate::{
         CompilerSession, Location, MirOptimization,
         hir::value::LiteralValue,
         mir::{Operation, Value, builder::FunctionBuilder, terminator::Terminator},
         module::{LocalFunctionId, ModuleId},
-        std::{logic::bool_type, math::int_type},
+        std::{
+            logic::bool_type,
+            math::{int_type, raw_float_type},
+        },
         types::{
             effects::no_effects,
             r#type::{CallImplType, FnType},
         },
     };
+
+    /// A scalar `let` parameter is a value; a `raw_float` one is still passed as a place, which
+    /// these fixtures read.
+    fn place_type() -> Type {
+        raw_float_type()
+    }
 
     fn hoist_reads(function: &Function, env: ModuleEnv<'_>) -> Option<Function> {
         hoist_invariant_loads(
@@ -1327,7 +1336,7 @@ mod tests {
             let env = session.module_env();
             let span = Location::new_synthesized();
             let mut builder = FunctionBuilder::new("scalar_read".into(), Default::default());
-            let int_ty = int_type();
+            let int_ty = place_type();
             let input = mir::Value::Parameter(
                 builder.add_parameter(int_ty, ParameterKind::Parameter(ArgConvention::Let)),
             );
@@ -1392,7 +1401,7 @@ mod tests {
         let session = CompilerSession::new();
         let env = session.module_env();
         let span = Location::new_synthesized();
-        let int_ty = int_type();
+        let int_ty = place_type();
         let mut builder = FunctionBuilder::new("read_then_call".into(), Default::default());
         let input = mir::Value::Parameter(
             builder.add_parameter(int_ty, ParameterKind::Parameter(ArgConvention::Let)),
@@ -1410,7 +1419,7 @@ mod tests {
         let result = builder
             .append_operation(head, Operation::alloca(span, int_ty))
             .unwrap();
-        let (callee, ty) = session.known_callees().int_add();
+        let (callee, ty) = session.known_callees().raw_float(KnownCallee::RawFloatAdd);
         builder.append_operation(
             head,
             Operation::call(
@@ -1538,7 +1547,7 @@ mod tests {
 
     fn local_read_at_boundary(boundary: LocalBoundary, env: ModuleEnv<'_>) -> Function {
         let span = Location::new_synthesized();
-        let int_ty = int_type();
+        let int_ty = place_type();
         let mut builder = FunctionBuilder::new("local_boundary".into(), Default::default());
         let input = mir::Value::Parameter(
             builder.add_parameter(int_ty, ParameterKind::Parameter(ArgConvention::Let)),
@@ -1561,7 +1570,7 @@ mod tests {
             .unwrap();
         let source = if partial {
             let index = mir::Value::Constant(builder.add_constant(
-                int_ty,
+                int_type(),
                 LiteralValue::new_native(0isize),
                 &env,
             ));
@@ -1620,7 +1629,7 @@ mod tests {
         let env = session.module_env();
         let span = Location::new_synthesized();
         let mut builder = FunctionBuilder::new("nested_reads".into(), Default::default());
-        let int_ty = int_type();
+        let int_ty = place_type();
         let input = mir::Value::Parameter(
             builder.add_parameter(int_ty, ParameterKind::Parameter(ArgConvention::Let)),
         );
@@ -1634,19 +1643,13 @@ mod tests {
         let backedge = builder.add_block();
         let exit = builder.add_block();
         builder.set_terminator(entry, Terminator::goto(span, outer));
-        let test = builder
-            .append_operation(outer, Operation::load(span, condition.clone()))
-            .unwrap();
         builder.set_terminator(
             outer,
-            Terminator::cond_br(span, test, inner_preheader, exit),
+            Terminator::cond_br(span, condition.clone(), inner_preheader, exit),
         );
         builder.set_terminator(inner_preheader, Terminator::goto(span, inner));
         builder.append_operation(inner, Operation::load(span, input));
-        let test = builder
-            .append_operation(inner, Operation::load(span, condition))
-            .unwrap();
-        builder.set_terminator(inner, Terminator::cond_br(span, test, inner, backedge));
+        builder.set_terminator(inner, Terminator::cond_br(span, condition, inner, backedge));
         builder.set_terminator(backedge, Terminator::goto(span, outer));
         builder.set_terminator(exit, Terminator::ret(span));
         let function = builder.finish(env);
@@ -1658,7 +1661,7 @@ mod tests {
                 .iter()
                 .filter(|op| matches!(op.kind, OperationKind::Load))
                 .count(),
-            3
+            1
         );
         assert!(hoisted.block(inner_preheader).operations().is_empty());
         assert!(hoisted.block(inner).operations().is_empty());
@@ -1670,7 +1673,7 @@ mod tests {
         let session = CompilerSession::new();
         let env = session.module_env();
         let span = Location::new_synthesized();
-        let int_ty = int_type();
+        let int_ty = place_type();
         let mut builder = FunctionBuilder::new("copy_used_after_loop".into(), Default::default());
         let input = mir::Value::Parameter(
             builder.add_parameter(int_ty, ParameterKind::Parameter(ArgConvention::Let)),
@@ -1686,15 +1689,12 @@ mod tests {
             .unwrap();
         builder.set_terminator(entry, Terminator::goto(span, head));
         builder.append_operation(head, Operation::memcpy(span, input, destination.clone()));
-        let test = builder
-            .append_operation(head, Operation::load(span, condition))
-            .unwrap();
-        builder.set_terminator(head, Terminator::cond_br(span, test, head, exit));
+        builder.set_terminator(head, Terminator::cond_br(span, condition, head, exit));
         builder.append_operation(exit, Operation::load(span, destination));
         builder.set_terminator(exit, Terminator::ret(span));
         let function = builder.finish(env);
-        let hoisted = hoist_reads(&function, env).unwrap();
-        // The independent condition load can move; the copy and its post-loop use must remain.
+        let hoisted = hoist_reads(&function, env).unwrap_or_else(|| function.clone());
+        // The copy and its post-loop use must remain.
         assert!(
             hoisted
                 .block(head)

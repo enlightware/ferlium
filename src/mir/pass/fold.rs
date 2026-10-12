@@ -1725,6 +1725,11 @@ impl FoldContext<'_> {
     fn is_value(&self, operand: &mir::Value) -> bool {
         match operand {
             mir::Value::Constant(_) => true,
+            mir::Value::Parameter(_) => self
+                .roles
+                .get_or_init(|| ValueRoles::derive(self.func))
+                .get(operand, self.func.constants())
+                .is_some_and(|role| matches!(*role, ValueRole::Materialized(MirType::Lowered(_)))),
             mir::Value::Register(_) if self.analysis.place_of(operand).is_none() => self
                 .roles
                 .get_or_init(|| ValueRoles::derive(self.func))
@@ -1948,11 +1953,11 @@ mod tests {
     fn known_array_element_slots_become_constants() {
         let body = optimized_main("fn main(n: int) -> [int] { [1, n, 3] }");
         assert!(
-            body.contains("build_array<int> [@c0, %r2, @c1] to %p1"),
+            body.contains("build_array<int> [@c0, %r0, @c1] to %p1"),
             "the known elements must be named directly:\n{body}"
         );
         assert_eq!(
-            body.matches("store ").count(),
+            body.matches("store @").count(),
             0,
             "no element literal should be stored into a slot first:\n{body}"
         );
@@ -2400,10 +2405,7 @@ mod tests {
             !body.contains("from_int"),
             "converting an int to an int must become a copy:\n{body}"
         );
-        assert!(
-            body.contains("= load %p0") && body.contains(" to %p1"),
-            "{body}"
-        );
+        assert!(body.contains("store %p0 to %p1"), "{body}");
     }
 
     /// `not` has no MIR operation of its own, but `comp_eq value false` is exactly it, so naming
@@ -2418,16 +2420,7 @@ mod tests {
             !body.contains("call std::not"),
             "the negation call must become a comparison:\n{body}"
         );
-        let argument = body
-            .lines()
-            .find(|line| line.ends_with("= load %p0"))
-            .and_then(|line| line.split(':').next())
-            .unwrap_or_else(|| panic!("`a` must be read:\n{body}"))
-            .trim();
-        assert!(
-            body.contains(&format!("comp_eq {argument} false")),
-            "{body}"
-        );
+        assert!(body.contains("comp_eq %p0 false"), "{body}");
     }
 
     /// A *known* argument must reach full evaluation instead: a constant beats both a copy of the

@@ -579,15 +579,34 @@ impl<'a> Interpreter<'a> {
         result
     }
 
+    /// Binds a frame's parameters to the caller's bindings. Callers pass every visible argument as
+    /// a place, so a value parameter reads its argument's place on entry.
+    fn bind_parameters(
+        &self,
+        func: &Function,
+        args: Vec<Binding>,
+    ) -> FxHashMap<mir::Value, Binding> {
+        args.into_iter()
+            .zip(func.parameters())
+            .enumerate()
+            .map(|(i, (binding, parameter))| {
+                let binding = match binding {
+                    Binding::Place(place) if parameter.is_value() => {
+                        Binding::Value(self.load_copy(&place))
+                    }
+                    binding => binding,
+                };
+                (mir::Value::Parameter(ParameterId::from_index(i)), binding)
+            })
+            .collect()
+    }
+
     /// Runs one already-depth-checked call frame (see [`run_function`](Self::run_function)). A plain
     /// call frame must run to completion: suspending out of it (a `YieldedOnce` accessor reached
     /// other than through a `project`) is a lowering bug.
     fn run_frame(&mut self, key: FunctionKey, args: Vec<Binding>) -> Result<(), RuntimeError> {
         let func = self.function(key);
-        let mut slots: FxHashMap<mir::Value, Binding> = FxHashMap::default();
-        for (i, b) in args.into_iter().enumerate() {
-            slots.insert(mir::Value::Parameter(ParameterId::from_index(i)), b);
-        }
+        let slots = self.bind_parameters(func, args);
         match self.run_loop(key, func, slots, func.entry())? {
             FrameOutcome::Completed => Ok(()),
             FrameOutcome::Suspended { .. } => {
@@ -1464,7 +1483,8 @@ impl<'a> Interpreter<'a> {
     }
 
     /// Binds each scalar argument passed as a value to a fresh cell holding a copy, for the
-    /// duration of the call, since a callee binds every visible argument to a place. Returns the
+    /// duration of the call, since a call passes every visible argument as a place (a value
+    /// parameter reads it on entry, see [`Self::bind_parameters`]). Returns the
     /// bindings to restore; the cells sit above the environment the caller saw before the call,
     /// which reclaims them afterwards.
     fn bind_value_arguments(
@@ -1724,10 +1744,7 @@ impl<'a> Interpreter<'a> {
         self.ctx.call_depth += 1;
         let frame_top = self.ctx.environment.len();
         let func = self.function(key);
-        let mut acc_slots: FxHashMap<mir::Value, Binding> = FxHashMap::default();
-        for (i, b) in args.into_iter().enumerate() {
-            acc_slots.insert(mir::Value::Parameter(ParameterId::from_index(i)), b);
-        }
+        let acc_slots = self.bind_parameters(func, args);
         match self.run_loop(key, func, acc_slots, func.entry()) {
             Ok(FrameOutcome::Suspended {
                 place,

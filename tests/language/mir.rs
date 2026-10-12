@@ -560,7 +560,9 @@ fn simple_functions() {
         session.emit_mir("fn t(x: int) {x}"),
         r#"fn t(%p0: @arg let int, %p1: @ret int):
   b0:
-    memcpy %p0 to %p1
+    %r0: place int = alloca int
+    store %p0 to %r0
+    memcpy %r0 to %p1
     ret
 "#,
     );
@@ -576,10 +578,12 @@ fn call_functions() {
   @c0: int = 1
   b0:
     %r0: place int = alloca int
-    store @c0 to %r0
+    store %p0 to %r0
     %r1: place int = alloca int
-    call std::Num<std::int>::from_int#impl:25eabc6b(%r0, %r1)
-    call std::Num<std::int>::add#impl:7665d3ee(%p0, %r1, %p1)
+    store @c0 to %r1
+    %r2: place int = alloca int
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r1, %r2)
+    call std::Num<std::int>::add#impl:7665d3ee(%r0, %r2, %p1)
     ret
 "#
     );
@@ -592,10 +596,12 @@ fn call_functions() {
   b0:
     %r0: place int = alloca int
     %r1: place int = alloca int
-    store @c0 to %r1
+    store %p0 to %r1
     %r2: place int = alloca int
-    call std::Num<std::int>::from_int#impl:25eabc6b(%r1, %r2)
-    call std::Num<std::int>::mul#impl:a3604103(%r2, %p0, %r0)
+    store @c0 to %r2
+    %r3: place int = alloca int
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %r3)
+    call std::Num<std::int>::mul#impl:a3604103(%r3, %r1, %r0)
     move %r0 to %p1
     ret
 "#
@@ -612,17 +618,19 @@ fn match_case_functions() {
   @c0: bool = true
   @c1: int = 2
   b0:
+    %r0: place int = alloca int
+    store %p0 to %r0
     br b1
   b1:
-    %r0: bool = comp_eq @c0 true
-    condbr %r0, b2, b3
+    %r1: bool = comp_eq @c0 true
+    condbr %r1, b2, b3
   b2:
-    memcpy %p0 to %p1
+    memcpy %r0 to %p1
     br b4
   b3:
-    %r1: place int = alloca int
-    store @c1 to %r1
-    call std::Num<std::int>::from_int#impl:25eabc6b(%r1, %p1)
+    %r2: place int = alloca int
+    store @c1 to %r2
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %p1)
     br b4
   b4:
     ret
@@ -634,29 +642,31 @@ fn match_case_functions() {
         r#"fn a0(%p0: @arg let int, %p1: @ret int):
   @c0: int = 1
   b0:
+    %r0: place int = alloca int
+    store %p0 to %r0
     br b1
   b1:
-    %r0: bool = comp_eq %p0 0
-    condbr %r0, b2, b3
+    %r1: bool = comp_eq %r0 0
+    condbr %r1, b2, b3
   b2:
-    memcpy %p0 to %p1
+    memcpy %r0 to %p1
     br b6
   b3:
-    %r1: bool = comp_eq %p0 1
-    condbr %r1, b4, b5
+    %r2: bool = comp_eq %r0 1
+    condbr %r2, b4, b5
   b4:
-    %r2: place int = alloca int
-    store @c0 to %r2
     %r3: place int = alloca int
-    call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %r3)
-    call std::Num<std::int>::sub#impl:6eee9827(%p0, %r3, %p1)
+    store @c0 to %r3
+    %r4: place int = alloca int
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r3, %r4)
+    call std::Num<std::int>::sub#impl:6eee9827(%r0, %r4, %p1)
     br b6
   b5:
-    %r4: place int = alloca int
-    store @c0 to %r4
     %r5: place int = alloca int
-    call std::Num<std::int>::from_int#impl:25eabc6b(%r4, %r5)
-    call std::Num<std::int>::neg#impl:6b873453(%r5, %p1)
+    store @c0 to %r5
+    %r6: place int = alloca int
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r5, %r6)
+    call std::Num<std::int>::neg#impl:6b873453(%r6, %p1)
     br b6
   b6:
     ret
@@ -765,8 +775,10 @@ fn user_function_call() {
         sessions.emit_mir("fn a0(x: int) { a0(x) }"),
         r#"fn a0(%p0: @arg let int, %p1: @ret never):
   b0:
+    %r0: place int = alloca int
+    store %p0 to %r0
     check_call_depth
-    call <test>::a0(%p0, %p1)
+    call <test>::a0(%r0, %p1)
     ret
 "#
     )
@@ -1011,32 +1023,34 @@ fn factorial() {
         r#"fn factorial(%p0: @arg let int, %p1: @ret int):
   @c0: int = 1
   b0:
-    check_call_depth
     %r0: place int = alloca int
-    store @c0 to %r0
+    store %p0 to %r0
+    check_call_depth
     %r1: place int = alloca int
-    call std::Num<std::int>::from_int#impl:25eabc6b(%r0, %r1)
-    %r2: place bool = alloca bool
-    call std::Ord<std::int>::gt#impl:e18c78bb(%p0, %r1, %r2)
+    store @c0 to %r1
+    %r2: place int = alloca int
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r1, %r2)
+    %r3: place bool = alloca bool
+    call std::Ord<std::int>::gt#impl:e18c78bb(%r0, %r2, %r3)
     br b1
   b1:
-    %r3: bool = load %r2
-    condbr %r3, b2, b3
+    %r4: bool = load %r3
+    condbr %r4, b2, b3
   b2:
-    %r4: place int = alloca int
-    store @c0 to %r4
     %r5: place int = alloca int
-    call std::Num<std::int>::from_int#impl:25eabc6b(%r4, %r5)
+    store @c0 to %r5
     %r6: place int = alloca int
-    call std::Num<std::int>::sub#impl:6eee9827(%p0, %r5, %r6)
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r5, %r6)
     %r7: place int = alloca int
-    call <test>::factorial(%r6, %r7)
-    call std::Num<std::int>::mul#impl:a3604103(%p0, %r7, %p1)
+    call std::Num<std::int>::sub#impl:6eee9827(%r0, %r6, %r7)
+    %r8: place int = alloca int
+    call <test>::factorial(%r7, %r8)
+    call std::Num<std::int>::mul#impl:a3604103(%r0, %r8, %p1)
     br b4
   b3:
-    %r8: place int = alloca int
-    store @c0 to %r8
-    call std::Num<std::int>::from_int#impl:25eabc6b(%r8, %p1)
+    %r9: place int = alloca int
+    store @c0 to %r9
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r9, %p1)
     br b4
   b4:
     ret
@@ -1092,13 +1106,17 @@ fn place_call_into_alias_local_branch() {
 
 #[test]
 fn iter1_multi_param_value() {
-    // Two by-value (TrivialCopy) params, both read -> bare %p0/%p1, no allocas.
+    // Two `int` params arrive as values; raw MIR stores each into a local the body reads.
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn f(x: int, y: int) { x + y }"),
         r#"fn f(%p0: @arg let int, %p1: @arg let int, %p2: @ret int):
   b0:
-    call std::Num<std::int>::add#impl:7665d3ee(%p0, %p1, %p2)
+    %r0: place int = alloca int
+    store %p0 to %r0
+    %r1: place int = alloca int
+    store %p1 to %r1
+    call std::Num<std::int>::add#impl:7665d3ee(%r0, %r1, %p2)
     ret
 "#,
     );
@@ -1107,7 +1125,7 @@ fn iter1_multi_param_value() {
 #[test]
 fn iter1_mut_local_copy() {
     // `mut x` = mutable LOCAL COPY (Owned, slot 1) seeded from the by-value param
-    // (%p0). The copy gets an `alloca`; the param itself stays `%p0`.
+    // (%p0), which raw MIR first stores into a local of its own. The copy gets an `alloca`.
     // Caller is NOT affected (value semantics).
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
@@ -1117,14 +1135,16 @@ fn iter1_mut_local_copy() {
   @c1: int = 1
   b0:
     %r0: place int = alloca int
-    memcpy %p0 to %r0
     %r1: place int = alloca int
+    store %p0 to %r1
+    memcpy %r1 to %r0
     %r2: place int = alloca int
-    store @c1 to %r2
     %r3: place int = alloca int
-    call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %r3)
-    call std::Num<std::int>::add#impl:7665d3ee(%r0, %r3, %r1)
-    move %r1 to %r0
+    store @c1 to %r3
+    %r4: place int = alloca int
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r3, %r4)
+    call std::Num<std::int>::add#impl:7665d3ee(%r0, %r4, %r2)
+    move %r2 to %r0
     memcpy %r0 to %p1
     ret
 "#,
@@ -1144,14 +1164,16 @@ fn iter1_let_mut_move_return() {
   @c1: int = 1
   b0:
     %r0: place int = alloca int
-    memcpy %p0 to %r0
     %r1: place int = alloca int
+    store %p0 to %r1
+    memcpy %r1 to %r0
     %r2: place int = alloca int
-    store @c1 to %r2
     %r3: place int = alloca int
-    call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %r3)
-    call std::Num<std::int>::add#impl:7665d3ee(%r0, %r3, %r1)
-    move %r1 to %r0
+    store @c1 to %r3
+    %r4: place int = alloca int
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r3, %r4)
+    call std::Num<std::int>::add#impl:7665d3ee(%r0, %r4, %r2)
+    move %r2 to %r0
     move %r0 to %p1
     ret
 "#,
@@ -1439,31 +1461,33 @@ fn place_call_value_in_branches() {
   @c0: int = 0
   @c1: int = 1
   b0:
+    %r0: place bool = alloca bool
+    store %p1 to %r0
     br b1
   b1:
-    %r0: bool = load %p1
-    condbr %r0, b2, b3
+    %r1: bool = load %r0
+    condbr %r1, b2, b3
   b2:
-    %r1: place int = alloca int
-    store @c0 to %r1
-    %r2: place *int = alloca_place int
-    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, %r1, %r2) -> b5 error b6
+    %r2: place int = alloca int
+    store @c0 to %r2
+    %r3: place *int = alloca_place int
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, %r2, %r3) -> b5 error b6
   b3:
-    %r4: place int = alloca int
-    store @c1 to %r4
-    %r5: place *int = alloca_place int
-    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, %r4, %r5) -> b7 error b6
+    %r5: place int = alloca int
+    store @c1 to %r5
+    %r6: place *int = alloca_place int
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, %r5, %r6) -> b7 error b6
   b4:
     ret
   b5:
-    %r3: *int = load %r2
-    memcpy %r3 to %p2
+    %r4: *int = load %r3
+    memcpy %r4 to %p2
     br b4
   b6:
     propagate_error
   b7:
-    %r6: *int = load %r5
-    memcpy %r6 to %p2
+    %r7: *int = load %r6
+    memcpy %r7 to %p2
     br b4
 "#,
     );
@@ -1503,8 +1527,10 @@ fn iter1_apply() {
         session.emit_mir("fn f(x: int) { f(x) }"),
         r#"fn f(%p0: @arg let int, %p1: @ret never):
   b0:
+    %r0: place int = alloca int
+    store %p0 to %r0
     check_call_depth
-    call <test>::f(%p0, %p1)
+    call <test>::f(%r0, %p1)
     ret
 "#,
     );
@@ -1581,10 +1607,12 @@ fn recursive_trivial_copy_call_uses_let_convention() {
   @c1: () = ()
   b0:
     %r0: place int = alloca int
-    check_call_depth
     %r1: place int = alloca int
-    store @c0 to %r1
-    call std::Num<std::int>::from_int#impl:25eabc6b(%r1, %r0)
+    store %p0 to %r1
+    check_call_depth
+    %r2: place int = alloca int
+    store @c0 to %r2
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %r0)
     call <test>::f(%r0, %p1)
     ret
 "#,
@@ -1593,15 +1621,17 @@ fn recursive_trivial_copy_call_uses_let_convention() {
 
 #[test]
 fn trivial_copy_call_uses_let_convention() {
-    // `TrivialCopy` determines snapshot construction, not the call convention. The incoming `Let`
-    // place is already a stable snapshot and is forwarded directly.
+    // `TrivialCopy` determines snapshot construction, not the call convention. The `int`
+    // parameter arrives as a value, which raw MIR stores into a local whose place the call takes.
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn f(a: int) { f(a) }"),
         r#"fn f(%p0: @arg let int, %p1: @ret never):
   b0:
+    %r0: place int = alloca int
+    store %p0 to %r0
     check_call_depth
-    call <test>::f(%p0, %p1)
+    call <test>::f(%r0, %p1)
     ret
 "#,
     );
@@ -1662,6 +1692,8 @@ fn call_passes_all_argument_conventions() {
         r#"fn callee(%p0: @arg let int, %p1: @arg &mut int, %p2: @arg let string, %p3: @ret ()):
   @c0: () = ()
   b0:
+    %r0: place int = alloca int
+    store %p0 to %r0
     store @c0 to %p3
     ret
 
@@ -1736,8 +1768,10 @@ fn dynamic_apply() {
         session.emit_mir("fn apply_fn(f, x: int) { f(x) }"),
         r#"fn apply_fn(%p0: @arg let (int) -> A ! e₀, %p1: @arg let int, %p2: @ret A):
   b0:
+    %r0: place int = alloca int
+    store %p1 to %r0
     check_call_depth
-    invoke call %p0(%p1, %p2) -> b1 error b2
+    invoke call %p0(%r0, %p2) -> b1 error b2
   b1:
     ret
   b2:
@@ -2018,12 +2052,14 @@ fn copy_int() {
   @c1: int = 1
   b0:
     %r0: place int = alloca int
-    memcpy %p0 to %r0
     %r1: place int = alloca int
-    store @c1 to %r1
+    store %p0 to %r1
+    memcpy %r1 to %r0
     %r2: place int = alloca int
-    call std::Num<std::int>::from_int#impl:25eabc6b(%r1, %r2)
-    call std::Num<std::int>::add#impl:7665d3ee(%r0, %r2, %p1)
+    store @c1 to %r2
+    %r3: place int = alloca int
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %r3)
+    call std::Num<std::int>::add#impl:7665d3ee(%r0, %r3, %p1)
     ret
 "#,
     );
@@ -2637,8 +2673,8 @@ fn reassign_local_literal() {
 
 #[test]
 fn reassign_local_from_param() {
-    // Reassigning an owned local from a by-value param is a trivial copy: load %p0,
-    // store into the local's alloca.
+    // Reassigning an owned local from a by-value param is a trivial copy from the local raw MIR
+    // stores the param into.
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn f(x: int) -> int { let mut y: int = 0; y = x; y }"),
@@ -2647,10 +2683,12 @@ fn reassign_local_from_param() {
   @c1: () = ()
   b0:
     %r0: place int = alloca int
-    store @c0 to %r0
     %r1: place int = alloca int
-    memcpy %p0 to %r1
-    move %r1 to %r0
+    store %p0 to %r1
+    store @c0 to %r0
+    %r2: place int = alloca int
+    memcpy %r1 to %r2
+    move %r2 to %r0
     move %r0 to %p1
     ret
 "#,
@@ -2673,25 +2711,27 @@ fn reassign_in_branches() {
   b0:
     %r0: place int = alloca int
     %r1: place () = alloca ()
+    %r2: place bool = alloca bool
+    store %p0 to %r2
     store @c0 to %r0
     br b1
   b1:
-    %r2: bool = load %p0
-    condbr %r2, b2, b3
+    %r3: bool = load %r2
+    condbr %r3, b2, b3
   b2:
-    %r3: place int = alloca int
     %r4: place int = alloca int
-    store @c2 to %r4
-    call std::Num<std::int>::from_int#impl:25eabc6b(%r4, %r3)
-    move %r3 to %r0
+    %r5: place int = alloca int
+    store @c2 to %r5
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r5, %r4)
+    move %r4 to %r0
     store @c1 to %r1
     br b4
   b3:
-    %r5: place int = alloca int
     %r6: place int = alloca int
-    store @c3 to %r6
-    call std::Num<std::int>::from_int#impl:25eabc6b(%r6, %r5)
-    move %r5 to %r0
+    %r7: place int = alloca int
+    store @c3 to %r7
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r7, %r6)
+    move %r6 to %r0
     store @c1 to %r1
     br b4
   b4:
@@ -2734,16 +2774,18 @@ fn reassign_array_element_from_param() {
   @c1: int = 0
   b0:
     %r0: place int = alloca int
-    memcpy %p1 to %r0
     %r1: place int = alloca int
-    store @c1 to %r1
-    %r2: place *int = alloca_place int
-    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, %r1, %r2) -> b1 error b2
+    store %p1 to %r1
+    memcpy %r1 to %r0
+    %r2: place int = alloca int
+    store @c1 to %r2
+    %r3: place *int = alloca_place int
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, %r2, %r3) -> b1 error b2
   b1:
-    %r3: *int = load %r2
-    %r4: place int = alloca int
-    move %r0 to %r4
-    move %r4 to %r3
+    %r4: *int = load %r3
+    %r5: place int = alloca int
+    move %r0 to %r5
+    move %r5 to %r4
     store @c0 to %p2
     ret
   b2:
@@ -2789,8 +2831,10 @@ fn void_body_tail_assignment_writes_ret() {
   @c0: () = ()
   b0:
     %r0: place int = alloca int
-    memcpy %p1 to %r0
-    move %r0 to %p0
+    store %p1 to %r0
+    %r1: place int = alloca int
+    memcpy %r0 to %r1
+    move %r1 to %p0
     store @c0 to %p2
     ret
 "#,
@@ -2958,14 +3002,16 @@ fn copy_int_param_to_local() {
   @c1: int = 1
   b0:
     %r0: place int = alloca int
-    memcpy %p0 to %r0
     %r1: place int = alloca int
+    store %p0 to %r1
+    memcpy %r1 to %r0
     %r2: place int = alloca int
-    store @c1 to %r2
     %r3: place int = alloca int
-    call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %r3)
-    call std::Num<std::int>::add#impl:7665d3ee(%r0, %r3, %r1)
-    move %r1 to %r0
+    store @c1 to %r3
+    %r4: place int = alloca int
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r3, %r4)
+    call std::Num<std::int>::add#impl:7665d3ee(%r0, %r4, %r2)
+    move %r2 to %r0
     move %r0 to %p1
     ret
 "#,
@@ -3035,14 +3081,16 @@ fn named_subscript_assign() {
   @c0: () = ()
   b0:
     %r0: place int = alloca int
-    memcpy %p1 to %r0
-    %r1: place *int = alloca_place int
-    invoke call <test>::first::ref_mut#subscript:19d196cf(%p0, %r1) -> b1 error b2
+    %r1: place int = alloca int
+    store %p1 to %r1
+    memcpy %r1 to %r0
+    %r2: place *int = alloca_place int
+    invoke call <test>::first::ref_mut#subscript:19d196cf(%p0, %r2) -> b1 error b2
   b1:
-    %r2: *int = load %r1
-    %r3: place int = alloca int
-    move %r0 to %r3
-    move %r3 to %r2
+    %r3: *int = load %r2
+    %r4: place int = alloca int
+    move %r0 to %r4
+    move %r4 to %r3
     store @c0 to %p2
     ret
   b2:
@@ -3076,13 +3124,15 @@ fn named_subscript_compound_assign() {
         r#"fn f(%p0: @arg &mut [int], %p1: @arg let int, %p2: @ret ()):
   @c0: () = ()
   b0:
-    %r0: place *int = alloca_place int
-    invoke call <test>::first::ref_mut#subscript:19d196cf(%p0, %r0) -> b1 error b2
+    %r0: place int = alloca int
+    store %p1 to %r0
+    %r1: place *int = alloca_place int
+    invoke call <test>::first::ref_mut#subscript:19d196cf(%p0, %r1) -> b1 error b2
   b1:
-    %r1: *int = load %r0
-    %r2: place int = alloca int
-    call std::Num<std::int>::add#impl:7665d3ee(%r1, %p1, %r2)
-    move %r2 to %r1
+    %r2: *int = load %r1
+    %r3: place int = alloca int
+    call std::Num<std::int>::add#impl:7665d3ee(%r2, %r0, %r3)
+    move %r3 to %r2
     store @c0 to %p2
     ret
   b2:
@@ -3112,7 +3162,9 @@ fn explicit_return_value() {
         session.emit_mir("fn g(x: int) -> int { return x }"),
         r#"fn g(%p0: @arg let int, %p1: @ret int):
   b0:
-    memcpy %p0 to %p1
+    %r0: place int = alloca int
+    store %p0 to %r0
+    memcpy %r0 to %p1
     ret
 "#,
     );
@@ -3232,13 +3284,15 @@ fn f(%p0: @arg &mut int, %p1: @arg let int, %p2: @ret ()):
   @c0: () = ()
   b0:
     %r0: place int = alloca int
-    memcpy %p1 to %r0
-    %r1: open place int = project <test>::cell::ref_mut#subscript:f3d0ec43(%p0)
-    %r2: place int = alloca int
-    move %r0 to %r2
-    move %r2 to %r1
+    %r1: place int = alloca int
+    store %p1 to %r1
+    memcpy %r1 to %r0
+    %r2: open place int = project <test>::cell::ref_mut#subscript:f3d0ec43(%p0)
+    %r3: place int = alloca int
+    move %r0 to %r3
+    move %r3 to %r2
     store @c0 to %p2
-    end_project %r1
+    end_project %r2
     ret
 "#,
     );
@@ -3280,12 +3334,14 @@ fn yielded_subscript_compound_assign() {
 fn f(%p0: @arg &mut int, %p1: @arg let int, %p2: @ret ()):
   @c0: () = ()
   b0:
-    %r0: open place int = project <test>::cell::ref_mut#subscript:f3d0ec43(%p0)
-    %r1: place int = alloca int
-    call std::Num<std::int>::add#impl:7665d3ee(%r0, %p1, %r1)
-    move %r1 to %r0
+    %r0: place int = alloca int
+    store %p1 to %r0
+    %r1: open place int = project <test>::cell::ref_mut#subscript:f3d0ec43(%p0)
+    %r2: place int = alloca int
+    call std::Num<std::int>::add#impl:7665d3ee(%r1, %r0, %r2)
+    move %r2 to %r1
     store @c0 to %p2
-    end_project %r0
+    end_project %r1
     ret
 "#,
     );
@@ -3317,16 +3373,18 @@ fn yielded_subscript_compound_assignment_closes_on_error() {
 fn f(%p0: @arg &mut float, %p1: @arg let float, %p2: @ret ()):
   @c0: () = ()
   b0:
-    %r0: open place float = project <test>::cell::ref_mut#subscript:1840c74b(%p0)
-    %r1: place float = alloca float
-    invoke call std::Div<std::float>::div#impl:a765c8d2(%r0, %p1, %r1) -> b1 error b2
+    %r0: place float = alloca float
+    store %p1 to %r0
+    %r1: open place float = project <test>::cell::ref_mut#subscript:1840c74b(%p0)
+    %r2: place float = alloca float
+    invoke call std::Div<std::float>::div#impl:a765c8d2(%r1, %r0, %r2) -> b1 error b2
   b1:
-    move %r1 to %r0
+    move %r2 to %r1
     store @c0 to %p2
-    end_project %r0
+    end_project %r1
     ret
   b2:
-    end_project %r0
+    end_project %r1
     propagate_error
 "#,
     );
@@ -3357,14 +3415,18 @@ fn f(%p0: @arg &mut int, %p1: @arg let int, %p2: @arg let int, %p3: @ret ()):
   @c0: () = ()
   b0:
     %r0: place int = alloca int
-    invoke call std::idiv(%p1, %p2, %r0) -> b1 error b2
-  b1:
-    %r1: open place int = project <test>::cell::ref_mut#subscript:f3d0ec43(%p0)
+    %r1: place int = alloca int
+    store %p1 to %r1
     %r2: place int = alloca int
-    move %r0 to %r2
-    move %r2 to %r1
+    store %p2 to %r2
+    invoke call std::idiv(%r1, %r2, %r0) -> b1 error b2
+  b1:
+    %r3: open place int = project <test>::cell::ref_mut#subscript:f3d0ec43(%p0)
+    %r4: place int = alloca int
+    move %r0 to %r4
+    move %r4 to %r3
     store @c0 to %p3
-    end_project %r1
+    end_project %r3
     ret
   b2:
     propagate_error
@@ -3514,12 +3576,14 @@ fn discarded_tuple_construction_lowers_into_throwaway_temp() {
   @c0: int = 0
   @c1: int = 1
   b0:
-    %r0: place (int, int) = alloca (int, int)
-    %r1: place int = subfield @c0 from %r0
-    memcpy %p0 to %r1
-    %r2: place int = subfield @c1 from %r0
-    memcpy %p0 to %r2
-    memcpy %p0 to %p1
+    %r0: place int = alloca int
+    store %p0 to %r0
+    %r1: place (int, int) = alloca (int, int)
+    %r2: place int = subfield @c0 from %r1
+    memcpy %r0 to %r2
+    %r3: place int = subfield @c1 from %r1
+    memcpy %r0 to %r3
+    memcpy %r0 to %p1
     ret
 "#,
     );
@@ -3536,12 +3600,14 @@ fn discarded_record_construction_lowers_into_throwaway_temp() {
   @c0: int = 0
   @c1: int = 1
   b0:
-    %r0: place { a: int, b: int } = alloca { a: int, b: int }
-    %r1: place int = subfield @c0 from %r0
-    memcpy %p0 to %r1
-    %r2: place int = subfield @c1 from %r0
-    memcpy %p0 to %r2
-    memcpy %p0 to %p1
+    %r0: place int = alloca int
+    store %p0 to %r0
+    %r1: place { a: int, b: int } = alloca { a: int, b: int }
+    %r2: place int = subfield @c0 from %r1
+    memcpy %r0 to %r2
+    %r3: place int = subfield @c1 from %r1
+    memcpy %r0 to %r3
+    memcpy %r0 to %p1
     ret
 "#,
     );
@@ -3619,11 +3685,13 @@ fn role_annotation_distinguishes_a_place_slot_from_a_value_slot() {
         session.emit_mir("fn a0(a: [int], i: int) -> int { a[i] }"),
         r#"fn a0(%p0: @arg let [int], %p1: @arg let int, %p2: @ret int):
   b0:
-    %r0: place *int = alloca_place int
-    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, %p1, %r0) -> b1 error b2
+    %r0: place int = alloca int
+    store %p1 to %r0
+    %r1: place *int = alloca_place int
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, %r0, %r1) -> b1 error b2
   b1:
-    %r1: *int = load %r0
-    memcpy %r1 to %p2
+    %r2: *int = load %r1
+    memcpy %r2 to %p2
     ret
   b2:
     propagate_error

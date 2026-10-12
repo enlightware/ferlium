@@ -535,6 +535,7 @@ fn constant_ty(constants: &[Constant], id: ConstantId) -> Type {
 fn parameter_role(parameter: &Parameter, result_convention: CallResultConvention) -> ValueRole {
     let ty = parameter.ty;
     match parameter.kind {
+        _ if parameter.is_value() => ValueRole::Materialized(MirType::Lowered(ty)),
         ParameterKind::Dictionary => ValueRole::Dictionary,
         ParameterKind::Parameter(_) | ParameterKind::Owned => {
             ValueRole::Place(MirType::Lowered(ty))

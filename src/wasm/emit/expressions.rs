@@ -1739,9 +1739,6 @@ mod tests {
                 LiteralValue::new_native(1_isize),
                 &env,
             ));
-            let condition = builder
-                .append_operation(entry, Operation::load(span, condition))
-                .unwrap();
             builder.set_terminator(entry, Terminator::cond_br(span, condition, left, right));
             for block in [left, right] {
                 if case == "copies" {
@@ -2331,11 +2328,8 @@ mod tests {
             let input = Value::Parameter(
                 builder.add_parameter(int_type(), ParameterKind::Parameter(ArgConvention::Let)),
             );
+            // A runtime value, so literal rematerialization does not replace store deferral.
             let block = builder.add_block();
-            // Use a runtime value so literal rematerialization does not replace store deferral.
-            let input = builder
-                .append_operation(block, Operation::load(span, input))
-                .unwrap();
             let zero = Value::Constant(builder.add_constant(
                 int_type(),
                 LiteralValue::new_native(0_isize),

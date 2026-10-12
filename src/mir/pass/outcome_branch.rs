@@ -876,9 +876,7 @@ mod tests {
             .append_operation(entry, Operation::stack_save(span))
             .unwrap();
         if matches!(shape, BooleanShape::SharedTail) {
-            let flag = builder
-                .append_operation(entry, Operation::load(span, flag))
-                .unwrap();
+            let flag = flag.clone();
             builder.set_terminator(entry, Terminator::cond_br(span, flag, root, yes));
         } else {
             builder.set_terminator(entry, Terminator::goto(span, root));

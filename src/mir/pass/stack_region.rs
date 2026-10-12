@@ -524,9 +524,7 @@ mod tests {
         // Neither history at the join may be ignored.
         let condition =
             builder.add_parameter(bool_type(), ParameterKind::Parameter(ArgConvention::Let));
-        let condition = builder
-            .append_operation(entry, Operation::load(span, Value::Parameter(condition)))
-            .unwrap();
+        let condition = Value::Parameter(condition).clone();
         builder.set_terminator(entry, Terminator::cond_br(span, condition, keep, reclaim));
         builder.append_operation(keep, Operation::stack_restore(span, inner.clone()));
         builder.set_terminator(keep, Terminator::goto(span, join));

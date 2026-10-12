@@ -21,7 +21,8 @@
 //! - **parameters are substituted by the caller's operands.** A call's operands are exactly the
 //!   callee's parameters in signature order (`@extra`, `@arg`, `@ret`), so the substitution is
 //!   positional. It is also why inlining hands folding known arguments: what was `%pN` becomes the
-//!   caller's place.
+//!   caller's place or value. Where the two disagree, the argument is converted first: a value
+//!   parameter given a place reads it, a place parameter given a value gets a fresh cell.
 //! - **blocks and registers are renumbered** into the caller and **constants merged** into its pool.
 //!   Both are allocated before anything is copied, because an operand may name a value or a block
 //!   that does not precede its use in block order.
@@ -52,7 +53,7 @@ use super::{
 use crate::{
     CompilerSession, Location,
     containers::DenseBitSet,
-    hir::elaboration::bind_call_type_instantiation,
+    hir::{elaboration::bind_call_type_instantiation, function::ArgConvention},
     mir::{
         self, BlockId, DebugLocation, Function, InlineSites, Instantiation, Operation,
         OperationKind, ParameterKind, ValueId,
@@ -680,7 +681,7 @@ fn inline_at(
     marker.assign_result_id(Some(marker_id));
     edit.block_mut(site.block()).operations.push(marker);
 
-    let arguments = spill_value_arguments(edit, site.block(), &call, roles);
+    let arguments = bind_arguments(edit, site.block(), &call, body, roles);
     assert_eq!(
         arguments.len(),
         body.parameters().len(),
@@ -712,13 +713,14 @@ fn inline_at(
     edit.block_mut(site.block()).terminator = Terminator::goto(span, entry);
 }
 
-/// The call's arguments as the callee's parameters, which are places: a scalar passed as a value
-/// is stored into a fresh `alloca` first. They follow the inline marker, so the callee's exits
-/// reclaim them with its own storage.
-fn spill_value_arguments(
+/// The call's arguments in the form the callee's parameters take. A place parameter given a value
+/// gets the value stored into a fresh `alloca`; a value parameter given a place gets a `load` of
+/// it. Both follow the inline marker, so the callee's exits reclaim the storage with its own.
+fn bind_arguments(
     edit: &mut FunctionEdit,
     block: BlockId,
     call: &Operation,
+    body: &Function,
     roles: &OnceCell<ValueRoles>,
 ) -> Vec<mir::Value> {
     let mut arguments = call.operands[1..].to_vec();
@@ -728,35 +730,49 @@ fn spill_value_arguments(
     let visible_start = call.operands.len()
         - ty.fn_ty.args.len()
         - usize::from(ty.result_convention.has_result_place());
-    let candidates = (0..ty.fn_ty.args.len())
+    // Only a scalar `Let` argument can take either form. Whether it is a value is known without
+    // roles unless it is a register, whose roles are derived once for the edit.
+    let conversions = (0..ty.fn_ty.args.len())
         .filter(|&offset| {
             accepts_value_argument(ty, metadata.as_deref(), offset)
-                && matches!(
-                    call.operands[visible_start + offset],
-                    mir::Value::Register(_) | mir::Value::Constant(_)
-                )
+                && body.parameters()[visible_start + offset - 1].kind
+                    == ParameterKind::Parameter(ArgConvention::Let)
+        })
+        .filter_map(|offset| {
+            let parameter = &body.parameters()[visible_start + offset - 1];
+            let is_value = match &call.operands[visible_start + offset] {
+                mir::Value::Constant(_) => true,
+                mir::Value::Parameter(id) => edit.parameters()[id.as_index()].is_value(),
+                operand @ mir::Value::Register(_) => roles
+                    .get_or_init(|| edit.value_roles())
+                    .get(operand, edit.constants())
+                    .is_some_and(|role| {
+                        matches!(*role, ValueRole::Materialized(MirType::Lowered(_)))
+                    }),
+                _ => return None,
+            };
+            (is_value != parameter.is_value()).then_some((offset, is_value))
         })
         .collect::<Vec<_>>();
-    if candidates.is_empty() {
-        return arguments;
-    }
-    let roles = roles.get_or_init(|| edit.value_roles());
-    for offset in candidates {
+    for (offset, is_value) in conversions {
         let operand = call.operands[visible_start + offset].clone();
-        if !roles
-            .get(&operand, edit.constants())
-            .is_some_and(|role| matches!(*role, ValueRole::Materialized(MirType::Lowered(_))))
-        {
-            continue;
-        }
-        let slot = edit.new_value();
-        let mut alloca = Operation::alloca(call.span, ty.fn_ty.args[offset].ty);
-        alloca.assign_result_id(Some(slot));
-        let slot = mir::Value::Register(slot);
+        let result = edit.new_value();
         let operations = &mut edit.block_mut(block).operations;
-        operations.push(alloca);
-        operations.push(Operation::store(call.span, operand, slot.clone()));
-        arguments[visible_start + offset - 1] = slot;
+        if is_value {
+            let mut alloca = Operation::alloca(call.span, ty.fn_ty.args[offset].ty);
+            alloca.assign_result_id(Some(result));
+            operations.push(alloca);
+            operations.push(Operation::store(
+                call.span,
+                operand,
+                mir::Value::Register(result),
+            ));
+        } else {
+            let mut load = Operation::load(call.span, operand);
+            load.assign_result_id(Some(result));
+            operations.push(load);
+        }
+        arguments[visible_start + offset - 1] = mir::Value::Register(result);
     }
     arguments
 }
@@ -834,6 +850,7 @@ pub(crate) fn cleanup_template(
         &mut template,
         &mut SimpleInstantiationMapper::new(&(substitution, FxHashMap::default())),
     );
+    monomorphize::store_value_parameters(&mut template, source);
     monomorphize::drop_redundant_layout_witnesses(&mut template, env);
     Some(template.finish_unverified())
 }

@@ -221,9 +221,7 @@ mod tests {
                 ParameterKind::Parameter(ArgConvention::Let),
             );
             let entry = builder.add_block();
-            let flag = builder
-                .append_operation(entry, Operation::load(span, Value::Parameter(flag)))
-                .unwrap();
+            let flag = Value::Parameter(flag).clone();
             let left = builder.add_block();
             let right = builder.add_block();
             let join = builder.add_block();

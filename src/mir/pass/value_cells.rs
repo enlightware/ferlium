@@ -43,8 +43,8 @@ use crate::{
 /// What fills a value cell.
 #[derive(Clone, Debug)]
 pub(crate) enum Definition {
-    /// `store %register to %cell`.
-    Register(ValueId),
+    /// `store %value to %cell`, from a register or a value parameter.
+    Value(mir::Value),
     /// `store <function> to %cell`: a bare function without an environment.
     Function(FunctionId),
     /// `store @constant to %cell`.
@@ -255,7 +255,9 @@ fn shape(
     let operation = operation_at(func, site);
     let definition = match (&operation.kind, &operation.operands[0]) {
         (OperationKind::Call { .. }, _) => Definition::CallResult,
-        (OperationKind::Store, mir::Value::Register(stored)) => Definition::Register(*stored),
+        (OperationKind::Store, stored @ (mir::Value::Register(_) | mir::Value::Parameter(_))) => {
+            Definition::Value(stored.clone())
+        }
         (OperationKind::Store, mir::Value::Function(function)) => Definition::Function(*function),
         (OperationKind::Store, mir::Value::Constant(constant)) => Definition::Constant(*constant),
         (

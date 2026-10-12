@@ -1224,9 +1224,7 @@ mod tests {
         let cell = builder
             .append_operation(entry, Operation::alloca(span, ty))
             .unwrap();
-        let taken = builder
-            .append_operation(entry, Operation::load(span, condition))
-            .unwrap();
+        let taken = condition.clone();
         builder.set_terminator(
             entry,
             Terminator::cond_br(span, taken, branches[0], branches[1]),

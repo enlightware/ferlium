@@ -504,6 +504,10 @@ impl<'a, 's> Body<'a, 's> {
             }
         }
         for (index, parameter) in body.parameters().iter().enumerate() {
+            // A value parameter is read from its input local, as any value.
+            if parameter.is_value() {
+                continue;
+            }
             if (parameter.kind == ParameterKind::Return
                 && parameter.ty != Type::never()
                 && !signature.output())

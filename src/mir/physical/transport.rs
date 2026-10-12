@@ -22,7 +22,9 @@ use rustc_hash::FxHashMap;
 use crate::{
     compiler::MirArtifacts,
     hir::function::ArgConvention,
-    mir::{Function, Operation, OperationKind, ParameterKind, Value, ValueId, operation},
+    mir::{
+        Function, Operation, OperationKind, Parameter, ParameterKind, Value, ValueId, operation,
+    },
     module::{CallableOrigin, FunctionId, ModuleEnv, TraitId, id::Id},
     types::r#trait::TraitDictionaryEntryIndex,
 };
@@ -100,10 +102,7 @@ impl<'a> Transports<'a> {
                     )
                 })
                 .nth(offset)
-                .is_some_and(|parameter| {
-                    parameter.kind == ParameterKind::Parameter(ArgConvention::Let)
-                        && operation::is_scalar_value_type(parameter.ty)
-                });
+                .is_some_and(Parameter::is_value);
         }
         let Some(function) = self
             .env

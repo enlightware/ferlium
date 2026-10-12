@@ -73,10 +73,11 @@ use crate::{
     std::logic::bool_type,
 };
 
-/// A boolean value, and whether reaching it passed through an odd number of negations.
-#[derive(Clone, Copy)]
+/// A boolean value, a register or a value parameter, and whether reaching it passed through an
+/// odd number of negations.
+#[derive(Clone)]
 struct Source {
-    value: ValueId,
+    value: mir::Value,
     negated: bool,
 }
 
@@ -130,8 +131,8 @@ pub(crate) fn forward_boolean_negations(func: &Function) -> Option<Function> {
             };
             compares.push(CompareRewrite {
                 site,
-                source,
                 pattern: pattern != source.negated,
+                source,
             });
         }
 
@@ -161,7 +162,7 @@ pub(crate) fn forward_boolean_negations(func: &Function) -> Option<Function> {
                     branches.push(BranchRewrite {
                         block,
                         source: Source {
-                            value: *condition,
+                            value: mir::Value::Register(*condition),
                             negated: !pattern,
                         },
                     });
@@ -178,7 +179,7 @@ pub(crate) fn forward_boolean_negations(func: &Function) -> Option<Function> {
     for compare in compares {
         let operation =
             &mut edit.block_mut(compare.site.block).operations[compare.site.index.as_index()];
-        operation.operands[0] = mir::Value::Register(compare.source.value);
+        operation.operands[0] = compare.source.value;
         operation.operands[1] = mir::Value::Pattern(b(LiteralValue::new_native(compare.pattern)));
     }
     for site in loads {
@@ -203,7 +204,7 @@ pub(crate) fn forward_boolean_negations(func: &Function) -> Option<Function> {
         };
         *terminator = Terminator::cond_br(
             terminator.span,
-            mir::Value::Register(branch.source.value),
+            branch.source.value,
             then_target,
             else_target,
         );
@@ -260,7 +261,7 @@ struct Resolver<'a> {
 
 /// What a cell holds, and the dominance that says where that answer is valid.
 struct Cells {
-    stored: FxHashMap<ValueId, (ValueId, OperationSite)>,
+    stored: FxHashMap<ValueId, (mir::Value, OperationSite)>,
     dominance: Dominance,
 }
 
@@ -318,10 +319,11 @@ impl<'a> Resolver<'a> {
     /// What a `condbr` condition ultimately reads, when that is not the condition itself.
     fn resolve(&self, value: ValueId) -> Option<Source> {
         let start = Source {
-            value,
+            value: mir::Value::Register(value),
             negated: false,
         };
-        self.walk(start).filter(|source| source.value != value)
+        self.walk(start)
+            .filter(|source| source.value != mir::Value::Register(value))
     }
 
     /// What a comparison's scrutinee ultimately reads, when that is not the scrutinee itself.
@@ -333,14 +335,14 @@ impl<'a> Resolver<'a> {
             value: self.read(scrutinee, at)?,
             negated: false,
         };
-        let resolved = match self.walk(start) {
+        let resolved = match self.walk(start.clone()) {
             Some(resolved) => resolved,
             // The scrutinee was a cell whose contents nothing further explains: comparing the
-            // stored register directly is still one place read less.
-            None if self.is_materialized(start.value) => start,
+            // stored value directly is still one place read less.
+            None if self.is_materialized(&start.value) => start,
             None => return None,
         };
-        (as_register(scrutinee) != Some(resolved.value)).then_some(resolved)
+        (*scrutinee != resolved.value).then_some(resolved)
     }
 
     /// Walks back as far as the proof reaches, or `None` when it does not reach at all.
@@ -352,26 +354,32 @@ impl<'a> Resolver<'a> {
     fn walk(&self, start: Source) -> Option<Source> {
         let mut current = start;
         let mut resolved = None;
-        while let Some(next) = self.step(current) {
-            current = next;
-            if self.is_materialized(next.value) {
-                resolved = Some(next);
+        while let Some(next) = self.step(&current) {
+            if self.is_materialized(&next.value) {
+                resolved = Some(next.clone());
             }
+            current = next;
         }
         resolved
     }
 
-    /// Whether a register holds a boolean rather than the place of one.
+    /// Whether a register or parameter holds a boolean rather than the place of one.
     ///
     /// The two forms the walk sees through are also the only two that materialize a boolean into a
-    /// register, so this is the same list read the other way round.
-    fn is_materialized(&self, value: ValueId) -> bool {
-        self.definitions.get(&value).is_some_and(|site| {
-            matches!(
-                self.operation(*site).kind,
-                OperationKind::Load | OperationKind::CompareEqual
-            ) && self.is_boolean(&mir::Value::Register(value))
-        })
+    /// register, so this is the same list read the other way round. A value parameter is one too.
+    fn is_materialized(&self, value: &mir::Value) -> bool {
+        match value {
+            mir::Value::Register(id) => self.definitions.get(id).is_some_and(|site| {
+                matches!(
+                    self.operation(*site).kind,
+                    OperationKind::Load | OperationKind::CompareEqual
+                ) && self.is_boolean(value)
+            }),
+            mir::Value::Parameter(id) => {
+                self.func.parameters()[id.as_index()].is_value() && self.is_boolean(value)
+            }
+            _ => false,
+        }
     }
 
     fn is_boolean(&self, value: &mir::Value) -> bool {
@@ -384,17 +392,15 @@ impl<'a> Resolver<'a> {
     }
 
     /// One step back: from a boolean to what computed it.
-    fn step(&self, from: Source) -> Option<Source> {
-        let site = *self.definitions.get(&from.value)?;
+    fn step(&self, from: &Source) -> Option<Source> {
+        let site = *self.definitions.get(&as_register(&from.value)?)?;
         let operation = self.operation(site);
         match operation.kind {
             // A load reads a cell; the cell proof says what the cell holds.
-            OperationKind::Load if self.is_boolean(&mir::Value::Register(from.value)) => {
-                Some(Source {
-                    value: self.read(&operation.operands[0], site)?,
-                    negated: from.negated,
-                })
-            }
+            OperationKind::Load if self.is_boolean(&from.value) => Some(Source {
+                value: self.read(&operation.operands[0], site)?,
+                negated: from.negated,
+            }),
             // A comparison against a boolean *is* a negation, or an identity.
             OperationKind::CompareEqual if self.is_boolean(&operation.operands[0]) => {
                 let pattern = bool_operand(self.func, &operation.operands[1])?;
@@ -407,18 +413,21 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    /// The register an operand read at `at` yields: itself when it already is one, and the register
+    /// The value an operand read at `at` yields: itself when it already is one, and the value
     /// stored into it when it is a cell this pass may see through.
-    fn read(&self, operand: &mir::Value, at: OperationSite) -> Option<ValueId> {
+    fn read(&self, operand: &mir::Value, at: OperationSite) -> Option<mir::Value> {
+        if let mir::Value::Parameter(_) = operand {
+            return self.is_materialized(operand).then(|| operand.clone());
+        }
         let value = as_register(operand)?;
         if !self.allocas.contains(&value) {
             // Not local storage: either a materialized boolean, which is what the walk is looking
             // for, or a place it may not see through, which the caller's own step then fails on.
-            return Some(value);
+            return Some(operand.clone());
         }
         let cells = self.cells();
-        let &(stored, store) = cells.stored.get(&value)?;
-        cells.dominates(store, at).then_some(stored)
+        let (stored, store) = cells.stored.get(&value)?;
+        cells.dominates(*store, at).then(|| stored.clone())
     }
 
     fn operation(&self, site: OperationSite) -> &Operation {
@@ -433,11 +442,11 @@ impl<'a> Resolver<'a> {
 fn forwardable_cells(
     func: &Function,
     allocas: &FxHashSet<ValueId>,
-) -> FxHashMap<ValueId, (ValueId, OperationSite)> {
+) -> FxHashMap<ValueId, (mir::Value, OperationSite)> {
     #[derive(Default)]
     struct Uses {
-        /// The register the single store wrote, when the single write was one.
-        stored: Option<(ValueId, OperationSite)>,
+        /// The register or parameter the single store wrote, when the single write was one.
+        stored: Option<(mir::Value, OperationSite)>,
         writes: usize,
         /// A use through which the cell could change, or its address escape.
         opaque: bool,
@@ -458,11 +467,16 @@ fn forwardable_cells(
                 };
                 let uses = cells.entry(cell).or_default();
                 match (&operation.kind, position) {
-                    // The one write a forwardable cell may have, and only of a register.
+                    // The one write a forwardable cell may have, and only of a register or a
+                    // parameter.
                     (OperationKind::Store, 1) => {
                         uses.writes += 1;
-                        uses.stored =
-                            as_register(&operation.operands[0]).map(|stored| (stored, site));
+                        uses.stored = match &operation.operands[0] {
+                            stored @ (mir::Value::Register(_) | mir::Value::Parameter(_)) => {
+                                Some((stored.clone(), site))
+                            }
+                            _ => None,
+                        };
                     }
                     // Direct immutable reads.
                     (OperationKind::Load, 0) | (OperationKind::CompareEqual, 0) => {}
@@ -608,9 +622,8 @@ mod tests {
             !body.contains("alloca") && !body.contains("comp_eq"),
             "the flag cell, its round trip and the negation must be gone:\n{body}"
         );
-        let condition = register_defining(&body, "load %p0");
         assert!(
-            body.contains(&format!("condbr {condition},")),
+            body.contains("condbr %p0,"),
             "the branch must test the condition directly:\n{body}"
         );
         assert_eq!(stored_constant(&body, &then_target(&body)), "2", "{body}");
@@ -770,12 +783,7 @@ mod tests {
         let flag = builder
             .append_operation(entry, Operation::alloca(span, bool_type()))
             .expect("alloca produces a place");
-        let condition = builder
-            .append_operation(
-                entry,
-                Operation::load(span, mir::Value::Parameter(argument)),
-            )
-            .expect("load produces a materialized bool");
+        let condition = mir::Value::Parameter(argument);
         builder.set_terminator(entry, Terminator::cond_br(span, condition, left, right));
 
         let truth = builder.add_constant(bool_type(), LiteralValue::new_native(true), &env);

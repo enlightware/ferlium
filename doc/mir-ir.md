@@ -114,22 +114,22 @@ Parameters appear in this order:
 3. `@ret`: the caller-provided result storage, present unconditionally in semantic MIR, including
    for `()` results.
 
-All argument conventions are represented as places. `Let` is immutable non-escaping access,
-`MutableRef` is exclusive mutable access, and `owned` transfers the pointee into a private callee
-variant which must consume it on every exit. Raw semantic MIR uses only the first two conventions;
-an optimized `owned` argument requires proof that the caller relinquishes ownership.
+Arguments and parameters are places, except for concrete scalars. `Let` is immutable non-escaping
+access, `MutableRef` is exclusive mutable access, and `owned` transfers the pointee into a private
+callee variant which must consume it on every exit. Raw semantic MIR uses only the first two
+conventions; an optimized `owned` argument requires proof that the caller relinquishes ownership.
 
-At a call site, a `Let` argument of a concrete scalar type (`int`, `float` or `bool`) may instead be
-a materialized value, as the ABI passes it. This changes the call site only: inside the callee's body
-the parameter remains a place (`%pN`), whatever the caller passed. Reading the argument just before
-the call is equivalent to letting the callee read it through the place, since overlapping mutable
-arguments are invalid. Whatever needs a place for such a value, such as inlining a body that reads
-its parameter as a place, stores it into one. Raw semantic MIR passes places only.
+A `Let` parameter of a concrete scalar type (`int`, `float` or `bool`) is a value, as the ABI passes
+it. A generic parameter is a place, so specializing it to a scalar turns it into a value. At a call
+site, such an argument may be a value or a place, whatever the callee takes: reading it just before
+the call is equivalent to the callee reading it, since overlapping mutable arguments are invalid.
+Raw semantic MIR passes places only.
 
-Physical MIR keeps such a value only where the callee's entry takes the argument directly, as the
-ABI does: a static callee whose own parameter has that scalar type, or a trait method declared with
-it. An entry that takes the argument through a pointer, such as a generic parameter or a stored
-callable, receives a place, which physical lowering provides.
+Physical MIR states the transport: a value exactly where the callee's entry takes the argument
+directly, as the ABI does (a static callee whose own parameter has that scalar type, or a trait
+method declared with it), and a place otherwise, such as for a generic parameter or a stored
+callable. An entry taking a place may lead to a body whose parameter is a value; the backend bridges
+the two.
 
 `CallResultConvention` determines the result storage shape:
 

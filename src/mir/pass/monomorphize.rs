@@ -950,6 +950,7 @@ pub(crate) fn specialize<Ty: TypeLike>(
     // Check callback forwarding while operands still name the original parameters.
     resolve_recursion(&mut edit, key, own);
     bind_callbacks(&mut edit, &key.callbacks);
+    store_value_parameters(&mut edit, body);
     simplify_after_substitution(&mut edit, env);
     edit.finish(env)
 }
@@ -1032,8 +1033,46 @@ pub(crate) fn substitute_body<Ty: TypeLike>(
 
     let mut edit = FunctionEdit::new(body.clone());
     map_types(&mut edit, &mut mapper);
+    store_value_parameters(&mut edit, body);
     simplify_after_substitution(&mut edit, env);
     edit.finish(env)
+}
+
+/// Stores each parameter the substitution turned into a value into a local of its own, which the
+/// body then reads in place of the parameter: `original` read it as a place.
+pub(crate) fn store_value_parameters(edit: &mut FunctionEdit, original: &Function) {
+    let span = edit.block(edit.entry()).terminator.span;
+    let mut setup = Vec::new();
+    let mut replacements = FxHashMap::default();
+    let flipped: Vec<_> = edit
+        .parameters()
+        .iter()
+        .zip(original.parameters())
+        .enumerate()
+        .filter(|(_, (parameter, before))| parameter.is_value() && !before.is_value())
+        .map(|(index, (parameter, _))| (index, parameter.ty))
+        .collect();
+    for (index, ty) in flipped {
+        let parameter_value = mir::Value::Parameter(ParameterId::from_index(index));
+        let mut alloca = Operation::alloca(span, ty);
+        let place = edit.assign_new_result(&mut alloca).unwrap();
+        setup.push(alloca);
+        setup.push(Operation::store(
+            span,
+            parameter_value.clone(),
+            place.clone(),
+        ));
+        replacements.insert(parameter_value, place);
+    }
+    if setup.is_empty() {
+        return;
+    }
+    edit.visit_operands_mut(|operand| {
+        if let Some(place) = replacements.get(operand) {
+            *operand = place.clone();
+        }
+    });
+    edit.block_mut(edit.entry()).operations.splice(0..0, setup);
 }
 
 /// The rewrites that knowing the concrete types makes possible, shared by both substituting paths.
@@ -3099,16 +3138,8 @@ fn use_it(x: int) { with_zero(x) }",
                 .unwrap()
                 .trim()
         };
-        // The specialized body passes `b` to `set` as a value, which it stores; the direct one
-        // copies the place.
-        assert_eq!(
-            body("ints").replace(
-                "%r0: int = load %p1\n    store %r0 to %p0",
-                "memcpy %p1 to %p0"
-            ),
-            body("direct")
-        );
-        assert!(body("direct").contains("memcpy %p1 to %p0"));
+        assert_eq!(body("ints"), body("direct"));
+        assert!(body("direct").contains("store %p1 to %p0"));
         let managed = body("strings");
         assert!(managed.find("replace ").unwrap() < managed.find("drop string ").unwrap());
     }

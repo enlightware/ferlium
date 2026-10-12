@@ -530,14 +530,15 @@ qualified. `unique_generated_name` guards collisions.
 
 Copies a callee's body into its call site. It pays twice: it removes the call, which in an
 interpreter costs frame setup and argument binding, and it hands folding a body whose parameters have
-become the caller's places.
+become the caller's operands.
 
 Either an ordinary `call` operation or an `invoke` terminator. The call site's block is split, the
 callee's blocks and registers are renumbered and its constants merged into the caller's pool, every
 exit is rewired (`return` to the continuation, `propagate_error` to the site's error successor), and
 the body is bracketed with `stack_save`/`stack_restore` since the callee's `alloca`s now live in the
-caller's frame. A scalar argument passed as a value is stored into a fresh `alloca` inside that
-bracket, since the callee's body uses its parameter as a place.
+caller's frame. Where an argument and its parameter disagree, the argument is converted inside
+that bracket: a value parameter given a place reads it, and a place parameter given a value, such as
+a generic one, gets a fresh `alloca` holding it.
 
 Refused when: the callee is not statically known, has no body, uses an unsupported result convention,
 is **generic** — meaning any parameter type is not constant — belongs to a known call-graph cycle,
@@ -724,9 +725,9 @@ MIR has no φ: a value meeting a join, or leaving an inlined callee through its 
 through a cell, so its reader sees `store %v to %cell; …; %x = load %cell`; inlining also leaves
 copies between cells. `mir::pass::store_forward` forwards the reads of value cells defined by a
 store or a copy and otherwise only loaded, compared or copied from. Each read sees what the
-definition stored: a materialized register, a constant, or, for a copy from another such cell,
-what that cell holds. A copy from a
-`let` parameter reads the parameter in place. A cell holding a non-capturing closure's function is
+definition stored: a materialized register or value parameter, a constant, or, for a copy from
+another such cell, what that cell holds. A copy from a `let` parameter passed as a place reads the
+parameter in place. A cell holding a non-capturing closure's function is
 one too: calls through it become direct, and its drop, which releases nothing, goes. A cell whose
 every read was forwarded is removed with its write.
 
@@ -1004,15 +1005,15 @@ the array's `start` once, where the read sat inside an addition that also took t
 The passes read through values: folding and the integer relations take a value argument's fact as
 they take a place's, folding follows a negation through the value loaded from its result, LICM
 admits a value defined outside the loop, and dead-call removal releases a load whose value only a
-removed call read, and ignores an unread load of a removed call's result. Inlining stores a value
-bound to a parameter into a fresh `alloca` after the inline marker. Physical lowering keeps a value
+removed call read, and ignores an unread load of a removed call's result. A value parameter takes
+facts and forwarding as a register does. Physical lowering keeps a value
 where the callee's entry takes the argument directly, as the ABI does. Where the entry takes it
 through a pointer, such as a generic parameter or a stored callable, it passes a value loaded right
 before the call as the place it was loaded from, and stores any other value into a frame slot of its
 own.
 
-This is the first step of bringing the ABI's scalar values into MIR. Results and callee parameters
-still use places.
+Callee parameters of a concrete scalar type are values too (see `doc/mir-ir.md`); inlining
+converts where an argument and its parameter disagree. Results still use places.
 
 ## Dead code elimination
 

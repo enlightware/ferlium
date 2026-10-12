@@ -343,15 +343,16 @@ impl<'a> Emitter<'a> {
         // arguments; for a lowered closure (lambda) the captured-environment slots come first — they
         // are the leading `LocalDecl`s but are not part of the surface `arg_names` — followed by the
         // visible arguments. The closure's application passes each environment slot's place ahead of
-        // the visible argument places, matching this order. Every parameter is passed by pointer (the
-        // resolved passing is recorded in the signature only as the obligation a later backend may
-        // relax to direct passing per `doc/abi.md`), so each argument local is the place its incoming
-        // pointer denotes. `parameter_passing` describes only the visible arguments, so it is indexed
-        // relative to the first visible argument.
+        // the visible argument places, matching this order. A concrete scalar `Let` parameter arrives
+        // as a value, as `doc/abi.md` passes it, and is stored into a local of its own below; every
+        // other argument local is the place its incoming pointer denotes. `parameter_passing`
+        // describes only the visible arguments, so it is indexed relative to the first visible
+        // argument.
         let runtime_arg_count = syntax.runtime_arg_count;
         let visible_arg_count = f.definition.arg_names.len();
         let capture_count = runtime_arg_count - visible_arg_count;
         let mut locals: FxHashMap<LocalDeclId, mir::Value> = FxHashMap::default();
+        let mut value_parameters = Vec::new();
         for i in 0..runtime_arg_count {
             let passing = if i < capture_count {
                 // A captured-environment slot is handed to the body as a mutable reference into the
@@ -360,9 +361,15 @@ impl<'a> Emitter<'a> {
             } else {
                 f.parameter_passing[i - capture_count]
             };
-            let param = mir::Value::Parameter(
-                lowered.add_parameter(f.locals[i].ty, mir::ParameterKind::Parameter(passing)),
-            );
+            let parameter = mir::Parameter {
+                ty: f.locals[i].ty,
+                kind: mir::ParameterKind::Parameter(passing),
+            };
+            let is_value = parameter.is_value();
+            let param = mir::Value::Parameter(lowered.add_parameter(parameter.ty, parameter.kind));
+            if is_value {
+                value_parameters.push((LocalDeclId::from_index(i), param.clone(), parameter.ty));
+            }
             locals.insert(LocalDeclId::from_index(i), param);
         }
 
@@ -409,6 +416,7 @@ impl<'a> Emitter<'a> {
 
         // Allocate frame storage for every `Owned` local and bind it to its `alloca` place.
         emitter.allocate_owned_locals();
+        emitter.store_value_parameters(value_parameters);
 
         // Lower the body, dispatching on the function's return convention.
         match f.definition.return_convention() {
@@ -1186,6 +1194,17 @@ impl<'a> Emitter<'a> {
             .collect();
         for (id, ty) in owned {
             let place = self.alloca_storage(self.context.span, ty);
+            self.context.locals.insert(id, place);
+        }
+    }
+
+    /// Stores each value parameter into a local of its own and binds its variable to that place,
+    /// since the body reads variables as places.
+    fn store_value_parameters(&mut self, parameters: Vec<(LocalDeclId, mir::Value, Type)>) {
+        let span = self.context.span;
+        for (id, value, ty) in parameters {
+            let place = self.alloca_storage(span, ty);
+            self.store(span, value, place.clone());
             self.context.locals.insert(id, place);
         }
     }

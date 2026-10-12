@@ -17,12 +17,13 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     mir::{
-        self, Function, Operation, OperationKind, ValueId,
+        self, Function, Operation, OperationKind, ParameterKind, ValueId,
         edit::FunctionEdit,
         operation::{OperationResult, accepts_value_argument},
         role::{MirType, ValueRole, ValueRoles},
         terminator::TerminatorKind,
     },
+    module::id::Id,
     types::r#type::Type,
 };
 
@@ -97,8 +98,9 @@ pub(crate) fn read_scalar_arguments(func: &Function) -> Option<Function> {
 }
 
 /// Whether a scalar argument may be passed as a place, before deriving roles to know: one that is a
-/// constant, or a register a `load` or `comp_eq` defines, is a value already. After the first
-/// round, nearly every body has only those.
+/// constant, a value parameter, a register a `comp_eq` defines, or one a `load` of a place of a
+/// Ferlium type defines, is a value already. After the first round, nearly every body has only
+/// those. A `load` of a pointer slot yields a place, so it does not count.
 fn may_pass_scalar_places(func: &Function) -> bool {
     let calls = || {
         func.blocks().flat_map(|block| {
@@ -110,14 +112,46 @@ fn may_pass_scalar_places(func: &Function) -> bool {
             block.operations().iter().chain(invoked)
         })
     };
-    let values: FxHashSet<ValueId> = calls()
-        .filter(|operation| {
-            matches!(
-                operation.kind,
-                OperationKind::Load | OperationKind::CompareEqual
-            )
+    let operations = || {
+        func.blocks()
+            .flat_map(|block| func.block(block).operations())
+    };
+    let loaded: FxHashSet<ValueId> = operations()
+        .filter_map(|operation| match (&operation.kind, &*operation.operands) {
+            (OperationKind::Load, [mir::Value::Register(source)]) => Some(*source),
+            _ => None,
         })
-        .filter_map(Operation::result_id)
+        .collect();
+    // Places of a Ferlium type, whose loads yield values rather than pointers.
+    let value_places: FxHashSet<ValueId> = operations()
+        .filter_map(|operation| {
+            let place = operation
+                .result_id()
+                .filter(|place| loaded.contains(place))?;
+            matches!(
+                operation.result(),
+                OperationResult::Pointer(pointee)
+                    if matches!(*pointee, OperationResult::Lowered(_))
+            )
+            .then_some(place)
+        })
+        .collect();
+    let values: FxHashSet<ValueId> = operations()
+        .filter_map(|operation| {
+            let is_value = match operation.kind {
+                OperationKind::CompareEqual => true,
+                OperationKind::Load => match &operation.operands[0] {
+                    mir::Value::Register(source) => value_places.contains(source),
+                    mir::Value::Parameter(id) => matches!(
+                        func.parameters()[id.as_index()].kind,
+                        ParameterKind::Parameter(_) | ParameterKind::Owned
+                    ),
+                    _ => false,
+                },
+                _ => false,
+            };
+            operation.result_id().filter(|_| is_value)
+        })
         .collect();
     calls().any(|operation| {
         let OperationKind::Call { ty, metadata } = &operation.kind else {
@@ -131,6 +165,7 @@ fn may_pass_scalar_places(func: &Function) -> bool {
                 && match &operation.operands[visible_start + offset] {
                     mir::Value::Constant(_) => false,
                     mir::Value::Register(id) => !values.contains(id),
+                    mir::Value::Parameter(id) => !func.parameters()[id.as_index()].is_value(),
                     _ => true,
                 }
         })
@@ -303,6 +338,7 @@ fn may_pass_values(func: &Function) -> bool {
                     && match &operation.operands[visible_start + offset] {
                         mir::Value::Constant(_) => true,
                         mir::Value::Register(id) => values.contains(id),
+                        mir::Value::Parameter(id) => func.parameters()[id.as_index()].is_value(),
                         _ => false,
                     }
             })
@@ -377,4 +413,65 @@ fn trailing_load(operations: &[Option<Operation>], value: ValueId) -> Option<usi
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_scalar_arguments;
+    use crate::{
+        CompilerSession, Location,
+        hir::value::LiteralValue,
+        mir::{
+            self, Operation, OperationKind, ParameterKind, builder::FunctionBuilder,
+            terminator::Terminator,
+        },
+        std::math::int_type,
+    };
+
+    /// A pointer loaded from a pointer slot is a place, so the scalar argument it names is read
+    /// although the body's only other argument is a value.
+    #[test]
+    fn an_argument_loaded_from_a_pointer_slot_is_still_read() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new("pointer_slot".into(), Default::default());
+        let result =
+            mir::Value::Parameter(builder.add_parameter(int_type(), ParameterKind::Return));
+        let block = builder.add_block();
+        let one = mir::Value::Constant(builder.add_constant(
+            int_type(),
+            LiteralValue::new_native(1isize),
+            &env,
+        ));
+        let cell = builder
+            .append_operation(block, Operation::alloca(span, int_type()))
+            .unwrap();
+        builder.append_operation(block, Operation::store(span, one.clone(), cell.clone()));
+        let slot = builder
+            .append_operation(block, Operation::alloca_place(span, int_type()))
+            .unwrap();
+        builder.append_operation(block, Operation::store(span, cell, slot.clone()));
+        let pointer = builder
+            .append_operation(block, Operation::load(span, slot))
+            .unwrap();
+        let (callee, ty) = session.known_callees().int_add();
+        builder.append_operation(
+            block,
+            Operation::call(
+                span,
+                mir::Value::Function(callee),
+                [pointer.clone(), one, result],
+                ty.clone(),
+            ),
+        );
+        builder.set_terminator(block, Terminator::ret(span));
+        let body = builder.finish(env);
+
+        let read = read_scalar_arguments(&body).expect("the pointer's pointee must be read");
+        let operations = read.block(read.entry()).operations();
+        assert!(operations.iter().any(|operation| {
+            operation.kind == OperationKind::Load && operation.operands[0] == pointer
+        }));
+    }
 }

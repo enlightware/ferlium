@@ -170,7 +170,7 @@ impl<'a> Registers<'a> {
     /// Whether `value` is a value rather than a place.
     fn is_value(&self, value: &mir::Value) -> bool {
         match value {
-            mir::Value::Register(_) => self
+            mir::Value::Register(_) | mir::Value::Parameter(_) => self
                 .roles
                 .get_or_init(|| ValueRoles::derive(self.func))
                 .get(value, self.func.constants())
@@ -493,6 +493,7 @@ fn speculate(
     let mut fast = Vec::with_capacity(2 * tree.members.len());
     let mut slow = Vec::with_capacity(tree.members.len());
     let mut raw: FxHashMap<mir::Value, mir::Value> = FxHashMap::default();
+    let mut stored: FxHashMap<mir::Value, mir::Value> = FxHashMap::default();
     let mut root_raw = None;
     let mut destination = None;
     let mut members = tree.members.iter().peekable();
@@ -532,11 +533,14 @@ fn speculate(
                 continue;
             }
             // A raw operation reads a `float` as a `raw_float` only through a place, which a value
-            // is stored into where the tree stood: that is a snapshot already.
+            // is stored into where the tree stood, once per tree: that is a snapshot already.
             if registers.is_value(&input) {
-                let cell = fresh_cell(edit, cells, span, float_type());
-                head.push(Operation::store(span, input, cell.clone()));
-                arguments.push(cell);
+                let cell = stored.entry(input.clone()).or_insert_with(|| {
+                    let cell = fresh_cell(edit, cells, span, float_type());
+                    head.push(Operation::store(span, input, cell.clone()));
+                    cell
+                });
+                arguments.push(cell.clone());
                 continue;
             }
             if snapshots && matches!(input, mir::Value::Register(_) | mir::Value::Parameter(_)) {
@@ -726,8 +730,9 @@ mod tests {
         assert_eq!(count(body, "raw_float_mul"), 2, "{body}");
         assert_eq!(count(body, "raw_float_add"), 1, "{body}");
         assert_eq!(count(body, "raw_float_sub"), 1, "{body}");
-        // The raw operations read the `float` inputs directly.
-        assert!(body.contains("raw_float_mul(%p0, %p1, "), "{body}");
+        // The raw operations read the `float` inputs through one cell each.
+        assert_eq!(body.matches("store %p0 to").count(), 1, "{body}");
+        assert_eq!(body.matches("store %p1 to").count(), 1, "{body}");
         // Nothing between the tree's operations writes, so no input is snapshotted.
         assert_eq!(body.matches("memcpy").count(), 0, "{body}");
         assert_eq!(count(body, "Num<std::float>::mul"), 2, "{body}");

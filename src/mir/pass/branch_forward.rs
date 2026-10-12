@@ -1456,9 +1456,7 @@ mod tests {
         let flag = builder
             .append_operation(entry, Operation::alloca(span, bool_ty))
             .unwrap();
-        let condition = builder
-            .append_operation(entry, Operation::load(span, Value::Parameter(argument)))
-            .unwrap();
+        let condition = Value::Parameter(argument).clone();
         builder.set_terminator(entry, Terminator::cond_br(span, condition, left, right));
         builder.append_operation(
             left,
@@ -1530,9 +1528,7 @@ mod tests {
         let storage = builder
             .append_operation(entry, Operation::alloca(span, variant_ty))
             .unwrap();
-        let condition = builder
-            .append_operation(entry, Operation::load(span, Value::Parameter(argument)))
-            .unwrap();
+        let condition = Value::Parameter(argument).clone();
         builder.set_terminator(entry, Terminator::cond_br(span, condition, left, right));
         for (block, tag) in [(left, less), (right, greater)] {
             let shell = builder

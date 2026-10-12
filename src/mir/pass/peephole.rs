@@ -196,12 +196,7 @@ mod tests {
         let left = builder.add_block();
         let right = builder.add_block();
         let join = builder.add_block();
-        let loaded_condition = builder
-            .append_operation(
-                entry,
-                Operation::load(span, mir::Value::Parameter(condition)),
-            )
-            .expect("load produces a materialized bool");
+        let loaded_condition = mir::Value::Parameter(condition);
 
         builder.set_terminator(
             entry,
@@ -300,7 +295,7 @@ mod tests {
             "{rendered}"
         );
         assert!(
-            rendered.contains("store %r0 to %p1"),
+            rendered.contains("store %p0 to %p1"),
             "positive polarity should store the original condition directly:\n{rendered}"
         );
     }
@@ -343,7 +338,7 @@ mod tests {
             "the branch should be replaced by direct boolean materialization:\n{rendered}"
         );
         assert!(
-            rendered.contains("comp_eq %r0 false"),
+            rendered.contains("comp_eq %p0 false"),
             "inverse polarity should compare the original condition with false:\n{rendered}"
         );
     }

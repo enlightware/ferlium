@@ -835,7 +835,11 @@ mod tests {
             verify::verify_physical_function,
         },
         module::ModuleEnv,
-        std::{logic::bool_type, math::int_type, string::string_type},
+        std::{
+            logic::bool_type,
+            math::{int_type, raw_float_type},
+            string::string_type,
+        },
         types::r#type::tuple_type,
     };
 
@@ -1084,15 +1088,18 @@ mod tests {
         assert!(dce::remove_dead_storage(&body).is_none());
     }
 
+    /// A `raw_float` `let` parameter is still passed as a place, unlike an `int` one.
     fn staged_memcpy(env: ModuleEnv<'_>) -> Function {
         let span = Location::new_synthesized();
         let mut builder = FunctionBuilder::new("staged_memcpy".into(), Default::default());
-        let source =
-            builder.add_parameter(int_type(), ParameterKind::Parameter(ArgConvention::Let));
-        let result = builder.add_parameter(int_type(), ParameterKind::Return);
+        let source = builder.add_parameter(
+            raw_float_type(),
+            ParameterKind::Parameter(ArgConvention::Let),
+        );
+        let result = builder.add_parameter(raw_float_type(), ParameterKind::Return);
         let block = builder.add_block();
         let temporary = builder
-            .append_operation(block, Operation::alloca(span, int_type()))
+            .append_operation(block, Operation::alloca(span, raw_float_type()))
             .unwrap();
         builder.append_operation(
             block,
@@ -1193,11 +1200,11 @@ mod tests {
         let module = optimized("fn replace(mut x: int) -> int { x = 1; x }");
         let body = body_of(&module, "replace");
 
-        assert_eq!(body.matches("alloca int").count(), 1, "{body}");
+        assert_eq!(body.matches("alloca int").count(), 0, "{body}");
         assert!(
             body.lines()
-                .any(|line| line.trim().starts_with("store @c0 to %r0")),
-            "the constant must be stored directly into the mutable local:\n{body}"
+                .any(|line| line.trim().starts_with("store @c0 to %p1")),
+            "the constant must be stored directly into the result:\n{body}"
         );
     }
 
@@ -1224,7 +1231,7 @@ mod tests {
             .expect("the staging memcpy must be forwarded");
         let body = forwarded.format_with(&env).to_string();
 
-        assert_eq!(body.matches("alloca int").count(), 0, "{body}");
+        assert_eq!(body.matches("alloca raw_float").count(), 0, "{body}");
         assert_eq!(body.matches("memcpy ").count(), 1, "{body}");
         assert!(body.contains("memcpy %p0 to %p1"), "{body}");
     }
@@ -1435,7 +1442,8 @@ mod tests {
     #[test]
     fn a_snapshot_is_not_forwarded_across_a_source_write() {
         let module = optimized(
-            "fn preserve(mut source: int, replacement: int) -> int {\n\
+            "struct Pair { a: int, b: int }\n\
+             fn preserve(mut source: Pair, replacement: Pair) -> Pair {\n\
                  let snapshot = source;\n\
                  source = replacement;\n\
                  snapshot\n\
@@ -1453,10 +1461,11 @@ mod tests {
     #[test]
     fn a_copy_with_an_independent_write_keeps_its_storage() {
         let module = optimized(
-            "fn change_copy(source: int, increment: int) -> int {\n\
+            "struct Pair { a: int, b: int }\n\
+             fn change_copy(source: Pair, increment: int) -> int {\n\
                  let mut copy = source;\n\
-                 copy = copy + increment;\n\
-                 source + copy\n\
+                 copy.a = copy.a + increment;\n\
+                 source.a + copy.a\n\
              }",
         );
         let body = body_of(&module, "change_copy");
@@ -1465,13 +1474,9 @@ mod tests {
             .lines()
             .find_map(|line| line.trim().strip_prefix("memcpy %p0 to "))
             .expect("the source snapshot must remain");
-        let add_arguments = call_places(body, "Num<std::int>::add");
         assert!(
-            add_arguments
-                == [
-                    vec![copied_local, "%p1", copied_local],
-                    vec!["%p0", copied_local, "%p2"],
-                ],
+            body.contains(&format!("subfield @c0 from {copied_local}"))
+                && body.contains("subfield @c0 from %p0"),
             "an independently written copy must remain a distinct place:\n{body}"
         );
     }

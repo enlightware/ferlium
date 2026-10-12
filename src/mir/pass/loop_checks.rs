@@ -153,13 +153,16 @@ impl Sources<'_> {
             Holder::Place(mir::Value::Register(register)) => {
                 defined_before(register) && self.int_place(*register) && self.live(*register)
             }
-            Holder::Value(register) => {
+            Holder::Value(mir::Value::Register(register)) => {
                 defined_before(register)
                     && self.definition(*register).is_some_and(|operation| {
                         operation.result() == OperationResult::Lowered(int_type())
                     })
             }
-            Holder::Place(_) => false,
+            Holder::Value(mir::Value::Parameter(parameter)) => {
+                self.func.parameters()[parameter.as_index()].ty == int_type()
+            }
+            Holder::Place(_) | Holder::Value(_) => false,
         }
     }
 
@@ -768,11 +771,11 @@ impl Emitter<'_, '_> {
     fn source(&mut self, source: &Source) -> mir::Value {
         match source {
             Source::Holder(Holder::Place(place)) => place.clone(),
-            Source::Holder(Holder::Value(register)) => {
+            Source::Holder(Holder::Value(value)) => {
                 let place = self.place(int_type());
                 self.edit.append_operation(
                     self.block,
-                    Operation::store(self.span, mir::Value::Register(*register), place.clone()),
+                    Operation::store(self.span, value.clone(), place.clone()),
                 );
                 place
             }

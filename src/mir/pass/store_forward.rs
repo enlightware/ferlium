@@ -11,8 +11,9 @@
 //! The cells are the [value cells](super::value_cells) defined by a store or a copy whose every
 //! read this pass can forward: a load, a comparison, a copy out or, for a bare function, a call
 //! through it or its drop. Each read sees:
-//! - the stored register, when the write stores a materialized register: a `load`'s uses are
-//!   rewritten to it, a `comp_eq` scrutinee reads it, and a copy from the cell stores it;
+//! - the stored value, when the write stores a materialized register or a value parameter: a
+//!   `load`'s uses are rewritten to it, a `comp_eq` scrutinee reads it, and a copy from the cell
+//!   stores it;
 //! - the stored constant, when the write stores one: a load's uses or a comparison name the
 //!   constant, and a copy from the cell stores it;
 //! - what another cell holds, when the write copies that cell and its own write dominates the copy:
@@ -30,6 +31,7 @@
 //!
 //! Registers are defined once, so a store dominating a read also proves `%v` still holds the value
 //! stored: `%v`'s definition dominates the store, and no path from it to the read avoids the store.
+//! A value parameter holds one value for the whole call.
 //! A cell written once reaches the same proof: if `%a`'s write dominates the copy to `%b`, and that
 //! copy dominates a read of `%b`, every path from `%a`'s last write to the read passes the copy, so
 //! `%a` still holds what `%b` received.
@@ -119,13 +121,10 @@ pub(crate) fn forward_stored_values(func: &Function, env: ModuleEnv<'_>) -> Opti
             }
             *forwarded_reads.entry(cell).or_default() += 1;
             match (cell_use.access, target) {
-                (
-                    Access::Read(local_cells::Read::Load),
-                    Target::Register(_) | Target::Constant(_),
-                ) => {
+                (Access::Read(local_cells::Read::Load), Target::Value(_) | Target::Constant(_)) => {
                     if let Some(result) = operation_at(func, at).result_id() {
                         let stored = match target {
-                            Target::Register(id) => mir::Value::Register(*id),
+                            Target::Value(value) => value.clone(),
                             Target::Constant(id) => mir::Value::Constant(*id),
                             _ => unreachable!(),
                         };
@@ -193,7 +192,8 @@ pub(crate) fn forward_stored_values(func: &Function, env: ModuleEnv<'_>) -> Opti
             },
         };
         let stored = match target {
-            Target::Register(stored) => resolve(*stored),
+            Target::Value(mir::Value::Register(stored)) => resolve(*stored),
+            Target::Value(stored) => stored.clone(),
             Target::Function(function) => mir::Value::Function(*function),
             Target::Constant(constant) => mir::Value::Constant(*constant),
             Target::Place(place) => {
@@ -253,8 +253,8 @@ pub(crate) fn forward_stored_values(func: &Function, env: ModuleEnv<'_>) -> Opti
 /// What the reads of a cell are forwarded to.
 #[derive(Clone)]
 enum Target {
-    /// The materialized register the cell holds.
-    Register(ValueId),
+    /// The materialized register or value parameter the cell holds.
+    Value(mir::Value),
     /// A place holding the same value for as long as the cell lives: another cell, or a `let`
     /// parameter, which the callee cannot mutate.
     Place(mir::Value),
@@ -343,12 +343,12 @@ fn targets(func: &Function, census: &Census<'_>) -> FxHashMap<ValueId, Target> {
     let stores_register = census
         .values
         .iter()
-        .any(|cell| matches!(cell.definition, Definition::Register(_)));
+        .any(|cell| matches!(cell.definition, Definition::Value(_)));
     let roles = stores_register.then(|| ValueRoles::derive(func));
-    let materialized = |stored: ValueId| {
+    let materialized = |stored: &mir::Value| {
         roles.as_ref().is_some_and(|roles| {
             roles
-                .get(&mir::Value::Register(stored), func.constants())
+                .get(stored, func.constants())
                 .is_some_and(|role| matches!(&*role, ValueRole::Materialized(_)))
         })
     };
@@ -361,7 +361,7 @@ fn targets(func: &Function, census: &Census<'_>) -> FxHashMap<ValueId, Target> {
     }
     impl<M> Resolver<'_, M>
     where
-        M: Fn(ValueId) -> bool,
+        M: Fn(&mir::Value) -> bool,
     {
         /// `cell`'s target, through the chain of copies it was written by. The chain is finite: a
         /// value cell's definition strictly dominates its copy into the next one.
@@ -373,8 +373,8 @@ fn targets(func: &Function, census: &Census<'_>) -> FxHashMap<ValueId, Target> {
             self.targets.insert(cell, None);
             let this = self.census.cell(cell);
             let target = match &this.definition {
-                Definition::Register(stored) => {
-                    (self.materialized)(*stored).then_some(Target::Register(*stored))
+                Definition::Value(stored) => {
+                    (self.materialized)(stored).then(|| Target::Value(stored.clone()))
                 }
                 Definition::Function(function) => Some(Target::Function(*function)),
                 Definition::Constant(constant) => Some(Target::Constant(*constant)),
@@ -394,7 +394,7 @@ fn targets(func: &Function, census: &Census<'_>) -> FxHashMap<ValueId, Target> {
             };
             self.census.values.get(*source_id)?;
             match self.resolve(*source_id) {
-                Some(Target::Register(stored)) => Some(Target::Register(stored)),
+                Some(Target::Value(stored)) => Some(Target::Value(stored)),
                 Some(Target::Constant(constant)) => Some(Target::Constant(constant)),
                 // Copies are of representation-copyable values, never of a function value.
                 Some(Target::Function(_)) => None,
@@ -440,7 +440,7 @@ mod tests {
         },
         std::{
             logic::bool_type,
-            math::{Float, float_type},
+            math::{Float, float_type, raw_float_type},
         },
     };
 
@@ -512,7 +512,7 @@ mod tests {
 
     /// ```text
     /// %a = alloca bool; %b = alloca bool
-    /// store %argument_read to %a; %x = load %a
+    /// store %argument to %a; %x = load %a
     /// store %x to %b; %y = load %b
     /// condbr %y, …
     /// ```
@@ -522,13 +522,11 @@ mod tests {
         let env = session.module_env();
         let span = Location::new_synthesized();
         let mut builder = FunctionBuilder::new("chain".into(), Default::default());
-        let argument =
-            builder.add_parameter(bool_type(), ParameterKind::Parameter(ArgConvention::Let));
+        let root = Value::Parameter(
+            builder.add_parameter(bool_type(), ParameterKind::Parameter(ArgConvention::Let)),
+        );
         let entry = builder.add_block();
         let exit = builder.add_block();
-        let root = builder
-            .append_operation(entry, Operation::load(span, Value::Parameter(argument)))
-            .unwrap();
         let mut stored = root.clone();
         for _ in 0..2 {
             let cell = builder
@@ -549,11 +547,7 @@ mod tests {
         assert!(
             matches!(&entry.terminator().kind, TerminatorKind::CondBr { condition, .. } if *condition == root)
         );
-        assert_eq!(
-            entry.operations().len(),
-            1,
-            "only the root load must remain"
-        );
+        assert!(entry.operations().is_empty(), "the cells must be gone");
     }
 
     #[test]
@@ -825,14 +819,12 @@ mod tests {
         let env = session.module_env();
         let span = Location::new_synthesized();
         let mut builder = FunctionBuilder::new("copies".into(), Default::default());
-        let argument =
-            builder.add_parameter(bool_type(), ParameterKind::Parameter(ArgConvention::Let));
+        let root = Value::Parameter(
+            builder.add_parameter(bool_type(), ParameterKind::Parameter(ArgConvention::Let)),
+        );
         let entry = builder.add_block();
         let body = builder.add_block();
         let exit = builder.add_block();
-        let root = builder
-            .append_operation(entry, Operation::load(span, Value::Parameter(argument)))
-            .unwrap();
         let [a, b, c] = [(); 3].map(|()| {
             builder
                 .append_operation(entry, Operation::alloca(span, bool_type()))
@@ -859,24 +851,27 @@ mod tests {
     }
 
     /// ```text
-    /// %a = alloca bool
+    /// %a = alloca raw_float
     /// memcpy %argument to %a
     /// %y = load %a
-    /// condbr %y, …
+    /// store %y to %ret
     /// ```
-    /// A `let` parameter cannot change during the call, so the read reads it in place.
+    /// A `let` parameter passed as a place cannot change during the call, so the read reads it in
+    /// place.
     #[test]
     fn a_copy_of_a_let_parameter_reads_the_parameter() {
         let session = CompilerSession::new();
         let env = session.module_env();
         let span = Location::new_synthesized();
         let mut builder = FunctionBuilder::new("parameter".into(), Default::default());
-        let argument =
-            builder.add_parameter(bool_type(), ParameterKind::Parameter(ArgConvention::Let));
+        let argument = builder.add_parameter(
+            raw_float_type(),
+            ParameterKind::Parameter(ArgConvention::Let),
+        );
+        let output = builder.add_parameter(raw_float_type(), ParameterKind::Return);
         let entry = builder.add_block();
-        let exit = builder.add_block();
         let cell = builder
-            .append_operation(entry, Operation::alloca(span, bool_type()))
+            .append_operation(entry, Operation::alloca(span, raw_float_type()))
             .unwrap();
         builder.append_operation(
             entry,
@@ -885,14 +880,21 @@ mod tests {
         let read = builder
             .append_operation(entry, Operation::load(span, cell))
             .unwrap();
-        builder.set_terminator(entry, Terminator::cond_br(span, read, exit, exit));
-        builder.set_terminator(exit, Terminator::ret(span));
+        builder.append_operation(
+            entry,
+            Operation::store(span, read, Value::Parameter(output)),
+        );
+        builder.set_terminator(entry, Terminator::ret(span));
         let source = builder.finish(env);
 
         let forwarded = forward_stored_values(&source, session.module_env())
             .expect("the read must be forwarded");
         let operations = forwarded.block(forwarded.entry()).operations();
-        assert_eq!(operations.len(), 1, "only the load must remain");
+        assert_eq!(
+            operations.len(),
+            2,
+            "only the load and its store must remain"
+        );
         assert!(operations[0].kind == OperationKind::Load);
         assert_eq!(operations[0].operands[0], Value::Parameter(argument));
     }
@@ -905,14 +907,12 @@ mod tests {
         let env = session.module_env();
         let span = Location::new_synthesized();
         let mut builder = FunctionBuilder::new("late_write".into(), Default::default());
-        let argument =
-            builder.add_parameter(bool_type(), ParameterKind::Parameter(ArgConvention::Let));
+        let root = Value::Parameter(
+            builder.add_parameter(bool_type(), ParameterKind::Parameter(ArgConvention::Let)),
+        );
         let entry = builder.add_block();
         let body = builder.add_block();
         let exit = builder.add_block();
-        let root = builder
-            .append_operation(entry, Operation::load(span, Value::Parameter(argument)))
-            .unwrap();
         let [a, b] = [(); 2].map(|()| {
             builder
                 .append_operation(entry, Operation::alloca(span, bool_type()))

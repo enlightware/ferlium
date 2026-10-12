@@ -63,8 +63,8 @@ use crate::{
     define_id_type, graph,
     hir::function::ArgConvention,
     mir::{
-        self, BlockId, Function, Operation, OperationKind, dominance::Dominance,
-        terminator::TerminatorKind, value::ValueId,
+        self, BlockId, Function, Operation, OperationKind, Parameter, ParameterId,
+        dominance::Dominance, terminator::TerminatorKind, value::ValueId,
     },
     module::{FunctionId, ProjectionIndex, id::Id},
     std::math::Int,
@@ -927,6 +927,9 @@ impl State {
 struct RootTypes {
     allocas: FxHashMap<ValueId, Type>,
     parameters: Vec<Type>,
+    /// Whether each parameter arrives as a value, which the analysis names as the entry contents
+    /// of its root: nothing writes it.
+    value_parameters: Vec<bool>,
 }
 
 impl RootTypes {
@@ -944,7 +947,12 @@ impl RootTypes {
         Self {
             allocas,
             parameters: func.parameters().iter().map(|p| p.ty).collect(),
+            value_parameters: func.parameters().iter().map(Parameter::is_value).collect(),
         }
+    }
+
+    fn is_value_parameter(&self, id: ParameterId) -> bool {
+        self.value_parameters[id.as_index()]
     }
 
     fn of(&self, root: Root) -> Option<Type> {
@@ -962,8 +970,8 @@ impl RootTypes {
 pub(crate) enum Holder {
     /// A place whose contents are the quantity.
     Place(mir::Value),
-    /// A register that is the quantity.
-    Value(ValueId),
+    /// A register or value parameter that is the quantity.
+    Value(mir::Value),
 }
 
 pub(crate) struct Analysis {
@@ -1107,7 +1115,9 @@ impl Analysis {
             .map(|(place, _)| *place)
             .collect();
         match *self.interner.symbols().name(symbol) {
-            Symbol::Register(register) => return vec![Holder::Value(register)],
+            Symbol::Register(register) => {
+                return vec![Holder::Value(mir::Value::Register(register))];
+            }
             Symbol::Stored(place, DefSite::Entry) if !state.current.contains_key(&place) => {
                 places.push(place);
             }
@@ -1119,6 +1129,9 @@ impl Analysis {
             .iter()
             .filter(|place| tree.is_root(**place))
             .filter_map(|place| match tree.root_of(*place) {
+                Root::Parameter(parameter) if self.types.is_value_parameter(parameter) => {
+                    Some(Holder::Value(mir::Value::Parameter(parameter)))
+                }
                 Root::Parameter(parameter) => Some(Holder::Place(mir::Value::Parameter(parameter))),
                 _ => None,
             })
@@ -2864,6 +2877,17 @@ fn value_fact(
         mir::Value::Register(id) => {
             let symbol = interner.symbol(Symbol::Register(*id));
             state.fact(symbol).cloned()
+        }
+        // A value parameter is the entry contents of its root, as a load of it would read.
+        mir::Value::Parameter(_) => {
+            let place = state.place_of(operand, interner)?;
+            let symbol = state.symbol_of(place, interner);
+            Some(
+                state
+                    .fact(symbol)
+                    .cloned()
+                    .unwrap_or_else(|| Fact::Value(state.place_affine(place, interner))),
+            )
         }
         _ => None,
     }

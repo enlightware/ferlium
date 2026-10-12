@@ -606,9 +606,7 @@ mod tests {
             let entry = builder.add_block();
             let initialize = builder.add_block();
             let cleanup = builder.add_block();
-            let condition = builder
-                .append_operation(entry, Operation::load(span, condition))
-                .unwrap();
+            let condition = condition.clone();
             let slot = builder
                 .append_operation(entry, Operation::alloca(span, int_type()))
                 .unwrap();
@@ -794,9 +792,7 @@ mod tests {
             Operation::drop(span, loaded.clone(), Value::Function(callee), int_type()),
         );
         builder.append_operation(repeat, Operation::store(span, one, input));
-        let again = builder
-            .append_operation(repeat, Operation::load(span, condition))
-            .unwrap();
+        let again = condition.clone();
         builder.set_terminator(repeat, Terminator::cond_br(span, again, repeat, done));
         builder.append_operation(done, Operation::store(span, unit, output));
         builder.set_terminator(done, Terminator::ret(span));
@@ -966,9 +962,7 @@ mod tests {
             .unwrap();
         builder.append_operation(entry, Operation::store(span, one.clone(), y.clone()));
         builder.append_operation(entry, Operation::store(span, one, z.clone()));
-        let condition = builder
-            .append_operation(entry, Operation::load(span, condition))
-            .unwrap();
+        let condition = condition.clone();
         builder.set_terminator(entry, Terminator::cond_br(span, condition, attempt, join));
         let mut call = Operation::call(
             span,
@@ -1107,9 +1101,7 @@ mod tests {
                 Operation::variant_payload(span, parent.clone(), zero, ty, None),
             )
             .unwrap();
-        let condition = builder
-            .append_operation(entry, Operation::load(span, condition))
-            .unwrap();
+        let condition = condition.clone();
         builder.set_terminator(entry, Terminator::cond_br(span, condition, clear, query));
         builder.append_operation(clear, Operation::clear(span, payload.clone()));
         builder.append_operation(clear, Operation::clear(span, parent.clone()));

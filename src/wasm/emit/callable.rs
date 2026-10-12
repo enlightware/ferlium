@@ -1107,12 +1107,17 @@ mod tests {
             .append_operation(block, Operation::alloca(span, ty))
             .unwrap();
         body.append_operation(block, Operation::store(span, cloned, second.clone()));
+        // A stored callable takes its argument through a pointer.
+        let argument = body
+            .append_operation(block, Operation::alloca(span, int_type()))
+            .unwrap();
+        body.append_operation(block, Operation::store(span, input, argument.clone()));
         body.append_operation(
             block,
             Operation::call(
                 span,
                 second.clone(),
-                [input, output],
+                [argument, output],
                 CallImplType::value(signature),
             ),
         );

@@ -279,8 +279,11 @@ impl RuntimeTypes {
                     body.name, parameter.kind
                 )));
             }
-            // A diverging callee never initializes its caller-provided result storage.
-            if parameter.kind != ParameterKind::Return || parameter.ty != Type::never() {
+            // A diverging callee never initializes its caller-provided result storage. A value
+            // parameter's type is concrete.
+            if (parameter.kind != ParameterKind::Return || parameter.ty != Type::never())
+                && !parameter.is_value()
+            {
                 let ty = match argument {
                     Binding::Evidence(evidence) => evidence.ty(),
                     _ => argument.place()?.ty,
@@ -854,6 +857,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         if body.result_convention() != CallResultConvention::YIELDED_ONCE {
             return Err(invalid("project requires a place-returning entry"));
         }
+        self.read_value_parameters(body, &mut args)?;
         let types =
             RuntimeTypes::for_call(body, &mut args, &self.memory, self.env(callable.function))?;
         self.prepare_frame(callable.function, body, &types)?;
@@ -1228,6 +1232,23 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         }
     }
 
+    /// Callers pass every visible argument as a place, so a value parameter reads its argument's
+    /// place on entry.
+    fn read_value_parameters(
+        &self,
+        body: &Function,
+        args: &mut [Binding],
+    ) -> Result<(), RuntimeError> {
+        for (argument, parameter) in args.iter_mut().zip(body.parameters()) {
+            if parameter.is_value()
+                && let Binding::Place(address) = *argument
+            {
+                *argument = Binding::Scalar(self.memory.read(address)?);
+            }
+        }
+        Ok(())
+    }
+
     fn call(&mut self, id: FunctionId, mut args: Vec<Binding>) -> Result<(), RuntimeError> {
         let symbol = id;
         let id = self.program.direct_entry(id);
@@ -1253,10 +1274,11 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         let Some(body) = self.program.function(id) else {
             return self.call_native(id, &args);
         };
+        self.read_value_parameters(body, &mut args)?;
         let types = RuntimeTypes::for_call(body, &mut args, &self.memory, self.env(id))?;
         self.prepare_frame(id, body, &types)?;
         for (argument, parameter) in args.iter().zip(body.parameters()) {
-            if parameter.kind == ParameterKind::Dictionary {
+            if parameter.kind == ParameterKind::Dictionary || parameter.is_value() {
                 continue;
             }
             // for_call checks runtime type identities; callable effect annotations are erased.
@@ -1622,8 +1644,8 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     .iter()
                     .map(|value| self.operand(body, args, registers, value))
                     .collect::<Result<Vec<_>, _>>()?;
-                // The callee binds every parameter to a place: a scalar passed as a value gets a
-                // cell of its own for the call.
+                // A call passes every argument as a place, which a value parameter reads on entry:
+                // a scalar passed as a value gets a cell of its own for the call.
                 let marker = self.memory.len();
                 for value in &mut values {
                     if let Binding::Scalar(scalar) = *value {

@@ -10,7 +10,7 @@ use crate::{
     format::FormatWith,
     hir::function::ArgConvention,
     mir::{
-        self, DebugLocation, Operation, ParameterId, ValueId,
+        self, DebugLocation, Operation, ParameterId, ValueId, operation,
         role::ValueRoles,
         terminator::{Terminator, TerminatorKind},
         value::{Constant, ConstantId},
@@ -38,6 +38,16 @@ pub enum ParameterKind {
 pub struct Parameter {
     pub ty: Type,
     pub kind: ParameterKind,
+}
+
+impl Parameter {
+    /// Whether the parameter arrives as a value rather than as a place: a `Let` parameter of a
+    /// concrete scalar type, as the direct entry receives it (`doc/abi.md`). A generic parameter
+    /// stays a place, so specializing it to a scalar turns it into a value.
+    pub fn is_value(&self) -> bool {
+        self.kind == ParameterKind::Parameter(ArgConvention::Let)
+            && operation::is_scalar_value_type(self.ty)
+    }
 }
 
 define_id_type!(
