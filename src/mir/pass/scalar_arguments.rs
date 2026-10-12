@@ -29,6 +29,9 @@ use crate::{
 /// Reads every scalar place argument of a `call` into a value before it, or `None` if there is
 /// none.
 pub(crate) fn read_scalar_arguments(func: &Function) -> Option<Function> {
+    if !may_pass_scalar_places(func) {
+        return None;
+    }
     let roles = ValueRoles::derive(func);
     // A place of a refined type, such as `raw_float` read as `float`, keeps passing as a place: its
     // value would not have the argument's type.
@@ -91,6 +94,47 @@ pub(crate) fn read_scalar_arguments(func: &Function) -> Option<Function> {
         block.terminator = terminator;
     }
     Some(edit.finish_unverified())
+}
+
+/// Whether a scalar argument may be passed as a place, before deriving roles to know: one that is a
+/// constant, or a register a `load` or `comp_eq` defines, is a value already. After the first
+/// round, nearly every body has only those.
+fn may_pass_scalar_places(func: &Function) -> bool {
+    let calls = || {
+        func.blocks().flat_map(|block| {
+            let block = func.block(block);
+            let invoked = match &block.terminator().kind {
+                TerminatorKind::Invoke { operation, .. } => Some(operation),
+                _ => None,
+            };
+            block.operations().iter().chain(invoked)
+        })
+    };
+    let values: FxHashSet<ValueId> = calls()
+        .filter(|operation| {
+            matches!(
+                operation.kind,
+                OperationKind::Load | OperationKind::CompareEqual
+            )
+        })
+        .filter_map(Operation::result_id)
+        .collect();
+    calls().any(|operation| {
+        let OperationKind::Call { ty, metadata } = &operation.kind else {
+            return false;
+        };
+        let visible_start = operation.operands.len()
+            - ty.fn_ty.args.len()
+            - usize::from(ty.result_convention.has_result_place());
+        (0..ty.fn_ty.args.len()).any(|offset| {
+            accepts_value_argument(ty, metadata.as_deref(), offset)
+                && match &operation.operands[visible_start + offset] {
+                    mir::Value::Constant(_) => false,
+                    mir::Value::Register(id) => !values.contains(id),
+                    _ => true,
+                }
+        })
+    })
 }
 
 /// Appends a `load` of each operand at `reads` to `operations`, and passes its value instead.

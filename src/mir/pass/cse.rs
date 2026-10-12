@@ -3,8 +3,10 @@
 
 //! Common-subexpression elimination over the calls and address computations a body repeats.
 //!
-//! Two complementary passes run at different points. Before inlining, available-expression
-//! analysis merges repeatable calls, copying the first result into the duplicate's out-slot. This
+//! Three passes run at different points. At the start of each round, available-expression analysis
+//! merges repeated loads of a place nothing wrote in between, so that a value read twice is one
+//! register. Before inlining, the same analysis merges repeatable calls, copying the first result
+//! into the duplicate's out-slot. This
 //! covers both caller-rooted `AddressorPlace` calls and environment-independent `Value` calls whose
 //! result is `TrivialCopy`. That is the economical point: `swap#spec:[int]` has four calls to
 //! `array_index::ref_mut` but only two distinct `(array, index)` pairs, so only two accessor bodies
@@ -22,16 +24,28 @@
 //!
 //! **Value availability.** A value call is eligible only when it is statically known, its effects
 //! permit compile-time evaluation, all visible arguments use `Let`, and its concrete result is
-//! `TrivialCopy`. Its cached result depends on the contents of every argument root and on the first
-//! result slot remaining live. Any write to one of those roots invalidates it. Restricting the
-//! result to `TrivialCopy` makes the replacement an ordinary `memcpy`; owned results would require
-//! explicit clone/drop accounting. Lowering must materialize a literal passed by value into a cell;
-//! the call pass records call sites and constant stores together, then runs the detailed proof only
-//! when a cheap over-approximation can find a duplicate. It identifies cells initialized once from
-//! the same pooled constant and used only as `Let` call arguments, and gives them the same
-//! expression-key operand. The cells themselves stay distinct, so this changes neither their
-//! lifetime nor their address identity; replacing the repeated call makes the later one dead for
-//! ordinary storage DCE.
+//! `TrivialCopy`. A value argument is keyed by itself: a register never changes, and merged loads
+//! make equal reads one register. Its cached result depends on the contents of every place
+//! argument's root and on the first result slot remaining live. Any write to one of those roots
+//! invalidates it. Restricting the result to `TrivialCopy` makes the replacement an ordinary
+//! `memcpy`; owned results would require explicit clone/drop accounting. A literal passed as a
+//! place lives in a cell of its own; the call pass records call sites and constant stores together,
+//! then runs the detailed proof only when a cheap over-approximation can find a duplicate. It
+//! identifies cells initialized once from the same pooled constant and used only as `Let` call
+//! arguments, and gives them the same expression-key operand. The cells themselves stay distinct,
+//! so this changes neither their lifetime nor their address identity; replacing the repeated call
+//! makes the later one dead for ordinary storage DCE.
+//!
+//! **Load availability.** A `load` is keyed by the place it reads and depends on that place's root,
+//! which every write to it invalidates as it invalidates a call reading it. A stack restore does
+//! not: the loaded register outlives the storage it was read from, and only allocating that storage
+//! again, as a loop does, makes a later load of it read something else. A later load of the same
+//! place, available on every path from one earlier load, reads that load's register instead.
+//!
+//! **Fixpoint.** Each block's entry is the intersection of what its reached predecessors send,
+//! recomputed whenever one of them changes rather than only shrunk. A loop header that loses an
+//! expression makes the occurrence in the loop body the available one, which the blocks after it
+//! must then see.
 //!
 //! **Dominator-based value numbering.** Each operation is keyed by its kind, its type metadata and
 //! the *canonical* identity of each operand, so comparing two arbitrarily deep expressions is one
@@ -57,7 +71,7 @@
 //! Two classes remain out, each for its own reason:
 //!
 //! - **A memory reader** — `load`, `comp_eq`, `extract_tag` — needs an aliasing argument about the
-//!   writes in between, which is what provenance is for.
+//!   writes in between, which is what provenance is for; loads are merged by availability above.
 //! - **An owned materialized value**, `build_subscript` among them, cannot be merged at all: such a
 //!   register must have exactly one consuming use, and merging is precisely what gives it two.
 //!   `subscript_member` is place-producing like `dict_entry` but is left out until its redundancy
@@ -87,6 +101,7 @@ use crate::{
         dominance::Dominance,
         edit::FunctionEdit,
         operation::Instantiation,
+        role::{MirType, ValueRole, ValueRoles},
         terminator::{Terminator, TerminatorKind},
         value::{ConstantId, ValueId},
     },
@@ -129,6 +144,13 @@ struct CallExpression {
     ty: CallImplType,
     instantiation: Option<Instantiation>,
     operands: Box<[CallOperand]>,
+}
+
+/// What an available-expression analysis compares: a call, or a `load` of the place it names.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum AvailableExpression {
+    Call(CallExpression),
+    Load(mir::Value),
 }
 
 type ImmutableConstantCells = FxHashMap<ValueId, ConstantId>;
@@ -379,18 +401,25 @@ enum AvailableCall {
         dependencies: Box<[Root]>,
         output_root: Root,
     },
+    /// A `load` whose register holds what `root` held when it ran.
+    Load {
+        output: mir::Value,
+        root: Root,
+    },
 }
 
 impl AvailableCall {
     fn output(&self) -> &mir::Value {
         match self {
-            AvailableCall::Addressor { output, .. } | AvailableCall::Value { output, .. } => output,
+            AvailableCall::Addressor { output, .. }
+            | AvailableCall::Value { output, .. }
+            | AvailableCall::Load { output, .. } => output,
         }
     }
 }
 
 define_id_type!(
-    /// An interned [`CallExpression`], so that a flow state is a map of plain words.
+    /// An interned [`AvailableExpression`], so that a flow state is a map of plain words.
     ExpressionId
 );
 
@@ -420,7 +449,21 @@ enum CallStep<'a> {
     },
 }
 
-/// The [`CallStep`] of every call in a body.
+/// Which operations an analysis run makes available.
+enum Candidates<'x> {
+    /// Repeatable calls. A value argument is keyed by itself; a place argument by its root's
+    /// contents.
+    Calls {
+        constant_cells: &'x ImmutableConstantCells,
+        is_value: &'x dyn Fn(&mir::Value) -> bool,
+        summary_of: &'x dyn Fn(FunctionId) -> AddressorSummary,
+        is_optimization_barrier: &'x dyn Fn(FunctionId) -> bool,
+    },
+    /// Loads of places of a known root that another load reads too: only those can repeat.
+    Loads(&'x FxHashSet<&'x mir::Value>),
+}
+
+/// The [`CallStep`] of every call, and of every load when loads are the candidates, in a body.
 struct CallSteps<'a> {
     /// By block, then by operation index; an `invoke`'s call takes the index past the last.
     steps: Vec<Vec<Option<CallStep<'a>>>>,
@@ -432,29 +475,47 @@ impl<'a> CallSteps<'a> {
         func: &'a Function,
         env: ModuleEnv<'_>,
         origins: &PlaceOrigins,
-        constant_cells: &ImmutableConstantCells,
-        summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
-        is_optimization_barrier: &dyn Fn(FunctionId) -> bool,
+        candidates: &Candidates<'_>,
     ) -> Self {
         let mut expressions = FxHashMap::default();
         let mut available = Vec::new();
         let mut step_of = |operation: &'a Operation| {
-            if !matches!(operation.kind, OperationKind::Call { .. }) {
-                return None;
-            }
-            if let Some((expression, call)) = call_expression(
-                operation,
-                origins,
-                constant_cells,
-                summary_of,
-                is_optimization_barrier,
-                env,
-            ) {
+            let candidate = match (&operation.kind, candidates) {
+                (OperationKind::Load, Candidates::Loads(repeated))
+                    if repeated.contains(&operation.operands[0]) =>
+                {
+                    load_expression(operation, origins)
+                }
+                (OperationKind::Load, _) => None,
+                (
+                    OperationKind::Call { .. },
+                    Candidates::Calls {
+                        constant_cells,
+                        is_value,
+                        summary_of,
+                        is_optimization_barrier,
+                    },
+                ) => call_expression(
+                    operation,
+                    origins,
+                    constant_cells,
+                    is_value,
+                    summary_of,
+                    is_optimization_barrier,
+                    env,
+                ),
+                (OperationKind::Call { .. }, Candidates::Loads(_)) => None,
+                _ => return None,
+            };
+            if let Some((expression, call)) = candidate {
                 let next = ExpressionId::from_index(expressions.len());
                 let expression = *expressions.entry(expression).or_insert(next);
                 available.push(call);
                 let call = CallId::from_index(available.len() - 1);
                 return Some(CallStep::Expression { expression, call });
+            }
+            if operation.kind == OperationKind::Load {
+                return None;
             }
             let Some(call) = call_operands_for_cse(operation, env) else {
                 return Some(CallStep::Opaque);
@@ -535,58 +596,24 @@ pub(crate) fn eliminate_common_calls(
         return None;
     }
     let origins = PlaceOrigins::of(func, summary_of);
+    let roles = ValueRoles::derive(func);
+    let is_value = |operand: &mir::Value| {
+        roles
+            .get(operand, func.constants())
+            .is_some_and(|role| matches!(*role, ValueRole::Materialized(MirType::Lowered(_))))
+    };
     let calls = CallSteps::of(
         func,
         env,
         &origins,
-        &scan.constant_cells,
-        summary_of,
-        is_optimization_barrier,
+        &Candidates::Calls {
+            constant_cells: &scan.constant_cells,
+            is_value: &is_value,
+            summary_of,
+            is_optimization_barrier,
+        },
     );
-    let entry_states = available_call_states(func, &calls, &origins);
-    let mut replacements = Vec::new();
-
-    for block_id in func.blocks() {
-        let Some(mut state) = entry_states[block_id.as_index()].clone() else {
-            continue;
-        };
-        let block = func.block(block_id);
-        for (index, operation) in block.operations().iter().enumerate() {
-            let step = calls.step(block_id, index);
-            if let Some((source, destination)) =
-                transfer(operation, step, &calls, &origins, &mut state)
-            {
-                replacements.push(CallReplacement {
-                    site: ReplacementSite::Operation {
-                        block: block_id,
-                        index: OperationIndex::from_index(index),
-                    },
-                    source,
-                    destination,
-                    span: operation.span,
-                });
-            }
-        }
-        if let TerminatorKind::Invoke {
-            operation, normal, ..
-        } = &block.terminator().kind
-        {
-            let step = calls.step(block_id, block.operations().len());
-            if let Some((source, destination)) =
-                transfer(operation, step, &calls, &origins, &mut state)
-            {
-                replacements.push(CallReplacement {
-                    site: ReplacementSite::Invoke {
-                        block: block_id,
-                        normal: *normal,
-                    },
-                    source,
-                    destination,
-                    span: operation.span,
-                });
-            }
-        }
-    }
+    let replacements = redundant_expressions(func, &calls, &origins);
     if replacements.is_empty() {
         return None;
     }
@@ -613,6 +640,140 @@ pub(crate) fn eliminate_common_calls(
     edit.remove_unreachable_blocks();
     edit.merge_blocks_into_predecessors();
     Some(edit.finish_unverified())
+}
+
+/// Replaces each `load` of a place whose root nothing wrote since an earlier load of the same
+/// place, on every path, by that earlier load's value.
+///
+/// Reading a scalar argument at its call makes each read explicit, so `x - x` reads `x` twice.
+/// Merging the reads gives equal values one register, which folding's identities and call CSE
+/// compare. The analysis is call CSE's, with loads as the expressions: a write to a load's root
+/// invalidates it exactly as it invalidates a call reading that root.
+pub(crate) fn eliminate_common_loads(
+    func: &Function,
+    env: ModuleEnv<'_>,
+    summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
+) -> Option<Function> {
+    let repeated = repeated_loads(func);
+    if repeated.is_empty() {
+        return None;
+    }
+    let origins = PlaceOrigins::of(func, summary_of);
+    let loads = CallSteps::of(func, env, &origins, &Candidates::Loads(&repeated));
+    let replacements = redundant_expressions(func, &loads, &origins);
+    if replacements.is_empty() {
+        return None;
+    }
+
+    let mut merged = FxHashMap::default();
+    let mut removed = FxHashMap::<BlockId, FxHashSet<OperationIndex>>::default();
+    for replacement in replacements {
+        let (ReplacementSite::Operation { block, index }, mir::Value::Register(load)) =
+            (replacement.site, replacement.destination)
+        else {
+            unreachable!("a load is an operation defining a register");
+        };
+        removed.entry(block).or_default().insert(index);
+        merged.insert(load, replacement.source);
+    }
+    let mut edit = FunctionEdit::new(func.clone());
+    for (block, indices) in &removed {
+        let mut index = 0;
+        edit.block_mut(*block).operations.retain(|_| {
+            let keep = !indices.contains(&OperationIndex::from_index(index));
+            index += 1;
+            keep
+        });
+    }
+    edit.visit_operands_mut(|operand| {
+        if let mir::Value::Register(id) = operand
+            && let Some(representative) = merged.get(id)
+        {
+            *operand = representative.clone();
+        }
+    });
+    Some(edit.finish_unverified())
+}
+
+/// The place operands two loads read, the only ones a load can repeat.
+fn repeated_loads(func: &Function) -> FxHashSet<&mir::Value> {
+    let mut seen = FxHashSet::default();
+    func.blocks()
+        .flat_map(|block| func.block(block).operations())
+        .filter(|operation| operation.kind == OperationKind::Load)
+        .filter(|operation| !seen.insert(&operation.operands[0]))
+        .map(|operation| &operation.operands[0])
+        .collect()
+}
+
+/// The `load` of a known root as an available expression; `None` for one whose value has to be
+/// consumed, or whose place has no known root.
+fn load_expression(
+    operation: &Operation,
+    origins: &PlaceOrigins,
+) -> Option<(AvailableExpression, AvailableCall)> {
+    if operation.result_requires_consuming_use() {
+        return None;
+    }
+    let output = mir::Value::Register(operation.result_id()?);
+    let place = &operation.operands[0];
+    let root = origins.origin_of(place)?.root;
+    Some((
+        AvailableExpression::Load(place.clone()),
+        AvailableCall::Load { output, root },
+    ))
+}
+
+/// Each operation whose expression is already available where it runs, with what replaces it.
+fn redundant_expressions(
+    func: &Function,
+    calls: &CallSteps<'_>,
+    origins: &PlaceOrigins,
+) -> Vec<CallReplacement> {
+    let entry_states = available_call_states(func, calls, origins);
+    let mut replacements = Vec::new();
+    for block_id in func.blocks() {
+        let Some(mut state) = entry_states[block_id.as_index()].clone() else {
+            continue;
+        };
+        let block = func.block(block_id);
+        for (index, operation) in block.operations().iter().enumerate() {
+            let step = calls.step(block_id, index);
+            if let Some((source, destination)) =
+                transfer(operation, step, calls, origins, &mut state)
+            {
+                replacements.push(CallReplacement {
+                    site: ReplacementSite::Operation {
+                        block: block_id,
+                        index: OperationIndex::from_index(index),
+                    },
+                    source,
+                    destination,
+                    span: operation.span,
+                });
+            }
+        }
+        if let TerminatorKind::Invoke {
+            operation, normal, ..
+        } = &block.terminator().kind
+        {
+            let step = calls.step(block_id, block.operations().len());
+            if let Some((source, destination)) =
+                transfer(operation, step, calls, origins, &mut state)
+            {
+                replacements.push(CallReplacement {
+                    site: ReplacementSite::Invoke {
+                        block: block_id,
+                        normal: *normal,
+                    },
+                    source,
+                    destination,
+                    span: operation.span,
+                });
+            }
+        }
+    }
+    replacements
 }
 
 /// Whether two recorded calls may have the same [`CallExpression`].
@@ -704,9 +865,11 @@ fn call_fingerprint(operation: &Operation, constant_cells: &ImmutableConstantCel
 
 /// The calls available on entry to each block; `None` for a block no path reaches.
 ///
-/// A must-analysis from the optimistic start: a block's entry is what its first reached predecessor
-/// sends, then only shrinks as others intersect it. A worklist in reverse postorder revisits just
-/// the blocks whose entry shrank, so a body without loops is walked once.
+/// A must-analysis from the optimistic start: an unreached predecessor sends everything. A block's
+/// entry is recomputed from what its reached predecessors currently send, rather than only shrunk:
+/// a loop header that loses an expression makes the load or call in its body the available one,
+/// which the blocks it dominates must then see. A worklist in reverse postorder revisits just the
+/// blocks a changed exit reaches, so a body without loops is walked once.
 fn available_call_states(
     func: &Function,
     calls: &CallSteps<'_>,
@@ -720,6 +883,23 @@ fn available_call_states(
             successors.map(|successor| successor.as_index()).collect()
         })
         .collect();
+    // Each predecessor, with whether it reaches the block through an `invoke`'s error edge, on
+    // which no call result is available. Empty is deliberately more conservative than preserving
+    // expressions from before the invoke.
+    let mut predecessors = vec![Vec::new(); block_count];
+    for block in func.blocks() {
+        match &func.block(block).terminator().kind {
+            TerminatorKind::Invoke { normal, error, .. } => {
+                predecessors[normal.as_index()].push((block.as_index(), false));
+                predecessors[error.as_index()].push((block.as_index(), true));
+            }
+            terminator => {
+                for successor in terminator.successors() {
+                    predecessors[successor.as_index()].push((block.as_index(), false));
+                }
+            }
+        }
+    }
     let entry = func.entry().as_index();
     let mut priority = vec![usize::MAX; block_count];
     for (order, block) in reverse_postorder(&successors, entry)
@@ -730,16 +910,32 @@ fn available_call_states(
     }
 
     let mut entries = vec![None; block_count];
-    entries[entry] = Some(AvailableCalls::default());
+    let mut exits: Vec<Option<AvailableCalls>> = vec![None; block_count];
     let mut queued = vec![false; block_count];
     queued[entry] = true;
     let mut worklist = BinaryHeap::from([Reverse((priority[entry], entry))]);
     while let Some(Reverse((_, block_index))) = worklist.pop() {
         queued[block_index] = false;
+        let mut state = if block_index == entry {
+            AvailableCalls::default()
+        } else {
+            let mut sent = predecessors[block_index]
+                .iter()
+                .filter_map(|&(predecessor, error)| {
+                    let exit = exits[predecessor].as_ref()?;
+                    Some(if error { None } else { Some(exit) })
+                });
+            let Some(first) = sent.next() else {
+                continue;
+            };
+            let mut state = first.cloned().unwrap_or_default();
+            for incoming in sent {
+                meet_available(&mut state, incoming, calls);
+            }
+            state
+        };
+        entries[block_index] = Some(state.clone());
         let block_id = BlockId::from_index(block_index);
-        let mut state = entries[block_index]
-            .clone()
-            .expect("only a reached block is queued");
         let block = func.block(block_id);
         for (index, operation) in block.operations().iter().enumerate() {
             transfer(
@@ -750,53 +946,40 @@ fn available_call_states(
                 &mut state,
             );
         }
-        let mut reach = |successor: BlockId, incoming: &AvailableCalls| {
-            let successor = successor.as_index();
-            if join_available(&mut entries[successor], incoming, calls) && !queued[successor] {
+        if let TerminatorKind::Invoke { operation, .. } = &block.terminator().kind {
+            let step = calls.step(block_id, block.operations().len());
+            transfer(operation, step, calls, origins, &mut state);
+        }
+        if exits[block_index].as_ref() == Some(&state) {
+            continue;
+        }
+        exits[block_index] = Some(state);
+        for &successor in &successors[block_index] {
+            if !queued[successor] {
                 queued[successor] = true;
                 worklist.push(Reverse((priority[successor], successor)));
-            }
-        };
-        match &block.terminator().kind {
-            TerminatorKind::Invoke {
-                operation,
-                normal,
-                error,
-            } => {
-                let step = calls.step(block_id, block.operations().len());
-                transfer(operation, step, calls, origins, &mut state);
-                reach(*normal, &state);
-                // No call result is available on failure. Empty is deliberately more conservative
-                // than preserving expressions from before the invoke.
-                reach(*error, &AvailableCalls::default());
-            }
-            terminator => {
-                for successor in terminator.successors() {
-                    reach(successor, &state);
-                }
             }
         }
     }
     entries
 }
 
-/// Intersects `incoming` into a block's entry, returning whether the entry changed.
-fn join_available(
-    entry: &mut Option<AvailableCalls>,
-    incoming: &AvailableCalls,
+/// Intersects `incoming` into `state`: an expression stays available only where both have it from
+/// the same call, `None` sending nothing.
+fn meet_available(
+    state: &mut AvailableCalls,
+    incoming: Option<&AvailableCalls>,
     calls: &CallSteps<'_>,
-) -> bool {
-    let Some(existing) = entry else {
-        *entry = Some(incoming.clone());
-        return true;
+) {
+    let Some(incoming) = incoming else {
+        state.clear();
+        return;
     };
-    let previous_len = existing.len();
-    existing.retain(|expression, call| {
+    state.retain(|expression, call| {
         incoming
             .get(expression)
             .is_some_and(|theirs| calls.available(*theirs) == calls.available(*call))
     });
-    existing.len() != previous_len
 }
 
 /// Applies one operation and returns the result copy which replaces it when it is redundant.
@@ -809,12 +992,15 @@ fn transfer(
 ) -> Option<(mir::Value, mir::Value)> {
     match step {
         Some(CallStep::Expression { expression, call }) => {
-            let output = calls.available(*call).output();
+            let available = calls.available(*call);
+            let output = available.output();
             // Every call writes its out-slot. This can invalidate another value expression whose
             // input or cached result occupies the same root, and overwrites an addressor pointer
-            // cached in exactly that slot.
-            forget_write(state, calls, origins, output);
-            state.retain(|_, cached| calls.available(*cached).output() != output);
+            // cached in exactly that slot. A load writes nothing but its register.
+            if !matches!(available, AvailableCall::Load { .. }) {
+                forget_write(state, calls, origins, output);
+                state.retain(|_, cached| calls.available(*cached).output() != output);
+            }
             if let Some(previous) = state.get(expression) {
                 return Some((calls.available(*previous).output().clone(), output.clone()));
             }
@@ -877,17 +1063,30 @@ fn transfer(
         | OperationKind::DropInitialized { .. }
         | OperationKind::DropSubscriptEnv
         | OperationKind::DropClosureEnv
+        | OperationKind::CloneSubscriptEnv { .. }
         | OperationKind::CloneClosureEnv { .. } => {
             forget_write(state, calls, origins, &operation.operands[0]);
         }
         // Deallocation invalidates every cached place which may be rooted in the released region.
-        // Allocation itself produces a fresh root and cannot change an existing cached value.
         OperationKind::RuntimeDealloc => state.clear(),
-        // Restoring can pop the out-slot holding the cached pointer. Scoped projections can run
-        // arbitrary setup/cleanup code and are outside the AddressorPlace contract.
-        OperationKind::StackRestore | OperationKind::Project { .. } | OperationKind::EndProject => {
-            state.clear()
+        // Allocation produces a fresh root and cannot change an existing cached value. Run again,
+        // in a loop, it replaces what its root named: a value loaded from the old one is stale.
+        OperationKind::Alloca { .. }
+        | OperationKind::AllocaPlace { .. }
+        | OperationKind::RuntimeAlloc { .. } => {
+            if let Some(id) = operation.result_id() {
+                forget_root(state, calls, Root::Alloca(id));
+            }
         }
+        // Restoring can pop the out-slot holding the cached pointer. A loaded value is a register,
+        // which outlives the storage it was read from: only allocating that storage again can make
+        // a later load of it read something else.
+        OperationKind::StackRestore => {
+            state.retain(|_, call| matches!(calls.available(*call), AvailableCall::Load { .. }))
+        }
+        // Scoped projections can run arbitrary setup/cleanup code and are outside the
+        // AddressorPlace contract.
+        OperationKind::Project { .. } | OperationKind::EndProject => state.clear(),
         _ => {}
     }
     None
@@ -897,10 +1096,11 @@ fn call_expression(
     operation: &Operation,
     origins: &PlaceOrigins,
     constant_cells: &ImmutableConstantCells,
+    is_value: &dyn Fn(&mir::Value) -> bool,
     summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
     is_optimization_barrier: &dyn Fn(FunctionId) -> bool,
     env: ModuleEnv<'_>,
-) -> Option<(CallExpression, AvailableCall)> {
+) -> Option<(AvailableExpression, AvailableCall)> {
     let OperationKind::Call { ty, metadata } = &operation.kind else {
         return None;
     };
@@ -944,9 +1144,11 @@ fn call_expression(
             {
                 return None;
             }
+            // A value argument is its own key: only a place argument depends on storage.
             let dependencies: Box<[Root]> = call
                 .arguments
                 .iter()
+                .filter(|(argument, _)| !is_value(argument))
                 .map(|(argument, _)| origins.origin_of(argument).map(|origin| origin.root))
                 .collect::<Option<Vec<_>>>()?
                 .into_boxed_slice();
@@ -966,7 +1168,7 @@ fn call_expression(
         _ => return None,
     };
     Some((
-        CallExpression {
+        AvailableExpression::Call(CallExpression {
             ty: ty.as_ref().clone(),
             instantiation: metadata
                 .as_deref()
@@ -980,7 +1182,7 @@ fn call_expression(
                 })
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
-        },
+        }),
         available,
     ))
 }
@@ -1005,6 +1207,7 @@ fn forget_write(
             output_root,
             ..
         } => *output_root != origin.root && !dependencies.contains(&origin.root),
+        AvailableCall::Load { root, .. } => *root != origin.root,
     });
 }
 
@@ -1019,6 +1222,9 @@ fn forget_root(state: &mut AvailableCalls, calls: &CallSteps<'_>, root: Root) {
             output_root,
             ..
         } => *output_root != root && !dependencies.contains(&root),
+        AvailableCall::Load {
+            root: load_root, ..
+        } => *load_root != root,
     });
 }
 

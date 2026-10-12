@@ -30,6 +30,8 @@ Per function (`mir::pass::optimize_function`):
 
 ```text
 for round in 0..MAX_ROUNDS:
+    scalar arguments // read scalar `Let` call arguments into values before their calls
+    load CSE      // read a place nothing wrote since an earlier load as that load's value
     fold          // constant/semantic folding, devirtualization; block merging in its own edit
     specialize    // point generic calls at concrete copies
     call CSE      // merge repeated addressor and trivial value calls before copying their bodies
@@ -38,7 +40,7 @@ for round in 0..MAX_ROUNDS:
     place CSE     // merge repeated subfield and dictionary-entry places
     inline        // budget-limited; block merging inside its own edit
     stop if nothing warranted another round
-scalar arguments  // read scalar `Let` call arguments into values before their calls
+scalar arguments  // if the rounds ran out: arguments the last inlining passed as places
 place CSE          // merge places which inlining exposes
 copy forward      // catch trivial-copy storage exposed after the last round
 store forward     // likewise for single-store cells
@@ -599,33 +601,42 @@ into the second out-slot.
 
 A `Value` call is eligible when it is direct, its effects permit compile-time evaluation, every
 visible argument uses `Let`, and its concrete result implements `TrivialCopy`. Its first result is
-then representation-copyable into every duplicate out-slot. The cached value depends on the
-contents of all its argument roots and on its first result slot remaining initialized, so a write
-to any of those roots invalidates it. Non-copy results remain excluded: reusing one would require
+then representation-copyable into every duplicate out-slot. A value argument is keyed by itself,
+since a register never changes. The cached value depends on the contents of its place arguments'
+roots and on its first result slot remaining initialized, so a write to any of those roots
+invalidates it. Non-copy results remain excluded: reusing one would require
 semantic cloning plus ownership and drop accounting. When the callee still has a module-table
 definition, its declared parameter-passing conventions are authoritative; this prevents incomplete
 generated-call metadata from hiding a mutable argument. Optimizer-created callees fall back to the
 conventions retained in their call type.
 
-Although MIR passes call arguments indirectly, independently lowered literal occurrences still
-denote the same value. The call pass's first input walk records eligible call sites and constant
-stores together. Only when an over-approximate fingerprint can repeat does it run the conservative
-use proof, which accepts local `alloca` cells with exactly one constant store whose other uses are
-exclusively visible `Let` arguments. Those operands are keyed by the typed constant rather than by
-the fresh cell. The cells themselves are not merged: call CSE removes the duplicate computation and
-ordinary storage DCE then removes the unread materialization. A second store or any reference,
-projection, ownership, result-slot or control-flow use rejects the equivalence. Addressor calls
-never use it because equal pointees do not make two places identical.
+A literal passed as a place, which store forwarding has not yet made a constant operand, still
+denotes the same value as another occurrence. The call pass's first input walk records eligible call
+sites and constant stores together. Only when an over-approximate fingerprint can repeat does it run
+the conservative use proof, which accepts local `alloca` cells with exactly one constant store whose
+other uses are exclusively visible `Let` arguments. Those operands are keyed by the typed constant
+rather than by the fresh cell. The cells themselves are not merged: call CSE removes the duplicate
+computation and ordinary storage DCE then removes the unread materialization. A second store or any
+reference, projection, ownership, result-slot or control-flow use rejects the equivalence. Addressor
+calls never use it because equal pointees do not make two places identical.
 
-Availability is a forward CFG intersection. An `invoke` generates a result only on its normal edge,
-so replacing a later identical invoke also removes an error edge that the earlier successful call
-proved unreachable. A call receiving the provenance root by mutable reference invalidates its
-addresses because it may reallocate the object; structural writes and `stack_restore` invalidate
-them as well. Writing a value through an addressor-produced leaf does not reallocate its containing
-object, which is why `swap` can reuse `a[j]`'s address across the assignment to `a[i]`. The same
-write does invalidate a cached value call that read that leaf or its containing root.
+Availability is a forward CFG intersection, each block's entry recomputed from what its predecessors
+currently send, so that the occurrence in a loop body becomes the available one once the loop's back
+edge kills the one before it. An `invoke` generates a result only on its normal edge, so replacing a
+later identical invoke also removes an error edge that the earlier successful call proved
+unreachable. A call receiving the provenance root by mutable reference invalidates its addresses
+because it may reallocate the object; structural writes and `stack_restore` invalidate them as well.
+Writing a value through an addressor-produced leaf does not reallocate its containing object, which
+is why `swap` can reuse `a[j]`'s address across the assignment to `a[i]`. The same write does
+invalidate a cached value call that read that leaf or its containing root.
 
-This runs inside each optimization round after specialization and before inlining. On
+The same analysis merges loads, at the start of each round, right after scalar arguments are read
+into values: a `load` is keyed by its place and invalidated by any write to that place's root, so
+`x - x` reads `x` once and folding sees one value on both sides, and two calls reading the same
+argument compare equal. A loaded register outlives a `stack_restore`; only allocating its place
+again, in the next iteration of a loop, invalidates it.
+
+Call CSE runs inside each optimization round after specialization and before inlining. On
 `swap#spec:[int]`, four `array_index::ref_mut` calls become two before the accessor is copied, so the
 final body has two bounds/index computations and two `buffer_slot` calls rather than four of each.
 
@@ -982,21 +993,23 @@ storage must move.
 ## Scalar call arguments
 
 The ABI passes a read-only argument of a concrete scalar type by value, and semantic MIR may too.
-After the rounds, `mir::pass::scalar_arguments` reads each such argument passed as a place into a
-value just before its call. The read the callee made through the place becomes a `load` in the
-caller, which the caller's passes see: store forwarding turns the load of a known cell into the
-constant itself, so a literal argument needs no cell, and LICM hoists a load the loop does not
-change. An array loop thus reads the array's `start` once, where the read sat inside an addition
-that also took the cursor.
+At the start of each round, `mir::pass::scalar_arguments` reads each such argument passed as a
+place into a value just before its call, so every pass of the round sees the read the callee made
+through the place as a `load` of the caller. Load CSE then reads a place read twice once: two calls
+taking the same argument compare equal, and folding's identities see `x - x` as one value on both
+sides. Store forwarding turns the load of a known cell into the constant itself, so a literal
+argument needs no cell, and LICM hoists a load the loop does not change. An array loop thus reads
+the array's `start` once, where the read sat inside an addition that also took the cursor.
 
-The value form then flows wherever the optimized body goes, including into callers that inline it,
-so the passes read through it: folding and the integer relations take a value argument's fact as
-they take a place's, LICM admits a value defined outside the loop, and dead-call removal releases a
-load whose value only a removed call read. Inlining stores a value bound to a parameter into a
-fresh `alloca` after the inline marker. Physical lowering keeps a value where the callee's entry
-takes the argument directly, as the ABI does. Where the entry takes it through a pointer, such as
-a generic parameter or a stored callable, it passes a value loaded right before the call as the
-place it was loaded from, and stores any other value into a frame slot of its own.
+The passes read through values: folding and the integer relations take a value argument's fact as
+they take a place's, folding follows a negation through the value loaded from its result, LICM
+admits a value defined outside the loop, and dead-call removal releases a load whose value only a
+removed call read, and ignores an unread load of a removed call's result. Inlining stores a value
+bound to a parameter into a fresh `alloca` after the inline marker. Physical lowering keeps a value
+where the callee's entry takes the argument directly, as the ABI does. Where the entry takes it
+through a pointer, such as a generic parameter or a stored callable, it passes a value loaded right
+before the call as the place it was loaded from, and stores any other value into a frame slot of its
+own.
 
 This is the first step of bringing the ABI's scalar values into MIR. Results and callee parameters
 still use places.

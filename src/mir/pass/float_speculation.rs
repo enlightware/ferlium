@@ -462,21 +462,28 @@ fn speculate(
         barrier.is_none_or(|barrier| barrier < at)
             && last_writes.get(place).is_none_or(|&write| write < at)
     };
-    let deferred: FxHashMap<mir::Value, mir::Value> = tree
+    // How often the tree reads each register: a load the tree is the only reader of moves with it.
+    let mut tree_reads = FxHashMap::<ValueId, usize>::default();
+    for arithmetic in tree
         .members
         .iter()
         .filter_map(|&member| arithmetic(&original[member], known, original_of))
-        .flat_map(|arithmetic| arithmetic.inputs)
-        .filter_map(|input| {
-            let mir::Value::Register(id) = input else {
-                return None;
-            };
+    {
+        for input in arithmetic.inputs {
+            if let mir::Value::Register(id) = input {
+                *tree_reads.entry(id).or_default() += 1;
+            }
+        }
+    }
+    let deferred: FxHashMap<mir::Value, mir::Value> = tree_reads
+        .iter()
+        .filter_map(|(&id, reads)| {
             let place = registers.loads.get(&id)?;
             let at = *positions.get(&id)?;
-            (registers.uses.get(&id) == Some(&1)
+            (registers.uses.get(&id) == Some(reads)
                 && tree.members.binary_search(&at).is_err()
                 && unchanged_after(place, at))
-            .then(|| (input, place.clone()))
+            .then(|| (mir::Value::Register(id), place.clone()))
         })
         .collect();
 

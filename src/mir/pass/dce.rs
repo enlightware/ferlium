@@ -113,6 +113,20 @@ fn remove_dead_results(
         }
         count_operands(&mut uses, basic_block.terminator().operands());
     }
+    // A load nothing reads is no read of the result it loads, and goes with it. A load that is a
+    // candidate itself is released by the walk below instead, which releases its place once.
+    let mut unread_loads = FxHashMap::<ValueId, Vec<DeadResultCandidate>>::default();
+    for (load, site) in &loads {
+        if !uses.contains_key(load)
+            && !candidates.contains_key(load)
+            && let mir::Value::Register(place) =
+                &func.block(site.block).operations()[site.operation.as_index()].operands[0]
+            && candidates.contains_key(place)
+        {
+            *uses.get_mut(place).expect("a load's place was counted") -= 1;
+            unread_loads.entry(*place).or_default().push(*site);
+        }
+    }
 
     let remaining_uses =
         |uses: &FxHashMap<ValueId, usize>, result: &ValueId| uses.get(result).copied().unwrap_or(0);
@@ -126,6 +140,12 @@ fn remove_dead_results(
     while let Some(result) = pending.pop() {
         if !removed_results.insert(result) || remaining_uses(&uses, &result) != dead_at {
             continue;
+        }
+        for load in unread_loads.remove(&result).into_iter().flatten() {
+            removed
+                .entry(load.block)
+                .or_default()
+                .insert(load.operation);
         }
         let mut released = vec![candidates[&result]];
         while let Some(definition) = released.pop() {
@@ -1607,6 +1627,45 @@ mod tests {
         let cleaned = remove_dead_trivial_results(&canonical).unwrap();
         let cleaned = FunctionEdit::new(cleaned).finish(env);
         assert!(cleaned.block(cleaned.entry()).operations().is_empty());
+    }
+
+    /// An unread load of a pointer that is itself loaded, and read elsewhere, releases that pointer
+    /// once: the pointer stays.
+    #[test]
+    fn an_unread_load_releases_its_loaded_place_once() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new("unread_load".into(), Default::default());
+        let block = builder.add_block();
+        let slot = builder
+            .append_operation(block, Operation::alloca_place(span, int_type()))
+            .unwrap();
+        let pointer = builder
+            .append_operation(block, Operation::load(span, slot))
+            .unwrap();
+        builder.append_operation(block, Operation::load(span, pointer.clone()));
+        let copy = builder
+            .append_operation(block, Operation::alloca(span, int_type()))
+            .unwrap();
+        builder.append_operation(block, Operation::memcpy(span, pointer.clone(), copy));
+        builder.set_terminator(block, Terminator::ret(span));
+        let function = builder.finish(env);
+        let cleaned = remove_dead_trivial_results(&function).unwrap();
+        let cleaned = FunctionEdit::new(cleaned).finish(env);
+        let operations = cleaned.block(cleaned.entry()).operations();
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|operation| operation.kind == OperationKind::Load)
+                .count(),
+            1
+        );
+        assert!(
+            operations.iter().any(
+                |operation| operation.result_id().map(Value::Register) == Some(pointer.clone())
+            )
+        );
     }
 
     /// Removing an unused comparison leaves the load it read unused too. Both the release of that

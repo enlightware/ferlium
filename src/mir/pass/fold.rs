@@ -1053,21 +1053,25 @@ fn fact_for_call_rewrite(
     }
 }
 
-/// A block-local negation result and the unchanged place its operand came from.
+/// A block-local negation result and its operand: an unchanged place, or a value.
 #[derive(Clone)]
 struct ArithmeticNegation {
     kind: KnownCallee,
     source: mir::Value,
-    source_place: PlaceId,
+    /// The place `source` names, `None` for a value, which nothing can change.
+    source_place: Option<PlaceId>,
 }
 
-/// Available negations over non-escaping storage. Copying a result preserves its origin, but any
-/// write to either the original operand or the result's root invalidates the relation. Unknown
-/// operations clear the table. Starting empty in each block avoids moving reads across joins or
-/// loop iterations; the normal fold rounds and block merging expose further local opportunities.
+/// Available negations over non-escaping storage, and in the values loaded from it. Copying a
+/// result preserves its origin, and so does loading it, but any write to the original operand
+/// invalidates the relation; a write to the result's root invalidates only the stored result.
+/// Unknown operations clear the table. Starting empty in each block avoids moving reads across
+/// joins or loop iterations; the normal fold rounds and block merging expose further local
+/// opportunities.
 #[derive(Default)]
 struct ArithmeticNegations {
     places: FxHashMap<PlaceId, ArithmeticNegation>,
+    values: FxHashMap<ValueId, ArithmeticNegation>,
 }
 
 impl ArithmeticNegations {
@@ -1108,22 +1112,44 @@ impl ArithmeticNegations {
         context: &FoldContext<'_>,
     ) -> Option<CallRewrite> {
         let (kind, source, _) = Self::call(operation, state, context)?;
-        let first = self
-            .places
-            .get(&context.analysis.tracked_place_of(source)?)?;
+        let first = match source {
+            mir::Value::Register(id) if self.values.contains_key(id) => &self.values[id],
+            _ => self
+                .places
+                .get(&context.analysis.tracked_place_of(source)?)?,
+        };
         (first.kind == kind).then(|| context.copy_of(first.source.clone()))
     }
 
     fn forget_write(&mut self, destination: &mir::Value, analysis: &Analysis) {
         let Some(place) = analysis.place_of(destination) else {
             self.places.clear();
+            self.values.clear();
             return;
         };
         let root = analysis.root_of_place(place);
+        let source_unchanged = |negation: &ArithmeticNegation| {
+            negation
+                .source_place
+                .is_none_or(|source| analysis.root_of_place(source) != root)
+        };
         self.places.retain(|place, negation| {
-            analysis.root_of_place(*place) != root
-                && analysis.root_of_place(negation.source_place) != root
+            analysis.root_of_place(*place) != root && source_unchanged(negation)
         });
+        self.values.retain(|_, negation| source_unchanged(negation));
+    }
+
+    /// The operand of a negation: a tracked place, or a value.
+    fn source_place(source: &mir::Value, context: &FoldContext<'_>) -> Option<Option<PlaceId>> {
+        if let Some(place) = context.analysis.tracked_place_of(source) {
+            return Some(Some(place));
+        }
+        context.is_value(source).then_some(None)
+    }
+
+    fn clear(&mut self) {
+        self.places.clear();
+        self.values.clear();
     }
 
     fn step(&mut self, operation: &Operation, state: &State, context: &FoldContext<'_>) {
@@ -1131,7 +1157,7 @@ impl ArithmeticNegations {
         match &operation.kind {
             OperationKind::Call { ty, .. } => {
                 let Some(call) = dataflow::call_operands(&operation.operands, ty) else {
-                    self.places.clear();
+                    self.clear();
                     return;
                 };
                 if !ty.effects().is_empty()
@@ -1141,19 +1167,21 @@ impl ArithmeticNegations {
                         .iter()
                         .any(|(_, convention)| *convention != ArgConvention::Let)
                 {
-                    self.places.clear();
+                    self.clear();
                     return;
                 }
                 let Some(destination) = dataflow::call_result_operand(&operation.operands, ty)
                 else {
-                    self.places.clear();
+                    self.clear();
                     return;
                 };
                 self.forget_write(destination, analysis);
                 if let Some((kind, source, destination)) = Self::call(operation, state, context)
-                    && let Some(source_place) = analysis.tracked_place_of(source)
+                    && let Some(source_place) = Self::source_place(source, context)
                     && let Some(place) = analysis.tracked_place_of(destination)
-                    && analysis.root_of_place(place) != analysis.root_of_place(source_place)
+                    && source_place.is_none_or(|source_place| {
+                        analysis.root_of_place(place) != analysis.root_of_place(source_place)
+                    })
                 {
                     self.places.insert(
                         place,
@@ -1167,7 +1195,7 @@ impl ArithmeticNegations {
             }
             OperationKind::Memcpy => {
                 let [source, destination] = operation.operands.as_ref() else {
-                    self.places.clear();
+                    self.clear();
                     return;
                 };
                 let origin = analysis
@@ -1177,18 +1205,28 @@ impl ArithmeticNegations {
                 self.forget_write(destination, analysis);
                 if let Some(origin) = origin
                     && let Some(place) = analysis.tracked_place_of(destination)
-                    && analysis.root_of_place(place) != analysis.root_of_place(origin.source_place)
+                    && origin.source_place.is_none_or(|source_place| {
+                        analysis.root_of_place(place) != analysis.root_of_place(source_place)
+                    })
                 {
                     self.places.insert(place, origin);
                 }
             }
+            OperationKind::Load => {
+                if let Some(id) = operation.result_id()
+                    && let Some(origin) = analysis
+                        .tracked_place_of(&operation.operands[0])
+                        .and_then(|place| self.places.get(&place))
+                {
+                    self.values.insert(id, origin.clone());
+                }
+            }
             OperationKind::Store => self.forget_write(&operation.operands[1], analysis),
             OperationKind::Alloca { .. }
-            | OperationKind::Load
             | OperationKind::DictEntry { .. }
             | OperationKind::Subfield { .. }
             | OperationKind::StackSave => {}
-            _ => self.places.clear(),
+            _ => self.clear(),
         }
     }
 }
@@ -1683,18 +1721,22 @@ impl FoldContext<'_> {
         self.analysis.read_is_known(operand, state)
     }
 
-    /// The rewrite making a call's result a copy of its argument `source`.
-    fn copy_of(&self, source: mir::Value) -> CallRewrite {
-        let is_value = match &source {
+    /// Whether `operand` is a value rather than a place.
+    fn is_value(&self, operand: &mir::Value) -> bool {
+        match operand {
             mir::Value::Constant(_) => true,
-            mir::Value::Register(_) if self.analysis.place_of(&source).is_none() => self
+            mir::Value::Register(_) if self.analysis.place_of(operand).is_none() => self
                 .roles
                 .get_or_init(|| ValueRoles::derive(self.func))
-                .get(&source, self.func.constants())
+                .get(operand, self.func.constants())
                 .is_some_and(|role| matches!(*role, ValueRole::Materialized(MirType::Lowered(_)))),
             _ => false,
-        };
-        if is_value {
+        }
+    }
+
+    /// The rewrite making a call's result a copy of its argument `source`.
+    fn copy_of(&self, source: mir::Value) -> CallRewrite {
+        if self.is_value(&source) {
             CallRewrite::Store(source)
         } else {
             CallRewrite::Copy(source)
@@ -2376,7 +2418,16 @@ mod tests {
             !body.contains("call std::not"),
             "the negation call must become a comparison:\n{body}"
         );
-        assert!(body.contains("comp_eq %p0 false"), "{body}");
+        let argument = body
+            .lines()
+            .find(|line| line.ends_with("= load %p0"))
+            .and_then(|line| line.split(':').next())
+            .unwrap_or_else(|| panic!("`a` must be read:\n{body}"))
+            .trim();
+        assert!(
+            body.contains(&format!("comp_eq {argument} false")),
+            "{body}"
+        );
     }
 
     /// A *known* argument must reach full evaluation instead: a constant beats both a copy of the
@@ -2457,13 +2508,17 @@ mod tests {
                 format!("let mut y = x; let z = -y; y = {one}; -z + y"),
             ] {
                 let body = optimized_main(&format!("fn main(x: {ty}) -> {ty} {{ {expression} }}"));
-                // The second expression needs the old negation; the first folds its overwritten
-                // value to a constant rather than copying x.
+                // The second expression negates the value `y` held before the write, read before
+                // it; the first folds its overwritten value to a constant rather than copying x.
                 if expression.contains("let z") {
-                    assert!(
-                        body.contains(&format!("call std::Num<std::{ty}>::neg")),
-                        "{body}"
-                    );
+                    let write = body.find("store @c").expect(&body);
+                    let negated = body
+                        .split(&format!("Num<std::{ty}>::add"))
+                        .nth(1)
+                        .and_then(|call| call.split(['(', ',']).nth(1))
+                        .expect(&body);
+                    let read = body.find(&format!("{negated}: {ty} = load")).expect(&body);
+                    assert!(read < write, "{body}");
                 } else {
                     assert!(body.contains("store @c"), "{body}");
                 }

@@ -1334,10 +1334,11 @@ mod tests {
     #[test]
     fn a_script_call_result_does_not_overwrite_its_aliased_argument() {
         let module = optimized(
-            "fn recursive(x: int) -> int {\n\
-                 if x == 0 { 0 } else { recursive(x - 1) }\n\
+            "struct Pair { a: int, b: int }\n\
+             fn recursive(x: Pair) -> Pair {\n\
+                 if x.a == 0 { x } else { recursive(Pair { a: x.a - 1, b: x.b }) }\n\
              }\n\
-             fn update(mut x: int) -> int { x = recursive(x); x }",
+             fn update(mut x: Pair) -> Pair { x = recursive(x); x }",
         );
         let body = body_of(&module, "update");
         let lines: Vec<_> = body.lines().map(str::trim).collect();
@@ -1418,15 +1419,16 @@ mod tests {
     fn storage_forwarding_preserves_an_overlapping_call_input() {
         let module = optimized(
             "struct Pair { a: int, b: int }\n\
-             fn recursive(x: int) -> int {\n\
-                 if x == 0 { 0 } else { recursive(x - 1) }\n\
+             struct Nested { a: int, b: Pair }\n\
+             fn recursive(x: Pair) -> Pair {\n\
+                 if x.a == 0 { x } else { recursive(Pair { a: x.a - 1, b: x.b }) }\n\
              }\n\
-             fn update(mut pair: Pair) -> Pair {\n\
-                 pair.b = recursive(pair.b); pair\n\
+             fn update(mut nested: Nested) -> Nested {\n\
+                 nested.b = recursive(nested.b); nested\n\
              }",
         );
         let body = body_of(&module, "update");
-        assert_eq!(body.matches("alloca int").count(), 1, "{body}");
+        assert_eq!(body.matches("alloca Pair").count(), 1, "{body}");
         assert!(body.contains("move "), "{body}");
     }
 

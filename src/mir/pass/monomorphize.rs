@@ -3099,8 +3099,16 @@ fn use_it(x: int) { with_zero(x) }",
                 .unwrap()
                 .trim()
         };
-        assert_eq!(body("ints"), body("direct"));
-        assert!(body("ints").contains("memcpy %p1 to %p0"));
+        // The specialized body passes `b` to `set` as a value, which it stores; the direct one
+        // copies the place.
+        assert_eq!(
+            body("ints").replace(
+                "%r0: int = load %p1\n    store %r0 to %p0",
+                "memcpy %p1 to %p0"
+            ),
+            body("direct")
+        );
+        assert!(body("direct").contains("memcpy %p1 to %p0"));
         let managed = body("strings");
         assert!(managed.find("replace ").unwrap() < managed.find("drop string ").unwrap());
     }
@@ -3127,26 +3135,26 @@ fn use_it(x: int) { with_zero(x) }",
                 .unwrap()
                 .trim()
         };
-        // Registers are named in order of first appearance: the two bodies mint their values on
-        // different paths.
-        let renumbered = |body: &str| {
-            let mut names = FxHashMap::default();
-            let mut renumbered = String::new();
-            let mut rest = body;
-            while let Some(start) = rest.find("%r") {
-                renumbered.push_str(&rest[..start]);
-                let digits = rest[start + 2..]
-                    .find(|c: char| !c.is_ascii_digit())
-                    .unwrap_or(rest.len() - start - 2);
-                let id = &rest[start + 2..start + 2 + digits];
-                let count = names.len();
-                renumbered.push_str(&format!("%r{}", names.entry(id).or_insert(count)));
-                rest = &rest[start + 2 + digits..];
-            }
-            renumbered + rest
+        // The specialized body reads `b` at its call to `add_to`, before `a`: the same operations,
+        // in another order, and so with other register names.
+        let operations = |body: &str| {
+            let mut lines: Vec<_> = body
+                .lines()
+                .map(|line| {
+                    let mut erased = String::new();
+                    let mut rest = line;
+                    while let Some(start) = rest.find("%r") {
+                        erased.push_str(&rest[..start + 2]);
+                        rest = rest[start + 2..].trim_start_matches(|c: char| c.is_ascii_digit());
+                    }
+                    erased + rest
+                })
+                .collect();
+            lines.sort();
+            lines
         };
         assert!(!body("ints").contains("replace "), "{}", body("ints"));
-        assert_eq!(renumbered(body("ints")), renumbered(body("direct")));
+        assert_eq!(operations(body("ints")), operations(body("direct")));
     }
 
     #[test]
@@ -3212,7 +3220,7 @@ fn use_it(x: int) { with_zero(x) }",
             .next()
             .expect("the specialization has a body");
         assert!(
-            specialized.contains("memcpy"),
+            specialized.contains("memcpy") || specialized.contains("store %"),
             "the element copy must be a representation copy:\n{specialized}"
         );
         assert!(

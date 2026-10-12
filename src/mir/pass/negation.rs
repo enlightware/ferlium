@@ -596,8 +596,8 @@ mod tests {
             .to_string()
     }
 
-    /// The shape the whole pass exists for: a negated condition costs one comparison and the
-    /// branch it already had, with no cell in between.
+    /// The shape the whole pass exists for: a negated condition costs nothing, with no cell in
+    /// between. The branch tests the condition itself and swaps its arms.
     #[test]
     fn a_negated_condition_leaves_no_storage_round_trip() {
         let body = optimized_function(
@@ -605,15 +605,15 @@ mod tests {
             "pick",
         );
         assert!(
-            !body.contains("alloca") && !body.contains("load"),
-            "the flag cell and its round trip must be gone:\n{body}"
+            !body.contains("alloca") && !body.contains("comp_eq"),
+            "the flag cell, its round trip and the negation must be gone:\n{body}"
         );
-        let negation = register_defining(&body, "comp_eq %p0 false");
+        let condition = register_defining(&body, "load %p0");
         assert!(
-            body.contains(&format!("condbr {negation},")),
-            "the branch must test the comparison directly:\n{body}"
+            body.contains(&format!("condbr {condition},")),
+            "the branch must test the condition directly:\n{body}"
         );
-        assert_eq!(stored_constant(&body, &then_target(&body)), "1", "{body}");
+        assert_eq!(stored_constant(&body, &then_target(&body)), "2", "{body}");
     }
 
     /// When the negated value is itself a comparison, nothing has to compute the negation at all:
@@ -629,19 +629,10 @@ mod tests {
             "the negation itself must disappear:\n{body}"
         );
         let tag = register_defining(&body, "extract_tag");
-        let switch = body
-            .lines()
-            .find(|line| line.contains(&format!("switch_variant {tag}")))
-            .unwrap();
-        let less = switch
-            .split("Less => ")
-            .nth(1)
-            .unwrap()
-            .split(']')
-            .next()
-            .unwrap();
+        let less = register_defining(&body, &format!("comp_eq {tag} Less"));
+        assert!(body.contains(&format!("condbr {less},")), "{body}");
         assert_eq!(
-            stored_constant(&body, less),
+            stored_constant(&body, &then_target(&body)),
             "2",
             "the negated Less branch must select the second source arm:\n{body}"
         );

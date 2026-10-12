@@ -81,7 +81,7 @@ pub(crate) use stage::{OptimizationStage, SemanticCallees};
 
 use crate::{
     compiler::CompilerSession,
-    mir::{self, Function, OperationKind, terminator::TerminatorKind},
+    mir::{self, Function, OperationKind, edit::FunctionEdit, terminator::TerminatorKind},
     module::{FunctionId, LocalFunctionId, ModuleEnv, ModuleId},
 };
 
@@ -295,8 +295,22 @@ pub(crate) fn optimize_function(
         // whole-function growth budget. Inlining then hands the next round a body whose parameters
         // have become the caller's places.
         let mut changed = false;
+        // Read scalar arguments into values at their calls, those of the body arriving and those
+        // the last round's inlining and specialization exposed, so that every pass of the round
+        // sees a read the callee made through a place as the caller's own `load`. A place read
+        // twice then becomes one value, which folding's identities and call CSE compare.
+        let source = current.as_ref().unwrap_or(function);
+        if let Some(read) = scalar_arguments::read_scalar_arguments(source) {
+            current = Some(read);
+        }
         let source = current.as_ref().unwrap_or(function);
         let callees = SemanticCallees::new(session, Some(specializations));
+        if let Some(merged) =
+            cse::eliminate_common_loads(source, env, &|callee| callees.addressor_summary(callee))
+        {
+            current = Some(merged);
+        }
+        let source = current.as_ref().unwrap_or(function);
         if let Some(folded) = fold::fold_function(
             source,
             growth_base,
@@ -411,14 +425,13 @@ pub(crate) fn optimize_function(
     }
     // The specialization table is final from here.
     let callees = SemanticCallees::new(session, Some(specializations));
-    // Read scalar arguments into values at their calls, so that a read the callee made through a
-    // place becomes the caller's own `load`: store forwarding below turns one of a known cell into
-    // the constant itself, and LICM hoists one a loop does not change.
-    let source = current.as_ref().unwrap_or(function);
-    if let Some(read) = scalar_arguments::read_scalar_arguments(source) {
-        current = Some(read);
-    }
     if rounds_exhausted {
+        // The last round's inlining may have passed scalar arguments as places, which no round
+        // start has read yet.
+        let source = current.as_ref().unwrap_or(function);
+        if let Some(read) = scalar_arguments::read_scalar_arguments(source) {
+            current = Some(read);
+        }
         // The last changing round may have exposed place computations and storage transfers after
         // their pre-inline placements. When a no-change round ended the loop, those placements have
         // already seen the settled body, so repeating them would deliver no additional work.
@@ -725,8 +738,13 @@ pub(crate) fn optimize_function(
         current = Some(simplified);
     }
     // Final artifact verification covers unchanged functions too, so cloning is the identity here.
+    // Most passes leave the constants they stop naming in the pool; prune them once, at the end.
     match current {
-        Some(rewritten) => rewritten,
+        Some(rewritten) => {
+            let mut edit = FunctionEdit::new(rewritten);
+            edit.prune_constants();
+            edit.finish_unverified()
+        }
         None => function.clone(),
     }
 }
