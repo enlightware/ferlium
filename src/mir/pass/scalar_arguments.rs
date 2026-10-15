@@ -44,9 +44,9 @@ pub(crate) fn read_before(
     }
 }
 
-/// Passes each scalar value argument of a `call` as a place where `takes_value` says its callee's
-/// entry takes that argument through a pointer. `takes_value` is given the call and the argument's
-/// offset among the visible ones. `None` if no such argument is a value.
+/// Passes each scalar value argument of a `call` or a `project` as a place where `takes_value` says
+/// its callee's entry takes that argument through a pointer. `takes_value` is given the operation and
+/// the argument's offset among the visible ones. `None` if no such argument is a value.
 ///
 /// A value loaded in the call's block, with nothing but other loads and `alloca`s in between, is
 /// replaced by the place it was loaded from, and the load is dropped when nothing else reads it:
@@ -62,14 +62,13 @@ pub(crate) fn spill_value_arguments(
     }
     let roles = ValueRoles::derive(func);
     let spills_of = |operation: &Operation| -> Vec<usize> {
-        let OperationKind::Call { ty, metadata, .. } = &operation.kind else {
+        let Some((_, ty, metadata)) = operation.call_site() else {
             return Vec::new();
         };
         let visible_start = operation.call_visible_start();
         (0..ty.fn_ty.args.len())
             .filter(|&offset| {
-                accepts_value_argument(ty, metadata.as_deref(), offset)
-                    && !takes_value(operation, offset)
+                accepts_value_argument(ty, metadata, offset) && !takes_value(operation, offset)
             })
             .map(|offset| visible_start + offset)
             .filter(|&index| {
@@ -273,12 +272,12 @@ fn may_pass_values(func: &Function) -> bool {
             _ => None,
         };
         block.operations().iter().chain(invoked).any(|operation| {
-            let OperationKind::Call { ty, metadata, .. } = &operation.kind else {
+            let Some((_, ty, metadata)) = operation.call_site() else {
                 return false;
             };
             let visible_start = operation.call_visible_start();
             (0..ty.fn_ty.args.len()).any(|offset| {
-                accepts_value_argument(ty, metadata.as_deref(), offset)
+                accepts_value_argument(ty, metadata, offset)
                     && match &operation.operands[visible_start + offset] {
                         mir::Value::Constant(_) => true,
                         mir::Value::Register(id) => values.contains(id),
@@ -321,12 +320,16 @@ fn spill_before(
             operations[position] = None;
         }
     }
-    let OperationKind::Call { ty, .. } = &call.kind else {
+    let Some((_, ty, _)) = call.call_site() else {
         return;
     };
     let visible_start = call.call_visible_start();
-    for index in stored {
-        let mut alloca = Operation::alloca(call.span, ty.fn_ty.args[index - visible_start].ty);
+    let types: Vec<_> = stored
+        .iter()
+        .map(|index| ty.fn_ty.args[index - visible_start].ty)
+        .collect();
+    for (index, ty) in stored.into_iter().zip(types) {
+        let mut alloca = Operation::alloca(call.span, ty);
         let slot = edit
             .assign_new_result(&mut alloca)
             .expect("an alloca defines its place");

@@ -681,14 +681,10 @@ pub(crate) fn check_operand_roles(
             for index in 1..visible_start {
                 evidence(index);
             }
-            let metadata = match &operation.kind {
-                OperationKind::Call { metadata, .. } => Some(metadata.as_deref()),
-                _ => None,
-            };
+            let (_, _, metadata) = operation.call_site().expect("a call or a projection");
             for offset in 0..ty.fn_ty.args.len() {
                 let index = visible_start + offset;
-                if let Some(metadata) = metadata
-                    && accepts_value_argument(ty, metadata, offset)
+                if accepts_value_argument(ty, metadata, offset)
                     && matches!(*role(index), ValueRole::Materialized(MirType::Lowered(_)))
                 {
                     continue;

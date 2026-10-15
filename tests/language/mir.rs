@@ -2969,6 +2969,66 @@ fn f(%p0: @arg &mut int) -> int:
 }
 
 #[test]
+fn yielded_subscript_scalar_arguments_are_values() {
+    // A `project` passes a read-only scalar argument as a value, as a call does: a value parameter as
+    // it arrived and a computed one as its register, without a cell. The accessor reads its value
+    // parameter directly.
+    let mut session = TestSession::new();
+    session.allow_experimental();
+    assert_eq_sans_flake!(
+        session.emit_mir(indoc::indoc! {"
+            subscript shifted(slot: &mut int, k: int) -> int {
+                ref mut { let mut local = slot + k; yield local; slot = local - k }
+            }
+            fn f(a: &mut int, k: int) -> int {
+                let x = a->[shifted](k);
+                let y = a->[shifted](k * 2);
+                x + y + a->[shifted](3)
+            }
+        "}),
+        r#"fn f(%p0: @arg &mut int, %p1: @arg let int) -> int:
+  @c0: () = ()
+  @c1: int = 2
+  @c2: int = 3
+  b0:
+    %r2: place int = alloca int
+    %r0: place int = alloca int
+    %r1: open place int = project <test>::shifted::ref_mut#subscript:80901f28(%p0, %p1)
+    memcpy %r1 to %r0
+    end_project %r1
+    %r3: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c1)
+    %r4: int = call std::Num<std::int>::mul#impl:a3604103(%p1, %r3)
+    %r5: open place int = project <test>::shifted::ref_mut#subscript:80901f28(%p0, %r4)
+    memcpy %r5 to %r2
+    end_project %r5
+    %r6: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c2)
+    %r7: open place int = project <test>::shifted::ref_mut#subscript:80901f28(%p0, %r6)
+    %r8: int = load %r0
+    %r9: int = load %r2
+    %r10: int = call std::Num<std::int>::add#impl:7665d3ee(%r8, %r9)
+    %r11: int = load %r7
+    %r12: int = call std::Num<std::int>::add#impl:7665d3ee(%r10, %r11)
+    end_project %r7
+    ret %r12
+
+fn shifted::ref_mut#subscript:80901f28(%p0: @arg &mut int, %p1: @arg let int, %p2: @ret int):
+  @c0: () = ()
+  b0:
+    %r0: place int = alloca int
+    %r1: int = load %p0
+    %r2: int = call std::Num<std::int>::add#impl:7665d3ee(%r1, %p1)
+    store %r2 to %r0
+    yield %r0 -> b1
+  b1:
+    %r3: int = load %r0
+    %r4: int = call std::Num<std::int>::sub#impl:6eee9827(%r3, %p1)
+    store %r4 to %p0
+    ret
+"#,
+    );
+}
+
+#[test]
 fn yielded_subscript_assign() {
     // The yielded place opens before `v` is copied; after the write, `end_project` runs the slide.
     let mut session = TestSession::new();

@@ -1604,8 +1604,8 @@ pub(crate) fn map_types(edit: &mut FunctionEdit, mapper: &mut impl TypeMapper) {
     }
 }
 
-/// Rewrites the types `operation` carries. An argument of a call that the substitution makes a
-/// read-only concrete scalar was a place, and is read into a value appended to `operations`, as the
+/// Rewrites the types `operation` carries. An argument of a call or a projection that the
+/// substitution makes a read-only concrete scalar was a place, and is read into a value appended to `operations`, as the
 /// canonical form requires.
 fn substitute_reading_arguments(
     edit: &mut FunctionEdit,
@@ -1613,24 +1613,22 @@ fn substitute_reading_arguments(
     mapper: &mut impl TypeMapper,
     operations: &mut Vec<Operation>,
 ) {
-    let OperationKind::Call { ty, metadata, .. } = &operation.kind else {
+    let Some((_, ty, metadata)) = operation.call_site() else {
         substitute_in_operation(operation, mapper);
         return;
     };
     let accepted_before: Vec<bool> = (0..ty.fn_ty.args.len())
-        .map(|offset| accepts_value_argument(ty, metadata.as_deref(), offset))
+        .map(|offset| accepts_value_argument(ty, metadata, offset))
         .collect();
     substitute_in_operation(operation, mapper);
-    let OperationKind::Call { ty, metadata, .. } = &operation.kind else {
-        unreachable!("substitution keeps the operation kind");
-    };
+    let (_, ty, metadata) = operation
+        .call_site()
+        .expect("substitution keeps the operation kind");
     let visible_start = operation.call_visible_start();
     let reads: Vec<usize> = accepted_before
         .iter()
         .enumerate()
-        .filter(|&(offset, &before)| {
-            !before && accepts_value_argument(ty, metadata.as_deref(), offset)
-        })
+        .filter(|&(offset, &before)| !before && accepts_value_argument(ty, metadata, offset))
         .map(|(offset, _)| visible_start + offset)
         .collect();
     scalar_arguments::read_before(edit, operation, &reads, operations);

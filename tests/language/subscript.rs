@@ -2259,6 +2259,29 @@ fn run_experimental_subscript_source(src: &str) -> ferlium::hir::value::Value {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn scoped_subscript_scalar_arguments_reach_the_accessor() {
+    // Scalar arguments reach a scoped accessor as values: a parameter, a computed value, a literal,
+    // and a generic argument that specialization makes an `int`.
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript at(slot: &mut [int], k: int) -> int {
+            ref mut { let mut local = slot[k] + k; yield local; slot[k] = local - k }
+        }
+        subscript tagged<A, B>(slot: &mut [A], k: B) -> A {
+            ref mut { let i = if k == k { 1 } else { 0 }; let mut local = slot[i]; yield local; slot[i] = local }
+        }
+        fn bump(a: &mut [int], k: int) { a->[at](k) += 10; a->[at](k + 1) += 100; a->[at](0) += 1000 }
+        fn swap_second<A, B>(a: &mut [A], k: B, v: A) { a->[tagged](k) = v }
+        let mut a = [1, 2, 3];
+        bump(a, 1);
+        swap_second(a, 7, 5);
+        a[0] * 10000 + a[1] * 100 + a[2]
+    "# });
+
+    assert_val_eq!(value, int(10010000 + 500 + 103));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn infers_addressor_subscript_argument_and_return_types() {
     let value = run_experimental_subscript_source(indoc! { r#"
         subscript cell(slot) {
@@ -2601,6 +2624,35 @@ fn first_class_yielded_subscript_parameter_is_inferred_and_runs_epilogue() {
     "# });
 
     assert_val_eq!(value, int(12));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn first_class_yielded_subscript_parameter_takes_a_scalar_argument() {
+    // A first-class subscript takes every argument through a pointer, so the scalar index, a value
+    // at the call site, is passed through a cell.
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript at(slot: &mut [int], k: int) -> int {
+            mut {
+                let mut local = slot[k] + k;
+                yield local;
+                slot[k] = local
+            }
+        }
+
+        #[inline(never)]
+        fn bump(accessor, k: int) -> int {
+            let mut values = [5, 6];
+            values->[accessor](k) += 7;
+            values->[accessor](k * 0) += 100;
+            values[0] * 1000 + values[1]
+        }
+
+        let accessor = at;
+        bump(accessor, 1)
+    "# });
+
+    assert_val_eq!(value, int(105014));
 }
 
 #[test]

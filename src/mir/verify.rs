@@ -19,8 +19,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::{
     format::FormatWith,
     mir::{
-        self, BlockId, Function, Instantiation, Operation, OperationKind, OperationResult,
-        ParameterId, ParameterKind, ValueId,
+        self, BlockId, CallMetadata, Function, Instantiation, Operation, OperationKind,
+        OperationResult, ParameterId, ParameterKind, ValueId,
         dominance::Dominance,
         operation::{
             SourceFallibility, accepts_value_argument, accepts_value_result, is_scalar_value_type,
@@ -1048,53 +1048,7 @@ impl<'a> Verifier<'a> {
                         .as_deref()
                         .and_then(|metadata| metadata.instantiation.as_ref()),
                 );
-                let visible_start = whole.call_visible_start();
-                for (offset, argument) in ty.fn_ty.args.iter().enumerate() {
-                    let index = visible_start + offset;
-                    let read_only = argument
-                        .mut_ty
-                        .as_resolved()
-                        .is_some_and(|mutability| !mutability.is_mutable())
-                        && !metadata
-                            .as_ref()
-                            .is_some_and(|metadata| metadata.owned_arguments.contains(offset));
-                    let expected = MirType::Lowered(argument.ty);
-                    if read_only && self.readable_as(&operands[index], &expected) {
-                        // A place of a refined type, such as `raw_float` read as `float`, is not
-                        // the value form's place: its value would not have the argument's type.
-                        assert!(
-                            !(self.semantic
-                                && accepts_value_argument(ty, metadata.as_deref(), offset)
-                                && self.place_pointee_type(&operands[index]) == Some(expected)),
-                            "MIR function `{}` node {}: scalar argument {} ({}) of type {} is \
-                             passed as a place instead of a value\n{}",
-                            self.func.name,
-                            node,
-                            offset,
-                            operands[index].format_with(&self.env),
-                            argument.ty.format_with(&self.env),
-                            self.func.format_with(&self.env)
-                        );
-                        continue;
-                    }
-                    if let Some(role) = self.roles.get(&operands[index], self.func.constants())
-                        && let ValueRole::Materialized(MirType::Lowered(actual)) = &*role
-                    {
-                        assert!(
-                            accepts_value_argument(ty, metadata.as_deref(), offset)
-                                && *actual == argument.ty,
-                            "MIR function `{}` node {}: value argument {} of type {} where {} \
-                             is passed",
-                            self.func.name,
-                            node,
-                            offset,
-                            actual.format_with(&self.env),
-                            argument.ty.format_with(&self.env),
-                        );
-                        continue;
-                    }
-                    self.verify_place_representation(node, index, &operands[index], expected);
-                }
+                self.verify_visible_arguments(node, whole, operands, ty, metadata.as_deref());
                 if let Some(metadata) = metadata {
                     for argument in metadata.owned_arguments.iter_ones() {
                         assert!(
@@ -1151,16 +1105,7 @@ impl<'a> Verifier<'a> {
                         ty.fn_ty.ret.format_with(&self.env)
                     );
                 }
-                let visible_start = operands.len() - ty.fn_ty.args.len();
-                for (offset, argument) in ty.fn_ty.args.iter().enumerate() {
-                    let index = visible_start + offset;
-                    self.verify_place_representation(
-                        node,
-                        index,
-                        &operands[index],
-                        MirType::Lowered(argument.ty),
-                    );
-                }
+                self.verify_visible_arguments(node, whole, operands, ty, None);
             }
             OperationKind::Store => {
                 if let (Some(value_ty), Some(destination_ty)) = (
@@ -1351,6 +1296,62 @@ impl<'a> Verifier<'a> {
             (Some(MirType::Lowered(stored)), MirType::Lowered(expected))
                 if readable_as(stored, *expected)
         )
+    }
+
+    /// Verifies the visible arguments of a `call` or a `project`: a read-only concrete scalar is a
+    /// value in semantic MIR; any other argument is a place of its type.
+    fn verify_visible_arguments(
+        &self,
+        node: NodeId,
+        whole: &Operation,
+        operands: &[mir::Value],
+        ty: &CallImplType,
+        metadata: Option<&CallMetadata>,
+    ) {
+        let visible_start = whole.call_visible_start();
+        for (offset, argument) in ty.fn_ty.args.iter().enumerate() {
+            let index = visible_start + offset;
+            let read_only = argument
+                .mut_ty
+                .as_resolved()
+                .is_some_and(|mutability| !mutability.is_mutable())
+                && !metadata.is_some_and(|metadata| metadata.owned_arguments.contains(offset));
+            let expected = MirType::Lowered(argument.ty);
+            if read_only && self.readable_as(&operands[index], &expected) {
+                // A place of a refined type, such as `raw_float` read as `float`, is not
+                // the value form's place: its value would not have the argument's type.
+                assert!(
+                    !(self.semantic
+                        && accepts_value_argument(ty, metadata, offset)
+                        && self.place_pointee_type(&operands[index]) == Some(expected)),
+                    "MIR function `{}` node {}: scalar argument {} ({}) of type {} is \
+                     passed as a place instead of a value\n{}",
+                    self.func.name,
+                    node,
+                    offset,
+                    operands[index].format_with(&self.env),
+                    argument.ty.format_with(&self.env),
+                    self.func.format_with(&self.env)
+                );
+                continue;
+            }
+            if let Some(role) = self.roles.get(&operands[index], self.func.constants())
+                && let ValueRole::Materialized(MirType::Lowered(actual)) = &*role
+            {
+                assert!(
+                    accepts_value_argument(ty, metadata, offset) && *actual == argument.ty,
+                    "MIR function `{}` node {}: value argument {} of type {} where {} \
+                     is passed",
+                    self.func.name,
+                    node,
+                    offset,
+                    actual.format_with(&self.env),
+                    argument.ty.format_with(&self.env),
+                );
+                continue;
+            }
+            self.verify_place_representation(node, index, &operands[index], expected);
+        }
     }
 
     fn verify_place_representation(

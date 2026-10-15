@@ -389,12 +389,24 @@ impl Operation {
         self
     }
 
-    /// The index of the first visible argument of a `call`.
+    /// The index of the first visible argument of a `call` or a `project`.
     pub(crate) fn call_visible_start(&self) -> usize {
-        let OperationKind::Call { ty, .. } = &self.kind else {
-            panic!("only a call has visible arguments");
-        };
+        let (_, ty, _) = self
+            .call_site()
+            .expect("only a call or a projection has visible arguments");
         self.operands.len() - ty.fn_ty.args.len() - usize::from(self.kind.call_has_result_place())
+    }
+
+    /// The callee, call-site type and metadata of a `call` or a `project`, whose visible arguments
+    /// follow the same conventions.
+    pub(crate) fn call_site(&self) -> Option<(&mir::Value, &CallImplType, Option<&CallMetadata>)> {
+        match &self.kind {
+            OperationKind::Call { ty, metadata, .. } => {
+                Some((&self.operands[0], ty, metadata.as_deref()))
+            }
+            OperationKind::Project { ty, .. } => Some((&self.operands[0], ty, None)),
+            _ => None,
+        }
     }
 
     /// The index of the caller-provided result place of a `call`, if it has one.

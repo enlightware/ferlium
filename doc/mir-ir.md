@@ -124,7 +124,8 @@ conventions; an optimized `owned` argument requires proof that the caller relinq
 A `Let` parameter of a concrete scalar type (`int`, `float` or `bool`) is a value, as the ABI passes
 it. A generic parameter is a place, so specializing it to a scalar turns it into a value. A `Let`
 argument of such a type is a value whatever the callee takes, read where the argument is evaluated;
-the verifier rejects the place form. A substitution that makes an argument's type such a scalar
+the verifier rejects the place form. This holds for the visible arguments of a `project` too, such
+as a scoped subscript's index. A substitution that makes an argument's type such a scalar
 reads it before its call, which is equivalent to the callee reading it, since overlapping mutable
 arguments are invalid.
 
@@ -137,8 +138,9 @@ function's result into a value.
 Physical MIR states the transport: a value exactly where the callee's entry takes the argument or
 returns the result directly, as the ABI does (a static callee whose own parameter or result has that
 scalar type, or a trait method parameter declared with it), and a place otherwise, such as for a
-generic parameter or result, a dictionary entry's result, or a stored callable. An entry taking a
-place may lead to a body whose parameter is a value; the backend bridges the two.
+generic parameter or result, a dictionary entry's result, a stored callable, or a first-class
+subscript. An entry taking a place may lead to a body whose parameter is a value; the backend
+bridges the two.
 
 `CallResultConvention` determines the result storage shape:
 

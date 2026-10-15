@@ -2009,9 +2009,7 @@ impl<'a> Emitter<'a> {
         for x in extra_arguments {
             arguments.push(self.lower_extra_argument(&self.hir_arena[*x]));
         }
-        for arg in visible_arguments {
-            arguments.push(self.lower_as_place(&self.hir_arena[arg.value]));
-        }
+        arguments.extend(self.lower_arguments(visible_arguments, &call_ty));
         // Accessor-expression temporaries are already live while the ramp runs. Give `project` an
         // error pad that drops them if the ramp fails. On success this scope is promoted below to
         // the projection scope, where the same temporaries remain live until after the slide.

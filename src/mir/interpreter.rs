@@ -976,16 +976,23 @@ impl<'a> Interpreter<'a> {
                     );
                 }
             }
-            OperationKind::Project { yielded, .. } => {
+            OperationKind::Project { yielded, ty } => {
                 // Enter a scoped subscript: run the accessor to its `yield`, bind the exposed place
-                // (and the suspended frame) to this register, and continue with the body.
-                self.exec_project(
+                // (and the suspended frame) to this register, and continue with the body. A value
+                // argument gets a cell, as for a call, which the accessor frame then owns.
+                let frame_top = self.ctx.environment.len();
+                let rebound =
+                    self.bind_value_arguments(func, slots, operation, ty, None, span.location)?;
+                let result = self.exec_project(
                     slots,
                     &operation.operands,
                     def.unwrap(),
                     *yielded,
+                    frame_top,
                     span.location,
-                )?;
+                );
+                Self::unbind_value_arguments(slots, rebound);
+                result?;
             }
             OperationKind::EndProject => self.exec_end_project(slots, &operation.operands)?,
             OperationKind::Drop { .. } => {
@@ -1596,12 +1603,17 @@ impl<'a> Interpreter<'a> {
     /// yielded place plus the suspended frame (a [`Binding::Projected`]). Mirrors the HIR
     /// interpreter's `call_accessor_until_yield`: the call depth incremented here stays held until the
     /// matching `end_project` resumes the slide and tears the frame down.
+    ///
+    /// `frame_top` is the environment's top before the cells of the value arguments, which the
+    /// accessor frame reclaims with its own. A member completing at once may return a place rooted
+    /// in such a cell, so its cells stay until the caller's stack region ends.
     fn exec_project(
         &mut self,
         slots: &mut FxHashMap<mir::Value, Binding>,
         operands: &[mir::Value],
         def: mir::Value,
         _ty: Type,
+        frame_top: usize,
         span: Location,
     ) -> Result<(), RuntimeError> {
         // A statically known accessor is a direct function reference; a member resolved through
@@ -1783,7 +1795,6 @@ impl<'a> Interpreter<'a> {
         // cells. A recursive accessor carries the same explicit prologue check as any other
         // recursive function.
         self.ctx.call_depth += 1;
-        let frame_top = self.ctx.environment.len();
         let func = self.function(key);
         let acc_slots = self.bind_parameters(func, args);
         match self.run_loop(key, func, acc_slots, func.entry()) {
