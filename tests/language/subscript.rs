@@ -16,7 +16,7 @@ use ferlium::{
     parse_module_and_expr,
     std::{array::int_array_type, math::int_type},
     types::{
-        effects::{PrimitiveEffect, effect},
+        effects::{PrimitiveEffect, effect, no_effects},
         r#type::TypeKind,
     },
 };
@@ -1594,6 +1594,68 @@ fn generic_projection_write_uses_mut_member_effects_from_evidence() {
             effect(PrimitiveEffect::Write),
             effect(PrimitiveEffect::Read),
         );
+}
+
+/// A blanket impl of a pure method may only use projection evidence whose effects are pure.
+///
+/// `before_read` runs in the method body before it reads `x`, and `field_value` is the value
+/// `Ratio`'s projection yields.
+fn pure_method_over_projection_source(before_read: &str, field_value: &str) -> String {
+    format!(
+        indoc! { r#"
+            trait ReadX<Self> {{
+                fn read_x(value: Self) -> int;
+            }}
+
+            impl<T> ReadX for T {{
+                fn read_x(value: T) -> int {{
+                    {};
+                    value.x
+                }}
+            }}
+
+            #[private_repr]
+            struct Ratio {{
+                divisor: int,
+            }}
+
+            subscript Ratio.x(self) -> int {{
+                ref {{
+                    let local = {};
+                    yield local
+                }}
+            }}
+
+            read_x(Ratio {{ divisor: 0 }})
+        "# },
+        before_read, field_value
+    )
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn blanket_impl_of_pure_method_accepts_pure_projection_evidence() {
+    for before_read in ["()", "value.x"] {
+        let value = run_experimental_subscript_source(&pure_method_over_projection_source(
+            before_read,
+            "self.divisor",
+        ));
+        assert_val_eq!(value, int(0));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn blanket_impl_of_pure_method_rejects_fallible_projection_evidence() {
+    // Read once, the method's effect is the evidence's; read twice, it is a union of variables.
+    for before_read in ["()", "value.x"] {
+        experimental_session()
+            .fail_compilation(&pure_method_over_projection_source(
+                before_read,
+                "idiv(1, self.divisor)",
+            ))
+            .expect_invalid_effect_dependency(effect(PrimitiveEffect::Fallible), no_effects());
+    }
 }
 
 #[test]

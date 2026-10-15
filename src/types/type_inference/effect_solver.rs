@@ -49,8 +49,8 @@ pub(crate) enum EffectConstraintOrigin {
 ///
 /// Effect equality is represented as two inclusions. Inclusions that have a
 /// unique local interpretation are solved eagerly; ambiguous composite
-/// inclusions are kept until more type/trait solving has substituted effect
-/// variables. Any residual inclusion is materialized conservatively into the
+/// inclusions are kept, as stated, until more type/trait solving has
+/// substituted effect variables. Any residual inclusion is materialized conservatively into the
 /// involved variables before generalization, preserving sound upper bounds at
 /// the cost of possible imprecision.
 #[derive(Debug, Clone)]
@@ -66,6 +66,7 @@ pub(crate) struct EffectSolverSnapshot {
     table: Snapshot<InPlace<EffectVarKey>>,
     pending_dependencies: Vec<PendingEffectDependency>,
     deferred_inclusions: Vec<EffectInclusion>,
+    closed_bounds: Vec<EffectInclusion>,
 }
 
 /// Solver state for inferred effect variables and effect relations.
@@ -75,12 +76,20 @@ pub(crate) struct EffectSolverSnapshot {
 /// are deferred until type and trait solving have substituted more variables.
 /// Before generalization, any residual deferred relation is conservatively
 /// materialized into the variables it constrains.
+///
+/// The table only records what a variable contains, so it can enforce an upper
+/// bound only by closing the variable. A variable that is already open when a
+/// closed bound arrives stays open, so each inclusion into a closed row is also
+/// kept in `closed_bounds` and checked again whenever pending dependencies are
+/// expanded. Recording upper bounds in the table itself would remove this
+/// limitation.
 #[derive(Default, Debug)]
 pub(crate) struct EffectSolver {
     table: InPlaceUnificationTable<EffectVarKey>,
     constraints: Vec<EffectConstraint>,
     pending_dependencies: Vec<PendingEffectDependency>,
     deferred_inclusions: Vec<EffectInclusion>,
+    closed_bounds: Vec<EffectInclusion>,
 }
 
 impl EffectSolver {
@@ -109,6 +118,7 @@ impl EffectSolver {
             table: self.table.snapshot(),
             pending_dependencies: self.pending_dependencies.clone(),
             deferred_inclusions: self.deferred_inclusions.clone(),
+            closed_bounds: self.closed_bounds.clone(),
         }
     }
 
@@ -116,6 +126,7 @@ impl EffectSolver {
         self.table.rollback_to(snapshot.table);
         self.pending_dependencies = snapshot.pending_dependencies;
         self.deferred_inclusions = snapshot.deferred_inclusions;
+        self.closed_bounds = snapshot.closed_bounds;
     }
 
     pub(super) fn add_same_constraint(
@@ -408,7 +419,33 @@ impl EffectSolver {
             self.materialize_residual_inclusion(inclusion)?;
         }
 
-        self.expand_all_pending_dependencies()
+        self.expand_all_pending_dependencies()?;
+        self.check_closed_bounds()
+    }
+
+    /// Check that every inclusion into a closed row still holds.
+    ///
+    /// Values only grow, so a bound that holds after the last expansion holds
+    /// for good. A concrete effect outside the row is an ordinary effect error.
+    /// A variable left in the lower side is one the table could not close: if
+    /// it were generalized, its bound would be lost from the scheme, so this is
+    /// an internal error rather than a silent unsoundness.
+    fn check_closed_bounds(&mut self) -> Result<(), InternalCompilationError> {
+        for bound in mem::take(&mut self.closed_bounds) {
+            let lower = self.normalize_effect(&bound.lower);
+            Self::check_closed_inclusion(&lower, &bound.upper, &bound)?;
+            if lower.has_variables() {
+                return Err(internal_compilation_error!(Internal {
+                    error: format!(
+                        "effect solver could not enforce the bound {lower} <= {}",
+                        bound.upper
+                    ),
+                    span: bound.lower_span,
+                }));
+            }
+            self.closed_bounds.push(bound);
+        }
+        Ok(())
     }
 
     fn expand_all_pending_dependencies(&mut self) -> Result<(), InternalCompilationError> {
@@ -450,22 +487,26 @@ impl EffectSolver {
             // Preserve the original lower-bound accumulator while it contains
             // only variables. Normalizing it first would turn repeated
             // dependencies `e <= a`, `e <= b` into a chain `a <= b` instead of
-            // the intended union `e <= a | b`.
+            // the intended union `e <= a | b`. This only applies to an open
+            // upper bound: a closed one is a bound on every variable the lower
+            // side stands for, applied below.
             if lower_value
                 .as_ref()
                 .is_none_or(|effects| effects.is_only_vars())
             {
                 let upper = self.normalize_effect(&inclusion.upper);
-                if upper.is_empty() || EffType::single_variable(lower_root) == upper {
+                if upper.has_variables() {
+                    if EffType::single_variable(lower_root) != upper {
+                        self.table.union_value(lower_root, Some(upper));
+                    }
                     return Ok(true);
                 }
-                self.table.union_value(lower_root, Some(upper));
-                return Ok(true);
             }
         }
 
         let lower = self.normalize_effect(&inclusion.lower);
         let upper = self.normalize_effect(&inclusion.upper);
+        self.record_closed_bound(&inclusion, &upper);
 
         if lower.is_empty() || lower == upper || lower.is_subset_of(&upper) {
             return Ok(true);
@@ -482,6 +523,7 @@ impl EffectSolver {
                 inclusion.origin,
             )),
             (false, true) => {
+                Self::check_closed_inclusion(&lower, &upper, &inclusion)?;
                 for var in lower_vars {
                     self.table.union_value(var, Some(upper.clone()));
                 }
@@ -498,13 +540,7 @@ impl EffectSolver {
                     });
                     Ok(true)
                 } else if defer_ambiguous {
-                    self.deferred_inclusions.push(EffectInclusion {
-                        lower,
-                        lower_span: inclusion.lower_span,
-                        upper,
-                        upper_span: inclusion.upper_span,
-                        origin: inclusion.origin,
-                    });
+                    self.deferred_inclusions.push(inclusion);
                     Ok(true)
                 } else {
                     Ok(false)
@@ -524,13 +560,7 @@ impl EffectSolver {
                     });
                     Ok(true)
                 } else if defer_ambiguous {
-                    self.deferred_inclusions.push(EffectInclusion {
-                        lower,
-                        lower_span: inclusion.lower_span,
-                        upper,
-                        upper_span: inclusion.upper_span,
-                        origin: inclusion.origin,
-                    });
+                    self.deferred_inclusions.push(inclusion);
                     Ok(true)
                 } else {
                     Ok(false)
@@ -545,6 +575,7 @@ impl EffectSolver {
     ) -> Result<(), InternalCompilationError> {
         let lower = self.normalize_effect(&inclusion.lower);
         let upper = self.normalize_effect(&inclusion.upper);
+        self.record_closed_bound(&inclusion, &upper);
 
         if lower.is_empty() || lower == upper || lower.is_subset_of(&upper) {
             return Ok(());
@@ -560,25 +591,73 @@ impl EffectSolver {
                 inclusion.upper_span,
                 inclusion.origin,
             )),
-            (false, _) => {
+            (false, true) => {
+                Self::check_closed_inclusion(&lower, &upper, &inclusion)?;
                 for var in lower_vars {
                     self.table.union_value(var, Some(upper.clone()));
                 }
                 Ok(())
             }
-            (true, false) => {
-                for var in upper_vars {
-                    self.pending_dependencies.push(PendingEffectDependency {
-                        source: lower.clone(),
-                        source_span: inclusion.lower_span,
-                        target: var,
-                        target_span: inclusion.upper_span,
-                        origin: inclusion.origin.clone(),
-                    });
+            (_, false) => {
+                // The concrete part of the lower side flows into every upper
+                // variable, and each lower variable is bounded by the upper side.
+                let concrete = EffType::multiple_primitive(&lower.inner_non_vars());
+                if !concrete.is_empty() {
+                    for &var in &upper_vars {
+                        self.pending_dependencies.push(PendingEffectDependency {
+                            source: concrete.clone(),
+                            source_span: inclusion.lower_span,
+                            target: var,
+                            target_span: inclusion.upper_span,
+                            origin: inclusion.origin.clone(),
+                        });
+                    }
+                }
+                for var in lower_vars {
+                    self.table.union_value(var, Some(upper.clone()));
                 }
                 Ok(())
             }
         }
+    }
+
+    /// Keep `inclusion` for [`Self::check_closed_bounds`] if its normalized
+    /// upper side `upper` is a closed row and its lower side has variables.
+    ///
+    /// The kept inclusion has its lower side as stated, whatever it normalizes
+    /// to now: a variable of it may later gain effects through its own value,
+    /// which neither its current normalization nor an inclusion that already
+    /// holds would show. A lower side without variables is decided now.
+    fn record_closed_bound(&mut self, inclusion: &EffectInclusion, upper: &EffType) {
+        if upper.has_variables() || !inclusion.lower.has_variables() {
+            return;
+        }
+        self.closed_bounds.push(EffectInclusion {
+            upper: upper.clone(),
+            ..inclusion.clone()
+        });
+    }
+
+    /// Check that the concrete effects of `lower` fit in the closed row `upper`.
+    ///
+    /// A closed upper bound cannot grow, so the concrete effects the lower side
+    /// already has are decided now; only its variables are left to bound.
+    fn check_closed_inclusion(
+        lower: &EffType,
+        upper: &EffType,
+        inclusion: &EffectInclusion,
+    ) -> Result<(), InternalCompilationError> {
+        let concrete = EffType::multiple_primitive(&lower.inner_non_vars());
+        if concrete.is_subset_of(upper) {
+            return Ok(());
+        }
+        Err(invalid_effect_dependency(
+            concrete,
+            inclusion.lower_span,
+            upper.clone(),
+            inclusion.upper_span,
+            inclusion.origin.clone(),
+        ))
     }
 
     fn normalize_effect(&mut self, eff: &EffType) -> EffType {
@@ -776,6 +855,159 @@ mod tests {
     };
 
     #[test]
+    fn pure_effect_bound_survives_a_dependency_unified_with_its_target() {
+        let mut solver = EffectSolver::default();
+        let source = solver.fresh_var_ty();
+        let target = solver.fresh_var_ty();
+        let span = Location::new_synthesized();
+
+        // Equating a dependency with its target leaves a self-referential row, which the table
+        // cannot close: the pure bound below leaves the variable open. The recorded closed bound
+        // catches the later effect when pending dependencies are expanded.
+        solver.add_effect_dep(&source, span, &target, span).unwrap();
+        solver
+            .unify_same_effect(source.clone(), span, target, span)
+            .unwrap();
+        solver
+            .add_effect_dep(&source, span, &EffType::empty(), span)
+            .unwrap();
+
+        let result = solver
+            .add_effect_dep(
+                &EffType::single_primitive(PrimitiveEffect::Fallible),
+                span,
+                &source,
+                span,
+            )
+            .and_then(|()| solver.expand_pending_dependencies());
+        result.expect_err("a variable bounded by the pure row must reject fallible effects");
+    }
+
+    #[test]
+    fn pure_effect_bound_on_a_variable_left_open_is_an_internal_error() {
+        let mut solver = EffectSolver::default();
+        let source = solver.fresh_var_ty();
+        let target = solver.fresh_var_ty();
+        let span = Location::new_synthesized();
+
+        // As above, but with no later effect: generalizing the open variable would drop its bound.
+        solver.add_effect_dep(&source, span, &target, span).unwrap();
+        solver
+            .unify_same_effect(source.clone(), span, target, span)
+            .unwrap();
+        solver
+            .add_effect_dep(&source, span, &EffType::empty(), span)
+            .unwrap();
+
+        let error = solver.expand_pending_dependencies().unwrap_err();
+        assert!(
+            matches!(&*error, CompilationErrorImpl::Internal { .. }),
+            "expected an internal error, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn pure_effect_bound_holds_for_the_variable_as_stated() {
+        let mut solver = EffectSolver::default();
+        let source = solver.fresh_var_ty();
+        let dependency = solver.fresh_var_ty();
+        let span = Location::new_synthesized();
+
+        // `source` stands for `dependency` when bounded, then gains an effect of its own.
+        solver
+            .add_effect_dep(&source, span, &dependency, span)
+            .unwrap();
+        solver
+            .add_effect_dep(&source, span, &EffType::empty(), span)
+            .unwrap();
+        solver
+            .unify_same_effect(
+                source,
+                span,
+                EffType::single_primitive(PrimitiveEffect::Fallible),
+                span,
+            )
+            .unwrap();
+
+        solver.expand_pending_dependencies().unwrap_err();
+    }
+
+    #[test]
+    fn pure_effect_bound_that_already_holds_is_kept() {
+        let mut solver = EffectSolver::default();
+        let source = solver.fresh_var_ty();
+        let dependency = solver.fresh_var_ty();
+        let span = Location::new_synthesized();
+
+        // The bound holds when added, as `source` stands for the pure `dependency`; it must still
+        // hold once `source` gains an effect of its own.
+        solver
+            .add_effect_dep(&source, span, &dependency, span)
+            .unwrap();
+        solver
+            .unify_same_effect(dependency, span, EffType::empty(), span)
+            .unwrap();
+        solver
+            .add_effect_dep(&source, span, &EffType::empty(), span)
+            .unwrap();
+        solver
+            .unify_same_effect(
+                source,
+                span,
+                EffType::single_primitive(PrimitiveEffect::Fallible),
+                span,
+            )
+            .unwrap();
+
+        solver.expand_pending_dependencies().unwrap_err();
+    }
+
+    #[test]
+    fn deferred_inclusion_is_retried_as_stated() {
+        let mut solver = EffectSolver::default();
+        let alias = solver.fresh_var();
+        let target = solver.fresh_var_ty();
+        let other = solver.fresh_var();
+        let left = solver.fresh_var();
+        let right = solver.fresh_var();
+        let span = Location::new_synthesized();
+
+        // `alias` stands for `target` when the ambiguous inclusion is deferred, then gains an
+        // effect of its own before the inclusion's upper side is closed.
+        solver
+            .add_effect_dep(&EffType::single_variable(alias), span, &target, span)
+            .unwrap();
+        solver
+            .add_effect_dep(
+                &EffType::multiple_variable(&[alias, other]),
+                span,
+                &EffType::multiple_variable(&[left, right]),
+                span,
+            )
+            .unwrap();
+        for var in [left, right] {
+            solver
+                .add_effect_dep(
+                    &EffType::single_variable(var),
+                    span,
+                    &EffType::empty(),
+                    span,
+                )
+                .unwrap();
+        }
+        solver
+            .unify_same_effect(
+                EffType::single_variable(alias),
+                span,
+                EffType::single_primitive(PrimitiveEffect::Fallible),
+                span,
+            )
+            .unwrap();
+
+        solver.expand_pending_dependencies().unwrap_err();
+    }
+
+    #[test]
     fn self_referential_effect_var_is_a_stable_noop() {
         let mut solver = EffectSolver::default();
         let var = solver.table.new_key(None);
@@ -857,6 +1089,67 @@ mod tests {
             }
             other => panic!("expected TraitMethodEffectMismatch, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn inclusion_into_pure_effect_closes_unconstrained_variable() {
+        let mut solver = EffectSolver::default();
+        let var = solver.table.new_key(None);
+        let span = Location::new_synthesized();
+
+        solver
+            .add_effect_dep(
+                &EffType::single_variable(var),
+                span,
+                &EffType::empty(),
+                span,
+            )
+            .unwrap();
+        assert_eq!(solver.table.probe_value(var), Some(EffType::empty()));
+
+        solver
+            .add_effect_dep(
+                &EffType::single_primitive(PrimitiveEffect::Fallible),
+                span,
+                &EffType::single_variable(var),
+                span,
+            )
+            .unwrap_err();
+    }
+
+    #[test]
+    fn inclusion_into_pure_effect_closes_the_variables_a_variable_stands_for() {
+        let mut solver = EffectSolver::default();
+        let left = solver.table.new_key(None);
+        let right = solver.table.new_key(None);
+        let union = solver
+            .table
+            .new_key(Some(EffType::multiple_variable(&[left, right])));
+        let span = Location::new_synthesized();
+
+        solver
+            .add_effect_dep(
+                &EffType::single_variable(union),
+                span,
+                &EffType::empty(),
+                span,
+            )
+            .unwrap();
+        assert_eq!(solver.table.probe_value(left), Some(EffType::empty()));
+        assert_eq!(solver.table.probe_value(right), Some(EffType::empty()));
+    }
+
+    #[test]
+    fn inclusion_into_pure_effect_rejects_concrete_effects_beside_variables() {
+        let mut solver = EffectSolver::default();
+        let var = solver.table.new_key(None);
+        let span = Location::new_synthesized();
+        let lower = EffType::single_primitive(PrimitiveEffect::Fallible)
+            .union(&EffType::single_variable(var));
+
+        solver
+            .add_effect_dep(&lower, span, &EffType::empty(), span)
+            .unwrap_err();
     }
 
     #[test]

@@ -738,6 +738,89 @@ fn blanket_impl_structural_field_constraint_matches_named_struct() {
     );
 }
 
+/// A blanket impl of a pure method may only use evidence whose effects are pure.
+///
+/// `before_match` runs in the method body before it reads the first item, and `next_item` is the
+/// item `Ratio`'s iterator yields.
+fn pure_method_over_iterator_source(before_match: &str, next_item: &str) -> String {
+    format!(
+        indoc! {r#"
+            trait First<Self> {{
+                fn first(value: Self) -> int;
+            }}
+
+            impl<T> First for T {{
+                fn first(value: T) -> int {{
+                    let mut iterator = value;
+                    {};
+                    match next(iterator) {{
+                        Some(item) => item,
+                        None => 0,
+                    }}
+                }}
+            }}
+
+            struct Ratio {{
+                divisor: int,
+            }}
+
+            impl Iterator for Ratio {{
+                fn next(iterator: &mut Ratio) -> None | Some(int) {{
+                    Some({})
+                }}
+            }}
+
+            first(Ratio {{ divisor: 0 }})
+        "#},
+        before_match, next_item
+    )
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn blanket_impl_of_pure_method_accepts_pure_iterator_evidence() {
+    let mut session = TestSession::new();
+    for before_match in ["()", "next(iterator)"] {
+        assert_val_eq!(
+            session.run(&pure_method_over_iterator_source(
+                before_match,
+                "iterator.divisor"
+            )),
+            int(0)
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn blanket_impl_of_pure_method_rejects_fallible_iterator_evidence() {
+    // Read once, the method's effect is the evidence's; read twice, it is a union of variables.
+    for before_match in ["()", "next(iterator)"] {
+        TestSession::new()
+            .fail_compilation(&pure_method_over_iterator_source(
+                before_match,
+                "idiv(1, iterator.divisor)",
+            ))
+            .expect_trait_impl_not_found("First", &["Self = Ratio"]);
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn blanket_impl_of_pure_method_rejects_failure_beside_iterator_evidence() {
+    TestSession::new()
+        .fail_compilation(&pure_method_over_iterator_source(
+            "idiv(1, 0)",
+            "iterator.divisor",
+        ))
+        .expect_trait_method_effect_mismatch(
+            "First",
+            "first",
+            &no_effects(),
+            &effect(PrimitiveEffect::Fallible),
+        );
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn parent_trait_constraints_support_multi_input_traits() {
