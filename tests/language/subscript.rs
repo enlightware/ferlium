@@ -482,6 +482,17 @@ fn addressor_subscript_accepts_explicit_return_place() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn native_member_rooted_in_a_scalar_receiver() {
+    let value = experimental_session().run(indoc! { r#"
+        fn read(x: int) -> int { x.int_self }
+        let y: int = 5;
+        read(41) * 10 + y.int_self + 3
+    "# });
+    assert_val_eq!(value, int(418));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn native_member_addressor_forwarding_and_pattern_matching() {
     let value = experimental_session().run(indoc! { r#"
         subscript forward<T>(value: &mut T) -> T {

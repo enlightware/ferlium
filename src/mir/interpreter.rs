@@ -32,7 +32,7 @@ use crate::{
         },
     },
     mir::{
-        self, BlockId, Function, Operation, OperationKind, ParameterId, ParameterKind,
+        self, BlockId, Function, Operation, OperationKind, Parameter, ParameterId, ParameterKind,
         operation::{CallMetadata, accepts_value_argument},
         profile::MirExecutionProfile,
         terminator::TerminatorKind,
@@ -472,14 +472,23 @@ impl<'a> Interpreter<'a> {
         mut arguments: CallArguments,
         span: Location,
     ) -> Result<Value, RuntimeError> {
+        let passing = &self
+            .hir_function(callee.module, callee.function)
+            .parameter_passing;
+        let visible_start = arguments.len().saturating_sub(passing.len());
         let mut args: Vec<ValOrMut> = Vec::with_capacity(arguments.len());
         // As in the script branch, an early return releases the arguments still held by the guard.
-        for argument in arguments.by_ref() {
+        for (index, argument) in arguments.by_ref().enumerate() {
             match argument {
-                // A native reads its arguments through places, exactly as a resolved native call
-                // marshals them.
+                // A native takes a `Let` argument as a value, as a resolved native call passes a
+                // value argument, and anything else through a place.
                 CallArgument::Value(value) => {
-                    args.push(ValOrMut::Mut(self.alloc_cell(value, span)?))
+                    let passing = index.checked_sub(visible_start).map(|i| passing[i]);
+                    args.push(if passing == Some(ArgConvention::Let) {
+                        ValOrMut::Val(value)
+                    } else {
+                        ValOrMut::Mut(self.alloc_cell(value, span)?)
+                    })
                 }
                 CallArgument::Dictionary(id) => args.push(ValOrMut::Dictionary(id)),
             }
@@ -932,57 +941,34 @@ impl<'a> Interpreter<'a> {
                 metadata,
                 value_result,
             } => {
+                // A value argument stays a value as far as the callee takes one; a cell given to a
+                // callee taking a place, or holding a value result, is reclaimed after the call,
+                // unless the call returns a place, which may be rooted in such a cell (as for a
+                // `project` completing at once).
                 let frame_top = self.ctx.environment.len();
-                let rebound = self.bind_value_arguments(
-                    func,
-                    slots,
-                    operation,
-                    ty,
-                    metadata.as_deref(),
-                    span.location,
-                )?;
-                if !value_result && rebound.is_empty() {
-                    self.exec_call(slots, &operation.operands, span.location)?;
-                } else if !value_result {
-                    let result = self.exec_call(slots, &operation.operands, span.location);
-                    Self::unbind_value_arguments(slots, rebound);
+                let (rebound, has_values) =
+                    self.bind_constant_arguments(func, slots, operation, ty, metadata.as_deref());
+                let result =
+                    self.exec_call(slots, &operation.operands, *value_result, span.location);
+                Self::unbind_constant_arguments(slots, rebound);
+                if (has_values && !ty.returns_place()) || *value_result {
                     self.reclaim_frame_storage(frame_top);
-                    result?;
-                } else {
-                    // A call passes its result place too: the result register names a fresh cell
-                    // for the call, and then the value the call left in it.
-                    let def = def.expect("a value call defines its result");
-                    let cell = match self.alloc_cell(Value::uninit(), span.location) {
-                        Ok(cell) => cell,
-                        Err(error) => {
-                            Self::unbind_value_arguments(slots, rebound);
-                            self.reclaim_frame_storage(frame_top);
-                            return Err(error);
-                        }
-                    };
-                    Self::bind(slots, def.clone(), Binding::Place(cell.clone()));
-                    let mut operands = operation.operands.to_vec();
-                    operands.push(def.clone());
-                    let result = self.exec_call(slots, &operands, span.location);
-                    let value = result.is_ok().then(|| self.load_copy(&cell));
-                    slots.remove(&def);
-                    Self::unbind_value_arguments(slots, rebound);
-                    self.reclaim_frame_storage(frame_top);
-                    result?;
+                }
+                if let Some(value) = result? {
                     Self::bind(
                         slots,
-                        def,
-                        Binding::Value(value.expect("a completed call left its result")),
+                        def.expect("a value call defines its result"),
+                        Binding::Value(value),
                     );
                 }
             }
             OperationKind::Project { yielded, ty } => {
                 // Enter a scoped subscript: run the accessor to its `yield`, bind the exposed place
                 // (and the suspended frame) to this register, and continue with the body. A value
-                // argument gets a cell, as for a call, which the accessor frame then owns.
+                // argument gets a cell where the accessor takes a place, as for a call, which the
+                // accessor frame then owns.
                 let frame_top = self.ctx.environment.len();
-                let rebound =
-                    self.bind_value_arguments(func, slots, operation, ty, None, span.location)?;
+                let (rebound, _) = self.bind_constant_arguments(func, slots, operation, ty, None);
                 let result = self.exec_project(
                     slots,
                     &operation.operands,
@@ -991,7 +977,7 @@ impl<'a> Interpreter<'a> {
                     frame_top,
                     span.location,
                 );
-                Self::unbind_value_arguments(slots, rebound);
+                Self::unbind_constant_arguments(slots, rebound);
                 result?;
             }
             OperationKind::EndProject => self.exec_end_project(slots, &operation.operands)?,
@@ -1406,7 +1392,9 @@ impl<'a> Interpreter<'a> {
                 .map(|operand| self.hidden_evidence_operand(slots, operand)),
         );
         let leading = self.hidden_evidence_bindings(&hidden_args, span)?;
-        self.exec_resolved_call(slots, module, identity, leading, 0, &operands[0..2], span)
+        let operands = &operands[0..2];
+        self.exec_resolved_call(slots, module, identity, leading, 0, operands, false, span)?;
+        Ok(())
     }
 
     fn exec_drop(
@@ -1490,12 +1478,15 @@ impl<'a> Interpreter<'a> {
     /// function value is called directly; a closure is applied by cloning its captured environment
     /// and prepending the environment slots (see [`exec_closure_call`](Self::exec_closure_call)),
     /// leaving the closure itself in place for its scope-cleanup drop.
+    /// Executes a call's operands `[callee, args..]`, followed by the return out-pointer unless
+    /// `value_result`, in which case the result value is returned.
     fn exec_call(
         &mut self,
         slots: &mut FxHashMap<mir::Value, Binding>,
         operands: &[mir::Value],
+        value_result: bool,
         span: Location,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<Option<Value>, RuntimeError> {
         let arg_ops = &operands[1..];
         let callee_op = &operands[0];
 
@@ -1508,6 +1499,7 @@ impl<'a> Interpreter<'a> {
                 Vec::new(),
                 0,
                 arg_ops,
+                value_result,
                 span,
             );
         }
@@ -1530,71 +1522,182 @@ impl<'a> Interpreter<'a> {
             )
         };
         if is_closure {
-            self.exec_closure_call(slots, &place, arg_ops, span)
+            self.exec_closure_call(slots, &place, arg_ops, value_result, span)
         } else {
-            self.exec_resolved_call(slots, module_id, function_id, Vec::new(), 0, arg_ops, span)
+            self.exec_resolved_call(
+                slots,
+                module_id,
+                function_id,
+                Vec::new(),
+                0,
+                arg_ops,
+                value_result,
+                span,
+            )
         }
     }
 
-    /// Binds each scalar argument passed as a value to a fresh cell holding a copy, for the
-    /// duration of the call, since a call passes every visible argument as a place (a value
-    /// parameter reads it on entry, see [`Self::bind_parameters`]). Returns the
-    /// bindings to restore; the cells sit above the environment the caller saw before the call,
-    /// which reclaims them afterwards.
-    fn bind_value_arguments(
-        &mut self,
+    /// Binds each constant scalar argument to its value for the duration of the call, so that every
+    /// value argument, constant or register, is a [`Binding::Value`] that the callee side passes
+    /// with [`Self::script_argument`] or [`Self::native_argument`]. Returns the bindings to restore
+    /// and whether any argument is a value.
+    fn bind_constant_arguments(
+        &self,
         func: &Function,
         slots: &mut FxHashMap<mir::Value, Binding>,
         operation: &Operation,
         ty: &CallImplType,
         metadata: Option<&CallMetadata>,
-        span: Location,
-    ) -> Result<Vec<(mir::Value, Option<Binding>)>, RuntimeError> {
-        let frame_top = self.ctx.environment.len();
+    ) -> (Vec<(mir::Value, Option<Binding>)>, bool) {
         let operands = &operation.operands;
         let visible_start = operation.call_visible_start();
         let mut rebound = Vec::new();
+        let mut has_values = false;
         for offset in 0..ty.fn_ty.args.len() {
-            let operand = &operands[visible_start + offset];
-            if !accepts_value_argument(ty, metadata, offset)
-                || rebound.iter().any(|(bound, _)| bound == operand)
-            {
+            if !accepts_value_argument(ty, metadata, offset) {
                 continue;
             }
-            let value = match operand {
-                mir::Value::Constant(_) => self.constant_value(func, operand),
-                _ => match slots.get(operand) {
-                    Some(Binding::Value(value))
-                        if value.as_primitive_ty::<PlaceResult>().is_none() =>
-                    {
-                        read_copy(value).expect("a scalar value argument is copyable")
-                    }
-                    _ => continue,
-                },
-            };
-            let cell = match self.alloc_cell(value, span) {
-                Ok(cell) => cell,
-                Err(error) => {
-                    Self::unbind_value_arguments(slots, rebound);
-                    self.reclaim_frame_storage(frame_top);
-                    return Err(error);
+            let operand = &operands[visible_start + offset];
+            if let mir::Value::Constant(_) = operand {
+                has_values = true;
+                if !rebound.iter().any(|(bound, _)| bound == operand) {
+                    let value = Binding::Value(self.constant_value(func, operand));
+                    let previous = slots.insert(operand.clone(), value);
+                    rebound.push((operand.clone(), previous));
                 }
-            };
-            let previous = slots.insert(operand.clone(), Binding::Place(cell));
-            rebound.push((operand.clone(), previous));
+            } else {
+                has_values |= Self::value_argument(slots, operand).is_some();
+            }
         }
-        Ok(rebound)
+        (rebound, has_values)
     }
 
-    fn unbind_value_arguments(
+    fn unbind_constant_arguments(
         slots: &mut FxHashMap<mir::Value, Binding>,
         rebound: Vec<(mir::Value, Option<Binding>)>,
     ) {
         for (operand, previous) in rebound {
-            match previous {
+            let bound = match previous {
                 Some(binding) => slots.insert(operand, binding),
                 None => slots.remove(&operand),
             };
+            if let Some(Binding::Value(value)) = bound {
+                value.discard_storage();
+            }
+        }
+    }
+
+    /// The value an argument operand is bound to, if it is passed as a value rather than as a place
+    /// (a place an addressor returned is bridged as a value, but denotes a place).
+    fn value_argument<'s>(
+        slots: &'s FxHashMap<mir::Value, Binding>,
+        operand: &mir::Value,
+    ) -> Option<&'s Value> {
+        match slots.get(operand) {
+            Some(Binding::Value(value)) if value.as_primitive_ty::<PlaceResult>().is_none() => {
+                Some(value)
+            }
+            _ => None,
+        }
+    }
+
+    /// Binds `leading` and then the argument operands to the script `func`'s parameters, by its
+    /// static parameter tags. An extra parameter is either a trait dictionary (binds to its interned
+    /// id) or subscript evidence (a subscript value passed by place) — both share the `Dictionary`
+    /// tag, so the operand disambiguates them; a non-extra parameter is never reinterpreted as a
+    /// dictionary. A value argument stays a value for a value parameter (see
+    /// [`Self::bind_parameters`]) and otherwise gets a fresh cell holding a copy, which the caller
+    /// reclaims after the call; every other operand binds to its place.
+    fn script_arguments(
+        &mut self,
+        slots: &FxHashMap<mir::Value, Binding>,
+        func: &Function,
+        leading: Vec<Binding>,
+        arg_ops: &[mir::Value],
+        span: Location,
+    ) -> Result<Vec<Binding>, RuntimeError> {
+        let param_tags = call_parameter_kinds(func);
+        let offset = leading.len();
+        let mut args: Vec<Binding> = Vec::with_capacity(offset + arg_ops.len() + 1);
+        args.extend(leading);
+        for (k, op) in arg_ops.iter().enumerate() {
+            let binding = if param_tags.get(offset + k) == Some(&ParameterKind::Dictionary) {
+                self.evidence_binding(slots, op, span)
+            } else if let Some(value) = Self::value_argument(slots, op) {
+                let value = read_copy(value).expect("a scalar value argument is copyable");
+                let takes_value = func
+                    .parameters()
+                    .get(offset + k)
+                    .is_some_and(Parameter::is_value);
+                if takes_value {
+                    Ok(Binding::Value(value))
+                } else {
+                    self.alloc_cell(value, span).map(Binding::Place)
+                }
+            } else {
+                Ok(Binding::Place(self.place_operand(slots, op)))
+            };
+            match binding {
+                Ok(binding) => args.push(binding),
+                Err(error) => {
+                    Self::discard_argument_values(args);
+                    return Err(error);
+                }
+            }
+        }
+        Ok(args)
+    }
+
+    /// Reclaims the values among argument bindings that were not passed, after a failure.
+    fn discard_argument_values(args: Vec<Binding>) {
+        for binding in args {
+            if let Binding::Value(value) = binding {
+                value.discard_storage();
+            }
+        }
+    }
+
+    /// The cell for a native addressor's receiver passed as a value: the returned place is rooted
+    /// in it (`result_rooted_in`), so it must be a place, which stays until the caller's stack
+    /// region ends. Allocated before any other native argument, which a failure would leak.
+    fn rooted_receiver_cell(
+        &mut self,
+        slots: &FxHashMap<mir::Value, Binding>,
+        f: &ModuleFunction,
+        visible_ops: &[mir::Value],
+        span: Location,
+    ) -> Result<Option<(usize, Place)>, RuntimeError> {
+        let Some(root) = f.definition.result_rooted_in.map(|root| root as usize) else {
+            return Ok(None);
+        };
+        let Some(value) = Self::value_argument(slots, &visible_ops[root]) else {
+            return Ok(None);
+        };
+        let value = read_copy(value).expect("a scalar value argument is copyable");
+        Ok(Some((root, self.alloc_cell(value, span)?)))
+    }
+
+    /// Pushes a native's visible arguments per its passing: a value argument as the value, as the
+    /// HIR interpreter passes a computed argument, except the receiver in `root`'s cell, and
+    /// anything else as its place.
+    fn push_native_arguments(
+        &self,
+        slots: &FxHashMap<mir::Value, Binding>,
+        passing: &[ArgConvention],
+        visible_ops: &[mir::Value],
+        mut root: Option<(usize, Place)>,
+        args: &mut Vec<ValOrMut>,
+    ) {
+        for (index, (arg_passing, op)) in passing.iter().zip(visible_ops).enumerate() {
+            args.push(match root.take_if(|(root, _)| *root == index) {
+                Some((_, cell)) => ValOrMut::Mut(cell),
+                None => match (arg_passing, Self::value_argument(slots, op)) {
+                    (ArgConvention::Let, Some(value)) => ValOrMut::Val(
+                        read_copy(value).expect("a scalar value argument is copyable"),
+                    ),
+                    _ => ValOrMut::Mut(self.place_operand(slots, op)),
+                },
+            });
         }
     }
 
@@ -1687,7 +1790,7 @@ impl<'a> Interpreter<'a> {
                 convention.returns_place(),
                 "a native member reached through `project` must return a place"
             );
-            let passing = f.parameter_passing.clone();
+            let passing = &f.parameter_passing;
             let n_vis = passing.len();
             let arg_ops = &operands[1..];
             let operand_extra_count = arg_ops
@@ -1706,6 +1809,7 @@ impl<'a> Interpreter<'a> {
                 );
             }
             let (extra_ops, visible_ops) = arg_ops.split_at(operand_extra_count);
+            let root = self.rooted_receiver_cell(slots, f, visible_ops, span)?;
             let mut args: Vec<ValOrMut> = Vec::with_capacity(extra_count + n_vis);
             for binding in leading {
                 args.push(match binding {
@@ -1731,14 +1835,7 @@ impl<'a> Interpreter<'a> {
                 };
                 args.push(arg);
             }
-            for (arg_passing, op) in passing.iter().zip(visible_ops) {
-                let place = self.place_operand(slots, op);
-                match arg_passing {
-                    ArgConvention::Let | ArgConvention::MutableRef => {
-                        args.push(ValOrMut::Mut(place));
-                    }
-                }
-            }
+            self.push_native_arguments(slots, passing, visible_ops, root, &mut args);
             let value = self.ctx.call_native(
                 FunctionId {
                     module: key.module,
@@ -1758,27 +1855,21 @@ impl<'a> Interpreter<'a> {
         }
 
         // Marshal the argument operands by the callee's static parameter tags — identical to the
-        // script branch of `exec_resolved_call` (an extra parameter binds to its interned dictionary
-        // or by-pointer place; every other operand, including the unused return out-pointer, binds to
-        // its place).
-        let param_tags = call_parameter_kinds(self.function(key));
-        let arg_ops = &operands[1..];
-        let offset = leading.len();
-        let mut args: Vec<Binding> = Vec::with_capacity(offset + arg_ops.len());
-        args.extend(leading);
-        for (k, op) in arg_ops.iter().enumerate() {
-            let binding = match param_tags.get(offset + k) {
-                Some(ParameterKind::Dictionary) => self.evidence_binding(slots, op, span)?,
-                _ => Binding::Place(self.place_operand(slots, op)),
-            };
-            args.push(binding);
-        }
+        // script branch of `exec_resolved_call` (the unused return out-pointer binds to its place).
+        let func = self.function(key);
+        let mut args = self.script_arguments(slots, func, leading, &operands[1..], span)?;
 
         // An `AddressorPlace` (script) member completes immediately — call it with a synthesized
         // place out-slot and bind the returned place directly; its `end_project` is then a no-op
         // (an addressor has no slide). A `YieldedOnce` member runs to its `yield` below.
         if convention.returns_place() {
-            let out = self.alloc_cell(Value::uninit(), span)?;
+            let out = match self.alloc_cell(Value::uninit(), span) {
+                Ok(out) => out,
+                Err(error) => {
+                    Self::discard_argument_values(args);
+                    return Err(error);
+                }
+            };
             args.push(Binding::Place(out.clone()));
             self.run_function(key, args)?;
             let place = self
@@ -1950,8 +2041,9 @@ impl<'a> Interpreter<'a> {
     /// Calls the resolved function `(callee_module, callee_identity)` with `leading` (a closure's
     /// prepended `@extra` dictionary evidence and captured-environment slots, in signature order;
     /// empty for a non-closure call) ahead of the visible arguments `arg_ops` (the last of which is
-    /// the return out-pointer). `closure_env_len` identifies the trailing value-capture bindings in
-    /// `leading`, keeping them distinct from evidence bindings even though both may be places.
+    /// the return out-pointer, unless `value_result`: the result value is then returned).
+    /// `closure_env_len` identifies the trailing value-capture bindings in `leading`, keeping them
+    /// distinct from evidence bindings even though both may be places.
     #[allow(clippy::too_many_arguments)]
     fn exec_resolved_call(
         &mut self,
@@ -1961,8 +2053,9 @@ impl<'a> Interpreter<'a> {
         leading: Vec<Binding>,
         closure_env_len: usize,
         arg_ops: &[mir::Value],
+        value_result: bool,
         span: Location,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<Option<Value>, RuntimeError> {
         let key = FunctionKey {
             module: callee_module,
             identity: callee_identity,
@@ -1975,31 +2068,36 @@ impl<'a> Interpreter<'a> {
             // first, then the argument operands straight through (the last is the return
             // out-pointer). Each argument operand is classified by the callee's *static* parameter
             // tag — a `Dictionary` parameter binds to the operand's interned dictionary id, every
-            // other parameter binds to its by-pointer place. Classifying by the callee's tag (rather
-            // than guessing from the operand's runtime binding) is essential: a value operand must
-            // bind as a place even if it could superficially resolve to a dictionary.
-            let param_tags = call_parameter_kinds(self.function(key));
+            // other parameter binds to its by-pointer place, or stays a value for a value
+            // parameter. Classifying by the callee's tag (rather than guessing from the operand's
+            // runtime binding) is essential: a value operand must bind as a place even if it could
+            // superficially resolve to a dictionary.
+            let func = self.function(key);
+            #[cfg(debug_assertions)]
             let offset = leading.len();
-            let mut args: Vec<Binding> = Vec::with_capacity(offset + arg_ops.len());
-            args.extend(leading);
-            for (k, op) in arg_ops.iter().enumerate() {
-                let binding = match param_tags.get(offset + k) {
-                    // An extra parameter is either a trait dictionary (binds to its interned id) or
-                    // subscript evidence (a subscript value passed by place) — both share the
-                    // `Dictionary` tag, so the operand disambiguates them. A non-extra
-                    // (visible/return) parameter is always a by-pointer place, never reinterpreted
-                    // as a dictionary.
-                    Some(ParameterKind::Dictionary) => self.evidence_binding(slots, op, span)?,
-                    _ => Binding::Place(self.place_operand(slots, op)),
-                };
-                args.push(binding);
-            }
+            let mut args = self.script_arguments(slots, func, leading, arg_ops, span)?;
+            // A value result gets a cell of its own, read once the call returns.
+            let result_cell = if value_result {
+                match self.alloc_cell(Value::uninit(), span) {
+                    Ok(cell) => {
+                        args.push(Binding::Place(cell.clone()));
+                        Some(cell)
+                    }
+                    Err(error) => {
+                        Self::discard_argument_values(args);
+                        return Err(error);
+                    }
+                }
+            } else {
+                None
+            };
             // Check the storage-state contract at the call boundary (debug only; see `doc/mir-ir.md`
             // §4.3). Only the *visible* operand arguments and the return out-pointer are checked: the
             // leading closure-environment slots (`[..offset]`) are excluded, because the body may
             // legitimately consume a captured value, leaving its (per-call cloned) slot a husk.
             #[cfg(debug_assertions)]
-            let boundary = Self::call_boundary(&param_tags[offset..], &args[offset..]);
+            let boundary =
+                Self::call_boundary(&call_parameter_kinds(func)[offset..], &args[offset..]);
             #[cfg(debug_assertions)]
             self.check_call_boundary(&boundary, CallPhase::Before, false);
             self.run_function(key, args)?;
@@ -2009,7 +2107,7 @@ impl<'a> Interpreter<'a> {
             let is_value_drop = self.is_value_drop_function(key);
             #[cfg(debug_assertions)]
             self.check_call_boundary(&boundary, CallPhase::After, is_value_drop);
-            return Ok(());
+            return Ok(result_cell.map(|cell| self.load_copy(&cell)));
         }
 
         self.exec_resolved_native_call(
@@ -2019,14 +2117,15 @@ impl<'a> Interpreter<'a> {
             leading,
             closure_env_len,
             arg_ops,
+            value_result,
             span,
         )
     }
 
     /// The native branch of [`exec_resolved_call`](Self::exec_resolved_call): marshals the extra
     /// (evidence) arguments and the visible arguments, delegates to the shared runtime, then
-    /// writes the returned value through the return out-pointer. Kept out of the script call path
-    /// so the recursion's per-frame stack stays small.
+    /// writes the returned value through the return out-pointer, or returns it for a value result.
+    /// Kept out of the script call path so the recursion's per-frame stack stays small.
     #[inline(never)]
     #[allow(clippy::too_many_arguments)]
     fn exec_resolved_native_call(
@@ -2037,8 +2136,9 @@ impl<'a> Interpreter<'a> {
         leading: Vec<Binding>,
         closure_env_len: usize,
         arg_ops: &[mir::Value],
+        value_result: bool,
         span: Location,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<Option<Value>, RuntimeError> {
         let f = self.hir_function(callee_module, callee_identity);
 
         // Native callee: marshal the extra (dictionary) arguments and the visible arguments,
@@ -2046,18 +2146,19 @@ impl<'a> Interpreter<'a> {
         // out-pointer.
         //
         // A call's operands are laid out as `[extra dictionaries…, visible args…, return
-        // out-pointer]`. A first-class constrained native instead carries some or all of those
+        // out-pointer]`, without the out-pointer for a value result. A first-class constrained native instead carries some or all of those
         // extras in `leading`. `parameter_passing` describes only the visible arguments, while the
         // native callable's runtime passing includes hidden evidence followed by visible arguments.
         assert_eq!(
             closure_env_len, 0,
             "a native function closure contains unexpected value captures"
         );
-        let passing = f.parameter_passing.clone();
+        let passing = &f.parameter_passing;
         let n_vis = passing.len();
-        let operand_extra_count = arg_ops.len().checked_sub(n_vis + 1).expect(
-            "a native call must pass the visible arguments and a return out-pointer at minimum",
-        );
+        let operand_extra_count = arg_ops
+            .len()
+            .checked_sub(n_vis + usize::from(!value_result))
+            .expect("a native call must pass the visible arguments and its result place");
         let extra_count = leading.len() + operand_extra_count;
         if let Some(runtime_passing) = f.code.runtime_argument_passing() {
             let expected_extra_count = runtime_passing
@@ -2071,7 +2172,8 @@ impl<'a> Interpreter<'a> {
         }
         let (extra_ops, rest) = arg_ops.split_at(operand_extra_count);
         let (visible_ops, ret_op) = rest.split_at(n_vis);
-        let ret_place = self.place_operand(slots, &ret_op[0]);
+        let ret_place = ret_op.first().map(|op| self.place_operand(slots, op));
+        let root = self.rooted_receiver_cell(slots, f, visible_ops, span)?;
 
         let mut args: Vec<ValOrMut> = Vec::with_capacity(extra_count + n_vis);
         // Captured hidden evidence from a first-class constrained native. Trait dictionaries remain
@@ -2105,15 +2207,7 @@ impl<'a> Interpreter<'a> {
             };
             args.push(arg);
         }
-        // Visible arguments, marshaled per the callee's resolved passing.
-        for (arg_passing, op) in passing.iter().zip(visible_ops) {
-            let place = self.place_operand(slots, op);
-            match arg_passing {
-                ArgConvention::Let | ArgConvention::MutableRef => {
-                    args.push(ValOrMut::Mut(place));
-                }
-            }
-        }
+        self.push_native_arguments(slots, passing, visible_ops, root, &mut args);
 
         // Delegate to the shared runtime with the callee's module given explicitly; the delegate
         // rotates its own ambient module internally, so the MIR interpreter never touches
@@ -2127,8 +2221,13 @@ impl<'a> Interpreter<'a> {
             args,
             span,
         )?;
-        self.store(value, &ret_place)?;
-        Ok(())
+        match ret_place {
+            Some(ret_place) => {
+                self.store(value, &ret_place)?;
+                Ok(None)
+            }
+            None => Ok(Some(value)),
+        }
     }
 
     /// Applies the closure at `place` (borrowed, not consumed): its environment is cloned into a fresh temporary
@@ -2141,10 +2240,11 @@ impl<'a> Interpreter<'a> {
         slots: &mut FxHashMap<mir::Value, Binding>,
         place: &Place,
         arg_ops: &[mir::Value],
+        value_result: bool,
         span: Location,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<Option<Value>, RuntimeError> {
         let marker = self.ctx.environment.len();
-        let result = self.exec_closure_call_inner(slots, place, arg_ops, span);
+        let result = self.exec_closure_call_inner(slots, place, arg_ops, value_result, span);
         self.reclaim_frame_storage(marker);
         result
     }
@@ -2154,8 +2254,9 @@ impl<'a> Interpreter<'a> {
         slots: &mut FxHashMap<mir::Value, Binding>,
         place: &Place,
         arg_ops: &[mir::Value],
+        value_result: bool,
         span: Location,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<Option<Value>, RuntimeError> {
         let (module_id, function_id, hidden_args, env_len, env_dict, env_ptr) = {
             let fv = place
                 .target_ref(&self.ctx)
@@ -2207,6 +2308,7 @@ impl<'a> Interpreter<'a> {
             leading,
             env_len,
             arg_ops,
+            value_result,
             span,
         );
 
@@ -2238,8 +2340,14 @@ impl<'a> Interpreter<'a> {
             }
         };
         match (call_result, drop_result) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Ok(()), Err(error)) | (Err(error), Ok(())) => Err(error),
+            (Ok(value), Ok(())) => Ok(value),
+            (Ok(value), Err(error)) => {
+                if let Some(value) = value {
+                    value.discard_storage();
+                }
+                Err(error)
+            }
+            (Err(error), Ok(())) => Err(error),
             (Err(initial), Err(during_cleanup)) => Err(self.ctx.poison(initial, during_cleanup)),
         }
     }
@@ -2451,8 +2559,10 @@ impl<'a> Interpreter<'a> {
             leading,
             0,
             &operands,
+            false,
             span,
-        )
+        )?;
+        Ok(())
     }
 
     /// Resolves a `drop` operation's callee operand to the `(module, function)` it targets, per the
@@ -3406,7 +3516,7 @@ mod capture_tests {
             let operand = mir::Value::Parameter(ParameterId::from_index(0));
             let mut slots = FxHashMap::from_iter([(operand.clone(), Binding::Place(output))]);
             let error = interpreter
-                .exec_closure_call(&mut slots, &source, &[operand], span)
+                .exec_closure_call(&mut slots, &source, &[operand], false, span)
                 .unwrap_err();
             assert_eq!(
                 error.kind(),

@@ -34,6 +34,7 @@ use crate::{
         DictionaryEntryEvidence, FunctionId, ModuleEnv, SubscriptId, TraitDictionaryId, id::Id,
     },
     std::{
+        math::readable_as,
         string::StaticStr,
         value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX},
     },
@@ -1669,22 +1670,13 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 if ty.result_convention == CallResultConvention::NoValue {
                     callable.function = self.program.direct_entry(callable.function);
                 }
+                // A scalar argument stays a value: a value parameter or a native's scalar input
+                // takes it as such.
                 let mut values = operation.operands[1..]
                     .iter()
                     .map(|value| self.operand(body, args, registers, value))
                     .collect::<Result<Vec<_>, _>>()?;
-                // A call passes every argument as a place, which a value parameter reads on entry:
-                // a scalar passed as a value gets a cell of its own for the call.
                 let marker = self.memory.len();
-                for value in &mut values {
-                    if let Binding::Scalar(scalar) = *value {
-                        let cell = self
-                            .memory
-                            .allocate(scalar.kind().ty(), Some(operation.span.location))?;
-                        self.memory.write(cell, scalar)?;
-                        *value = Binding::Place(cell);
-                    }
-                }
                 // A call passes its result place too: a value result gets a cell of its own, read
                 // once the call returns.
                 let result_cell = if *value_result {
@@ -2414,8 +2406,18 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         {
             return Err(invalid("invalid native output storage"));
         }
+        // A scalar input arrives as a value or in a cell; anything else arrives in its storage.
         let mut addresses = Vec::with_capacity(inputs.len());
+        let mut scalars = Vec::with_capacity(inputs.len());
         for (input, parameter) in inputs.iter().zip(&signature.parameters) {
+            if let (Binding::Scalar(scalar), NativeParameter::Scalar(..)) = (input, parameter) {
+                if !readable_as(scalar.kind().ty(), parameter.layout().ty) {
+                    return Err(invalid("invalid native scalar input"));
+                }
+                addresses.push(None);
+                scalars.push(Some(*scalar));
+                continue;
+            }
             let address = input.place()?;
             match parameter {
                 NativeParameter::Scalar(..) => self
@@ -2433,10 +2435,13 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             {
                 return Err(invalid("native output aliases an input"));
             }
-            addresses.push(address);
+            addresses.push(Some(address));
+            scalars.push(None);
         }
         for (index, address) in addresses.iter().enumerate() {
+            let Some(address) = address else { continue };
             for (other_index, other) in addresses[..index].iter().enumerate() {
+                let Some(other) = other else { continue };
                 if self.memory.overlaps(*address, *other)?
                     && !matches!(signature.parameters[index], NativeParameter::Scalar(..))
                     && !matches!(
@@ -2457,31 +2462,34 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         }
         // Scalar transport copies before establishing *any* native reference. Optimized MIR may
         // legitimately reuse an input's storage as the output or as another mutable argument.
-        let mut scalars = addresses
+        for ((address, scalar), parameter) in addresses
             .iter()
+            .zip(&mut scalars)
             .zip(&signature.parameters)
-            .map(|(address, parameter)| {
-                if matches!(parameter, NativeParameter::Scalar(..)) {
-                    self.memory.read(*address).map(Some)
-                } else {
-                    Ok(None)
-                }
-            })
-            .collect::<Result<Vec<_>, RuntimeError>>()?;
+        {
+            if let (Some(address), NativeParameter::Scalar(..)) = (address, parameter) {
+                *scalar = Some(self.memory.read(*address)?);
+            }
+        }
         // Invalidate saved opaque bytes before any mutable native access, also on source failure.
         for (address, parameter) in addresses.iter().zip(&signature.parameters) {
-            match parameter {
-                NativeParameter::Mutable(_) => self.memory.native_mutated(*address)?,
-                NativeParameter::Shared(_) => self.memory.invalidate_native_snapshot(*address)?,
+            match (address, parameter) {
+                (Some(address), NativeParameter::Mutable(_)) => {
+                    self.memory.native_mutated(*address)?
+                }
+                (Some(address), NativeParameter::Shared(_)) => {
+                    self.memory.invalidate_native_snapshot(*address)?
+                }
                 _ => (),
             }
         }
         let pointers = addresses
             .iter()
             .zip(&mut scalars)
-            .map(|(address, scalar)| match scalar {
-                Some(value) => Ok(value.pointer()),
-                None => self.memory.pointer(*address),
+            .map(|(address, scalar)| match (scalar, address) {
+                (Some(value), _) => Ok(value.pointer()),
+                (None, Some(address)) => self.memory.pointer(*address),
+                (None, None) => unreachable!("an input is either a scalar or in storage"),
             })
             .collect::<Result<Vec<_>, _>>()?;
         let marker = self.memory.len();
@@ -2506,7 +2514,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             return Err(invalid("never native returned success"));
         }
         for (address, parameter) in addresses.iter().zip(&signature.parameters) {
-            if matches!(parameter, NativeParameter::Consuming(_)) {
+            if let (Some(address), NativeParameter::Consuming(_)) = (address, parameter) {
                 self.memory.consume_native(*address)?;
             }
         }
@@ -2520,7 +2528,8 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             // Memory additionally checks alignment, receiver lifetime, and access permissions.
             let member = unsafe {
                 self.memory.native_member(
-                    addresses[root as usize],
+                    addresses[root as usize]
+                        .ok_or_else(|| invalid("native addressor root is a scalar"))?,
                     member_pointer,
                     pointee.ty,
                     mutable,

@@ -832,6 +832,10 @@ unsafe extern "C" fn tracked_self_mut(value: *mut CloneTrackedNative) -> *mut Cl
     value
 }
 
+unsafe extern "C" fn int_self_ref(value: *const isize) -> *const isize {
+    value
+}
+
 unsafe extern "C" fn tracked_failing_member(
     failure: &mut ferlium::hir::native_functions::NativeFailureState,
     value: *mut CloneTrackedNative,
@@ -950,6 +954,15 @@ fn add_tracked_members(module: &mut Module) {
                 "Rooted native value",
                 no_effects(),
             )),
+        );
+        module.add_native_member(
+            ustr("int_self"),
+            Some(NativeAddressorRef::new(int_self_ref).description(
+                ["self"],
+                "Rooted scalar value",
+                no_effects(),
+            )),
+            None,
         );
         module.add_native_member(
             ustr("checked_payload"),
