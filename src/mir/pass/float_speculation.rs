@@ -747,7 +747,7 @@ mod tests {
     #[test]
     fn inputs_written_before_the_root_are_snapshotted() {
         let module = optimized(
-            "fn f(x: float, y: float) -> float { let mut a = x; let t = a * y; a = 2.0; (t + a) * y }",
+            "fn keep(a: &mut float) {} fn f(x: float, y: float) -> float { let mut a = x; keep(a); let t = a * y; a = 2.0; (t + a) * y }",
         );
         let body = body_of(&module, "f");
         assert_eq!(count(body, "raw_float_is_finite"), 1, "{body}");

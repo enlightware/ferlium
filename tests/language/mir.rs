@@ -762,7 +762,9 @@ fn mir_call_depth_limit_stops_recursive_execution() {
 fn mir_environment_cell_limit_stops_allocation_and_leaves_session_usable() {
     let mut session = TestSession::new();
     let module_id = session
-        .compile("fn main() -> int { let mut x: int = 1; x = x + 1; x }")
+        .compile(
+            "fn inc(v: &mut int) { v = v + 1 } fn main() -> int { let mut x: int = 1; inc(x); x }",
+        )
         .module_id;
     let main_id = session
         .session()
@@ -1051,9 +1053,9 @@ fn iter1_multi_param_value() {
 
 #[test]
 fn iter1_mut_local_copy() {
-    // `mut x` = mutable LOCAL COPY (Owned, slot 1) seeded from the by-value param
-    // (%p0), which raw MIR first stores into a local of its own. The copy gets an `alloca`.
-    // Caller is NOT affected (value semantics).
+    // `mut x` = mutable LOCAL COPY (Owned, slot 1) seeded from the by-value param (%p0). Within
+    // a block, raw MIR names the mutable scalar's current value directly, so the copy needs no
+    // `alloca`. Caller is NOT affected (value semantics).
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn add_one(mut x: int) -> int { x = x + 1; x }"),
@@ -1061,22 +1063,17 @@ fn iter1_mut_local_copy() {
   @c0: () = ()
   @c1: int = 1
   b0:
-    %r0: place int = alloca int
-    store %p0 to %r0
-    %r1: int = load %r0
-    %r2: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c1)
-    %r3: int = call std::Num<std::int>::add#impl:7665d3ee(%r1, %r2)
-    store %r3 to %r0
-    %r4: int = load %r0
-    ret %r4
+    %r0: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c1)
+    %r1: int = call std::Num<std::int>::add#impl:7665d3ee(%p0, %r0)
+    ret %r1
 "#,
     );
 }
 
 #[test]
 fn iter1_let_mut_move_return() {
-    // `let mut y = x` -> Owned local (alloca) initialized by a trivial-copy clone
-    // of the by-value param; tail `y` is a `TakeLocalValue(MoveOwned)` -> load + no
+    // `let mut y = x` -> Owned local initialized by a trivial-copy clone of the by-value param;
+    // tail `y` is a `TakeLocalValue(MoveOwned)` of its current value, without storage, and no
     // drop (drop is Skip for int anyway).
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
@@ -1085,14 +1082,9 @@ fn iter1_let_mut_move_return() {
   @c0: () = ()
   @c1: int = 1
   b0:
-    %r0: place int = alloca int
-    store %p0 to %r0
-    %r1: int = load %r0
-    %r2: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c1)
-    %r3: int = call std::Num<std::int>::add#impl:7665d3ee(%r1, %r2)
-    store %r3 to %r0
-    %r4: int = load %r0
-    ret %r4
+    %r0: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c1)
+    %r1: int = call std::Num<std::int>::add#impl:7665d3ee(%p0, %r0)
+    ret %r1
 "#,
     );
 }
@@ -1178,8 +1170,8 @@ fn place_call_returned_as_value() {
 
 #[test]
 fn place_call_into_owned_local() {
-    // A place-returning call initializing an owned (`let mut`) local copies the element value
-    // into the local's alloca; the local must hold the value, not the element address.
+    // A place-returning call initializing an owned (`let mut`) local reads the element value;
+    // the local must hold the value, not the element address.
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn f(a: [int]) -> int { let mut x = a[0]; x = x + 1; x }"),
@@ -1188,17 +1180,14 @@ fn place_call_into_owned_local() {
   @c1: () = ()
   @c2: int = 1
   b0:
-    %r0: place int = alloca int
-    %r1: place *int = alloca_place int
-    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, @c0, %r1) -> b1 error b2
+    %r0: place *int = alloca_place int
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, @c0, %r0) -> b1 error b2
   b1:
-    %r2: *int = load %r1
-    memcpy %r2 to %r0
-    %r3: int = load %r0
-    %r4: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c2)
-    %r5: int = call std::Num<std::int>::add#impl:7665d3ee(%r3, %r4)
-    store %r5 to %r0
-    move %r0 to %p1
+    %r1: *int = load %r0
+    %r2: int = load %r1
+    %r3: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c2)
+    %r4: int = call std::Num<std::int>::add#impl:7665d3ee(%r2, %r3)
+    store %r4 to %p1
     ret
   b2:
     propagate_error
@@ -2449,8 +2438,8 @@ fn return_local_int_move() {
 
 #[test]
 fn reassign_local_literal() {
-    // Reassigning an owned int local overwrites its alloca in place; the old value
-    // needs no semantic drop (Skip for int).
+    // Reassigning an owned int local within a block replaces its current value, without
+    // storage; the old value needs no semantic drop (Skip for int).
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn f() -> int { let mut y: int = 1; y = 2; y }"),
@@ -2459,20 +2448,15 @@ fn reassign_local_literal() {
   @c1: () = ()
   @c2: int = 2
   b0:
-    %r0: place int = alloca int
-    store @c0 to %r0
-    %r1: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c2)
-    store %r1 to %r0
-    %r2: int = load %r0
-    ret %r2
+    %r0: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c2)
+    ret %r0
 "#,
     );
 }
 
 #[test]
 fn reassign_local_from_param() {
-    // Reassigning an owned local from a by-value param is a trivial copy from the local raw MIR
-    // stores the param into.
+    // Reassigning an owned local from a by-value param makes the param its current value.
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn f(x: int) -> int { let mut y: int = 0; y = x; y }"),
@@ -2480,18 +2464,15 @@ fn reassign_local_from_param() {
   @c0: int = 0
   @c1: () = ()
   b0:
-    %r0: place int = alloca int
-    store @c0 to %r0
-    store %p0 to %r0
-    %r1: int = load %r0
-    ret %r1
+    ret %p0
 "#,
     );
 }
 
 #[test]
 fn reassign_in_branches() {
-    // Each branch writes its value directly into the same owned local's alloca.
+    // Each branch's value leaves its block through the owned local's alloca, which the join
+    // reads; so does the initial value, at the branch.
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir(
@@ -2503,22 +2484,22 @@ fn reassign_in_branches() {
   @c2: int = 1
   @c3: int = 2
   b0:
-    %r0: place int = alloca int
-    %r1: place () = alloca ()
-    store @c0 to %r0
+    %r1: place int = alloca int
+    %r0: place () = alloca ()
+    store @c0 to %r1
     condbr %p0, b1, b2
   b1:
     %r2: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c2)
-    store %r2 to %r0
-    store @c1 to %r1
+    store @c1 to %r0
+    store %r2 to %r1
     br b3
   b2:
     %r3: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c3)
-    store %r3 to %r0
-    store @c1 to %r1
+    store @c1 to %r0
+    store %r3 to %r1
     br b3
   b3:
-    %r4: int = load %r0
+    %r4: int = load %r1
     ret %r4
 "#,
     );
@@ -2736,14 +2717,9 @@ fn copy_int_param_to_local() {
   @c0: () = ()
   @c1: int = 1
   b0:
-    %r0: place int = alloca int
-    store %p0 to %r0
-    %r1: int = load %r0
-    %r2: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c1)
-    %r3: int = call std::Num<std::int>::add#impl:7665d3ee(%r1, %r2)
-    store %r3 to %r0
-    %r4: int = load %r0
-    ret %r4
+    %r0: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c1)
+    %r1: int = call std::Num<std::int>::add#impl:7665d3ee(%p0, %r0)
+    ret %r1
 "#,
     );
 }
@@ -3431,14 +3407,13 @@ fn role_annotation_distinguishes_a_place_slot_from_a_value_slot() {
         r#"fn a0(%p0: @arg let [int], %p1: @arg let int, %p2: @ret int):
   @c0: () = ()
   b0:
-    %r0: place int = alloca int
-    store %p1 to %r0
-    %r1: int = load %r0
-    %r2: place *int = alloca_place int
-    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, %r1, %r2) -> b1 error b2
+    %r1: place int = alloca int
+    %r0: place *int = alloca_place int
+    store %p1 to %r1
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, %p1, %r0) -> b1 error b2
   b1:
-    %r3: *int = load %r2
-    memcpy %r3 to %p2
+    %r2: *int = load %r0
+    memcpy %r2 to %p2
     ret
   b2:
     propagate_error

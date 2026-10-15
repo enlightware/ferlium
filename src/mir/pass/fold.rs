@@ -2635,10 +2635,12 @@ mod tests {
         for ty in ["int", "float"] {
             let one = if ty == "int" { "1" } else { "1.0" };
             for expression in [
-                format!("let mut y = -x; y = {one}; -y"),
-                format!("let mut y = x; let z = -y; y = {one}; -z + y"),
+                format!("let mut y = -x; keep(y); y = {one}; -y"),
+                format!("let mut y = x; keep(y); let z = -y; y = {one}; -z + y"),
             ] {
-                let body = optimized_main(&format!("fn main(x: {ty}) -> {ty} {{ {expression} }}"));
+                let body = optimized_main(&format!(
+                    "fn keep(y: &mut {ty}) {{}} fn main(x: {ty}) -> {ty} {{ {expression} }}"
+                ));
                 // The second expression negates the value `y` held before the write, read before
                 // it; the first folds its overwritten value to a constant rather than copying x.
                 if expression.contains("let z") {

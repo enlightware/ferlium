@@ -23,6 +23,7 @@ use crate::{
             SourceFallibility, accepts_value_argument, accepts_value_result,
             definition_returns_value, is_scalar_value_type,
         },
+        ssa_construction::Variables,
         terminator::Terminator,
     },
     module::{
@@ -312,7 +313,28 @@ pub fn build_mir_function(source: LocalFunctionId, env: ModuleEnv<'_>) -> mir::F
 
 impl<'a> Emitter<'a> {
     /// Builds and returns the lowered MIR representation of `source`.
+    ///
+    /// A mutable scalar local whose place the body needs is a cell from its declaration: when
+    /// building finds one it tracked as a value (see `variables`), it builds again without tracking
+    /// it, so that its storage receives each value where it is defined, not where the place is first
+    /// needed. Building reads the module only.
     fn build_mir_fn(source: LocalFunctionId, env: ModuleEnv<'a>) -> mir::Function {
+        let mut place_locals = FxHashSet::default();
+        loop {
+            match Self::build_mir_fn_with(source, env, &place_locals) {
+                Ok(function) => return function,
+                Err(demoted) => place_locals.extend(demoted),
+            }
+        }
+    }
+
+    /// Builds the lowered MIR representation of `source`, tracking every mutable scalar local but
+    /// `place_locals` as a value; `Err` with the tracked locals whose place the body needed, if any.
+    fn build_mir_fn_with(
+        source: LocalFunctionId,
+        env: ModuleEnv<'a>,
+        place_locals: &FxHashSet<LocalDeclId>,
+    ) -> Result<mir::Function, Vec<LocalDeclId>> {
         let module = env.current;
         let others = env.modules;
         let f = module.get_function_by_id(source).unwrap();
@@ -420,6 +442,8 @@ impl<'a> Emitter<'a> {
                 locals,
                 value_locals,
                 deferred_locals: FxHashSet::default(),
+                variables: Variables::default(),
+                local_aliases: FxHashMap::default(),
                 extra_parameters,
                 evidence_bindings: FxHashMap::default(),
                 evidence_traits: FxHashMap::default(),
@@ -443,7 +467,7 @@ impl<'a> Emitter<'a> {
         emitter.lower_function_evidence_bindings(&f.evidence_bindings);
 
         // Allocate frame storage for every `Owned` local and bind it to its `alloca` place.
-        emitter.allocate_owned_locals();
+        emitter.allocate_owned_locals(place_locals);
 
         // Lower the body, dispatching on the function's return convention.
         match f.definition.return_convention() {
@@ -482,8 +506,12 @@ impl<'a> Emitter<'a> {
         // operations and terminators are known because only the builder admits pending blocks.
         emitter.fill_pending_pads();
 
+        let demoted = emitter.context.variables.demoted();
+        if !demoted.is_empty() {
+            return Err(demoted);
+        }
         let env = emitter.env;
-        emitter.context.function.finish(env)
+        Ok(emitter.context.function.finish(env))
     }
 
     /// Returns from the function, passing the result written into its local when it returns its
@@ -1257,7 +1285,10 @@ impl<'a> Emitter<'a> {
     /// that binding rather than be re-allocated, so locals already bound (the runtime arguments) are
     /// skipped here. Non-owning, non-argument locals (aliases) are bound to their initializer's place
     /// when their `StoreLocal` is lowered.
-    fn allocate_owned_locals(&mut self) {
+    ///
+    /// A mutable owned scalar local is tracked as a value (see `variables`) unless it is one of
+    /// `place_locals`.
+    fn allocate_owned_locals(&mut self, place_locals: &FxHashSet<LocalDeclId>) {
         let f = self
             .env
             .current
@@ -1272,14 +1303,19 @@ impl<'a> Emitter<'a> {
             {
                 continue;
             }
-            if l.mut_ty == MutType::constant()
-                && is_scalar_value_type(l.ty)
+            if is_scalar_value_type(l.ty)
                 && matches!(l.clone, None | Some(ResolvedLocalClone::TrivialCopy))
             {
-                self.context.deferred_locals.insert(id);
-            } else {
-                owned.push((id, l.ty));
+                if l.mut_ty == MutType::constant() {
+                    self.context.deferred_locals.insert(id);
+                    continue;
+                }
+                if !place_locals.contains(&id) {
+                    self.context.variables.declare(id);
+                    continue;
+                }
             }
+            owned.push((id, l.ty));
         }
         for (id, ty) in owned {
             let place = self.alloca_storage(self.context.span, ty);
@@ -1414,7 +1450,21 @@ impl<'a> Emitter<'a> {
     /// it where it is defined: right after the operation defining a register, or at the start of
     /// the entry block for a parameter or a constant. A body reading such a local only as a value
     /// has no storage for it.
+    ///
+    /// A tracked mutable local (see `variables`) is accessed through its place from now on: each
+    /// block holding a value its storage does not hold yet writes it there first.
     fn place_of_local(&mut self, l: LocalDeclId) -> mir::Value {
+        let l = self.aliased_local(l);
+        if self.context.variables.is_declared(l) {
+            let span = self.context.span;
+            let place = self.variable_storage(l);
+            for (block, value) in self.context.variables.demote(l) {
+                self.context
+                    .function
+                    .append_operation(block, Operation::store(span, value, place.clone()));
+            }
+            return place;
+        }
         if let Some(place) = self.context.locals.get(&l) {
             return place.clone();
         }
@@ -1445,6 +1495,75 @@ impl<'a> Emitter<'a> {
         }
         self.context.locals.insert(l, place.clone());
         place
+    }
+
+    /// Writes `value` into the mutable local `l`: its value in the current block while it is tracked,
+    /// or else its storage, as when evaluating `value` needed its place.
+    fn write_variable(&mut self, span: Location, l: LocalDeclId, value: mir::Value) {
+        if self.context.variables.is_declared(l) {
+            let InsertionPoint::End(block) = self.context.point;
+            self.context.variables.write(l, block, value);
+        } else {
+            let place = self.place_of_local(l);
+            self.store(span, value, place);
+        }
+    }
+
+    /// The local that `l` stands for: itself, or the local it is bound to (see `local_aliases`).
+    fn aliased_local(&self, l: LocalDeclId) -> LocalDeclId {
+        self.context.local_aliases.get(&l).copied().unwrap_or(l)
+    }
+
+    /// The value the tracked mutable local `l` holds in the current block, if it holds one there.
+    fn tracked_value(&self, l: LocalDeclId) -> Option<mir::Value> {
+        let InsertionPoint::End(block) = self.context.point;
+        self.context.variables.read(l, block)
+    }
+
+    /// The place of the local `l` for a copy of its whole value out of it. A tracked local with no
+    /// value in the current block is copied from its storage, which holds its value there, and stays
+    /// tracked.
+    fn copied_place_of_local(&mut self, l: LocalDeclId) -> mir::Value {
+        if self.context.variables.is_declared(l) {
+            self.variable_storage(l)
+        } else {
+            self.place_of_local(l)
+        }
+    }
+
+    /// The storage of the tracked mutable local `l`, created in the entry block on first need.
+    fn variable_storage(&mut self, l: LocalDeclId) -> mir::Value {
+        if let Some(place) = self.context.locals.get(&l) {
+            return place.clone();
+        }
+        let ty = self.local_declaration(l).ty;
+        let place = self
+            .context
+            .function
+            .prepend_operation(
+                BlockId::from_index(0),
+                Operation::alloca(self.context.span, ty),
+            )
+            .expect("an alloca defines its place");
+        self.context.locals.insert(l, place.clone());
+        place
+    }
+
+    /// Writes into storage the values of tracked mutable locals that the current block's successors
+    /// read there, before the block is terminated by `terminator`. A block leaving the function
+    /// writes none: its values are dead.
+    fn end_block_values(&mut self, terminator: &Terminator) {
+        let InsertionPoint::End(block) = self.context.point;
+        let values = self.context.variables.end_block(block);
+        if terminator.successors().next().is_none() {
+            return;
+        }
+        for (local, value) in values {
+            let place = self.variable_storage(local);
+            self.context
+                .function
+                .append_operation(block, Operation::store(terminator.span, value, place));
+        }
     }
 
     /// Lowers an aggregate (tuple or record) into `destination` by projecting each field of the
@@ -2043,7 +2162,15 @@ impl<'a> Emitter<'a> {
     ///
     /// Mirrors the interpreter's `eval_with_place`: the binding aliases existing caller-rooted
     /// storage, so no store is emitted (the same shape as a non-owning `StoreLocal` alias).
+    ///
+    /// A binding to a local, as a compound assignment `y += 1` makes, stands for that local itself,
+    /// so a tracked mutable local stays tracked through it.
     fn bind_local_for_with_place(&mut self, n: &hir::WithPlace<Elaborated>) {
+        if let hir::NodeKind::LoadLocal(local) = &self.hir_arena[n.place].kind {
+            let local = self.aliased_local(local.id);
+            self.context.local_aliases.insert(n.binding, local);
+            return;
+        }
         let place = self.lower_as_place(&self.hir_arena[n.place]);
         self.context.locals.insert(n.binding, place);
     }
@@ -2727,21 +2854,38 @@ impl<'a> Emitter<'a> {
         ty: Type,
         destination: mir::Value,
     ) {
+        let local = self.aliased_local(local);
         if let Some(value) = self.context.value_locals.get(&local) {
             let value = value.clone();
             self.store(span, value, destination);
             return;
         }
+        if let Some(value) = self.tracked_value(local) {
+            self.store(span, value, destination);
+            return;
+        }
         self.assert_statically_sized(ty);
-        let source = self.place_of_local(local);
+        let source = self.copied_place_of_local(local);
         self.memcpy_into_if_needed(span, source, Some(destination));
     }
 
     /// Reads the scalar local `local`. A local bound to a value is never written, so it is read as
-    /// that value.
+    /// that value; a tracked mutable local is read as the value it holds in the current block, or
+    /// else from its storage, once per block.
     fn load_local(&mut self, span: Location, local: LocalDeclId) -> Option<mir::Value> {
+        let local = self.aliased_local(local);
         if let Some(value) = self.context.value_locals.get(&local) {
             return Some(value.clone());
+        }
+        if self.context.variables.is_declared(local) {
+            let InsertionPoint::End(block) = self.context.point;
+            if let Some(value) = self.context.variables.read(local, block) {
+                return Some(value);
+            }
+            let place = self.variable_storage(local);
+            let value = self.insert(Operation::load(span, place))?;
+            self.context.variables.remember(local, block, value.clone());
+            return Some(value);
         }
         let place = self.place_of_local(local);
         self.insert(Operation::load(span, place))
@@ -2855,6 +2999,20 @@ impl<'a> Emitter<'a> {
                 // optimization may elide this temporary after proving non-aliasing. A scalar
                 // produced as a value, which has nothing to drop, is already complete and is stored
                 // directly.
+                // A tracked mutable local takes the value as its own, without storage.
+                if let K::LoadLocal(local) = &self.hir_arena[n.place].kind
+                    && let local = self.aliased_local(local.id)
+                    && self.context.variables.is_declared(local)
+                    && matches!(n.drop, None | Some(ResolvedLocalDrop::Skip))
+                    && let Some(value) = self.lower_scalar_value(&self.hir_arena[n.value])
+                {
+                    if self.current_block_is_terminated() {
+                        return;
+                    }
+                    self.write_variable(self.hir_arena[n.value].span, local, value);
+                    self.store_unit_result(node.span, destination);
+                    return;
+                }
                 let place = self.lower_as_place(&self.hir_arena[n.place]);
                 let dropped_ty = self.hir_arena[n.place].ty;
                 let value_span = self.hir_arena[n.value].span;
@@ -2912,6 +3070,17 @@ impl<'a> Emitter<'a> {
                     && let Some(value) = self.lower_scalar_value(&self.hir_arena[n.value])
                 {
                     self.context.value_locals.insert(n.id, value);
+                    self.store_unit_result(node.span, destination);
+                    return;
+                }
+                // A tracked mutable local takes its initial value as its own, without storage.
+                if self.context.variables.is_declared(n.id)
+                    && let Some(value) = self.lower_scalar_value(&self.hir_arena[n.value])
+                {
+                    if self.current_block_is_terminated() {
+                        return;
+                    }
+                    self.write_variable(node.span, n.id, value);
                     self.store_unit_result(node.span, destination);
                     return;
                 }
@@ -3039,13 +3208,17 @@ impl<'a> Emitter<'a> {
                     // local's lexical drop (cleanup is deferred). A move transfers the value
                     // wholesale, so a generic (dynamically-sized) value needs no `Value::clone` —
                     // just a witnessed `move_dynamic`; a statically-sized one uses a plain `move`.
-                    // A local bound to a value stores it.
+                    // A local bound to a value, or a tracked mutable local holding one in this
+                    // block, stores its value.
                     if let Some(destination) = destination {
-                        if let Some(value) = self.context.value_locals.get(&n.id) {
+                        let local = self.aliased_local(n.id);
+                        if let Some(value) = self.context.value_locals.get(&local) {
                             let value = value.clone();
                             self.store(node.span, value, destination);
+                        } else if let Some(value) = self.tracked_value(local) {
+                            self.store(node.span, value, destination);
                         } else {
-                            let source = self.place_of_local(n.id);
+                            let source = self.copied_place_of_local(local);
                             self.move_value_into(node.span, source, destination, node.ty);
                         }
                     }
@@ -3551,17 +3724,17 @@ impl<'a> Emitter<'a> {
                 self.failure_during_cleanup_block(span.location)
             }
         };
+        let terminator = Terminator::invoke(span, operation, normal, error);
+        self.end_block_values(&terminator);
         let InsertionPoint::End(block) = self.context.point;
-        let result = self
-            .context
-            .function
-            .set_terminator(block, Terminator::invoke(span, operation, normal, error));
+        let result = self.context.function.set_terminator(block, terminator);
         self.context.point = InsertionPoint::End(normal);
         result
     }
 
     /// Terminates the current block.
     fn terminate(&mut self, terminator: Terminator) {
+        self.end_block_values(&terminator);
         let InsertionPoint::End(block) = self.context.point;
         self.context.function.set_terminator(block, terminator);
     }
@@ -3653,6 +3826,15 @@ struct InsertionContext {
     /// The immutable owned scalar locals given no storage up front: their initialization binds them
     /// to the value it produces, or, if it produces none, gives them storage.
     deferred_locals: FxHashSet<LocalDeclId>,
+
+    /// The values of the mutable owned scalar locals within each block (see `ssa_construction`).
+    /// Such a local gets storage only where a value leaves its block or the body needs its place;
+    /// once the body needs its place, it is no longer tracked (see `place_of_local`).
+    variables: Variables<LocalDeclId>,
+
+    /// The non-owning locals bound to another local, which they stand for (see
+    /// `bind_local_for_with_place`).
+    local_aliases: FxHashMap<LocalDeclId, LocalDeclId>,
 
     /// The MIR values bound to extra parameters of the function.
     extra_parameters: FxHashMap<ExtraParameterId, mir::Value>,

@@ -3,6 +3,8 @@
 
 //! Construction-only state for canonical MIR functions.
 
+use std::collections::VecDeque;
+
 use ustr::Ustr;
 
 #[cfg(test)]
@@ -28,8 +30,10 @@ use crate::{
 };
 
 /// A temporarily unterminated block used only while lowering.
+///
+/// A deque, since lowering prepends storage it discovers it needs only later, such as a local's.
 struct PendingBlock {
-    operations: Vec<Operation>,
+    operations: VecDeque<Operation>,
     terminator: Option<Terminator>,
 }
 
@@ -106,7 +110,7 @@ impl FunctionBuilder {
     pub(crate) fn add_block(&mut self) -> BlockId {
         let id = BlockId::from_index(self.blocks.len());
         self.blocks.push(PendingBlock {
-            operations: Vec::new(),
+            operations: VecDeque::new(),
             terminator: None,
         });
         id
@@ -144,7 +148,9 @@ impl FunctionBuilder {
             &self.constants,
         );
         let result = self.assign_result(&mut operation);
-        self.blocks[block.as_index()].operations.push(operation);
+        self.blocks[block.as_index()]
+            .operations
+            .push_back(operation);
         result
     }
 
@@ -163,7 +169,7 @@ impl FunctionBuilder {
         let result = self.assign_result(&mut operation);
         self.blocks[block.as_index()]
             .operations
-            .insert(0, operation);
+            .push_front(operation);
         result
     }
 
@@ -309,7 +315,7 @@ impl FunctionBuilder {
             .enumerate()
             .map(|(index, block)| {
                 BasicBlock::new(
-                    block.operations,
+                    block.operations.into(),
                     block.terminator.unwrap_or_else(|| {
                         panic!("MIR block b{index} was not terminated during lowering")
                     }),

@@ -16,6 +16,7 @@ pub mod profile;
 pub(crate) mod reify;
 pub(crate) mod role;
 pub(crate) mod site;
+pub(crate) mod ssa_construction;
 pub mod terminator;
 pub mod value;
 pub(crate) mod verify;

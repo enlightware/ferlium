@@ -135,6 +135,10 @@ and each `return` passes the value. A fallible call keeps its result place, as t
 status and writes the result through a pointer. Specializing a generic result or effect can turn a
 function's result into a value.
 
+Raw MIR names an owned local of such a concrete scalar type by its value where it can: an
+immutable one by its initializer's value, a mutable one by its current value within a block, with
+an `alloca` only where a value crosses blocks or the body needs the local's place.
+
 Physical MIR states the transport: a value exactly where the callee's entry takes the argument or
 returns the result directly, as the ABI does (a static callee whose own parameter or result has that
 scalar type, or a trait method parameter declared with it), and a place otherwise, such as for a

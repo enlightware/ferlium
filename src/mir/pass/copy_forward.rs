@@ -1169,7 +1169,9 @@ mod tests {
 
     #[test]
     fn a_native_call_result_is_stored_back_in_place() {
-        let module = optimized("fn increment(mut x: int) -> int { x = x + 1; x }");
+        let module = optimized(
+            "fn keep(x: &mut int) {} fn increment(mut x: int) -> int { keep(x); x = x + 1; x }",
+        );
         let body = body_of(&module, "increment");
         let [arguments] = call_places(body, "Num<std::int>::add")
             .try_into()

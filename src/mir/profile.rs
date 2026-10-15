@@ -350,7 +350,7 @@ mod tests {
         let module_id = session
             .compile_for(
                 ExecutionTarget::Mir,
-                "fn twice(x: int) -> int { x + x } fn main(x: int) -> int { let mut y = x; y = twice(y); y }",
+                "fn twice(x: int) -> int { x + x } fn keep(y: &mut int) {} fn main(x: int) -> int { let mut y = x; keep(y); y = twice(y); y }",
                 "profile",
                 Path::single_str("profile"),
             )
