@@ -152,6 +152,7 @@ impl MirInstructionKind {
                 | Term::Yield
                 | Term::Return
                 | Term::PropagateError
+                | Term::EffectViolation
                 | Term::FailureDuringCleanup
                 | Term::InvariantFailure,
             ) => Cost::Scalar,

@@ -16,18 +16,21 @@
 //! saturation would have been the identity. The unsaturated result is then bit-for-bit the
 //! saturated one, including the sign of zero, which saturation also preserves.
 //!
-//! The rewrite of a tree whose root writes `D` is therefore:
+//! The rewrite of a tree whose root defines `D` is therefore:
 //!
 //! ```text
 //! head:  ...non-tree operations of the original span...
 //!        raw_float_{add,sub,mul,neg} of the inputs into fresh raw temporaries
 //!        ok = raw_float_is_finite(root)
 //!        condbr ok, fast, slow
-//! fast:  D = raw_float_to_float(root)          // the identity, since root is finite
+//! fast:  r = raw_float_to_float(root)          // the identity, since root is finite
+//!        store r, d
 //!        goto tail
-//! slow:  the original tree                    // re-executes on the same inputs
+//! slow:  the original tree, its root's value   // re-executes on the same inputs
+//!        stored into d
 //!        goto tail
-//! tail:  ...the rest of the original block...
+//! tail:  D = load d
+//!        ...the rest of the original block...
 //! ```
 //!
 //! The raw values have their own compiler-internal type, `raw_float`, because they break `float`'s
@@ -38,23 +41,19 @@
 //! than relying on its position behind the check; a target may elide that fallback where it sees
 //! the check (see the Wasm emitter).
 //!
-//! **Trees, not DAGs.** An intermediate qualifies only if it is a `float` allocation written by one
-//! tree operation and read by exactly one other, so a tree has a single exit and needs a single
-//! check. A shared value simply ends its tree and becomes an input of the next one.
+//! **Trees, not DAGs.** An intermediate qualifies only if it is the result of one tree operation
+//! read by exactly one other, so a tree has a single exit and needs a single check. A shared value
+//! simply ends its tree and becomes an input of the next one.
 //!
 //! **Division is excluded.** `finite / inf` is zero, so an overflowed divisor would vanish into a
 //! finite result the check accepts. Division is also fallible, and so ends a block anyway.
 //!
-//! **Moving the tree.** Both paths run at the root, so they read the inputs later than the
-//! original did. That is exact unless an operation between the tree's first operation and its root
-//! may change or release storage. A write is harmless only to an unaliased `float` cell that no
-//! earlier tree operation reads, since those that read it later saw the new value in the original
-//! too. Otherwise each tree operation copies its inputs to snapshots where it stood, and both paths
-//! read those. An input passed as a value was read where it stood, so it needs no snapshot; but a
-//! raw operation reads a `float` only through a place, so the fast path stores it into a cell there.
-//! When the value is a load only the tree reads, from a place nothing changes before the root, the
-//! load moves to the slow path instead and the fast path reads the place. The rewrite allocates its
-//! cells in the entry block, below every stack region a tree spans, such as an inlined callee's.
+//! **Moving the tree.** Both paths run at the root. The inputs are values, read where they were
+//! evaluated, so reading them later reads the same. A raw operation reads a `float` only through a
+//! place, so the fast path stores each input into a cell where the tree stood. When the input is a
+//! load only the tree reads, from a place nothing changes before the root, the load moves to the
+//! slow path instead and the fast path reads the place. The rewrite allocates its cells in the
+//! entry block, below every stack region a tree spans, such as an inlined callee's.
 //!
 //! **Final bodies only.** Physical expansion runs the pass on optimized bodies. Semantic MIR, which
 //! callers inline, keeps its saturating trees, so an inlined tree joins its caller's.
@@ -71,10 +70,7 @@ use crate::{
         terminator::Terminator,
     },
     module::{FunctionId, ModuleEnv},
-    std::{
-        logic::bool_type,
-        math::{float_type, raw_float_type},
-    },
+    std::math::{float_type, raw_float_type},
     types::r#type::Type,
 };
 
@@ -84,12 +80,12 @@ use super::known_callee::{KnownCallee, KnownCallees};
 /// contain to be worth a check and a duplicated slow path. A single one gains nothing.
 const MIN_OVERFLOWING_OPERATIONS: usize = 2;
 
-/// A saturating float arithmetic call and its operands.
+/// A saturating float arithmetic call, its operands and the register it defines.
 struct Arithmetic {
     /// The raw operation computing the same value without saturation.
     raw: KnownCallee,
     inputs: Vec<mir::Value>,
-    output: mir::Value,
+    output: ValueId,
 }
 
 impl Arithmetic {
@@ -106,8 +102,8 @@ struct Registers<'a> {
     /// The type each `alloca` register allocates.
     allocas: FxHashMap<ValueId, Type>,
     /// The registers used other than to access a whole cell: as a stored value, a base for a
-    /// projection, a call argument other than float arithmetic's, and so on. Only through such a
-    /// use can an alias of an allocation come to exist.
+    /// projection, a call argument, and so on. Only through such a use can an alias of an
+    /// allocation come to exist.
     escaped: FxHashSet<ValueId>,
     /// The place each `load` register was read from.
     loads: FxHashMap<ValueId, mir::Value>,
@@ -116,11 +112,7 @@ struct Registers<'a> {
 }
 
 impl<'a> Registers<'a> {
-    fn of(
-        func: &'a Function,
-        known: &KnownCallees,
-        original_of: &impl Fn(FunctionId) -> Option<FunctionId>,
-    ) -> Self {
+    fn of(func: &'a Function) -> Self {
         let mut uses = FxHashMap::default();
         let mut allocas = FxHashMap::default();
         let mut escaped = FxHashSet::default();
@@ -138,12 +130,11 @@ impl<'a> Registers<'a> {
                     _ => {}
                 }
                 count_uses(&mut uses, &operation.operands);
-                let is_arithmetic = arithmetic(operation, known, original_of).is_some();
                 for (position, operand) in operation.operands.iter().enumerate() {
                     let whole_cell = match operation.kind {
                         OperationKind::Store => position == 1,
                         OperationKind::Load | OperationKind::Memcpy => true,
-                        _ => is_arithmetic,
+                        _ => false,
                     };
                     if let (false, mir::Value::Register(id)) = (whole_cell, operand) {
                         escaped.insert(*id);
@@ -180,35 +171,11 @@ impl<'a> Registers<'a> {
         }
     }
 
-    /// The intermediate `input` reads: the cell itself, or the cell a `load` used only by `input`'s
-    /// reader read.
-    fn read_cell(&self, input: &mir::Value) -> mir::Value {
-        match input {
-            mir::Value::Register(id) if self.uses.get(id) == Some(&1) => {
-                self.loads.get(id).cloned().unwrap_or_else(|| input.clone())
-            }
-            _ => input.clone(),
-        }
-    }
-
-    /// Whether `value` is a whole `float` allocation.
-    fn is_float_alloca(&self, value: &mir::Value) -> bool {
-        matches!(value, mir::Value::Register(id) if self.allocas.get(id) == Some(&float_type()))
-    }
-
     /// Whether `value` is a whole `float` allocation that nothing aliases, so that its register is
     /// the only way to read or write it.
     fn is_unaliased_float_cell(&self, value: &mir::Value) -> bool {
-        self.is_float_alloca(value)
-            && matches!(value, mir::Value::Register(id) if !self.escaped.contains(id))
-    }
-
-    /// Whether `value` can be a tree intermediate: a whole `float` allocation used exactly twice,
-    /// by the operation writing it and the one reading it, either an operation or a `load` whose
-    /// value only that operation reads. Nothing therefore aliases it.
-    fn is_intermediate_candidate(&self, value: &mir::Value) -> bool {
-        self.is_float_alloca(value)
-            && matches!(value, mir::Value::Register(id) if self.uses.get(id) == Some(&2))
+        matches!(value, mir::Value::Register(id)
+            if self.allocas.get(id) == Some(&float_type()) && !self.escaped.contains(id))
     }
 }
 
@@ -226,7 +193,10 @@ fn arithmetic(
     known: &KnownCallees,
     original_of: &impl Fn(FunctionId) -> Option<FunctionId>,
 ) -> Option<Arithmetic> {
-    let OperationKind::Call { .. } = operation.kind else {
+    let OperationKind::Call {
+        value_result: true, ..
+    } = operation.kind
+    else {
         return None;
     };
     let mir::Value::Function(callee) = operation.operands.first()? else {
@@ -239,19 +209,18 @@ fn arithmetic(
         KnownCallee::FloatNeg => (KnownCallee::RawFloatNeg, 1),
         _ => return None,
     };
-    // Concrete std callees take no hidden evidence: callee, visible arguments, result.
-    if operation.operands.len() != arity + 2 {
+    // Concrete std callees take no hidden evidence: callee and visible arguments.
+    if operation.operands.len() != arity + 1 {
         return None;
     }
     Some(Arithmetic {
         raw,
-        inputs: operation.operands[1..=arity].to_vec(),
-        output: operation.operands[arity + 1].clone(),
+        inputs: operation.operands[1..].to_vec(),
+        output: operation.result_id()?,
     })
 }
 
-/// A tree found in one block, in operation order, its root last. Its members are its arithmetic
-/// and the loads that read its intermediates.
+/// A tree found in one block, in operation order, its root last.
 struct Tree {
     members: Vec<usize>,
 }
@@ -268,15 +237,8 @@ fn find_tree(
         .map(|operation| arithmetic(operation, known, original_of))
         .collect();
     // An intermediate is produced and consumed by arithmetic in this block, in that order. Its use
-    // count makes both unique.
+    // count makes the consumer unique.
     let mut producers = FxHashMap::default();
-    // The position of each load, by its register.
-    let positions: FxHashMap<_, _> = operations
-        .iter()
-        .enumerate()
-        .filter(|(_, operation)| operation.kind == OperationKind::Load)
-        .filter_map(|(index, operation)| Some((operation.result_id()?, index)))
-        .collect();
     let mut children: Vec<Vec<usize>> = vec![Vec::new(); operations.len()];
     let mut consumed = vec![false; operations.len()];
     for (index, operation) in arithmetic.iter().enumerate() {
@@ -284,24 +246,17 @@ fn find_tree(
             continue;
         };
         for input in &operation.inputs {
-            let cell = registers.read_cell(input);
-            let Some(&producer) = producers.get(&cell) else {
+            let mir::Value::Register(id) = input else {
                 continue;
             };
-            // A value read from the intermediate brings its load, which lies between the two.
-            let load = match input {
-                mir::Value::Register(id) if cell != *input => match positions.get(id) {
-                    Some(&load) if load > producer => Some(load),
-                    _ => continue,
-                },
-                _ => None,
+            let Some(&producer) = producers.get(id) else {
+                continue;
             };
             children[index].push(producer);
-            children[index].extend(load);
             consumed[producer] = true;
         }
-        if registers.is_intermediate_candidate(&operation.output) {
-            producers.insert(operation.output.clone(), index);
+        if registers.uses.get(&operation.output) == Some(&1) {
+            producers.insert(operation.output, index);
         }
     }
     (0..operations.len())
@@ -323,48 +278,6 @@ fn find_tree(
                 })
                 .count();
             (overflowing >= MIN_OVERFLOWING_OPERATIONS).then_some(Tree { members })
-        })
-}
-
-/// Whether an operation between the tree's first member and its root may change or release storage
-/// an input reads, so that the slow path, which reads the inputs at the root, needs snapshots.
-///
-/// Besides operations that write nothing, only a write to an unaliased cell that no earlier member
-/// reads is harmless: those members already read their inputs, and later ones read the new value
-/// in the original too.
-fn needs_snapshots(
-    operations: &[Operation],
-    members: &[usize],
-    registers: &Registers,
-    known: &KnownCallees,
-    original_of: &impl Fn(FunctionId) -> Option<FunctionId>,
-) -> bool {
-    let root = *members.last().unwrap();
-    let read_before = |index: usize, place: &mir::Value| {
-        members
-            .iter()
-            .take_while(|&&member| member < index)
-            .any(|&member| {
-                arithmetic(&operations[member], known, original_of)
-                    .is_some_and(|arithmetic| arithmetic.inputs.contains(place))
-            })
-    };
-    (members[0]..root)
-        .filter(|index| members.binary_search(index).is_err())
-        .any(|index| {
-            let operation = &operations[index];
-            match operation.kind {
-                OperationKind::Alloca { .. }
-                | OperationKind::Load
-                | OperationKind::CompareEqual
-                | OperationKind::Subfield { .. }
-                | OperationKind::StackSave => false,
-                OperationKind::Store | OperationKind::Memcpy => {
-                    let written = &operation.operands[1];
-                    !registers.is_unaliased_float_cell(written) || read_before(index, written)
-                }
-                _ => true,
-            }
         })
 }
 
@@ -404,6 +317,25 @@ fn call_into_fresh(
     place
 }
 
+/// Appends the value call `callee(arguments...)` to `operations`, returning its result.
+fn call_value(
+    edit: &mut FunctionEdit,
+    operations: &mut Vec<Operation>,
+    span: DebugLocation,
+    known: &KnownCallees,
+    callee: KnownCallee,
+    arguments: impl IntoIterator<Item = mir::Value>,
+) -> mir::Value {
+    let (function, ty) = known.raw_float(callee);
+    let mut call = Operation::call(span, mir::Value::Function(function), arguments, ty.clone())
+        .with_value_result();
+    let result = edit
+        .assign_new_result(&mut call)
+        .expect("a value call defines its result");
+    operations.push(call);
+    result
+}
+
 /// Rewrites `tree` of `block` into its fast and slow paths, returning the block holding the
 /// operations after it. The cells it allocates are appended to `cells`.
 fn speculate(
@@ -417,17 +349,15 @@ fn speculate(
 ) -> BlockId {
     let root = *tree.members.last().unwrap();
     let operations = mem::take(&mut edit.block_mut(block).operations);
-    let snapshots = needs_snapshots(&operations, &tree.members, registers, known, original_of);
     let mut operations = operations.into_iter();
     let original: Vec<_> = operations.by_ref().take(root + 1).collect();
     let rest: Vec<_> = operations.collect();
     let span = original[root].span;
     // An input read by a load that only the tree reads, from a place nothing changes before the
     // root, is read from that place: the load moves to the slow path, and the fast path reads the
-    // place, as both did when the tree took the place itself.
-    // Before the root, an operation writes nothing, writes only an unaliased `float` cell, or may
-    // change anything. A place is unchanged after a position if neither the last of the latter nor
-    // the last write to it follow that position.
+    // place. Before the root, an operation writes nothing, writes only an unaliased `float` cell,
+    // or may change anything. A place is unchanged after a position if neither the last of the
+    // latter nor the last write to it follow that position.
     let mut barrier = None;
     let mut last_writes = FxHashMap::default();
     let mut positions = FxHashMap::default();
@@ -442,13 +372,12 @@ fn speculate(
                 None
             }
             OperationKind::Store | OperationKind::Memcpy => Some(operation.operands[1].clone()),
-            _ => match arithmetic(operation, known, original_of) {
-                Some(arithmetic) => Some(arithmetic.output),
-                None => {
+            _ => {
+                if arithmetic(operation, known, original_of).is_none() {
                     barrier = Some(index);
-                    None
                 }
-            },
+                None
+            }
         };
         if let Some(written) = written {
             if registers.is_unaliased_float_cell(&written) {
@@ -480,24 +409,21 @@ fn speculate(
         .filter_map(|(&id, reads)| {
             let place = registers.loads.get(&id)?;
             let at = *positions.get(&id)?;
-            (registers.uses.get(&id) == Some(reads)
-                && tree.members.binary_search(&at).is_err()
-                && unchanged_after(place, at))
-            .then(|| (mir::Value::Register(id), place.clone()))
+            (registers.uses.get(&id) == Some(reads) && unchanged_after(place, at))
+                .then(|| (mir::Value::Register(id), place.clone()))
         })
         .collect();
 
-    // The tree leaves the head, where only its snapshots remain, and both paths run at the root.
-    // The fast path reads its `float` inputs as raw floats, which they refine.
+    // The tree leaves the head and both paths run at the root. The fast path reads its `float`
+    // inputs as raw floats, which they refine.
     let mut head = Vec::with_capacity(original.len() + 2 * tree.members.len());
     let mut fast = Vec::with_capacity(2 * tree.members.len());
     let mut slow = Vec::with_capacity(tree.members.len());
-    let mut raw: FxHashMap<mir::Value, mir::Value> = FxHashMap::default();
+    let mut raw: FxHashMap<ValueId, mir::Value> = FxHashMap::default();
     let mut stored: FxHashMap<mir::Value, mir::Value> = FxHashMap::default();
     let mut root_raw = None;
-    let mut destination = None;
     let mut members = tree.members.iter().peekable();
-    for (index, mut operation) in original.into_iter().enumerate() {
+    for (index, operation) in original.into_iter().enumerate() {
         if members.next_if(|&&member| member == index).is_none() {
             if operation
                 .result_id()
@@ -509,22 +435,14 @@ fn speculate(
             }
             continue;
         }
-        // A read of an intermediate stays with its reader on the slow path; the fast path reads
-        // the raw intermediate instead.
-        let Some(arithmetic) = arithmetic(&operation, known, original_of) else {
-            let intermediate = raw[&operation.operands[0]].clone();
-            raw.insert(
-                mir::Value::Register(operation.result_id().unwrap()),
-                intermediate,
-            );
-            slow.push(operation);
-            continue;
-        };
+        let arithmetic =
+            arithmetic(&operation, known, original_of).expect("a tree member is arithmetic");
         let mut arguments = Vec::with_capacity(arithmetic.inputs.len());
-        for (position, input) in arithmetic.inputs.into_iter().enumerate() {
-            // A later tree operation names an intermediate by its saturating place, or by the
-            // value read from it.
-            if let Some(intermediate) = raw.get(&input) {
+        for input in arithmetic.inputs {
+            // A later tree operation names an intermediate by its saturating result.
+            if let mir::Value::Register(id) = &input
+                && let Some(intermediate) = raw.get(id)
+            {
                 arguments.push(intermediate.clone());
                 continue;
             }
@@ -533,7 +451,7 @@ fn speculate(
                 continue;
             }
             // A raw operation reads a `float` as a `raw_float` only through a place, which a value
-            // is stored into where the tree stood, once per tree: that is a snapshot already.
+            // is stored into where the tree stood, once per tree.
             if registers.is_value(&input) {
                 let cell = stored.entry(input.clone()).or_insert_with(|| {
                     let cell = fresh_cell(edit, cells, span, float_type());
@@ -543,14 +461,7 @@ fn speculate(
                 arguments.push(cell.clone());
                 continue;
             }
-            if snapshots && matches!(input, mir::Value::Register(_) | mir::Value::Parameter(_)) {
-                let snapshot = fresh_cell(edit, cells, span, float_type());
-                head.push(Operation::memcpy(span, input, snapshot.clone()));
-                operation.operands[1 + position] = snapshot.clone();
-                arguments.push(snapshot);
-            } else {
-                arguments.push(input);
-            }
+            arguments.push(input);
         }
         let result = call_into_fresh(
             edit,
@@ -562,55 +473,53 @@ fn speculate(
             arguments,
             raw_float_type(),
         );
-        raw.insert(arithmetic.output.clone(), result.clone());
+        raw.insert(arithmetic.output, result.clone());
         root_raw = Some(result);
-        destination = Some(arithmetic.output);
         slow.push(operation);
     }
     let root_raw = root_raw.unwrap();
     head.extend(fast);
-    let finite = call_into_fresh(
+    let condition = call_value(
         edit,
-        cells,
         &mut head,
         span,
         known,
         KnownCallee::RawFloatIsFinite,
         [root_raw.clone()],
-        bool_type(),
     );
-    let mut load = Operation::load(span, finite);
-    let condition = edit.assign_new_result(&mut load).unwrap();
-    head.push(load);
 
+    // Both paths leave the root's value in a cell, which the tail reads into the root's register.
+    let result = fresh_cell(edit, cells, span, float_type());
     let terminator =
         std::mem::replace(&mut edit.block_mut(block).terminator, Terminator::ret(span));
     let tail = edit.add_block(terminator);
-    edit.block_mut(tail).operations = rest;
+    let root_output = slow
+        .last()
+        .and_then(Operation::result_id)
+        .expect("the root defines its result");
+    let mut load = Operation::load(span, result.clone());
+    load.assign_result_id(Some(root_output));
+    edit.block_mut(tail).operations = [load].into_iter().chain(rest).collect();
     let fast_block = edit.add_block(Terminator::goto(span, tail));
-    let (function, ty) = known.raw_float(KnownCallee::RawFloatToFloat);
-    edit.block_mut(fast_block).operations.push(Operation::call(
+    let mut fast = Vec::with_capacity(2);
+    let value = call_value(
+        edit,
+        &mut fast,
         span,
-        mir::Value::Function(function),
-        [root_raw, destination.unwrap()],
-        ty.clone(),
-    ));
-    // The slow path writes its intermediates to fresh cells: their original ones may lie in a
-    // stack region released before the root, and nothing else reads them.
-    for index in 0..slow.len() - 1 {
-        if slow[index].kind == OperationKind::Load {
-            continue;
-        }
-        let output = slow[index].operands.last().unwrap().clone();
-        let fresh = fresh_cell(edit, cells, span, float_type());
-        for operation in &mut slow[index..] {
-            for operand in &mut operation.operands {
-                if *operand == output {
-                    *operand = fresh.clone();
-                }
-            }
-        }
-    }
+        known,
+        KnownCallee::RawFloatToFloat,
+        [root_raw],
+    );
+    fast.push(Operation::store(span, value, result.clone()));
+    edit.block_mut(fast_block).operations = fast;
+    // The slow path's root defines a register of its own, stored into the cell.
+    let slow_root = slow.pop().expect("the tree has a root");
+    let mut slow_root = Operation::from_parts(slow_root.span, slow_root.operands, slow_root.kind);
+    let value = edit
+        .assign_new_result(&mut slow_root)
+        .expect("the root defines its result");
+    slow.push(slow_root);
+    slow.push(Operation::store(span, value, result));
     let slow_block = edit.add_block(Terminator::goto(span, tail));
     edit.block_mut(slow_block).operations = slow;
     let head_block = edit.block_mut(block);
@@ -642,7 +551,7 @@ pub(crate) fn speculate_float_trees(
     // The original use counts describe the trees of the blocks still to scan: a rewrite leaves the
     // operations after its root untouched, and its own operations use only fresh registers besides
     // the tree's inputs, which are no intermediates there.
-    let registers = Registers::of(func, known, original_of);
+    let registers = Registers::of(func);
     let mut cells = Vec::new();
     let mut pending: Vec<_> = edit.blocks().collect();
     while let Some(block) = pending.pop() {

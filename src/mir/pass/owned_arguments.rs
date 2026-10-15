@@ -318,7 +318,7 @@ pub(crate) fn forward_terminal_clones(
         ) else {
             continue;
         };
-        if !matches!(basic.terminator().kind, TerminatorKind::Return)
+        if !matches!(basic.terminator().kind, TerminatorKind::Return { .. })
             && used_after(source, block, root, &origins)
         {
             continue;
@@ -402,7 +402,7 @@ fn forward_clones_into_owned_invokes(source: &Function) -> Option<Function> {
         else {
             continue;
         };
-        let OperationKind::Call { ty, metadata } = &invoke.kind else {
+        let OperationKind::Call { metadata, .. } = &invoke.kind else {
             continue;
         };
         let Some(metadata) = metadata.as_deref() else {
@@ -411,7 +411,7 @@ fn forward_clones_into_owned_invokes(source: &Function) -> Option<Function> {
         if metadata.owned_arguments.is_empty() {
             continue;
         }
-        let visible_start = invoke.operands.len() - (ty.fn_ty.args.len() + 1);
+        let visible_start = invoke.call_visible_start();
 
         for (index, operation) in source.block(block).operations().iter().enumerate() {
             let OperationKind::Clone { .. } = operation.kind else {
@@ -652,14 +652,14 @@ impl VariantFactory<'_> {
                 {
                     clone_sites.insert(site);
                 }
-                OperationKind::Call { ty, metadata } => {
+                OperationKind::Call { ty, metadata, .. } => {
                     if metadata
                         .as_deref()
                         .is_some_and(|metadata| !metadata.owned_arguments.is_empty())
                     {
                         return None;
                     }
-                    let visible_start = operation.operands.len() - (ty.fn_ty.args.len() + 1);
+                    let visible_start = operation.call_visible_start();
                     if operand_index < visible_start
                         || operand_index >= visible_start + ty.fn_ty.args.len()
                     {
@@ -740,7 +740,7 @@ fn rewrite_caller(source: &Function, factory: &mut VariantFactory<'_>) -> Option
 
     for call in call_sites {
         let operation = operation_at(source, call);
-        let OperationKind::Call { ty, metadata } = &operation.kind else {
+        let OperationKind::Call { ty, metadata, .. } = &operation.kind else {
             unreachable!()
         };
         if metadata
@@ -755,7 +755,7 @@ fn rewrite_caller(source: &Function, factory: &mut VariantFactory<'_>) -> Option
         if callee.module != factory.module || callee.function.as_index() >= factory.sources.len() {
             continue;
         }
-        let visible_start = operation.operands.len() - (ty.fn_ty.args.len() + 1);
+        let visible_start = operation.call_visible_start();
         let mut candidates = Vec::new();
         for argument in 0..ty.fn_ty.args.len() {
             if ty.fn_ty.args[argument]
@@ -876,7 +876,7 @@ fn terminal_drops(
             )?;
             if !matches!(
                 function.block(block).terminator().kind,
-                TerminatorKind::Return
+                TerminatorKind::Return { .. }
             ) && used_after(function, block, root, origins)
             {
                 return None;
@@ -894,7 +894,7 @@ fn terminal_drops(
                 if predecessors[successor.as_index()] != 1
                     || !matches!(
                         function.block(successor).terminator().kind,
-                        TerminatorKind::Return | TerminatorKind::PropagateError
+                        TerminatorKind::Return { .. } | TerminatorKind::PropagateError
                     )
                 {
                     return None;
@@ -1056,7 +1056,7 @@ fn site_dominates_exits(function: &Function, site: Site) -> bool {
         }
         visited.insert(block.as_index());
         match &function.block(block).terminator().kind {
-            TerminatorKind::Return | TerminatorKind::PropagateError => return false,
+            TerminatorKind::Return { .. } | TerminatorKind::PropagateError => return false,
             TerminatorKind::Goto { target } => pending.push(*target),
             TerminatorKind::CondBr {
                 then_target,
@@ -1075,7 +1075,9 @@ fn site_dominates_exits(function: &Function, site: Site) -> bool {
                 pending.push(*error);
             }
             TerminatorKind::Yield { resume, .. } => pending.push(*resume),
-            TerminatorKind::FailureDuringCleanup | TerminatorKind::InvariantFailure { .. } => {}
+            TerminatorKind::EffectViolation
+            | TerminatorKind::FailureDuringCleanup
+            | TerminatorKind::InvariantFailure { .. } => {}
         }
     }
     true
@@ -1377,6 +1379,7 @@ mod tests {
         let function = Function::new(
             "fallible_before_sink".into(),
             Default::default(),
+            None,
             vec![],
             vec![],
             vec![

@@ -136,8 +136,9 @@ fn derive(
             TerminatorKind::Goto { .. }
             | TerminatorKind::CondBr { .. }
             | TerminatorKind::SwitchVariant { .. }
-            | TerminatorKind::Return
+            | TerminatorKind::Return { .. }
             | TerminatorKind::PropagateError
+            | TerminatorKind::EffectViolation
             | TerminatorKind::FailureDuringCleanup => {}
         }
     }

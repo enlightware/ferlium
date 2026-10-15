@@ -256,16 +256,18 @@ mod tests {
     #[test]
     fn retains_a_store_read_on_a_loop_back_edge() {
         let module = optimized(indoc! {"
-            fn loop_read(mut n: int) -> int {
+            fn loop_read(mut n: int, k: int) -> int {
                 let mut y = 7;
+                let mut sum = 0;
                 loop {
                     if n <= 0 { break };
                     let z = y;
-                    if z < 0 { y = 12 };
+                    sum = sum + z;
+                    if z < k { y = 12 };
                     y = 11;
                     n = n - 1;
                 };
-                0
+                sum
             }
         "});
         let body = body_of(&module, "loop_read");

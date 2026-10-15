@@ -107,30 +107,33 @@ fn unchecked_array_index(
     rewritten_ty.fn_ty.effects = effects.clone();
     *ty = b(rewritten_ty);
     if let Some(offset) = offset {
-        let OperationKind::Call { ty, .. } = &replacement.kind else {
-            unreachable!()
-        };
-        let visible_start = replacement.operands.len() - (ty.fn_ty.args.len() + 1);
+        let visible_start = replacement.call_visible_start();
         replacement.operands[visible_start + 1] = offset;
     }
     replacement
 }
 
-/// Materializes the wrapping integer addition whose affine result the analysis proved in range.
+/// Materializes the wrapping integer addition whose affine result the analysis proved in range,
+/// with the register it defines.
 fn add_offset(
+    edit: &mut FunctionEdit,
     span: DebugLocation,
     known: &KnownCallees,
     length: mir::Value,
     index: mir::Value,
-    destination: mir::Value,
-) -> Operation {
+) -> (Operation, mir::Value) {
     let (callee, ty) = known.int_add();
-    Operation::call(
+    let mut add = Operation::call(
         span,
         mir::Value::Function(callee),
-        [length, index, destination],
+        [length, index],
         ty.clone(),
     )
+    .with_value_result();
+    let sum = edit
+        .assign_new_result(&mut add)
+        .expect("a value call defines its result");
+    (add, sum)
 }
 
 /// Replaces every bounds check whose index is provably in range with a copy, and every branch the
@@ -160,11 +163,11 @@ pub(crate) fn eliminate_bounds_checks(
             original_of,
             block,
             |operation, def, state, interner, context| {
-                let OperationKind::Call { ty, .. } = &operation.kind else {
+                let OperationKind::Call { .. } = &operation.kind else {
                     return;
                 };
                 let callee = relations::resolved_callee(operation, known, original_of);
-                let Some(call) = call_operands(&operation.operands, ty) else {
+                let Some(call) = call_operands(operation) else {
                     return;
                 };
                 if call.arguments.len() != 2 {
@@ -186,7 +189,10 @@ pub(crate) fn eliminate_bounds_checks(
                             Replacement::ResolvedIndex {
                                 index: index.clone(),
                                 length: length.clone(),
-                                destination: call.result.clone(),
+                                destination: call
+                                    .result
+                                    .expect("a fallible call keeps its result place")
+                                    .clone(),
                                 normalization: Normalization::NonNegative,
                             },
                         )
@@ -344,15 +350,18 @@ pub(crate) fn eliminate_bounds_checks(
                 length,
                 destination,
                 normalization,
-            } => vec![match normalization {
+            } => match normalization {
                 Normalization::NonNegative if is_value(&index) => {
-                    Operation::store(check.span, index, destination)
+                    vec![Operation::store(check.span, index, destination)]
                 }
-                Normalization::NonNegative => Operation::memcpy(check.span, index, destination),
+                Normalization::NonNegative => {
+                    vec![Operation::memcpy(check.span, index, destination)]
+                }
                 Normalization::Negative => {
-                    add_offset(check.span, known, length, index, destination)
+                    let (add, sum) = add_offset(&mut edit, check.span, known, length, index);
+                    vec![add, Operation::store(check.span, sum, destination)]
                 }
-            }],
+            },
             Replacement::UncheckedArrayIndex {
                 operation,
                 array,
@@ -398,22 +407,12 @@ pub(crate) fn eliminate_bounds_checks(
                     let length = edit
                         .assign_new_result(&mut length_load)
                         .expect("a load defines its value");
-
-                    let offset_id = edit.new_value();
-                    let mut offset = Operation::alloca(check.span, int_type());
-                    offset.assign_result_id(Some(offset_id));
-                    let offset_place = mir::Value::Register(offset_id);
-                    let mut offset_load = Operation::load(check.span, offset_place.clone());
-                    let offset_value = edit
-                        .assign_new_result(&mut offset_load)
-                        .expect("a load defines its value");
+                    let (add, offset) = add_offset(&mut edit, check.span, known, length, index);
                     vec![
                         length_operation,
                         length_load,
-                        offset,
-                        add_offset(check.span, known, length, index, offset_place),
-                        offset_load,
-                        unchecked_array_index(&operation, known, Some(offset_value)),
+                        add,
+                        unchecked_array_index(&operation, known, Some(offset)),
                     ]
                 }
             },

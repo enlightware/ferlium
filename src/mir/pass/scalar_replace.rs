@@ -1159,9 +1159,7 @@ mod tests {
         },
         mir::{
             BlockId, Function, Operation, OperationKind, ParameterKind, Value,
-            builder::FunctionBuilder,
-            edit::FunctionEdit,
-            terminator::{Terminator, TerminatorKind},
+            builder::FunctionBuilder, edit::FunctionEdit, terminator::Terminator,
             verify::verify_function,
         },
         module::Path,
@@ -1771,21 +1769,17 @@ mod tests {
             .difference(&original_allocas)
             .copied()
             .collect();
+        // A call's scalar argument is read where it is evaluated, and its result is stored.
         assert!(
             split.blocks().any(|block| {
-                let block = split.block(block);
-                let invoked = match &block.terminator().kind {
-                    TerminatorKind::Invoke { operation, .. } => Some(operation),
-                    _ => None,
-                };
-                block.operations().iter().chain(invoked).any(|op| {
-                    matches!(op.kind, OperationKind::Call { .. })
-                        && op.operands.iter().skip(1).any(
+                split.block(block).operations().iter().any(|op| {
+                    matches!(op.kind, OperationKind::Load | OperationKind::Store)
+                        && op.operands.iter().any(
                             |value| matches!(value, Value::Register(id) if fields.contains(id)),
                         )
                 })
             }),
-            "retained call must read a split field directly"
+            "retained call must read or write a split field directly"
         );
         // Also retain the original inlined-product float case end to end, after splitting.
         session.set_mir_optimization(MirOptimization::Enabled);

@@ -362,8 +362,8 @@ pub(super) fn access(
         {
             Access::Write
         }
-        OperationKind::Call { ty, metadata } => {
-            let Some(call) = call_operands(&operation.operands, ty) else {
+        OperationKind::Call { ty, metadata, .. } => {
+            let Some(call) = call_operands(operation) else {
                 return Access::Escape;
             };
             // Repeatability proves even an `&mut` addressor input is not written by this call.
@@ -388,7 +388,7 @@ pub(super) fn access(
                 } else {
                     Access::Write
                 }
-            } else if operation.operands.get(position) == Some(call.result) {
+            } else if call.result.is_some() && operation.operands.get(position) == call.result {
                 Access::Write
             } else {
                 Access::Escape
@@ -409,7 +409,9 @@ fn is_rooted_repeatable_addressor(
     let summary = summary_of(*callee);
     summary.repeatable
         && matches!(summary.provenance, ResultProvenance::Argument(_))
-        && origins.returned_origin(call.result).is_some()
+        && call
+            .result
+            .is_some_and(|result| origins.returned_origin(result).is_some())
 }
 
 /// Checks every reachable absent/active state of this clone's lifetime. A read-only cycle needs

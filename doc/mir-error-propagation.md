@@ -42,6 +42,10 @@ that may raise a source failure:
 A sandbox violation during either ordinary execution or cleanup bypasses all MIR successors. If it
 interrupts source cleanup, the pending source failure is retained as diagnostic context.
 
+A function whose type cannot fail ends its source-error paths in `effect_violation` rather than
+`propagate_error`: a failure there escaped through `effects_unsafe`, no caller expects it, so after
+the function's cleanup it poisons the executor like `failure_during_cleanup`.
+
 ## Verification
 
 The verifier checks that:
@@ -49,7 +53,8 @@ The verifier checks that:
 - fallible operations occur only in `invoke` and infallible operations do not;
 - invoked results dominate only the normal successor;
 - normal and source-error paths do not silently rejoin;
-- `return`, `propagate_error`, and `failure_during_cleanup` receive the appropriate error state; and
+- `return`, `propagate_error`, `effect_violation`, and `failure_during_cleanup` receive the
+  appropriate error state; and
 - ownership state is transferred separately along normal and error edges.
 
 The HIR interpreter performs the equivalent cleanup traversal imperatively. Language tests execute

@@ -152,12 +152,15 @@ pub(crate) fn access(operation: &Operation, position: usize) -> Access {
         | (OperationKind::Replace, 1) => Access::Modify,
         (OperationKind::Call { .. }, 0) => Access::Callee,
         (OperationKind::Call { ty, .. }, _) => {
-            // The layout is `[callee, extras.., args.., ret]`; see `dataflow::CallOperands`.
-            let Some(result) = call_result_operand_index(&operation.operands, ty) else {
+            // The layout is `[callee, extras.., args.., ret]`, without `ret` for a call defining
+            // its result as a register; see `dataflow::CallOperands`.
+            let result = call_result_operand_index(operation);
+            if result.is_none() && operation.result_id().is_none() {
                 return Access::Opaque;
-            };
-            let arguments = result - ty.fn_ty.args.len();
-            if position == result {
+            }
+            let arguments =
+                operation.operands.len() - usize::from(result.is_some()) - ty.fn_ty.args.len();
+            if Some(position) == result {
                 Access::Write(Write::CallResult)
             } else if let Some(argument) = position.checked_sub(arguments) {
                 match arg_convention_for_arg(&ty.fn_ty.args[argument]) {

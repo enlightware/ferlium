@@ -181,30 +181,47 @@ fn canonicalize_boolean_flow(
 }
 
 fn cleanup_dead_representation_chains(
-    mut current: Function,
+    current: Function,
     env: ModuleEnv<'_>,
     context: &OptimizationContext,
     callees: SemanticCallees<'_>,
     will_return: &impl Fn(FunctionId) -> bool,
 ) -> Function {
+    clean_dead_representation_chains(&current, env, context, callees, will_return)
+        .unwrap_or(current)
+}
+
+/// Removes dead representation chains to a fixpoint; `None` if there was none.
+fn clean_dead_representation_chains(
+    function: &Function,
+    env: ModuleEnv<'_>,
+    context: &OptimizationContext,
+    callees: SemanticCallees<'_>,
+    will_return: &impl Fn(FunctionId) -> bool,
+) -> Option<Function> {
+    let mut current: Option<Function> = None;
     loop {
         let mut cleaned_any = false;
-        if let Some(cleaned) = dce::remove_dead_trivial_results(&current) {
-            current = cleaned;
+        if let Some(cleaned) =
+            dce::remove_dead_trivial_results(current.as_ref().unwrap_or(function))
+        {
+            current = Some(cleaned);
             cleaned_any = true;
         }
         if let Some(cleaned) = dce::remove_dead_proven_calls(
-            &current,
+            current.as_ref().unwrap_or(function),
             env,
             context.known_callees,
             &callees.original_of(),
             will_return,
         ) {
-            current = cleaned;
+            current = Some(cleaned);
             cleaned_any = true;
         }
-        if let Some(cleaned) = dce::remove_dead_nonconsuming_storage(&current) {
-            current = cleaned;
+        if let Some(cleaned) =
+            dce::remove_dead_nonconsuming_storage(current.as_ref().unwrap_or(function))
+        {
+            current = Some(cleaned);
             cleaned_any = true;
         }
         if !cleaned_any {
@@ -553,15 +570,13 @@ pub(crate) fn optimize_function(
     // Purity does not imply termination, so general dead-call elimination would be unsound. Remove
     // an unused direct call only under either the known native total/speculatable contract or a
     // module-table script body's raw-MIR return proof plus passive-input and copy-result
-    // restrictions; ordinary DCE then collects its unread result and argument cells.
+    // restrictions. A call's result register is often read only by a store into a local nothing
+    // reads, so the cleanup removes such stores and the calls they leave unused to a fixpoint;
+    // ordinary DCE then collects the unread cells.
     let source = current.as_ref().unwrap_or(function);
-    if let Some(cleaned) = dce::remove_dead_proven_calls(
-        source,
-        env,
-        context.known_callees,
-        &callees.original_of(),
-        &will_return,
-    ) {
+    if let Some(cleaned) =
+        clean_dead_representation_chains(source, env, context, callees, &will_return)
+    {
         current = Some(cleaned);
     }
     // A local `TrivialCopy` cell often receives an initializer only for every branch to replace it
@@ -822,8 +837,8 @@ mod tests {
         let body = body_of(&module, "sum").split("\nfn ").next().unwrap();
         let entry = body.split("\n  b1:").next().unwrap();
         assert!(
-            entry.contains("from %p0\n") && entry.contains("memcpy"),
-            "the length of the borrowed array must be copied in the entry block:\n{body}"
+            entry.contains("from %p0\n") && entry.contains(": int = load "),
+            "the length of the borrowed array must be read in the entry block:\n{body}"
         );
     }
 

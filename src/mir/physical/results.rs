@@ -362,7 +362,7 @@ pub(super) fn decode_adapter(body: &Function) -> Option<ValueAdapter<'_>> {
                 Some(failure.terminator()),
             )
         }
-        TerminatorKind::Return => {
+        TerminatorKind::Return { .. } => {
             let [call, store] = entry.operations() else {
                 return None;
             };
@@ -370,7 +370,7 @@ pub(super) fn decode_adapter(body: &Function) -> Option<ValueAdapter<'_>> {
         }
         _ => return None,
     };
-    if !matches!(returned.kind, TerminatorKind::Return)
+    if !matches!(returned.kind, TerminatorKind::Return { .. })
         || !matches!(call.kind, OperationKind::Call { .. })
         || !matches!(store.kind, OperationKind::Store)
     {
@@ -517,6 +517,7 @@ fn build_adapter(
     let mut edit = FunctionEdit::new(Function::new(
         name,
         CallResultConvention::Value,
+        None,
         parameters.to_vec(),
         vec![],
         blocks,
@@ -768,6 +769,7 @@ mod tests {
         let direct = Function::new(
             ustr("direct"),
             CallResultConvention::NoValue,
+            None,
             vec![],
             vec![],
             vec![BasicBlock::new(

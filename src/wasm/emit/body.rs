@@ -1721,7 +1721,14 @@ impl<'a, 's> Body<'a, 's> {
         self.i(I::End);
     }
 
-    fn return_frame(&mut self, failed: bool, explicit_return: bool) -> Result<(), String> {
+    /// Leaves the frame. `returned` is the value a function returning its result as a value
+    /// passes to its `return`.
+    fn return_frame(
+        &mut self,
+        failed: bool,
+        explicit_return: bool,
+        returned: Option<&Value>,
+    ) -> Result<(), String> {
         if matches!(self.mode, BodyMode::ProjectionStart { .. }) && !failed {
             // Resume-only blocks share the same MIR body. They are encoded in the start entry but
             // cannot be reached before its Yield; trap if malformed control flow reaches one.
@@ -1733,7 +1740,13 @@ impl<'a, 's> Body<'a, 's> {
         }
         // Terminal writers already leave their direct result on the operand stack. Otherwise,
         // read it while the frame and evidence are still live, before running the epilogue.
-        if returns_direct_result(self.mode, self.signature) && self.analysis.stack_return.is_none()
+        if let Some(returned) = returned {
+            if !returns_direct_result(self.mode, self.signature) {
+                return Err("a value result from an entry returning through a pointer".into());
+            }
+            self.value(returned)?;
+        } else if returns_direct_result(self.mode, self.signature)
+            && self.analysis.stack_return.is_none()
         {
             let result =
                 Value::Parameter(ParameterId::from_index(self.body.parameters().len() - 1));
@@ -1931,12 +1944,12 @@ impl<'a, 's> Body<'a, 's> {
             return self.end_project(&op.operands[0], invoked);
         }
         let callee = callee(op).ok_or("unsupported fallible operation")?;
+        // A call defining its result register leaves the result on the operand stack, which
+        // `finish_operation_result` takes.
+        let value_result = op.result_id().is_some();
         let (inputs, output): (Vec<_>, _) = match &op.kind {
-            OperationKind::Call { ty, .. } => {
-                let output = ty
-                    .result_convention
-                    .has_result_place()
-                    .then(|| op.operands.last().unwrap());
+            OperationKind::Call { .. } => {
+                let output = op.call_result_place();
                 (
                     op.operands[1..op.operands.len() - usize::from(output.is_some())]
                         .iter()
@@ -1955,6 +1968,9 @@ impl<'a, 's> Body<'a, 's> {
             _ => return Err("unsupported call operation".into()),
         };
         let Value::Function(target) = callee else {
+            if value_result {
+                return Err("a dynamic callee returns its result through a pointer".into());
+            }
             if let Value::Register(id) = callee
                 && let Some(selected) = self.borrowed_subscripts.get(id).cloned()
             {
@@ -1976,11 +1992,12 @@ impl<'a, 's> Body<'a, 's> {
         if inputs.len() != abi.parameters.len() {
             return Err("hidden call evidence".into());
         }
-        let direct_result = if !abi.fallible {
-            match abi.result {
-                ResultKind::Direct(_) => Some(self.pointee(output.ok_or("missing result")?)?),
-                _ => None,
-            }
+        let direct = !abi.fallible && matches!(abi.result, ResultKind::Direct(_));
+        if value_result && !direct {
+            return Err("a value result from an entry returning through a pointer".into());
+        }
+        let direct_result = if direct && !value_result {
+            Some(self.pointee(output.ok_or("missing result")?)?)
         } else {
             None
         };
@@ -2169,9 +2186,11 @@ impl<'a, 's> Body<'a, 's> {
         if inputs.len() != arity {
             return Err("wasm intrinsic argument count".into());
         }
-        let output = output.ok_or("wasm intrinsic result storage")?;
-        let ty = self.pointee(output)?;
-        let offset = self.prepare_store(output)?;
+        // Without a result place, the result stays on the operand stack for the result register.
+        let stored = match output {
+            Some(output) => Some((output, self.pointee(output)?, self.prepare_store(output)?)),
+            None => None,
+        };
         match intrinsic {
             KnownCallee::IntBitAnd
             | KnownCallee::IntBitOr
@@ -2428,7 +2447,9 @@ impl<'a, 's> Body<'a, 's> {
             }
             _ => unreachable!("wasm_intrinsic filters unsupported known callees"),
         }
-        self.finish_store(output, ty, offset);
+        if let Some((output, ty, offset)) = stored {
+            self.finish_store(output, ty, offset);
+        }
         self.call_status(invoked, false);
         Ok(())
     }
@@ -2446,8 +2467,6 @@ impl<'a, 's> Body<'a, 's> {
         if inputs.len() != 2 {
             return Err("wasm division argument count".into());
         }
-        let output = output.ok_or("wasm division result storage")?;
-        let ty = self.pointee(output)?;
         let nonzero = if intrinsic != KnownCallee::FloatDiv {
             self.analysis
                 .integer_constant(self.body, inputs[1])
@@ -2482,7 +2501,11 @@ impl<'a, 's> Body<'a, 's> {
             ));
             self.i(I::Else);
         }
-        let offset = self.prepare_store(output)?;
+        // Without a result place, the result stays on the operand stack for the result register.
+        let stored = match output {
+            Some(output) => Some((output, self.pointee(output)?, self.prepare_store(output)?)),
+            None => None,
+        };
         if intrinsic == KnownCallee::IntDiv {
             let divisor = self.analysis.integer_constant(self.body, inputs[1]);
             if divisor == Some(-1) {
@@ -2560,7 +2583,9 @@ impl<'a, 's> Body<'a, 's> {
                 self.i(I::F64Min);
             }
         }
-        self.finish_store(output, ty, offset);
+        if let Some((output, ty, offset)) = stored {
+            self.finish_store(output, ty, offset);
+        }
         if invoked {
             self.i(I::I32Const(0));
         }
@@ -3081,8 +3106,9 @@ impl<'a, 's> Body<'a, 's> {
                 self.close_source();
                 return Ok(());
             }
-            TerminatorKind::Return
+            TerminatorKind::Return { .. }
             | TerminatorKind::PropagateError
+            | TerminatorKind::EffectViolation
             | TerminatorKind::FailureDuringCleanup
             | TerminatorKind::InvariantFailure { .. } => {
                 self.open_source(terminator.span);
@@ -3207,15 +3233,23 @@ impl<'a, 's> Body<'a, 's> {
         match &self.body.block(block_id).terminator().kind {
             TerminatorKind::PropagateError => {
                 self.propagate_failure();
-                self.return_frame(true, true)?;
+                self.return_frame(true, true, None)?;
+            }
+            TerminatorKind::EffectViolation => {
+                self.propagate_failure();
+                self.fail(FailureCode::EffectViolation);
             }
             TerminatorKind::FailureDuringCleanup => {
                 self.propagate_failure();
                 // A correctly chained cleanup failure already trapped while propagating.
                 self.fail(FailureCode::Invariant);
             }
-            TerminatorKind::Return => {
-                self.return_frame(false, self.fallthrough_return != Some(block_id))?;
+            TerminatorKind::Return { value } => {
+                self.return_frame(
+                    false,
+                    self.fallthrough_return != Some(block_id),
+                    value.as_ref(),
+                )?;
             }
             TerminatorKind::InvariantFailure { .. } => self.fail(FailureCode::Invariant),
             _ => unreachable!("expected a terminator without successors"),
@@ -3384,8 +3418,9 @@ impl<'a, 's> Body<'a, 's> {
                 }
             }
             TerminatorKind::Yield { place, .. } => self.suspend(place)?,
-            TerminatorKind::Return
+            TerminatorKind::Return { .. }
             | TerminatorKind::PropagateError
+            | TerminatorKind::EffectViolation
             | TerminatorKind::FailureDuringCleanup
             | TerminatorKind::InvariantFailure { .. } => self.exit(block_id)?,
         }
@@ -4143,7 +4178,8 @@ impl<'a, 's> Body<'a, 's> {
     }
 }
 
-/// Follow only Clear and elided stack markers through Gotos to PropagateError. Even an operation
+/// Follow only Clear and elided stack markers through Gotos to PropagateError or EffectViolation,
+/// which both forward the current diagnostic. Even an operation
 /// that only traps requires retention: `Failures::finish` cannot recover the native failure cell.
 /// Start only at Invoke error targets collected during storage planning. Each visited block is
 /// decided once; a tentative false decision terminates cycles without an exit.
@@ -4168,7 +4204,7 @@ fn immediate_propagation_blocks(
             path.push(id);
             let block = body.block(id);
             let next = match block.terminator().kind {
-                TerminatorKind::PropagateError => None,
+                TerminatorKind::PropagateError | TerminatorKind::EffectViolation => None,
                 TerminatorKind::Goto { target } => Some(target),
                 _ => break false,
             };
@@ -4370,36 +4406,45 @@ fn checked_float_conversions(
             continue;
         }
         let operations = block.operations();
-        let Some(load) = operations
+        let Some(definition) = operations
             .iter()
             .position(|operation| operation.result_id() == Some(*condition))
         else {
             continue;
         };
-        if !matches!(operations[load].kind, OperationKind::Load) {
-            continue;
-        }
-        let flag = &operations[load].operands[0];
-        let Some(test) = (0..load)
-            .rev()
-            .find(|&index| operations[index].operands.contains(flag))
-        else {
+        // The test defines the condition, or writes a flag the condition loads.
+        let (test, flag) = if is(
+            ExpressionSource::from_index(block_id, definition),
+            KnownCallee::RawFloatIsFinite,
+        ) {
+            (definition, None)
+        } else if matches!(operations[definition].kind, OperationKind::Load) {
+            let flag = &operations[definition].operands[0];
+            let Some(test) = (0..definition)
+                .rev()
+                .find(|&index| operations[index].operands.contains(flag))
+            else {
+                continue;
+            };
+            if !is(
+                ExpressionSource::from_index(block_id, test),
+                KnownCallee::RawFloatIsFinite,
+            ) || operations[test].operands.last() != Some(flag)
+            {
+                continue;
+            }
+            (test, Some(flag))
+        } else {
             continue;
         };
-        if !is(
-            ExpressionSource::from_index(block_id, test),
-            KnownCallee::RawFloatIsFinite,
-        ) || operations[test].operands.last() != Some(flag)
-        {
-            continue;
-        }
         let tested = &operations[test].operands[1];
         let untouched = operations[test + 1..]
             .iter()
             .enumerate()
             .all(|(offset, operation)| {
-                test + 1 + offset == load
-                    || !(operation.operands.contains(tested) || operation.operands.contains(flag))
+                test + 1 + offset == definition
+                    || !(operation.operands.contains(tested)
+                        || flag.is_some_and(|flag| operation.operands.contains(flag)))
             });
         if !untouched {
             continue;
@@ -4454,7 +4499,10 @@ fn has_fallthrough_return(
     match items.last() {
         Some(Item::Node { block, .. })
             if matches!(mode, BodyMode::Normal)
-                && matches!(body.block(*block).terminator().kind, TerminatorKind::Return) =>
+                && matches!(
+                    body.block(*block).terminator().kind,
+                    TerminatorKind::Return { .. }
+                ) =>
         {
             Some(*block)
         }

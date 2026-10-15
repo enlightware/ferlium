@@ -26,6 +26,8 @@ Operations never carry intra-function successors. The terminators are:
 - `yield place -> resume`, which suspends a scoped accessor;
 - `return`;
 - `propagate_error`, which returns the pending source failure;
+- `effect_violation`, which poisons execution with the pending source failure in a function whose
+  type says it cannot fail, in place of `propagate_error`;
 - `failure_during_cleanup`, which poisons execution after a second source failure; and
 - `invariant_failure "message"`, which fatally terminates execution on a compiler/runtime bug.
 
@@ -111,8 +113,8 @@ Parameters appear in this order:
 
 1. `@extra`: dictionaries and other hidden evidence;
 2. `@arg`: runtime arguments tagged `let`, `&mut`, or optimized-MIR-only `owned`; and
-3. `@ret`: the caller-provided result storage, present unconditionally in semantic MIR, including
-   for `()` results.
+3. `@ret`: the caller-provided result storage, present in semantic MIR, including for `()`
+   results, unless the function returns its result as a value (see below).
 
 Arguments and parameters are places, except for concrete scalars. `Let` is immutable non-escaping
 access, `MutableRef` is exclusive mutable access, and `owned` transfers the pointee into a private
@@ -126,15 +128,21 @@ the verifier rejects the place form. A substitution that makes an argument's typ
 reads it before its call, which is equivalent to the callee reading it, since overlapping mutable
 arguments are invalid.
 
-Physical MIR states the transport: a value exactly where the callee's entry takes the argument
-directly, as the ABI does (a static callee whose own parameter has that scalar type, or a trait
-method declared with it), and a place otherwise, such as for a generic parameter or a stored
-callable. An entry taking a place may lead to a body whose parameter is a value; the backend bridges
-the two.
+A non-fallible call whose result has such a concrete scalar type defines that result as a register,
+and has no result place. A function of such a type returns its result as a value: it has no `@ret`,
+and each `return` passes the value. A fallible call keeps its result place, as the ABI returns a
+status and writes the result through a pointer. Specializing a generic result or effect can turn a
+function's result into a value.
+
+Physical MIR states the transport: a value exactly where the callee's entry takes the argument or
+returns the result directly, as the ABI does (a static callee whose own parameter or result has that
+scalar type, or a trait method parameter declared with it), and a place otherwise, such as for a
+generic parameter or result, a dictionary entry's result, or a stored callable. An entry taking a
+place may lead to a body whose parameter is a value; the backend bridges the two.
 
 `CallResultConvention` determines the result storage shape:
 
-- `Value`: the callee initializes `*T` through `@ret`;
+- `Value`: the callee initializes `*T` through `@ret`, or returns its scalar result as a value;
 - `AddressorPlace`: the callee writes a caller-rooted `*T` through an `@ret` of shape `**T`; and
 - `YieldedOnce`: `project` exposes a callee-rooted place until `end_project` resumes its slide.
 
@@ -150,8 +158,9 @@ Every `Call` and `Project` retains its instantiated `CallImplType`. It is the so
 result types, the result convention, and source fallibility. A native entry's machine return form
 does not change this MIR result-storage contract.
 
-Call operands are `[callee, hidden evidence..., visible arguments..., ret-out]`. Project operands omit
-the trailing result place because the operation itself yields the scoped place. A dynamic callee is
+Call operands are `[callee, hidden evidence..., visible arguments..., ret-out]`, without `ret-out`
+for a call defining its result register. Project operands omit the trailing result place because
+the operation itself yields the scoped place. A dynamic callee is
 read through the place of its function value, so calling a closure never moves its environment.
 
 ## Operations
@@ -216,11 +225,14 @@ fallibility from its `OpenProjection` operand rather than duplicating the access
 
 Both a fallible operation in a block body and an infallible `Invoke` are invalid. The implicit
 source-error payload follows the explicit CFG: normal code may `return`, one pending failure may
-`propagate_error`, and a second failure must reach `failure_during_cleanup`. Normal and error control
-flow may not silently rejoin.
+`propagate_error` or reach `effect_violation`, and a second failure must reach
+`failure_during_cleanup`. Normal and error control flow may not silently rejoin.
 
-Unsafe operations must not let a source failure escape a plain MIR operation:
-that violates the MIR contract, and no recoverable cleanup path exists there.
+A function whose type cannot fail (no `fallible` effect and no effect variable) never propagates: a
+source failure reaching its exit, which only `effects_unsafe` makes possible, ends in
+`effect_violation` after the function's cleanup, so a plain call to it never raises. HIR emission
+chooses the exit from the function's type, and specialization turns a `propagate_error` into
+`effect_violation` when the substituted type cannot fail.
 
 Sandbox violations, such as exceeding fuel, call-depth, or memory limits, are not source failures.
 They bypass MIR successors, poison the executor, and enter runtime reclamation without running
@@ -338,7 +350,8 @@ The diagnostic layout remains opaque; its ownership and lifetime are specified i
 
 ### Physical call results
 
-Semantic MIR gives every call a result place, including calls returning `()`. Physical lowering
+Semantic MIR gives every call a result place or a result register, including calls returning `()`,
+which use a place. Physical lowering
 assigns a result convention to each lowered function artifact after specialization. A direct
 artifact returning a statically zero-sized Ferlium product may use `NoValue`, omitting both its
 `@ret` parameter and the corresponding call operand. This includes unit, empty structs, tuples and

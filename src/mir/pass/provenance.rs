@@ -273,7 +273,7 @@ impl PlaceOrigins {
         let Some(origin) = self.origin_of(argument) else {
             return false;
         };
-        let mir::Value::Register(output) = call.result else {
+        let Some(mir::Value::Register(output)) = call.result else {
             return false;
         };
         if !self.single_writer_slots.contains(output) {
@@ -291,7 +291,7 @@ fn addressor_call(operation: &Operation) -> Option<CallOperands<'_>> {
     if ty.result_convention != CallResultConvention::ADDRESSOR_PLACE {
         return None;
     }
-    call_operands(&operation.operands, ty)
+    call_operands(operation)
 }
 
 /// Only private, single-writer pointer slots can have a function-wide referent origin. A slot's
@@ -313,7 +313,7 @@ fn single_writer_addressor_slots(func: &Function) -> FxHashSet<ValueId> {
     let mut slots = FxHashMap::<ValueId, usize>::default();
     for operation in operations() {
         if let Some(call) = addressor_call(operation)
-            && let mir::Value::Register(slot) = call.result
+            && let Some(mir::Value::Register(slot)) = call.result
         {
             *slots.entry(*slot).or_default() += 1;
         }
@@ -346,7 +346,8 @@ fn single_writer_addressor_slots(func: &Function) -> FxHashSet<ValueId> {
                 OperationKind::Load | OperationKind::Clear => index == 0,
                 OperationKind::Call { .. } => {
                     index + 1 == operation.operands.len()
-                        && addressor_call(operation).is_some_and(|call| call.result == operand)
+                        && addressor_call(operation)
+                            .is_some_and(|call| call.result == Some(operand))
                 }
                 _ => false,
             };
@@ -614,12 +615,16 @@ fn derive_repeatable(
                     if !effects_allow_const_eval(ty.effects()) {
                         return false;
                     }
-                    let Some(call) = call_operands(&operation.operands, ty) else {
+                    let Some(call) = call_operands(operation) else {
                         return false;
                     };
-                    // Every call writes its result out-slot. Writing it directly into a visible
-                    // argument is an argument mutation, independently of argument conventions.
-                    if root_of(call.result, &roots).is_some() {
+                    // A call writes its result out-slot, if it has one. Writing it directly into a
+                    // visible argument is an argument mutation, independently of argument
+                    // conventions.
+                    if call
+                        .result
+                        .is_some_and(|result| root_of(result, &roots).is_some())
+                    {
                         return false;
                     }
                     let callee_summary = match call.callee {
@@ -643,7 +648,7 @@ fn derive_repeatable(
                         && let ResultProvenance::Argument(index) = callee_summary.provenance
                         && let Some((argument, _)) = call.arguments.get(index.as_index())
                         && let Some(root) = root_of(argument, &roots)
-                        && let mir::Value::Register(out) = call.result
+                        && let Some(mir::Value::Register(out)) = call.result
                     {
                         roots.insert(*out, root);
                     }
@@ -653,7 +658,7 @@ fn derive_repeatable(
                         && let Some((argument, _)) = call.arguments.get(index.as_index())
                         && place_of(argument, &places).is_some()
                         && let mir::Value::Function(callee) = call.callee
-                        && let mir::Value::Register(out) = call.result
+                        && let Some(mir::Value::Register(out)) = call.result
                     {
                         returned_places.insert(
                             *out,

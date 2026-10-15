@@ -505,6 +505,15 @@ fn assert_outcomes_agree(
                      failure during cleanup"
                 ),
             }
+            if let (Some(expected), Some(actual)) =
+                (expected.effect_violation(), actual.effect_violation())
+            {
+                assert_eq!(
+                    actual.kind(),
+                    expected.kind(),
+                    "{label} retained a different effect violation than HIR"
+                );
+            }
         }
         (expected, actual) => panic!(
             "{label} diverged from the HIR interpreter: one produced a value and the other a \

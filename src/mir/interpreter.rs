@@ -318,11 +318,7 @@ impl<'a> Interpreter<'a> {
             identity: entry_id,
         };
         let func = self.function(key);
-        let parameter_tags = func
-            .parameters()
-            .iter()
-            .map(|parameter| parameter.kind)
-            .collect::<Vec<_>>();
+        let parameter_tags = call_parameter_kinds(func);
         assert_eq!(
             parameter_tags.len(),
             arguments.len() + 1,
@@ -459,7 +455,7 @@ impl<'a> Interpreter<'a> {
 
         debug_assert_eq!(
             bindings.len(),
-            self.function(key).parameters().len(),
+            call_parameter_kinds(self.function(key)).len(),
             "known-argument call must bind every parameter of its callee"
         );
         self.run_function(key, bindings)?;
@@ -558,9 +554,10 @@ impl<'a> Interpreter<'a> {
             self.ctx.exhaust_fuel();
         }
         let function = self.function(key);
+        // A function returning its result as a value is passed its result place all the same.
         assert_eq!(
             args.len(),
-            function.parameters().len(),
+            function.parameters().len() + usize::from(function.value_result().is_some()),
             "MIR call to {}:{} supplied {} bindings for {} parameters",
             key.module,
             key.identity,
@@ -580,12 +577,17 @@ impl<'a> Interpreter<'a> {
     }
 
     /// Binds a frame's parameters to the caller's bindings. Callers pass every visible argument as
-    /// a place, so a value parameter reads its argument's place on entry.
+    /// a place, so a value parameter reads its argument's place on entry. They pass a result place
+    /// too, which a function returning its result as a value takes past its last parameter, where
+    /// its `return` writes.
     fn bind_parameters(
         &self,
         func: &Function,
-        args: Vec<Binding>,
+        mut args: Vec<Binding>,
     ) -> FxHashMap<mir::Value, Binding> {
+        let result = func
+            .value_result()
+            .map(|_| args.pop().expect("a call passes its result place"));
         args.into_iter()
             .zip(func.parameters())
             .enumerate()
@@ -598,6 +600,7 @@ impl<'a> Interpreter<'a> {
                 };
                 (mir::Value::Parameter(ParameterId::from_index(i)), binding)
             })
+            .chain(result.map(|result| (result_parameter(func), result)))
             .collect()
     }
 
@@ -705,11 +708,16 @@ impl<'a> Interpreter<'a> {
                         block = *error;
                     }
                 },
-                TerminatorKind::Return => {
+                TerminatorKind::Return { value } => {
                     assert!(
                         pending.is_none(),
                         "return reached while a source failure was in flight"
                     );
+                    if let Some(value) = value {
+                        let value = self.value_operand(func, &mut slots, value);
+                        let place = self.place_operand(&slots, &result_parameter(func));
+                        self.store(value, &place)?;
+                    }
                     self.discard_inactive_bindings(slots);
                     return Ok(FrameOutcome::Completed);
                 }
@@ -719,6 +727,15 @@ impl<'a> Interpreter<'a> {
                         .take()
                         .expect("propagate_error reached without an in-flight source failure");
                     self.discard_inactive_bindings(slots);
+                    return Err(error);
+                }
+                TerminatorKind::EffectViolation => {
+                    assert!(cleanup_failure.is_none());
+                    let error = pending
+                        .take()
+                        .expect("effect_violation reached without an in-flight source failure");
+                    let error = self.ctx.poison_effect_violation(error);
+                    self.discard_bindings_after_poisoning(slots);
                     return Err(error);
                 }
                 TerminatorKind::FailureDuringCleanup => {
@@ -910,23 +927,53 @@ impl<'a> Interpreter<'a> {
             OperationKind::ExtractTag => {
                 self.exec_extract_tag(slots, &operation.operands, def.unwrap());
             }
-            OperationKind::Call { ty, metadata } => {
+            OperationKind::Call {
+                ty,
+                metadata,
+                value_result,
+            } => {
                 let frame_top = self.ctx.environment.len();
                 let rebound = self.bind_value_arguments(
                     func,
                     slots,
-                    &operation.operands,
+                    operation,
                     ty,
                     metadata.as_deref(),
                     span.location,
                 )?;
-                if rebound.is_empty() {
+                if !value_result && rebound.is_empty() {
                     self.exec_call(slots, &operation.operands, span.location)?;
-                } else {
+                } else if !value_result {
                     let result = self.exec_call(slots, &operation.operands, span.location);
                     Self::unbind_value_arguments(slots, rebound);
                     self.reclaim_frame_storage(frame_top);
                     result?;
+                } else {
+                    // A call passes its result place too: the result register names a fresh cell
+                    // for the call, and then the value the call left in it.
+                    let def = def.expect("a value call defines its result");
+                    let cell = match self.alloc_cell(Value::uninit(), span.location) {
+                        Ok(cell) => cell,
+                        Err(error) => {
+                            Self::unbind_value_arguments(slots, rebound);
+                            self.reclaim_frame_storage(frame_top);
+                            return Err(error);
+                        }
+                    };
+                    Self::bind(slots, def.clone(), Binding::Place(cell.clone()));
+                    let mut operands = operation.operands.to_vec();
+                    operands.push(def.clone());
+                    let result = self.exec_call(slots, &operands, span.location);
+                    let value = result.is_ok().then(|| self.load_copy(&cell));
+                    slots.remove(&def);
+                    Self::unbind_value_arguments(slots, rebound);
+                    self.reclaim_frame_storage(frame_top);
+                    result?;
+                    Self::bind(
+                        slots,
+                        def,
+                        Binding::Value(value.expect("a completed call left its result")),
+                    );
                 }
             }
             OperationKind::Project { yielded, .. } => {
@@ -1491,15 +1538,14 @@ impl<'a> Interpreter<'a> {
         &mut self,
         func: &Function,
         slots: &mut FxHashMap<mir::Value, Binding>,
-        operands: &[mir::Value],
+        operation: &Operation,
         ty: &CallImplType,
         metadata: Option<&CallMetadata>,
         span: Location,
     ) -> Result<Vec<(mir::Value, Option<Binding>)>, RuntimeError> {
         let frame_top = self.ctx.environment.len();
-        let visible_start = operands.len()
-            - ty.fn_ty.args.len()
-            - usize::from(ty.result_convention.has_result_place());
+        let operands = &operation.operands;
+        let visible_start = operation.call_visible_start();
         let mut rebound = Vec::new();
         for offset in 0..ty.fn_ty.args.len() {
             let operand = &operands[visible_start + offset];
@@ -1703,12 +1749,7 @@ impl<'a> Interpreter<'a> {
         // script branch of `exec_resolved_call` (an extra parameter binds to its interned dictionary
         // or by-pointer place; every other operand, including the unused return out-pointer, binds to
         // its place).
-        let param_tags: Vec<ParameterKind> = self
-            .function(key)
-            .parameters()
-            .iter()
-            .map(|p| p.kind)
-            .collect();
+        let param_tags = call_parameter_kinds(self.function(key));
         let arg_ops = &operands[1..];
         let offset = leading.len();
         let mut args: Vec<Binding> = Vec::with_capacity(offset + arg_ops.len());
@@ -1926,12 +1967,7 @@ impl<'a> Interpreter<'a> {
             // other parameter binds to its by-pointer place. Classifying by the callee's tag (rather
             // than guessing from the operand's runtime binding) is essential: a value operand must
             // bind as a place even if it could superficially resolve to a dictionary.
-            let param_tags: Vec<ParameterKind> = self
-                .function(key)
-                .parameters()
-                .iter()
-                .map(|p| p.kind)
-                .collect();
+            let param_tags = call_parameter_kinds(self.function(key));
             let offset = leading.len();
             let mut args: Vec<Binding> = Vec::with_capacity(offset + arg_ops.len());
             args.extend(leading);
@@ -3047,6 +3083,22 @@ impl<'a> Interpreter<'a> {
         old.discard_storage();
         Ok(())
     }
+}
+
+/// The kinds of the bindings a call passes `func`: one per parameter, and a result place for a
+/// function returning its result as a value too, which it binds past its last parameter.
+fn call_parameter_kinds(func: &Function) -> Vec<ParameterKind> {
+    func.parameters()
+        .iter()
+        .map(|parameter| parameter.kind)
+        .chain(func.value_result().map(|_| ParameterKind::Return))
+        .collect()
+}
+
+/// Where a frame returning its result as a value binds the result place its caller passed: past
+/// its last parameter.
+fn result_parameter(func: &Function) -> mir::Value {
+    mir::Value::Parameter(ParameterId::from_index(func.parameters().len()))
 }
 
 pub(crate) fn static_evidence_value(evidence: &StaticEvidence) -> HiddenEvidenceArgValue {

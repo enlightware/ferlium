@@ -291,6 +291,7 @@ mod tests {
         Function::new(
             "control_flow".into(),
             CallResultConvention::Value,
+            None,
             Vec::new(),
             Vec::new(),
             terminators

@@ -328,6 +328,13 @@ impl EffType {
         self.primitives().is_empty() && self.variables_len() == 0
     }
 
+    /// Whether a function with these effects cannot fail: they neither include `fallible` nor
+    /// may be instantiated to include it. A source failure escaping such a function, which only
+    /// `effects_unsafe` makes possible, poisons execution instead of propagating.
+    pub fn cannot_fail(&self) -> bool {
+        !self.primitives().contains(PrimitiveEffect::Fallible) && !self.has_variables()
+    }
+
     pub fn contains(&self, effect: Effect) -> bool {
         match effect {
             Effect::Primitive(effect) => self.primitives().contains(effect),

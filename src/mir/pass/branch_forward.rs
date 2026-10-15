@@ -697,8 +697,8 @@ fn census_uses(func: &Function, uses: &mut FxHashMap<ValueId, Uses>) -> FxHashMa
                         };
                         summary.stores.push(Stored { block, value });
                     }
-                    OperationKind::Call { ref ty, .. }
-                        if dataflow::call_result_operand_index(&operation.operands, ty)
+                    OperationKind::Call { .. }
+                        if dataflow::call_result_operand_index(operation)
                             == Some(operand_index) =>
                     {
                         summary.stores.push(Stored {
@@ -1143,8 +1143,11 @@ mod tests {
     #[test]
     fn a_nested_multiway_variant_dispatch_is_forwarded() {
         let module = optimized(
-            "fn choose(first: bool, second: bool, value: int) {\
-                 if first { First(value) } else if second { Second(value * value + 1) } else { None }\
+            "#[inline(never)] fn first_of(p: (int, int)) -> int { p.0 }\
+             fn choose(first: bool, second: bool, value: int) {\
+                 if first { First(value) } else if second {\
+                     Second(first_of((value, value * value)) + 1)\
+                 } else { None }\
              }\
              fn consume(first: bool, second: bool, value: int) -> int {\
                  match choose(first, second, value) {\

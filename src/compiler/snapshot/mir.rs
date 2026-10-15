@@ -175,6 +175,7 @@ struct SnapshotSpecialization {
 pub(super) struct SnapshotMirFunction {
     name: String,
     result_convention: CallResultConvention,
+    value_result: Option<SnapshotTypeId>,
     parameters: Vec<SnapshotParameter>,
     constants: Vec<SnapshotConstant>,
     blocks: Vec<SnapshotBasicBlock>,
@@ -283,6 +284,7 @@ enum SnapshotOperationKind {
     Call {
         ty: SnapshotCallImplType,
         metadata: Option<SnapshotCallMetadata>,
+        value_result: bool,
     },
     Project {
         yielded: SnapshotTypeId,
@@ -416,8 +418,11 @@ enum SnapshotTerminatorKind {
         place: SnapshotValue,
         resume: mir::BlockId,
     },
-    Return,
+    Return {
+        value: Option<SnapshotValue>,
+    },
     PropagateError,
+    EffectViolation,
     FailureDuringCleanup,
     InvariantFailure {
         message: String,
@@ -617,6 +622,10 @@ impl SnapshotMirFunction {
         Ok(Self {
             name: function.name.to_string(),
             result_convention: function.result_convention(),
+            value_result: function
+                .value_result()
+                .map(|ty| graph.capture(ty))
+                .transpose()?,
             parameters: function
                 .parameters()
                 .iter()
@@ -649,6 +658,9 @@ impl SnapshotMirFunction {
         Ok(Function::new(
             self.name.as_str().into(),
             self.result_convention,
+            self.value_result
+                .map(|ty| resolve_type(types, ty))
+                .transpose()?,
             self.parameters
                 .iter()
                 .map(|parameter| {
@@ -858,12 +870,17 @@ impl SnapshotOperationKind {
                 pointee: graph.capture(*pointee)?,
             },
             Source::RuntimeDealloc => Stored::RuntimeDealloc,
-            Source::Call { ty, metadata } => Stored::Call {
+            Source::Call {
+                ty,
+                metadata,
+                value_result,
+            } => Stored::Call {
                 ty: SnapshotCallImplType::capture(ty, graph)?,
                 metadata: metadata
                     .as_deref()
                     .map(|m| SnapshotCallMetadata::capture(m, graph))
                     .transpose()?,
+                value_result: *value_result,
             },
             Source::Project { yielded, ty } => Stored::Project {
                 yielded: graph.capture(*yielded)?,
@@ -1009,12 +1026,17 @@ impl SnapshotOperationKind {
                 pointee: resolve_type(types, *pointee)?,
             },
             Stored::RuntimeDealloc => Runtime::RuntimeDealloc,
-            Stored::Call { ty, metadata } => Runtime::Call {
+            Stored::Call {
+                ty,
+                metadata,
+                value_result,
+            } => Runtime::Call {
                 ty: Box::new(ty.materialize(types)?),
                 metadata: metadata
                     .as_ref()
                     .map(|m| m.materialize(types).map(Box::new))
                     .transpose()?,
+                value_result: *value_result,
             },
             Stored::Project { yielded, ty } => Runtime::Project {
                 yielded: resolve_type(types, *yielded)?,
@@ -1277,8 +1299,11 @@ impl SnapshotTerminator {
                     place: SnapshotValue::capture(place)?,
                     resume: *resume,
                 },
-                Source::Return => Stored::Return,
+                Source::Return { value } => Stored::Return {
+                    value: value.as_ref().map(SnapshotValue::capture).transpose()?,
+                },
                 Source::PropagateError => Stored::PropagateError,
+                Source::EffectViolation => Stored::EffectViolation,
                 Source::FailureDuringCleanup => Stored::FailureDuringCleanup,
                 Source::InvariantFailure { message } => Stored::InvariantFailure {
                     message: message.to_string(),
@@ -1329,8 +1354,11 @@ impl SnapshotTerminator {
                     place: place.materialize()?,
                     resume: *resume,
                 },
-                Stored::Return => Runtime::Return,
+                Stored::Return { value } => Runtime::Return {
+                    value: value.as_ref().map(SnapshotValue::materialize).transpose()?,
+                },
                 Stored::PropagateError => Runtime::PropagateError,
+                Stored::EffectViolation => Runtime::EffectViolation,
                 Stored::FailureDuringCleanup => Runtime::FailureDuringCleanup,
                 Stored::InvariantFailure { message } => Runtime::InvariantFailure {
                     message: message.as_str().into(),

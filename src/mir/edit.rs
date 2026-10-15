@@ -42,7 +42,7 @@ use crate::{
     hir::value::LiteralValue,
     mir::{
         self, BasicBlock, BlockId, DebugLocation, Function, Operation, OperationResult, Parameter,
-        ParameterId, ValueId,
+        ParameterId, ParameterKind, ValueId,
         role::ValueRoles,
         terminator::{Terminator, TerminatorKind},
         value::{Constant, ConstantId},
@@ -61,6 +61,7 @@ pub(crate) struct EditBlock {
 pub(crate) struct FunctionEdit {
     name: Ustr,
     result_convention: CallResultConvention,
+    value_result: Option<Type>,
     parameters: Vec<Parameter>,
     constants: Vec<Constant>,
     blocks: Vec<EditBlock>,
@@ -95,7 +96,8 @@ impl FunctionEdit {
             .max()
             .unwrap_or(0);
 
-        let (name, result_convention, parameters, constants, blocks) = func.into_parts();
+        let (name, result_convention, value_result, parameters, constants, blocks) =
+            func.into_parts();
         let blocks = blocks
             .into_iter()
             .map(|block| {
@@ -109,6 +111,7 @@ impl FunctionEdit {
         Self {
             name,
             result_convention,
+            value_result,
             parameters,
             constants,
             blocks,
@@ -167,6 +170,45 @@ impl FunctionEdit {
         });
     }
 
+    /// Makes a definition writing its result of type `ty` through its result parameter return it
+    /// as a value instead: the parameter becomes a local, which each `return` reads and passes.
+    pub(crate) fn return_result_as_value(&mut self, ty: Type) {
+        let index = self
+            .parameters
+            .iter()
+            .position(|parameter| parameter.kind == ParameterKind::Return)
+            .expect("a definition returning through a place has a result parameter");
+        let parameter = mir::Value::Parameter(ParameterId::from_index(index));
+        let entry = self.entry();
+        let span = self.blocks[entry.as_index()].terminator.span;
+        let mut alloca = Operation::alloca(span, ty);
+        let slot = self
+            .assign_new_result(&mut alloca)
+            .expect("an alloca defines its place");
+        self.visit_operands_mut(|operand| {
+            if *operand == parameter {
+                *operand = slot.clone();
+            }
+        });
+        self.blocks[entry.as_index()].operations.insert(0, alloca);
+        self.remove_parameters(|parameter| parameter.kind == ParameterKind::Return);
+        for index in 0..self.blocks.len() {
+            let terminator = &self.blocks[index].terminator;
+            if !matches!(terminator.kind, TerminatorKind::Return { value: None }) {
+                continue;
+            }
+            let span = terminator.span;
+            let mut load = Operation::load(span, slot.clone());
+            let value = self
+                .assign_new_result(&mut load)
+                .expect("a load defines its value");
+            let block = &mut self.blocks[index];
+            block.operations.push(load);
+            block.terminator = Terminator::ret_value(span, value);
+        }
+        self.value_result = Some(ty);
+    }
+
     /// The constant pool, for a pass that rewrites the *types* of existing entries. Adding one goes
     /// through [`Self::add_constant`], which dedups; removing one is [`Self::prune_constants`],
     /// which renumbers.
@@ -200,6 +242,10 @@ impl FunctionEdit {
 
     pub(crate) fn set_result_convention(&mut self, convention: CallResultConvention) {
         self.result_convention = convention;
+    }
+
+    pub(crate) fn value_result(&self) -> Option<Type> {
+        self.value_result
     }
 
     pub(crate) fn blocks(&self) -> impl Iterator<Item = BlockId> + '_ {
@@ -595,6 +641,7 @@ impl FunctionEdit {
         Function::new(
             self.name,
             self.result_convention,
+            self.value_result,
             self.parameters,
             self.constants,
             blocks,
@@ -624,9 +671,10 @@ fn visit_terminator_operands(terminator: &Terminator, visit: &mut impl FnMut(&mi
         TerminatorKind::CondBr { condition, .. } => visit(condition),
         TerminatorKind::SwitchVariant { tag, .. } => visit(tag),
         TerminatorKind::Yield { place, .. } => visit(place),
+        TerminatorKind::Return { value } => value.iter().for_each(visit),
         TerminatorKind::Goto { .. }
-        | TerminatorKind::Return
         | TerminatorKind::PropagateError
+        | TerminatorKind::EffectViolation
         | TerminatorKind::FailureDuringCleanup
         | TerminatorKind::InvariantFailure { .. } => {}
     }
@@ -641,9 +689,10 @@ fn visit_terminator_operands_mut(
         TerminatorKind::CondBr { condition, .. } => visit(condition),
         TerminatorKind::SwitchVariant { tag, .. } => visit(tag),
         TerminatorKind::Yield { place, .. } => visit(place),
+        TerminatorKind::Return { value } => value.iter_mut().for_each(visit),
         TerminatorKind::Goto { .. }
-        | TerminatorKind::Return
         | TerminatorKind::PropagateError
+        | TerminatorKind::EffectViolation
         | TerminatorKind::FailureDuringCleanup
         | TerminatorKind::InvariantFailure { .. } => {}
     }
@@ -664,8 +713,9 @@ fn successors_mut(terminator: &mut Terminator) -> Vec<&mut BlockId> {
             .collect(),
         TerminatorKind::Invoke { normal, error, .. } => vec![normal, error],
         TerminatorKind::Yield { resume, .. } => vec![resume],
-        TerminatorKind::Return
+        TerminatorKind::Return { .. }
         | TerminatorKind::PropagateError
+        | TerminatorKind::EffectViolation
         | TerminatorKind::FailureDuringCleanup
         | TerminatorKind::InvariantFailure { .. } => Vec::new(),
     }
@@ -801,7 +851,7 @@ mod tests {
         assert_eq!(finished.blocks().count(), 1);
         assert!(matches!(
             finished.block(finished.entry()).terminator().kind,
-            TerminatorKind::Return
+            TerminatorKind::Return { .. }
         ));
     }
 

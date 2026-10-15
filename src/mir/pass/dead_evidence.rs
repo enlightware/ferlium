@@ -150,7 +150,7 @@ fn rewrite(
                 _ => None,
             });
         for operation in operations {
-            let OperationKind::Call { ty, .. } = &operation.kind else {
+            let OperationKind::Call { .. } = &operation.kind else {
                 continue;
             };
             let Some(count) = dropped_at(&operation.operands[0]) else {
@@ -160,7 +160,7 @@ fn rewrite(
             // evidence, the visible arguments named by the call-site type, and the return
             // out-pointer. Asserted rather than assumed, because a mismatch would silently shift
             // every argument the callee binds positionally.
-            let visible_start = operation.operands.len() - (ty.fn_ty.args.len() + 1);
+            let visible_start = operation.call_visible_start();
             assert_eq!(
                 visible_start - 1,
                 count,

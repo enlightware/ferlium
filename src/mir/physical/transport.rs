@@ -1,19 +1,22 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-//! How a call's arguments reach the entry it calls.
+//! How a call's arguments and result reach the entry it calls.
 //!
 //! The ABI (`doc/abi.md`) passes a concrete scalar `Let` parameter of a direct entry by value, and
-//! every other parameter through a pointer. Semantic MIR passes a scalar `Let` argument as a value
-//! whenever its call-site type is concrete, whatever the callee. Physical MIR states the transport:
-//! it keeps a value only where the entry takes the parameter directly, so physical lowering spills
-//! the others into a place.
+//! every other parameter through a pointer; it returns a non-fallible concrete scalar result of a
+//! direct entry by value, and every other result through a pointer. Semantic MIR passes a scalar
+//! `Let` argument, and defines a scalar result register, whenever its call-site type says so,
+//! whatever the callee. Physical MIR states the transport: it keeps a value only where the entry
+//! takes the parameter or returns the result directly, so physical lowering passes a place for the
+//! others.
 //!
 //! The entry follows from the callee operand. A static function takes a parameter directly if its
 //! own type, before instantiation, is a concrete scalar: a generic parameter is indirect even where
-//! the call instantiates it to `int`. A dictionary entry is the trait method's declared type, also
-//! per parameter. Every other dynamic callee, such as a stored callable, has a uniform entry that
-//! takes everything indirectly.
+//! the call instantiates it to `int`. It returns its result directly under the same condition on
+//! its result and effects. A dictionary entry is the trait method's declared type for its
+//! parameters, and returns through a pointer. Every other dynamic callee, such as a stored
+//! callable, has a uniform entry that takes and returns everything indirectly.
 
 use std::cell::OnceCell;
 
@@ -85,6 +88,30 @@ impl<'a> Transports<'a> {
             }),
             _ => false,
         }
+    }
+
+    /// Whether the entry `call` reaches returns its result as a value.
+    pub(crate) fn returns_value(&self, call: &Operation) -> bool {
+        let Value::Function(callee) = &call.operands[0] else {
+            return false;
+        };
+        if callee.module == self.env.current.module_id()
+            && let Some(specialization) = self.semantic.specialization(callee.function)
+        {
+            return specialization.body.value_result().is_some();
+        }
+        let Some(function) = self
+            .env
+            .module_by_id(callee.module)
+            .and_then(|module| module.get_function_by_id(callee.function))
+        else {
+            return false;
+        };
+        // A storage primitive is expanded in place, from its result place.
+        if matches!(function.origin, CallableOrigin::BufferPrimitive(_)) {
+            return false;
+        }
+        operation::definition_returns_value(&function.definition)
     }
 
     fn function_takes_value(&self, callee: FunctionId, offset: usize) -> bool {

@@ -20,9 +20,10 @@
 //! An empty block is the limiting case in the other direction: it holds nothing to execute, so its
 //! terminator can be folded into its predecessors without duplicating an operation. How far that
 //! goes depends on the terminator. A `goto` is folded into *every* predecessor edge, whatever its
-//! kind, because an edge can name any block. An operand-free terminal — `return`, error propagation
-//! or cleanup failure — can only replace a predecessor's own `goto`: a conditional or invoke edge
-//! must name a block, and has nowhere to put a terminal instead.
+//! kind, because an edge can name any block. A terminal — `return`, error propagation or cleanup
+//! failure — can only replace a predecessor's own `goto`: a conditional or invoke edge must name a
+//! block, and has nowhere to put a terminal instead. A returned value defined before the empty
+//! block dominates each of its predecessors too.
 
 use std::hash::{Hash, Hasher};
 
@@ -130,9 +131,15 @@ fn block_fingerprint(
             hash_value(place, local_results, &mut state);
             canonical_target(*resume, replacement).hash(&mut state);
         }
-        TerminatorKind::Return => 4u8.hash(&mut state),
+        TerminatorKind::Return { value } => {
+            4u8.hash(&mut state);
+            if let Some(value) = value {
+                hash_value(value, local_results, &mut state);
+            }
+        }
         TerminatorKind::PropagateError => 5u8.hash(&mut state),
         TerminatorKind::FailureDuringCleanup => 6u8.hash(&mut state),
+        TerminatorKind::EffectViolation => 8u8.hash(&mut state),
         TerminatorKind::InvariantFailure { message } => {
             7u8.hash(&mut state);
             message.hash(&mut state);
@@ -265,8 +272,17 @@ fn blocks_alpha_equivalent(
                 && canonical_target(*left_resume, replacement)
                     == canonical_target(*right_resume, replacement)
         }
-        (TerminatorKind::Return, TerminatorKind::Return)
-        | (TerminatorKind::PropagateError, TerminatorKind::PropagateError)
+        (TerminatorKind::Return { value: left }, TerminatorKind::Return { value: right }) => {
+            match (left, right) {
+                (None, None) => true,
+                (Some(left), Some(right)) => {
+                    values_alpha_equivalent(left, right, &left_results, &right_results)
+                }
+                _ => false,
+            }
+        }
+        (TerminatorKind::PropagateError, TerminatorKind::PropagateError)
+        | (TerminatorKind::EffectViolation, TerminatorKind::EffectViolation)
         | (TerminatorKind::FailureDuringCleanup, TerminatorKind::FailureDuringCleanup) => true,
         (
             TerminatorKind::InvariantFailure { message: left },
@@ -300,11 +316,12 @@ pub(crate) struct SimplifiedTails {
     pub(crate) exposed_dead_code: bool,
 }
 
-fn is_operand_free_terminal(kind: &TerminatorKind) -> bool {
+fn is_terminal(kind: &TerminatorKind) -> bool {
     matches!(
         kind,
-        TerminatorKind::Return
+        TerminatorKind::Return { .. }
             | TerminatorKind::PropagateError
+            | TerminatorKind::EffectViolation
             | TerminatorKind::FailureDuringCleanup
             | TerminatorKind::InvariantFailure { .. }
     )
@@ -312,7 +329,7 @@ fn is_operand_free_terminal(kind: &TerminatorKind) -> bool {
 
 fn is_empty_terminal_block(function: &Function, block: BlockId) -> bool {
     let block = function.block(block);
-    block.operations().is_empty() && is_operand_free_terminal(&block.terminator().kind)
+    block.operations().is_empty() && is_terminal(&block.terminator().kind)
 }
 
 fn is_empty_forwarding_block(function: &Function, block: BlockId) -> bool {
@@ -388,8 +405,9 @@ fn fold_empty_forwarding_blocks(edit: &mut FunctionEdit) -> bool {
                 *error = next();
             }
             TerminatorKind::Yield { resume, .. } => *resume = next(),
-            TerminatorKind::Return
+            TerminatorKind::Return { .. }
             | TerminatorKind::PropagateError
+            | TerminatorKind::EffectViolation
             | TerminatorKind::FailureDuringCleanup
             | TerminatorKind::InvariantFailure { .. } => {}
         }
@@ -427,7 +445,7 @@ fn fold_empty_terminal_successors(edit: &mut FunctionEdit) {
         };
         let terminal = {
             let target = edit.block(target);
-            if target.operations.is_empty() && is_operand_free_terminal(&target.terminator.kind) {
+            if target.operations.is_empty() && is_terminal(&target.terminator.kind) {
                 target.terminator.clone()
             } else {
                 continue;
@@ -546,8 +564,9 @@ pub(crate) fn simplify_tails(function: &Function) -> Option<SimplifiedTails> {
             TerminatorKind::Yield { resume, .. } => {
                 *resume = replacement.get(resume).copied().unwrap_or(*resume);
             }
-            TerminatorKind::Return
+            TerminatorKind::Return { .. }
             | TerminatorKind::PropagateError
+            | TerminatorKind::EffectViolation
             | TerminatorKind::FailureDuringCleanup
             | TerminatorKind::InvariantFailure { .. } => {}
         }
@@ -858,11 +877,11 @@ mod tests {
         assert_eq!(simplified.body.blocks().count(), 3);
         assert!(matches!(
             simplified.body.block(left).terminator().kind,
-            TerminatorKind::Return
+            TerminatorKind::Return { .. }
         ));
         assert!(matches!(
             simplified.body.block(right).terminator().kind,
-            TerminatorKind::Return
+            TerminatorKind::Return { .. }
         ));
     }
 
@@ -883,7 +902,7 @@ mod tests {
         assert_eq!(simplified.body.blocks().count(), 1);
         assert!(matches!(
             simplified.body.block(entry).terminator().kind,
-            TerminatorKind::Return
+            TerminatorKind::Return { .. }
         ));
     }
 }

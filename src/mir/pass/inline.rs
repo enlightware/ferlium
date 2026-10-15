@@ -260,7 +260,7 @@ fn plan_inlinings<'a>(
             });
 
         for (operation_index, operation) in candidates {
-            let OperationKind::Call { ty, metadata } = &operation.kind else {
+            let OperationKind::Call { ty, metadata, .. } = &operation.kind else {
                 continue;
             };
             // Keep the enumerator as an ephemeral `usize`; only an actual call site retained by
@@ -613,6 +613,7 @@ fn check_inlinable(
             body.block(block).terminator().kind,
             TerminatorKind::Invoke { .. }
                 | TerminatorKind::PropagateError
+                | TerminatorKind::EffectViolation
                 | TerminatorKind::FailureDuringCleanup
         )
     });
@@ -674,6 +675,36 @@ fn inline_at(
     };
 
     let span = call.span;
+    // A call defining its result register takes the value of the callee's only `return`
+    // directly. Otherwise the callee's exits leave the result in a slot, which the continuation
+    // reads; the slot precedes the inline marker so that the exits' restores keep it.
+    let returns = body
+        .blocks()
+        .filter(|&block| {
+            matches!(
+                body.block(block).terminator().kind,
+                TerminatorKind::Return { .. }
+            )
+        })
+        .count();
+    let result_slot = call.result_id().and_then(|result| {
+        if body.value_result().is_some() && returns == 1 {
+            return None;
+        }
+        let OperationKind::Call { ty, .. } = &call.kind else {
+            unreachable!("only a call defines a result register here");
+        };
+        let mut alloca = Operation::alloca(span, ty.ret());
+        let slot = edit
+            .assign_new_result(&mut alloca)
+            .expect("an alloca defines its place");
+        edit.block_mut(site.block()).operations.push(alloca);
+        let mut load = Operation::load(span, slot.clone());
+        load.assign_result_id(Some(result));
+        edit.block_mut(normal).operations.insert(0, load);
+        Some(slot)
+    });
+
     // The callee's `alloca`s land in the caller's frame; the bracket is what reclaims them where
     // the callee's own frame used to end.
     let marker_id = edit.new_value();
@@ -681,7 +712,19 @@ fn inline_at(
     marker.assign_result_id(Some(marker_id));
     edit.block_mut(site.block()).operations.push(marker);
 
-    let arguments = bind_arguments(edit, site.block(), &call, body, roles);
+    let mut arguments = bind_arguments(edit, site.block(), &call, body, roles);
+    // Where a callee returning its result as a value leaves it: the call's result slot or its own
+    // slot, or nowhere when the call's register takes it directly.
+    let mut destination = None;
+    match (
+        call.call_result_place().is_some(),
+        body.value_result().is_some(),
+    ) {
+        (true, true) => destination = arguments.pop(),
+        (false, true) => destination = result_slot,
+        (false, false) => arguments.extend(result_slot),
+        (true, false) => {}
+    }
     assert_eq!(
         arguments.len(),
         body.parameters().len(),
@@ -699,6 +742,8 @@ fn inline_at(
     let mut copier = Copier {
         body,
         arguments,
+        destination,
+        returned: None,
         marker: mir::Value::Register(marker_id),
         normal,
         error,
@@ -711,6 +756,13 @@ fn inline_at(
     };
     let entry = copier.copy_into(edit, env);
     edit.block_mut(site.block()).terminator = Terminator::goto(span, entry);
+    if let (Some(result), Some(returned)) = (call.result_id(), copier.returned) {
+        edit.visit_operands_mut(|operand| {
+            if *operand == mir::Value::Register(result) {
+                *operand = returned.clone();
+            }
+        });
+    }
 }
 
 /// The call's arguments in the form the callee's parameters take. A place parameter given a value
@@ -724,12 +776,11 @@ fn bind_arguments(
     roles: &OnceCell<ValueRoles>,
 ) -> Vec<mir::Value> {
     let mut arguments = call.operands[1..].to_vec();
-    let OperationKind::Call { ty, metadata } = &call.kind else {
+    let OperationKind::Call { ty, metadata, .. } = &call.kind else {
         return arguments;
     };
-    let visible_start = call.operands.len()
-        - ty.fn_ty.args.len()
-        - usize::from(ty.result_convention.has_result_place());
+    let visible_start =
+        call.operands.len() - ty.fn_ty.args.len() - usize::from(call.kind.call_has_result_place());
     // Only a scalar `Let` argument can take either form. Whether it is a value is known without
     // roles unless it is a register, whose roles are derived once for the edit.
     let conversions = (0..ty.fn_ty.args.len())
@@ -791,6 +842,7 @@ pub(crate) fn expand_cleanup(
         body.block(block).terminator().kind,
         TerminatorKind::Invoke { .. }
             | TerminatorKind::PropagateError
+            | TerminatorKind::EffectViolation
             | TerminatorKind::FailureDuringCleanup
             | TerminatorKind::Yield { .. }
     )));
@@ -822,6 +874,7 @@ pub(crate) fn cleanup_template(
             block.terminator().kind,
             TerminatorKind::Invoke { .. }
                 | TerminatorKind::PropagateError
+                | TerminatorKind::EffectViolation
                 | TerminatorKind::FailureDuringCleanup
                 | TerminatorKind::Yield { .. }
         ) || block
@@ -865,6 +918,10 @@ struct Copier<'a> {
     rebase: InlineRebase,
     /// The call's operands, which are the callee's parameters in signature order.
     arguments: Vec<mir::Value>,
+    /// Where a `return` of a value stores it, if anywhere.
+    destination: Option<mir::Value>,
+    /// The value a `return` returned, when it is stored nowhere.
+    returned: Option<mir::Value>,
     /// The stack marker every rewired exit restores to.
     marker: mir::Value,
     /// Where a `return` continues.
@@ -1018,7 +1075,16 @@ impl Copier<'_> {
             }
             // Both exits leave the callee's storage behind in the caller's frame, so both restore
             // before continuing where the call site did.
-            TerminatorKind::Return => {
+            TerminatorKind::Return { value } => {
+                if let Some(value) = value {
+                    let value = self.operand(edit, value, env);
+                    match &self.destination {
+                        Some(destination) => {
+                            operations.push(Operation::store(span, value, destination.clone()))
+                        }
+                        None => self.returned = Some(value),
+                    }
+                }
                 operations.push(Operation::stack_restore(span, self.marker.clone()));
                 Terminator::goto(span, self.normal)
             }
@@ -1031,6 +1097,7 @@ impl Copier<'_> {
             }
             // Poisoning hands the frame to runtime reclamation, so there is nothing to restore.
             TerminatorKind::FailureDuringCleanup => Terminator::failure_during_cleanup(span),
+            TerminatorKind::EffectViolation => Terminator::effect_violation(span),
             TerminatorKind::InvariantFailure { message } => {
                 Terminator::invariant_failure(span, *message)
             }
@@ -1199,12 +1266,10 @@ mod tests {
         assert!(body.blocks().any(|block| matches!(body.block(block).terminator().kind,
             TerminatorKind::InvariantFailure { message } if message.as_str() == "broken invariant"
         )));
-        assert!(
-            body.blocks().all(|block| !matches!(
-                body.block(block).terminator().kind,
-                TerminatorKind::Return
-            ))
-        );
+        assert!(body.blocks().all(|block| !matches!(
+            body.block(block).terminator().kind,
+            TerminatorKind::Return { .. }
+        )));
     }
 
     /// What inlining is for: the callee's body arrives with the caller's operands substituted in,

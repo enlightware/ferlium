@@ -61,7 +61,9 @@ impl AdapterTarget {
                 body.parameters()
                     .iter()
                     .find(|p| p.kind == ParameterKind::Return)
-                    .map_or(Type::unit(), |p| p.ty),
+                    .map(|p| p.ty)
+                    .or(body.value_result())
+                    .unwrap_or(Type::unit()),
             )
         } else {
             let signature = native.ok_or("missing adapter target")?.signature();

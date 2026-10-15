@@ -130,7 +130,7 @@ pub(super) fn verify(
                 OperationKind::Call { ty, .. }
                     if ty.result_convention == CallResultConvention::ADDRESSOR_PLACE =>
                 {
-                    let call = call_operands(operands, ty).expect("verified call shape");
+                    let call = call_operands(op).expect("verified call shape");
                     let signature = match call.callee {
                         Value::Function(id) => signatures.get(id),
                         _ => None,
@@ -154,7 +154,8 @@ pub(super) fn verify(
                     } else {
                         0
                     };
-                    changed |= add(&mut contents, call.result, flags);
+                    let result = call.result.expect("an addressor writes its result place");
+                    changed |= add(&mut contents, result, flags);
                 }
                 _ => {}
             }
@@ -227,8 +228,8 @@ pub(super) fn verify(
                 consume(&operands[0])?;
                 write(&operands[1], true)?;
             }
-            OperationKind::Call { ty, metadata } => {
-                let end = operands.len() - usize::from(ty.result_convention.has_result_place());
+            OperationKind::Call { ty, metadata, .. } => {
+                let end = operands.len() - usize::from(op.kind.call_has_result_place());
                 let start = end - ty.fn_ty.args.len();
                 for (index, (argument, passing)) in operands[start..end]
                     .iter()
@@ -256,7 +257,7 @@ pub(super) fn verify(
                         }
                     }
                 }
-                if ty.result_convention.has_result_place() {
+                if op.kind.call_has_result_place() {
                     write(&operands[end], false)?;
                 }
             }

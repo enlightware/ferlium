@@ -297,7 +297,7 @@ fn stack_return(
             {
                 Some(1)
             }
-            OperationKind::Call { ty, .. } if ty.result_convention.has_result_place() => {
+            OperationKind::Call { .. } if operation.kind.call_has_result_place() => {
                 let source = Source::from_index(block_id, block.operations().len() - 1);
                 let intrinsic = inputs.intrinsic(layout, source);
                 let direct = call_abi(operation, intrinsic, callees, program).is_some_and(|abi| {
@@ -350,6 +350,28 @@ impl Plan {
             if consumer.block != source.block
                 || consumer.operation_id().as_index() <= source.operation_id().as_index()
                 || !stackifiable_consumer(body, consumer)
+            {
+                continue;
+            }
+            // An intrinsic computes its result inline, with no effect of its own to keep in place.
+            // Any other call has effects, so it is deferred only where nothing moves across it:
+            // into the operation right after it, storing its value after the destination address,
+            // or into the terminator.
+            if let OperationKind::Call { .. } = source
+                .operation(body)
+                .expect("a value definition is an operation")
+                .kind
+                && inputs.intrinsic(layout, *source).is_none()
+                && !(consumer.operation_id().as_index() == source.operation_id().as_index() + 1
+                    && match consumer.operation(body) {
+                        Some(consumer) => {
+                            consumer.kind == OperationKind::Store && consumer.operands[0] == value
+                        }
+                        None => matches!(
+                            body.block(consumer.block).terminator().kind,
+                            TerminatorKind::Return { .. } | TerminatorKind::CondBr { .. }
+                        ),
+                    })
             {
                 continue;
             }
@@ -867,6 +889,7 @@ impl Inputs {
             let block = body.block(block_id);
             for (operation, op) in block.operations().iter().enumerate() {
                 let source = Source::from_index(block_id, operation);
+                let intrinsic = wasm_intrinsic(session, op);
                 if let Some(id) = op.result_id() {
                     definitions[id.as_index()] = Some(source);
                     if matches!(
@@ -883,11 +906,13 @@ impl Inputs {
                             | OperationKind::ExtractPayloadIndirection
                             | OperationKind::AddressOffset { .. }
                             | OperationKind::AddressOffsetPlace { .. }
-                    ) {
+                    ) || matches!(op.kind, OperationKind::Call { .. })
+                    {
+                        // A call defining its result register; see `Plan::of` for where it can
+                        // move.
                         value_definitions[id.as_index()] = Some(source);
                     }
                 }
-                let intrinsic = wasm_intrinsic(session, op);
                 intrinsics[layout.index(source).as_index()] = intrinsic;
                 if let Some(known) = intrinsic {
                     intrinsic_calls.push((source, op, known));
@@ -914,7 +939,11 @@ impl Inputs {
                         call_abi(operation, intrinsic, callees, program),
                     );
                 }
-                TerminatorKind::Return => {
+                TerminatorKind::Return { value } => {
+                    // A returned value is read like an operand; it names no storage.
+                    if let Some(value) = value {
+                        scan.operand(value, source, Some(AccessKind::Read));
+                    }
                     if let Some(id) = scan.return_parameter {
                         return_blocks.push(block_id);
                         // This implicit ABI read is not an occurrence in the MIR use count.
@@ -989,11 +1018,8 @@ impl Inputs {
         }
         // Add emitted rereads after discovering immutable literal places from the ordinary census.
         for (source, operation, intrinsic) in intrinsic_calls {
-            let OperationKind::Call { ty, .. } = &operation.kind else {
-                unreachable!()
-            };
             let end =
-                operation.operands.len() - usize::from(ty.result_convention.has_result_place());
+                operation.operands.len() - usize::from(operation.kind.call_has_result_place());
             let inputs = &operation.operands[1..end];
             for (input, operand) in inputs.iter().enumerate() {
                 if intrinsic_reads_input_repeatedly(
@@ -1293,11 +1319,11 @@ fn observes_address(
         {
             false
         }
-        OperationKind::Call { ty, .. } => {
+        OperationKind::Call { .. } => {
             if intrinsic.is_some() {
                 false
             } else if index + 1 == operation.operands.len()
-                && ty.result_convention.has_result_place()
+                && operation.kind.call_has_result_place()
             {
                 call_abi.is_none_or(CallAbi::output)
             } else {
@@ -1370,8 +1396,8 @@ fn classify_access(op: &Operation, index: usize) -> Option<AccessKind> {
     }
     Some(match &op.kind {
         OperationKind::Store if index == 1 => AccessKind::Write,
-        OperationKind::Call { ty, .. }
-            if index + 1 == op.operands.len() && ty.result_convention.has_result_place() =>
+        OperationKind::Call { .. }
+            if index + 1 == op.operands.len() && op.kind.call_has_result_place() =>
         {
             AccessKind::Write
         }
@@ -1400,9 +1426,9 @@ fn local_writes(
     let written = match operation.kind {
         OperationKind::Load | OperationKind::CompareEqual => None,
         OperationKind::Store | OperationKind::Memcpy => Some(1),
-        OperationKind::Call { ref ty, .. } if inputs.intrinsic(layout, source).is_some() => ty
-            .result_convention
-            .has_result_place()
+        OperationKind::Call { .. } if inputs.intrinsic(layout, source).is_some() => operation
+            .kind
+            .call_has_result_place()
             .then(|| operation.operands.len() - 1),
         _ => return None,
     };
@@ -1489,11 +1515,11 @@ fn stackifiable_address_consumer(
         // Plain scalar intrinsics prepare their result address once before reading inputs
         // or performing effects. Invokes may prepare it only on success; other call operands
         // retain ordinary scalar planning.
-        OperationKind::Call { ref ty, .. }
+        OperationKind::Call { .. }
             if consumer.operation_id().as_index()
                 < body.block(consumer.block).operations().len()
                 && inputs.intrinsic(layout, consumer).is_some()
-                && ty.result_convention.has_result_place()
+                && operation.kind.call_has_result_place()
                 && operation.operands.last() == Some(value) =>
         {
             true
@@ -1549,7 +1575,7 @@ fn stackifiable_consumer(body: &Function, source: Source) -> bool {
     }
     matches!(
         body.block(source.block).terminator().kind,
-        TerminatorKind::CondBr { .. } | TerminatorKind::Return
+        TerminatorKind::CondBr { .. } | TerminatorKind::Return { .. }
     )
 }
 
@@ -1603,10 +1629,7 @@ fn comparison_fusions(
             else {
                 continue;
             };
-            let OperationKind::Call { ty, .. } = &call.kind else {
-                continue;
-            };
-            if !ty.result_convention.has_result_place()
+            if !call.kind.call_has_result_place()
                 || !matches!(extract.kind, OperationKind::ExtractTag)
                 || call.operands.len() != 4
             {

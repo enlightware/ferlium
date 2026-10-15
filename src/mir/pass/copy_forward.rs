@@ -825,13 +825,8 @@ mod tests {
             value::{LiteralValue, Value},
         },
         mir::{
-            self, Function, Operation, ParameterKind,
-            builder::FunctionBuilder,
-            edit::FunctionEdit,
-            operation::OperationKindDiscriminant as Op,
-            pass::dce,
-            profile::{MirInstructionCounts, MirInstructionKind as Kind},
-            terminator::Terminator,
+            self, Function, Operation, ParameterKind, builder::FunctionBuilder, edit::FunctionEdit,
+            pass::dce, profile::MirInstructionCounts, terminator::Terminator,
             verify::verify_physical_function,
         },
         module::ModuleEnv,
@@ -1134,19 +1129,11 @@ mod tests {
         let raw = profile_repeated(MirOptimization::Disabled);
         let optimized = profile_repeated(MirOptimization::Enabled);
 
-        // A scalar argument is read by an explicit `load` before its call in optimized MIR, where
-        // the callee read it through a place before: the same read, not more work.
-        let work =
-            |counts: &MirInstructionCounts| counts.total() - counts.get(Kind::Operation(Op::Load));
         assert!(
-            work(&optimized) < work(&raw),
+            optimized.total() < raw.total(),
             "the optimized repeated call must execute less MIR: raw {}, optimized {}",
-            work(&raw),
-            work(&optimized)
-        );
-        assert!(
-            optimized.get(Kind::Operation(Op::Alloca)) < raw.get(Kind::Operation(Op::Alloca)),
-            "copy forwarding must avoid executing the redundant result allocation"
+            raw.total(),
+            optimized.total()
         );
     }
 
@@ -1181,17 +1168,21 @@ mod tests {
     }
 
     #[test]
-    fn a_native_call_result_is_written_back_in_place() {
+    fn a_native_call_result_is_stored_back_in_place() {
         let module = optimized("fn increment(mut x: int) -> int { x = x + 1; x }");
         let body = body_of(&module, "increment");
         let [arguments] = call_places(body, "Num<std::int>::add")
             .try_into()
             .unwrap_or_else(|_| panic!("increment has one add call:\n{body}"));
+        let result = body
+            .lines()
+            .find(|line| line.contains("Num<std::int>::add"))
+            .and_then(|line| line.trim().split(':').next())
+            .expect("the add call defines its result");
 
-        assert_eq!(
-            arguments.first(),
-            arguments.last(),
-            "native add must write directly to the left-hand side:\n{body}"
+        assert!(
+            body.contains(&format!("store {result} to {}", arguments[0])),
+            "native add's result must be stored directly into the left-hand side:\n{body}"
         );
     }
 
@@ -1202,9 +1193,8 @@ mod tests {
 
         assert_eq!(body.matches("alloca int").count(), 0, "{body}");
         assert!(
-            body.lines()
-                .any(|line| line.trim().starts_with("store @c0 to %p1")),
-            "the constant must be stored directly into the result:\n{body}"
+            body.lines().any(|line| line.trim() == "ret @c0"),
+            "the constant must be returned directly:\n{body}"
         );
     }
 

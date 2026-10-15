@@ -259,6 +259,7 @@ mod tests {
         check_nesting(&Function::new(
             "stack".into(),
             CallResultConvention::Value,
+            None,
             Vec::new(),
             Vec::new(),
             blocks

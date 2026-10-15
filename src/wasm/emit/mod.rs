@@ -423,7 +423,8 @@ fn script_abi(body: &Function, env: ModuleEnv<'_>) -> Result<CallAbi, String> {
         return Err("scoped result convention".into());
     }
     let mut parameters = Vec::new();
-    let mut result = None;
+    // A function returning its result as a value has no result parameter.
+    let mut result = body.value_result();
     for parameter in body.parameters() {
         match parameter.kind {
             ParameterKind::Return => result = Some(parameter.ty),
@@ -450,11 +451,13 @@ fn script_abi(body: &Function, env: ModuleEnv<'_>) -> Result<CallAbi, String> {
         Some(ty) => ScalarType::in_env(ty, &env)
             .map_or(ResultKind::Output, |ty| ResultKind::Direct(ty.wasm())),
     };
+    // An entry returns a failure status exactly where its body propagates one; a body that cannot
+    // fail ends its failure paths in `effect_violation`, which traps instead.
     let fallible = yielded
         || body.blocks().any(|id| {
             matches!(
                 body.block(id).terminator().kind,
-                TerminatorKind::Invoke { .. }
+                TerminatorKind::PropagateError
             )
         });
     Ok(CallAbi {
@@ -657,7 +660,9 @@ pub(super) fn host_signature(
         .parameters()
         .iter()
         .find(|parameter| parameter.kind == ParameterKind::Return)
-        .map(|parameter| ScalarType::of(parameter.ty))
+        .map(|parameter| parameter.ty)
+        .or(body.value_result())
+        .map(ScalarType::of)
         .transpose()?
         .unwrap_or_else(ScalarType::unit);
     let parameters = body
@@ -763,7 +768,9 @@ pub(super) fn emit_boxed(
                     .parameters()
                     .iter()
                     .find(|parameter| parameter.kind == ParameterKind::Return)
-                    .map_or(Type::unit(), |parameter| parameter.ty),
+                    .map(|parameter| parameter.ty)
+                    .or(body.value_result())
+                    .unwrap_or(Type::unit()),
             })
         },
     )
@@ -935,10 +942,10 @@ fn emit_with_export_kind(
                             reachable.entry(trait_id, entry);
                         }
                     }
-                    OperationKind::Call { ref ty, .. } if borrowed_subscript => {
+                    OperationKind::Call { .. } if borrowed_subscript => {
                         let arity = operation.operands.len()
                             - 1
-                            - usize::from(ty.result_convention.has_result_place());
+                            - usize::from(operation.kind.call_has_result_place());
                         if !subscript_arities.contains(&arity) {
                             subscript_arities.push(arity);
                         }
@@ -949,13 +956,13 @@ fn emit_with_export_kind(
                             subscript_arities.push(arity);
                         }
                     }
-                    OperationKind::Call { ref ty, .. }
+                    OperationKind::Call { .. }
                         if !matches!(operation.operands[0], Value::Function(_)) =>
                     {
                         callables.arity(
                             operation.operands.len()
                                 - 1
-                                - usize::from(ty.result_convention.has_result_place()),
+                                - usize::from(operation.kind.call_has_result_place()),
                         );
                     }
                     OperationKind::BuildDictionary { definition, .. } => {
@@ -1607,7 +1614,7 @@ fn is_trivial_runtime_body(body: &Function, signature: &CallAbi) -> bool {
         && body.blocks().count() == 1
         && matches!(
             body.block(body.entry()).terminator().kind,
-            TerminatorKind::Return
+            TerminatorKind::Return { .. }
         )
         && body
             .parameters()

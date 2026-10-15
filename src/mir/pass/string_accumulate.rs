@@ -226,7 +226,7 @@ pub(crate) fn fuse_static_string_appends(
             func.block(fusion.push.block).operations()[fusion.push.index.as_index()].clone();
         push.operands[0] = mir::Value::Function(functions.push_static);
         push.operands[2] = mir::Value::Register(fusion.text);
-        let OperationKind::Call { ty, metadata } = &mut push.kind else {
+        let OperationKind::Call { ty, metadata, .. } = &mut push.kind else {
             unreachable!("a planned string append is a call")
         };
         // Ownership forwarding runs after this pass. A masked call could carry callee-specific

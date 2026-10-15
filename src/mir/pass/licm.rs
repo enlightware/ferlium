@@ -643,9 +643,7 @@ fn initializes_whole(operation: &Operation, root: ValueId) -> bool {
             operation.operands.get(1)
         }
         OperationKind::BuildArray { .. } => operation.operands.last(),
-        OperationKind::Call { ty, .. } => {
-            dataflow::call_operands(&operation.operands, ty).map(|call| call.result)
-        }
+        OperationKind::Call { .. } => dataflow::call_result_operand(operation),
         _ => None,
     };
     destination == Some(&mir::Value::Register(root))
@@ -714,7 +712,7 @@ fn eligible_call<'a>(
     will_return: &impl Fn(FunctionId) -> bool,
     is_optimization_barrier: &impl Fn(FunctionId) -> bool,
 ) -> Option<dataflow::CallOperands<'a>> {
-    let OperationKind::Call { ty, metadata } = &operation.kind else {
+    let OperationKind::Call { ty, metadata, .. } = &operation.kind else {
         return None;
     };
     if !ty.effects().is_empty()
@@ -728,7 +726,7 @@ fn eligible_call<'a>(
     {
         return None;
     }
-    let call = dataflow::call_operands(&operation.operands, ty)?;
+    let call = dataflow::call_operands(operation)?;
     if call
         .arguments
         .iter()
@@ -777,29 +775,37 @@ fn find_hoist(
                 else {
                     continue;
                 };
-                let mir::Value::Register(result) = call.result else {
-                    continue;
+                // A result register needs nothing more: the call is its only definition. A result
+                // slot must be one only this call writes, and only the loop reads.
+                let output = match call.result {
+                    None => None,
+                    Some(mir::Value::Register(result)) => {
+                        let Some(alloca) = allocas.get(result).copied() else {
+                            continue;
+                        };
+                        Some((*result, alloca))
+                    }
+                    Some(_) => continue,
                 };
-                let Some(alloca) = allocas.get(result).copied() else {
-                    continue;
-                };
-                if !alloca.is_static
-                    || alloca.ty
-                        != match &operation.kind {
-                            OperationKind::Call { ty, .. } => ty.ret(),
-                            _ => unreachable!(),
-                        }
-                    || !concrete_type_is_trivial_copy(alloca.ty, &env)
+                let output_root = output.map(|(result, _)| Root::Alloca(result));
+                if let Some((_, alloca)) = output
+                    && (!alloca.is_static
+                        || alloca.ty
+                            != match &operation.kind {
+                                OperationKind::Call { ty, .. } => ty.ret(),
+                                _ => unreachable!(),
+                            }
+                        || !concrete_type_is_trivial_copy(alloca.ty, &env))
                 {
                     continue;
                 }
-                let output_root = Root::Alloca(*result);
-                if writes
-                    .get(&output_root)
-                    .is_none_or(|sites| sites.as_slice() != [call_site])
-                    || root_blocks
-                        .get_or_init(|| RootBlocks::of(func, &roots))
-                        .used_outside(output_root, &natural.blocks)
+                if let Some(output_root) = output_root
+                    && (writes
+                        .get(&output_root)
+                        .is_none_or(|sites| sites.as_slice() != [call_site])
+                        || root_blocks
+                            .get_or_init(|| RootBlocks::of(func, &roots))
+                            .used_outside(output_root, &natural.blocks))
                 {
                     continue;
                 }
@@ -832,7 +838,7 @@ fn find_hoist(
                                 }
                                 _ => false,
                             },
-                            Some(root) if root == output_root => false,
+                            Some(root) if Some(root) == output_root => false,
                             Some(root) if !writes.contains_key(&root) => {
                                 inputs.push(input);
                                 true
@@ -872,14 +878,15 @@ fn find_hoist(
                     continue;
                 }
 
-                let move_alloca = natural.blocks.contains(&alloca.site.block);
-                if move_alloca {
-                    if !definition_dominates(alloca.site, call_site, dominance) {
-                        continue;
+                if let Some((_, alloca)) = output {
+                    if natural.blocks.contains(&alloca.site.block) {
+                        if !definition_dominates(alloca.site, call_site, dominance) {
+                            continue;
+                        }
+                        operations.push(alloca.site);
+                    } else if let Some(result) = call.result {
+                        inputs.push(result);
                     }
-                    operations.push(alloca.site);
-                } else {
-                    inputs.push(call.result);
                 }
                 operations.push(call_site);
                 let Some(insertion) = insertion_point(
@@ -1053,12 +1060,14 @@ fn record_writes(
         }
     };
     match &operation.kind {
-        OperationKind::Call { ty, metadata } => {
-            let Some(call) = dataflow::call_operands(&operation.operands, ty) else {
+        OperationKind::Call { metadata, .. } => {
+            let Some(call) = dataflow::call_operands(operation) else {
                 operation.operands.iter().for_each(&mut write);
                 return;
             };
-            write(call.result);
+            if let Some(result) = call.result {
+                write(result);
+            }
             for (argument, convention) in &call.arguments {
                 if *convention == ArgConvention::MutableRef {
                     write(argument);
@@ -1304,29 +1313,10 @@ mod tests {
             .unwrap_or_else(|| panic!("module has no `{name}`:\n{module}"))
     }
 
-    /// Positions of a direct call and the allocation passed as its trailing result place.
-    fn call_and_result_alloca(body: &str, callee: &str) -> (usize, usize) {
-        let call = body
-            .find(callee)
-            .unwrap_or_else(|| panic!("body has no `{callee}` call:\n{body}"));
-        let line = &body[call..body[call..].find('\n').map_or(body.len(), |end| call + end)];
-        let result = line
-            .trim_end_matches(')')
-            .rsplit_once(", ")
-            .map(|(_, result)| result)
-            .unwrap_or_else(|| panic!("call has no result operand: {line}"));
-        // A definition renders as `%rN: <role> = alloca ...`, so the role annotation sits between
-        // the register and its operation.
-        let alloca = body
-            .find(&format!("{result}: "))
-            .filter(|start| body[*start..].starts_with(&format!("{result}: place ")))
-            .filter(|start| {
-                body[*start..]
-                    .split_once(" = ")
-                    .is_some_and(|(_, rest)| rest.starts_with("alloca"))
-            })
-            .unwrap_or_else(|| panic!("call result {result} has no allocation:\n{body}"));
-        (call, alloca)
+    /// The position of the call whose line contains `callee`.
+    fn call_position(body: &str, callee: &str) -> usize {
+        body.find(callee)
+            .unwrap_or_else(|| panic!("body has no `{callee}` call:\n{body}"))
     }
 
     #[test]
@@ -1714,12 +1704,12 @@ mod tests {
 
     #[test]
     fn hoists_an_invariant_pure_call_before_the_loop_stack_marker() {
-        // The extra addition leaves a loop-local temporary, so the marker still delimits real
+        // The array literal leaves a loop-local temporary, so the marker still delimits real
         // storage after LICM and final DCE; an unread marker is no longer retained as scaffolding.
         let module = optimized(
             "fn invariant(x: int, y: int, n: int) {\n\
                  let mut total = 0;\n\
-                 for i in 0..n { total = total + x * y + i };\n\
+                 for i in 0..n { total = total + x * y + [i, i][0] };\n\
                  total\n\
              }",
         );
@@ -1738,11 +1728,6 @@ mod tests {
             body.matches("call std::Num<std::int>::mul").count(),
             1,
             "LICM moves rather than duplicates the call:\n{body}"
-        );
-        let (_, result_alloca) = call_and_result_alloca(body, "call std::Num<std::int>::mul");
-        assert!(
-            result_alloca < marker,
-            "a loop-local result allocation must move with the call:\n{body}"
         );
     }
 
@@ -1813,11 +1798,11 @@ mod tests {
         let module = optimized(source);
         let body = body_of(&module, "constant_operand");
         // Of the two multiplications, only the invariant one takes the constant.
-        let (call, result_alloca) = call_and_result_alloca(body, ", @c2, ");
+        let call = call_position(body, ", @c2)");
         let outer_marker = body.find("stack_save").expect("both loops have markers");
         assert!(
-            call < outer_marker && result_alloca < call,
-            "the call and its storage must move out of both loops:\n{body}"
+            call < outer_marker,
+            "the call must move out of both loops:\n{body}"
         );
 
         let mut session = CompilerSession::new();
@@ -1838,11 +1823,9 @@ mod tests {
         let multiply = body
             .find("call std::Num<std::int>::mul")
             .expect("the multiplication remains");
-        let marker = body
-            .find("stack_save")
-            .expect("the loop has a stack marker");
+        let header = body.find("check_fuel").expect("the loop checks fuel");
         assert!(
-            marker < multiply,
+            header < multiply,
             "a call reading a loop-carried place must remain in the loop:\n{body}"
         );
     }
@@ -1861,11 +1844,9 @@ mod tests {
         let call = body
             .find("call licm::diverges")
             .expect("the pure call remains");
-        let marker = body
-            .find("stack_save")
-            .expect("the loop has a stack marker");
+        let header = body.find("check_fuel").expect("the loop checks fuel");
         assert!(
-            marker < call,
+            header < call,
             "a possibly diverging call must remain guarded:\n{body}"
         );
     }
@@ -1891,9 +1872,9 @@ mod tests {
         let call = body
             .find("call licm::spin")
             .expect("#[inline(never)] keeps the spin call visible");
-        let marker = body.find("stack_save").expect("the loop has a marker");
+        let header = body.find("check_fuel").expect("the loop checks fuel");
         assert!(
-            marker < call,
+            header < call,
             "the conditionally diverging call must remain on the entered-loop path:\n{body}"
         );
 
@@ -1997,23 +1978,26 @@ mod tests {
     }
 
     #[test]
-    fn does_not_hoist_a_result_used_after_the_loop() {
-        let module = optimized(
-            "fn escaping_result(x: int, y: int, n: int) {\n\
-                 let mut saved = 0;\n\
-                 for i in 0..n { saved = x * y };\n\
-                 saved\n\
-             }",
-        );
+    fn a_result_stored_in_the_loop_hoists_only_its_call() {
+        // The result is a register: storing it into a local the loop body writes stays in the loop.
+        let source = "fn escaping_result(x: int, y: int, n: int) {\n\
+                          let mut saved = 0;\n\
+                          for i in 0..n { saved = x * y };\n\
+                          saved\n\
+                      }\n\
+                      fn main() { escaping_result(6, 7, 3) + escaping_result(6, 7, 0) }";
+        let module = optimized(source);
         let body = body_of(&module, "escaping_result");
-        let call = body
-            .find("call std::Num<std::int>::mul")
-            .expect("the multiplication remains a call");
+        let call = call_position(body, "call std::Num<std::int>::mul");
         let header = body.find("check_fuel").expect("the loop checks fuel");
         assert!(
-            header < call,
-            "a call whose result root escapes the loop must remain inside it:\n{body}"
+            call < header,
+            "the invariant call must move out of the loop:\n{body}"
         );
+
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        assert_eq!(session.eval_mir("licm_run", source), "42");
     }
 
     #[test]
@@ -2037,22 +2021,22 @@ mod tests {
     }
 
     #[test]
-    fn hoisted_storage_survives_iteration_restores_and_zero_trip_execution() {
-        // Keep a varying intermediate result inside the loop, forcing real iteration restores.
+    fn a_hoisted_call_survives_iteration_restores_and_zero_trip_execution() {
+        // Keep varying loop-local storage inside the loop, forcing real iteration restores.
         let source = "fn invariant(x: int, y: int, n: int) {\n\
                           let mut total = 0;\n\
-                          for i in 0..n { total = total + x * y + i };\n\
+                          for i in 0..n { total = total + x * y + [i, i][0] };\n\
                           total\n\
                       }\n\
                       fn main() { invariant(6, 7, 4) + invariant(6, 7, 0) }";
         let module = optimized(source);
         let body = body_of(&module, "invariant");
-        let (_, result_alloca) = call_and_result_alloca(body, "call std::Num<std::int>::mul");
+        let call = call_position(body, "call std::Num<std::int>::mul");
         let marker = body.find("stack_save").expect("the loop has a marker");
         assert!(body.contains("stack_restore"), "{body}");
         assert!(
-            result_alloca < marker,
-            "this execution test must exercise the loop-local alloca moved with its call:\n{body}"
+            call < marker,
+            "this execution test must exercise the call moved out of the loop:\n{body}"
         );
 
         let mut session = CompilerSession::new();

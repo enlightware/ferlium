@@ -69,10 +69,11 @@ struct DeadResultCandidate {
     operation: OperationIndex,
 }
 
-/// Removes candidate operations once their result has only `dead_at` remaining uses.
+/// Removes candidate operations once their result has only `dead_at(result)` remaining uses.
 ///
-/// A direct result-producing operation is dead at zero uses. A value-returning call writes through
-/// an alloca operand, so its one self-use is the dead state. In either case, removing one candidate
+/// A direct result-producing operation, such as a call defining its result register, is dead at
+/// zero uses. A call writing its result through an alloca operand has one self-use in the dead
+/// state. In either case, removing one candidate
 /// decrements its operands and can expose another candidate in the same backwards walk.
 fn count_operands(uses: &mut FxHashMap<ValueId, usize>, operands: &[mir::Value]) {
     for operand in operands {
@@ -85,7 +86,7 @@ fn count_operands(uses: &mut FxHashMap<ValueId, usize>, operands: &[mir::Value])
 fn remove_dead_results(
     func: &Function,
     candidates: FxHashMap<ValueId, DeadResultCandidate>,
-    dead_at: usize,
+    dead_at: impl Fn(&ValueId) -> usize,
 ) -> Option<Function> {
     if candidates.is_empty() {
         return None;
@@ -133,12 +134,12 @@ fn remove_dead_results(
     let mut pending: Vec<_> = candidates
         .keys()
         .copied()
-        .filter(|result| remaining_uses(&uses, result) == dead_at)
+        .filter(|result| remaining_uses(&uses, result) == dead_at(result))
         .collect();
     let mut removed_results = FxHashSet::default();
     let mut removed = FxHashMap::<BlockId, FxHashSet<OperationIndex>>::default();
     while let Some(result) = pending.pop() {
-        if !removed_results.insert(result) || remaining_uses(&uses, &result) != dead_at {
+        if !removed_results.insert(result) || remaining_uses(&uses, &result) != dead_at(&result) {
             continue;
         }
         for load in unread_loads.remove(&result).into_iter().flatten() {
@@ -173,7 +174,9 @@ fn remove_dead_results(
                         released.push(*load);
                     }
                 }
-                if remaining_uses(&uses, operand) == dead_at && candidates.contains_key(operand) {
+                if candidates.contains_key(operand)
+                    && remaining_uses(&uses, operand) == dead_at(operand)
+                {
                     pending.push(*operand);
                 }
             }
@@ -231,7 +234,7 @@ pub(crate) fn remove_dead_trivial_results(func: &Function) -> Option<Function> {
             }
         }
     }
-    remove_dead_results(func, candidates, 0)
+    remove_dead_results(func, candidates, |_| 0)
 }
 
 /// Removes unused calls known to return without source-visible effects.
@@ -253,6 +256,7 @@ pub(crate) fn remove_dead_proven_calls(
     will_return: &dyn Fn(FunctionId) -> bool,
 ) -> Option<Function> {
     let mut allocas = FxHashSet::default();
+    let mut value_results = FxHashSet::default();
     let mut candidates = FxHashMap::<ValueId, DeadResultCandidate>::default();
     let mut trivial_copy = FxHashMap::default();
     for block in func.blocks() {
@@ -262,13 +266,13 @@ pub(crate) fn remove_dead_proven_calls(
             {
                 allocas.insert(result);
             }
-            let OperationKind::Call { ty, metadata } = &operation.kind else {
+            let OperationKind::Call { ty, metadata, .. } = &operation.kind else {
                 continue;
             };
             if !ty.effects().is_empty() || ty.result_convention != CallResultConvention::Value {
                 continue;
             }
-            let Some(mut call) = dataflow::call_operands(&operation.operands, ty) else {
+            let Some(mut call) = dataflow::call_operands(operation) else {
                 continue;
             };
             let mir::Value::Function(callee) = *call.callee else {
@@ -319,11 +323,20 @@ pub(crate) fn remove_dead_proven_calls(
             if !eligible {
                 continue;
             }
-            let mir::Value::Register(result) = call.result else {
-                continue;
+            let result = match call.result {
+                // A result register is dead once nothing reads it.
+                None => match operation.result_id() {
+                    Some(result) => {
+                        value_results.insert(result);
+                        result
+                    }
+                    None => continue,
+                },
+                Some(mir::Value::Register(result)) => *result,
+                Some(_) => continue,
             };
             candidates.insert(
-                *result,
+                result,
                 DeadResultCandidate {
                     block,
                     operation: OperationIndex::from_index(index),
@@ -331,10 +344,13 @@ pub(crate) fn remove_dead_proven_calls(
             );
         }
     }
-    candidates.retain(|result, _| allocas.contains(result));
+    candidates.retain(|result, _| allocas.contains(result) || value_results.contains(result));
     // The shared use census is the more expensive part and starts only after the semantic scan
-    // above found an eligible call whose result is local storage.
-    remove_dead_results(func, candidates, 1)
+    // above found an eligible call whose result is a register or local storage, which the call
+    // itself uses.
+    remove_dead_results(func, candidates, |result| {
+        usize::from(!value_results.contains(result))
+    })
 }
 
 #[derive(Clone)]
@@ -728,7 +744,7 @@ pub(super) fn may_leave_frame_storage(
                 .operands
                 .len()
                 .checked_sub(
-                    ty.fn_ty.args.len() + usize::from(ty.result_convention.has_result_place()),
+                    ty.fn_ty.args.len() + usize::from(operation.kind.call_has_result_place()),
                 )
                 .filter(|start| *start >= 1)
             else {
@@ -1079,9 +1095,10 @@ impl DceCensus {
             TerminatorKind::CondBr { condition, .. } => note(condition),
             TerminatorKind::SwitchVariant { tag, .. } => note(tag),
             TerminatorKind::Yield { place, .. } => note(place),
+            TerminatorKind::Return { value } => value.iter().for_each(&mut note),
             TerminatorKind::Goto { .. }
-            | TerminatorKind::Return
             | TerminatorKind::PropagateError
+            | TerminatorKind::EffectViolation
             | TerminatorKind::FailureDuringCleanup
             | TerminatorKind::InvariantFailure { .. } => {}
         }
@@ -1229,8 +1246,8 @@ fn is_exact_clone_lifetime_role(operation: &Operation, position: usize) -> bool 
         | OperationKind::Replace
         | OperationKind::MoveBytes { .. } => position == 1,
         OperationKind::BuildArray { .. } => position + 1 == operation.operands.len(),
-        OperationKind::Call { ty, .. } => {
-            dataflow::call_result_operand_index(&operation.operands, ty) == Some(position)
+        OperationKind::Call { .. } => {
+            dataflow::call_result_operand_index(operation) == Some(position)
         }
         _ => false,
     }
@@ -1292,9 +1309,10 @@ mod tests {
             !main.contains("alloca"),
             "every argument place is dead after folding:\n{main}"
         );
-        let stores = main.lines().filter(|line| line.contains("store ")).count();
-        assert_eq!(stores, 1, "only the result store must remain:\n{main}");
-        assert!(main.contains("to %p0"), "{main}");
+        assert!(
+            !main.contains("store ") && main.contains("ret @c"),
+            "only the returned result must remain:\n{main}"
+        );
     }
 
     /// Devirtualization takes a dictionary entry's only reader, leaving an operation that computes

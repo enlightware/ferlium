@@ -318,9 +318,9 @@ fn classify(error: RuntimeError) -> NotFoldable {
     match error {
         RuntimeError::Backend(_) => unreachable!("const evaluation uses the boxed interpreter"),
         RuntimeError::SourceFailure(_) => NotFoldable::Failed,
-        RuntimeError::SandboxViolation(_) | RuntimeError::FailureDuringCleanup(_) => {
-            NotFoldable::BudgetExceeded
-        }
+        RuntimeError::SandboxViolation(_)
+        | RuntimeError::FailureDuringCleanup(_)
+        | RuntimeError::EffectViolation(_) => NotFoldable::BudgetExceeded,
     }
 }
 

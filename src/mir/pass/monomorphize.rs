@@ -61,7 +61,7 @@ use crate::{
         ValueId,
         debug_location::InlineRebase,
         edit::FunctionEdit,
-        operation::{SourceFallibility, accepts_value_argument},
+        operation::{SourceFallibility, accepts_value_argument, accepts_value_result},
         role::MirType,
         terminator::{Terminator, TerminatorKind, TerminatorKindDiscriminant},
         value::StaticEvidence,
@@ -73,7 +73,7 @@ use crate::{
     std::value::{dynamic_product_member_layouts, type_has_static_layout},
     types::{
         effects::{EffType, Effect, PrimitiveEffect},
-        r#type::Type,
+        r#type::{CallImplType, FnType, Type},
         type_like::TypeLike,
         type_mapper::{BitmapInstantiationMapper, TypeMapper},
         type_properties::concrete_type_is_trivial_copy,
@@ -644,10 +644,10 @@ impl Specializations {
     /// *new* key whose residual MIR turns out to be one already created, which needs the body built
     /// to be recognized. Both lookups map to the retained copy, so later call sites take the cheap
     /// path. Ordinary type/evidence construction cannot be refused.
-    pub(crate) fn get_or_create<Ty: TypeLike>(
+    pub(crate) fn get_or_create(
         &mut self,
         key: SpecializationKey,
-        scheme: &TypeScheme<Ty>,
+        scheme: &TypeScheme<FnType>,
         body: &Function,
         env: ModuleEnv<'_>,
     ) -> LocalFunctionId {
@@ -669,10 +669,10 @@ impl Specializations {
     }
 
     /// Callback-only admission retains an exact check after conservative preflight.
-    fn get_or_create_callback<Ty: TypeLike>(
+    fn get_or_create_callback(
         &mut self,
         key: SpecializationKey,
-        scheme: &TypeScheme<Ty>,
+        scheme: &TypeScheme<FnType>,
         body: &Function,
         env: ModuleEnv<'_>,
     ) -> Option<LocalFunctionId> {
@@ -687,10 +687,10 @@ impl Specializations {
         self.create(key, scheme, body, env)
     }
 
-    fn create<Ty: TypeLike>(
+    fn create(
         &mut self,
         key: SpecializationKey,
-        scheme: &TypeScheme<Ty>,
+        scheme: &TypeScheme<FnType>,
         body: &Function,
         env: ModuleEnv<'_>,
     ) -> Option<LocalFunctionId> {
@@ -820,11 +820,11 @@ impl Specializations {
     /// The substitution is deterministic in its inputs, so the memo changes no decision — it only
     /// stops the inliner from rebuilding and re-verifying an identical body at every call site that
     /// asks for it.
-    pub(crate) fn substituted_body<Ty: TypeLike>(
+    pub(crate) fn substituted_body(
         &self,
         callee: FunctionId,
         instantiation: &Instantiation,
-        scheme: &TypeScheme<Ty>,
+        scheme: &TypeScheme<FnType>,
         body: &Function,
         env: ModuleEnv<'_>,
     ) -> Function {
@@ -933,9 +933,9 @@ impl Specializations {
 /// the verifier requires that instantiating a callee's declared signature by a call's recorded
 /// arguments reproduces that call's own type, which is precisely the agreement between evidence and
 /// types that binding dictionaries alone destroyed.
-pub(crate) fn specialize<Ty: TypeLike>(
+pub(crate) fn specialize(
     body: &Function,
-    scheme: &TypeScheme<Ty>,
+    scheme: &TypeScheme<FnType>,
     key: &SpecializationKey,
     own: FunctionId,
     env: ModuleEnv<'_>,
@@ -953,6 +953,7 @@ pub(crate) fn specialize<Ty: TypeLike>(
     bind_callbacks(&mut edit, &key.callbacks);
     store_value_parameters(&mut edit, body);
     simplify_after_substitution(&mut edit, env);
+    settle_exits(&mut edit, scheme, &mut mapper);
     edit.finish(env)
 }
 
@@ -1023,9 +1024,9 @@ fn bind_callbacks(edit: &mut FunctionEdit, callbacks: &[(ParameterId, FunctionId
 /// no dictionaries to bind, because an inliner substitutes the caller's own evidence operands
 /// positionally like any other parameter; and no recursion to redirect, because no new function is
 /// created for a self-call to name — a recursive callee is refused by the inliner anyway.
-pub(crate) fn substitute_body<Ty: TypeLike>(
+pub(crate) fn substitute_body(
     body: &Function,
-    scheme: &TypeScheme<Ty>,
+    scheme: &TypeScheme<FnType>,
     instantiation: &Instantiation,
     env: ModuleEnv<'_>,
 ) -> Function {
@@ -1036,7 +1037,41 @@ pub(crate) fn substitute_body<Ty: TypeLike>(
     map_types(&mut edit, &mut mapper);
     store_value_parameters(&mut edit, body);
     simplify_after_substitution(&mut edit, env);
+    settle_exits(&mut edit, scheme, &mut mapper);
     edit.finish(env)
+}
+
+/// Settles a body's exits on its substituted type, as HIR emission would have lowered them for
+/// that type: specializing a generic effect can make it unable to fail (see
+/// [`EffType::cannot_fail`]), so a
+/// source failure still reaching its exit, which only `effects_unsafe` makes possible, becomes an
+/// effect violation; and specializing a generic result or effect can make it return its result
+/// as a value (see [`accepts_value_result`]), so its result parameter becomes a local, which each
+/// `return` reads.
+fn settle_exits(
+    edit: &mut FunctionEdit,
+    scheme: &TypeScheme<FnType>,
+    mapper: &mut impl TypeMapper,
+) {
+    let ty = CallImplType::new(scheme.ty.clone(), edit.result_convention()).map(mapper);
+    if ty.effects().cannot_fail() {
+        let exits: Vec<_> = edit
+            .blocks()
+            .filter(|&block| {
+                matches!(
+                    edit.block(block).terminator.kind,
+                    TerminatorKind::PropagateError
+                )
+            })
+            .collect();
+        for block in exits {
+            let terminator = &mut edit.block_mut(block).terminator;
+            *terminator = Terminator::effect_violation(terminator.span);
+        }
+    }
+    if edit.value_result().is_none() && accepts_value_result(&ty) {
+        edit.return_result_as_value(ty.fn_ty.ret);
+    }
 }
 
 /// Stores each parameter the substitution turned into a value into a local of its own, which the
@@ -1213,8 +1248,8 @@ fn elide_trivial_ownership_operations(edit: &mut FunctionEdit, env: ModuleEnv<'_
                         position == 1
                     }
                     // A result place is written by the call; its inputs are separate operands.
-                    OperationKind::Call { ty, .. } => {
-                        ty.result_convention.has_result_place()
+                    OperationKind::Call { .. } => {
+                        operation.kind.call_has_result_place()
                             && position + 1 == operation.operands.len()
                     }
                     OperationKind::Replace => position == 0 && replacements.insert(*root),
@@ -1468,12 +1503,15 @@ fn demote_infallible_invokes(edit: &mut FunctionEdit) {
         }
         let span = block.terminator.span;
         let normal = *normal;
-        let TerminatorKind::Invoke { operation, .. } =
+        let TerminatorKind::Invoke { mut operation, .. } =
             mem::replace(&mut block.terminator, Terminator::goto(span, normal)).kind
         else {
             unreachable!("the terminator was just matched as an invoke");
         };
+        let store = scalar_arguments::return_value_from_call(edit, &mut operation);
+        let block = edit.block_mut(block_id);
         block.operations.push(operation);
+        block.operations.extend(store);
         demoted = true;
     }
     if demoted {
@@ -1552,7 +1590,9 @@ pub(crate) fn map_types(edit: &mut FunctionEdit, mapper: &mut impl TypeMapper) {
         let mut rewritten = Vec::with_capacity(operations.len());
         for mut operation in operations {
             substitute_reading_arguments(edit, &mut operation, mapper, &mut rewritten);
+            let store = scalar_arguments::return_value_from_call(edit, &mut operation);
             rewritten.push(operation);
+            rewritten.extend(store);
         }
         let mut terminator = edit.block(block).terminator.clone();
         if let TerminatorKind::Invoke { operation, .. } = &mut terminator.kind {
@@ -1573,7 +1613,7 @@ fn substitute_reading_arguments(
     mapper: &mut impl TypeMapper,
     operations: &mut Vec<Operation>,
 ) {
-    let OperationKind::Call { ty, metadata } = &operation.kind else {
+    let OperationKind::Call { ty, metadata, .. } = &operation.kind else {
         substitute_in_operation(operation, mapper);
         return;
     };
@@ -1581,12 +1621,10 @@ fn substitute_reading_arguments(
         .map(|offset| accepts_value_argument(ty, metadata.as_deref(), offset))
         .collect();
     substitute_in_operation(operation, mapper);
-    let OperationKind::Call { ty, metadata } = &operation.kind else {
+    let OperationKind::Call { ty, metadata, .. } = &operation.kind else {
         unreachable!("substitution keeps the operation kind");
     };
-    let visible_start = operation.operands.len()
-        - ty.fn_ty.args.len()
-        - usize::from(ty.result_convention.has_result_place());
+    let visible_start = operation.call_visible_start();
     let reads: Vec<usize> = accepted_before
         .iter()
         .enumerate()
@@ -1672,7 +1710,7 @@ fn substitute_in_operation(operation: &mut Operation, mapper: &mut impl TypeMapp
         OperationKind::BuildArray { element_ty } => *element_ty = element_ty.map(mapper),
         OperationKind::AllocaPlace { pointing_to } => *pointing_to = pointing_to.map(mapper),
         OperationKind::RuntimeAlloc { pointee } => *pointee = pointee.map(mapper),
-        OperationKind::Call { ty, metadata } => {
+        OperationKind::Call { ty, metadata, .. } => {
             **ty = ty.map(mapper);
             // The instantiation this body's own calls record. Easy to miss because it is not a
             // type field, and the one that makes specialization cascade: an inner call recording
@@ -1913,7 +1951,7 @@ fn visible_start(operation: &Operation) -> Option<usize> {
     operation
         .operands
         .len()
-        .checked_sub(ty.fn_ty.args.len() + usize::from(ty.result_convention.has_result_place()))
+        .checked_sub(ty.fn_ty.args.len() + usize::from(operation.kind.call_has_result_place()))
         .filter(|start| *start >= 1)
 }
 
@@ -2031,7 +2069,7 @@ fn specialization_for(
     session: &CompilerSession,
     specializations: &mut Specializations,
 ) -> Option<LocalFunctionId> {
-    let OperationKind::Call { ty, metadata } = &operation.kind else {
+    let OperationKind::Call { ty, metadata, .. } = &operation.kind else {
         return None;
     };
     let recorded_instantiation = metadata
@@ -2177,9 +2215,9 @@ fn move_inline_sites(body: Function, from: ModuleId, to: ModuleId, env: ModuleEn
 /// one of its direct generic calls, making that callee eligible for specialization on a later
 /// round. These are detected separately: body size prices the first, while changed call metadata
 /// proves the second rather than treating arbitrary dictionary use as useful.
-fn worth_specializing<Ty: TypeLike>(
+fn worth_specializing(
     body: &Function,
-    scheme: &TypeScheme<Ty>,
+    scheme: &TypeScheme<FnType>,
     instantiation: &Instantiation,
     dictionaries: &[StaticEvidence],
     env: ModuleEnv<'_>,
@@ -2234,16 +2272,16 @@ fn worth_specializing<Ty: TypeLike>(
                         bound_entries.insert(result);
                     }
                 }
-                OperationKind::Call { ty, metadata }
+                OperationKind::Call { ty, metadata, .. }
                     if matches!(operation.operands.first(), Some(mir::Value::Function(_)))
                         && metadata
                             .as_deref()
                             .and_then(|metadata| metadata.instantiation.as_ref())
                             .is_some_and(|inner| {
-                            let visible_start = operation
-                                .operands
-                                .len()
-                                .checked_sub(ty.fn_ty.args.len() + 1);
+                            let visible_start = operation.operands.len().checked_sub(
+                                ty.fn_ty.args.len()
+                                    + usize::from(operation.kind.call_has_result_place()),
+                            );
                             let binds_forwarded_evidence = visible_start.is_some_and(|start| {
                                 operation.operands.get(1..start).is_some_and(|evidence| {
                                     evidence.iter().any(|operand| {
@@ -2621,7 +2659,7 @@ mod tests {
                     _ => None,
                 });
             for operation in operations {
-                let OperationKind::Call { ty, metadata } = &operation.kind else {
+                let OperationKind::Call { metadata, .. } = &operation.kind else {
                     continue;
                 };
                 let Value::Function(callee) = &operation.operands[0] else {
@@ -2639,7 +2677,7 @@ mod tests {
                     .clone();
                 // The operand layout the verifier assumes: callee, evidence, visible arguments,
                 // result place.
-                let visible_start = operation.operands.len() - (ty.fn_ty.args.len() + 1);
+                let visible_start = operation.call_visible_start();
                 let dictionaries = operation.operands[1..visible_start]
                     .iter()
                     .map(static_evidence_operand)
@@ -3658,7 +3696,7 @@ fn use_it(x: int) { with_zero(x) }",
                         _ => None,
                     });
                 for operation in operations {
-                    let OperationKind::Call { ty, metadata } = &operation.kind else {
+                    let OperationKind::Call { metadata, .. } = &operation.kind else {
                         continue;
                     };
                     let Some(instantiation) = metadata
@@ -3686,7 +3724,7 @@ fn use_it(x: int) { with_zero(x) }",
                         continue; // not generic: nothing to substitute
                     }
 
-                    let visible_start = operation.operands.len() - (ty.fn_ty.args.len() + 1);
+                    let visible_start = operation.call_visible_start();
                     let Some(dictionaries) = operation.operands[1..visible_start]
                         .iter()
                         .map(static_evidence_operand)

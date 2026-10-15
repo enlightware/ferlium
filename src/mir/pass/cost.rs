@@ -292,7 +292,7 @@ mod tests {
         CompilerSession, ExecutionTarget,
         compiler::MirOptimization,
         mir::{
-            self, BlockId, OperationKind,
+            self, BlockId,
             pass::budget::{INLINE_FUNCTION_GROWTH, INLINE_LOOP_GROWTH},
         },
         module::{LocalFunctionId, ModuleId, Path, id::Id},
@@ -357,12 +357,7 @@ mod tests {
             .expect("`float_kernel` has a body");
         // Constants stay values: a literal argument was never a read.
         let places = spill_value_arguments(body, |call, offset| {
-            let OperationKind::Call { ty, .. } = &call.kind else {
-                unreachable!("only calls take arguments")
-            };
-            let visible_start = call.operands.len()
-                - ty.fn_ty.args.len()
-                - usize::from(ty.result_convention.has_result_place());
+            let visible_start = call.call_visible_start();
             matches!(
                 call.operands[visible_start + offset],
                 mir::Value::Constant(_)

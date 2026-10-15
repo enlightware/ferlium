@@ -90,7 +90,15 @@ impl Terminator {
     pub fn ret(span: impl Into<DebugLocation>) -> Self {
         Self {
             span: span.into(),
-            kind: TerminatorKind::Return,
+            kind: TerminatorKind::Return { value: None },
+        }
+    }
+
+    /// Returns `value` as the result of a function whose definition carries it as a value.
+    pub fn ret_value(span: impl Into<DebugLocation>, value: mir::Value) -> Self {
+        Self {
+            span: span.into(),
+            kind: TerminatorKind::Return { value: Some(value) },
         }
     }
 
@@ -98,6 +106,13 @@ impl Terminator {
         Self {
             span: span.into(),
             kind: TerminatorKind::PropagateError,
+        }
+    }
+
+    pub fn effect_violation(span: impl Into<DebugLocation>) -> Self {
+        Self {
+            span: span.into(),
+            kind: TerminatorKind::EffectViolation,
         }
     }
 
@@ -159,9 +174,10 @@ impl Terminator {
             TerminatorKind::SwitchVariant { tag, .. } => from_ref(tag),
             TerminatorKind::Invoke { operation, .. } => &operation.operands,
             TerminatorKind::Yield { place, .. } => from_ref(place),
+            TerminatorKind::Return { value } => value.as_slice(),
             TerminatorKind::Goto { .. }
-            | TerminatorKind::Return
             | TerminatorKind::PropagateError
+            | TerminatorKind::EffectViolation
             | TerminatorKind::FailureDuringCleanup
             | TerminatorKind::InvariantFailure { .. } => &[],
         }
@@ -206,9 +222,17 @@ pub enum TerminatorKind {
         place: mir::Value,
         resume: BlockId,
     },
-    Return,
+    /// Return to the caller. A function whose definition carries its result as a value returns it
+    /// here; any other wrote its result through its result parameter.
+    Return {
+        value: Option<mir::Value>,
+    },
     /// Continue propagating the source failure currently in flight to the caller.
     PropagateError,
+    /// Poison execution with the source failure currently in flight, which would otherwise escape
+    /// a function whose type says it cannot fail; only `effects_unsafe` makes this reachable. Takes
+    /// the place of `PropagateError` in such a function, after its cleanup ran.
+    EffectViolation,
     /// Poison execution after a cleanup action raised while another source failure was in flight.
     FailureDuringCleanup,
     /// Fatal compiler/runtime invariant violation. Executors must trap or terminate, never
@@ -231,8 +255,9 @@ impl TerminatorKind {
             Self::SwitchVariant { cases, default, .. } => (cases, [Some(*default), None]),
             Self::Invoke { normal, error, .. } => (&[], [Some(*normal), Some(*error)]),
             Self::Yield { resume, .. } => (&[], [Some(*resume), None]),
-            Self::Return
+            Self::Return { .. }
             | Self::PropagateError
+            | Self::EffectViolation
             | Self::FailureDuringCleanup
             | Self::InvariantFailure { .. } => (&[], [None, None]),
         };
@@ -286,8 +311,12 @@ impl FormatWith<ModuleEnv<'_>> for Terminator {
                 place.format_with(env),
                 resume.as_u32()
             ),
-            TerminatorKind::Return => write!(f, "ret"),
+            TerminatorKind::Return { value: None } => write!(f, "ret"),
+            TerminatorKind::Return { value: Some(value) } => {
+                write!(f, "ret {}", value.format_with(env))
+            }
             TerminatorKind::PropagateError => write!(f, "propagate_error"),
+            TerminatorKind::EffectViolation => write!(f, "effect_violation"),
             TerminatorKind::FailureDuringCleanup => write!(f, "failure_during_cleanup"),
             TerminatorKind::InvariantFailure { message } => {
                 write!(f, "invariant_failure {message:?}")

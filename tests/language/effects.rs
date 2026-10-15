@@ -8,7 +8,7 @@ use ustr::ustr;
 
 use crate::harness::{TestSession, int};
 use ferlium::{
-    compiler::error::{CompilationErrorImpl, UnsafeFeature},
+    compiler::error::{CompilationErrorImpl, RuntimeErrorKind, SourceFailureKind, UnsafeFeature},
     module::{LocalImplId, id::Id},
     std::core_traits_names::DESERIALIZE_TRAIT_NAME,
     types::effects::*,
@@ -277,6 +277,42 @@ fn effects_unsafe_erases_effects_in_trusted_code() {
         "fn f(x: int) { effects_unsafe { idiv(1, x) } }",
         "f",
         EffType::empty(),
+    );
+}
+
+/// A source failure escaping a function whose type says it cannot fail poisons execution rather
+/// than reaching a caller that does not expect it.
+fn assert_effect_violation_by_division_by_zero(session: &mut TestSession, src: &str) {
+    let error = session.try_run(src).expect_err("the division fails");
+    assert_eq!(error.kind(), RuntimeErrorKind::EffectViolation);
+    assert_eq!(
+        error.effect_violation().unwrap().kind(),
+        SourceFailureKind::DivisionByZero
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn effects_unsafe_failure_in_infallible_function_poisons() {
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    assert_effect_violation_by_division_by_zero(
+        &mut session,
+        "fn f(x: int) -> int { effects_unsafe { idiv(1, x) } }\nf(0)",
+    );
+    // Poisoning ends that execution only: the session runs again.
+    assert_val_eq!(session.run("1 + 1"), int(2));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn effects_unsafe_failure_in_specialized_infallible_function_poisons() {
+    // `apply`'s effects are its callback's; with a pure one, its specialization cannot fail.
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    assert_effect_violation_by_division_by_zero(
+        &mut session,
+        "fn apply(f, x) { effects_unsafe { idiv(1, f(x)) } }\napply(|x| x, 0)",
     );
 }
 

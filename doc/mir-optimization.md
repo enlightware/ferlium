@@ -718,7 +718,7 @@ more before final DCE. The use analysis runs only when that scan finds a viable 
 
 ## Forwarding through single-assignment cells
 
-MIR has no φ: a value meeting a join, or leaving an inlined callee through its `@ret`, travels
+MIR has no φ: a value meeting a join, or leaving an inlined callee through several returns, travels
 through a cell, so its reader sees `store %v to %cell; …; %x = load %cell`; inlining also leaves
 copies between cells. `mir::pass::store_forward` forwards the reads of value cells defined by a
 store or a copy and otherwise only loaded, compared or copied from. Each read sees what the
@@ -1085,7 +1085,8 @@ reaching it — without copying an operation, since there is none. How far that 
 terminator, and the asymmetry is the IR's, not a choice. A `goto` is folded into *every* predecessor
 edge whatever its kind, because an edge names a block and forwarding only changes which one; chains
 of them resolve in a single scan, with the block count bounding the walk so a cycle of empty jumps
-is left alone. An operand-free terminal — `ret`, `propagate_error` or `failure_during_cleanup` — can
+is left alone. A terminal — `ret`, `propagate_error`, `effect_violation` or
+`failure_during_cleanup` — can
 only replace a predecessor's own `goto`: a `condbr` or `invoke` edge must name a block and has
 nowhere to put a terminal instead. That is why an `invoke`'s continuation survives as a block even
 when it does nothing but return.

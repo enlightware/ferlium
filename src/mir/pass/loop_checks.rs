@@ -46,6 +46,7 @@ use crate::{
         ParameterKind,
         dominance::Dominance,
         edit::FunctionEdit,
+        site::{OperationIndex, OperationSite},
         terminator::{Terminator, TerminatorKind},
         value::ValueId,
     },
@@ -249,9 +250,23 @@ impl Sources<'_> {
 
     /// `symbol` as the integer operation that defined it, on operands available before the loop.
     fn computed(&mut self, symbol: SymbolId, depth: usize) -> Option<Source> {
-        let Symbol::Stored(_, DefSite::Operation(site)) = *self.analysis.symbols().name(symbol)
-        else {
-            return None;
+        let site = match *self.analysis.symbols().name(symbol) {
+            Symbol::Stored(_, DefSite::Operation(site)) => site,
+            // A call defining its result register.
+            Symbol::Register(register) => {
+                let block = *self.definitions.get(&register)?;
+                let index = self
+                    .func
+                    .block(block)
+                    .operations()
+                    .iter()
+                    .position(|operation| operation.result_id() == Some(register))?;
+                OperationSite {
+                    block,
+                    index: OperationIndex::from_index(index),
+                }
+            }
+            Symbol::Stored(..) => return None,
         };
         let operation = self
             .func
@@ -265,10 +280,10 @@ impl Sources<'_> {
         ) {
             return None;
         }
-        let OperationKind::Call { ty, .. } = &operation.kind else {
+        let OperationKind::Call { .. } = &operation.kind else {
             return None;
         };
-        let call = call_operands(&operation.operands, ty)?;
+        let call = call_operands(operation)?;
         let [(left, _), (right, _)] = call.arguments.as_slice() else {
             return None;
         };
@@ -532,10 +547,10 @@ fn failure_forms(
             if def.operation_index().map(|index| index.as_index()) != Some(terminator_index) {
                 return;
             }
-            let OperationKind::Call { ty, .. } = &operation.kind else {
+            let OperationKind::Call { .. } = &operation.kind else {
                 return;
             };
-            let Some(call) = call_operands(&operation.operands, ty) else {
+            let Some(call) = call_operands(operation) else {
                 return;
             };
             let [(index, _), (length, _)] = call.arguments.as_slice() else {
@@ -659,7 +674,7 @@ fn cleanup_before(
     }
     let terminator = func.block(error).terminator().clone();
     match terminator.kind {
-        TerminatorKind::PropagateError => {}
+        TerminatorKind::PropagateError | TerminatorKind::EffectViolation => {}
         TerminatorKind::Goto { target } => {
             // The rest of the cleanup is shared with errors raised outside the loop only if it
             // mentions nothing of the loop.
@@ -774,17 +789,18 @@ impl Emitter<'_, '_> {
         left: mir::Value,
         right: mir::Value,
     ) -> mir::Value {
-        let result = self.place(int_type());
-        self.edit.append_operation(
-            self.block,
-            Operation::call(
-                self.span,
-                mir::Value::Function(callee),
-                [left, right, result.clone()],
-                ty.clone(),
-            ),
-        );
-        self.load(result)
+        self.edit
+            .append_operation(
+                self.block,
+                Operation::call(
+                    self.span,
+                    mir::Value::Function(callee),
+                    [left, right],
+                    ty.clone(),
+                )
+                .with_value_result(),
+            )
+            .expect("an `int` operation defines its result")
     }
 
     /// `source`'s quantity.

@@ -146,6 +146,8 @@ pub(super) enum FailureCode {
     StackCapacity,
     Invariant,
     Source,
+    /// A source failure escaped a function whose type says it cannot fail.
+    EffectViolation,
 }
 
 /// Export name of the function a compiled program runs.
@@ -502,6 +504,12 @@ impl RuntimeInstance {
                 }
                 Some(FailureCode::Source) => {
                     return diagnostics.finish(None).expect("source failure diagnostic");
+                }
+                Some(FailureCode::EffectViolation) => {
+                    return diagnostics
+                        .finish(None)
+                        .expect("effect violation diagnostic")
+                        .into_effect_violation();
                 }
                 None => js_error(error),
             };

@@ -12,7 +12,7 @@ enabled by Ferlium source.
 
 ## Runtime outcomes
 
-Once guest execution starts, there are three outcomes besides successful return:
+Once guest execution starts, there are four outcomes besides successful return:
 
 1. A **source failure** is declared by the `Fallible` effect. It follows semantic cleanup and uses
    the status-bearing function ABI. If cleanup succeeds, the executor remains reusable.
@@ -22,9 +22,14 @@ Once guest execution starts, there are three outcomes besides successful return:
 3. A **failure during cleanup** means a second source failure was raised while propagating an
    earlier source failure. Both causes are retained, the execution domain is poisoned, and guest
    cleanup stops.
+4. An **effect violation** means a source failure escaped a function whose type says it cannot
+   fail (no `fallible` effect and no effect variable), which only trusted code using
+   `effects_unsafe` makes possible. The function's own cleanup runs first; then the failure is
+   retained, the execution domain is poisoned, and guest cleanup stops, since no caller expects it.
 
 The Rust representation makes these cases distinct through `RuntimeError::SourceFailure`,
-`RuntimeError::SandboxViolation`, and `RuntimeError::FailureDuringCleanup`. A poisoned interpreter
+`RuntimeError::SandboxViolation`, `RuntimeError::FailureDuringCleanup`, and
+`RuntimeError::EffectViolation`. A poisoned interpreter
 rejects re-entry. `CompilerSession` owns immutable compiler artifacts rather than an executor
 generation, so the REPL, IDE, and other interactive hosts recover by reporting the violation and
 creating a fresh executor for the next evaluation.

@@ -97,6 +97,10 @@ impl BasicBlock {
 pub struct Function {
     pub name: Ustr,
     result_convention: CallResultConvention,
+    /// The result type of a definition carrying its result as a value, which each `return`
+    /// passes, instead of writing it through a result parameter. See
+    /// [`accepts_value_result`](operation::accepts_value_result).
+    value_result: Option<Type>,
     parameters: Vec<Parameter>,
     constants: Vec<Constant>,
     blocks: Vec<BasicBlock>,
@@ -119,6 +123,7 @@ impl Function {
     pub(crate) fn new(
         name: Ustr,
         result_convention: CallResultConvention,
+        value_result: Option<Type>,
         parameters: Vec<Parameter>,
         constants: Vec<Constant>,
         blocks: Vec<BasicBlock>,
@@ -126,6 +131,7 @@ impl Function {
         Self {
             name,
             result_convention,
+            value_result,
             parameters,
             constants,
             blocks,
@@ -134,6 +140,11 @@ impl Function {
 
     pub fn result_convention(&self) -> CallResultConvention {
         self.result_convention
+    }
+
+    /// The result type, if each `return` passes the result as a value.
+    pub fn value_result(&self) -> Option<Type> {
+        self.value_result
     }
 
     pub fn parameters(&self) -> &[Parameter] {
@@ -219,6 +230,8 @@ impl Function {
             }
             if self.result_convention == CallResultConvention::NoValue {
                 write!(text, ") no_value:")?;
+            } else if let Some(ty) = self.value_result {
+                write!(text, ") -> {}:", ty.format_with(env))?;
             } else {
                 write!(text, "):")?;
             }
@@ -301,9 +314,10 @@ impl Function {
                 TerminatorKind::CondBr { condition, .. } => visit_operand(condition),
                 TerminatorKind::SwitchVariant { tag, .. } => visit_operand(tag),
                 TerminatorKind::Yield { place, .. } => visit_operand(place),
+                TerminatorKind::Return { value } => value.iter().for_each(&mut visit_operand),
                 TerminatorKind::Goto { .. }
-                | TerminatorKind::Return
                 | TerminatorKind::PropagateError
+                | TerminatorKind::EffectViolation
                 | TerminatorKind::FailureDuringCleanup
                 | TerminatorKind::InvariantFailure { .. } => {}
             }
@@ -330,6 +344,7 @@ impl Function {
     ) -> (
         Ustr,
         CallResultConvention,
+        Option<Type>,
         Vec<Parameter>,
         Vec<Constant>,
         Vec<BasicBlock>,
@@ -337,6 +352,7 @@ impl Function {
         (
             self.name,
             self.result_convention,
+            self.value_result,
             self.parameters,
             self.constants,
             self.blocks,

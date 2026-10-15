@@ -22,7 +22,9 @@ use crate::{
         self, BlockId, Function, Instantiation, Operation, OperationKind, OperationResult,
         ParameterId, ParameterKind, ValueId,
         dominance::Dominance,
-        operation::{SourceFallibility, accepts_value_argument},
+        operation::{
+            SourceFallibility, accepts_value_argument, accepts_value_result, is_scalar_value_type,
+        },
         physical::is_zero_sized_result,
         role::{self, MirType, ValueRole, ValueRoles},
         terminator::TerminatorKind,
@@ -549,11 +551,58 @@ impl<'a> Verifier<'a> {
     }
 
     fn verify_shared_contracts(&mut self, roles: Option<ValueRoles>) {
+        self.verify_result_form();
         self.verify_structure();
         self.collect_value_information(roles);
         self.verify_operand_roles_and_dominance();
         self.verify_source_failure_flow();
         self.verify_register_ownership();
+    }
+
+    /// Verifies that a function returning its result as a value has no result parameter and that
+    /// each `return` passes a value exactly when it does.
+    fn verify_result_form(&self) {
+        let value_result = self.func.value_result();
+        if let Some(ty) = value_result {
+            assert!(
+                self.func.result_convention() == CallResultConvention::Value
+                    && is_scalar_value_type(ty),
+                "MIR function `{}` returns a value of a type {} without a scalar value result",
+                self.func.name,
+                ty.format_with(&self.env)
+            );
+            assert!(
+                !self
+                    .func
+                    .parameters()
+                    .iter()
+                    .any(|parameter| parameter.kind == ParameterKind::Return),
+                "MIR function `{}` returns a value but has a result parameter",
+                self.func.name
+            );
+            // A body that may fail returns its status, and its result through a place. A source
+            // failure reaching the exit of a body that cannot fail poisons instead.
+            assert!(
+                !self.func.blocks().any(|block| matches!(
+                    self.func.block(block).terminator().kind,
+                    TerminatorKind::PropagateError
+                )),
+                "MIR function `{}` returns a value but may fail",
+                self.func.name
+            );
+        }
+        for block in self.func.blocks() {
+            if let TerminatorKind::Return { value } = &self.func.block(block).terminator().kind {
+                assert_eq!(
+                    value.is_some(),
+                    value_result.is_some(),
+                    "MIR function `{}` block {}: a return passes a value exactly when the function \
+                     returns its result as one",
+                    self.func.name,
+                    block.as_u32()
+                );
+            }
+        }
     }
 
     /// Verifies that source-error edges cannot rejoin normal execution and that each terminal form
@@ -601,7 +650,7 @@ impl<'a> Verifier<'a> {
                     );
                     vec![(*resume, state)]
                 }
-                TerminatorKind::Return => {
+                TerminatorKind::Return { .. } => {
                     assert_eq!(
                         state,
                         FailureState::Normal,
@@ -616,6 +665,16 @@ impl<'a> Verifier<'a> {
                         state,
                         FailureState::Propagating,
                         "MIR function `{}` block {}: propagate_error requires one in-flight source failure",
+                        self.func.name,
+                        block.as_u32()
+                    );
+                    vec![]
+                }
+                TerminatorKind::EffectViolation => {
+                    assert_eq!(
+                        state,
+                        FailureState::Propagating,
+                        "MIR function `{}` block {}: effect_violation requires one in-flight source failure",
                         self.func.name,
                         block.as_u32()
                     );
@@ -885,13 +944,27 @@ impl<'a> Verifier<'a> {
         let constants = self.func.constants();
         let at = NodeAt(node);
         let Some(whole) = self.operation(node) else {
+            let terminator = self.terminator(node).unwrap();
             role::check_terminator_operand_roles(
                 &self.roles,
                 self.func.name,
                 &at,
-                self.terminator(node).unwrap(),
+                terminator,
                 constants,
             );
+            if let TerminatorKind::Return { value: Some(value) } = terminator
+                && let Some(ty) = self.func.value_result()
+            {
+                let actual = self.materialized_type(value);
+                assert!(
+                    actual == Some(MirType::Lowered(ty)),
+                    "MIR function `{}` node {}: returned value {} is not of the result type {}",
+                    self.func.name,
+                    node,
+                    value.format_with(&self.env),
+                    ty.format_with(&self.env)
+                );
+            }
             return;
         };
         role::check_operand_roles(&self.roles, self.func.name, &at, whole, constants);
@@ -940,7 +1013,27 @@ impl<'a> Verifier<'a> {
                     MirType::Lowered(array_type(*element_ty)),
                 );
             }
-            OperationKind::Call { ty, metadata } => {
+            OperationKind::Call {
+                ty,
+                metadata,
+                value_result,
+            } => {
+                // Semantic MIR carries a call's result as a value exactly where the call-site type
+                // says so; physical MIR keeps the place where the callee's entry needs it.
+                let canonical = accepts_value_result(ty);
+                assert!(
+                    if self.semantic {
+                        *value_result == canonical
+                    } else {
+                        !value_result || canonical
+                    },
+                    "MIR function `{}` node {}: call result of type {} is {} a value\n{}",
+                    self.func.name,
+                    node,
+                    ty.fn_ty.ret.format_with(&self.env),
+                    if *value_result { "wrongly" } else { "not" },
+                    self.func.format_with(&self.env)
+                );
                 if ty.result_convention == CallResultConvention::NoValue {
                     assert!(
                         is_zero_sized_result(ty.fn_ty.ret, &self.env),
@@ -955,9 +1048,7 @@ impl<'a> Verifier<'a> {
                         .as_deref()
                         .and_then(|metadata| metadata.instantiation.as_ref()),
                 );
-                let visible_start = operands.len()
-                    - ty.fn_ty.args.len()
-                    - usize::from(ty.result_convention.has_result_place());
+                let visible_start = whole.call_visible_start();
                 for (offset, argument) in ty.fn_ty.args.iter().enumerate() {
                     let index = visible_start + offset;
                     let read_only = argument
@@ -1024,7 +1115,7 @@ impl<'a> Verifier<'a> {
                         );
                     }
                 }
-                if ty.fn_ty.ret != Type::never() && ty.result_convention.has_result_place() {
+                if ty.fn_ty.ret != Type::never() && whole.kind.call_has_result_place() {
                     let expected = if ty.result_convention.returns_place() {
                         MirType::pointer_to(MirType::Lowered(ty.fn_ty.ret))
                     } else {
@@ -1367,7 +1458,7 @@ impl<'a> Verifier<'a> {
 
             if matches!(
                 self.terminator(node),
-                Some(TerminatorKind::Return | TerminatorKind::PropagateError)
+                Some(TerminatorKind::Return { .. } | TerminatorKind::PropagateError)
             ) {
                 let live = state
                     .registers
@@ -1623,21 +1714,22 @@ impl<'a> Verifier<'a> {
                         .expect("build_array has a trailing destination");
                     self.initialize_call_result(node, destination, &mut normal);
                 }
-                OperationKind::Call { ty, metadata } => {
+                OperationKind::Call { metadata, .. } => {
+                    let visible_start = whole.call_visible_start();
+                    // Operation arity and role verification establish that every call ends in a
+                    // result place, including calls returning unit, unless it defines its result
+                    // register.
+                    let destination = whole.call_result_place().cloned();
                     if let Some(metadata) = metadata {
-                        let visible_start = operands.len() - (ty.fn_ty.args.len() + 1);
                         for argument in metadata.owned_arguments.iter_ones() {
                             let source = &operands[visible_start + argument];
                             self.consume_place(source, &mut normal);
                             self.consume_place(source, &mut unwind);
                         }
                     }
-                    // Operation arity and role verification establish that every call ends in a
-                    // result place, including calls returning unit.
-                    let destination = operands
-                        .last()
-                        .expect("call arity was verified before ownership analysis");
-                    self.initialize_call_result(node, destination, &mut normal);
+                    if let Some(destination) = destination {
+                        self.initialize_call_result(node, &destination, &mut normal);
+                    }
                 }
                 OperationKind::BuildClosure {
                     num_hidden_dicts,
@@ -1692,10 +1784,10 @@ impl<'a> Verifier<'a> {
         }
 
         match self.terminator(node) {
-            Some(TerminatorKind::Return | TerminatorKind::PropagateError) => {
+            Some(TerminatorKind::Return { .. } | TerminatorKind::PropagateError) => {
                 self.verify_frame_exit(node, input);
             }
-            Some(TerminatorKind::FailureDuringCleanup) => {
+            Some(TerminatorKind::FailureDuringCleanup | TerminatorKind::EffectViolation) => {
                 // Poisoning transfers remaining ownership to runtime reclamation.
             }
             Some(TerminatorKind::InvariantFailure { .. }) => {
@@ -2247,8 +2339,9 @@ impl<'a> Verifier<'a> {
                 result.push((first(resume), EdgeKind::Normal));
             }
             Some(
-                TerminatorKind::Return
+                TerminatorKind::Return { .. }
                 | TerminatorKind::PropagateError
+                | TerminatorKind::EffectViolation
                 | TerminatorKind::FailureDuringCleanup
                 | TerminatorKind::InvariantFailure { .. },
             ) => {}
@@ -2908,7 +3001,7 @@ mod tests {
         let mut f = FunctionBuilder::new("bad_call_argument_type".into(), Default::default());
         let block = f.add_block();
         let argument = append_result(&mut f, block, Operation::alloca(span, bool_type()));
-        let result = append_result(&mut f, block, Operation::alloca(span, int_type()));
+        let result = append_result(&mut f, block, Operation::alloca(span, string_type()));
         append(
             &mut f,
             block,
@@ -2919,7 +3012,11 @@ mod tests {
                     LocalFunctionId::default(),
                 )),
                 [argument, result],
-                CallImplType::value(FnType::new_by_val([int_type()], int_type(), no_effects())),
+                CallImplType::value(FnType::new_by_val(
+                    [int_type()],
+                    string_type(),
+                    no_effects(),
+                )),
             ),
         );
         terminate_return(&mut f, block, span);

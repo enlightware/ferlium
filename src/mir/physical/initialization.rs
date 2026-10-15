@@ -493,17 +493,15 @@ impl Places {
             }
             Clone { .. } if success => effect(&op.operands[1], Update::Set(Live)),
             BuildArray { .. } if success => effect(op.operands.last().unwrap(), Update::Set(Live)),
-            Call { ty, metadata } => {
+            Call { metadata, .. } => {
                 if let Some(metadata) = metadata {
-                    let start = op.operands.len()
-                        - ty.fn_ty.args.len()
-                        - usize::from(ty.result_convention.has_result_place());
+                    let start = op.call_visible_start();
                     for index in metadata.owned_arguments.iter_ones() {
                         effect(&op.operands[start + index], Update::Set(Absent));
                     }
                 }
-                if success && ty.result_convention.has_result_place() {
-                    effect(op.operands.last().unwrap(), Update::Set(Live));
+                if success && let Some(result) = op.call_result_place() {
+                    effect(result, Update::Set(Live));
                 }
             }
             _ => (),

@@ -37,7 +37,7 @@ use crate::{
     cached_primitive_ty,
     containers::{B, DenseBitSet, b},
     format::FormatWith,
-    hir::value::VariantPayloadStorage,
+    hir::{function::CallableDefinition, value::VariantPayloadStorage},
     mir,
     mir::{DebugLocation, ValueId},
     module::{FunctionId, ModuleEnv, ProjectionIndex, TraitDictionaryId, TraitId},
@@ -45,7 +45,7 @@ use crate::{
     types::{
         effects::{EffType, Effect, PrimitiveEffect},
         r#trait::TraitDictionaryEntryIndex,
-        r#type::{CallImplType, Type},
+        r#type::{CallImplType, CallResultConvention, Type},
         type_inference::substitution::InstSubst,
         type_like::TypeLike,
         type_scheme::TypeScheme,
@@ -310,8 +310,10 @@ impl Operation {
 
     /// Creates a `call` operation with the given properties.
     ///
-    /// A call yields no register. Its last operand is the result out-pointer, except for physical
+    /// The call yields no register: its last operand is the result out-pointer, except for physical
     /// `NoValue` calls, which return statically zero-sized products without result storage.
+    /// [`with_value_result`](Self::with_value_result) makes a call built without that operand
+    /// define its result as a register instead.
     ///
     /// ## Callee contract
     ///
@@ -365,8 +367,47 @@ impl Operation {
                         owned_arguments: DenseBitSet::empty(),
                     })
                 }),
+                value_result: false,
             },
         }
+    }
+
+    /// Makes this `call`, built without a trailing result place, define its result as a register.
+    pub(crate) fn with_value_result(mut self) -> Self {
+        let OperationKind::Call {
+            ty, value_result, ..
+        } = &mut self.kind
+        else {
+            panic!("only a call defines a value result");
+        };
+        assert_eq!(
+            ty.result_convention,
+            CallResultConvention::Value,
+            "only a value-returning call defines a value result"
+        );
+        *value_result = true;
+        self
+    }
+
+    /// The index of the first visible argument of a `call`.
+    pub(crate) fn call_visible_start(&self) -> usize {
+        let OperationKind::Call { ty, .. } = &self.kind else {
+            panic!("only a call has visible arguments");
+        };
+        self.operands.len() - ty.fn_ty.args.len() - usize::from(self.kind.call_has_result_place())
+    }
+
+    /// The index of the caller-provided result place of a `call`, if it has one.
+    pub(crate) fn call_result_place_index(&self) -> Option<usize> {
+        self.kind
+            .call_has_result_place()
+            .then(|| self.operands.len() - 1)
+    }
+
+    /// The caller-provided result place of a `call`, if it has one.
+    pub(crate) fn call_result_place(&self) -> Option<&mir::Value> {
+        self.call_result_place_index()
+            .map(|index| &self.operands[index])
     }
 
     /// Creates a `project` operation: the *enter* half of a scoped (`YieldedOnce`) subscript
@@ -1215,6 +1256,29 @@ pub(crate) fn accepts_value_argument(
         && is_scalar_value_type(argument.ty)
 }
 
+/// Whether a call of type `ty`, or a definition of that type, carries its result as a value: a
+/// register defined by the call, an operand of the definition's `return`.
+///
+/// The ABI returns a non-fallible concrete scalar directly. A fallible entry returns its status
+/// and writes the result through a pointer, so a fallible call keeps its result place. In semantic
+/// MIR the form follows this type alone, whatever the callee; physical MIR keeps the place where
+/// the callee's entry returns through a pointer.
+pub(crate) fn accepts_value_result(ty: &CallImplType) -> bool {
+    ty.result_convention == CallResultConvention::Value
+        && is_scalar_value_type(ty.fn_ty.ret)
+        && ty.effects().cannot_fail()
+}
+
+/// Whether `definition` returns its result as a value: its type carries the result as a value (see
+/// [`accepts_value_result`]). Every site deciding a definition's result form, at its lowering or at
+/// a call to it, reads this one rule.
+pub(crate) fn definition_returns_value(definition: &CallableDefinition) -> bool {
+    accepts_value_result(&CallImplType::new(
+        definition.ty_scheme.ty.clone(),
+        definition.return_convention(),
+    ))
+}
+
 /// Whether `ty` is a concrete scalar that call boundaries may carry as a value.
 pub(crate) fn is_scalar_value_type(ty: Type) -> bool {
     ty == int_type() || ty == float_type() || ty == bool_type()
@@ -1297,9 +1361,13 @@ pub enum OperationKind {
     /// A statically or dynamically resolved function call with its instantiated call-site type.
     /// Optional metadata records generic instantiation and optimized ownership transfer. Both are
     /// boxed to keep every operation compact; most calls need no metadata at all.
+    ///
+    /// A call with `value_result` defines its result as a register instead of writing a trailing
+    /// result place; see [`accepts_value_result`].
     Call {
         ty: B<CallImplType>,
         metadata: Option<B<CallMetadata>>,
+        value_result: bool,
     },
     /// Enter a scoped subscript accessor and expose its yielded place.
     /// The call-site type is boxed for the same compactness reason as [`Self::Call`].
@@ -1481,6 +1549,12 @@ impl OperationKind {
     /// callers that only want to know which functions a body reaches and must not pay a body clone
     /// to ask. Exhaustive for the same reason, and the two must agree: a kind that starts carrying a
     /// function stops both compiling.
+    /// Whether this is a `call` whose last operand is its caller-provided result place.
+    pub(crate) fn call_has_result_place(&self) -> bool {
+        matches!(self, OperationKind::Call { ty, value_result, .. }
+            if !value_result && ty.result_convention.has_result_place())
+    }
+
     pub(crate) fn function_id(&self) -> Option<FunctionId> {
         use OperationKind::*;
         match self {
@@ -1624,6 +1698,11 @@ impl OperationKind {
             ExtractPayloadIndirection => OperationResult::Lowered(cached_primitive_ty!(bool)),
             IsInitialized => OperationResult::Lowered(cached_primitive_ty!(bool)),
             StackSave => OperationResult::StackMarker,
+            Call {
+                ty,
+                value_result: true,
+                ..
+            } => OperationResult::Lowered(ty.fn_ty.ret),
             Call { .. }
             | BlackBox { .. }
             | BuildArray { .. }
@@ -1671,12 +1750,17 @@ impl OperationKind {
                 matches!(whole.operands.len(), 1 | 2),
                 "black_box takes the value place and optional layout evidence"
             ),
-            Call { ty, .. } => {
+            Call {
+                ty, value_result, ..
+            } => {
                 assert!(
                     whole.operands.len()
-                        >= 1 + ty.fn_ty.args.len()
-                            + usize::from(ty.result_convention.has_result_place()),
+                        >= 1 + ty.fn_ty.args.len() + usize::from(self.call_has_result_place()),
                     "call needs its callee, arguments and convention-specific result place"
+                );
+                assert!(
+                    !value_result || ty.result_convention == CallResultConvention::Value,
+                    "only a value-returning call defines a value result"
                 );
                 if !ty.result_convention.has_result_place() {
                     assert!(
@@ -1912,7 +1996,7 @@ impl OperationKind {
                 }
                 Ok(())
             }
-            Call { ty, metadata } => {
+            Call { ty, metadata, .. } => {
                 write!(f, "call ")?;
                 if !ty.result_convention.has_result_place() {
                     write!(f, "no_value ")?;
@@ -2220,8 +2304,7 @@ fn fmt_callee_and_args(
     owned: Option<(&DenseBitSet, usize)>,
 ) -> fmt::Result {
     write!(f, "{}(", whole.operands[0].format_with(env))?;
-    let result_count = usize::from(matches!(&whole.kind,
-        OperationKind::Call { ty, .. } if ty.result_convention.has_result_place()));
+    let result_count = usize::from(whole.kind.call_has_result_place());
     let visible_start = owned.map(|(_, visible)| whole.operands.len() - visible - result_count);
     for (i, operand) in whole.operands[1..].iter().enumerate() {
         if i != 0 {

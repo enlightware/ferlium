@@ -175,6 +175,10 @@ Nested host-initiated invocations use separate states. A second failure during c
 both causes and triggers harness cancellation; poisoning is not another return status. Diagnostic
 storage must survive guest-domain reclamation.
 
+A function without language failure never returns status. A failure escaping it through
+`effects_unsafe` is an effect violation: like a failure during cleanup, it preserves the diagnostic
+and triggers harness cancellation (see [mir-error-propagation.md](mir-error-propagation.md)).
+
 ### Sandbox violations
 
 Host-enforced sandbox violations are separate from the source-language `Fallible` effect. Fuel,

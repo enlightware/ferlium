@@ -6,7 +6,7 @@ use std::{fmt::Write, mem};
 use ustr::Ustr;
 
 use crate::{
-    FxHashMap, Location, Modules,
+    FxHashMap, FxHashSet, Location, Modules,
     compiler::MirArtifacts,
     containers,
     format::FormatWith,
@@ -19,7 +19,10 @@ use crate::{
     mir::{
         self, BlockId, Instantiation, Operation,
         builder::FunctionBuilder,
-        operation::{SourceFallibility, accepts_value_argument},
+        operation::{
+            SourceFallibility, accepts_value_argument, accepts_value_result,
+            definition_returns_value, is_scalar_value_type,
+        },
         terminator::Terminator,
     },
     module::{
@@ -42,6 +45,7 @@ use crate::{
     },
     types::{
         effects::{Effect, PrimitiveEffect, no_effects},
+        mutability::MutType,
         r#trait::{TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex},
         r#type::{
             CallImplType, CallResultConvention, FnType, SubscriptResultConvention, Type, TypeKind,
@@ -257,7 +261,9 @@ fn append_rendered_function(
 
 /// The MIR blocks involved in the lowering of a case in a match expression.
 struct CaseBlocks {
-    /// The condition blocks for value comparisons; empty when the case uses a tag switch.
+    /// The condition blocks for value comparisons; empty when the case uses a tag switch. The
+    /// first alternative is tested in the block that reads the scrutinee, which
+    /// [`lower_case`](Emitter::lower_case) puts first once it has read it.
     heads: Vec<BlockId>,
 
     /// The body blocks for the conditions.
@@ -266,8 +272,16 @@ struct CaseBlocks {
     /// The default case block.
     default: BlockId,
 
-    /// The tail block of the case.
-    tail: BlockId,
+    /// The tail block of the case, which the alternatives join; none when each returns.
+    tail: Option<BlockId>,
+}
+
+/// How a `match` lowers its alternatives.
+enum ArmLowering {
+    /// Into a destination, after which the alternatives join.
+    Into(Option<mir::Value>),
+    /// In return position, where each returns on its own; see `Emitter::lower_return`.
+    Return,
 }
 
 fn case_dispatches_on_tag(case: &Case<Elaborated>) -> bool {
@@ -346,15 +360,16 @@ impl<'a> Emitter<'a> {
         // are the leading `LocalDecl`s but are not part of the surface `arg_names` — followed by the
         // visible arguments. The closure's application passes each environment slot's place ahead of
         // the visible argument places, matching this order. A concrete scalar `Let` parameter arrives
-        // as a value, as `doc/abi.md` passes it, and is stored into a local of its own below; every
-        // other argument local is the place its incoming pointer denotes. `parameter_passing`
+        // as a value, as `doc/abi.md` passes it, and gets a local of its own only where the body
+        // needs its place (see `place_of_local`); every other argument local is the place its
+        // incoming pointer denotes. `parameter_passing`
         // describes only the visible arguments, so it is indexed relative to the first visible
         // argument.
         let runtime_arg_count = syntax.runtime_arg_count;
         let visible_arg_count = f.definition.arg_names.len();
         let capture_count = runtime_arg_count - visible_arg_count;
         let mut locals: FxHashMap<LocalDeclId, mir::Value> = FxHashMap::default();
-        let mut value_parameters = Vec::new();
+        let mut value_locals = FxHashMap::default();
         for i in 0..runtime_arg_count {
             let passing = if i < capture_count {
                 // A captured-environment slot is handed to the body as a mutable reference into the
@@ -370,22 +385,29 @@ impl<'a> Emitter<'a> {
             let is_value = parameter.is_value();
             let param = mir::Value::Parameter(lowered.add_parameter(parameter.ty, parameter.kind));
             if is_value {
-                value_parameters.push((LocalDeclId::from_index(i), param.clone(), parameter.ty));
+                value_locals.insert(LocalDeclId::from_index(i), param);
+            } else {
+                locals.insert(LocalDeclId::from_index(i), param);
             }
-            locals.insert(LocalDeclId::from_index(i), param);
         }
 
-        // Append the return out-pointer as the last parameter. It is present unconditionally, even
-        // when the return type is `()`: the function writes its result through this pointer and then
-        // returns with no operand.
+        // Append the return out-pointer as the last parameter. It is present even when the return
+        // type is `()`: the function writes its result through this pointer and then returns with
+        // no operand. A function returning its result as a value (`accepts_value_result`) writes
+        // it into a local instead, which each `return` reads and passes.
         let return_type = f.definition.ty_scheme.ty.ret;
-        let return_destination =
-            mir::Value::Parameter(lowered.add_parameter(return_type, mir::ParameterKind::Return));
+        let value_result = definition_returns_value(&f.definition);
+        let return_parameter = (!value_result).then(|| {
+            mir::Value::Parameter(lowered.add_parameter(return_type, mir::ParameterKind::Return))
+        });
 
         // Create the function's entry.
         let entry = lowered.add_block();
         let code = &module.hir_arena[syntax.entry_node_id];
         let span = code.span;
+        if value_result {
+            lowered.set_value_result(return_type);
+        }
 
         // Instantiate an emitter to generate the function's contents.
         let mut emitter = Emitter {
@@ -396,6 +418,8 @@ impl<'a> Emitter<'a> {
                 point: InsertionPoint::End(entry),
                 span,
                 locals,
+                value_locals,
+                deferred_locals: FxHashSet::default(),
                 extra_parameters,
                 evidence_bindings: FxHashMap::default(),
                 evidence_traits: FxHashMap::default(),
@@ -403,12 +427,14 @@ impl<'a> Emitter<'a> {
                 value_witnesses,
                 static_layouts: FxHashMap::default(),
                 loops: FxHashMap::default(),
-                return_destination,
+                return_destination: return_parameter,
+                value_result: value_result.then_some(return_type),
                 returns_place: f.definition.returns_place(),
                 scopes: Vec::new(),
                 pending_pads: Vec::new(),
                 cleanup_unwind_target: CleanupUnwindTarget::CurrentScope,
                 propagate_error_block: None,
+                cannot_fail: f.definition.ty_scheme.ty.effects.cannot_fail(),
                 failure_during_cleanup_block: None,
             },
             hir_arena: &module.hir_arena,
@@ -418,14 +444,15 @@ impl<'a> Emitter<'a> {
 
         // Allocate frame storage for every `Owned` local and bind it to its `alloca` place.
         emitter.allocate_owned_locals();
-        emitter.store_value_parameters(value_parameters);
 
         // Lower the body, dispatching on the function's return convention.
         match f.definition.return_convention() {
             CallResultConvention::NoValue => unreachable!("NoValue is physical-only"),
-            // A value-returning function stores its result into the return out-pointer.
+            // A function returning its result as a value returns it from each path; any other
+            // value-returning function stores its result into the return out-pointer.
+            CallResultConvention::Value if value_result => emitter.lower_return(code),
             CallResultConvention::Value => {
-                let ret_dest = emitter.context.return_destination.clone();
+                let ret_dest = emitter.return_destination();
                 emitter.lower_value_into(code, Some(ret_dest));
             }
             // An addressor function returns a caller-rooted place. Its body is `never`-typed and
@@ -448,7 +475,7 @@ impl<'a> Emitter<'a> {
 
         // Append the trailing return terminator.
         if !emitter.current_block_is_terminated() {
-            emitter.terminate(Terminator::ret(emitter.context.span));
+            emitter.terminate_return(emitter.context.span);
         }
 
         // Fill cleanup blocks after the body. Their identities can be referenced before their
@@ -457,6 +484,43 @@ impl<'a> Emitter<'a> {
 
         let env = emitter.env;
         emitter.context.function.finish(env)
+    }
+
+    /// Returns from the function, passing the result written into its local when it returns its
+    /// result as a value.
+    fn terminate_return(&mut self, span: Location) {
+        let terminator = if self.context.value_result.is_some() {
+            let result = self.return_destination();
+            let result = self
+                .insert(Operation::load(span, result))
+                .expect("a load defines its value");
+            Terminator::ret_value(span, result)
+        } else {
+            Terminator::ret(span)
+        };
+        self.terminate(terminator);
+    }
+
+    /// The return out-pointer, or the result local of a function returning its result as a value,
+    /// allocated in the entry block when a path first needs it.
+    fn return_destination(&mut self) -> mir::Value {
+        if let Some(destination) = &self.context.return_destination {
+            return destination.clone();
+        }
+        let ty = self
+            .context
+            .value_result
+            .expect("a function without a result parameter returns a value");
+        let local = self
+            .context
+            .function
+            .prepend_operation(
+                BlockId::from_index(0),
+                Operation::alloca(self.context.span, ty),
+            )
+            .expect("an alloca defines its place");
+        self.context.return_destination = Some(local.clone());
+        local
     }
 
     /// Returns the module-qualified identity of `f`.
@@ -853,8 +917,8 @@ impl<'a> Emitter<'a> {
                 None => continue,
             };
             let dropped_ty = decl.ty;
-            let place = self.place_of_local(local);
             if let Some(spec) = self.resolve_drop(drop) {
+                let place = self.place_of_local(local);
                 actions.push(CleanupAction::Drop(DropObligation {
                     place,
                     dropped_ty,
@@ -1074,7 +1138,7 @@ impl<'a> Emitter<'a> {
             self.context.cleanup_unwind_target = CleanupUnwindTarget::CurrentScope;
             match pad.outer {
                 Some(outer_pad) => self.terminate(Terminator::goto(pad.span, outer_pad)),
-                None => self.terminate(Terminator::propagate_error(pad.span)),
+                None => self.terminate(self.failure_exit(pad.span)),
             };
         }
     }
@@ -1083,6 +1147,9 @@ impl<'a> Emitter<'a> {
     /// an `invoke` with explicit normal and source-error successors, even when the error successor
     /// merely propagates. A proven source-infallible call remains an ordinary operation. Sandbox
     /// violations bypass both successors.
+    ///
+    /// A call carrying its result as a value (see [`accepts_value_result`]) is given no result
+    /// place and returns the register it defines.
     fn emit_call(
         &mut self,
         span: Location,
@@ -1090,14 +1157,13 @@ impl<'a> Emitter<'a> {
         arguments: Vec<mir::Value>,
         ty: &CallImplType,
         instantiation: Option<Instantiation>,
-    ) {
-        self.insert(Operation::instantiated_call(
-            span,
-            callee,
-            arguments,
-            ty.clone(),
-            instantiation,
-        ));
+    ) -> Option<mir::Value> {
+        let call = Operation::instantiated_call(span, callee, arguments, ty.clone(), instantiation);
+        if accepts_value_result(ty) {
+            self.insert(call.with_value_result())
+        } else {
+            self.insert(call)
+        }
     }
 
     /// The instantiation to record on a call, from the HIR call node's data.
@@ -1138,6 +1204,15 @@ impl<'a> Emitter<'a> {
         destination: Option<mir::Value>,
         instantiation: Option<Instantiation>,
     ) {
+        if accepts_value_result(ty) {
+            let value = self
+                .emit_call(node.span, callee, arguments, ty, instantiation)
+                .expect("a value call defines its result");
+            if let Some(destination) = destination {
+                self.store(node.span, value, destination);
+            }
+            return;
+        }
         arguments.push(destination.unwrap_or_else(|| self.allocate_result(node, ty)));
         self.emit_call(node.span, callee, arguments, ty, instantiation);
     }
@@ -1155,6 +1230,13 @@ impl<'a> Emitter<'a> {
         instantiation: Option<Instantiation>,
     ) -> mir::Value {
         let result_storage = self.allocate_result(node, ty);
+        if accepts_value_result(ty) {
+            let value = self
+                .emit_call(node.span, callee, arguments, ty, instantiation)
+                .expect("a value call defines its result");
+            self.store(node.span, value, result_storage.clone());
+            return result_storage;
+        }
         arguments.push(result_storage.clone());
         self.emit_call(node.span, callee, arguments, ty, instantiation);
         if ty.returns_place() {
@@ -1181,32 +1263,26 @@ impl<'a> Emitter<'a> {
             .current
             .get_function_by_id(self.context.source)
             .unwrap();
-        let owned: Vec<(LocalDeclId, Type)> = f
-            .locals
-            .iter()
-            .enumerate()
-            .filter(|(i, l)| {
-                l.owns_storage()
-                    && !self
-                        .context
-                        .locals
-                        .contains_key(&LocalDeclId::from_index(*i))
-            })
-            .map(|(i, l)| (LocalDeclId::from_index(i), l.ty))
-            .collect();
+        let mut owned = Vec::new();
+        for (i, l) in f.locals.iter().enumerate() {
+            let id = LocalDeclId::from_index(i);
+            if !l.owns_storage()
+                || self.context.locals.contains_key(&id)
+                || self.context.value_locals.contains_key(&id)
+            {
+                continue;
+            }
+            if l.mut_ty == MutType::constant()
+                && is_scalar_value_type(l.ty)
+                && matches!(l.clone, None | Some(ResolvedLocalClone::TrivialCopy))
+            {
+                self.context.deferred_locals.insert(id);
+            } else {
+                owned.push((id, l.ty));
+            }
+        }
         for (id, ty) in owned {
             let place = self.alloca_storage(self.context.span, ty);
-            self.context.locals.insert(id, place);
-        }
-    }
-
-    /// Stores each value parameter into a local of its own and binds its variable to that place,
-    /// since the body reads variables as places.
-    fn store_value_parameters(&mut self, parameters: Vec<(LocalDeclId, mir::Value, Type)>) {
-        let span = self.context.span;
-        for (id, value, ty) in parameters {
-            let place = self.alloca_storage(span, ty);
-            self.store(span, value, place.clone());
             self.context.locals.insert(id, place);
         }
     }
@@ -1332,14 +1408,43 @@ impl<'a> Emitter<'a> {
 
     /// Returns the place (a pointer MIR value) backing the local `l`.
     ///
-    /// Every local is bound to a place: an incoming by-pointer parameter or an `Owned` `alloca`
-    /// or a non-owned alias.
-    fn place_of_local(&self, l: LocalDeclId) -> mir::Value {
-        self.context
-            .locals
-            .get(&l)
-            .expect("local must be bound in the current frame")
-            .clone()
+    /// Every local is bound to a place: an incoming by-pointer parameter, an `Owned` `alloca`, a
+    /// non-owned alias, or, for a local bound to a value (see `value_locals`), a local of its own.
+    /// That local is created the first time the body needs the place, and the value is stored into
+    /// it where it is defined: right after the operation defining a register, or at the start of
+    /// the entry block for a parameter or a constant. A body reading such a local only as a value
+    /// has no storage for it.
+    fn place_of_local(&mut self, l: LocalDeclId) -> mir::Value {
+        if let Some(place) = self.context.locals.get(&l) {
+            return place.clone();
+        }
+        let span = self.context.span;
+        let ty = self.local_declaration(l).ty;
+        let entry = BlockId::from_index(0);
+        let value = self.context.value_locals.get(&l).cloned();
+        assert!(
+            value.is_some() || self.context.deferred_locals.contains(&l),
+            "local must be bound in the current frame"
+        );
+        let function = &mut self.context.function;
+        let place = function
+            .prepend_operation(entry, Operation::alloca(span, ty))
+            .expect("an alloca defines its place");
+        match value {
+            Some(mir::Value::Register(register)) => {
+                function.insert_operation_after(
+                    register,
+                    Operation::store(span, mir::Value::Register(register), place.clone()),
+                );
+            }
+            Some(value) => {
+                function.insert_operation(entry, 1, Operation::store(span, value, place.clone()));
+            }
+            // Its storage is needed before its initialization, which then stores into it.
+            None => {}
+        }
+        self.context.locals.insert(l, place.clone());
+        place
     }
 
     /// Lowers an aggregate (tuple or record) into `destination` by projecting each field of the
@@ -1619,14 +1724,14 @@ impl<'a> Emitter<'a> {
                 Type::function_type(getter_fn_ty.clone()),
             ))
             .unwrap();
-        let result = self.insert(Operation::alloca(span, int_type())).unwrap();
-        self.insert(Operation::call(
+        self.emit_call(
             span,
             getter_place,
-            [result.clone()],
-            CallImplType::value(getter_fn_ty),
-        ));
-        self.insert(Operation::load(span, result)).unwrap()
+            Vec::new(),
+            &CallImplType::value(getter_fn_ty),
+            None,
+        )
+        .expect("a getter returns its `int` as a value")
     }
 
     /// Interns a typed Ferlium `int` in the function-local constant pool.
@@ -1763,47 +1868,14 @@ impl<'a> Emitter<'a> {
                 }
             }
 
-            K::FunctionApply(n) => {
-                // The callee is lowered as a *place*: a function value (in particular a closure) is
-                // borrowed in place and read by reference at the call, so it survives repeated calls
-                // (`f() + f()`) and is dropped once by its scope cleanup — mirroring the HIR
-                // interpreter's `eval_apply`, which calls through a borrow of the function value.
-                let f = self.lower_as_place(&self.hir_arena[n.function]);
-                let arguments = self.lower_arguments(&n.arguments, &n.ty);
-                self.emit_call_as_place(node, f, arguments, &n.ty, None)
-            }
-
-            K::StaticApply(n) => {
-                let f = self.function_value(n.function);
-                let mut arguments: Vec<mir::Value> = vec![];
-                for x in &n.extra_arguments {
-                    arguments.push(self.lower_extra_argument(&self.hir_arena[*x]));
-                }
-                arguments.extend(self.lower_arguments(&n.arguments, &n.ty));
-                self.emit_call_as_place(
-                    node,
-                    f,
-                    arguments,
-                    &n.ty,
-                    Self::instantiation_of(&n.inst_data),
-                )
-            }
-
-            K::SubscriptApply(n) => {
-                // A place-returning subscript application (an addressor member): resolve the
-                // member out of the subscript evidence, then call it like any other place call.
-                // The member function value carries the subscript's captured hidden evidence, so
-                // no extra arguments are passed here.
-                let f = self.lower_subscript_member(node, n);
-                let arguments = self.lower_arguments(&n.arguments, &n.ty);
-                self.emit_call_as_place(node, f, arguments, &n.ty, None)
-            }
-
-            K::CallDictionaryFunction(n) => {
-                // A place-returning method dispatched through a dictionary: project+load the
-                // method, call it with a place out-pointer, then load the returned place.
-                let (function, arguments) = self.lower_dictionary_function_target(node, n);
-                self.emit_call_as_place(node, function, arguments, &n.ty, None)
+            K::FunctionApply(_)
+            | K::StaticApply(_)
+            | K::SubscriptApply(_)
+            | K::CallDictionaryFunction(_) => {
+                let (callee, arguments, ty, instantiation) = self
+                    .lower_call_parts(node)
+                    .expect("an application is a call");
+                self.emit_call_as_place(node, callee, arguments, &ty, instantiation)
             }
 
             K::GetDictionaryFunction(n) => {
@@ -1854,7 +1926,7 @@ impl<'a> Emitter<'a> {
                     // Dead code: a leading statement terminated the block, so the tail place is
                     // unreachable. Return an arbitrary valid place (the return out-pointer) that is
                     // never consumed.
-                    self.context.return_destination.clone()
+                    self.return_destination()
                 } else {
                     self.lower_as_place(&self.hir_arena[*tail])
                 };
@@ -1904,7 +1976,7 @@ impl<'a> Emitter<'a> {
         // Bind the binding to an arbitrary valid place (never consumed) and push the scope the
         // caller's `exit_scope` expects; its cleanup no-ops on the terminated path.
         if self.current_block_is_terminated() {
-            let dummy = self.context.return_destination.clone();
+            let dummy = self.return_destination();
             self.context.locals.insert(n.binding, dummy.clone());
             self.context.scopes.push(Scope {
                 actions: Vec::new(),
@@ -2002,11 +2074,15 @@ impl<'a> Emitter<'a> {
                 .unwrap();
             return (tag, false);
         }
-        match &node.kind {
-            hir::NodeKind::Immediate(value) => {
-                (self.immediate_constant(node.ty, value.clone()), false)
-            }
-            _ => (self.lower_as_place(node), true),
+        // A scalar scrutinee is read once, as a value, before any alternative's body runs.
+        match self.lower_scalar_value(node) {
+            Some(value) => (value, false),
+            None => match &node.kind {
+                hir::NodeKind::Immediate(value) => {
+                    (self.immediate_constant(node.ty, value.clone()), false)
+                }
+                _ => (self.lower_as_place(node), true),
+            },
         }
     }
 
@@ -2018,8 +2094,9 @@ impl<'a> Emitter<'a> {
 
     /// Lowers the visible `arguments` of a call of type `ty` to their call operands.
     ///
-    /// A read-only argument of a concrete scalar type is a value: a literal is a constant, and an
-    /// existing place is read where the argument is evaluated, since a later argument may write it.
+    /// A read-only argument of a concrete scalar type is a value: a literal is a constant, a value
+    /// parameter is passed as it arrived, and an existing place is read where the argument is
+    /// evaluated, since a later argument may write it.
     /// A value materialized into a temporary is read just before the call, as nothing else writes
     /// it. Any other argument is a pointer to its storage.
     fn lower_arguments(
@@ -2035,8 +2112,10 @@ impl<'a> Emitter<'a> {
                 operands.push(self.lower_as_place(node));
                 continue;
             }
-            if let hir::NodeKind::Immediate(value) = &node.kind {
-                operands.push(self.immediate_constant(node.ty, value.clone()));
+            // A literal, a call's result register (read nowhere else) or a local read where the
+            // argument is evaluated.
+            if let Some(value) = self.lower_scalar_value(node) {
+                operands.push(value);
                 continue;
             }
             let place = self.lower_as_place(node);
@@ -2060,18 +2139,18 @@ impl<'a> Emitter<'a> {
     }
 
     /// Returns the blocks created for `n`.
-    fn create_case_blocks(&mut self, n: &Case<Elaborated>) -> CaseBlocks {
+    fn create_case_blocks(&mut self, n: &Case<Elaborated>, joins: bool) -> CaseBlocks {
         let uses_tag_switch = case_dispatches_on_tag(n);
         let mut heads: Vec<BlockId> = vec![];
         let mut bodies: Vec<BlockId> = vec![];
-        for _ in n.alternatives.iter() {
-            if !uses_tag_switch {
+        for i in 0..n.alternatives.len() {
+            if !uses_tag_switch && i > 0 {
                 heads.push(self.context.function.add_block());
             }
             bodies.push(self.context.function.add_block());
         }
         let default: BlockId = self.context.function.add_block();
-        let tail: BlockId = self.context.function.add_block();
+        let tail = joins.then(|| self.context.function.add_block());
         CaseBlocks {
             heads,
             bodies,
@@ -2371,6 +2450,356 @@ impl<'a> Emitter<'a> {
     /// Lowers a place-returning call in value position: the call's place result is resolved and
     /// its value is copied into the destination (trivial copy; non-trivial reads are wrapped in
     /// `CloneValue` by HIR). A `None` destination lowers the call for its effects only.
+    /// Lowers a call node's callee and arguments, with the call-site type and the instantiation it
+    /// records; `None` if `node` is no call.
+    fn lower_call_parts(
+        &mut self,
+        node: &ENode,
+    ) -> Option<(
+        mir::Value,
+        Vec<mir::Value>,
+        CallImplType,
+        Option<Instantiation>,
+    )> {
+        use hir::NodeKind as K;
+        Some(match &node.kind {
+            K::FunctionApply(n) => {
+                // The callee is lowered as a *place*: a function value (in particular a closure) is
+                // borrowed in place and read by reference at the call, so it survives repeated
+                // calls (`f() + f()`) and is dropped once by its scope cleanup — mirroring the HIR
+                // interpreter's `eval_apply`, which calls through a borrow of the function value.
+                let f = self.lower_as_place(&self.hir_arena[n.function]);
+                let arguments = self.lower_arguments(&n.arguments, &n.ty);
+                (f, arguments, n.ty.clone(), None)
+            }
+            K::StaticApply(n) => {
+                let f = self.function_value(n.function);
+                let mut arguments: Vec<mir::Value> = vec![];
+                for x in &n.extra_arguments {
+                    arguments.push(self.lower_extra_argument(&self.hir_arena[*x]));
+                }
+                arguments.extend(self.lower_arguments(&n.arguments, &n.ty));
+                (
+                    f,
+                    arguments,
+                    n.ty.clone(),
+                    Self::instantiation_of(&n.inst_data),
+                )
+            }
+            K::SubscriptApply(n) => {
+                // Resolve the applied member out of the subscript evidence; the member function
+                // value carries the subscript's captured hidden evidence, so the call passes only
+                // the visible arguments.
+                let f = self.lower_subscript_member(node, n);
+                let arguments = self.lower_arguments(&n.arguments, &n.ty);
+                (f, arguments, n.ty.clone(), None)
+            }
+            K::CallDictionaryFunction(n) => {
+                // Project the function out of the dictionary, then call it.
+                let (function, arguments) = self.lower_dictionary_function_target(node, n);
+                (function, arguments, n.ty.clone(), None)
+            }
+            _ => return None,
+        })
+    }
+
+    /// Lowers a `match`, its alternatives as `arms` says.
+    fn lower_case(&mut self, node: &ENode, n: &Case<Elaborated>, arms: ArmLowering) {
+        // Mirror the HIR interpreter's `eval_case`: read the scrutinee once. Variant cases
+        // switch on an opaque tag; other cases compare the whole value against each whole
+        // pattern (`comp_eq` does non-consuming `LiteralValue` equality). The scrutinee is
+        // taken as a borrowable place — never loaded/moved — so a string/tuple stays live
+        // across alternatives and into the arm body; an immediate stays a primitive
+        // constant.
+        // (We do *not* decompose composite patterns: the HIR compares the whole tuple
+        // structurally, so the MIR does the same.)
+        let variant_tag_case = case_dispatches_on_tag(n);
+        debug_assert!(
+            n.alternatives
+                .iter()
+                .all(|(pattern, _)| pattern.as_variant_tag().is_some() == variant_tag_case)
+        );
+        let joins = matches!(arms, ArmLowering::Into(_));
+        let mut blocks = self.create_case_blocks(n, joins);
+        let (scrutinee, scrutinee_is_place) =
+            self.lower_case_scrutinee(&self.hir_arena[n.value], variant_tag_case);
+
+        if variant_tag_case {
+            let cases = n
+                .alternatives
+                .iter()
+                .zip(&blocks.bodies)
+                .map(|((pattern, _), target)| {
+                    (
+                        *pattern
+                            .as_variant_tag()
+                            .expect("variant case checked above"),
+                        *target,
+                    )
+                })
+                .collect();
+            self.terminate(Terminator::switch_variant(
+                node.span,
+                scrutinee.clone(),
+                cases,
+                blocks.default,
+            ));
+        } else if n.alternatives.is_empty() {
+            // With no alternatives (e.g. a single irrefutable arm), there are no condition
+            // heads to test, so branch straight to the default block.
+            self.terminate(Terminator::goto(node.span, blocks.default));
+        } else {
+            // The first alternative is tested right where the scrutinee was read.
+            let InsertionPoint::End(current) = self.context.point;
+            blocks.heads.insert(0, current);
+        }
+
+        // Lower the alternatives. Each alternative stores its value directly into `dest`.
+        for (i, (c, a)) in n.alternatives.iter().enumerate() {
+            let body = blocks.bodies[i];
+            if !variant_tag_case {
+                // Load the next alternative's condition if there's one. Otherwise, we've
+                // reached the default case.
+                let next = if i < n.alternatives.len() - 1 {
+                    blocks.heads[i + 1]
+                } else {
+                    blocks.default
+                };
+
+                // Transfer control flow to the head of the match. Compare the whole
+                // scrutinee against this alternative's whole pattern and branch to its body
+                // on a match or to `next` otherwise.
+                self.context.point = InsertionPoint::End(blocks.heads[i]);
+                // `if`, and a `match` on a `bool`, both arrive here, and their head would
+                // compare a boolean against a boolean pattern — a test whose answer is the
+                // scrutinee itself. Branch on the scrutinee instead, read from its slot if it
+                // has one, and let the branch carry the polarity.
+                let (condition, then_target, else_target) = match c.as_primitive_ty::<bool>() {
+                    Some(&expects_true) if self.hir_arena[n.value].ty == bool_type() => {
+                        let loaded = if scrutinee_is_place {
+                            self.insert(Operation::load(node.span, scrutinee.clone()))
+                                .unwrap()
+                        } else {
+                            scrutinee.clone()
+                        };
+                        if expects_true {
+                            (loaded, body, next)
+                        } else {
+                            (loaded, next, body)
+                        }
+                    }
+                    _ => {
+                        let pattern = self.lower_case_pattern(c);
+                        let eq = self
+                            .insert(Operation::compare_eq(node.span, scrutinee.clone(), pattern))
+                            .unwrap();
+                        (eq, body, next)
+                    }
+                };
+                self.terminate(Terminator::cond_br(
+                    node.span,
+                    condition,
+                    then_target,
+                    else_target,
+                ));
+            }
+
+            // Lower the body of the alternative into the destination. A
+            // `break`/`continue`/`return` arm terminates its own block, so it needs no
+            // branch to the tail.
+            self.context.point = InsertionPoint::End(body);
+            self.lower_arm(&self.hir_arena[*a], &arms);
+            self.join_case_tail(node.span, blocks.tail);
+        }
+
+        // Default case.
+        self.context.point = InsertionPoint::End(blocks.default);
+        self.lower_arm(&self.hir_arena[n.default], &arms);
+        self.join_case_tail(node.span, blocks.tail);
+
+        // Tail. The value has already been stored into `dest`. In return position, every
+        // alternative returned, and the current block stays terminated.
+        if let Some(tail) = blocks.tail {
+            self.context.point = InsertionPoint::End(tail);
+        }
+    }
+
+    fn lower_arm(&mut self, node: &ENode, arms: &ArmLowering) {
+        match arms {
+            ArmLowering::Into(destination) => self.lower_value_into(node, destination.clone()),
+            ArmLowering::Return => self.lower_return(node),
+        }
+    }
+
+    /// Ends an alternative by joining the case's tail, unless it already left.
+    fn join_case_tail(&mut self, span: Location, tail: Option<BlockId>) {
+        if self.current_block_is_terminated() {
+            return;
+        }
+        let tail = tail.expect("an alternative in return position returns");
+        self.terminate(Terminator::goto(span, tail));
+    }
+
+    /// Lowers `node` in the return position of a function returning its result as a value: the
+    /// tail of its body, or the operand of a `return`. Each path through a block's tail or a
+    /// `match`'s alternatives returns its own value, rather than joining the others through the
+    /// result local first. Before returning, the enclosing scopes drop their locals, as for a
+    /// `return`.
+    fn lower_return(&mut self, node: &ENode) {
+        use hir::NodeKind as K;
+        match &node.kind {
+            K::Block(n) => {
+                let cleanup = n.cleanup.clone();
+                self.enter_scope(&cleanup);
+                if let Some((tail, init)) = n.body.split_last() {
+                    for s in init {
+                        if self.current_block_is_terminated() {
+                            break;
+                        }
+                        self.lower_value_into(&self.hir_arena[*s], None);
+                    }
+                    if !self.current_block_is_terminated() {
+                        self.lower_return(&self.hir_arena[*tail]);
+                    }
+                } else {
+                    self.return_value(node);
+                }
+                self.exit_scope(node.span);
+            }
+            K::Case(n) => self.lower_case(node, n, ArmLowering::Return),
+            // A subscript site returns its body's value; returning runs the scoped accessor's
+            // slide, as it drops the enclosing scopes' locals.
+            K::WithPlace(n) => {
+                self.bind_local_for_with_place(n);
+                self.lower_return(&self.hir_arena[n.body]);
+            }
+            K::WithYielded(n) => {
+                self.lower_with_yielded_enter(n);
+                self.lower_return(&self.hir_arena[n.body]);
+                self.exit_scope(node.span);
+            }
+            // An explicit `return`, or anything else that does not complete, leaves on its own.
+            _ if node.ty == Type::never() => self.lower_value_into(node, None),
+            _ => self.return_value(node),
+        }
+    }
+
+    /// Lowers a scalar `node` that produces its value without storage, returning that value: a
+    /// literal, the register a value call defines, a read of a local (a copy, or a move out of
+    /// an owned local, which for a scalar leaves nothing to drop), or a read of an existing place,
+    /// such as a projection or the element a subscript yields. `None`, lowering nothing, for any
+    /// other node.
+    fn lower_scalar_value(&mut self, node: &ENode) -> Option<mir::Value> {
+        use hir::NodeKind as K;
+        if !is_scalar_value_type(node.ty) {
+            return None;
+        }
+        match &node.kind {
+            K::CloneValue(n) if matches!(n.clone, ResolvedLocalClone::TrivialCopy) => {
+                let source = &self.hir_arena[n.source];
+                self.lower_scalar_value(source)
+            }
+            K::Immediate(value) => Some(self.immediate_constant(node.ty, value.clone())),
+            K::LoadLocal(n) => self.load_local(node.span, n.id),
+            K::TakeLocalValue(n)
+                if matches!(
+                    n.mode,
+                    ResolvedTakeLocalValueMode::MoveOwned
+                        | ResolvedTakeLocalValueMode::CloneBorrowed(
+                            ResolvedLocalClone::TrivialCopy
+                        )
+                ) =>
+            {
+                self.load_local(node.span, n.id)
+            }
+            _ if self.node_yields_place(node) => {
+                let place = self.lower_as_place(node);
+                self.insert(Operation::load(node.span, place))
+            }
+            _ => self.lower_call_value(node),
+        }
+    }
+
+    /// Copies the local `local` of type `ty` into `destination`: a local bound to a value stores
+    /// that value, any other local is copied from its place.
+    fn copy_local_into(
+        &mut self,
+        span: Location,
+        local: LocalDeclId,
+        ty: Type,
+        destination: mir::Value,
+    ) {
+        if let Some(value) = self.context.value_locals.get(&local) {
+            let value = value.clone();
+            self.store(span, value, destination);
+            return;
+        }
+        self.assert_statically_sized(ty);
+        let source = self.place_of_local(local);
+        self.memcpy_into_if_needed(span, source, Some(destination));
+    }
+
+    /// Reads the scalar local `local`. A local bound to a value is never written, so it is read as
+    /// that value.
+    fn load_local(&mut self, span: Location, local: LocalDeclId) -> Option<mir::Value> {
+        if let Some(value) = self.context.value_locals.get(&local) {
+            return Some(value.clone());
+        }
+        let place = self.place_of_local(local);
+        self.insert(Operation::load(span, place))
+    }
+
+    /// Returns `node`'s value: a scalar value lowered without storage, a read of the place it
+    /// yields, or else what it leaves in the result local.
+    fn return_value(&mut self, node: &ENode) {
+        let value = if let Some(value) = self.lower_scalar_value(node) {
+            value
+        } else if self.node_yields_place(node) {
+            let place = self.lower_as_place(node);
+            self.insert(Operation::load(node.span, place))
+                .expect("a load defines its value")
+        } else {
+            let result = self.return_destination();
+            self.lower_value_into(node, Some(result.clone()));
+            if self.current_block_is_terminated() {
+                return;
+            }
+            self.insert(Operation::load(node.span, result))
+                .expect("a load defines its value")
+        };
+        if self.current_block_is_terminated() {
+            return;
+        }
+        self.emit_return_drops(node.span);
+        self.terminate(Terminator::ret_value(node.span, value));
+    }
+
+    /// Lowers a value-returning call node into `destination`, or for its effects alone.
+    fn lower_call_into(&mut self, node: &ENode, destination: Option<mir::Value>) {
+        let (callee, arguments, ty, instantiation) = self
+            .lower_call_parts(node)
+            .expect("an application is a call");
+        self.emit_call_into(node, callee, arguments, &ty, destination, instantiation);
+    }
+
+    /// Lowers a call node carrying its result as a value, returning that value; `None`, lowering
+    /// nothing, for any other node.
+    fn lower_call_value(&mut self, node: &ENode) -> Option<mir::Value> {
+        use hir::NodeKind as K;
+        let ty = match &node.kind {
+            K::FunctionApply(n) => &n.ty,
+            K::StaticApply(n) => &n.ty,
+            K::SubscriptApply(n) => &n.ty,
+            K::CallDictionaryFunction(n) => &n.ty,
+            _ => return None,
+        };
+        if !accepts_value_result(ty) {
+            return None;
+        }
+        let (callee, arguments, ty, instantiation) = self.lower_call_parts(node)?;
+        self.emit_call(node.span, callee, arguments, &ty, instantiation)
+    }
+
     fn lower_place_call_into(&mut self, node: &ENode, destination: Option<mir::Value>) {
         let place = self.lower_as_place(node);
         if destination.is_some() {
@@ -2410,128 +2839,7 @@ impl<'a> Emitter<'a> {
                 self.exit_scope(node.span);
             }
 
-            K::Case(n) => {
-                // Mirror the HIR interpreter's `eval_case`: read the scrutinee once. Variant cases
-                // switch on an opaque tag; other cases compare the whole value against each whole
-                // pattern (`comp_eq` does non-consuming `LiteralValue` equality). The scrutinee is
-                // taken as a borrowable place — never loaded/moved — so a string/tuple stays live
-                // across alternatives and into the arm body; an immediate stays a primitive
-                // constant.
-                // (We do *not* decompose composite patterns: the HIR compares the whole tuple
-                // structurally, so the MIR does the same.)
-                let variant_tag_case = case_dispatches_on_tag(n);
-                debug_assert!(
-                    n.alternatives
-                        .iter()
-                        .all(|(pattern, _)| pattern.as_variant_tag().is_some() == variant_tag_case)
-                );
-                let blocks = self.create_case_blocks(n);
-                let (scrutinee, scrutinee_is_place) =
-                    self.lower_case_scrutinee(&self.hir_arena[n.value], variant_tag_case);
-
-                if variant_tag_case {
-                    let cases = n
-                        .alternatives
-                        .iter()
-                        .zip(&blocks.bodies)
-                        .map(|((pattern, _), target)| {
-                            (
-                                *pattern
-                                    .as_variant_tag()
-                                    .expect("variant case checked above"),
-                                *target,
-                            )
-                        })
-                        .collect();
-                    self.terminate(Terminator::switch_variant(
-                        node.span,
-                        scrutinee.clone(),
-                        cases,
-                        blocks.default,
-                    ));
-                } else {
-                    // With no alternatives (e.g. a single irrefutable arm), there are no condition
-                    // heads to test, so branch straight to the default block.
-                    let entry = blocks.heads.first().copied().unwrap_or(blocks.default);
-                    self.terminate(Terminator::goto(node.span, entry));
-                }
-
-                // Lower the alternatives. Each alternative stores its value directly into `dest`.
-                for (i, (c, a)) in n.alternatives.iter().enumerate() {
-                    let body = blocks.bodies[i];
-                    if !variant_tag_case {
-                        // Load the next alternative's condition if there's one. Otherwise, we've
-                        // reached the default case.
-                        let next = if i < n.alternatives.len() - 1 {
-                            blocks.heads[i + 1]
-                        } else {
-                            blocks.default
-                        };
-
-                        // Transfer control flow to the head of the match. Compare the whole
-                        // scrutinee against this alternative's whole pattern and branch to its body
-                        // on a match or to `next` otherwise.
-                        self.context.point = InsertionPoint::End(blocks.heads[i]);
-                        // `if`, and a `match` on a `bool`, both arrive here, and their head would
-                        // compare a boolean against a boolean pattern — a test whose answer is the
-                        // scrutinee itself. Read the slot instead and let the branch carry the
-                        // polarity. `condbr` takes a materialized value, so the read remains; the
-                        // comparison does not.
-                        let (condition, then_target, else_target) =
-                            match c.as_primitive_ty::<bool>() {
-                                Some(&expects_true)
-                                    if scrutinee_is_place
-                                        && self.hir_arena[n.value].ty == bool_type() =>
-                                {
-                                    let loaded = self
-                                        .insert(Operation::load(node.span, scrutinee.clone()))
-                                        .unwrap();
-                                    if expects_true {
-                                        (loaded, body, next)
-                                    } else {
-                                        (loaded, next, body)
-                                    }
-                                }
-                                _ => {
-                                    let pattern = self.lower_case_pattern(c);
-                                    let eq = self
-                                        .insert(Operation::compare_eq(
-                                            node.span,
-                                            scrutinee.clone(),
-                                            pattern,
-                                        ))
-                                        .unwrap();
-                                    (eq, body, next)
-                                }
-                            };
-                        self.terminate(Terminator::cond_br(
-                            node.span,
-                            condition,
-                            then_target,
-                            else_target,
-                        ));
-                    }
-
-                    // Lower the body of the alternative into the destination. A
-                    // `break`/`continue`/`return` arm terminates its own block, so it needs no
-                    // branch to the tail.
-                    self.context.point = InsertionPoint::End(body);
-                    self.lower_value_into(&self.hir_arena[*a], destination.clone());
-                    if !self.current_block_is_terminated() {
-                        self.terminate(Terminator::goto(node.span, blocks.tail));
-                    }
-                }
-
-                // Default case.
-                self.context.point = InsertionPoint::End(blocks.default);
-                self.lower_value_into(&self.hir_arena[n.default], destination.clone());
-                if !self.current_block_is_terminated() {
-                    self.terminate(Terminator::goto(node.span, blocks.tail));
-                }
-
-                // Tail. The value has already been stored into `dest`.
-                self.context.point = InsertionPoint::End(blocks.tail);
-            }
+            K::Case(n) => self.lower_case(node, n, ArmLowering::Into(destination)),
 
             K::Immediate(n) => {
                 let value = self.immediate_constant(node.ty, n.clone());
@@ -2546,11 +2854,23 @@ impl<'a> Emitter<'a> {
                 // completed in fresh storage even when the old value needs no semantic drop: direct
                 // field-by-field aggregate construction could otherwise overwrite an early field
                 // before a later field reads it (for example `a = (a.1, a.0)`). A later MIR
-                // optimization may elide this temporary after proving non-aliasing.
+                // optimization may elide this temporary after proving non-aliasing. A scalar
+                // produced as a value, which has nothing to drop, is already complete and is stored
+                // directly.
                 let place = self.lower_as_place(&self.hir_arena[n.place]);
                 let dropped_ty = self.hir_arena[n.place].ty;
                 let value_span = self.hir_arena[n.value].span;
                 let value_ty = self.hir_arena[n.value].ty;
+                if matches!(n.drop, None | Some(ResolvedLocalDrop::Skip))
+                    && let Some(value) = self.lower_scalar_value(&self.hir_arena[n.value])
+                {
+                    if self.current_block_is_terminated() {
+                        return;
+                    }
+                    self.store(value_span, value, place);
+                    self.store_unit_result(node.span, destination);
+                    return;
+                }
                 let temp = self.alloca_storage(value_span, value_ty);
                 self.lower_value_into(&self.hir_arena[n.value], Some(temp.clone()));
                 if self.current_block_is_terminated() {
@@ -2571,10 +2891,8 @@ impl<'a> Emitter<'a> {
             K::LoadLocal(n) => {
                 // A bare load in value position is a trivial-copy read (non-trivial reads are wrapped
                 // in `CloneValue`/`TakeLocalValue` by HIR): copy the local's place into the dest.
-                if destination.is_some() {
-                    self.assert_statically_sized(node.ty);
-                    let p = self.place_of_local(n.id);
-                    self.memcpy_into_if_needed(node.span, p, destination);
+                if let Some(destination) = destination {
+                    self.copy_local_into(node.span, n.id, node.ty, destination);
                 }
             }
 
@@ -2587,6 +2905,16 @@ impl<'a> Emitter<'a> {
                 if !self.local_declaration(n.id).owns_storage() {
                     let aliasee = self.lower_as_place(&self.hir_arena[n.value]);
                     self.context.locals.insert(n.id, aliasee);
+                    return;
+                }
+                // A deferred local binds the value its initializer produces; one needing its place
+                // already, or initialized otherwise, gets storage.
+                if self.context.deferred_locals.contains(&n.id)
+                    && !self.context.locals.contains_key(&n.id)
+                    && let Some(value) = self.lower_scalar_value(&self.hir_arena[n.value])
+                {
+                    self.context.value_locals.insert(n.id, value);
+                    self.store_unit_result(node.span, destination);
                     return;
                 }
                 let clone = self.local_declaration(n.id).clone;
@@ -2713,9 +3041,15 @@ impl<'a> Emitter<'a> {
                     // local's lexical drop (cleanup is deferred). A move transfers the value
                     // wholesale, so a generic (dynamically-sized) value needs no `Value::clone` —
                     // just a witnessed `move_dynamic`; a statically-sized one uses a plain `move`.
+                    // A local bound to a value stores it.
                     if let Some(destination) = destination {
-                        let source = self.place_of_local(n.id);
-                        self.move_value_into(node.span, source, destination, node.ty);
+                        if let Some(value) = self.context.value_locals.get(&n.id) {
+                            let value = value.clone();
+                            self.store(node.span, value, destination);
+                        } else {
+                            let source = self.place_of_local(n.id);
+                            self.move_value_into(node.span, source, destination, node.ty);
+                        }
                     }
                 }
                 ResolvedTakeLocalValueMode::CloneBorrowed(clone) => {
@@ -2726,9 +3060,7 @@ impl<'a> Emitter<'a> {
                     if let Some(destination) = destination {
                         match clone {
                             ResolvedLocalClone::TrivialCopy => {
-                                self.assert_statically_sized(node.ty);
-                                let source = self.place_of_local(n.id);
-                                self.memcpy_into_if_needed(node.span, source, Some(destination));
+                                self.copy_local_into(node.span, n.id, node.ty, destination);
                             }
                             ResolvedLocalClone::Static(f) => {
                                 let f = self.function_value(f);
@@ -2760,22 +3092,8 @@ impl<'a> Emitter<'a> {
                 if n.ty.returns_place() {
                     return self.lower_place_call_into(node, destination);
                 }
-                let f = self.function_value(n.function);
-                let mut arguments: Vec<mir::Value> = vec![];
-                for x in &n.extra_arguments {
-                    arguments.push(self.lower_extra_argument(&self.hir_arena[*x]));
-                }
-                arguments.extend(self.lower_arguments(&n.arguments, &n.ty));
-
                 assert_eq!(node.ty, n.ty.ret());
-                self.emit_call_into(
-                    node,
-                    f,
-                    arguments,
-                    &n.ty,
-                    destination,
-                    Self::instantiation_of(&n.inst_data),
-                );
+                self.lower_call_into(node, destination);
             }
 
             K::GetDictionary(d) => {
@@ -2828,12 +3146,7 @@ impl<'a> Emitter<'a> {
                 if n.ty.returns_place() {
                     return self.lower_place_call_into(node, destination);
                 }
-                // Resolve the applied member out of the subscript evidence; the member function
-                // value carries the subscript's captured hidden evidence, so the call passes only
-                // the visible arguments (plus the result out-pointer).
-                let f = self.lower_subscript_member(node, n);
-                let arguments = self.lower_arguments(&n.arguments, &n.ty);
-                self.emit_call_into(node, f, arguments, &n.ty, destination, None);
+                self.lower_call_into(node, destination);
             }
 
             K::GetFunction(n) => {
@@ -2931,13 +3244,7 @@ impl<'a> Emitter<'a> {
                 if n.ty.returns_place() {
                     return self.lower_place_call_into(node, destination);
                 }
-                // The callee is lowered as a *place*: a function value (in particular a closure) is
-                // borrowed in place and read by reference at the call, so it survives repeated calls
-                // (`f() + f()`) and is dropped once by its scope cleanup — mirroring the HIR
-                // interpreter's `eval_apply`, which calls through a borrow of the function value.
-                let f = self.lower_as_place(&self.hir_arena[n.function]);
-                let arguments = self.lower_arguments(&n.arguments, &n.ty);
-                self.emit_call_into(node, f, arguments, &n.ty, destination, None);
+                self.lower_call_into(node, destination);
             }
 
             K::Project(_) => {
@@ -3110,10 +3417,7 @@ impl<'a> Emitter<'a> {
                 if n.ty.returns_place() {
                     return self.lower_place_call_into(node, destination);
                 }
-                // Project the function out of the dictionary, load it, then call it into the
-                // destination (or a throwaway result for a discarded call).
-                let (function, arguments) = self.lower_dictionary_function_target(node, n);
-                self.emit_call_into(node, function, arguments, &n.ty, destination, None);
+                self.lower_call_into(node, destination);
             }
 
             K::CheckCallDepth => self.emit_runtime_check(node.span, true),
@@ -3163,7 +3467,11 @@ impl<'a> Emitter<'a> {
                 // ignoring the ambient `destination`. Mirrors the interpreter's `eval_return`:
                 // a place-returning function returns the `*T` place pointer; otherwise the value.
                 let operand = &self.hir_arena[*n];
-                let dest = self.context.return_destination.clone();
+                if self.context.value_result.is_some() {
+                    self.lower_return(operand);
+                    return;
+                }
+                let dest = self.return_destination();
                 if self.context.returns_place {
                     let place = self.lower_as_place(operand);
                     self.store(node.span, place, dest);
@@ -3174,7 +3482,7 @@ impl<'a> Emitter<'a> {
                 // returning. The result has already been moved into the out-pointer, so a returned
                 // local reads as uninitialized and its guarded drop is skipped.
                 self.emit_return_drops(node.span);
-                self.terminate(Terminator::ret(node.span));
+                self.terminate_return(node.span);
             }
 
             K::Yield(place_node) => {
@@ -3265,11 +3573,20 @@ impl<'a> Emitter<'a> {
             return block;
         }
         let block = self.context.function.add_block();
-        self.context
-            .function
-            .set_terminator(block, Terminator::propagate_error(span));
+        let exit = self.failure_exit(span);
+        self.context.function.set_terminator(block, exit);
         self.context.propagate_error_block = Some(block);
         block
+    }
+
+    /// How a source failure leaves the function once its cleanup ran: propagated to the caller, or,
+    /// where the function's type says it cannot fail, as an effect violation poisoning execution.
+    fn failure_exit(&self, span: Location) -> Terminator {
+        if self.context.cannot_fail {
+            Terminator::effect_violation(span)
+        } else {
+            Terminator::propagate_error(span)
+        }
     }
 
     fn failure_during_cleanup_block(&mut self, span: Location) -> BlockId {
@@ -3329,6 +3646,16 @@ struct InsertionContext {
     /// (each passed by pointer) and any variables declared within the function.
     locals: FxHashMap<LocalDeclId, mir::Value>,
 
+    /// The values of the locals bound to a value, which are never written: the value parameters
+    /// (concrete scalar `Let` parameters), which arrive as values, and the deferred locals whose
+    /// initializer produced a value. Such a local is bound in `locals` once the body needs its
+    /// place (see `place_of_local`).
+    value_locals: FxHashMap<LocalDeclId, mir::Value>,
+
+    /// The immutable owned scalar locals given no storage up front: their initialization binds them
+    /// to the value it produces, or, if it produces none, gives them storage.
+    deferred_locals: FxHashSet<LocalDeclId>,
+
     /// The MIR values bound to extra parameters of the function.
     extra_parameters: FxHashMap<ExtraParameterId, mir::Value>,
 
@@ -3352,8 +3679,13 @@ struct InsertionContext {
     /// The lexically enclosing loops, keyed by `LoopId`, used to lower `break`/`continue`.
     loops: FxHashMap<LoopId, LoopFrame>,
 
-    /// The return out-pointer (the last parameter) into which the function writes its result.
-    return_destination: mir::Value,
+    /// The return out-pointer (the last parameter) into which the function writes its result, or
+    /// the local a `return` reads when the function returns its result as a value, until
+    /// `Emitter::return_destination` allocates it.
+    return_destination: Option<mir::Value>,
+
+    /// The result type of a function returning its result as a value.
+    value_result: Option<Type>,
 
     /// Whether the lowered function itself returns a place (`SubscriptResultConvention::AddressorPlace`).
     /// When set, `return <expr>` lowers `<expr>` as a place and stores that pointer into the
@@ -3376,6 +3708,10 @@ struct InsertionContext {
 
     /// Shared terminal source-error exit, allocated lazily.
     propagate_error_block: Option<BlockId>,
+
+    /// Whether the function's type says it cannot fail (see [`EffType::cannot_fail`]), so a source failure
+    /// leaves it as an effect violation.
+    cannot_fail: bool,
 
     /// Shared terminal double-failure exit, allocated lazily.
     failure_during_cleanup_block: Option<BlockId>,

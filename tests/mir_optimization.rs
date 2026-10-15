@@ -51,8 +51,8 @@ fn constant_arithmetic_folds_away() {
         .expect("the corpus defines main");
     assert_eq!(calls(main), 0, "`let x = 2 + 3; x * 7` must fold:\n{main}");
     assert!(
-        main.contains("to %p0"),
-        "the folded result must reach the return place:\n{main}"
+        main.contains("= 35") && main.contains("ret @c"),
+        "the folded result must be returned:\n{main}"
     );
 }
 

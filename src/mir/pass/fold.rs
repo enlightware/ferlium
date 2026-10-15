@@ -40,6 +40,7 @@ use super::{
     cost::{Growth, GrowthBase},
     dataflow::{self, Analysis, Const, Fact, PlaceId, Root, State},
     known_callee::{KnownCallee, KnownCallees},
+    scalar_arguments,
     site::OperationIndex,
 };
 use crate::{
@@ -121,9 +122,16 @@ struct Fold {
     block: BlockId,
     /// Index of the operation within its block.
     index: OperationIndex,
-    /// The place the folded call would have written its result into.
-    destination: mir::Value,
+    destination: FoldDestination,
     result: CallRewrite,
+}
+
+/// Where a folded call would have left its result.
+enum FoldDestination {
+    /// The place the call would have written its result into.
+    Place(mir::Value),
+    /// The register the call would have defined.
+    Register(ValueId),
 }
 
 /// A source-fallible call the pass decided to replace, in its block's `Invoke` terminator.
@@ -292,7 +300,8 @@ impl<'m, 's> FoldResources<'m, 's> {
 }
 
 struct RefusalContext {
-    /// The `alloca`s a call writes its result into. See [`call_destinations`].
+    /// The `alloca`s a call writes its result into, and the registers it defines. See
+    /// [`call_destinations`].
     call_destinations: FxHashSet<ValueId>,
     /// The place each `load` read, so that a value argument is explained by its place.
     loaded_from: FxHashMap<ValueId, mir::Value>,
@@ -364,21 +373,28 @@ pub(crate) fn fold_function(
     apply_array_elements(&mut edit, plan.arrays, env);
     // A reflexive comparison expands one call into `variant Equal; store`, so apply sites in
     // reverse order and splice without invalidating a later index planned in the same block.
+    let mut renamed = FxHashMap::default();
     for fold in plan.calls.into_iter().rev() {
         let index = fold.index.as_index();
         let span = edit.block(fold.block).operations[index].span;
-        let replacements = materialize_call_rewrite(
-            &mut edit,
-            span,
-            fold.result,
-            fold.destination,
-            env,
-            string_materializer,
-        );
+        let replacements = match fold.destination {
+            FoldDestination::Place(destination) => materialize_call_rewrite(
+                &mut edit,
+                span,
+                fold.result,
+                destination,
+                env,
+                string_materializer,
+            ),
+            FoldDestination::Register(register) => {
+                define_call_rewrite(&mut edit, span, fold.result, register, &mut renamed, env)
+            }
+        };
         edit.block_mut(fold.block)
             .operations
             .splice(index..=index, replacements);
     }
+    rename_registers(&mut edit, &renamed);
     for invoke in plan.invokes {
         let span = edit.block(invoke.block).terminator.span;
         // The call becomes an ordinary store at the end of the block, and the terminator loses its
@@ -413,8 +429,13 @@ pub(crate) fn fold_function(
         // Retargetable declarations have identical instantiation and ownership conventions.
         // Preserve the original metadata while replacing the callee's effect type.
         *call_ty = b(ty);
+        let span = block.terminator.span;
+        block.terminator = Terminator::goto(span, normal);
+        // An infallible call carries a scalar result as a value.
+        let store = scalar_arguments::return_value_from_call(&mut edit, &mut operation);
+        let block = edit.block_mut(block_id);
         block.operations.push(operation);
-        block.terminator = Terminator::goto(block.terminator.span, normal);
+        block.operations.extend(store);
     }
     for (block, target) in plan.branches {
         let span = edit.block(block).terminator.span;
@@ -472,6 +493,68 @@ fn apply_array_elements(edit: &mut FunctionEdit, arrays: Vec<ArrayElements>, env
                 mir::Value::Constant(constant);
         }
     }
+}
+
+/// Turns either full evaluation or a partial known-call identity into MIR operations defining the
+/// call's result `register`, or into an entry of `renamed`, when the register is to be replaced by
+/// a constant or by a value already available.
+fn define_call_rewrite(
+    edit: &mut FunctionEdit,
+    span: DebugLocation,
+    rewrite: CallRewrite,
+    register: ValueId,
+    renamed: &mut FxHashMap<ValueId, mir::Value>,
+    env: ModuleEnv<'_>,
+) -> Vec<Operation> {
+    let defined = |mut operation: Operation| {
+        operation.assign_result_id(Some(register));
+        vec![operation]
+    };
+    match rewrite {
+        CallRewrite::Reification(Reification::Constant(constant)) => {
+            let id = edit.add_constant(constant.ty, constant.representation, &env);
+            renamed.insert(register, mir::Value::Constant(id));
+            Vec::new()
+        }
+        CallRewrite::Store(source) => {
+            renamed.insert(register, source);
+            Vec::new()
+        }
+        CallRewrite::Copy(source) => defined(Operation::load(span, source)),
+        CallRewrite::ArithmeticNegation { source, callee, ty } => defined(
+            Operation::call(span, mir::Value::Function(callee), [source], ty).with_value_result(),
+        ),
+        CallRewrite::Negate(source) => defined(Operation::compare_eq(
+            span,
+            source,
+            mir::Value::Pattern(b(LiteralValue::new_native(false))),
+        )),
+        CallRewrite::Reification(_) | CallRewrite::EqualOrdering => {
+            unreachable!("a scalar result reifies as a constant")
+        }
+    }
+}
+
+/// Replaces each use of a register `renamed` maps by what it maps to, following chains: a folded
+/// call's result may be the result of another.
+fn rename_registers(edit: &mut FunctionEdit, renamed: &FxHashMap<ValueId, mir::Value>) {
+    if renamed.is_empty() {
+        return;
+    }
+    let resolve = |value: &mir::Value| {
+        let mut value = value.clone();
+        while let mir::Value::Register(id) = &value
+            && let Some(next) = renamed.get(id)
+        {
+            value = next.clone();
+        }
+        value
+    };
+    edit.visit_operands_mut(|operand| {
+        if matches!(operand, mir::Value::Register(id) if renamed.contains_key(id)) {
+            *operand = resolve(operand);
+        }
+    });
 }
 
 /// Turns either full evaluation or a partial known-call identity into MIR operations.
@@ -792,8 +875,9 @@ fn may_have_fold_consumer(func: &Function, devirtualize: bool) -> bool {
                 TerminatorKind::CondBr { .. } | TerminatorKind::SwitchVariant { .. } => true,
                 TerminatorKind::Goto { .. }
                 | TerminatorKind::Yield { .. }
-                | TerminatorKind::Return
+                | TerminatorKind::Return { .. }
                 | TerminatorKind::PropagateError
+                | TerminatorKind::EffectViolation
                 | TerminatorKind::FailureDuringCleanup
                 | TerminatorKind::InvariantFailure { .. } => false,
             }
@@ -855,7 +939,9 @@ fn plan_folds_with(
             let double_negation = negations.double_negation(operation, &state, &context);
             negations.step(operation, &state, &context);
             if let OperationKind::Call { ty, .. } = &operation.kind
-                && let Some(destination) = dataflow::call_result_operand(&operation.operands, ty)
+                && let Some(destination) = dataflow::call_result_operand(operation)
+                    .map(|place| FoldDestination::Place(place.clone()))
+                    .or_else(|| operation.result_id().map(FoldDestination::Register))
                 && let Some(result) = double_negation
                     .or_else(|| partial_call_outcome(operation, ty, &state, &context))
                     .filter(|rewrite| {
@@ -871,14 +957,26 @@ fn plan_folds_with(
                     .get_or_insert_with(|| Growth::new(growth_base, func))
                     .reserve(block, 1, call_rewrite_operation_count(&result))
                 {
-                    let destination = destination.clone();
                     // Known results and newly exposed arithmetic negations can enable another fold.
                     plan.warrants_another_round |=
                         warrants_another_fold_round(&result, &state, analysis);
-                    if let Some(place) = analysis.tracked_place_of(&destination) {
-                        let fact =
-                            fact_for_call_rewrite(&result, &state, analysis, func.constants());
-                        analysis.set_place_known(&mut state, place, fact);
+                    match &destination {
+                        FoldDestination::Place(place) => {
+                            if let Some(place) = analysis.tracked_place_of(place) {
+                                let fact = fact_for_call_rewrite(
+                                    &result,
+                                    &state,
+                                    analysis,
+                                    func.constants(),
+                                );
+                                analysis.set_place_known(&mut state, place, fact);
+                            }
+                        }
+                        FoldDestination::Register(register) => {
+                            let fact =
+                                fact_for_call_rewrite(&result, &state, analysis, func.constants());
+                            analysis.set_register_known(&mut state, *register, fact);
+                        }
                     }
                     plan.calls.push(Fold {
                         block,
@@ -932,8 +1030,7 @@ fn plan_folds_with(
             } => {
                 if let OperationKind::Call { ty, .. } = &operation.kind
                     && let Some(result) = fold_outcome(operation, ty, &state, &context, refusals)
-                    && let Some(destination) =
-                        dataflow::call_result_operand(&operation.operands, ty)
+                    && let Some(destination) = dataflow::call_result_operand(operation)
                 {
                     if growth
                         .get_or_insert_with(|| Growth::new(growth_base, func))
@@ -995,8 +1092,9 @@ fn plan_folds_with(
             }
             TerminatorKind::Goto { .. }
             | TerminatorKind::Yield { .. }
-            | TerminatorKind::Return
+            | TerminatorKind::Return { .. }
             | TerminatorKind::PropagateError
+            | TerminatorKind::EffectViolation
             | TerminatorKind::FailureDuringCleanup
             | TerminatorKind::InvariantFailure { .. } => {}
         }
@@ -1079,14 +1177,14 @@ impl ArithmeticNegations {
         operation: &'a Operation,
         state: &State,
         context: &FoldContext<'_>,
-    ) -> Option<(KnownCallee, &'a mir::Value, &'a mir::Value)> {
+    ) -> Option<(KnownCallee, &'a mir::Value)> {
         let OperationKind::Call { ty, .. } = &operation.kind else {
             return None;
         };
         if !ty.effects().is_empty() || ty.result_convention != CallResultConvention::Value {
             return None;
         }
-        let call = dataflow::call_operands(&operation.operands, ty)?;
+        let call = dataflow::call_operands(operation)?;
         let [(source, ArgConvention::Let)] = call.arguments.as_slice() else {
             return None;
         };
@@ -1098,11 +1196,7 @@ impl ArithmeticNegations {
             },
         };
         let known = context.known_calls.resolve(callee)?;
-        matches!(known, KnownCallee::IntNeg | KnownCallee::FloatNeg).then_some((
-            known,
-            *source,
-            dataflow::call_result_operand(&operation.operands, ty)?,
-        ))
+        matches!(known, KnownCallee::IntNeg | KnownCallee::FloatNeg).then_some((known, *source))
     }
 
     fn double_negation(
@@ -1111,7 +1205,7 @@ impl ArithmeticNegations {
         state: &State,
         context: &FoldContext<'_>,
     ) -> Option<CallRewrite> {
-        let (kind, source, _) = Self::call(operation, state, context)?;
+        let (kind, source) = Self::call(operation, state, context)?;
         let first = match source {
             mir::Value::Register(id) if self.values.contains_key(id) => &self.values[id],
             _ => self
@@ -1156,7 +1250,7 @@ impl ArithmeticNegations {
         let analysis = &context.analysis;
         match &operation.kind {
             OperationKind::Call { ty, .. } => {
-                let Some(call) = dataflow::call_operands(&operation.operands, ty) else {
+                let Some(call) = dataflow::call_operands(operation) else {
                     self.clear();
                     return;
                 };
@@ -1170,13 +1264,29 @@ impl ArithmeticNegations {
                     self.clear();
                     return;
                 }
-                let Some(destination) = dataflow::call_result_operand(&operation.operands, ty)
-                else {
+                // A call writes its result slot, or defines its result register, which nothing else
+                // names yet.
+                if let Some(result) = operation.result_id() {
+                    if let Some((kind, source)) = Self::call(operation, state, context)
+                        && let Some(source_place) = Self::source_place(source, context)
+                    {
+                        self.values.insert(
+                            result,
+                            ArithmeticNegation {
+                                kind,
+                                source: source.clone(),
+                                source_place,
+                            },
+                        );
+                    }
+                    return;
+                }
+                let Some(destination) = dataflow::call_result_operand(operation) else {
                     self.clear();
                     return;
                 };
                 self.forget_write(destination, analysis);
-                if let Some((kind, source, destination)) = Self::call(operation, state, context)
+                if let Some((kind, source)) = Self::call(operation, state, context)
                     && let Some(source_place) = Self::source_place(source, context)
                     && let Some(place) = analysis.tracked_place_of(destination)
                     && source_place.is_none_or(|source_place| {
@@ -1221,7 +1331,22 @@ impl ArithmeticNegations {
                     self.values.insert(id, origin.clone());
                 }
             }
-            OperationKind::Store => self.forget_write(&operation.operands[1], analysis),
+            OperationKind::Store => {
+                // Storing a negation's result register gives the slot that negation.
+                let origin = match &operation.operands[0] {
+                    mir::Value::Register(id) => self.values.get(id).cloned(),
+                    _ => None,
+                };
+                self.forget_write(&operation.operands[1], analysis);
+                if let Some(origin) = origin
+                    && let Some(place) = analysis.tracked_place_of(&operation.operands[1])
+                    && origin.source_place.is_none_or(|source_place| {
+                        analysis.root_of_place(place) != analysis.root_of_place(source_place)
+                    })
+                {
+                    self.places.insert(place, origin);
+                }
+            }
             OperationKind::Alloca { .. }
             | OperationKind::DictEntry { .. }
             | OperationKind::Subfield { .. }
@@ -1237,7 +1362,7 @@ fn proven_nonzero_arithmetic(
     state: &State,
     context: &FoldContext<'_>,
 ) -> Option<(FunctionId, CallImplType)> {
-    let OperationKind::Call { ty, .. } = &operation.kind else {
+    let OperationKind::Call { .. } = &operation.kind else {
         return None;
     };
     let mir::Value::Function(callee) = operation.operands.first()? else {
@@ -1245,7 +1370,7 @@ fn proven_nonzero_arithmetic(
     };
     let known = context.known_calls.resolve(*callee)?;
     let (replacement, replacement_ty) = context.known_calls.callees.nonzero_arithmetic(known)?;
-    let call = dataflow::call_operands(&operation.operands, ty)?;
+    let call = dataflow::call_operands(operation)?;
     // These concrete primitives have no hidden evidence or ownership transfer.
     if !call.extras.is_empty() || call.arguments.len() != 2 {
         return None;
@@ -1287,7 +1412,7 @@ fn partial_call_outcome(
     if !ty.effects().is_empty() || ty.result_convention != CallResultConvention::Value {
         return None;
     }
-    let call = dataflow::call_operands(&operation.operands, ty)?;
+    let call = dataflow::call_operands(operation)?;
     if call
         .arguments
         .iter()
@@ -1586,7 +1711,7 @@ fn why_argument_unknown(
         return why_argument_unknown(source, state, analysis, refusal);
     }
     let Some(place) = analysis.place_of(operand) else {
-        return why_operand_names_no_place(operand, state, analysis);
+        return why_operand_names_no_place(operand, state, analysis, refusal);
     };
     let root = analysis.root_of_place(place);
     if analysis.is_escaped(root) {
@@ -1616,11 +1741,16 @@ fn why_operand_names_no_place(
     operand: &mir::Value,
     state: &State,
     analysis: &Analysis,
+    refusal: &RefusalContext,
 ) -> NotFoldable {
     let mir::Value::Register(id) = operand else {
         return NotFoldable::ArgumentStorageNotModelled;
     };
     match state.register(*id) {
+        // A call's result register is unknown because that call did not fold.
+        Some(Fact::Unknown) if refusal.call_destinations.contains(id) => {
+            NotFoldable::ArgumentFromCall
+        }
         // Bound, but to a value rather than a slot. Folding reads arguments only through places,
         // so a *known* value here is a gap rather than a missing analysis — worth separating,
         // because the two have completely different costs to close.
@@ -1633,7 +1763,8 @@ fn why_operand_names_no_place(
     }
 }
 
-/// The `alloca`s that some call in this function writes its result into.
+/// The `alloca`s that some call in this function writes its result into, and the registers that
+/// some call defines as its result.
 ///
 /// Used to separate "this argument is unknown because the call producing it did not fold" — which
 /// needs no new machinery, only the other refusal lifted — from "unknown because the analysis does
@@ -1649,11 +1780,14 @@ fn why_operand_names_no_place(
 fn call_destinations(func: &Function) -> FxHashSet<ValueId> {
     let mut destinations = FxHashSet::default();
     let mut record = |operation: &Operation| {
-        if let OperationKind::Call { ty, .. } = &operation.kind
-            && let Some(mir::Value::Register(id)) =
-                dataflow::call_result_operand(&operation.operands, ty)
+        if let OperationKind::Call { .. } = &operation.kind
+            && let Some(id) = match dataflow::call_result_operand(operation) {
+                Some(mir::Value::Register(id)) => Some(*id),
+                Some(_) => None,
+                None => operation.result_id(),
+            }
         {
-            destinations.insert(*id);
+            destinations.insert(id);
         }
     };
     for block in func.blocks() {
@@ -1758,7 +1892,7 @@ fn try_fold_call(
     context: &FoldContext<'_>,
 ) -> Result<Reification, NotFoldable> {
     let evaluator = context.evaluator.as_ref().ok_or(NotFoldable::NoBody)?;
-    let Some(call) = dataflow::call_operands(&operation.operands, ty) else {
+    let Some(call) = dataflow::call_operands(operation) else {
         return Err(NotFoldable::UnsupportedConvention);
     };
     // A callee is either named directly, or read from a place the analysis knows holds a function
@@ -1952,8 +2086,12 @@ mod tests {
     #[test]
     fn known_array_element_slots_become_constants() {
         let body = optimized_main("fn main(n: int) -> [int] { [1, n, 3] }");
+        let (_, operands) = body
+            .split_once("build_array<int> [")
+            .expect("the array is still built");
+        let operands: Vec<_> = operands.split(']').next().unwrap().split(", ").collect();
         assert!(
-            body.contains("build_array<int> [@c0, %r0, @c1] to %p1"),
+            matches!(operands[..], ["@c0", slot, "@c1"] if slot.starts_with("%r")),
             "the known elements must be named directly:\n{body}"
         );
         assert_eq!(
@@ -2231,15 +2369,15 @@ mod tests {
 
     /// The gate example: constant arithmetic collapses into a single store into `@ret`.
     #[test]
-    fn constant_arithmetic_folds_to_a_store() {
+    fn constant_arithmetic_folds_to_a_returned_constant() {
         let main = optimized_main("fn main() -> int { let x = 2 + 3; x * 7 }");
         assert!(
             !main.contains("call "),
             "every call of a constant expression must fold:\n{main}"
         );
         assert!(
-            main.contains("store @c") && main.contains("to %p0"),
-            "the result must be stored into the return place:\n{main}"
+            main.contains("= 35") && main.contains("ret @c"),
+            "the result must be returned:\n{main}"
         );
     }
 
@@ -2405,7 +2543,7 @@ mod tests {
             !body.contains("from_int"),
             "converting an int to an int must become a copy:\n{body}"
         );
-        assert!(body.contains("store %p0 to %p1"), "{body}");
+        assert!(body.contains("ret %p0"), "{body}");
     }
 
     /// `not` has no MIR operation of its own, but `comp_eq value false` is exactly it, so naming
@@ -2430,7 +2568,7 @@ mod tests {
         let main = optimized_main("fn main() -> bool { not (from_int(1) == 1) }");
         assert!(!main.contains("comp_eq"), "{main}");
         assert!(
-            main.contains("store @c") && main.contains("to %p0"),
+            main.contains("ret @c"),
             "the whole expression must fold to a constant:\n{main}"
         );
     }
@@ -2513,7 +2651,7 @@ mod tests {
                     let read = body.find(&format!("{negated}: {ty} = load")).expect(&body);
                     assert!(read < write, "{body}");
                 } else {
-                    assert!(body.contains("store @c"), "{body}");
+                    assert!(body.contains("ret @c"), "{body}");
                 }
             }
         }

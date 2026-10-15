@@ -1,16 +1,18 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-//! Scalar call arguments.
+//! Scalar call arguments and results.
 //!
 //! The ABI passes a read-only argument of a concrete scalar type by value, and semantic MIR does
 //! too (see [`accepts_value_argument`]): HIR emission reads it where the argument is evaluated, and
 //! a substitution that makes an argument such a scalar reads it with [`read_before`]. The read is
 //! an ordinary `load` of the caller, which the caller's passes see: LICM hoists one that a loop does
-//! not change, where a read inside a call was invisible to it.
+//! not change, where a read inside a call was invisible to it. A non-fallible scalar result is a
+//! register the call defines, likewise (see [`accepts_value_result`]).
 //!
 //! Physical MIR passes such an argument as a place where the callee's entry takes it through a
-//! pointer ([`spill_value_arguments`]).
+//! pointer ([`spill_value_arguments`]), and such a result as a place where the entry returns it
+//! through one ([`place_value_results`]).
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -18,7 +20,7 @@ use crate::{
     mir::{
         self, Function, Operation, OperationKind, ValueId,
         edit::FunctionEdit,
-        operation::{OperationResult, accepts_value_argument},
+        operation::{OperationResult, accepts_value_argument, accepts_value_result},
         role::{MirType, ValueRole, ValueRoles},
         terminator::TerminatorKind,
     },
@@ -60,12 +62,10 @@ pub(crate) fn spill_value_arguments(
     }
     let roles = ValueRoles::derive(func);
     let spills_of = |operation: &Operation| -> Vec<usize> {
-        let OperationKind::Call { ty, metadata } = &operation.kind else {
+        let OperationKind::Call { ty, metadata, .. } = &operation.kind else {
             return Vec::new();
         };
-        let visible_start = operation.operands.len()
-            - ty.fn_ty.args.len()
-            - usize::from(ty.result_convention.has_result_place());
+        let visible_start = operation.call_visible_start();
         (0..ty.fn_ty.args.len())
             .filter(|&offset| {
                 accepts_value_argument(ty, metadata.as_deref(), offset)
@@ -152,6 +152,100 @@ pub(crate) fn spill_value_arguments(
     Some(edit.finish_unverified())
 }
 
+/// Makes a call writing its result through a place define it as a register instead, if its type
+/// now carries the result as a value (see [`accepts_value_result`]): substituting a generic result
+/// or effect, or making a fallible call infallible, can make it one. Returns the store of the
+/// register into the former result place, which follows the call.
+pub(crate) fn return_value_from_call(
+    edit: &mut FunctionEdit,
+    call: &mut Operation,
+) -> Option<Operation> {
+    let OperationKind::Call {
+        ty, value_result, ..
+    } = &mut call.kind
+    else {
+        return None;
+    };
+    if *value_result || !accepts_value_result(ty) {
+        return None;
+    }
+    *value_result = true;
+    let mut operands = call.operands.to_vec();
+    let place = operands
+        .pop()
+        .expect("a call returning through a place has one");
+    call.operands = operands.into_boxed_slice();
+    let value = edit
+        .assign_new_result(call)
+        .expect("a value call defines its result");
+    Some(Operation::store(call.span, value, place))
+}
+
+/// Passes a result place to each `call` defining its result register where `returns_value` says its
+/// callee's entry returns that result through a pointer. The place is a frame slot of its own in the
+/// entry block, which a `load` after the call reads into the register. `None` if no call needs one.
+pub(crate) fn place_value_results(
+    func: &Function,
+    returns_value: impl Fn(&Operation) -> bool,
+) -> Option<Function> {
+    let needs_place = |operation: &Operation| {
+        matches!(
+            operation.kind,
+            OperationKind::Call {
+                value_result: true,
+                ..
+            }
+        ) && !returns_value(operation)
+    };
+    if !func
+        .blocks()
+        .any(|block| func.block(block).operations().iter().any(&needs_place))
+    {
+        return None;
+    }
+    let mut edit = FunctionEdit::new(func.clone());
+    let mut slots = Vec::new();
+    for block in edit.blocks().collect::<Vec<_>>() {
+        let operations = std::mem::take(&mut edit.block_mut(block).operations);
+        let mut rewritten = Vec::with_capacity(operations.len());
+        for operation in operations {
+            if !needs_place(&operation) {
+                rewritten.push(operation);
+                continue;
+            }
+            let OperationKind::Call { ty, metadata, .. } = &operation.kind else {
+                unreachable!("only a call defines a value result");
+            };
+            let result = operation
+                .result_id()
+                .expect("a value call defines its result");
+            let mut alloca = Operation::alloca(operation.span, ty.fn_ty.ret);
+            let slot = edit
+                .assign_new_result(&mut alloca)
+                .expect("an alloca defines its place");
+            slots.push(alloca);
+            let mut operands = operation.operands.to_vec();
+            operands.push(slot.clone());
+            rewritten.push(Operation::from_parts(
+                operation.span,
+                operands.into_boxed_slice(),
+                OperationKind::Call {
+                    ty: ty.clone(),
+                    metadata: metadata.clone(),
+                    value_result: false,
+                },
+            ));
+            let mut load = Operation::load(operation.span, slot);
+            load.assign_result_id(Some(result));
+            rewritten.push(load);
+        }
+        edit.block_mut(block).operations = rewritten;
+    }
+    let entry = edit.entry();
+    edit.block_mut(entry).operations.splice(0..0, slots);
+    Some(edit.finish_unverified())
+}
+
 /// Whether some call may pass a scalar argument as a value: a constant, or a register whose
 /// definition may yield a value, such as a `load`, a comparison, or a load's uses forwarded to the
 /// value stored. A syntactic filter, so that a body without one, such as raw MIR, derives no roles;
@@ -179,12 +273,10 @@ fn may_pass_values(func: &Function) -> bool {
             _ => None,
         };
         block.operations().iter().chain(invoked).any(|operation| {
-            let OperationKind::Call { ty, metadata } = &operation.kind else {
+            let OperationKind::Call { ty, metadata, .. } = &operation.kind else {
                 return false;
             };
-            let visible_start = operation.operands.len()
-                - ty.fn_ty.args.len()
-                - usize::from(ty.result_convention.has_result_place());
+            let visible_start = operation.call_visible_start();
             (0..ty.fn_ty.args.len()).any(|offset| {
                 accepts_value_argument(ty, metadata.as_deref(), offset)
                     && match &operation.operands[visible_start + offset] {
@@ -232,9 +324,7 @@ fn spill_before(
     let OperationKind::Call { ty, .. } = &call.kind else {
         return;
     };
-    let visible_start = call.operands.len()
-        - ty.fn_ty.args.len()
-        - usize::from(ty.result_convention.has_result_place());
+    let visible_start = call.call_visible_start();
     for index in stored {
         let mut alloca = Operation::alloca(call.span, ty.fn_ty.args[index - visible_start].ty);
         let slot = edit

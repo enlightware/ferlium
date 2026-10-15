@@ -104,7 +104,7 @@ fn is_boolean_tail(func: &Function, block: BlockId) -> bool {
     let body = func.block(block);
     if !matches!(
         body.terminator().kind,
-        TerminatorKind::Goto { .. } | TerminatorKind::Return
+        TerminatorKind::Goto { .. } | TerminatorKind::Return { .. }
     ) || body.operations().len() > OUTCOME_BOOLEAN_OPERATIONS
     {
         return false;

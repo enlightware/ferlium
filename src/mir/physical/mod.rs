@@ -674,12 +674,17 @@ fn expand_physical_mir(
             let body = drop_elaboration::elaborate(body, semantic, env, |variant, payload| {
                 lowerer.intern_variant_payload_release(variant, payload)
             });
-            // Physical MIR keeps a scalar value only where the callee's entry takes it directly.
+            // Physical MIR keeps a scalar value only where the callee's entry takes or returns it
+            // directly.
             let transports = Transports::of(&body, semantic, env);
             let body = scalar_arguments::spill_value_arguments(&body, |call, offset| {
                 transports.takes_value(call, offset)
             })
             .unwrap_or(body);
+            let transports = Transports::of(&body, semantic, env);
+            let body =
+                scalar_arguments::place_value_results(&body, |call| transports.returns_value(call))
+                    .unwrap_or(body);
             let body = lowerer.lower_body(function, original, body)?;
             *entry = Some(
                 if lowerer.known.resolve(original, |_| None) == Some(KnownCallee::BlackBox) {
@@ -1019,6 +1024,33 @@ impl<'a> PhysicalLowerer<'a> {
         body: Function,
     ) -> Result<Function, BackendReadinessError> {
         let mut edit = FunctionEdit::new(body);
+        // A concrete scalar result is returned as a value: the barrier observes it through a slot.
+        if let Some(result_ty) = edit.value_result() {
+            let span = edit.block(edit.entry()).terminator.span;
+            let mut alloca = Operation::alloca(span, result_ty);
+            let slot = edit
+                .assign_new_result(&mut alloca)
+                .expect("an alloca defines its place");
+            let entry = edit.entry();
+            edit.block_mut(entry).operations.insert(0, alloca);
+            for block in edit.blocks().collect::<Vec<_>>() {
+                let terminator = edit.block(block).terminator.clone();
+                let TerminatorKind::Return { value: Some(value) } = terminator.kind else {
+                    continue;
+                };
+                let span = terminator.span;
+                edit.append_operation(block, Operation::store(span, value, slot.clone()));
+                edit.append_operation(
+                    block,
+                    Operation::black_box(span, result_ty, slot.clone(), None),
+                );
+                let returned = edit
+                    .append_operation(block, Operation::load(span, slot.clone()))
+                    .expect("a load defines its value");
+                edit.block_mut(block).terminator = Terminator::ret_value(span, returned);
+            }
+            return Ok(edit.finish_unverified());
+        }
         let Some((result_index, result)) = edit
             .parameters()
             .iter()
@@ -1058,7 +1090,12 @@ impl<'a> PhysicalLowerer<'a> {
         };
         let returns = edit
             .blocks()
-            .filter(|block| matches!(edit.block(*block).terminator.kind, TerminatorKind::Return))
+            .filter(|block| {
+                matches!(
+                    edit.block(*block).terminator.kind,
+                    TerminatorKind::Return { .. }
+                )
+            })
             .collect::<Vec<_>>();
         for block in returns {
             let span = edit.block(block).terminator.span;
@@ -1687,7 +1724,12 @@ impl<'a> PhysicalLowerer<'a> {
         let helper = self.intern_variant_payload_release(variant_ty, payload_ty);
         let exits = edit
             .blocks()
-            .filter(|block| matches!(edit.block(*block).terminator.kind, TerminatorKind::Return))
+            .filter(|block| {
+                matches!(
+                    edit.block(*block).terminator.kind,
+                    TerminatorKind::Return { .. }
+                )
+            })
             .collect::<Vec<_>>();
         for block in exits {
             let span = edit.block(block).terminator.span;
@@ -2801,10 +2843,11 @@ fn int_unary(
     result
 }
 
-/// Value/place boundaries have one trailing result parameter; NoValue has none.
-/// A Project supplies its result through the yield protocol rather than an explicit out-pointer.
+/// Value/place boundaries have one trailing result parameter; NoValue and a value result have
+/// none. A Project supplies its result through the yield protocol rather than an explicit
+/// out-pointer.
 fn physical_call_arity(body: &Function, projection: bool) -> Option<usize> {
-    if body.result_convention() == CallResultConvention::NoValue {
+    if body.result_convention() == CallResultConvention::NoValue || body.value_result().is_some() {
         return (!projection
             && body
                 .parameters()
@@ -2894,8 +2937,9 @@ fn verify_physical_mir(
                 TerminatorKind::Goto { .. }
                 | TerminatorKind::CondBr { .. }
                 | TerminatorKind::SwitchVariant { .. }
-                | TerminatorKind::Return
+                | TerminatorKind::Return { .. }
                 | TerminatorKind::PropagateError
+                | TerminatorKind::EffectViolation
                 | TerminatorKind::FailureDuringCleanup
                 | TerminatorKind::InvariantFailure { .. } => {}
             }
@@ -3469,9 +3513,15 @@ fn verify_direct_call(
         return Ok(());
     };
     if let Some(signature) = artifacts.native_signature(*target) {
-        let expected = signature.parameters.len() + 1;
+        // A native returning a scalar directly may define the call's result register instead.
+        let expected = signature.parameters.len()
+            + usize::from(projection || operation.kind.call_has_result_place());
         let actual = operation.operands.len() - 1;
-        if actual != expected {
+        if actual != expected
+            || (!operation.kind.call_has_result_place()
+                && !projection
+                && !matches!(signature.result, NativeResult::Scalar(..)))
+        {
             return Err(BackendReadinessError::InvalidPhysicalCall {
                 owner,
                 target: *target,
@@ -5224,7 +5274,10 @@ mod tests {
                             Some(Value::Function(function)) if function.module == release.module
                                 && physical.direct_entry(function.function) == release.function
                         )
-                    }) && matches!(body.block(block).terminator().kind, TerminatorKind::Return)
+                    }) && matches!(
+                        body.block(block).terminator().kind,
+                        TerminatorKind::Return { .. }
+                    )
                 })
             }),
             "the selected Value::drop implementation releases representation storage"

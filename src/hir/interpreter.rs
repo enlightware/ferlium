@@ -126,9 +126,22 @@ fn eval_script_call(
         &metadata.locals,
     ) {
         Ok(flow) => Ok(flow),
-        Err(error) => Err(interpreter.cleanup_after_error(error, |interpreter| {
-            drop_frame_owned_locals_on_error(interpreter, &metadata.locals, span)
-        })),
+        Err(error) => {
+            let error = interpreter.cleanup_after_error(error, |interpreter| {
+                drop_frame_owned_locals_on_error(interpreter, &metadata.locals, span)
+            });
+            // A source failure escaping a function whose type says it cannot fail, which only
+            // `effects_unsafe` makes possible, poisons execution, as MIR's `effect_violation`.
+            Err(
+                if matches!(error, RuntimeError::SourceFailure(_))
+                    && metadata.definition.ty_scheme.ty.effects.cannot_fail()
+                {
+                    interpreter.runtime.poison_effect_violation(error)
+                } else {
+                    error
+                },
+            )
+        }
     };
     interpreter.runtime.call_depth -= 1;
     if result.is_ok() {

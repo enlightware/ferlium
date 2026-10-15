@@ -50,17 +50,19 @@ indices and count remain interpreter-only metadata and do not contribute Wasm us
 ## Keep single-use addresses on the stack
 
 Expression planning defers single-use addresses to memory operations, tag reads and plain scalar
-intrinsic results when ordering permits and the consumer evaluates each address once. Materialized
-pointers used elsewhere retain ordinary scalar planning. Literal aggregate initialization, selected
+intrinsic results when ordering permits and the consumer evaluates each address once. Another
+call's result register, whose call has effects, is deferred only into the operation right after it
+that stores or returns it, so nothing moves across the call. Materialized pointers used elsewhere
+retain ordinary scalar planning. Literal aggregate initialization, selected
 method stores, aggregate comparisons and witnessed moves retain address locals because they can
 reread an address or call out before consuming it.
 
 ## Keep terminal scalar results on the stack
 
-Infallible direct scalar returns need no output local when every use of the return place is a
-supported final writer immediately before a normal return. Each writer leaves its result on the
-operand stack, where it survives the existing epilogue. Other return-place uses retain ordinary
-storage.
+A function returning its result as a value pushes the returned value, which survives the existing
+epilogue. Otherwise, infallible direct scalar returns need no output local when every use of the
+return place is a supported final writer immediately before a normal return. Each writer leaves its
+result on the operand stack. Other return-place uses retain ordinary storage.
 
 ## Expand small copies without changing overlap behavior
 

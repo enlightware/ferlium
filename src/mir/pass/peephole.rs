@@ -312,7 +312,7 @@ mod tests {
         assert_eq!(optimized.blocks().count(), 1, "{rendered}");
         let block = optimized.block(optimized.entry());
         assert!(
-            matches!(block.terminator().kind, TerminatorKind::Return),
+            matches!(block.terminator().kind, TerminatorKind::Return { .. }),
             "{rendered}"
         );
         assert_eq!(

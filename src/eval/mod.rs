@@ -388,6 +388,9 @@ impl<'a> EvalCtx<'a> {
             ExecutionState::Poisoned(PoisonReason::FailureDuringCleanup(failure)) => Err(
                 RuntimeError::FailureDuringCleanup(Box::new(failure.clone())),
             ),
+            ExecutionState::Poisoned(PoisonReason::EffectViolation(failure)) => {
+                Err(RuntimeError::EffectViolation(Box::new(failure.clone())))
+            }
         }
     }
 
@@ -399,6 +402,12 @@ impl<'a> EvalCtx<'a> {
         self.record_poisoning_error(initial.interrupted_by(during_cleanup))
     }
 
+    /// Poisons the execution domain with `error` escaping a function whose type says it cannot
+    /// fail: a source failure becomes an effect violation, an already poisoning error is kept.
+    pub(crate) fn poison_effect_violation(&mut self, error: RuntimeError) -> RuntimeError {
+        self.record_poisoning_error(error.into_effect_violation())
+    }
+
     pub(crate) fn record_poisoning_error(&mut self, error: RuntimeError) -> RuntimeError {
         self.execution_state = ExecutionState::Poisoned(match &error {
             RuntimeError::Backend(_) => unreachable!("backend errors precede guest execution"),
@@ -407,6 +416,9 @@ impl<'a> EvalCtx<'a> {
             }
             RuntimeError::FailureDuringCleanup(failure) => {
                 PoisonReason::FailureDuringCleanup((**failure).clone())
+            }
+            RuntimeError::EffectViolation(failure) => {
+                PoisonReason::EffectViolation((**failure).clone())
             }
             RuntimeError::SourceFailure(_) => {
                 panic!("source failure cannot directly poison an execution domain")
@@ -580,6 +592,9 @@ pub enum RuntimeError {
     SandboxViolation(SandboxViolation),
     /// A second source failure raised while cleaning up an earlier one.
     FailureDuringCleanup(Box<FailureDuringCleanup>),
+    /// A source failure escaping a function whose type says it cannot fail, which only
+    /// `effects_unsafe` makes possible. Guest cleanup must not run after this point.
+    EffectViolation(Box<SourceFailure>),
 }
 
 /// Source location and accumulated call stack shared by runtime diagnostics.
@@ -616,6 +631,7 @@ pub struct FailureDuringCleanup {
 pub enum PoisonReason {
     SandboxViolation(SandboxViolation),
     FailureDuringCleanup(FailureDuringCleanup),
+    EffectViolation(SourceFailure),
 }
 
 impl FailureDuringCleanup {
@@ -704,6 +720,15 @@ impl RuntimeError {
         }
     }
 
+    /// This error escaping a function whose type says it cannot fail: a source failure becomes an
+    /// effect violation; any other error is kept.
+    pub(crate) fn into_effect_violation(self) -> Self {
+        match self {
+            Self::SourceFailure(failure) => Self::EffectViolation(Box::new(failure)),
+            error => error,
+        }
+    }
+
     pub fn new(kind: SourceFailureKind, location: Option<Location>) -> Self {
         Self::SourceFailure(SourceFailure {
             kind,
@@ -747,13 +772,19 @@ impl RuntimeError {
                     during_cleanup: failure.during_cleanup.with_frame(function_id, location),
                 }))
             }
+            Self::EffectViolation(failure) => {
+                Self::EffectViolation(Box::new(failure.with_frame(function_id, location)))
+            }
         }
     }
 
     pub fn source_failure(&self) -> Option<&SourceFailure> {
         match self {
             Self::SourceFailure(failure) => Some(failure),
-            Self::Backend(_) | Self::SandboxViolation(_) | Self::FailureDuringCleanup(_) => None,
+            Self::Backend(_)
+            | Self::SandboxViolation(_)
+            | Self::FailureDuringCleanup(_)
+            | Self::EffectViolation(_) => None,
         }
     }
 
@@ -765,20 +796,37 @@ impl RuntimeError {
                 RuntimeErrorKind::SandboxViolation(violation.kind())
             }
             Self::FailureDuringCleanup(_) => RuntimeErrorKind::FailureDuringCleanup,
+            Self::EffectViolation(_) => RuntimeErrorKind::EffectViolation,
         }
     }
 
     pub fn sandbox_violation(&self) -> Option<&SandboxViolation> {
         match self {
             Self::SandboxViolation(violation) => Some(violation),
-            Self::Backend(_) | Self::SourceFailure(_) | Self::FailureDuringCleanup(_) => None,
+            Self::Backend(_)
+            | Self::SourceFailure(_)
+            | Self::FailureDuringCleanup(_)
+            | Self::EffectViolation(_) => None,
         }
     }
 
     pub fn failure_during_cleanup(&self) -> Option<&FailureDuringCleanup> {
         match self {
             Self::FailureDuringCleanup(failure) => Some(failure),
-            Self::Backend(_) | Self::SourceFailure(_) | Self::SandboxViolation(_) => None,
+            Self::Backend(_)
+            | Self::SourceFailure(_)
+            | Self::SandboxViolation(_)
+            | Self::EffectViolation(_) => None,
+        }
+    }
+
+    pub fn effect_violation(&self) -> Option<&SourceFailure> {
+        match self {
+            Self::EffectViolation(failure) => Some(failure),
+            Self::Backend(_)
+            | Self::SourceFailure(_)
+            | Self::SandboxViolation(_)
+            | Self::FailureDuringCleanup(_) => None,
         }
     }
 
@@ -788,6 +836,7 @@ impl RuntimeError {
             Self::SourceFailure(failure) => failure.location(),
             Self::SandboxViolation(violation) => violation.location(),
             Self::FailureDuringCleanup(failure) => failure.initial.location(),
+            Self::EffectViolation(failure) => failure.location(),
         }
     }
 
@@ -797,6 +846,7 @@ impl RuntimeError {
             Self::SourceFailure(failure) => failure.backtrace(),
             Self::SandboxViolation(violation) => violation.backtrace(),
             Self::FailureDuringCleanup(failure) => failure.initial.backtrace(),
+            Self::EffectViolation(failure) => failure.backtrace(),
         }
     }
 
@@ -804,7 +854,7 @@ impl RuntimeError {
     pub fn is_poisoning(&self) -> bool {
         matches!(
             self,
-            Self::SandboxViolation(_) | Self::FailureDuringCleanup(_)
+            Self::SandboxViolation(_) | Self::FailureDuringCleanup(_) | Self::EffectViolation(_)
         )
     }
 
@@ -839,6 +889,13 @@ impl FormatWith<(&SourceTable, &Modules)> for RuntimeError {
                 failure.initial.fmt_with(f, data)?;
                 writeln!(f, "failure during cleanup:")?;
                 failure.during_cleanup.fmt_with(f, data)?;
+            }
+            Self::EffectViolation(failure) => {
+                writeln!(
+                    f,
+                    "Execution poisoned by a failure escaping a function that cannot fail:"
+                )?;
+                failure.fmt_with(f, data)?;
             }
         }
         Ok(())

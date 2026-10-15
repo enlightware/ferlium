@@ -51,7 +51,7 @@ use crate::{
     std::math::Int,
     types::{
         r#trait::TraitDictionaryEntryIndex,
-        r#type::{CallImplType, Type, TypeKind},
+        r#type::{Type, TypeKind},
     },
 };
 
@@ -496,6 +496,11 @@ impl Analysis {
         );
         state.set_place(place, fact, &self.register_places);
     }
+    /// Records `fact` for the register `id` defines, for a pass replacing its definition.
+    pub(crate) fn set_register_known(&self, state: &mut State, id: ValueId, fact: Fact) {
+        state.registers.insert(id, fact);
+    }
+
     /// The state on entry to `block`.
     pub(crate) fn entry_state(&self, block: BlockId) -> State {
         self.entry_states
@@ -755,8 +760,7 @@ impl State {
             TerminatorKind::Invoke {
                 operation, error, ..
             } if successor == *error => {
-                if let OperationKind::Call { ty, .. } = &operation.kind
-                    && let Some(result) = call_result_operand(&operation.operands, ty)
+                if let Some(result) = call_result_operand(operation)
                     && let Some(place) = bindings.place_of(result)
                 {
                     state.to_mut().set_place(place, Fact::Unknown, bindings);
@@ -1181,9 +1185,12 @@ fn transfer(
             state.places.insert(place, fact);
         }
         OperationKind::Call { ty, .. } => {
-            // The callee replaces its result slot. Only the type or adapter's result-domain
-            // contract is known without evaluating it; no effects or operand laws follow.
-            if let Some(result) = call_result_operand(&operation.operands, ty)
+            // The callee replaces its result slot or defines its result register. Only the type or
+            // adapter's result-domain contract is known without evaluating it; no effects or
+            // operand laws follow.
+            if let Some(result) = operation.result_id() {
+                state.registers.insert(result, type_fact(ty.ret(), env));
+            } else if let Some(result) = call_result_operand(operation)
                 && let Some(place) = place_of(result)
                 && tracked(place)
             {
@@ -1446,7 +1453,7 @@ pub(crate) fn escaping_roots(
             // Source and destination ownership are modelled above; the remaining operand is a
             // materialized integer extent, not evidence or a place that can escape.
             OperationKind::MoveBytes { .. } | OperationKind::MoveRange { .. } => {}
-            OperationKind::Call { ty, .. } => match call_operands(&operation.operands, ty) {
+            OperationKind::Call { .. } => match call_operands(operation) {
                 // A `Let` argument is immutable and non-escaping by the language's own convention,
                 // and the callee reads its function value and evidence by reference. What a call
                 // does change is its result place, which the transfer function kills. Anything the
@@ -1506,8 +1513,9 @@ pub(crate) fn escaping_roots(
             TerminatorKind::SwitchVariant { tag, .. } => escape_operand(tag, &mut escaped),
             TerminatorKind::Yield { place, .. } => escape_operand(place, &mut escaped),
             TerminatorKind::Goto { .. }
-            | TerminatorKind::Return
+            | TerminatorKind::Return { .. }
             | TerminatorKind::PropagateError
+            | TerminatorKind::EffectViolation
             | TerminatorKind::FailureDuringCleanup
             | TerminatorKind::InvariantFailure { .. } => {}
         }
@@ -1519,47 +1527,48 @@ pub(crate) fn escaping_roots(
 ///
 /// The layout is `[callee, extras.., args.., ret]`, matching the callee's parameter order
 /// (`@extra`, `@arg`, `@ret`); the number of hidden evidence operands follows from the visible
-/// argument count in the call's type.
+/// argument count in the call's type. A call defining its result as a register has no `ret`.
 pub(crate) struct CallOperands<'a> {
     pub callee: &'a mir::Value,
     pub extras: &'a [mir::Value],
     /// Visible arguments, paired with the convention the callee receives them under.
     pub arguments: Vec<(&'a mir::Value, ArgConvention)>,
-    pub result: &'a mir::Value,
+    /// The caller-provided result place, if the call writes its result through one.
+    pub result: Option<&'a mir::Value>,
 }
 
-/// Returns the caller-provided result-place operand's index.
+/// Returns the caller-provided result-place operand's index of a `call`, if it has one.
 ///
 /// Use this for comparisons of operand positions. Consumers that only need the result place
 /// should use [`call_result_operand`] to avoid constructing visible argument/convention pairs.
-pub(crate) fn call_result_operand_index(
-    operands: &[mir::Value],
-    ty: &CallImplType,
-) -> Option<usize> {
-    if !ty.result_convention.has_result_place() {
+pub(crate) fn call_result_operand_index(operation: &Operation) -> Option<usize> {
+    let OperationKind::Call { ty, .. } = &operation.kind else {
         return None;
-    }
-    let visible = ty.fn_ty.args.len();
+    };
+    let index = operation.call_result_place_index()?;
     // callee + extras + args + ret
-    let extras = operands.len().checked_sub(visible + 2)?;
-    Some(1 + extras + visible)
+    operation
+        .operands
+        .len()
+        .checked_sub(ty.fn_ty.args.len() + 2)?;
+    Some(index)
 }
 
-/// Returns the caller-provided result place without constructing argument/convention pairs.
-pub(crate) fn call_result_operand<'a>(
-    operands: &'a [mir::Value],
-    ty: &CallImplType,
-) -> Option<&'a mir::Value> {
-    call_result_operand_index(operands, ty).map(|index| &operands[index])
+/// Returns the caller-provided result place of a `call` without constructing argument/convention
+/// pairs.
+pub(crate) fn call_result_operand(operation: &Operation) -> Option<&mir::Value> {
+    call_result_operand_index(operation).map(|index| &operation.operands[index])
 }
 
-pub(crate) fn call_operands<'a>(
-    operands: &'a [mir::Value],
-    ty: &CallImplType,
-) -> Option<CallOperands<'a>> {
+/// The operands of a `call`, or `None` for any other operation.
+pub(crate) fn call_operands(operation: &Operation) -> Option<CallOperands<'_>> {
+    let OperationKind::Call { ty, .. } = &operation.kind else {
+        return None;
+    };
+    let operands = &operation.operands;
     let visible = ty.fn_ty.args.len();
-    let result_index = call_result_operand_index(operands, ty)?;
-    let extras = operands.len().checked_sub(visible + 2)?;
+    let result = usize::from(operation.kind.call_has_result_place());
+    let extras = operands.len().checked_sub(visible + result + 1)?;
     let conventions = arg_conventions_for_args(&ty.fn_ty.args);
     Some(CallOperands {
         callee: &operands[0],
@@ -1568,7 +1577,7 @@ pub(crate) fn call_operands<'a>(
             .iter()
             .zip(conventions)
             .collect(),
-        result: &operands[result_index],
+        result: (result == 1).then(|| &operands[1 + extras + visible]),
     })
 }
 

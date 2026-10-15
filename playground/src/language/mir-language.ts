@@ -6,7 +6,7 @@ import { LanguageSupport, StreamLanguage } from "@codemirror/language";
 const definitionKeywords = new Set(["fn", "let", "ref", "mut"]);
 const controlKeywords = new Set([
 	"br", "condbr", "switch_variant", "invoke", "ret", "yield", "propagate_error",
-	"failure_during_cleanup", "invariant_failure",
+	"effect_violation", "failure_during_cleanup", "invariant_failure",
 ]);
 // Keep these spellings aligned with OperationKind::fmt_within in src/mir/operation.rs.
 const operationKeywords = new Set([

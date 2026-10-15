@@ -1215,10 +1215,10 @@ impl Context<'_> {
         if self.semantics.of(operation)? != KnownCallee::ArrayIndex {
             return None;
         }
-        let OperationKind::Call { ty, .. } = &operation.kind else {
+        let OperationKind::Call { .. } = &operation.kind else {
             return None;
         };
-        let call = call_operands(&operation.operands, ty)?;
+        let call = call_operands(operation)?;
         if call.arguments.len() != 2 {
             return None;
         }
@@ -1994,14 +1994,12 @@ fn writes_only(
         OperationKind::Memcpy | OperationKind::Move | OperationKind::MoveBytes { .. } => {
             names(&operation.operands[1]) && !operation.operands.iter().skip(2).any(rooted)
         }
-        OperationKind::Call { ty, .. } => {
-            call_operands(&operation.operands, ty).is_some_and(|call| {
-                names(call.result)
-                    && !call.arguments.iter().any(|(operand, convention)| {
-                        matches!(convention, ArgConvention::MutableRef) && rooted(operand)
-                    })
-            })
-        }
+        OperationKind::Call { .. } => call_operands(operation).is_some_and(|call| {
+            call.result.is_some_and(names)
+                && !call.arguments.iter().any(|(operand, convention)| {
+                    matches!(convention, ArgConvention::MutableRef) && rooted(operand)
+                })
+        }),
         _ => false,
     }
 }
@@ -2054,9 +2052,9 @@ fn writes_into(operation: &Operation, root: Root, register_places: &PlaceBinding
         | OperationKind::Drop { .. }
         | OperationKind::DropInitialized { .. } => rooted(&operation.operands[0]),
         OperationKind::Clone { .. } => rooted(&operation.operands[1]),
-        OperationKind::Call { ty, .. } => match call_operands(&operation.operands, ty) {
+        OperationKind::Call { .. } => match call_operands(operation) {
             Some(call) => {
-                rooted(call.result)
+                call.result.is_some_and(rooted)
                     || call.arguments.iter().any(|(operand, convention)| {
                         matches!(convention, ArgConvention::MutableRef) && rooted(operand)
                     })
@@ -2233,17 +2231,16 @@ fn resolved_index_bounds(
     if context.semantics.of(operation)? != KnownCallee::ArrayResolveIndex {
         return None;
     }
-    let OperationKind::Call { ty, .. } = &operation.kind else {
-        return None;
-    };
-    let call = call_operands(&operation.operands, ty)?;
+    let call = call_operands(operation)?;
     let index = argument_affine(call.arguments.first()?.0, interner, state)?;
     let len = argument_affine(call.arguments.get(1)?.0, interner, state)?;
     let zero = Affine::constant(0);
     let offset = if state.implies(&Predicate::between(&zero, Comparison::LessOrEqual, &index)?) {
         index
+    } else if let Some(result) = operation.result_id() {
+        argument_affine(&mir::Value::Register(result), interner, state)?
     } else {
-        let place = tracked_place(state, call.result, context.escaped, interner)?;
+        let place = tracked_place(state, call.result?, context.escaped, interner)?;
         state.place_affine(place, interner)
     };
     Some(vec![
@@ -2568,8 +2565,8 @@ fn transfer(
             let symbol = interner.symbol(Symbol::Register(result));
             state.set_fact(symbol, fact);
         }
-        OperationKind::Call { ty, .. } => {
-            let Some(call) = call_operands(&operation.operands, ty) else {
+        OperationKind::Call { .. } => {
+            let Some(call) = call_operands(operation) else {
                 return;
             };
             let known = semantics.of(operation);
@@ -2631,7 +2628,15 @@ fn transfer(
             let fact = fact.or_else(|| {
                 yield_fact(known?, &call.arguments, inductions, cursor, interner, state)
             });
-            if let Some(place) = tracked_place(state, call.result, escaped, interner) {
+            if let Some(result) = operation.result_id() {
+                // A result nothing is known about is still one value, which relates its uses.
+                let symbol = interner.symbol(Symbol::Register(result));
+                let fact = fact.or(Some(Fact::Value(Affine::symbol(symbol))));
+                state.set_fact(symbol, fact);
+            } else if let Some(place) = call
+                .result
+                .and_then(|result| tracked_place(state, result, escaped, interner))
+            {
                 state.define(place, def, interner, fact);
             }
         }

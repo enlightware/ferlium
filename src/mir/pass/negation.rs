@@ -365,14 +365,19 @@ impl<'a> Resolver<'a> {
 
     /// Whether a register or parameter holds a boolean rather than the place of one.
     ///
-    /// The two forms the walk sees through are also the only two that materialize a boolean into a
-    /// register, so this is the same list read the other way round. A value parameter is one too.
+    /// The two forms the walk sees through materialize a boolean into a register, and so does a
+    /// call defining its boolean result, where the walk stops. A value parameter is one too.
     fn is_materialized(&self, value: &mir::Value) -> bool {
         match value {
             mir::Value::Register(id) => self.definitions.get(id).is_some_and(|site| {
                 matches!(
                     self.operation(*site).kind,
-                    OperationKind::Load | OperationKind::CompareEqual
+                    OperationKind::Load
+                        | OperationKind::CompareEqual
+                        | OperationKind::Call {
+                            value_result: true,
+                            ..
+                        }
                 ) && self.is_boolean(value)
             }),
             mir::Value::Parameter(id) => {
@@ -577,15 +582,15 @@ mod tests {
         name.trim_end_matches(':').to_string()
     }
 
-    /// The constant a block stores, as the pool renders its value.
-    fn stored_constant(body: &str, block: &str) -> String {
+    /// The constant a block returns, as the pool renders its value.
+    fn returned_constant(body: &str, block: &str) -> String {
         let stored = body
             .split(&format!("{block}:\n"))
             .nth(1)
             .unwrap_or_else(|| panic!("no block `{block}` in:\n{body}"))
             .lines()
-            .find_map(|line| line.trim_start().strip_prefix("store "))
-            .unwrap_or_else(|| panic!("block `{block}` stores nothing in:\n{body}"))
+            .find_map(|line| line.trim_start().strip_prefix("ret "))
+            .unwrap_or_else(|| panic!("block `{block}` returns nothing in:\n{body}"))
             .split(' ')
             .next()
             .expect("a store names what it stores")
@@ -626,7 +631,7 @@ mod tests {
             body.contains("condbr %p0,"),
             "the branch must test the condition directly:\n{body}"
         );
-        assert_eq!(stored_constant(&body, &then_target(&body)), "2", "{body}");
+        assert_eq!(returned_constant(&body, &then_target(&body)), "2", "{body}");
     }
 
     /// When the negated value is itself a comparison, nothing has to compute the negation at all:
@@ -645,7 +650,7 @@ mod tests {
         let less = register_defining(&body, &format!("comp_eq {tag} Less"));
         assert!(body.contains(&format!("condbr {less},")), "{body}");
         assert_eq!(
-            stored_constant(&body, &then_target(&body)),
+            returned_constant(&body, &then_target(&body)),
             "2",
             "the negated Less branch must select the second source arm:\n{body}"
         );
@@ -662,7 +667,7 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("lt_int"), "{body}");
-        assert_eq!(stored_constant(&body, &then_target(&body)), "2", "{body}");
+        assert_eq!(returned_constant(&body, &then_target(&body)), "2", "{body}");
     }
 
     #[test]

@@ -72,6 +72,8 @@ pub enum RuntimeErrorKind {
     SourceFailure(SourceFailureKind),
     SandboxViolation(SandboxViolationKind),
     FailureDuringCleanup,
+    /// A source failure escaped a function whose type says it cannot fail (through `effects_unsafe`).
+    EffectViolation,
 }
 
 impl Display for RuntimeErrorKind {
@@ -82,6 +84,9 @@ impl Display for RuntimeErrorKind {
             Self::SandboxViolation(kind) => kind.fmt(f),
             Self::FailureDuringCleanup => {
                 f.write_str("A second source failure occurred during cleanup")
+            }
+            Self::EffectViolation => {
+                f.write_str("A source failure escaped a function that cannot fail")
             }
         }
     }

@@ -40,6 +40,7 @@ struct PendingBlock {
 pub(crate) struct FunctionBuilder {
     name: Ustr,
     result_convention: CallResultConvention,
+    value_result: Option<Type>,
     parameters: Vec<Parameter>,
     constants: Vec<Constant>,
     blocks: Vec<PendingBlock>,
@@ -57,6 +58,7 @@ impl FunctionBuilder {
         Self {
             name,
             result_convention,
+            value_result: None,
             parameters: Vec::new(),
             constants: Vec::new(),
             blocks: Vec::new(),
@@ -64,6 +66,12 @@ impl FunctionBuilder {
             #[cfg(any(debug_assertions, test))]
             roles: ValueRoles::default(),
         }
+    }
+
+    /// Makes the function carry its result, of type `ty`, as a value: each `return` passes it, and
+    /// there is no result parameter.
+    pub(crate) fn set_value_result(&mut self, ty: Type) {
+        self.value_result = Some(ty);
     }
 
     pub(crate) fn add_parameter(&mut self, ty: Type, tag: ParameterKind) -> ParameterId {
@@ -137,6 +145,82 @@ impl FunctionBuilder {
         );
         let result = self.assign_result(&mut operation);
         self.blocks[block.as_index()].operations.push(operation);
+        result
+    }
+
+    /// Inserts a non-terminating operation at the start of `block`, which may already be
+    /// terminated, and returns its result value, if any. For storage a lowering discovers it needs
+    /// only after emitting the block, such as a function's result local.
+    pub(crate) fn prepend_operation(
+        &mut self,
+        block: BlockId,
+        mut operation: Operation,
+    ) -> Option<mir::Value> {
+        assert!(
+            operation.operands.is_empty(),
+            "a prepended operation reads nothing defined before it"
+        );
+        let result = self.assign_result(&mut operation);
+        self.blocks[block.as_index()]
+            .operations
+            .insert(0, operation);
+        result
+    }
+
+    /// Inserts a non-terminating operation right after the operation defining `register`, and
+    /// returns its result value, if any. The operation reads only parameters, constants and values
+    /// defined before it.
+    pub(crate) fn insert_operation_after(
+        &mut self,
+        register: ValueId,
+        operation: Operation,
+    ) -> Option<mir::Value> {
+        let (block, index) = self
+            .blocks
+            .iter()
+            .enumerate()
+            .find_map(|(block, contents)| {
+                contents
+                    .operations
+                    .iter()
+                    .position(|operation| operation.result_id() == Some(register))
+                    .map(|index| (BlockId::from_index(block), index))
+            })
+            .expect("the register is defined by an operation");
+        self.insert_operation(block, index + 1, operation)
+    }
+
+    /// Inserts a non-terminating operation at position `index` of `block`, which may already be
+    /// terminated, and returns its result value, if any. The operation reads only parameters,
+    /// constants and values its predecessors in the block define; it initializes storage a
+    /// lowering discovers it needs only after emitting the block, such as a value parameter's
+    /// local.
+    pub(crate) fn insert_operation(
+        &mut self,
+        block: BlockId,
+        index: usize,
+        mut operation: Operation,
+    ) -> Option<mir::Value> {
+        assert_ne!(
+            operation.source_fallibility(),
+            SourceFallibility::Fallible,
+            "source-fallible operation must be wrapped by an invoke terminator"
+        );
+        #[cfg(any(debug_assertions, test))]
+        role::check_operand_roles(
+            &self.roles,
+            self.name,
+            &OperationSite {
+                block,
+                index: OperationIndex::from_index(index),
+            },
+            &operation,
+            &self.constants,
+        );
+        let result = self.assign_result(&mut operation);
+        self.blocks[block.as_index()]
+            .operations
+            .insert(index, operation);
         result
     }
 
@@ -235,6 +319,7 @@ impl FunctionBuilder {
         Function::new(
             self.name,
             self.result_convention,
+            self.value_result,
             self.parameters,
             self.constants,
             blocks,

@@ -2858,11 +2858,11 @@ fn wasm_codegen_rematerializes_immutable_scalar_literals() {
             assert!(
                 body.blocks().any(|block| {
                     body.block(block).operations().iter().any(|call| {
-                        let OperationKind::Call { ty, .. } = &call.kind else {
+                        let OperationKind::Call { .. } = &call.kind else {
                             return false;
                         };
-                        let end = call.operands.len()
-                            - usize::from(ty.result_convention.has_result_place());
+                        let end =
+                            call.operands.len() - usize::from(call.kind.call_has_result_place());
                         call.operands[1..end].iter().any(|operand| {
                             matches!(operand, MirValue::Constant(id) if body
                             .constant(*id)
@@ -3935,7 +3935,7 @@ fn wasm_codegen_cleanup_failures_and_immediate_propagation() {
             .map(|index| module.get(LocalFunctionId::from_index(index)).cloned())
             .collect::<Vec<_>>();
         let body = entries[entry.function.as_index()].take().unwrap();
-        let (name, convention, parameters, constants, mut blocks) = body.into_parts();
+        let (name, convention, value_result, parameters, constants, mut blocks) = body.into_parts();
         let shared = BlockId::from_index(blocks.len());
         // Join the propagation exits explicitly, preserving all preceding cleanup and stack work.
         // This fixes the fixture's shape independently of the optimizer's block-merging policy.
@@ -3957,7 +3957,12 @@ fn wasm_codegen_cleanup_failures_and_immediate_propagation() {
             Terminator::propagate_error(Location::new_synthesized()),
         ));
         entries[entry.function.as_index()] = Some(crate::mir::Function::new(
-            name, convention, parameters, constants, blocks,
+            name,
+            convention,
+            value_result,
+            parameters,
+            constants,
+            blocks,
         ));
         let semantic = session
             .mir_artifacts_for(entry.module, optimization)
@@ -4104,12 +4109,16 @@ fn wasm_codegen_structured_control_flow_and_local_storage() {
 
 #[wasm_bindgen_test]
 fn wasm_codegen_omits_noop_stack_markers_in_loops() {
+    // The inlined callee's local, which it writes twice, keeps a statically sized slot inside the
+    // loop's stack bracket.
     let mut session = CompilerSession::new();
+    session.set_mir_optimization(MirOptimization::Enabled);
     let entry = compile(
         &mut session,
-        "fn compute(limit: int) -> int { \
+        "fn bump(x: int) -> int { let mut y = x; y += 1; y } \
+         fn compute(limit: int) -> int { \
              let mut i = 0; let mut sum = 0; \
-             loop { if i >= limit { break; }; sum += i; i += 1; }; \
+             loop { if i >= limit { break; }; sum += bump(i); i += 1; }; \
              sum \
          }",
     );
@@ -4150,7 +4159,7 @@ fn wasm_codegen_omits_noop_stack_markers_in_loops() {
     }
 
     let mut instance = code.instantiate::<(isize,), isize>().unwrap();
-    assert_eq!(instance.run((10,), WasmLimits::default()).unwrap(), 45);
+    assert_eq!(instance.run((10,), WasmLimits::default()).unwrap(), 55);
 }
 
 #[wasm_bindgen_test]

@@ -664,11 +664,7 @@ pub(crate) fn check_operand_roles(
             let visible_start = operands
                 .len()
                 .checked_sub(
-                    ty.fn_ty.args.len()
-                        + usize::from(
-                            !matches!(operation.kind, OperationKind::Project { .. })
-                                && ty.result_convention.has_result_place(),
-                        ),
+                    ty.fn_ty.args.len() + usize::from(operation.kind.call_has_result_place()),
                 )
                 .filter(|start| *start >= 1)
                 .unwrap_or_else(|| {
@@ -699,9 +695,7 @@ pub(crate) fn check_operand_roles(
                 }
                 place(index);
             }
-            if matches!(operation.kind, OperationKind::Call { .. })
-                && ty.result_convention.has_result_place()
-            {
+            if operation.kind.call_has_result_place() {
                 let result = role(operands.len() - 1);
                 assert!(
                     result.is_place_operand(),
@@ -911,9 +905,17 @@ pub(crate) fn check_terminator_operand_roles(
         TerminatorKind::Invoke { operation, .. } => {
             check_operand_roles(roles, func_name, at, operation, constants)
         }
+        TerminatorKind::Return { value: Some(value) } => {
+            let role = roles.expect(func_name, value, constants);
+            assert!(
+                role.materialized_type().is_some(),
+                "MIR function `{func_name}` {at}: returned operand must be a value, got {role:?}"
+            );
+        }
         TerminatorKind::Goto { .. }
-        | TerminatorKind::Return
+        | TerminatorKind::Return { value: None }
         | TerminatorKind::PropagateError
+        | TerminatorKind::EffectViolation
         | TerminatorKind::FailureDuringCleanup
         | TerminatorKind::InvariantFailure { .. } => {}
     }

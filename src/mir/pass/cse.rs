@@ -364,10 +364,10 @@ fn call_operands_for_cse<'a>(
     operation: &'a Operation,
     env: ModuleEnv<'_>,
 ) -> Option<CallOperands<'a>> {
-    let OperationKind::Call { ty, .. } = &operation.kind else {
+    let OperationKind::Call { .. } = &operation.kind else {
         return None;
     };
-    let mut call = call_operands(&operation.operands, ty)?;
+    let mut call = call_operands(operation)?;
     let mir::Value::Function(callee) = call.callee else {
         return Some(call);
     };
@@ -396,10 +396,11 @@ enum AvailableCall {
         output: mir::Value,
         root: Root,
     },
+    /// A value call's output is its result register, or its result slot with that slot's root.
     Value {
         output: mir::Value,
         dependencies: Box<[Root]>,
-        output_root: Root,
+        output_root: Option<Root>,
     },
     /// A `load` whose register holds what `root` held when it ran.
     Load {
@@ -441,10 +442,10 @@ enum CallStep<'a> {
     },
     /// A call whose operands cannot be read, which may write anything.
     Opaque,
-    /// Any other call: it writes its result, and the roots it takes mutably, `None` for one whose
-    /// origin is unknown.
+    /// Any other call: it writes its result slot, if it has one, and the roots it takes mutably,
+    /// `None` for one whose origin is unknown.
     Writes {
-        result: &'a mir::Value,
+        result: Option<&'a mir::Value>,
         mutable: Vec<Option<Root>>,
     },
 }
@@ -618,24 +619,89 @@ pub(crate) fn eliminate_common_calls(
         return None;
     }
 
+    // A redundant call's result register takes the earlier output: the earlier register directly,
+    // or a load of the earlier result slot. A result slot takes a copy of the earlier output.
+    let call_results: FxHashSet<ValueId> = func
+        .blocks()
+        .flat_map(|block| func.block(block).operations())
+        .filter(|operation| matches!(operation.kind, OperationKind::Call { .. }))
+        .filter_map(Operation::result_id)
+        .collect();
+    let defines =
+        |value: &mir::Value| matches!(value, mir::Value::Register(id) if call_results.contains(id));
     let mut edit = FunctionEdit::new(func.clone());
+    let mut merged = FxHashMap::default();
+    let mut removed = FxHashMap::<BlockId, FxHashSet<OperationIndex>>::default();
     for replacement in replacements {
-        let copy = Operation::memcpy(
-            replacement.span,
-            replacement.source,
-            replacement.destination,
-        );
-        match replacement.site {
-            ReplacementSite::Operation { block, index } => {
-                edit.block_mut(block)
-                    .replace_operation(index.as_index(), copy);
+        let ReplacementSite::Operation { block, index } = replacement.site else {
+            // A fallible call keeps its result slot, so an invoke's redundant copy is a copy.
+            let ReplacementSite::Invoke { block, normal } = replacement.site else {
+                unreachable!()
+            };
+            let copy = Operation::memcpy(
+                replacement.span,
+                replacement.source,
+                replacement.destination,
+            );
+            let block = edit.block_mut(block);
+            block.operations.push(copy);
+            block.terminator = Terminator::goto(replacement.span, normal);
+            continue;
+        };
+        // The output is the register the call defines, or a place it writes: a result slot or
+        // a result parameter.
+        let destination = replacement.destination;
+        let source_is_value = defines(&replacement.source);
+        let defined = match destination {
+            mir::Value::Register(id) => func
+                .block(block)
+                .operations()
+                .get(index.as_index())
+                .is_some_and(|operation| operation.result_id() == Some(id))
+                .then_some(id),
+            _ => None,
+        };
+        match (source_is_value, defined) {
+            (true, Some(defined)) => {
+                removed.entry(block).or_default().insert(index);
+                merged.insert(defined, replacement.source);
             }
-            ReplacementSite::Invoke { block, normal } => {
-                let block = edit.block_mut(block);
-                block.operations.push(copy);
-                block.terminator = Terminator::goto(replacement.span, normal);
+            (false, Some(_)) => {
+                edit.block_mut(block).replace_operation(
+                    index.as_index(),
+                    Operation::load(replacement.span, replacement.source),
+                );
+            }
+            (true, None) => {
+                edit.block_mut(block).replace_operation(
+                    index.as_index(),
+                    Operation::store(replacement.span, replacement.source, destination),
+                );
+            }
+            (false, None) => {
+                edit.block_mut(block).replace_operation(
+                    index.as_index(),
+                    Operation::memcpy(replacement.span, replacement.source, destination),
+                );
             }
         }
+    }
+    for (block, indices) in &removed {
+        let mut index = 0;
+        edit.block_mut(*block).operations.retain(|_| {
+            let keep = !indices.contains(&OperationIndex::from_index(index));
+            index += 1;
+            keep
+        });
+    }
+    if !merged.is_empty() {
+        edit.visit_operands_mut(|operand| {
+            if let mir::Value::Register(id) = operand
+                && let Some(representative) = merged.get(id)
+            {
+                *operand = representative.clone();
+            }
+        });
     }
     edit.remove_unreachable_blocks();
     edit.merge_blocks_into_predecessors();
@@ -823,7 +889,7 @@ fn has_duplicate_call_fingerprint(
 }
 
 fn call_fingerprint(operation: &Operation, constant_cells: &ImmutableConstantCells) -> Option<u64> {
-    let OperationKind::Call { ty, metadata } = &operation.kind else {
+    let OperationKind::Call { ty, metadata, .. } = &operation.kind else {
         return None;
     };
     if metadata
@@ -840,7 +906,10 @@ fn call_fingerprint(operation: &Operation, constant_cells: &ImmutableConstantCel
         return None;
     }
 
-    let (_, expression_operands) = operation.operands.split_last()?;
+    let expression_operands = match operation.call_result_place_index() {
+        Some(index) => &operation.operands[..index],
+        None => &operation.operands[..],
+    };
     if !matches!(expression_operands.first(), Some(mir::Value::Function(_))) {
         return None;
     }
@@ -994,10 +1063,18 @@ fn transfer(
         Some(CallStep::Expression { expression, call }) => {
             let available = calls.available(*call);
             let output = available.output();
-            // Every call writes its out-slot. This can invalidate another value expression whose
-            // input or cached result occupies the same root, and overwrites an addressor pointer
-            // cached in exactly that slot. A load writes nothing but its register.
-            if !matches!(available, AvailableCall::Load { .. }) {
+            // A call writes its out-slot, if it has one. This can invalidate another value
+            // expression whose input or cached result occupies the same root, and overwrites an
+            // addressor pointer cached in exactly that slot. A load, or a call defining its result
+            // register, writes nothing but that register.
+            if !matches!(
+                available,
+                AvailableCall::Load { .. }
+                    | AvailableCall::Value {
+                        output_root: None,
+                        ..
+                    }
+            ) {
                 forget_write(state, calls, origins, output);
                 state.retain(|_, cached| calls.available(*cached).output() != output);
             }
@@ -1012,8 +1089,10 @@ fn transfer(
             return None;
         }
         Some(CallStep::Writes { result, mutable }) => {
-            forget_write(state, calls, origins, result);
-            state.retain(|_, cached| calls.available(*cached).output() != *result);
+            if let Some(result) = result {
+                forget_write(state, calls, origins, result);
+                state.retain(|_, cached| calls.available(*cached).output() != *result);
+            }
             // An address computation declared repeatable is independent of environmental state,
             // so effects alone do not kill it. Mutable access to its storage root does.
             for root in mutable {
@@ -1101,7 +1180,7 @@ fn call_expression(
     is_optimization_barrier: &dyn Fn(FunctionId) -> bool,
     env: ModuleEnv<'_>,
 ) -> Option<(AvailableExpression, AvailableCall)> {
-    let OperationKind::Call { ty, metadata } = &operation.kind else {
+    let OperationKind::Call { ty, metadata, .. } = &operation.kind else {
         return None;
     };
     if metadata
@@ -1114,6 +1193,8 @@ fn call_expression(
         return None;
     }
     let call = call_operands_for_cse(operation, env)?;
+    let expression_operands =
+        &operation.operands[..operation.operands.len() - usize::from(call.result.is_some())];
     let mir::Value::Function(callee) = call.callee else {
         return None;
     };
@@ -1131,7 +1212,7 @@ fn call_expression(
             };
             let (base, _) = call.arguments.get(index.as_index())?;
             AvailableCall::Addressor {
-                output: call.result.clone(),
+                output: call.result?.clone(),
                 root: origins.origin_of(base)?.root,
             }
         }
@@ -1152,15 +1233,18 @@ fn call_expression(
                 .map(|(argument, _)| origins.origin_of(argument).map(|origin| origin.root))
                 .collect::<Option<Vec<_>>>()?
                 .into_boxed_slice();
-            let output_root = origins.origin_of(call.result)?.root;
+            let (output, output_root) = match call.result {
+                Some(result) => (result.clone(), Some(origins.origin_of(result)?.root)),
+                None => (mir::Value::Register(operation.result_id()?), None),
+            };
             // The call reads its arguments before writing its result. Keeping those roots distinct
             // lets transfer invalidate the destination before looking up the old expression and is
             // also the ordinary MIR lowering shape.
-            if dependencies.contains(&output_root) {
+            if output_root.is_some_and(|root| dependencies.contains(&root)) {
                 return None;
             }
             AvailableCall::Value {
-                output: call.result.clone(),
+                output,
                 dependencies,
                 output_root,
             }
@@ -1173,7 +1257,7 @@ fn call_expression(
             instantiation: metadata
                 .as_deref()
                 .and_then(|metadata| metadata.instantiation.clone()),
-            operands: operation.operands[..operation.operands.len() - 1]
+            operands: expression_operands
                 .iter()
                 .map(|operand| match ty.result_convention {
                     CallResultConvention::Value => CallOperand::of(operand, constant_cells),
@@ -1206,7 +1290,7 @@ fn forget_write(
             dependencies,
             output_root,
             ..
-        } => *output_root != origin.root && !dependencies.contains(&origin.root),
+        } => *output_root != Some(origin.root) && !dependencies.contains(&origin.root),
         AvailableCall::Load { root, .. } => *root != origin.root,
     });
 }
@@ -1221,7 +1305,7 @@ fn forget_root(state: &mut AvailableCalls, calls: &CallSteps<'_>, root: Root) {
             dependencies,
             output_root,
             ..
-        } => *output_root != root && !dependencies.contains(&root),
+        } => *output_root != Some(root) && !dependencies.contains(&root),
         AvailableCall::Load {
             root: load_root, ..
         } => *load_root != root,
@@ -1751,7 +1835,7 @@ mod tests {
             "the two immutable cells holding 1 denote the same call input:\n{body}"
         );
         assert!(
-            !body.contains("store @c0") && body.contains(", @c0, "),
+            !body.contains("store @c0") && body.contains(", @c0)"),
             "the literal is passed as a value, with no cell to duplicate:\n{body}"
         );
     }
@@ -1799,6 +1883,27 @@ mod tests {
             calls(&body, "Bits<std::bool>::bit_and"),
             1,
             "the repeated boolean computation should be copied from its first result:\n{body}"
+        );
+    }
+
+    #[test]
+    fn a_repeated_call_into_the_result_parameter_copies_the_earlier_result() {
+        let src = "#[inline(never)] fn pair(x: int) { (x, x) }\n\
+             fn f(x: int) {\n\
+                 let a = pair(x);\n\
+                 if a.0 > 0 { pair(x) } else { (0, 0) }\n\
+             }";
+        let body = body_of(src, "f");
+        assert_eq!(
+            calls(&body, "cse::pair"),
+            1,
+            "the call writing the result parameter must reuse the earlier result:\n{body}"
+        );
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        assert_eq!(
+            session.eval_mir("cse", &format!("{src}\nfn main() {{ f(2) }}")),
+            "(2, 2)"
         );
     }
 

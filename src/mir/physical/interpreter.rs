@@ -263,7 +263,8 @@ impl RuntimeTypes {
         memory: &Memory,
         env: ModuleEnv<'_>,
     ) -> Result<Self, RuntimeError> {
-        if args.len() != body.parameters().len() {
+        // A function returning its result as a value is passed its result place all the same.
+        if args.len() != body.parameters().len() + usize::from(body.value_result().is_some()) {
             return Err(invalid("call arity mismatch"));
         }
         let mut types = Self::default();
@@ -378,10 +379,17 @@ pub(crate) fn run_entry_with_profile(
         .function(entry)
         .ok_or_else(|| unsupported("native host entry points"))?;
     interpreter.prepare_frame(entry, body, &RuntimeTypes::default())?;
-    let (result, parameters) = body
-        .parameters()
-        .split_last()
-        .ok_or_else(|| invalid("missing result parameter"))?;
+    // A function returning its result as a value is passed its result place all the same.
+    let (result_ty, parameters) = match body.value_result() {
+        Some(ty) => (ty, body.parameters()),
+        None => {
+            let (result, parameters) = body
+                .parameters()
+                .split_last()
+                .ok_or_else(|| invalid("missing result parameter"))?;
+            (result.ty, parameters)
+        }
+    };
     assert_eq!(
         parameters.len(),
         arguments.len(),
@@ -400,6 +408,7 @@ pub(crate) fn run_entry_with_profile(
     for parameter in body.parameters() {
         interpreter.memory.validate_host_type(parameter.ty)?;
     }
+    interpreter.memory.validate_host_type(result_ty)?;
     for (parameter, argument) in parameters.iter().zip(arguments.iter()) {
         interpreter.memory.validate_import(parameter.ty, argument)?;
     }
@@ -410,7 +419,7 @@ pub(crate) fn run_entry_with_profile(
         interpreter.memory.write_value(address, &value)?;
         bindings.push(Binding::Place(address));
     }
-    let result = interpreter.memory.allocate(result.ty, None)?;
+    let result = interpreter.memory.allocate(result_ty, None)?;
     bindings.push(Binding::Place(result));
     let outcome = interpreter.call(entry, bindings);
     if outcome.is_ok() || matches!(&outcome, Err(RuntimeError::SourceFailure(_))) {
@@ -1586,9 +1595,22 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                         .find(|(case, _)| *case == tag)
                         .map_or(*default, |(_, target)| *target);
                 }
-                TerminatorKind::Return => {
+                TerminatorKind::Return { value } => {
                     if pending.is_some() {
                         return Err(invalid("return during source failure"));
+                    }
+                    // A function returning its result as a value writes it into the result place
+                    // its caller passed past its parameters.
+                    if let Some(value) = value {
+                        let Binding::Scalar(scalar) = self.operand(body, args, registers, value)?
+                        else {
+                            return Err(invalid("returned value is not a scalar"));
+                        };
+                        let place = args
+                            .get(body.parameters().len())
+                            .ok_or_else(|| invalid("value result place missing"))?
+                            .place()?;
+                        self.memory.write(place, scalar)?;
                     }
                     return Ok(FrameExit::Returned);
                 }
@@ -1603,6 +1625,11 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 }
                 TerminatorKind::PropagateError => {
                     return Err(pending.ok_or_else(|| invalid("no failure to propagate"))?);
+                }
+                TerminatorKind::EffectViolation => {
+                    return Err(pending
+                        .ok_or_else(|| invalid("no failure violating effects"))?
+                        .into_effect_violation());
                 }
                 TerminatorKind::FailureDuringCleanup => {
                     return Err(pending
@@ -1629,7 +1656,9 @@ impl<'a, 'p> Interpreter<'a, 'p> {
     ) -> Result<(), RuntimeError> {
         use OperationKind::*;
         let result = match &operation.kind {
-            Call { ty, .. } => {
+            Call {
+                ty, value_result, ..
+            } => {
                 let mut callable = self.resolve_callable(self.operand(
                     body,
                     args,
@@ -1656,10 +1685,25 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                         *value = Binding::Place(cell);
                     }
                 }
+                // A call passes its result place too: a value result gets a cell of its own, read
+                // once the call returns.
+                let result_cell = if *value_result {
+                    let cell = self
+                        .memory
+                        .allocate(ty.fn_ty.ret, Some(operation.span.location))?;
+                    values.push(Binding::Place(cell));
+                    Some(cell)
+                } else {
+                    None
+                };
                 let result = self.invoke(callable, values);
+                let value = match (&result, result_cell) {
+                    (Ok(()), Some(cell)) => Some(Binding::Scalar(self.memory.read(cell)?)),
+                    _ => None,
+                };
                 self.memory.restore(marker);
                 result.map_err(|error| error.with_frame(id, operation.span.location))?;
-                None
+                value
             }
             DropInitialized { ty } => {
                 self.drop_operation(body, args, registers, operation, *ty)?;
@@ -2649,6 +2693,7 @@ mod tests {
             let body = Function::new(
                 "evidence_arguments".into(),
                 convention,
+                None,
                 vec![
                     Parameter {
                         ty: flag.ty,
@@ -2935,6 +2980,7 @@ mod tests {
         let body = Function::new(
             "transfers".into(),
             CallResultConvention::Value,
+            None,
             vec![],
             vec![],
             vec![],
