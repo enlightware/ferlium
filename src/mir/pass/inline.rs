@@ -40,7 +40,7 @@
 
 #![allow(dead_code)]
 
-use std::{borrow::Cow, cell::OnceCell};
+use std::borrow::Cow;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -60,7 +60,6 @@ use crate::{
         debug_location::InlineRebase,
         edit::FunctionEdit,
         operation::accepts_value_argument,
-        role::{MirType, ValueRole, ValueRoles},
         terminator::{Terminator, TerminatorKind},
     },
     module::{FunctionId, ModuleEnv, ModuleId, id::Id},
@@ -192,7 +191,6 @@ pub(crate) fn inline_function(
     }
 
     let mut edit = FunctionEdit::new(func.clone());
-    let roles = OnceCell::new();
     // Later sites first, so splicing one does not move the ones still to be done: within a block
     // that is the terminator before the operations, and the operations in decreasing index — which
     // is the reverse of the order they were planned in.
@@ -203,7 +201,6 @@ pub(crate) fn inline_function(
             inlining.callee.module,
             inlining.site,
             env,
-            &roles,
         );
     }
     // Splicing always splits the call site's block and joins the pieces with jumps, so a callee
@@ -638,16 +635,12 @@ fn check_inlinable(
 /// Replaces the call at `site` with `body`, rewired into the caller.
 ///
 /// `body` was read from module `from`, whose table its inline chains index.
-///
-/// `roles` holds the roles of the caller's registers as they were before any splice of this edit,
-/// derived on first need: a splice keeps the registers it does not define.
 fn inline_at(
     edit: &mut FunctionEdit,
     body: &Function,
     from: ModuleId,
     site: Site,
     env: ModuleEnv<'_>,
-    roles: &OnceCell<ValueRoles>,
 ) {
     // Take the call apart, and decide where the callee's exits lead.
     let (call, normal, error) = match site {
@@ -712,7 +705,7 @@ fn inline_at(
     marker.assign_result_id(Some(marker_id));
     edit.block_mut(site.block()).operations.push(marker);
 
-    let mut arguments = bind_arguments(edit, site.block(), &call, body, roles);
+    let mut arguments = bind_arguments(edit, site.block(), &call, body);
     // Where a callee returning its result as a value leaves it: the call's result slot or its own
     // slot, or nowhere when the call's register takes it directly.
     let mut destination = None;
@@ -768,12 +761,14 @@ fn inline_at(
 /// The call's arguments in the form the callee's parameters take. A place parameter given a value
 /// gets the value stored into a fresh `alloca`; a value parameter given a place gets a `load` of
 /// it. Both follow the inline marker, so the callee's exits reclaim the storage with its own.
+///
+/// Only a scalar `Let` argument can take either form, and it is a value exactly when the call-site
+/// type says so (see [`accepts_value_argument`]), as the semantic verifier requires.
 fn bind_arguments(
     edit: &mut FunctionEdit,
     block: BlockId,
     call: &Operation,
     body: &Function,
-    roles: &OnceCell<ValueRoles>,
 ) -> Vec<mir::Value> {
     let mut arguments = call.operands[1..].to_vec();
     let OperationKind::Call { ty, metadata, .. } = &call.kind else {
@@ -781,27 +776,13 @@ fn bind_arguments(
     };
     let visible_start =
         call.operands.len() - ty.fn_ty.args.len() - usize::from(call.kind.call_has_result_place());
-    // Only a scalar `Let` argument can take either form. Whether it is a value is known without
-    // roles unless it is a register, whose roles are derived once for the edit.
     let conversions = (0..ty.fn_ty.args.len())
-        .filter(|&offset| {
-            accepts_value_argument(ty, metadata.as_deref(), offset)
-                && body.parameters()[visible_start + offset - 1].kind
-                    == ParameterKind::Parameter(ArgConvention::Let)
-        })
         .filter_map(|offset| {
             let parameter = &body.parameters()[visible_start + offset - 1];
-            let is_value = match &call.operands[visible_start + offset] {
-                mir::Value::Constant(_) => true,
-                mir::Value::Parameter(id) => edit.parameters()[id.as_index()].is_value(),
-                operand @ mir::Value::Register(_) => roles
-                    .get_or_init(|| edit.value_roles())
-                    .get(operand, edit.constants())
-                    .is_some_and(|role| {
-                        matches!(*role, ValueRole::Materialized(MirType::Lowered(_)))
-                    }),
-                _ => return None,
-            };
+            if parameter.kind != ParameterKind::Parameter(ArgConvention::Let) {
+                return None;
+            }
+            let is_value = accepts_value_argument(ty, metadata.as_deref(), offset);
             (is_value != parameter.is_value()).then_some((offset, is_value))
         })
         .collect::<Vec<_>>();
@@ -855,7 +836,6 @@ pub(crate) fn expand_cleanup(
             index: OperationIndex::from_index(index),
         },
         env,
-        &OnceCell::new(),
     );
 }
 
@@ -1259,7 +1239,6 @@ mod tests {
                 index: OperationIndex::from_index(0),
             },
             env,
-            &OnceCell::new(),
         );
         edit.remove_unreachable_blocks();
         let body = edit.finish(env);

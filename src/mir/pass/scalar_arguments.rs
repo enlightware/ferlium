@@ -14,17 +14,13 @@
 //! pointer ([`spill_value_arguments`]), and such a result as a place where the entry returns it
 //! through one ([`place_value_results`]).
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
-use crate::{
-    mir::{
-        self, Function, Operation, OperationKind, ValueId,
-        edit::FunctionEdit,
-        operation::{OperationResult, accepts_value_argument, accepts_value_result},
-        role::{MirType, ValueRole, ValueRoles},
-        terminator::TerminatorKind,
-    },
-    module::id::Id,
+use crate::mir::{
+    self, Function, Operation, OperationKind, ValueId,
+    edit::FunctionEdit,
+    operation::{accepts_value_argument, accepts_value_result},
+    terminator::TerminatorKind,
 };
 
 /// Appends a `load` of each operand at `reads` to `operations`, and passes its value instead.
@@ -46,7 +42,7 @@ pub(crate) fn read_before(
 
 /// Passes each scalar value argument of a `call` or a `project` as a place where `takes_value` says
 /// its callee's entry takes that argument through a pointer. `takes_value` is given the operation and
-/// the argument's offset among the visible ones. `None` if no such argument is a value.
+/// the argument's offset among the visible ones. `None` if no argument needs a place.
 ///
 /// A value loaded in the call's block, with nothing but other loads and `alloca`s in between, is
 /// replaced by the place it was loaded from, and the load is dropped when nothing else reads it:
@@ -57,10 +53,8 @@ pub(crate) fn spill_value_arguments(
     func: &Function,
     takes_value: impl Fn(&Operation, usize) -> bool,
 ) -> Option<Function> {
-    if !may_pass_values(func) {
-        return None;
-    }
-    let roles = ValueRoles::derive(func);
+    // A read-only scalar argument is a value exactly when the call-site type says so, as the
+    // semantic verifier requires.
     let spills_of = |operation: &Operation| -> Vec<usize> {
         let Some((_, ty, metadata)) = operation.call_site() else {
             return Vec::new();
@@ -71,13 +65,6 @@ pub(crate) fn spill_value_arguments(
                 accepts_value_argument(ty, metadata, offset) && !takes_value(operation, offset)
             })
             .map(|offset| visible_start + offset)
-            .filter(|&index| {
-                roles
-                    .get(&operation.operands[index], func.constants())
-                    .is_some_and(|role| {
-                        matches!(*role, ValueRole::Materialized(MirType::Lowered(_)))
-                    })
-            })
             .collect()
     };
     let changed = func.blocks().any(|block| {
@@ -243,50 +230,6 @@ pub(crate) fn place_value_results(
     let entry = edit.entry();
     edit.block_mut(entry).operations.splice(0..0, slots);
     Some(edit.finish_unverified())
-}
-
-/// Whether some call may pass a scalar argument as a value: a constant, or a register whose
-/// definition may yield a value, such as a `load`, a comparison, or a load's uses forwarded to the
-/// value stored. A syntactic filter, so that a body without one, such as raw MIR, derives no roles;
-/// it may admit a body that passes none, never miss one that does.
-fn may_pass_values(func: &Function) -> bool {
-    let values = func
-        .blocks()
-        .flat_map(|block| func.block(block).operations())
-        .filter(|operation| {
-            operation.result_id().is_some()
-                && !matches!(operation.kind, OperationKind::Alloca { .. })
-                && matches!(
-                    operation.result(),
-                    OperationResult::Lowered(_)
-                        | OperationResult::Pointee(_)
-                        | OperationResult::Same(_)
-                )
-        })
-        .filter_map(Operation::result_id)
-        .collect::<FxHashSet<_>>();
-    func.blocks().any(|block| {
-        let block = func.block(block);
-        let invoked = match &block.terminator().kind {
-            TerminatorKind::Invoke { operation, .. } => Some(operation),
-            _ => None,
-        };
-        block.operations().iter().chain(invoked).any(|operation| {
-            let Some((_, ty, metadata)) = operation.call_site() else {
-                return false;
-            };
-            let visible_start = operation.call_visible_start();
-            (0..ty.fn_ty.args.len()).any(|offset| {
-                accepts_value_argument(ty, metadata, offset)
-                    && match &operation.operands[visible_start + offset] {
-                        mir::Value::Constant(_) => true,
-                        mir::Value::Register(id) => values.contains(id),
-                        mir::Value::Parameter(id) => func.parameters()[id.as_index()].is_value(),
-                        _ => false,
-                    }
-            })
-        })
-    })
 }
 
 /// Passes each value operand at `spills` of `call`, which follows `operations`, as a place: the
