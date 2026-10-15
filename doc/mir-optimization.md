@@ -677,10 +677,11 @@ shared, fail-safe classification of direct uses; each pass then decides which us
 other analyses, it is rebuilt after a rewrite rather than maintained through one.
 
 On top of it, `mir::pass::value_cells` recognizes the cells that behave as values, like rustc's
-`SsaLocals`: one definition fills the cell whole and dominates every other use, and every other use
-only observes it, including as a `let` call argument, which the callee can neither mutate nor
-retain. A pass may then treat each read of such a cell as the value its definition produced.
-Store forwarding and LICM consume this verdict.
+`SsaLocals`: one store or copy fills the cell whole and dominates every other use, and every other
+use only observes it, including as a `let` call argument, which the callee can neither mutate nor
+retain. A call's result place is not such a definition, since a scalar result is a register. A pass
+may then treat each read of such a cell as the value its definition produced. Store forwarding and
+LICM consume this verdict.
 
 ## Storage forwarding
 
@@ -756,13 +757,12 @@ against a boolean literal carries the same information. Each names the slot and 
 stored the pattern it compares against.
 
 An arm may also store a computed boolean: it cannot pick an edge itself, so it ends in a `condbr`
-on the value it stored, which is the join's read and branch run on that arm alone.
-A call producing the boolean follows the same rule, preserving its execution count, effects and
-cleanup order.
+on the value it stored, which is the join's read and branch run on that arm alone. A call
+producing the boolean defines a register, which its arm stores, so it follows the same rule.
 
 The proof is a linear use and predecessor census and deliberately narrower than general jump
-threading. The slot must be a local boolean `alloca`; its only uses must be a boolean store or call
-result per incoming predecessor and the final read; every predecessor must jump unconditionally
+threading. The slot must be a local boolean `alloca`; its only uses must be a boolean store per
+incoming predecessor and the final read; every predecessor must jump unconditionally
 to the join; and the join may contain only `stack_restore`s besides that read. Other operations,
 additional uses, unknown stores and self-edges all refuse the rewrite.
 
@@ -957,10 +957,12 @@ answer merely declines an optimization and avoids invalidation inside the per-fu
 The initial proof is deliberately conservative. Every visible argument must use the `Let`
 convention. A place argument's definition must dominate the preheader and its storage root must not
 be written anywhere in the loop, unless it is a value cell defined in the loop by a value available
-before it; that definition then moves with the call. A value argument must be a constant or defined
-outside the loop, such as by a read hoisted first. The call must use the value-result convention, have no owned
-arguments, and write a concrete `TrivialCopy` value to a whole static local allocation. That result
-allocation has no other writer and none of its uses may escape the loop. These conditions are
+before it, such as a unit argument's constant; that definition then moves with the call. A value
+argument must be a constant or defined outside the loop, such as by a read hoisted first. The call
+must use the value-result convention, have no owned arguments, and return a concrete `TrivialCopy`
+value. A call defining its result register needs
+nothing more. Any other result, such as a `raw_float` or an aggregate, goes to a whole static local
+allocation with no other writer, none of whose uses may escape the loop. These conditions are
 generic over all direct callees satisfying the effect contract; they are implementation limits that
 can be relaxed independently if a concrete workload justifies it.
 

@@ -328,13 +328,10 @@ fn read_kind(access: Access) -> Option<Read> {
     }
 }
 
-/// Whether this pass admits `access` to one of its cells: a call result is not a value it can name,
-/// and a cell passed as a call argument keeps its storage, so its other reads stay too.
+/// Whether this pass admits `access` to one of its cells: a cell passed as a call argument keeps its
+/// storage, so its other reads stay too.
 fn forwardable(access: Access) -> bool {
-    !matches!(
-        access,
-        Access::Write(local_cells::Write::CallResult) | Access::Read(local_cells::Read::Argument)
-    )
+    access != Access::Read(local_cells::Read::Argument)
 }
 
 /// What the reads of each forwardable cell are forwarded to.
@@ -379,7 +376,6 @@ fn targets(func: &Function, census: &Census<'_>) -> FxHashMap<ValueId, Target> {
                 Definition::Function(function) => Some(Target::Function(*function)),
                 Definition::Constant(constant) => Some(Target::Constant(*constant)),
                 Definition::Copy(source) => self.copied(cell, source),
-                Definition::CallResult => unreachable!("a census cell is not a call result"),
             };
             self.targets.insert(cell, target.clone());
             target

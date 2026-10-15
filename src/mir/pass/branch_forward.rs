@@ -50,11 +50,10 @@
 //! only edge cleanup, and replays that cleanup on each arm it redirects.
 //!
 //! The proof is intentionally local and linear. The flag must be a local boolean `alloca`; every
-//! use must be a boolean store, a call result destination, or the one final read; every block on a walked path
-//! must end in an unconditional jump; a store-free block on a path may contain only
-//! `stack_restore`s; the join may contain only `stack_restore`s besides the read; and the
-//! stores found must be exactly those the use census saw, which is what proves no other definition
-//! reaches the join. Two paths may not meet at one block, since rewriting it would mean duplicating
+//! use must be a boolean store or the one final read; every block on a walked path must end in an
+//! unconditional jump; a store-free block on a path may contain only `stack_restore`s; the join may
+//! contain only `stack_restore`s besides the read; and the stores found must be exactly those the
+//! use census saw, which is what proves no other definition reaches the join. Two paths may not meet at one block, since rewriting it would mean duplicating
 //! it. For a variant, the forward analysis takes the place of the store census: a block where
 //! paths storing one tag meet leaves that tag and is redirected itself.
 
@@ -90,7 +89,6 @@ struct Stored<T> {
 enum Flag {
     Literal(bool),
     Computed(ValueId),
-    CallResult(ValueId),
 }
 
 #[derive(Default)]
@@ -119,11 +117,6 @@ struct Arm {
 /// boolean, to a branch on that value.
 enum Exit {
     Goto(BlockId),
-    TestPlace {
-        place: ValueId,
-        then_target: BlockId,
-        else_target: BlockId,
-    },
     Branch {
         condition: ValueId,
         then_target: BlockId,
@@ -182,7 +175,7 @@ pub(crate) fn forward_boolean_branches(func: &Function) -> Option<Function> {
     for forward in forwards {
         for arm in forward.arms {
             let span = edit.block(arm.source).terminator.span;
-            let terminator = arm.exit.terminator(span, &mut edit, arm.source);
+            let terminator = arm.exit.terminator(span);
             let block = edit.block_mut(arm.source);
             block.operations.extend(arm.replay);
             block.terminator = terminator;
@@ -349,7 +342,7 @@ pub(crate) fn forward_variant_branches(func: &Function, env: ModuleEnv<'_>) -> O
     for forward in forwards {
         for arm in forward.arms {
             let span = edit.block(arm.source).terminator.span;
-            let terminator = arm.exit.terminator(span, &mut edit, arm.source);
+            let terminator = arm.exit.terminator(span);
             let block = edit.block_mut(arm.source);
             block.operations.extend(arm.replay);
             block.terminator = terminator;
@@ -622,26 +615,9 @@ pub(crate) fn shadow_variant_tag_tests(func: &Function, env: ModuleEnv<'_>) -> O
 }
 
 impl Exit {
-    fn terminator(
-        self,
-        span: DebugLocation,
-        edit: &mut FunctionEdit,
-        block: BlockId,
-    ) -> Terminator {
+    fn terminator(self, span: DebugLocation) -> Terminator {
         match self {
             Self::Goto(target) => Terminator::goto(span, target),
-            Self::TestPlace {
-                place,
-                then_target,
-                else_target,
-            } => {
-                // Read before replaying the join's stack cleanup. The call and its
-                // result storage remain in place; only the redundant join goes.
-                let condition = edit
-                    .append_operation(block, Operation::load(span, mir::Value::Register(place)))
-                    .expect("load has a result");
-                Terminator::cond_br(span, condition, then_target, else_target)
-            }
             Self::Branch {
                 condition,
                 then_target,
@@ -696,15 +672,6 @@ fn census_uses(func: &Function, uses: &mut FxHashMap<ValueId, Uses>) -> FxHashMa
                             },
                         };
                         summary.stores.push(Stored { block, value });
-                    }
-                    OperationKind::Call { .. }
-                        if dataflow::call_result_operand_index(operation)
-                            == Some(operand_index) =>
-                    {
-                        summary.stores.push(Stored {
-                            block,
-                            value: Flag::CallResult(*id),
-                        });
                     }
                     OperationKind::CompareEqual | OperationKind::Load => summary.reads.push(site),
                     _ => summary.other = true,
@@ -793,11 +760,6 @@ fn plan_join(
             let exit = match reaching.value {
                 Flag::Literal(true) => Exit::Goto(then_target),
                 Flag::Literal(false) => Exit::Goto(else_target),
-                Flag::CallResult(place) => Exit::TestPlace {
-                    place,
-                    then_target,
-                    else_target,
-                },
                 Flag::Computed(condition) => Exit::Branch {
                     condition,
                     then_target,

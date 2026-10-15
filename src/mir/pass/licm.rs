@@ -13,8 +13,10 @@
 //! throughout the loop. An input may instead be a [value cell](super::value_cells) whose definition
 //! in the loop stores a constant, a bare function or a register defined before the loop, and whose
 //! every use stays in the loop: the definition, with any loop-local allocation, moves with the call.
-//! The result must be a whole local `alloca`; no other write may reach it and every use of its root
-//! must stay in the loop. When that allocation is loop-local it moves with the call.
+//! Such a cell holds a non-scalar argument, such as unit, since a scalar one is a value. A call
+//! defining its result register needs nothing more. Any other result, such as a `raw_float`, goes
+//! to a whole local `alloca`; no other write may reach it and every use of its root must stay in
+//! the loop. When that allocation is loop-local it moves with the call.
 //!
 //! Stack regions are part of correctness, not cleanup decoration. A loop-local result moved after a
 //! preheader's `stack_save` would be popped by the matching per-iteration `stack_restore`. The
@@ -916,10 +918,7 @@ fn find_hoist(
 fn invariant_cell_access(access: local_cells::Access) -> bool {
     !matches!(
         access,
-        local_cells::Access::Write(local_cells::Write::CallResult)
-            | local_cells::Access::MoveOut(_)
-            | local_cells::Access::Callee
-            | local_cells::Access::Drop
+        local_cells::Access::MoveOut(_) | local_cells::Access::Callee | local_cells::Access::Drop
     )
 }
 
@@ -956,7 +955,7 @@ fn invariant_cell<'f>(
         Definition::Value(_) => {
             inputs.push(&value_cells::operation_at(func, cell.site).operands[0])
         }
-        Definition::Copy(_) | Definition::CallResult => return false,
+        Definition::Copy(_) => return false,
     }
     if values
         .uses(cell)
@@ -1734,25 +1733,27 @@ mod tests {
     #[test]
     fn a_cell_moved_out_in_the_loop_keeps_its_definition_there() {
         // `move` leaves its source uninitialized, so the cell must be filled again each iteration.
+        // The cell holds unit: a scalar argument would be a value, not a cell.
         let session = CompilerSession::new();
         let env = session.module_env();
         let span = Location::new_synthesized();
         let mut builder = FunctionBuilder::new("moved_cell".into(), Default::default());
         let preheader = builder.add_block();
         let body = builder.add_block();
-        let constant = Value::Constant(builder.add_constant(
-            int_type(),
-            LiteralValue::new_native(3isize),
-            &env,
-        ));
+        let constant =
+            Value::Constant(builder.add_constant(Type::unit(), LiteralValue::new_native(()), &env));
         let callee = FunctionId::new(ModuleId::default(), LocalFunctionId::default());
         builder.set_terminator(preheader, Terminator::goto(span, body));
-        let mut alloca = || {
+        let mut alloca = |ty| {
             builder
-                .append_operation(body, Operation::alloca(span, int_type()))
+                .append_operation(body, Operation::alloca(span, ty))
                 .expect("an alloca has a result")
         };
-        let (cell, result, destination) = (alloca(), alloca(), alloca());
+        let (cell, result, destination) = (
+            alloca(Type::unit()),
+            alloca(int_type()),
+            alloca(Type::unit()),
+        );
         builder.append_operation(body, Operation::store(span, constant, cell.clone()));
         builder.append_operation(
             body,
@@ -1761,7 +1762,7 @@ mod tests {
                 Value::Function(callee),
                 [cell.clone(), result],
                 CallImplType::value(FnType::new_mut_resolved(
-                    [(int_type(), false)],
+                    [(Type::unit(), false)],
                     int_type(),
                     no_effects(),
                 )),
@@ -1781,6 +1782,32 @@ mod tests {
             hoisted.is_none(),
             "the store refilling a moved-out cell must stay in the loop"
         );
+    }
+
+    #[test]
+    fn hoists_a_call_with_a_unit_argument_cell() {
+        // A unit argument is not a scalar, so it is a cell the loop fills; its constant store
+        // moves out with the call.
+        let source = "#[inline(never)]\n\
+                      fn bias(u: (), a: int) -> int { a + 1 }\n\
+                      fn total(a: int, n: int) -> int {\n\
+                          let mut sum = 0;\n\
+                          for i in 0..n { sum += bias((), a) };\n\
+                          sum\n\
+                      }\n\
+                      fn main() { total(2, 3) + total(2, 0) }";
+        let module = optimized(source);
+        let body = body_of(&module, "total");
+        let call = call_position(body, "call licm::bias");
+        let header = body.find("check_fuel").expect("the loop checks fuel");
+        assert!(
+            call < header,
+            "the call and its unit cell must move out of the loop:\n{body}"
+        );
+
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        assert_eq!(session.eval_mir("licm_run", source), "9");
     }
 
     #[test]

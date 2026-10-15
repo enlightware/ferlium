@@ -3,27 +3,26 @@
 
 //! Local cells that behave as values: Ferlium's analogue of rustc's `SsaLocals`.
 //!
-//! MIR has no φ and passes scalars by place, so a value computed once and read later travels
-//! through a cell: `store %v to %cell`, a constant stored to become a call operand, or a call's
-//! result place. Such a cell is a value when one definition fills it whole, that definition
-//! dominates every other use, and every other use only observes the contents. A pass may then
-//! treat each read as the definition's value instead of reasoning about the cell's memory.
+//! MIR has no φ, so a value meeting a join, leaving an inlined callee or bound to a local whose
+//! place the body needs travels through a cell: `store %v to %cell`, or a copy into it. Such a
+//! cell is a value when one definition fills it whole, that definition dominates every other use,
+//! and every other use only observes the contents. A pass may then treat each read as the
+//! definition's value instead of reasoning about the cell's memory.
 //!
-//! The verdict is a whitelist over the [`LocalCells`] classification. Admitted reads are loads,
-//! `comp_eq` scrutinees, copies out, `move`s out of statically sized contents, and visible `Let`
-//! call arguments, which the callee may neither mutate nor retain. A cell defined by storing a
-//! bare function may also be called through and dropped: it holds no environment. Any other value
-//! must be `TrivialCopy`, so a read never transfers ownership and the cell carries no drop
-//! obligation. A `move` out still leaves the cell uninitialized, making it the cell's last use until
-//! the definition runs again.
+//! The verdict is a whitelist over the [`LocalCells`] classification. The definition is a store or
+//! a copy; a call's result place is not one, since a scalar result is a register and any other has
+//! no register to name. Admitted reads are loads, `comp_eq` scrutinees, copies out, `move`s out of
+//! statically sized contents, and visible `Let` call arguments, which the callee may neither mutate
+//! nor retain: since scalar arguments are values, such an argument is of another type, such as
+//! unit. A cell defined by storing a bare function may also be called through and dropped: it holds
+//! no environment. Any other value must be `TrivialCopy`, so a read never transfers ownership and
+//! the cell carries no drop obligation. A `move` out still leaves the cell uninitialized, making it
+//! the cell's last use until the definition runs again.
 //!
 //! Dominance is per block, and in program order within one; a use before the definition in its
 //! block belongs to an earlier iteration and disqualifies the cell. A cell allocated inside a loop
 //! is a value within each iteration; moving its definition across iterations is the consumer's
 //! proof, which must also respect the stack region releasing it and exclude moves out.
-//!
-//! An invoked call's result is available only on its success edge, which block dominance does not
-//! distinguish, so a result place of an `invoke` is not a definition.
 
 use super::{
     local_cells::{self, Access, Allocation, Cell, CellId, CellUse, LocalCells, Transfer},
@@ -52,8 +51,6 @@ pub(crate) enum Definition {
     /// `memcpy`/`move %source to %cell`, from a register or a parameter. The source may change
     /// after the copy; the cell keeps what it received.
     Copy(mir::Value),
-    /// The result place of a call operation.
-    CallResult,
 }
 
 /// A local cell holding one value for its whole lifetime.
@@ -99,8 +96,8 @@ impl<'a> ValueCells<'a> {
             let dominance = dominance();
             candidates.retain(|(value, definition)| {
                 let cell = local.get(value.id).expect("a candidate is a local cell");
-                // A use in the defining operation itself, such as an in-place call argument, is
-                // not dominated by it.
+                // A use in the defining operation itself, such as a copy of the cell into itself,
+                // is not dominated by it.
                 local
                     .uses(cell)
                     .iter()
@@ -234,11 +231,6 @@ fn shape(
                     return None;
                 }
             }
-            Access::Write(local_cells::Write::CallResult) if !cell_use.in_terminator(func) => {
-                if found.replace((cell_use.site, index)).is_some() {
-                    return None;
-                }
-            }
             Access::Read(
                 local_cells::Read::Load
                 | local_cells::Read::Compare
@@ -254,7 +246,6 @@ fn shape(
     let (site, index) = found?;
     let operation = operation_at(func, site);
     let definition = match (&operation.kind, &operation.operands[0]) {
-        (OperationKind::Call { .. }, _) => Definition::CallResult,
         (OperationKind::Store, stored @ (mir::Value::Register(_) | mir::Value::Parameter(_))) => {
             Definition::Value(stored.clone())
         }
@@ -329,15 +320,13 @@ mod tests {
                 .append_operation(block, Operation::alloca(span, int_type()))
                 .unwrap()
         };
-        // A constant made a call operand, and the call's result.
-        let operand = alloca(&mut builder);
+        // A stored constant, read by a load.
+        let stored = alloca(&mut builder);
         builder.append_operation(
             block,
-            Operation::store(span, constant.clone(), operand.clone()),
+            Operation::store(span, constant.clone(), stored.clone()),
         );
-        let result = alloca(&mut builder);
-        builder.append_operation(block, call(operand.clone(), result.clone()));
-        builder.append_operation(block, Operation::load(span, result.clone()));
+        builder.append_operation(block, Operation::load(span, stored.clone()));
         // A call reading the place it defines.
         let in_place = alloca(&mut builder);
         builder.append_operation(block, call(in_place.clone(), in_place.clone()));
@@ -357,11 +346,7 @@ mod tests {
             };
             values.get(*id).map(|value| value.definition.clone())
         };
-        assert!(matches!(
-            definition(&operand),
-            Some(Definition::Constant(_))
-        ));
-        assert!(matches!(definition(&result), Some(Definition::CallResult)));
+        assert!(matches!(definition(&stored), Some(Definition::Constant(_))));
         assert!(definition(&in_place).is_none());
         assert!(definition(&early).is_none());
     }
