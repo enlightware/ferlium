@@ -15,7 +15,9 @@ $(RUST_WASM): $(RUST_SOURCES) $(RUST_CONFIG_FILES)
 	wasm-pack build script-api/ --target web
 
 install-wasm-deps:
-	cargo install wasm-pack
+	@if ! command -v wasm-pack >/dev/null 2>&1; then \
+		cargo install wasm-pack --version 0.15.0 --locked; \
+	fi
 
 install-npm-deps:
 	npm i
