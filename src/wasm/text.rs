@@ -462,9 +462,11 @@ mod tests {
             ("fn f(x: int, y: int) -> bool { x != y }", "i32.ne"),
             ("fn f(x: int) -> bool { x == 0 }", "i32.eqz"),
             ("fn f(x: float, y: float) -> bool { not (x > y) }", "f64.le"),
+            // A branch-only negation is removed in MIR by swapping the arms, so this
+            // tests equality and returns 2 when it holds instead of materializing `!=`.
             (
                 "fn f(x: int, y: int) -> int { if x != y { 1 } else { 2 } }",
-                "i32.ne",
+                "i32.eq",
             ),
             (
                 "fn f(x: int) -> int { if x == 0 { 1 } else { 2 } }",
