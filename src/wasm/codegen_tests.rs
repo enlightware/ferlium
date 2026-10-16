@@ -4109,13 +4109,13 @@ fn wasm_codegen_structured_control_flow_and_local_storage() {
 
 #[wasm_bindgen_test]
 fn wasm_codegen_omits_noop_stack_markers_in_loops() {
-    // The inlined callee's local, which it writes twice, keeps a statically sized slot inside the
+    // The inlined callee's local, which crosses a join, keeps a statically sized slot inside the
     // loop's stack bracket.
     let mut session = CompilerSession::new();
     session.set_mir_optimization(MirOptimization::Enabled);
     let entry = compile(
         &mut session,
-        "fn bump(x: int) -> int { let mut y = x; y += 1; y } \
+        "fn bump(x: int) -> int { let mut y = x; if x > 3 { y += 1 }; y } \
          fn compute(limit: int) -> int { \
              let mut i = 0; let mut sum = 0; \
              loop { if i >= limit { break; }; sum += bump(i); i += 1; }; \
@@ -4159,7 +4159,7 @@ fn wasm_codegen_omits_noop_stack_markers_in_loops() {
     }
 
     let mut instance = code.instantiate::<(isize,), isize>().unwrap();
-    assert_eq!(instance.run((10,), WasmLimits::default()).unwrap(), 55);
+    assert_eq!(instance.run((10,), WasmLimits::default()).unwrap(), 51);
 }
 
 #[wasm_bindgen_test]
@@ -4612,9 +4612,9 @@ fn wasm_codegen_stackifies_across_elided_stack_markers() {
     let mut session = CompilerSession::new();
     let entry = compile(
         &mut session,
-        // The inlined body's mutable local keeps it bracketed by stack markers; a scalar argument
-        // alone no longer needs a scoped temporary.
-        "fn add_one(x: int) -> int { let mut r = x; r += 1; r }
+        // The inlined body's mutable local crosses a join, which keeps it bracketed by stack
+        // markers; a straight-line local alone no longer needs a cell.
+        "fn add_one(x: int) -> int { let mut r = x; if x > 100 { r = 0 }; r + 1 }
          fn compute(x: int, y: int) -> bool {
              let sum = add_one(x); let scaled = sum * 2; scaled == y
          }",
