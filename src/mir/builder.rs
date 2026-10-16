@@ -23,7 +23,7 @@ use crate::{
         ParameterKind, ValueId,
         operation::SourceFallibility,
         terminator::{Terminator, TerminatorKind},
-        value::{Constant, ConstantId},
+        value::{Constant, ConstantId, ConstantPool},
     },
     module::{ModuleEnv, id::Id},
     types::r#type::{CallResultConvention, Type},
@@ -46,7 +46,7 @@ pub(crate) struct FunctionBuilder {
     result_convention: CallResultConvention,
     value_result: Option<Type>,
     parameters: Vec<Parameter>,
-    constants: Vec<Constant>,
+    constants: ConstantPool,
     blocks: Vec<PendingBlock>,
     next_value_index: usize,
     /// The role of every value defined so far, maintained as operations are appended.
@@ -64,7 +64,7 @@ impl FunctionBuilder {
             result_convention,
             value_result: None,
             parameters: Vec::new(),
-            constants: Vec::new(),
+            constants: ConstantPool::default(),
             blocks: Vec::new(),
             next_value_index: 0,
             #[cfg(any(debug_assertions, test))]
@@ -98,13 +98,7 @@ impl FunctionBuilder {
             representation.has_representation_type_in(ty, env),
             "MIR constant representation does not match its declared type"
         );
-        let constant = Constant { ty, representation };
-        if let Some(index) = self.constants.iter().position(|item| item == &constant) {
-            return ConstantId::from_index(index);
-        }
-        let id = ConstantId::from_index(self.constants.len());
-        self.constants.push(constant);
-        id
+        self.constants.intern(Constant { ty, representation })
     }
 
     pub(crate) fn add_block(&mut self) -> BlockId {
@@ -145,7 +139,7 @@ impl FunctionBuilder {
             self.name,
             &self.insertion_site(block),
             &operation,
-            &self.constants,
+            self.constants.as_slice(),
         );
         let result = self.assign_result(&mut operation);
         self.blocks[block.as_index()]
@@ -221,7 +215,7 @@ impl FunctionBuilder {
                 index: OperationIndex::from_index(index),
             },
             &operation,
-            &self.constants,
+            self.constants.as_slice(),
         );
         let result = self.assign_result(&mut operation);
         self.blocks[block.as_index()]
@@ -246,7 +240,7 @@ impl FunctionBuilder {
             self.name,
             &self.insertion_site(block),
             &terminator.kind,
-            &self.constants,
+            self.constants.as_slice(),
         );
         let result = match &mut terminator.kind {
             TerminatorKind::Invoke { operation, .. } => self.assign_result(operation),
@@ -279,8 +273,13 @@ impl FunctionBuilder {
             // Resolving the role here is what requires an operand to be defined before the
             // operation reading it is appended. Blocks may be filled in any order, but a value is
             // always handed back from the append that created it, so a use cannot precede it.
-            self.roles
-                .define(self.name, result_id, operation, result, &self.constants);
+            self.roles.define(
+                self.name,
+                result_id,
+                operation,
+                result,
+                self.constants.as_slice(),
+            );
         }
         result_id.map(mir::Value::Register)
     }
@@ -327,7 +326,7 @@ impl FunctionBuilder {
             self.result_convention,
             self.value_result,
             self.parameters,
-            self.constants,
+            self.constants.into_vec(),
             blocks,
         )
     }

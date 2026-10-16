@@ -34,7 +34,7 @@ use crate::{
     hir::value::{LiteralValue, VariantPayloadStorage},
     mir::{
         self, BlockId, Function, Operation, OperationKind, ValueId, edit::FunctionEdit,
-        terminator::TerminatorKind, value::ConstantId,
+        terminator::TerminatorKind,
     },
     module::{FunctionId, ModuleEnv, id::Id},
     std::value::{structural_variant, variant_payload_storage_for_payload_type},
@@ -666,9 +666,6 @@ fn split(func: &Function, env: ModuleEnv<'_>, managed: Option<OptimizationStage<
         .collect();
 
     let mut edit = FunctionEdit::new(func.clone());
-    // Borrow keys from the original pool/its field literals. Append new typed leaves with hash
-    // interning instead of a linear pool search for every field of a large literal product.
-    let mut field_constants = None;
     // Use original allocation order, not hash iteration order, for deterministic value identities.
     for block in func.blocks() {
         for operation in func.block(block).operations() {
@@ -744,27 +741,13 @@ fn split(func: &Function, env: ModuleEnv<'_>, managed: Option<OptimizationStage<
                     &func.constant(id).representation,
                 )
                 .unwrap();
-                let field_constants = field_constants.get_or_insert_with(|| {
-                    func.constants()
-                        .iter()
-                        .enumerate()
-                        .map(|(index, constant)| {
-                            (
-                                (constant.ty, &constant.representation),
-                                ConstantId::from_index(index),
-                            )
-                        })
-                        .collect::<FxHashMap<_, _>>()
-                });
                 let range = candidate.shape.nodes[place.node].leaves.clone();
                 for ((literal, ty), field) in literals
                     .into_iter()
                     .zip(&candidate.shape.leaf_types[range.clone()])
                     .zip(&candidate.fields[range])
                 {
-                    let literal = *field_constants
-                        .entry((*ty, literal))
-                        .or_insert_with(|| edit.append_constant(*ty, literal.clone(), &env));
+                    let literal = edit.add_constant(*ty, literal.clone(), &env);
                     operations.push(Operation::store(
                         operation.span,
                         mir::Value::Constant(literal),

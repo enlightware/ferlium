@@ -3,9 +3,12 @@
 
 use std::{
     fmt,
-    hash::{Hash, Hasher},
+    hash::{BuildHasher, Hash, Hasher},
     mem::discriminant,
 };
+
+use rustc_hash::{FxBuildHasher, FxHashMap};
+use smallvec::SmallVec;
 
 use crate::{
     containers::B,
@@ -194,6 +197,71 @@ pub(crate) fn same_literal_representation(left: &LiteralValue, right: &LiteralVa
         LiteralValue::VariantTag(left) => {
             matches!(right, LiteralValue::VariantTag(right) if left == right)
         }
+    }
+}
+
+/// A function's constants under construction or edit, interned by representation.
+///
+/// Interning looks a constant up by its hash rather than comparing it with every entry, which on a
+/// body with many literals, such as a large array, made adding constants quadratic. The index is
+/// built on the first lookup, so an edit adding no constant pays nothing for it, and dropped
+/// whenever the entries are changed in place.
+#[derive(Default)]
+pub(crate) struct ConstantPool {
+    constants: Vec<Constant>,
+    /// The ids of the constants, by the hash of each.
+    index: Option<FxHashMap<u64, SmallVec<[ConstantId; 1]>>>,
+}
+
+impl ConstantPool {
+    pub(crate) fn new(constants: Vec<Constant>) -> Self {
+        Self {
+            constants,
+            index: None,
+        }
+    }
+
+    pub(crate) fn as_slice(&self) -> &[Constant] {
+        &self.constants
+    }
+
+    /// The constants, for changing them in place.
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [Constant] {
+        self.index = None;
+        &mut self.constants
+    }
+
+    pub(crate) fn into_vec(self) -> Vec<Constant> {
+        self.constants
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.constants.len()
+    }
+
+    /// The id of an entry equal to `constant`, which is added if there is none.
+    pub(crate) fn intern(&mut self, constant: Constant) -> ConstantId {
+        let hash = FxBuildHasher.hash_one(&constant);
+        let constants = &self.constants;
+        let index = self.index.get_or_insert_with(|| {
+            let mut index = FxHashMap::<u64, SmallVec<_>>::default();
+            for (position, constant) in constants.iter().enumerate() {
+                let hash = FxBuildHasher.hash_one(constant);
+                index
+                    .entry(hash)
+                    .or_default()
+                    .push(ConstantId::from_index(position));
+            }
+            index
+        });
+        let ids = index.entry(hash).or_default();
+        if let Some(&id) = ids.iter().find(|id| constants[id.as_index()] == constant) {
+            return id;
+        }
+        let id = ConstantId::from_index(constants.len());
+        ids.push(id);
+        self.constants.push(constant);
+        id
     }
 }
 

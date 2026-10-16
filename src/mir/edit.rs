@@ -45,7 +45,7 @@ use crate::{
         ParameterId, ParameterKind, ValueId,
         role::ValueRoles,
         terminator::{Terminator, TerminatorKind},
-        value::{Constant, ConstantId},
+        value::{Constant, ConstantId, ConstantPool},
     },
     module::{FunctionId, ModuleEnv, id::Id},
     types::r#type::{CallResultConvention, Type},
@@ -63,7 +63,7 @@ pub(crate) struct FunctionEdit {
     result_convention: CallResultConvention,
     value_result: Option<Type>,
     parameters: Vec<Parameter>,
-    constants: Vec<Constant>,
+    constants: ConstantPool,
     blocks: Vec<EditBlock>,
     /// One past the highest result identity in use, so fresh identities never collide with an
     /// existing one — including one whose defining operation has just been removed.
@@ -113,7 +113,7 @@ impl FunctionEdit {
             result_convention,
             value_result,
             parameters,
-            constants,
+            constants: ConstantPool::new(constants),
             blocks,
             next_value_index,
         }
@@ -213,11 +213,11 @@ impl FunctionEdit {
     /// through [`Self::add_constant`], which dedups; removing one is [`Self::prune_constants`],
     /// which renumbers.
     pub(crate) fn constants_mut(&mut self) -> &mut [Constant] {
-        &mut self.constants
+        self.constants.as_mut_slice()
     }
 
     pub(crate) fn constants(&self) -> &[Constant] {
-        &self.constants
+        self.constants.as_slice()
     }
 
     /// The roles of the body as it currently stands; see [`ValueRoles::derive`].
@@ -225,7 +225,7 @@ impl FunctionEdit {
         ValueRoles::derive_from_parts(
             &self.parameters,
             self.result_convention,
-            &self.constants,
+            self.constants.as_slice(),
             self.blocks
                 .iter()
                 .map(|block| (block.operations.as_slice(), &block.terminator.kind)),
@@ -233,7 +233,7 @@ impl FunctionEdit {
     }
 
     pub(crate) fn constant(&self, id: ConstantId) -> &Constant {
-        &self.constants[id.as_index()]
+        &self.constants.as_slice()[id.as_index()]
     }
 
     pub(crate) fn result_convention(&self) -> CallResultConvention {
@@ -325,28 +325,11 @@ impl FunctionEdit {
         representation: LiteralValue,
         env: &ModuleEnv<'_>,
     ) -> ConstantId {
-        let constant = Constant { ty, representation };
-        if let Some(index) = self.constants.iter().position(|item| item == &constant) {
-            return ConstantId::from_index(index);
-        }
-        self.append_constant(constant.ty, constant.representation, env)
-    }
-
-    /// Appends a typed constant without searching the pool. Bulk rewrites which maintain their
-    /// own hash interner use this to avoid a quadratic sequence of `add_constant` searches.
-    pub(crate) fn append_constant(
-        &mut self,
-        ty: Type,
-        representation: LiteralValue,
-        env: &ModuleEnv<'_>,
-    ) -> ConstantId {
         debug_assert!(
             representation.has_representation_type_in(ty, env),
             "MIR constant representation does not match its declared type"
         );
-        let id = ConstantId::from_index(self.constants.len());
-        self.constants.push(Constant { ty, representation });
-        id
+        self.constants.intern(Constant { ty, representation })
     }
 
     /// Drops every block unreachable from the entry and renumbers the rest.
@@ -542,14 +525,18 @@ impl FunctionEdit {
 
         let mut renumbered = FxHashMap::default();
         let mut retained = Vec::with_capacity(used.len());
-        for (index, constant) in mem::take(&mut self.constants).into_iter().enumerate() {
+        for (index, constant) in mem::take(&mut self.constants)
+            .into_vec()
+            .into_iter()
+            .enumerate()
+        {
             let id = ConstantId::from_index(index);
             if used.contains(&id) {
                 renumbered.insert(id, ConstantId::from_index(retained.len()));
                 retained.push(constant);
             }
         }
-        self.constants = retained;
+        self.constants = ConstantPool::new(retained);
         self.visit_operands_mut(|operand| {
             if let mir::Value::Constant(id) = operand {
                 *id = renumbered[id];
@@ -643,7 +630,7 @@ impl FunctionEdit {
             self.result_convention,
             self.value_result,
             self.parameters,
-            self.constants,
+            self.constants.into_vec(),
             blocks,
         )
     }
