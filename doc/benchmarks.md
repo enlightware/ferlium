@@ -94,6 +94,11 @@ check that a repeated measurement lands on the same counts.
 
 Ranges are reproducible to within a few instructions and comparable across shard layouts.
 
+Building does not reproduce as well: rebuilding identical sources can move compile counts by up to
+about 0.7%, and a build in a git worktree differs from one in the main checkout, since the build
+path is embedded in the binary. Build the base and the change in the same directory, and treat
+compile differences below that as noise.
+
 The baseline stays in `target/`, where it belongs: the simulated cache follows the host CPU, so
 counts are comparable on the machine that produced them, under the Node and Valgrind versions the
 report prints.

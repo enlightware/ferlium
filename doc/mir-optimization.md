@@ -183,7 +183,7 @@ non-inlined calls remain unchanged.
 
 ## Placement rules
 
-Four rules, which apply to any new pass.
+Five rules, which apply to any new pass.
 
 1. **Internal pass edits restore canonical form but do not cross a verification boundary.** The
    optimizer owns every intermediate body, then verifies final artifacts once after whole-module
@@ -200,6 +200,12 @@ Four rules, which apply to any new pass.
    cheap syntactic filter and then lets DCE remove the entries it strands.
 4. **Cleanup runs on every body**, not only on one a pass changed. A specialization arrives already
    carrying dead code, so "nothing changed it, so nothing is dead" does not hold.
+5. **A pass belongs in the rounds only if its output feeds folding, specialization or inlining.**
+   Passes inside a round expose known arguments and callees, or shrink a body before the inliner
+   prices it. Passes after the rounds consume the settled body and feed nothing back: ownership
+   proofs, bounds checks, the managed split (products are local only once inlined, and callees are
+   split before their callers price them), LICM and cleanup. A pass in the rounds pays its cost
+   every round, so moving one there needs an opportunity the later passes miss.
 
 ## Folding
 
