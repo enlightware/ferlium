@@ -3,6 +3,7 @@
 
 use std::{panic, sync::Once};
 
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
 use ferlium::ide::PositionEncoding;
@@ -19,14 +20,14 @@ pub use ferlium::ide::{
     AnnotationData, CompilationReport, ErrorData, ExecutionErrorData, IrText, TextSourceMapEntry,
 };
 
-#[wasm_bindgen]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 pub struct PlaygroundCompiler {
     inner: ferlium::Compiler,
 }
 
-#[wasm_bindgen]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 impl PlaygroundCompiler {
-    #[wasm_bindgen(constructor)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(constructor))]
     pub fn new() -> Self {
         let mut session = CompilerSession::new();
         session.register_module(
@@ -99,7 +100,7 @@ impl Default for PlaygroundCompiler {
     }
 }
 
-#[wasm_bindgen]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 pub fn init_rust_api() {
     set_panic_hook();
     wasm_logger::init(wasm_logger::Config::new(log::Level::Debug).module_prefix("ferlium"));
