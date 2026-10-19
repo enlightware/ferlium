@@ -122,14 +122,15 @@ access, `MutableRef` is exclusive mutable access, and `owned` transfers the poin
 callee variant which must consume it on every exit. Raw semantic MIR uses only the first two
 conventions; an optimized `owned` argument requires proof that the caller relinquishes ownership.
 
-A `Let` parameter of a concrete scalar type (`int`, `float`, `bool`, or a closed variant whose cases
-all carry unit) is a value, as the ABI passes it, and its signature says so (`@arg value`): a
-value's role is read from MIR, never from its type, and the verifier checks the type. A generic
-parameter is a place, so specializing it to a scalar turns it into a value. A `Let` argument of such
-a type is a value whatever the callee takes, read where the argument is evaluated; the verifier
-rejects the place form. This holds for the visible arguments of a `project` too, such as a scoped
-subscript's index. A substitution that makes an argument's type such a scalar reads it before its
-call, which is equivalent to the callee reading it, since overlapping mutable arguments are invalid.
+A `Let` parameter of a concrete scalar type (`int`, `float`, `bool`, the compiler-internal
+`raw_float`, or a closed variant whose cases all carry unit) is a value, as the ABI passes it, and
+its signature says so (`@arg value`): a value's role is read from MIR, never from its type, and the
+verifier checks the type. A generic parameter is a place, so specializing it to a scalar turns it
+into a value. A `Let` argument of such a type is a value whatever the callee takes, read where the
+argument is evaluated; the verifier rejects the place form. This holds for the visible arguments of
+a `project` too, such as a scoped subscript's index. A substitution that makes an argument's type
+such a scalar reads it before its call, which is equivalent to the callee reading it, since
+overlapping mutable arguments are invalid.
 
 A non-fallible call whose result has such a concrete scalar type defines that result as a register,
 and has no result place. A function of such a type returns its result as a value: it has no `@ret`,
@@ -267,11 +268,10 @@ them. Call/storage representations are independently checked when both sides are
 witnessed generic moves and calls retain that inference boundary. Standalone serialization requires
 explicit normalized-layout/equality metadata to preserve those proofs.
 
-One refinement relaxes that check: `float` storage may be passed for a `raw_float` argument the
-callee only reads, neither mutably nor owned. Every `float` is a valid compiler-internal
-`raw_float` with the same representation. The subtyping holds for reading only, since a written
-`raw_float` could put an infinity in `float` storage. The physical interpreter accepts the same
-refinement for scalar native inputs.
+One refinement relaxes that check: a `float` value may be passed for a `raw_float` argument.
+Every `float` is a valid `raw_float` with the same representation; only their arithmetic differs.
+The subtyping holds for values only, since a `raw_float` written into `float` storage could put an
+infinity there. The physical interpreter accepts the same refinement for scalar native inputs.
 
 ## Physical MIR stage
 

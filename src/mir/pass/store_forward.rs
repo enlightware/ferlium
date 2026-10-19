@@ -441,8 +441,9 @@ mod tests {
         },
         std::{
             logic::bool_type,
-            math::{Float, float_type, raw_float_type},
+            math::{Float, float_type, int_type},
         },
+        types::r#type::tuple_type,
     };
 
     /// ```text
@@ -847,7 +848,7 @@ mod tests {
     }
 
     /// ```text
-    /// %a = alloca raw_float
+    /// %a = alloca (int, int)
     /// memcpy %argument to %a
     /// %y = load %a
     /// store %y to %ret
@@ -860,12 +861,12 @@ mod tests {
         let env = session.module_env();
         let span = Location::new_synthesized();
         let mut builder = FunctionBuilder::new("parameter".into(), Default::default());
-        let argument =
-            builder.add_parameter(raw_float_type(), ParameterKind::Place(ArgConvention::Let));
-        let output = builder.add_parameter(raw_float_type(), ParameterKind::Return);
+        let pair = tuple_type([int_type(), int_type()]);
+        let argument = builder.add_parameter(pair, ParameterKind::Place(ArgConvention::Let));
+        let output = builder.add_parameter(pair, ParameterKind::Return);
         let entry = builder.add_block();
         let cell = builder
-            .append_operation(entry, Operation::alloca(span, raw_float_type()))
+            .append_operation(entry, Operation::alloca(span, pair))
             .unwrap();
         builder.append_operation(
             entry,

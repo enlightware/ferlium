@@ -1332,16 +1332,6 @@ impl<'a> Verifier<'a> {
         );
     }
 
-    /// Whether a place argument the callee only reads refines its expected type, which is
-    /// otherwise checked for an equal representation. See [`readable_as`].
-    fn readable_as(&self, value: &mir::Value, expected: &MirType) -> bool {
-        matches!(
-            (self.place_pointee_type(value), expected),
-            (Some(MirType::Lowered(stored)), MirType::Lowered(expected))
-                if readable_as(stored, *expected)
-        )
-    }
-
     /// Verifies the visible arguments of a `call` or a `project`: a read-only concrete scalar is a
     /// value in semantic MIR; any other argument is a place of its type.
     fn verify_visible_arguments(
@@ -1361,13 +1351,9 @@ impl<'a> Verifier<'a> {
                 .is_some_and(|mutability| !mutability.is_mutable())
                 && !metadata.is_some_and(|metadata| metadata.owned_arguments.contains(offset));
             let expected = MirType::Lowered(argument.ty);
-            if read_only && self.readable_as(&operands[index], &expected) {
-                // A place of a refined type, such as `raw_float` read as `float`, is not
-                // the value form's place: its value would not have the argument's type.
+            if read_only && self.place_pointee_type(&operands[index]).as_ref() == Some(&expected) {
                 assert!(
-                    !(self.semantic
-                        && accepts_value_argument(ty, metadata, offset, &self.env)
-                        && self.place_pointee_type(&operands[index]) == Some(expected)),
+                    !(self.semantic && accepts_value_argument(ty, metadata, offset, &self.env)),
                     "MIR function `{}` node {}: scalar argument {} ({}) of type {} is \
                      passed as a place instead of a value\n{}",
                     self.func.name,
@@ -1384,7 +1370,7 @@ impl<'a> Verifier<'a> {
             {
                 assert!(
                     accepts_value_argument(ty, metadata, offset, &self.env)
-                        && *actual == argument.ty,
+                        && readable_as(*actual, argument.ty),
                     "MIR function `{}` node {}: value argument {} of type {} where {} \
                      is passed",
                     self.func.name,
@@ -2979,21 +2965,23 @@ mod tests {
         verify(f);
     }
 
-    /// A call reading a `raw_float` argument from `float` storage, the argument being mutable if
-    /// `mutable`.
-    fn call_reading_raw_float_from_float(mutable: bool) -> FunctionBuilder {
+    /// A call reading a `raw_float` argument from a `float` value, or from `float` storage if
+    /// `place`.
+    fn call_reading_raw_float_from_float(place: bool) -> FunctionBuilder {
         let span = Location::new_synthesized();
         let mut f = FunctionBuilder::new("refined_call_argument".into(), Default::default());
         let block = f.add_block();
-        let argument = append_result(&mut f, block, Operation::alloca(span, float_type()));
-        let literal = float_literal(&mut f);
-        append(
-            &mut f,
-            block,
-            Operation::store(span, literal, argument.clone()),
-        );
-        let result = append_result(&mut f, block, Operation::alloca(span, raw_float_type()));
-        append(
+        let mut argument = float_literal(&mut f);
+        if place {
+            let cell = append_result(&mut f, block, Operation::alloca(span, float_type()));
+            append(
+                &mut f,
+                block,
+                Operation::store(span, argument, cell.clone()),
+            );
+            argument = cell;
+        }
+        append_result(
             &mut f,
             block,
             Operation::call(
@@ -3002,13 +2990,14 @@ mod tests {
                     ModuleId::default(),
                     LocalFunctionId::default(),
                 )),
-                [argument, result],
-                CallImplType::value(FnType::new_mut_resolved(
-                    [(raw_float_type(), mutable)],
+                [argument],
+                CallImplType::value(FnType::new_by_val(
+                    [raw_float_type()],
                     raw_float_type(),
                     no_effects(),
                 )),
-            ),
+            )
+            .with_value_result(),
         );
         terminate_return(&mut f, block, span);
         f
@@ -3023,19 +3012,18 @@ mod tests {
         ))
     }
 
-    /// `float` refines `raw_float`, so storage of the former may be read as the latter.
+    /// `float` refines `raw_float`, so a value of the former may be read as the latter.
     #[test]
-    fn accepts_float_storage_for_a_read_raw_float_argument() {
+    fn accepts_a_float_value_for_a_raw_float_argument() {
         verify(call_reading_raw_float_from_float(false));
     }
 
-    /// The refinement holds for reading only: a callee writing a `raw_float` into `float` storage
-    /// could store an infinity.
+    /// The refinement holds for values only: a place keeps its exact type.
     #[test]
     #[should_panic(
         expected = "operand 1 place representation float differs from expected raw_float"
     )]
-    fn rejects_float_storage_for_a_mutable_raw_float_argument() {
+    fn rejects_float_storage_for_a_raw_float_argument() {
         verify(call_reading_raw_float_from_float(true));
     }
 

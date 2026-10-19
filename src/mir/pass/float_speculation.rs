@@ -20,7 +20,7 @@
 //!
 //! ```text
 //! head:  ...non-tree operations of the original span...
-//!        raw_float_{add,sub,mul,neg} of the inputs into fresh raw temporaries
+//!        raw_float_{add,sub,mul,neg} of the inputs, as raw values
 //!        ok = raw_float_is_finite(root)
 //!        condbr ok, fast, slow
 //! fast:  r = raw_float_to_float(root)          // the identity, since root is finite
@@ -35,11 +35,10 @@
 //!
 //! The raw values have their own compiler-internal type, `raw_float`, because they break `float`'s
 //! contract: no pass, native function or interpreter ever sees an infinite `float`. Conversely,
-//! every `float` is a valid `raw_float` with the same representation, so the raw operations read
-//! their `float` inputs directly, as MIR allows for arguments a callee only reads. Every raw
-//! operation is total, including the conversion back, which maps a non-finite value to zero rather
-//! than relying on its position behind the check; a target may elide that fallback where it sees
-//! the check (see the Wasm emitter).
+//! every `float` is a valid `raw_float` with the same representation, so the raw operations take
+//! their `float` inputs as values directly. Every raw operation is total, including the conversion
+//! back, which maps a non-finite value to zero rather than relying on its position behind the
+//! check; a target may elide that fallback where it sees the check (see the Wasm emitter).
 //!
 //! **Trees, not DAGs.** An intermediate qualifies only if it is the result of one tree operation
 //! read by exactly one other, so a tree has a single exit and needs a single check. A shared value
@@ -49,11 +48,12 @@
 //! finite result the check accepts. Division is also fallible, and so ends a block anyway.
 //!
 //! **Moving the tree.** Both paths run at the root. The inputs are values, read where they were
-//! evaluated, so reading them later reads the same. A raw operation reads a `float` only through a
-//! place, so the fast path stores each input into a cell where the tree stood. When the input is a
-//! load only the tree reads, from a place nothing changes before the root, the load moves to the
-//! slow path instead and the fast path reads the place. The rewrite allocates its cells in the
-//! entry block, below every stack region a tree spans, such as an inlined callee's.
+//! evaluated, so reading them later reads the same. When the input is a load only the tree reads,
+//! from a place nothing changes before the root, the load moves to the slow path instead and the
+//! fast path loads the place again, so that neither path keeps the value across the branch. An
+//! input spilled to a place for its saturating callee is loaded where the tree stood. The paths
+//! join through a cell, allocated in the entry block, below every stack region a tree spans, such
+//! as an inlined callee's.
 //!
 //! **Final bodies only.** Physical expansion runs the pass on optimized bodies. Semantic MIR, which
 //! callers inline, keeps its saturating trees, so an inlined tree joins its caller's.
@@ -70,7 +70,7 @@ use crate::{
         terminator::Terminator,
     },
     module::{FunctionId, ModuleEnv},
-    std::math::{float_type, raw_float_type},
+    std::math::float_type,
     types::r#type::Type,
 };
 
@@ -295,29 +295,6 @@ fn fresh_cell(
     place
 }
 
-/// Appends `callee(arguments..., result)` to `operations`, into a fresh cell of `result_ty`.
-#[allow(clippy::too_many_arguments)]
-fn call_into_fresh(
-    edit: &mut FunctionEdit,
-    cells: &mut Vec<Operation>,
-    operations: &mut Vec<Operation>,
-    span: DebugLocation,
-    known: &KnownCallees,
-    callee: KnownCallee,
-    arguments: impl IntoIterator<Item = mir::Value>,
-    result_ty: Type,
-) -> mir::Value {
-    let place = fresh_cell(edit, cells, span, result_ty);
-    let (function, ty) = known.raw_float(callee);
-    operations.push(Operation::call(
-        span,
-        mir::Value::Function(function),
-        arguments.into_iter().chain([place.clone()]),
-        ty.clone(),
-    ));
-    place
-}
-
 /// Appends the value call `callee(arguments...)` to `operations`, returning its result.
 fn call_value(
     edit: &mut FunctionEdit,
@@ -355,10 +332,11 @@ fn speculate(
     let rest: Vec<_> = operations.collect();
     let span = original[root].span;
     // An input read by a load that only the tree reads, from a place nothing changes before the
-    // root, is read from that place: the load moves to the slow path, and the fast path reads the
-    // place. Before the root, an operation writes nothing, writes only an unaliased `float` cell,
-    // or may change anything. A place is unchanged after a position if neither the last of the
-    // latter nor the last write to it follow that position.
+    // root, is loaded again where the tree stood: the original load moves to the slow path, so
+    // each path reads the place once and neither keeps the value across the branch. Before the
+    // root, an operation writes nothing, writes only an unaliased `float` cell, or may change
+    // anything. A place is unchanged after a position if neither the last of the latter nor the
+    // last write to it follow that position.
     let mut barrier = None;
     let mut last_writes = FxHashMap::default();
     let mut positions = FxHashMap::default();
@@ -416,12 +394,12 @@ fn speculate(
         .collect();
 
     // The tree leaves the head and both paths run at the root. The fast path reads its `float`
-    // inputs as raw floats, which they refine.
-    let mut head = Vec::with_capacity(original.len() + 2 * tree.members.len());
-    let mut fast = Vec::with_capacity(2 * tree.members.len());
+    // inputs as raw floats, which they refine; it loads a place input once per tree.
+    let mut head = Vec::with_capacity(original.len() + tree.members.len());
+    let mut fast = Vec::with_capacity(tree.members.len());
     let mut slow = Vec::with_capacity(tree.members.len());
     let mut raw: FxHashMap<ValueId, mir::Value> = FxHashMap::default();
-    let mut stored: FxHashMap<mir::Value, mir::Value> = FxHashMap::default();
+    let mut loaded: FxHashMap<mir::Value, mir::Value> = FxHashMap::default();
     let mut root_raw = None;
     let mut members = tree.members.iter().peekable();
     for (index, operation) in original.into_iter().enumerate() {
@@ -447,33 +425,23 @@ fn speculate(
                 arguments.push(intermediate.clone());
                 continue;
             }
-            if let Some(place) = deferred.get(&input) {
-                arguments.push(place.clone());
-                continue;
-            }
-            // A raw operation reads a `float` as a `raw_float` only through a place, which a value
-            // is stored into where the tree stood, once per tree.
-            if registers.is_value(&input) {
-                let cell = stored.entry(input.clone()).or_insert_with(|| {
-                    let cell = fresh_cell(edit, cells, span, float_type());
-                    head.push(Operation::store(span, input, cell.clone()));
-                    cell
-                });
-                arguments.push(cell.clone());
-                continue;
-            }
-            arguments.push(input);
+            let input = match deferred.get(&input) {
+                Some(place) => place.clone(),
+                None if registers.is_value(&input) => {
+                    arguments.push(input);
+                    continue;
+                }
+                None => input,
+            };
+            let value = loaded.entry(input.clone()).or_insert_with(|| {
+                let mut load = Operation::load(span, input);
+                let value = edit.assign_new_result(&mut load).unwrap();
+                fast.push(load);
+                value
+            });
+            arguments.push(value.clone());
         }
-        let result = call_into_fresh(
-            edit,
-            cells,
-            &mut fast,
-            span,
-            known,
-            arithmetic.raw,
-            arguments,
-            raw_float_type(),
-        );
+        let result = call_value(edit, &mut fast, span, known, arithmetic.raw, arguments);
         raw.insert(arithmetic.output, result.clone());
         root_raw = Some(result);
         slow.push(operation);
@@ -640,11 +608,9 @@ mod tests {
         assert_eq!(count(body, "raw_float_mul"), 2, "{body}");
         assert_eq!(count(body, "raw_float_add"), 1, "{body}");
         assert_eq!(count(body, "raw_float_sub"), 1, "{body}");
-        // The raw operations read the `float` inputs through one cell each.
-        assert_eq!(body.matches("store %p0 to").count(), 1, "{body}");
-        assert_eq!(body.matches("store %p1 to").count(), 1, "{body}");
-        // Nothing between the tree's operations writes, so no input is snapshotted.
-        assert_eq!(body.matches("memcpy").count(), 0, "{body}");
+        // The raw operations read the `float` inputs as values; only the join has a cell.
+        assert!(body.contains("raw_float_mul(%p0, %p1)"), "{body}");
+        assert_eq!(body.matches("alloca").count(), 1, "{body}");
         assert_eq!(count(body, "Num<std::float>::mul"), 2, "{body}");
         assert_eq!(count(body, "Num<std::float>::add"), 1, "{body}");
         assert_eq!(count(body, "Num<std::float>::sub"), 1, "{body}");
@@ -665,10 +631,11 @@ mod tests {
         assert_eq!(count(body, "raw_float_sub"), 1, "{body}");
     }
 
-    /// Inputs may project temporary storage released before the root: the tree reads them through
-    /// snapshots taken where it stood, as for a local product in an inlined callee.
+    /// Inputs may be read from temporary storage released before the root, as for a local product
+    /// in an inlined callee: the tree reads the loaded values, and its join cell is allocated
+    /// below the released region.
     #[test]
-    fn inputs_released_before_the_root_are_snapshotted() {
+    fn inputs_released_before_the_root_are_read_as_values() {
         // Inspect speculation before aggregate splitting removes the tuple and its stack region.
         // This pins the lifetime proof independently of later storage cleanup.
         let mut session = CompilerSession::new();
@@ -738,17 +705,25 @@ mod tests {
         let rendered = speculated.format_with(&env).to_string();
         let body = rendered.as_str();
         assert_eq!(count(body, "raw_float_is_finite"), 1, "{body}");
-        // The two inputs read from the released tuple are kept in cells before its release; the
-        // parameters stay where they are.
+        let save = body.find("stack_save").expect(body);
         let restore = body.find("stack_restore").expect(body);
-        let snapshots = body[..restore].matches("store %r").count();
-        assert_eq!(snapshots, 2, "{body}");
+        let mul = body.find("raw_float_mul(").expect(body);
+        let operands = &body[mul..];
+        let first_operand = operands["raw_float_mul(".len()..]
+            .split(',')
+            .next()
+            .unwrap();
+        assert!(body[..save].contains("alloca float"), "{body}");
+        assert!(
+            body[..restore].contains(&format!("{first_operand}: float = load")) && restore < mul,
+            "{body}"
+        );
     }
 
-    /// A write between the tree's operations to an input an earlier one read changes what the
-    /// root would read: the tree reads the value read before the write, kept in a cell.
+    /// A write between the tree's operations to a place an earlier input was loaded from does not
+    /// change what the moved tree reads: its inputs are the loaded values.
     #[test]
-    fn inputs_written_before_the_root_are_snapshotted() {
+    fn inputs_written_before_the_root_are_read_as_values() {
         let module = optimized(
             "fn keep(a: &mut float) {} fn f(x: float, y: float) -> float { let mut a = x; keep(a); let t = a * y; a = 2.0; (t + a) * y }",
         );
@@ -761,10 +736,7 @@ mod tests {
             .find(|line| line.ends_with(&format!("= load {written}")))
             .expect(body);
         let value = read.split(':').next().unwrap().trim();
-        assert!(
-            body[..store].contains(&format!("store {value} to")),
-            "{body}"
-        );
+        assert!(body.contains(&format!("raw_float_mul({value}, ")), "{body}");
     }
 
     /// One overflowing operation gains nothing from a check and a duplicate.

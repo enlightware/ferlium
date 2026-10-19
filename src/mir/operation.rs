@@ -41,11 +41,7 @@ use crate::{
     mir,
     mir::{DebugLocation, ResultTransport, ValueId},
     module::{FunctionId, ModuleEnv, ProjectionIndex, TraitDictionaryId, TraitId},
-    std::{
-        logic::bool_type,
-        math::{float_type, int_type},
-        value::{TypeLayoutEnv, is_tag_scalar},
-    },
+    std::value::{TypeLayoutEnv, is_abi_scalar},
     types::{
         effects::{EffType, Effect, PrimitiveEffect},
         r#trait::TraitDictionaryEntryIndex,
@@ -1313,10 +1309,9 @@ pub(crate) fn accepts_value_result(ty: &CallImplType, env: &impl TypeLayoutEnv) 
 
 /// Whether `ty` is a concrete scalar that call boundaries may carry as a value.
 ///
-/// So far the ABI scalars other than `raw_float`, which still travels through places. The
-/// environment classifies unit-only variant tags.
+/// These are exactly the ABI scalars; the environment classifies unit-only variant tags.
 pub(crate) fn is_scalar_value_type(ty: Type, env: &impl TypeLayoutEnv) -> bool {
-    ty == int_type() || ty == float_type() || ty == bool_type() || is_tag_scalar(ty, env)
+    is_abi_scalar(ty, env)
 }
 
 /// Static types needed to lower a variant shell and its selected payload.

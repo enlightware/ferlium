@@ -20,7 +20,7 @@ use crate::{
     module::{ProjectionIndex, id::Id},
     std::{
         buffer::buffer_element_type,
-        math::{Float, RawFloat, readable_as},
+        math::{Float, RawFloat},
         string::{StaticStr, String as NativeString},
         value::{
             TypeLayoutEnv, product_layout_spec, product_member_types, structural_variant,
@@ -817,27 +817,11 @@ impl Memory {
         address: Address,
         layout: NativeLayout,
     ) -> Result<(), RuntimeError> {
-        self.check_native_storage(address, layout, address.ty == layout.ty)
-    }
-
-    /// Like [`check_native`](Self::check_native), for a scalar the native receives by copy and
-    /// therefore only reads, whose storage may refine the parameter type (see [`readable_as`]).
-    pub(super) fn check_native_scalar_input(
-        &self,
-        address: Address,
-        layout: NativeLayout,
-    ) -> Result<(), RuntimeError> {
-        self.check_native_storage(address, layout, readable_as(address.ty, layout.ty))
-    }
-
-    fn check_native_storage(
-        &self,
-        address: Address,
-        layout: NativeLayout,
-        type_matches: bool,
-    ) -> Result<(), RuntimeError> {
         self.check_layout(address, layout.size, layout.align)?;
-        if !type_matches || self.is_pointer_slot(address)? || !self.initialized(address)? {
+        if address.ty != layout.ty
+            || self.is_pointer_slot(address)?
+            || !self.initialized(address)?
+        {
             return Err(invalid("invalid native input storage"));
         }
         self.native_identity(address)?;

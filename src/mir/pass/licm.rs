@@ -14,9 +14,9 @@
 //! in the loop stores a constant, a bare function or a register defined before the loop, and whose
 //! every use stays in the loop: the definition, with any loop-local allocation, moves with the call.
 //! Such a cell holds a non-scalar argument, such as unit, since a scalar one is a value. A call
-//! defining its result register needs nothing more. Any other result, such as a `raw_float`, goes
-//! to a whole local `alloca`; no other write may reach it and every use of its root must stay in
-//! the loop. When that allocation is loop-local it moves with the call.
+//! defining its result register needs nothing more. Any other result, such as a tuple, goes to a
+//! whole local `alloca`; no other write may reach it and every use of its root must stay in the
+//! loop. When that allocation is loop-local it moves with the call.
 //!
 //! Stack regions are part of correctness, not cleanup decoration. A loop-local result moved after a
 //! preheader's `stack_save` would be popped by the matching per-iteration `stack_restore`. The
@@ -1264,27 +1264,24 @@ fn apply_hoist(func: &Function, hoist: Hoist) -> Function {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{known_callee::KnownCallee, provenance::ResultProvenance};
+    use super::super::provenance::ResultProvenance;
     use super::*;
     use crate::{
         CompilerSession, Location, MirOptimization,
         hir::value::LiteralValue,
         mir::{Operation, Value, builder::FunctionBuilder, terminator::Terminator},
         module::{LocalFunctionId, ModuleId},
-        std::{
-            logic::bool_type,
-            math::{int_type, raw_float_type},
-        },
+        std::{logic::bool_type, math::int_type},
         types::{
             effects::no_effects,
             r#type::{CallImplType, FnType},
         },
     };
 
-    /// A scalar `let` parameter is a value; a `raw_float` one is still passed as a place, which
-    /// these fixtures read.
+    /// A scalar `let` parameter is a value; a pair is passed as a place, which these fixtures
+    /// read.
     fn place_type() -> Type {
-        raw_float_type()
+        Type::tuple([int_type(), int_type()])
     }
 
     fn hoist_reads(function: &Function, env: ModuleEnv<'_>) -> Option<Function> {
@@ -1325,15 +1322,15 @@ mod tests {
             let env = session.module_env();
             let span = Location::new_synthesized();
             let mut builder = FunctionBuilder::new("scalar_read".into(), Default::default());
-            let int_ty = place_type();
+            let place_ty = place_type();
             let input = mir::Value::Parameter(
-                builder.add_parameter(int_ty, ParameterKind::Place(ArgConvention::Let)),
+                builder.add_parameter(place_ty, ParameterKind::Place(ArgConvention::Let)),
             );
             let entry = builder.add_block();
             let head = builder.add_block();
             let source = if local {
                 let source = builder
-                    .append_operation(entry, Operation::alloca(span, int_ty))
+                    .append_operation(entry, Operation::alloca(span, place_ty))
                     .unwrap();
                 builder.append_operation(
                     entry,
@@ -1390,10 +1387,10 @@ mod tests {
         let session = CompilerSession::new();
         let env = session.module_env();
         let span = Location::new_synthesized();
-        let int_ty = place_type();
+        let place_ty = place_type();
         let mut builder = FunctionBuilder::new("read_then_call".into(), Default::default());
         let input = mir::Value::Parameter(
-            builder.add_parameter(int_ty, ParameterKind::Place(ArgConvention::Let)),
+            builder.add_parameter(place_ty, ParameterKind::Place(ArgConvention::Let)),
         );
         let entry = builder.add_block();
         let head = builder.add_block();
@@ -1402,20 +1399,24 @@ mod tests {
             .unwrap();
         builder.set_terminator(entry, Terminator::goto(span, head));
         let copy = builder
-            .append_operation(head, Operation::alloca(span, int_ty))
+            .append_operation(head, Operation::alloca(span, place_ty))
             .unwrap();
         builder.append_operation(head, Operation::memcpy(span, input.clone(), copy.clone()));
         let result = builder
-            .append_operation(head, Operation::alloca(span, int_ty))
+            .append_operation(head, Operation::alloca(span, place_ty))
             .unwrap();
-        let (callee, ty) = session.known_callees().raw_float(KnownCallee::RawFloatAdd);
+        let callee = FunctionId::new(ModuleId::default(), LocalFunctionId::default());
         builder.append_operation(
             head,
             Operation::call(
                 span,
                 mir::Value::Function(callee),
                 [copy, input, result],
-                ty.clone(),
+                CallImplType::value(FnType::new_by_val(
+                    [place_ty, place_ty],
+                    place_ty,
+                    no_effects(),
+                )),
             ),
         );
         builder.append_operation(head, Operation::stack_restore(span, marker));
@@ -1536,10 +1537,10 @@ mod tests {
 
     fn local_read_at_boundary(boundary: LocalBoundary, env: ModuleEnv<'_>) -> Function {
         let span = Location::new_synthesized();
-        let int_ty = place_type();
+        let place_ty = place_type();
         let mut builder = FunctionBuilder::new("local_boundary".into(), Default::default());
         let input = mir::Value::Parameter(
-            builder.add_parameter(int_ty, ParameterKind::Place(ArgConvention::Let)),
+            builder.add_parameter(place_ty, ParameterKind::Place(ArgConvention::Let)),
         );
         let entry = builder.add_block();
         let head = builder.add_block();
@@ -1550,9 +1551,9 @@ mod tests {
         });
         let partial = matches!(boundary, LocalBoundary::PartialInitialization);
         let source_ty = if partial {
-            Type::tuple([int_ty, int_ty])
+            Type::tuple([place_ty, place_ty])
         } else {
-            int_ty
+            place_ty
         };
         let root = builder
             .append_operation(entry, Operation::alloca(span, source_ty))
@@ -1566,7 +1567,7 @@ mod tests {
             builder
                 .append_operation(
                     entry,
-                    Operation::product_subfield(span, root, index, int_ty, source_ty, []),
+                    Operation::product_subfield(span, root, index, place_ty, source_ty, []),
                 )
                 .unwrap()
         } else {
@@ -1575,7 +1576,7 @@ mod tests {
         builder.append_operation(entry, Operation::memcpy(span, input, source.clone()));
         if matches!(boundary, LocalBoundary::EscapingPointer) {
             let slot = builder
-                .append_operation(entry, Operation::alloca_place(span, int_ty))
+                .append_operation(entry, Operation::alloca_place(span, place_ty))
                 .unwrap();
             builder.append_operation(entry, Operation::store(span, source.clone(), slot));
         }
@@ -1618,9 +1619,9 @@ mod tests {
         let env = session.module_env();
         let span = Location::new_synthesized();
         let mut builder = FunctionBuilder::new("nested_reads".into(), Default::default());
-        let int_ty = place_type();
+        let place_ty = place_type();
         let input = mir::Value::Parameter(
-            builder.add_parameter(int_ty, ParameterKind::Place(ArgConvention::Let)),
+            builder.add_parameter(place_ty, ParameterKind::Place(ArgConvention::Let)),
         );
         let condition =
             mir::Value::Parameter(builder.add_parameter(bool_type(), ParameterKind::Value));
@@ -1661,10 +1662,10 @@ mod tests {
         let session = CompilerSession::new();
         let env = session.module_env();
         let span = Location::new_synthesized();
-        let int_ty = place_type();
+        let place_ty = place_type();
         let mut builder = FunctionBuilder::new("copy_used_after_loop".into(), Default::default());
         let input = mir::Value::Parameter(
-            builder.add_parameter(int_ty, ParameterKind::Place(ArgConvention::Let)),
+            builder.add_parameter(place_ty, ParameterKind::Place(ArgConvention::Let)),
         );
         let condition =
             mir::Value::Parameter(builder.add_parameter(bool_type(), ParameterKind::Value));
@@ -1672,7 +1673,7 @@ mod tests {
         let head = builder.add_block();
         let exit = builder.add_block();
         let destination = builder
-            .append_operation(entry, Operation::alloca(span, int_ty))
+            .append_operation(entry, Operation::alloca(span, place_ty))
             .unwrap();
         builder.set_terminator(entry, Terminator::goto(span, head));
         builder.append_operation(head, Operation::memcpy(span, input, destination.clone()));

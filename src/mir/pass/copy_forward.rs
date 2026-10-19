@@ -830,11 +830,7 @@ mod tests {
             verify::verify_physical_function,
         },
         module::ModuleEnv,
-        std::{
-            logic::bool_type,
-            math::{int_type, raw_float_type},
-            string::string_type,
-        },
+        std::{logic::bool_type, math::int_type, string::string_type},
         types::r#type::tuple_type,
     };
 
@@ -1083,16 +1079,16 @@ mod tests {
         assert!(dce::remove_dead_storage(&body).is_none());
     }
 
-    /// A `raw_float` `let` parameter is still passed as a place, unlike an `int` one.
+    /// A pair `let` parameter is passed as a place, unlike an `int` one.
     fn staged_memcpy(env: ModuleEnv<'_>) -> Function {
         let span = Location::new_synthesized();
         let mut builder = FunctionBuilder::new("staged_memcpy".into(), Default::default());
-        let source =
-            builder.add_parameter(raw_float_type(), ParameterKind::Place(ArgConvention::Let));
-        let result = builder.add_parameter(raw_float_type(), ParameterKind::Return);
+        let pair = tuple_type([int_type(), int_type()]);
+        let source = builder.add_parameter(pair, ParameterKind::Place(ArgConvention::Let));
+        let result = builder.add_parameter(pair, ParameterKind::Return);
         let block = builder.add_block();
         let temporary = builder
-            .append_operation(block, Operation::alloca(span, raw_float_type()))
+            .append_operation(block, Operation::alloca(span, pair))
             .unwrap();
         builder.append_operation(
             block,
@@ -1221,7 +1217,7 @@ mod tests {
             .expect("the staging memcpy must be forwarded");
         let body = forwarded.format_with(&env).to_string();
 
-        assert_eq!(body.matches("alloca raw_float").count(), 0, "{body}");
+        assert_eq!(body.matches("alloca (int, int)").count(), 0, "{body}");
         assert_eq!(body.matches("memcpy ").count(), 1, "{body}");
         assert!(body.contains("memcpy %p0 to %p1"), "{body}");
     }

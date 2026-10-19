@@ -983,11 +983,11 @@ be written anywhere in the loop, unless it is a value cell defined in the loop b
 before it, such as a unit argument's constant; that definition then moves with the call. A value
 argument must be a constant or defined outside the loop, such as by a read hoisted first. The call
 must use the value-result convention, have no owned arguments, and return a concrete `TrivialCopy`
-value. A call defining its result register needs
-nothing more. Any other result, such as a `raw_float` or an aggregate, goes to a whole static local
-allocation with no other writer, none of whose uses may escape the loop. These conditions are
-generic over all direct callees satisfying the effect contract; they are implementation limits that
-can be relaxed independently if a concrete workload justifies it.
+value. A call defining its result register needs nothing more. Any other result, such as an
+aggregate, goes to a whole static local allocation with no other writer, none of whose uses may
+escape the loop. These conditions are generic over all direct callees satisfying the effect
+contract; they are implementation limits that can be relaxed independently if a concrete workload
+justifies it.
 
 The existing call is relocated rather than copied, and a loop-local result allocation moves with
 it, so the pass never grows MIR. Stack regions constrain the insertion point: the moved allocation
@@ -1253,11 +1253,9 @@ ordinary pure calls. The Wasm backend emits them as bare `f64` instructions and 
 fallback where the check provably guards it.
 
 **Decisions not to revisit.** The pass once ran in semantic MIR, but callers then inlined an already
-speculated body and speculated its slow path again. The raw operations read their `float` inputs
-directly, through the read-only refinement in `doc/mir-ir.md`: a separate widening operation was
-shared by CSE and kept the fast path off the Wasm stack. The refinement applies to places, so an
-input passed as a value is read from the place it was loaded from when nothing changes that place
-before the root, and from a cell holding it otherwise. Merging the check and the conversion into
+speculated body and speculated its slow path again. The raw operations read their `float` input
+values directly, through the refinement in `doc/mir-ir.md`: a separate widening operation was
+shared by CSE and kept the fast path off the Wasm stack. Merging the check and the conversion into
 one operation has no cheap MIR encoding: a mutable output must already be initialized, an optional
 result lives in memory on Wasm, and an `invoke` error edge may not rejoin. The backend's elision
 instead saves about 5% of the bytes of float-bound code. One check per block rather than per tree

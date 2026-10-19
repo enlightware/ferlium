@@ -174,12 +174,13 @@ pub(crate) fn raw_float_type() -> Type {
     cached_primitive_ty!(RawFloat)
 }
 
-/// Whether storage holding a `stored` value may be read as an `expected` one, without conversion.
+/// Whether a value of type `stored` may be passed where an `expected` one is read, without
+/// conversion.
 ///
 /// Types are equal or `float` refines `raw_float`: every float is a raw float with the same
-/// representation, so reading one as the other is free. That subtyping holds for reading only.
-/// Writing a `raw_float` into `float` storage could store an infinity, so a place anything may
-/// write or consume keeps its exact type.
+/// representation, so reading one as the other is free. That subtyping holds for values only.
+/// Writing a `raw_float` into `float` storage could store an infinity, so a place keeps its exact
+/// type.
 pub(crate) fn readable_as(stored: Type, expected: Type) -> bool {
     stored == expected || (stored == float_type() && expected == raw_float_type())
 }
@@ -188,10 +189,10 @@ pub(crate) fn readable_as(stored: Type, expected: Type) -> bool {
 ///
 /// Source code cannot name this type. Float speculation (`mir::pass::float_speculation`) computes
 /// a chain of float arithmetic in it without the per-operation saturation, reading its `float`
-/// inputs directly (see [`readable_as`]), then converts the chain's result back to [`Float`] only
-/// after checking that it is finite. Both types are 64-bit doubles;
-/// only the finiteness contract differs. Its values may therefore be
-/// infinite or NaN; its equality and hash are bitwise so that a folded constant has one identity.
+/// inputs as values directly (see [`readable_as`]), then converts the chain's result back to
+/// [`Float`] only after checking that it is finite. Both types are 64-bit doubles; only the
+/// finiteness contract differs. Its values may therefore be infinite or NaN; its equality and hash
+/// are bitwise so that a folded constant has one identity.
 #[derive(Clone, Copy, Debug)]
 #[repr(transparent)]
 pub(crate) struct RawFloat(f64);
