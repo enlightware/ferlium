@@ -1168,13 +1168,19 @@ impl<'a> PhysicalLowerer<'a> {
         let roles = OnceCell::new();
         for (block, index, candidate) in candidates.into_iter().rev() {
             match candidate {
-                Candidate::Call(BufferPrimitive::Drop, mut operation) => {
-                    let buffer_ty = buffer_call_type(&operation, 1, function)?.fn_ty.args[0].ty;
+                Candidate::Call(BufferPrimitive::Drop, operation) => {
+                    let ty = buffer_call_type(&operation, 1, function)?;
+                    let buffer_ty = ty.fn_ty.args[0].ty;
                     let element_ty = buffer_element_type(buffer_ty)
                         .ok_or(BackendReadinessError::InvalidBufferCall { function })?;
-                    operation.operands[0] =
-                        Value::Function(self.intern_buffer_drop(buffer_ty, element_ty));
-                    edit.replace_operation_sequence(block, index, [operation]);
+                    // The helper returns no value, so the primitive's result place is left unused.
+                    let call = Operation::call(
+                        operation.span,
+                        Value::Function(self.intern_buffer_drop(buffer_ty, element_ty)),
+                        [operation.operands[1].clone()],
+                        CallImplType::new(ty.fn_ty.clone(), CallResultConvention::NoValue),
+                    );
+                    edit.replace_operation_sequence(block, index, [call]);
                 }
                 Candidate::Call(callee, operation) => {
                     let roles = roles.get_or_init(|| edit.value_roles());
@@ -1204,7 +1210,7 @@ impl<'a> PhysicalLowerer<'a> {
             return *id;
         }
         let id = self.next_helper_id();
-        let body = build_buffer_drop(buffer_ty, element_ty, self.helpers.len(), self.env);
+        let body = build_buffer_drop(buffer_ty, element_ty, self.helpers.len(), None, self.env);
         self.helper_ids.insert(key, id);
         self.helpers.push(body);
         id
@@ -1632,11 +1638,6 @@ impl<'a> PhysicalLowerer<'a> {
             );
             let base = store.operands[1].clone();
             let mut operations = vec![store];
-            let mut result_operation = Operation::alloca(shell.span, Type::unit());
-            let result = edit
-                .assign_new_result(&mut result_operation)
-                .expect("alloca produces a place");
-            operations.push(result_operation);
             let mut arguments = Vec::new();
             if *has_layout_witness {
                 arguments.push(
@@ -1647,7 +1648,7 @@ impl<'a> PhysicalLowerer<'a> {
                         .expect("layout witness is present"),
                 );
             }
-            arguments.extend([base.clone(), result]);
+            arguments.push(base.clone());
             operations.push(Operation::call(
                 shell.span,
                 Value::Function(helper),
@@ -1738,9 +1739,8 @@ impl<'a> PhysicalLowerer<'a> {
             // payload. That drop clears the payload leaf, not the shell/tag initialization flag, so
             // the release helper can still inspect the representation before the caller's whole-
             // variant `drop` operation finally consumes the shell.
-            let operations =
-                variant_payload_release_call(edit, helper, base.clone(), variant_ty, span);
-            edit.block_mut(block).operations.extend(operations);
+            let call = variant_payload_release_call(helper, base.clone(), variant_ty, span);
+            edit.block_mut(block).operations.push(call);
         }
     }
 
@@ -1777,13 +1777,12 @@ impl<'a> PhysicalLowerer<'a> {
                     .expect("load produces a result");
                 let helper =
                     self.intern_variant_payload_release(cleanup.variant_ty, cleanup.payload_ty);
-                let mut operations = variant_payload_release_call(
-                    edit,
+                let mut operations = vec![variant_payload_release_call(
                     helper,
                     base,
                     cleanup.variant_ty,
                     cleanup.span,
-                );
+                )];
                 operations.push(Operation::store(
                     cleanup.span,
                     false_value.clone(),
@@ -2023,19 +2022,25 @@ fn edit_store_unit(
     operations.push(Operation::store(span, Value::Constant(unit), destination));
 }
 
+/// Builds the body releasing a buffer. `declared_result` is the unit result a module's buffer drop
+/// entry declares, which keeps its uniform callable adapter; a helper is direct-only and declares
+/// none.
 fn build_buffer_drop(
     buffer_ty: Type,
     element_ty: Type,
     helper_index: usize,
+    declared_result: Option<Type>,
     env: ModuleEnv<'_>,
 ) -> Function {
     let span = Location::new_synthesized();
     let name = Ustr::from(&format!("#physical:buffer_drop:{helper_index}"));
-    let mut builder = FunctionBuilder::new(name, CallResultConvention::Value);
+    let mut builder = FunctionBuilder::new(name, CallResultConvention::NoValue);
+    if let Some(ty) = declared_result {
+        builder.set_no_value_result(ty);
+    }
     let buffer = Value::Parameter(
         builder.add_parameter(buffer_ty, ParameterKind::Place(ArgConvention::MutableRef)),
     );
-    let destination = Value::Parameter(builder.add_parameter(Type::unit(), ParameterKind::Return));
     let entry = builder.add_block();
     let zero = builder.add_constant(int_type(), LiteralValue::new_native(0isize), &env);
     let pointer_slot = append_result(
@@ -2050,7 +2055,7 @@ fn build_buffer_drop(
     );
     builder.append_operation(entry, Operation::runtime_dealloc(span, allocation));
     builder.append_operation(entry, Operation::clear(span, pointer_slot));
-    finish_unit_result(&mut builder, entry, destination, span.into(), env);
+    builder.set_terminator(entry, Terminator::ret(span));
     builder.finish_unverified()
 }
 
@@ -2156,31 +2161,24 @@ fn variant_payload_addressor_call_type(variant_ty: Type, payload_ty: Type) -> Ca
 }
 
 fn variant_payload_helper_call_type(variant_ty: Type) -> CallImplType {
-    CallImplType::value(FnType::new_mut_resolved(
-        [(variant_ty, true)],
-        Type::unit(),
-        no_effects(),
-    ))
+    CallImplType::new(
+        FnType::new_mut_resolved([(variant_ty, true)], Type::unit(), no_effects()),
+        CallResultConvention::NoValue,
+    )
 }
 
 fn variant_payload_release_call(
-    edit: &mut FunctionEdit,
     helper: FunctionId,
     base: Value,
     variant_ty: Type,
     span: DebugLocation,
-) -> Vec<Operation> {
-    let mut result_operation = Operation::alloca(span, Type::unit());
-    let result = edit
-        .assign_new_result(&mut result_operation)
-        .expect("alloca produces a place");
-    let call = Operation::call(
+) -> Operation {
+    Operation::call(
         span,
         Value::Function(helper),
-        [base, result],
+        [base],
         variant_payload_helper_call_type(variant_ty),
-    );
-    vec![result_operation, call]
+    )
 }
 
 fn build_variant_payload_allocation(
@@ -2196,7 +2194,7 @@ fn build_variant_payload_allocation(
     let name = Ustr::from(&format!(
         "#physical:variant_payload_allocation:{helper_index}"
     ));
-    let mut builder = FunctionBuilder::new(name, CallResultConvention::Value);
+    let mut builder = FunctionBuilder::new(name, CallResultConvention::NoValue);
     let witness = static_layout.is_none().then(|| {
         let value_trait = env.expect_std_trait_id(VALUE_TRAIT_NAME);
         let requirement =
@@ -2209,7 +2207,6 @@ fn build_variant_payload_allocation(
     let base = Value::Parameter(
         builder.add_parameter(variant_ty, ParameterKind::Place(ArgConvention::MutableRef)),
     );
-    let destination = Value::Parameter(builder.add_parameter(Type::unit(), ParameterKind::Return));
     let entry = builder.add_block();
     let done = builder.add_block();
     let allocate = if storage == Some(VariantPayloadStorage::Indirect) {
@@ -2262,7 +2259,7 @@ fn build_variant_payload_allocation(
     );
     builder.append_operation(allocate, Operation::store(span, allocation, slot));
     builder.set_terminator(allocate, Terminator::goto(span, done));
-    finish_unit_result(&mut builder, done, destination, span.into(), env);
+    builder.set_terminator(done, Terminator::ret(span));
     builder.finish_unverified()
 }
 
@@ -2377,11 +2374,10 @@ fn build_variant_payload_release(
 ) -> Function {
     let span = Location::new_synthesized();
     let name = Ustr::from(&format!("#physical:variant_payload_release:{helper_index}"));
-    let mut builder = FunctionBuilder::new(name, CallResultConvention::Value);
+    let mut builder = FunctionBuilder::new(name, CallResultConvention::NoValue);
     let base = Value::Parameter(
         builder.add_parameter(variant_ty, ParameterKind::Place(ArgConvention::MutableRef)),
     );
-    let destination = Value::Parameter(builder.add_parameter(Type::unit(), ParameterKind::Return));
     let entry = builder.add_block();
     let done = builder.add_block();
     // A whole variant can mix inline and indirect cases. Release therefore reads the active tag's
@@ -2413,11 +2409,6 @@ fn build_variant_payload_release(
     builder.append_operation(release, Operation::clear(span, slot));
     builder.set_terminator(release, Terminator::goto(span, done));
 
-    let unit = builder.add_constant(Type::unit(), LiteralValue::new_native(()), &env);
-    builder.append_operation(
-        done,
-        Operation::store(span, Value::Constant(unit), destination),
-    );
     builder.set_terminator(done, Terminator::ret(span));
     builder.finish_unverified()
 }

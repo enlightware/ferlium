@@ -49,6 +49,7 @@ impl PhysicalLowerer<'_> {
                 ty,
                 buffer_element_type(ty).unwrap(),
                 id.function.as_index(),
+                Some(signature.ret),
                 self.env,
             );
             body.name = module.get_function_name_by_id(id.function).unwrap();

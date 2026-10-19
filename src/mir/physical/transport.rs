@@ -105,7 +105,13 @@ impl<'a> Transports<'a> {
             return ResultTransport::Place;
         };
         let Some(function) = module.get_function_by_id(callee.function) else {
-            return ResultTransport::Place;
+            // A physical helper is built with the transport its calls state.
+            return match &call.kind {
+                OperationKind::Call {
+                    result_transport, ..
+                } => *result_transport,
+                _ => ResultTransport::Place,
+            };
         };
         // A storage primitive is expanded in place, from its result place.
         if matches!(function.origin, CallableOrigin::BufferPrimitive(_)) {

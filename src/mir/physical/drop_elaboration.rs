@@ -131,14 +131,13 @@ pub(super) fn elaborate(
         );
         edit.block_mut(cleanup).operations.push(call);
         if variant && let Some(payload) = variant_indirect_payload_type(ty, &env) {
-            let operations = variant_payload_release_call(
-                &mut edit,
+            let call = variant_payload_release_call(
                 release(ty, payload),
                 op.operands[0].clone(),
                 ty,
                 op.span,
             );
-            edit.block_mut(cleanup).operations.extend(operations);
+            edit.block_mut(cleanup).operations.push(call);
         }
         edit.block_mut(cleanup)
             .operations
