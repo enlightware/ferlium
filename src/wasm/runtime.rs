@@ -90,6 +90,8 @@ pub(super) extern "C" fn black_box(data: *const u8, size: usize) {
 }
 
 /// Compare an owned run-time string with immutable compiler pattern data.
+/// Must agree with Value<string>::eq against String::from_static(expected), as required
+/// by the MIR static-string equality rewrite (see doc/mir-optimization.md).
 ///
 /// # Safety
 /// Both pointers must address initialized values of their respective Rust types for the duration

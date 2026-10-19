@@ -832,6 +832,21 @@ polarity. This also covers native predicate results held in storage, preserving 
 
 ## String construction and accumulation rewrites
 
+`mir::pass::string_accumulate` replaces equality against a freshly materialized literal string
+with `comp_eq` against its `StaticStr` pattern data, removing construction and drop. It resolves
+the concrete `Value<string>::eq` implementation and accepts the literal on either side. The
+fresh local string must have exactly three uses: construction, equality and drop, in that order
+in one block; aliases, escapes and additional uses prevent the rewrite. The comparison stays at
+the original equality site, preserving the other operand's read timing and intervening effects.
+The pattern embeds immutable text rather than borrowing its temporary cell, and preserves the
+equality call's Boolean result register. Ordinary dead-storage cleanup removes unused cells.
+
+The named std contract is that `Value<string>::eq(value, string_from_static(text))` agrees with
+`comp_eq value text`, symmetrically. Construction and pattern data preserve NFC normalization,
+and neither equality nor the temporary's construction/drop has source-visible effects. This
+contract is recorded beside native equality and both interpreter and Wasm pattern comparisons.
+Removing the allocation follows the same runtime resource-failure policy as static-append fusion.
+
 A constructively reified string initially has the general-purpose shape
 `string_from_static(text, temporary)`, followed by whatever consumes the owned result. When its
 only consumer appends it to a builder and then drops it, `mir::pass::string_accumulate` retargets

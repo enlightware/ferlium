@@ -512,6 +512,13 @@ pub(crate) fn optimize_function(
     {
         current = Some(forwarded);
     }
+    // A literal used only by concrete string equality can use match's direct comparison.
+    let source = current.as_ref().unwrap_or(function);
+    if let Some(fused) =
+        string_accumulate::fuse_static_string_equalities(source, context.string_functions)
+    {
+        current = Some(fused);
+    }
     // A constructively reified string is `StaticStr` plus `string_from_static`. If its only purpose
     // is an append, use the static appender directly and leave no owned temporary to construct or
     // drop. This runs before accumulator forwarding so that pass sees the final mix of appenders.

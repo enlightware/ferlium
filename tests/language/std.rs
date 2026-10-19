@@ -36,6 +36,49 @@ use wasm_bindgen_test::*;
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn string_literal_equality_preserves_normalization_and_mutation() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+            fn compare(value: string) {
+                (value == "cafe\u{301}", "caf\u{e9}" == value,
+                 value != "caf\u{e9}", value == "", value == "other")
+            }
+            let mut value = "caf\u{e9}";
+            let before = compare(value);
+            string_push_str(value, "!");
+            (before, compare(value), compare(""))
+            "#,
+        ),
+        expected_tuple(vec![
+            expected_tuple(vec![
+                bool(true),
+                bool(true),
+                bool(false),
+                bool(false),
+                bool(false)
+            ]),
+            expected_tuple(vec![
+                bool(false),
+                bool(false),
+                bool(true),
+                bool(false),
+                bool(false)
+            ]),
+            expected_tuple(vec![
+                bool(false),
+                bool(false),
+                bool(true),
+                bool(true),
+                bool(false)
+            ]),
+        ])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn typed_native_entries_through_interpreters_and_dictionaries() {
     let mut session = TestSession::new();
     for name in [

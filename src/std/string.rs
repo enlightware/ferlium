@@ -669,6 +669,10 @@ extern "C" fn hash_string(value: &String, state: &mut Hasher) {
     state.write_bytes(value.as_ref().as_bytes());
 }
 
+// MIR's static-string equality rewrite relies on this agreeing with `comp_eq` against
+// StaticStr pattern data: comparing with `String::from_static(text)` is exactly comparing
+// the string's contents with `text.as_str()`. Preserve this contract and NFC normalization
+// across construction and both pattern-comparison backends (see doc/mir-optimization.md).
 extern "C" fn equal_string(lhs: &String, rhs: &String) -> bool {
     lhs == rhs
 }

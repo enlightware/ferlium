@@ -722,6 +722,8 @@ impl LiteralValue {
                 if let Some(expected) =
                     LiteralNativeValue::as_any(expected.as_ref()).downcast_ref::<StaticStr>()
                 {
+                    // The MIR static-string equality rewrite requires this to agree with
+                    // Value<string>::eq against String::from_static(expected).
                     return actual
                         .as_any()
                         .downcast_ref::<NativeString>()

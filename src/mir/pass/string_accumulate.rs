@@ -7,6 +7,8 @@
 //! `string_from_static`, since the constant pool cannot own mutable-semantics resources. When that
 //! fresh string is immediately appended and dropped, this module retargets the append to
 //! `string_push_static_str` and removes the unnecessary materialization.
+//! A fresh literal used only by concrete string equality instead becomes a `comp_eq` with
+//! immutable pattern data, under the std equality contract in `doc/mir-optimization.md`.
 //!
 //! Formatting `out = f"{out}{suffix}"` lowers through an empty builder: render `out` into a
 //! temporary string, append that complete snapshot to the builder, append the suffix, then replace
@@ -32,7 +34,11 @@ use ustr::ustr;
 use super::site::{OperationIndex, OperationSite};
 use crate::{
     containers::b,
-    mir::{self, BlockId, Function, Operation, OperationKind, edit::FunctionEdit, value::ValueId},
+    hir::value::LiteralValue,
+    mir::{
+        self, BlockId, Function, Operation, OperationKind, ResultTransport, edit::FunctionEdit,
+        value::ValueId,
+    },
     module::{ConcreteTraitImplKey, FunctionId, ModuleEnv, id::Id},
     std::{
         STD_MODULE_ID,
@@ -41,7 +47,7 @@ use crate::{
             STRING_FROM_STATIC_FUNCTION_NAME, STRING_PUSH_STATIC_STR_FUNCTION_NAME,
             STRING_PUSH_STR_FUNCTION_NAME, StaticStr, static_str_type, string_type,
         },
-        value::{VALUE_DROP_METHOD_INDEX, VALUE_TO_STRING_METHOD_INDEX},
+        value::{VALUE_DROP_METHOD_INDEX, VALUE_EQ_METHOD_INDEX, VALUE_TO_STRING_METHOD_INDEX},
     },
     types::r#type::Type,
 };
@@ -127,6 +133,7 @@ pub(crate) struct StringFunctions {
     push_static: FunctionId,
     to_string: FunctionId,
     drop: FunctionId,
+    equal: FunctionId,
 }
 
 impl StringFunctions {
@@ -159,6 +166,10 @@ impl StringFunctions {
             drop: FunctionId::new(
                 STD_MODULE_ID,
                 implementation.methods[usize::from(VALUE_DROP_METHOD_INDEX)],
+            ),
+            equal: FunctionId::new(
+                STD_MODULE_ID,
+                implementation.methods[usize::from(VALUE_EQ_METHOD_INDEX)],
             ),
         }
     }
@@ -320,6 +331,135 @@ fn plan_static_append(
         push,
         drop,
         text: *text,
+    })
+}
+
+struct StaticEquality {
+    materialization: OperationSite,
+    comparison: OperationSite,
+    drop: OperationSite,
+    scrutinee: mir::Value,
+    text: StaticStr,
+}
+
+/// Replace a fresh literal's sole equality use with the existing string-pattern comparison.
+/// The whole-function use census rules out aliases, escapes and mutation of the temporary.
+/// Comparison stays at its original site, so reads and intervening effects keep their order.
+pub(crate) fn fuse_static_string_equalities(
+    func: &Function,
+    functions: StringFunctions,
+) -> Option<Function> {
+    let candidates = candidate_initializations(func, functions.from_static);
+    if candidates.is_empty() {
+        return None;
+    }
+    let census = Census::new(func);
+    let mut comparisons = FxHashSet::default();
+    let fusions: Vec<_> = candidates
+        .into_iter()
+        .filter_map(|site| plan_static_equality(func, &census, functions, site))
+        // Two fresh literals can share an equality; rewrite only one side in this round.
+        .filter(|fusion| comparisons.insert(fusion.comparison))
+        .collect();
+    if fusions.is_empty() {
+        return None;
+    }
+
+    let mut replacements = FxHashMap::default();
+    let mut removals: FxHashMap<BlockId, FxHashSet<OperationIndex>> = FxHashMap::default();
+    for fusion in fusions {
+        let call =
+            &func.block(fusion.comparison.block).operations()[fusion.comparison.index.as_index()];
+        let mut comparison = Operation::compare_eq(
+            call.span,
+            fusion.scrutinee,
+            mir::Value::Pattern(b(LiteralValue::new_native(fusion.text))),
+        );
+        // Concrete, infallible bool calls always define a value in semantic MIR.
+        comparison.assign_result_id(call.result_id());
+        replacements.insert(fusion.comparison, comparison);
+        removals
+            .entry(fusion.materialization.block)
+            .or_default()
+            .insert(fusion.materialization.index);
+        removals
+            .entry(fusion.drop.block)
+            .or_default()
+            .insert(fusion.drop.index);
+    }
+    Some(apply_site_edits(func, replacements, &removals))
+}
+
+fn plan_static_equality(
+    func: &Function,
+    census: &Census,
+    functions: StringFunctions,
+    materialization: OperationSite,
+) -> Option<StaticEquality> {
+    let operations = func.block(materialization.block).operations();
+    let [
+        mir::Value::Function(_),
+        mir::Value::Register(text),
+        mir::Value::Register(rendered),
+    ] = operations[materialization.index.as_index()]
+        .operands
+        .as_ref()
+    else {
+        return None;
+    };
+    if !census.is_local_alloca(*text, static_str_type())
+        || !census.is_local_alloca(*rendered, string_type())
+    {
+        return None;
+    }
+    let text = static_initialization(func, census, *text, materialization)?;
+    let uses = census.uses.get(rendered)?;
+    if uses.len() != 3 || !uses.contains(&operation_use(materialization, 2)) {
+        return None;
+    }
+    let mut comparison = None;
+    let mut drop = None;
+    for use_site in uses {
+        let UseSite::Operation { site, operand } = *use_site else {
+            return None;
+        };
+        if site.block != materialization.block {
+            return None;
+        }
+        let candidate = &operations[site.index.as_index()];
+        if (operand == 1 || operand == 2) && is_direct_call(candidate, functions.equal) {
+            let OperationKind::Call {
+                result_transport: ResultTransport::Value,
+                metadata: None,
+                ..
+            } = candidate.kind
+            else {
+                return None;
+            };
+            if candidate.operands.len() != 3 {
+                return None;
+            }
+            comparison = Some((site, candidate.operands[3 - operand as usize].clone()));
+        } else if operand == 0 && is_string_drop(candidate, functions.drop, *rendered) {
+            drop = Some(site);
+        } else if site != materialization || operand != 2 {
+            return None;
+        }
+    }
+    let (comparison, scrutinee) = comparison?;
+    let drop = drop?;
+    if materialization.index.as_index() >= comparison.index.as_index()
+        || comparison.index.as_index() >= drop.index.as_index()
+    {
+        return None;
+    }
+    // Pattern data embeds the immutable text, so it does not extend the StaticStr cell's lifetime.
+    Some(StaticEquality {
+        materialization,
+        comparison,
+        drop,
+        scrutinee,
+        text,
     })
 }
 
@@ -744,6 +884,30 @@ mod tests {
 
     fn count(body: &str, needle: &str) -> usize {
         body.matches(needle).count()
+    }
+
+    #[test]
+    fn compares_literal_strings_without_materializing_them() {
+        for expression in ["value == \"abc\"", "\"abc\" == value"] {
+            let module = optimized(&format!(
+                "fn compare(value: string) -> bool {{ {expression} }}"
+            ));
+            let body = body_of(&module, "compare");
+            assert!(
+                body.contains("comp_eq") && body.contains("\"abc\""),
+                "{body}"
+            );
+            assert!(!body.contains("std::string_from_static"), "{body}");
+        }
+    }
+
+    #[test]
+    fn keeps_a_compared_literal_with_other_uses() {
+        let module = optimized(
+            "fn compare(value: string) -> (bool, string) { let text = \"abc\"; (value == text, text) }",
+        );
+        let body = body_of(&module, "compare");
+        assert!(body.contains("std::string_from_static"), "{body}");
     }
 
     #[test]
