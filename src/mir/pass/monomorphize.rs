@@ -999,37 +999,6 @@ fn bind_callbacks(edit: &mut FunctionEdit, callbacks: &[(ParameterId, FunctionId
         ));
         replacements.insert(parameter, place);
     }
-    // Passing the same callable place as an argument can prevent ordinary store forwarding.
-    // Its direct invocations are nevertheless known by the immutable parameter binding itself.
-    let bound: FxHashMap<_, _> = callbacks.iter().copied().collect();
-    let mut loaded = FxHashMap::default();
-    for block in edit.blocks() {
-        for operation in edit.block(block).operations.iter() {
-            if matches!(operation.kind, OperationKind::Load)
-                && let mir::Value::Parameter(parameter) = operation.operands[0]
-            {
-                loaded.insert(operation.result_id().unwrap(), parameter);
-            }
-        }
-    }
-    for block in edit.blocks().collect::<Vec<_>>() {
-        let block = edit.block_mut(block);
-        for operation in block
-            .operations
-            .iter_mut()
-            .chain(match &mut block.terminator.kind {
-                TerminatorKind::Invoke { operation, .. } => Some(operation),
-                _ => None,
-            })
-        {
-            if matches!(operation.kind, OperationKind::Call { .. }) {
-                let parameter = callback_parameter(&operation.operands[0], &loaded);
-                if let Some(function) = parameter.and_then(|parameter| bound.get(&parameter)) {
-                    operation.operands[0] = mir::Value::Function(*function);
-                }
-            }
-        }
-    }
     edit.visit_operands_mut(|operand| {
         if let mir::Value::Parameter(parameter) = operand
             && let Some(place) = replacements.get(parameter)
@@ -1927,22 +1896,9 @@ fn operation_at_mut(edit: &mut FunctionEdit, site: OperationSite) -> &mut Operat
     }
 }
 
-/// Calls accept the parameter's place directly or a value loaded from it.
-fn callback_parameter(
-    callee: &mir::Value,
-    loads: &FxHashMap<ValueId, ParameterId>,
-) -> Option<ParameterId> {
-    match callee {
-        mir::Value::Parameter(parameter) => Some(*parameter),
-        mir::Value::Register(id) => loads.get(id).copied(),
-        _ => None,
-    }
-}
-
 /// Immutable callback parameters invoked in a loop or directly by a self-recursive function.
 /// A single isolated invocation does not justify copying the enclosing body.
 fn repeated_callback_parameters(body: &Function, identity: FunctionId) -> FxHashSet<ParameterId> {
-    let mut loads = FxHashMap::default();
     let mut callees = Vec::new();
     for block_id in body.blocks() {
         let block = body.block(block_id);
@@ -1954,14 +1910,8 @@ fn repeated_callback_parameters(body: &Function, identity: FunctionId) -> FxHash
                 _ => None,
             })
         {
-            match operation.kind {
-                OperationKind::Load => {
-                    if let mir::Value::Parameter(parameter) = operation.operands[0] {
-                        loads.insert(operation.result_id().unwrap(), parameter);
-                    }
-                }
-                OperationKind::Call { .. } => callees.push((block_id, &operation.operands[0])),
-                _ => {}
+            if matches!(operation.kind, OperationKind::Call { .. }) {
+                callees.push((block_id, &operation.operands[0]));
             }
         }
     }
@@ -1971,7 +1921,10 @@ fn repeated_callback_parameters(body: &Function, identity: FunctionId) -> FxHash
     let invoked = callees
         .into_iter()
         .filter_map(|(block, callee)| {
-            let parameter = callback_parameter(callee, &loads)?;
+            // MIR calls function values through their places, never through loaded values.
+            let mir::Value::Parameter(parameter) = *callee else {
+                return None;
+            };
             let definition = &body.parameters()[parameter.as_index()];
             (definition.kind == ParameterKind::Place(ArgConvention::Let)
                 && definition.ty.is_function())

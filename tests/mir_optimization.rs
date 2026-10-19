@@ -78,6 +78,29 @@ fn a_local_non_capturing_closure_is_called_directly() {
     );
 }
 
+#[test]
+fn a_known_callable_stays_direct_after_a_read_only_call() {
+    let optimized = emit(
+        "callable_place",
+        r#"
+        #[inline(never)] fn inc(x: int) -> int { x + 1 }
+        #[inline(never)] fn observe(f, x: int) -> int { f(x) }
+        fn run(x: int) -> int {
+            let f = inc;
+            observe(f, x) + f(x)
+        }
+        "#,
+        MirOptimization::Enabled,
+    );
+    let run = rendered_function_with_prefix(&optimized, "run");
+    assert!(run.contains("call callable_place::observe("), "{run}");
+    assert!(run.contains("call callable_place::inc("), "{run}");
+    assert!(
+        !run.contains("call %"),
+        "the local callback must stay known: {run}"
+    );
+}
+
 /// An owned string cannot enter the constant pool, but its immutable contents can. Folding a
 /// formatter therefore leaves the terminal `StaticStr` -> fresh `string` construction rather than
 /// the formatter call itself.

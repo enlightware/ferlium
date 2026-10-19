@@ -9,8 +9,9 @@
 //! where a callee's parameter or temporary received the caller's value.
 //!
 //! The cells are the [value cells](super::value_cells) defined by a store or a copy whose every
-//! read this pass can forward: a load, a comparison, a copy out or, for a bare function, a call
-//! through it or its drop. Each read sees:
+//! read only observes the value. Read-only call arguments keep their storage; other reads can
+//! still be forwarded: a load, a comparison, a copy out or, for a bare function, a call through it
+//! or its drop. Each forwarded read sees:
 //! - the stored value, when the write stores a materialized register or a value parameter: a
 //!   `load`'s uses are rewritten to it, a `comp_eq` scrutinee reads it, and a copy from the cell
 //!   stores it;
@@ -66,21 +67,29 @@ pub(crate) fn forward_stored_values(func: &Function, env: ModuleEnv<'_>) -> Opti
         return None;
     }
     let dominance = OnceCell::new();
-    let values = ValueCells::of_matching(func, env, &local, forwardable, || {
-        dominance.get_or_init(|| {
-            let successors: Vec<Vec<usize>> = func
-                .blocks()
-                .map(|block| {
-                    func.block(block)
-                        .terminator()
-                        .successors()
-                        .map(|target| target.as_index())
-                        .collect()
-                })
-                .collect();
-            Dominance::of(&successors, func.entry().as_index())
-        })
-    });
+    // A read-only argument keeps its cell, but does not invalidate its other reads. The shared
+    // value-cell proof already rejects mutation and aliases and checks every use is dominated.
+    let values = ValueCells::of_matching(
+        func,
+        env,
+        &local,
+        |_| true,
+        || {
+            dominance.get_or_init(|| {
+                let successors: Vec<Vec<usize>> = func
+                    .blocks()
+                    .map(|block| {
+                        func.block(block)
+                            .terminator()
+                            .successors()
+                            .map(|target| target.as_index())
+                            .collect()
+                    })
+                    .collect();
+                Dominance::of(&successors, func.entry().as_index())
+            })
+        },
+    );
     if values.is_empty() {
         return None;
     }
@@ -333,12 +342,6 @@ fn read_kind(access: Access) -> Option<Read> {
     }
 }
 
-/// Whether this pass admits `access` to one of its cells: a cell passed as a call argument keeps its
-/// storage, so its other reads stay too.
-fn forwardable(access: Access) -> bool {
-    access != Access::Read(local_cells::Read::Argument)
-}
-
 /// What the reads of each forwardable cell are forwarded to.
 fn targets(func: &Function, census: &Census<'_>) -> FxHashMap<ValueId, Target> {
     // A store bridges a place register to a pointer value, which the register itself is not.
@@ -443,7 +446,10 @@ mod tests {
             logic::bool_type,
             math::{Float, float_type, int_type},
         },
-        types::r#type::tuple_type,
+        types::{
+            effects::no_effects,
+            r#type::{CallImplType, FnType, Type, tuple_type},
+        },
     };
 
     /// ```text
@@ -755,6 +761,102 @@ mod tests {
             assert!(operations[0].kind == OperationKind::CompareEqual);
             assert_eq!(operations[0].operands[0], literal);
             verify_function(&forwarded, env);
+        }
+    }
+
+    /// A read-only argument needs the original cell, but does not invalidate the function
+    /// identity. Mutable or escaped places and uses before initialization must stay indirect.
+    #[test]
+    fn callable_reads_forward_without_removing_read_only_argument_storage() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let (function, call_ty) = session.known_callees().int_neg();
+        let callable_ty = Type::function_type(call_ty.fn_ty.clone());
+        for case in ["read-only", "mutable", "escaped", "read before write"] {
+            let mut builder = FunctionBuilder::new(case.into(), Default::default());
+            let observer_ty = CallImplType::value(FnType::new_mut_resolved(
+                [(callable_ty, case == "mutable")],
+                int_type(),
+                no_effects(),
+            ));
+            let observer = Value::Parameter(builder.add_parameter(
+                Type::function_type(observer_ty.fn_ty.clone()),
+                ParameterKind::Place(ArgConvention::Let),
+            ));
+            let entry = builder.add_block();
+            let body = builder.add_block();
+            let marker = builder
+                .append_operation(entry, Operation::stack_save(span))
+                .unwrap();
+            let cell = builder
+                .append_operation(entry, Operation::alloca(span, callable_ty))
+                .unwrap();
+            let argument = Value::Constant(builder.add_constant(
+                int_type(),
+                LiteralValue::new_native(3isize),
+                &env,
+            ));
+            if case == "read before write" {
+                builder.append_operation(
+                    entry,
+                    Operation::call(span, cell.clone(), [argument.clone()], call_ty.clone())
+                        .with_value_result(),
+                );
+            }
+            builder.append_operation(
+                entry,
+                Operation::store(span, Value::Function(function), cell.clone()),
+            );
+            builder.append_operation(
+                entry,
+                Operation::call(span, observer.clone(), [cell.clone()], observer_ty)
+                    .with_value_result(),
+            );
+            if case == "escaped" {
+                builder.append_operation(
+                    entry,
+                    Operation::black_box(span, callable_ty, cell.clone(), None),
+                );
+            }
+            builder.set_terminator(entry, Terminator::goto(span, body));
+            builder.append_operation(
+                body,
+                Operation::call(span, cell.clone(), [argument], call_ty.clone())
+                    .with_value_result(),
+            );
+            builder.append_operation(body, Operation::stack_restore(span, marker));
+            builder.set_terminator(body, Terminator::ret(span));
+            // The read-before-write case deliberately contains an uninitialized use.
+            let source = builder.finish_unverified();
+            let forwarded = forward_stored_values(&source, env);
+            if case != "read-only" {
+                assert!(forwarded.is_none(), "{case}");
+                continue;
+            }
+            verify_function(&source, env);
+            let forwarded = forwarded.expect("read-only calls preserve the known function");
+            verify_function(&forwarded, env);
+            assert_eq!(
+                forwarded.block(body).operations()[0].operands[0],
+                Value::Function(function)
+            );
+            let operations = forwarded.block(entry).operations();
+            assert!(
+                operations
+                    .iter()
+                    .any(|operation| operation.kind == OperationKind::Store)
+            );
+            let call = operations
+                .iter()
+                .find(|operation| matches!(operation.kind, OperationKind::Call { .. }))
+                .unwrap();
+            assert_eq!(call.operands[0], observer);
+            assert_eq!(
+                call.operands[1], cell,
+                "the argument still borrows the original storage"
+            );
+            assert!(forward_stored_values(&forwarded, env).is_none());
         }
     }
 

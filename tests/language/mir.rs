@@ -3576,3 +3576,32 @@ fn zero_sized_result_limits_reached_during_substitution_are_compilation_errors()
             .any(|diagnostic| diagnostic.location == error.span)
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn known_callable_places_survive_read_only_calls_and_scoped_lifetimes() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+        #[inline(never)] fn inc(x: int) -> int { x + 1 }
+        #[inline(never)] fn observe(f, x: int) -> int { f(x) }
+        #[inline(never)] fn run(x: int, n: int) -> int {
+            let mut result = 0;
+            for i in 0..n {
+                let f = inc;
+                result += observe(f, x + i) + f(x + i);
+            };
+            result
+        }
+        #[inline(never)] fn captured(x: int) -> int {
+            let offset = black_box(7);
+            let f = |y| y + offset;
+            observe(f, x) + f(x)
+        }
+        (run(black_box(10), 0), run(black_box(10), 3), captured(black_box(10)))
+        "#
+        ),
+        expected_tuple([int(0), int(72), int(34)])
+    );
+}

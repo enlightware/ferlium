@@ -364,9 +364,9 @@ callbacks. Callback-use summaries are shared across callers and rounds, and refr
 callee's raw body is replaced by its optimized body.
 
 Known captureless callbacks enter the specialization key when an immutable parameter invokes them
-in a loop or a directly self-recursive callee. Binding preserves the visible ABI, materializes other
-uses in private places and exposes direct calls to existing folding and inlining. Unknown callbacks
-and capturing closures are not bound.
+in a loop or a directly self-recursive callee. Binding preserves the visible ABI and materializes
+the known functions in private places; ordinary store forwarding exposes their direct calls to
+existing folding and inlining. Unknown callbacks and capturing closures are not bound.
 
 Callback copies have a smaller count allowance within the module generation budget, fixed from
 its original body population to leave capacity for type/evidence specialization. Each callee,
@@ -729,12 +729,13 @@ more before final DCE. The use analysis runs only when that scan finds a viable 
 MIR has no φ: a value meeting a join, or leaving an inlined callee through several returns, travels
 through a cell, so its reader sees `store %v to %cell; …; %x = load %cell`; inlining also leaves
 copies between cells. `mir::pass::store_forward` forwards the reads of value cells defined by a
-store or a copy and otherwise only loaded, compared or copied from. Each read sees what the
-definition stored: a materialized register or value parameter, a constant, or, for a copy from
-another such cell, what that cell holds. A copy from a `let` parameter passed as a place reads the
-parameter in place. A cell holding a non-capturing closure's function is
+store or a copy and otherwise only observed, including as read-only `let` call arguments. Each
+forwarded read sees what the definition stored: a materialized register or value parameter, a
+constant, or, for a copy from another such cell, what that cell holds. A copy from a `let` parameter
+passed as a place reads the parameter in place. A cell holding a non-capturing closure's function is
 one too: calls through it become direct, and its drop, which releases nothing, goes. A cell whose
-every read was forwarded is removed with its write.
+every read was forwarded is removed with its write. A read-only `let` argument keeps the cell but
+does not block forwarding its other reads.
 
 It is a canonicalizer: every later pass may assume a value is tested where it is computed, not
 where a rewrite parked it. It therefore runs in each round next to storage forwarding and after the
@@ -746,8 +747,8 @@ elimination, see its canonical form, and again in each final cleanup sweep, wher
 simplification stores computed predicates.
 
 Loads and comparisons of constant cells read the pool constant directly, preserving its
-representation. Ordinary call arguments still require places; this does not substitute scalar
-constants for places passed to calls.
+representation. Call arguments retain their original transport; forwarding does not substitute a
+value for a place argument.
 
 ## Local branch forwarding
 
