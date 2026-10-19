@@ -37,7 +37,7 @@ pub(crate) fn call_result_transport(
 ) -> ResultTransport {
     if accepts_no_value_result(ty, env) {
         ResultTransport::NoValue
-    } else if accepts_value_result(ty) {
+    } else if accepts_value_result(ty, env) {
         ResultTransport::Value
     } else {
         ResultTransport::Place
@@ -51,10 +51,13 @@ pub(crate) fn definition_result_transport(
 ) -> ResultTransport {
     if definition_returns_no_value(definition, env) {
         ResultTransport::NoValue
-    } else if accepts_value_result(&CallImplType::new(
-        definition.ty_scheme.ty.clone(),
-        definition.return_convention(),
-    )) {
+    } else if accepts_value_result(
+        &CallImplType::new(
+            definition.ty_scheme.ty.clone(),
+            definition.return_convention(),
+        ),
+        &env,
+    ) {
         ResultTransport::Value
     } else {
         ResultTransport::Place

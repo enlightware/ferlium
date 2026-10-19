@@ -454,7 +454,6 @@ mod tests {
     use crate::mir::{ParameterKind, Value, builder::FunctionBuilder, terminator::Terminator};
     use crate::{
         CompilerSession, Location, MirOptimization,
-        hir::function::ArgConvention,
         std::{logic::bool_type, math::int_type},
     };
 
@@ -522,8 +521,7 @@ mod tests {
             .append_operation(entry, Operation::stack_save(span))
             .unwrap();
         // Neither history at the join may be ignored.
-        let condition =
-            builder.add_parameter(bool_type(), ParameterKind::Parameter(ArgConvention::Let));
+        let condition = builder.add_parameter(bool_type(), ParameterKind::Value);
         let condition = Value::Parameter(condition).clone();
         builder.set_terminator(entry, Terminator::cond_br(span, condition, keep, reclaim));
         builder.append_operation(keep, Operation::stack_restore(span, inner.clone()));

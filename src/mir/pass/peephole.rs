@@ -187,8 +187,7 @@ mod tests {
         let env = session.module_env();
         let bool_ty = bool_type();
         let mut builder = FunctionBuilder::new("materialize".into(), Default::default());
-        let condition =
-            builder.add_parameter(bool_ty, ParameterKind::Parameter(ArgConvention::Let));
+        let condition = builder.add_parameter(bool_ty, ParameterKind::Value);
         let result = builder.add_parameter(bool_ty, ParameterKind::Return);
         let true_value = builder.add_constant(bool_ty, LiteralValue::new_native(true), &env);
         let false_value = builder.add_constant(bool_ty, LiteralValue::new_native(false), &env);
@@ -240,7 +239,7 @@ mod tests {
         let mut builder = FunctionBuilder::new("materialize_variant".into(), Default::default());
         let variant = builder.add_parameter(
             option_type(int_type()),
-            ParameterKind::Parameter(ArgConvention::Let),
+            ParameterKind::Place(ArgConvention::Let),
         );
         let result = builder.add_parameter(bool_ty, ParameterKind::Return);
         let true_value = builder.add_constant(bool_ty, LiteralValue::new_native(true), &env);

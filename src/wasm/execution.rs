@@ -209,7 +209,7 @@ impl CompiledProgram {
     ) -> Result<Instance<A, R>, RuntimeError> {
         let types = A::types()
             .into_iter()
-            .map(ScalarType::of)
+            .map(ScalarType::host_primitive)
             .collect::<Result<Vec<_>, _>>()
             .map_err(RuntimeError::Backend)?;
         let [export] = self.emitted.exports.as_slice() else {
@@ -221,7 +221,7 @@ impl CompiledProgram {
             ));
         };
         if types != *parameters
-            || ScalarType::of(R::ty()).map_err(RuntimeError::Backend)? != *result
+            || ScalarType::host_primitive(R::ty()).map_err(RuntimeError::Backend)? != *result
         {
             return Err(RuntimeError::Backend(
                 "Rust signature does not match the Wasm entry".into(),

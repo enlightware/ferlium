@@ -1617,6 +1617,9 @@ pub(crate) fn map_types(
     let span = edit.block(edit.entry()).terminator.span.location;
     for parameter in edit.parameters_mut() {
         parameter.ty = parameter.ty.map(mapper);
+        if let ParameterKind::Place(convention) = parameter.kind {
+            parameter.kind = ParameterKind::visible(convention, parameter.ty, &env);
+        }
         if parameter.kind == ParameterKind::Return {
             check_result_limits(parameter.ty, &env, span)?;
         }
@@ -1628,7 +1631,7 @@ pub(crate) fn map_types(
         let operations = mem::take(&mut edit.block_mut(block).operations);
         let mut rewritten = Vec::with_capacity(operations.len());
         for mut operation in operations {
-            substitute_reading_arguments(edit, &mut operation, mapper, &mut rewritten);
+            substitute_reading_arguments(edit, &mut operation, mapper, &mut rewritten, env);
             if let OperationKind::Call { ty, .. } = &operation.kind {
                 check_result_limits(ty.fn_ty.ret, &env, operation.span.location)?;
             }
@@ -1641,7 +1644,7 @@ pub(crate) fn map_types(
             operation, normal, ..
         } = &mut terminator.kind
         {
-            substitute_reading_arguments(edit, operation, mapper, &mut rewritten);
+            substitute_reading_arguments(edit, operation, mapper, &mut rewritten, env);
             if let OperationKind::Call { ty, .. } = &operation.kind {
                 check_result_limits(ty.fn_ty.ret, &env, operation.span.location)?;
             }
@@ -1666,13 +1669,14 @@ fn substitute_reading_arguments(
     operation: &mut Operation,
     mapper: &mut impl TypeMapper,
     operations: &mut Vec<Operation>,
+    env: ModuleEnv<'_>,
 ) {
     let Some((_, ty, metadata)) = operation.call_site() else {
         substitute_in_operation(operation, mapper);
         return;
     };
     let accepted_before: Vec<bool> = (0..ty.fn_ty.args.len())
-        .map(|offset| accepts_value_argument(ty, metadata, offset))
+        .map(|offset| accepts_value_argument(ty, metadata, offset, &env))
         .collect();
     substitute_in_operation(operation, mapper);
     let (_, ty, metadata) = operation
@@ -1682,7 +1686,7 @@ fn substitute_reading_arguments(
     let reads: Vec<usize> = accepted_before
         .iter()
         .enumerate()
-        .filter(|&(offset, &before)| !before && accepts_value_argument(ty, metadata, offset))
+        .filter(|&(offset, &before)| !before && accepts_value_argument(ty, metadata, offset, &env))
         .map(|(offset, _)| visible_start + offset)
         .collect();
     scalar_arguments::read_before(edit, operation, &reads, operations);
@@ -1969,7 +1973,7 @@ fn repeated_callback_parameters(body: &Function, identity: FunctionId) -> FxHash
         .filter_map(|(block, callee)| {
             let parameter = callback_parameter(callee, &loads)?;
             let definition = &body.parameters()[parameter.as_index()];
-            (definition.kind == ParameterKind::Parameter(ArgConvention::Let)
+            (definition.kind == ParameterKind::Place(ArgConvention::Let)
                 && definition.ty.is_function())
             .then_some((block, parameter))
         })
@@ -2012,12 +2016,7 @@ fn visible_parameters(parameters: &[mir::Parameter]) -> Vec<ParameterId> {
     parameters
         .iter()
         .enumerate()
-        .filter(|(_, parameter)| {
-            matches!(
-                parameter.kind,
-                ParameterKind::Parameter(_) | ParameterKind::Owned
-            )
-        })
+        .filter(|(_, parameter)| parameter.kind.is_visible())
         .map(|(index, _)| ParameterId::from_index(index))
         .collect()
 }
@@ -4352,7 +4351,7 @@ fn use_it(x: int) { with_zero(x) }",
             .parameters()
             .iter()
             .position(|parameter| {
-                parameter.kind == ParameterKind::Parameter(ArgConvention::Let)
+                parameter.kind == ParameterKind::Place(ArgConvention::Let)
                     && parameter.ty.is_function()
             })
             .unwrap();

@@ -543,7 +543,7 @@ mod tests {
         CompilerSession, Location, MirOptimization,
         containers::b,
         format::FormatWith,
-        hir::{function::ArgConvention, value::LiteralValue},
+        hir::value::LiteralValue,
         mir::{
             self, Function, Operation, OperationKind, ParameterKind,
             builder::FunctionBuilder,
@@ -777,8 +777,7 @@ mod tests {
         let span = Location::new_synthesized();
         let env = session.module_env();
         let mut builder = FunctionBuilder::new("twice_written".into(), Default::default());
-        let argument =
-            builder.add_parameter(bool_type(), ParameterKind::Parameter(ArgConvention::Let));
+        let argument = builder.add_parameter(bool_type(), ParameterKind::Value);
         let entry = builder.add_block();
         let left = builder.add_block();
         let right = builder.add_block();

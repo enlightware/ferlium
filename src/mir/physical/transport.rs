@@ -26,8 +26,8 @@ use crate::{
     compiler::MirArtifacts,
     hir::{function::ArgConvention, native_functions::NativeResult},
     mir::{
-        Function, Operation, OperationKind, Parameter, ParameterKind, ResultTransport, Value,
-        ValueId, operation, results::definition_result_transport,
+        Function, Operation, OperationKind, Parameter, ResultTransport, Value, ValueId, operation,
+        results::definition_result_transport,
     },
     module::{CallableOrigin, FunctionId, ModuleEnv, TraitId, id::Id},
     types::{r#trait::TraitDictionaryEntryIndex, r#type::CallImplType},
@@ -84,7 +84,7 @@ impl<'a> Transports<'a> {
                             .mut_ty
                             .as_resolved()
                             .is_none_or(|mutability| mutability.is_mutable())
-                            && operation::is_scalar_value_type(argument.ty)
+                            && operation::is_scalar_value_type(argument.ty, &self.env)
                     })
             }),
             _ => false,
@@ -122,10 +122,13 @@ impl<'a> Transports<'a> {
             .is_some_and(|entry| entry.signature().result == NativeResult::Unit)
         {
             ResultTransport::NoValue
-        } else if operation::accepts_value_result(&CallImplType::new(
-            function.definition.ty_scheme.ty.clone(),
-            function.definition.return_convention(),
-        )) {
+        } else if operation::accepts_value_result(
+            &CallImplType::new(
+                function.definition.ty_scheme.ty.clone(),
+                function.definition.return_convention(),
+            ),
+            &self.env,
+        ) {
             ResultTransport::Value
         } else {
             ResultTransport::Place
@@ -140,12 +143,7 @@ impl<'a> Transports<'a> {
                 .body
                 .parameters()
                 .iter()
-                .filter(|parameter| {
-                    matches!(
-                        parameter.kind,
-                        ParameterKind::Parameter(_) | ParameterKind::Owned
-                    )
-                })
+                .filter(|parameter| parameter.kind.is_visible())
                 .nth(offset)
                 .is_some_and(Parameter::is_value);
         }
@@ -169,6 +167,6 @@ impl<'a> Transports<'a> {
                 .ty
                 .args
                 .get(offset)
-                .is_some_and(|argument| operation::is_scalar_value_type(argument.ty))
+                .is_some_and(|argument| operation::is_scalar_value_type(argument.ty, &self.env))
     }
 }

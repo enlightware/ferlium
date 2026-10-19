@@ -1191,9 +1191,7 @@ mod tests {
             ("Some".into(), payload),
         ]);
         let mut builder = FunctionBuilder::new("joined_variant".into(), Default::default());
-        let condition = Value::Parameter(
-            builder.add_parameter(bool_type(), ParameterKind::Parameter(ArgConvention::Let)),
-        );
+        let condition = Value::Parameter(builder.add_parameter(bool_type(), ParameterKind::Value));
         let output = Value::Parameter(builder.add_parameter(int_type(), ParameterKind::Return));
         let entry = builder.add_block();
         let branches = [builder.add_block(), builder.add_block()];
@@ -1573,7 +1571,7 @@ mod tests {
         for opaque in ["whole read", "foreign copy", "field address", "invoke copy"] {
             let mut builder = FunctionBuilder::new(opaque.into(), Default::default());
             let parameter = Value::Parameter(
-                builder.add_parameter(ty, ParameterKind::Parameter(ArgConvention::Let)),
+                builder.add_parameter(ty, ParameterKind::Place(ArgConvention::Let)),
             );
             let entry = builder.add_block();
             let roots: Vec<_> = (0..3)

@@ -400,7 +400,7 @@ pub(crate) fn run_entry_with_profile(
     if parameters.iter().any(|p| {
         !matches!(
             p.kind,
-            ParameterKind::Parameter(ArgConvention::Let) | ParameterKind::Owned
+            ParameterKind::Value | ParameterKind::Place(ArgConvention::Let) | ParameterKind::Owned
         )
     }) {
         return Err(unsupported("this host entry signature"));

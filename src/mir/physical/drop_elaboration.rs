@@ -596,9 +596,8 @@ mod tests {
         for conditional in [false, true] {
             let span = Location::new_synthesized();
             let mut builder = FunctionBuilder::new("guarded".into(), CallResultConvention::Value);
-            let condition = Value::Parameter(
-                builder.add_parameter(bool_type(), ParameterKind::Parameter(ArgConvention::Let)),
-            );
+            let condition =
+                Value::Parameter(builder.add_parameter(bool_type(), ParameterKind::Value));
             let output =
                 Value::Parameter(builder.add_parameter(Type::unit(), ParameterKind::Return));
             let entry = builder.add_block();
@@ -757,13 +756,10 @@ mod tests {
             .unwrap();
         let span = Location::new_synthesized();
         let mut builder = FunctionBuilder::new("loop_places".into(), CallResultConvention::Value);
-        let input = Value::Parameter(builder.add_parameter(
-            int_type(),
-            ParameterKind::Parameter(ArgConvention::MutableRef),
-        ));
-        let condition = Value::Parameter(
-            builder.add_parameter(bool_type(), ParameterKind::Parameter(ArgConvention::Let)),
+        let input = Value::Parameter(
+            builder.add_parameter(int_type(), ParameterKind::Place(ArgConvention::MutableRef)),
         );
+        let condition = Value::Parameter(builder.add_parameter(bool_type(), ParameterKind::Value));
         let output = Value::Parameter(builder.add_parameter(Type::unit(), ParameterKind::Return));
         let entry = builder.add_block();
         let repeat = builder.add_block();
@@ -939,9 +935,7 @@ mod tests {
         let span = Location::new_synthesized();
         let mut builder = FunctionBuilder::new("invoke_flags".into(), CallResultConvention::Value);
         let input = Value::Parameter(builder.add_parameter(int_type(), ParameterKind::Owned));
-        let condition = Value::Parameter(
-            builder.add_parameter(bool_type(), ParameterKind::Parameter(ArgConvention::Let)),
-        );
+        let condition = Value::Parameter(builder.add_parameter(bool_type(), ParameterKind::Value));
         let output = Value::Parameter(builder.add_parameter(bool_type(), ParameterKind::Return));
         let entry = builder.add_block();
         let attempt = builder.add_block();
@@ -1080,9 +1074,7 @@ mod tests {
         let span = Location::new_synthesized();
         let mut builder = FunctionBuilder::new("shell_flags".into(), CallResultConvention::Value);
         let parent = Value::Parameter(builder.add_parameter(ty, ParameterKind::Owned));
-        let condition = Value::Parameter(
-            builder.add_parameter(bool_type(), ParameterKind::Parameter(ArgConvention::Let)),
-        );
+        let condition = Value::Parameter(builder.add_parameter(bool_type(), ParameterKind::Value));
         let output = Value::Parameter(builder.add_parameter(bool_type(), ParameterKind::Return));
         let entry = builder.add_block();
         let clear = builder.add_block();

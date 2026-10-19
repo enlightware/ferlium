@@ -1069,9 +1069,7 @@ mod tests {
         let ty = Type::function_type(signature.clone());
         let span = Location::new_synthesized();
         let mut body = FunctionBuilder::new(ustr("compute"), CallResultConvention::Value);
-        let input = Value::Parameter(
-            body.add_parameter(int_type(), ParameterKind::Parameter(ArgConvention::Let)),
-        );
+        let input = Value::Parameter(body.add_parameter(int_type(), ParameterKind::Value));
         let output = Value::Parameter(body.add_parameter(int_type(), ParameterKind::Return));
         let block = body.add_block();
         let marker = body

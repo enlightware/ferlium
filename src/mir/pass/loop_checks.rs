@@ -148,7 +148,9 @@ impl Sources<'_> {
                 parameter.ty == int_type()
                     && matches!(
                         parameter.kind,
-                        ParameterKind::Parameter(ArgConvention::Let) | ParameterKind::Owned
+                        ParameterKind::Value
+                            | ParameterKind::Place(ArgConvention::Let)
+                            | ParameterKind::Owned
                     )
             }
             Holder::Place(mir::Value::Register(register)) => {

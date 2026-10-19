@@ -406,13 +406,10 @@ impl<'a> Emitter<'a> {
             } else {
                 f.parameter_passing[i - capture_count]
             };
-            let parameter = mir::Parameter {
-                ty: f.locals[i].ty,
-                kind: mir::ParameterKind::Parameter(passing),
-            };
-            let is_value = parameter.is_value();
-            let param = mir::Value::Parameter(lowered.add_parameter(parameter.ty, parameter.kind));
-            if is_value {
+            let ty = f.locals[i].ty;
+            let kind = mir::ParameterKind::visible(passing, ty, &env);
+            let param = mir::Value::Parameter(lowered.add_parameter(ty, kind));
+            if kind == mir::ParameterKind::Value {
                 value_locals.insert(LocalDeclId::from_index(i), param);
             } else {
                 locals.insert(LocalDeclId::from_index(i), param);
@@ -1361,7 +1358,7 @@ impl<'a> Emitter<'a> {
             {
                 continue;
             }
-            if is_scalar_value_type(l.ty)
+            if is_scalar_value_type(l.ty, &self.env)
                 && matches!(l.clone, None | Some(ResolvedLocalClone::TrivialCopy))
             {
                 if l.mut_ty == MutType::constant() {
@@ -2291,7 +2288,7 @@ impl<'a> Emitter<'a> {
         let mut temporaries = Vec::new();
         for (offset, argument) in arguments.iter().enumerate() {
             let node = &self.hir_arena[argument.value];
-            if !accepts_value_argument(ty, None, offset) {
+            if !accepts_value_argument(ty, None, offset, &self.env) {
                 operands.push(self.lower_as_place(node));
                 continue;
             }
@@ -2877,7 +2874,7 @@ impl<'a> Emitter<'a> {
     /// other node.
     fn lower_scalar_value(&mut self, node: &ENode) -> Option<mir::Value> {
         use hir::NodeKind as K;
-        if !is_scalar_value_type(node.ty) {
+        if !is_scalar_value_type(node.ty, &self.env) {
             return None;
         }
         match &node.kind {
@@ -2996,7 +2993,7 @@ impl<'a> Emitter<'a> {
             K::CallDictionaryFunction(n) => &n.ty,
             _ => return None,
         };
-        if !accepts_value_result(ty) {
+        if !accepts_value_result(ty, &self.env) {
             return None;
         }
         let (callee, arguments, ty, instantiation) = self.lower_call_parts(node)?;

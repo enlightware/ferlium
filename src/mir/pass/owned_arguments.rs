@@ -621,9 +621,14 @@ impl VariantFactory<'_> {
             .iter()
             .enumerate()
             .filter_map(|(index, parameter)| match parameter.kind {
-                ParameterKind::Parameter(convention) => {
+                ParameterKind::Place(convention) => {
                     Some((ParameterId::from_index(index), convention, parameter.ty))
                 }
+                ParameterKind::Value => Some((
+                    ParameterId::from_index(index),
+                    ArgConvention::Let,
+                    parameter.ty,
+                )),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -692,7 +697,10 @@ impl VariantFactory<'_> {
         let mut edit = FunctionEdit::new(source.clone());
         let mut visible_index = 0;
         for parameter in edit.parameters_mut() {
-            if matches!(parameter.kind, ParameterKind::Parameter(_)) {
+            if matches!(
+                parameter.kind,
+                ParameterKind::Place(_) | ParameterKind::Value
+            ) {
                 if arguments.contains(visible_index) {
                     parameter.kind = ParameterKind::Owned;
                 }

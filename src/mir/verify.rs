@@ -18,6 +18,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     format::FormatWith,
+    hir::function::ArgConvention,
     mir::{
         self, BlockId, CallMetadata, Function, Instantiation, Operation, OperationKind,
         OperationResult, ParameterId, ParameterKind, ResultTransport, ValueId,
@@ -544,12 +545,38 @@ impl<'a> Verifier<'a> {
     }
 
     fn verify_shared_contracts(&mut self, roles: Option<ValueRoles>) {
+        self.verify_parameter_form();
         self.verify_result_form();
         self.verify_structure();
         self.collect_value_information(roles);
         self.verify_operand_roles_and_dominance();
         self.verify_source_failure_flow();
         self.verify_register_ownership();
+    }
+
+    /// Verifies that a `Let` parameter is a value exactly when its type is a scalar value type, as
+    /// call arguments are.
+    fn verify_parameter_form(&self) {
+        for parameter in self.func.parameters() {
+            let scalar = is_scalar_value_type(parameter.ty, &self.env);
+            match parameter.kind {
+                ParameterKind::Value => assert!(
+                    scalar,
+                    "MIR function `{}`: value parameter of type {}, which is not a scalar value \
+                     type",
+                    self.func.name,
+                    parameter.ty.format_with(&self.env)
+                ),
+                ParameterKind::Place(ArgConvention::Let) => assert!(
+                    !scalar,
+                    "MIR function `{}`: `let` parameter of scalar type {} is a place instead of \
+                     a value",
+                    self.func.name,
+                    parameter.ty.format_with(&self.env)
+                ),
+                _ => {}
+            }
+        }
     }
 
     /// Verifies that a function returning its result as a value has no result parameter and that
@@ -577,7 +604,7 @@ impl<'a> Verifier<'a> {
         if let Some(ty) = value_result {
             assert!(
                 self.func.result_convention() == CallResultConvention::Value
-                    && is_scalar_value_type(ty),
+                    && is_scalar_value_type(ty, &self.env),
                 "MIR function `{}` returns a value of a type {} without a scalar value result",
                 self.func.name,
                 ty.format_with(&self.env)
@@ -1339,7 +1366,7 @@ impl<'a> Verifier<'a> {
                 // the value form's place: its value would not have the argument's type.
                 assert!(
                     !(self.semantic
-                        && accepts_value_argument(ty, metadata, offset)
+                        && accepts_value_argument(ty, metadata, offset, &self.env)
                         && self.place_pointee_type(&operands[index]) == Some(expected)),
                     "MIR function `{}` node {}: scalar argument {} ({}) of type {} is \
                      passed as a place instead of a value\n{}",
@@ -1356,7 +1383,8 @@ impl<'a> Verifier<'a> {
                 && let ValueRole::Materialized(MirType::Lowered(actual)) = &*role
             {
                 assert!(
-                    accepts_value_argument(ty, metadata, offset) && *actual == argument.ty,
+                    accepts_value_argument(ty, metadata, offset, &self.env)
+                        && *actual == argument.ty,
                     "MIR function `{}` node {}: value argument {} of type {} where {} \
                      is passed",
                     self.func.name,
@@ -2453,10 +2481,9 @@ mod tests {
         let session = CompilerSession::new();
         let span = Location::new_synthesized();
         let mut f = FunctionBuilder::new("replace_test".into(), Default::default());
-        let destination = Value::Parameter(f.add_parameter(
-            int_type(),
-            ParameterKind::Parameter(ArgConvention::MutableRef),
-        ));
+        let destination = Value::Parameter(
+            f.add_parameter(int_type(), ParameterKind::Place(ArgConvention::MutableRef)),
+        );
         let block = f.add_block();
         let replacement = append_result(&mut f, block, Operation::alloca(span, int_type()));
         if initialized {
@@ -2596,7 +2623,7 @@ mod tests {
     fn replace_rejects_a_borrowed_replacement() {
         let span = Location::new_synthesized();
         let mut f = FunctionBuilder::new("borrowed_replace".into(), Default::default());
-        let kind = ParameterKind::Parameter(ArgConvention::MutableRef);
+        let kind = ParameterKind::Place(ArgConvention::MutableRef);
         let first = Value::Parameter(f.add_parameter(int_type(), kind));
         let second = Value::Parameter(f.add_parameter(int_type(), kind));
         let block = f.add_block();
@@ -2613,7 +2640,7 @@ mod tests {
         let first = Value::Parameter(f.add_parameter(string_type(), ParameterKind::Owned));
         let second = Value::Parameter(f.add_parameter(
             string_type(),
-            ParameterKind::Parameter(ArgConvention::MutableRef),
+            ParameterKind::Place(ArgConvention::MutableRef),
         ));
         let block = f.add_block();
         append(&mut f, block, Operation::replace(span, first, second, None));

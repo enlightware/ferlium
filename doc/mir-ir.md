@@ -112,7 +112,7 @@ matches use `comp_eq` and conditional branches.
 Parameters appear in this order:
 
 1. `@extra`: dictionaries and other hidden evidence;
-2. `@arg`: runtime arguments tagged `let`, `&mut`, or optimized-MIR-only `owned`; and
+2. `@arg`: runtime arguments tagged `let`, `&mut`, `value`, or optimized-MIR-only `owned`; and
 3. `@ret`: the caller-provided result storage, absent for a scalar value result or a `NoValue`
    result (see below).
 
@@ -122,7 +122,9 @@ callee variant which must consume it on every exit. Raw semantic MIR uses only t
 conventions; an optimized `owned` argument requires proof that the caller relinquishes ownership.
 
 A `Let` parameter of a concrete scalar type (`int`, `float` or `bool`) is a value, as the ABI passes
-it. A generic parameter is a place, so specializing it to a scalar turns it into a value. A `Let`
+it, and its signature says so (`@arg value`): a value's role is read from MIR, never from its type,
+and the verifier checks the type. A generic parameter is a place, so specializing it to a scalar
+turns it into a value. A `Let`
 argument of such a type is a value whatever the callee takes, read where the argument is evaluated;
 the verifier rejects the place form. This holds for the visible arguments of a `project` too, such
 as a scoped subscript's index. A substitution that makes an argument's type such a scalar

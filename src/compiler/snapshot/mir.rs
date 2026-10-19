@@ -194,7 +194,8 @@ struct SnapshotParameter {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy)]
 enum SnapshotParameterKind {
-    Parameter(ArgConvention),
+    Place(ArgConvention),
+    Value,
     Owned,
     Dictionary,
     Return,
@@ -693,7 +694,8 @@ impl SnapshotMirFunction {
 impl From<ParameterKind> for SnapshotParameterKind {
     fn from(value: ParameterKind) -> Self {
         match value {
-            ParameterKind::Parameter(convention) => Self::Parameter(convention),
+            ParameterKind::Place(convention) => Self::Place(convention),
+            ParameterKind::Value => Self::Value,
             ParameterKind::Owned => Self::Owned,
             ParameterKind::Dictionary => Self::Dictionary,
             ParameterKind::Return => Self::Return,
@@ -704,7 +706,8 @@ impl From<ParameterKind> for SnapshotParameterKind {
 impl From<SnapshotParameterKind> for ParameterKind {
     fn from(value: SnapshotParameterKind) -> Self {
         match value {
-            SnapshotParameterKind::Parameter(convention) => Self::Parameter(convention),
+            SnapshotParameterKind::Place(convention) => Self::Place(convention),
+            SnapshotParameterKind::Value => Self::Value,
             SnapshotParameterKind::Owned => Self::Owned,
             SnapshotParameterKind::Dictionary => Self::Dictionary,
             SnapshotParameterKind::Return => Self::Return,

@@ -73,7 +73,8 @@ impl PhysicalLowerer<'_> {
             .iter()
             .zip(passing)
             .map(|(arg, passing)| {
-                Value::Parameter(builder.add_parameter(arg.ty, ParameterKind::Parameter(*passing)))
+                let kind = ParameterKind::visible(*passing, arg.ty, &self.env);
+                Value::Parameter(builder.add_parameter(arg.ty, kind))
             })
             .collect::<Vec<_>>();
         let destination =

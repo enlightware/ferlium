@@ -802,7 +802,7 @@ mod tests {
         let mut builder = FunctionBuilder::new("append".into(), Default::default());
         let out = mir::Value::Parameter(builder.add_parameter(
             string_type(),
-            ParameterKind::Parameter(ArgConvention::MutableRef),
+            ParameterKind::Place(ArgConvention::MutableRef),
         ));
         let entry = builder.add_block();
         let text_value = builder.add_constant(

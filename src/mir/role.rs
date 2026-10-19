@@ -39,7 +39,7 @@ use crate::{
     mir::{
         self, Function, Operation, OperationKind, OperationResult, Parameter, ParameterKind,
         ValueId,
-        operation::accepts_value_argument,
+        operation::reads_argument,
         site::{OperationIndex, OperationSite},
         terminator::TerminatorKind,
         value::{Constant, ConstantId, StaticEvidence},
@@ -535,11 +535,9 @@ fn constant_ty(constants: &[Constant], id: ConstantId) -> Type {
 fn parameter_role(parameter: &Parameter, result_convention: CallResultConvention) -> ValueRole {
     let ty = parameter.ty;
     match parameter.kind {
-        _ if parameter.is_value() => ValueRole::Materialized(MirType::Lowered(ty)),
+        ParameterKind::Value => ValueRole::Materialized(MirType::Lowered(ty)),
         ParameterKind::Dictionary => ValueRole::Dictionary,
-        ParameterKind::Parameter(_) | ParameterKind::Owned => {
-            ValueRole::Place(MirType::Lowered(ty))
-        }
+        ParameterKind::Place(_) | ParameterKind::Owned => ValueRole::Place(MirType::Lowered(ty)),
         ParameterKind::Return if result_convention.returns_place() => {
             ValueRole::Place(MirType::pointer_to(MirType::Lowered(ty)))
         }
@@ -682,9 +680,11 @@ pub(crate) fn check_operand_roles(
                 evidence(index);
             }
             let (_, _, metadata) = operation.call_site().expect("a call or a projection");
+            // Which types a read-only argument may pass as a value is the verifier's question, since
+            // answering it needs the type definitions; roles only need the argument to be read-only.
             for offset in 0..ty.fn_ty.args.len() {
                 let index = visible_start + offset;
-                if accepts_value_argument(ty, metadata, offset)
+                if reads_argument(ty, metadata, offset)
                     && matches!(*role(index), ValueRole::Materialized(MirType::Lowered(_)))
                 {
                     continue;

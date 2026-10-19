@@ -192,7 +192,6 @@ mod tests {
     use super::*;
     use crate::{
         CompilerSession, Location, MirOptimization,
-        hir::function::ArgConvention,
         mir::{Operation, ParameterKind, Value, builder::FunctionBuilder, terminator::Terminator},
         types::r#type::Type,
     };
@@ -216,10 +215,7 @@ mod tests {
         let span = Location::new_synthesized();
         for guarded_entry in [false, true] {
             let mut builder = FunctionBuilder::new("checks".into(), Default::default());
-            let flag = builder.add_parameter(
-                Type::primitive::<bool>(),
-                ParameterKind::Parameter(ArgConvention::Let),
-            );
+            let flag = builder.add_parameter(Type::primitive::<bool>(), ParameterKind::Value);
             let entry = builder.add_block();
             let flag = Value::Parameter(flag).clone();
             let left = builder.add_block();

@@ -39,7 +39,7 @@ use crate::{
         },
         hash::hasher_type,
         logic::bool_type,
-        math::{Float, int_type},
+        math::{Float, float_type, int_type, raw_float_type},
         ordering::ORDERING_GREATER,
         string::{static_str_type, string_type},
     },
@@ -662,11 +662,26 @@ pub(crate) fn structural_variant(
     }
 }
 
+/// Whether `ty` has a scalar ABI representation (`doc/abi.md`, "Scalar slots"): a value passed
+/// and returned directly. MIR and the backends ask this one question so that caller and callee
+/// always agree; type definition ids are global, so any environment that reaches the type's
+/// definition gives the same answer. Unit has no scalar representation.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) fn is_abi_scalar(ty: Type, env: &impl TypeLayoutEnv) -> bool {
+    is_primitive_scalar(ty) || is_tag_scalar(ty, env)
+}
+
+/// The part of [`is_abi_scalar`] that needs no type definitions: `bool`, `int`, `float` and the
+/// compiler-internal `raw_float`.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) fn is_primitive_scalar(ty: Type) -> bool {
+    [bool_type(), int_type(), float_type(), raw_float_type()].contains(&ty)
+}
+
 /// A closed variant whose complete representation is just its canonical u32 tag.
 /// Unit payloads have no storage or ownership obligations; larger aggregates never become
 /// scalars merely because their layout happens to fit in a machine register.
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-pub(crate) fn is_tag_scalar(ty: Type, env: &impl TypeLayoutEnv) -> bool {
+fn is_tag_scalar(ty: Type, env: &impl TypeLayoutEnv) -> bool {
     ty.is_constant()
         && structural_variant(ty, env).is_some_and(|(_, cases)| {
             !cases.is_empty() && cases.iter().all(|(_, payload)| *payload == Type::unit())

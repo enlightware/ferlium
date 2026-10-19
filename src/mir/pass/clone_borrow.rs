@@ -98,7 +98,7 @@ pub(crate) fn borrow_read_only_clones(
         let eligible_source = match source {
             Root::Parameter(id) => matches!(
                 func.parameters()[id.as_index()].kind,
-                ParameterKind::Parameter(ArgConvention::Let)
+                ParameterKind::Place(ArgConvention::Let)
             ),
             Root::Alloca(id) => allocas.get(&id).is_some_and(|source| {
                 let destination = allocas[destination];

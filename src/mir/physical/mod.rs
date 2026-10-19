@@ -673,9 +673,11 @@ fn expand_physical_mir(
             // Physical MIR keeps a scalar value only where the callee's entry takes or returns it
             // directly.
             let transports = Transports::of(&body, semantic, env);
-            let body = scalar_arguments::spill_value_arguments(&body, |call, offset| {
-                transports.takes_value(call, offset)
-            })
+            let body = scalar_arguments::spill_value_arguments(
+                &body,
+                |call, offset| transports.takes_value(call, offset),
+                env,
+            )
             .unwrap_or(body);
             let transports = Transports::of(&body, semantic, env);
             let body = scalar_arguments::place_value_results(&body, |call| transports.result(call))
@@ -2030,10 +2032,9 @@ fn build_buffer_drop(
     let span = Location::new_synthesized();
     let name = Ustr::from(&format!("#physical:buffer_drop:{helper_index}"));
     let mut builder = FunctionBuilder::new(name, CallResultConvention::Value);
-    let buffer = Value::Parameter(builder.add_parameter(
-        buffer_ty,
-        ParameterKind::Parameter(ArgConvention::MutableRef),
-    ));
+    let buffer = Value::Parameter(
+        builder.add_parameter(buffer_ty, ParameterKind::Place(ArgConvention::MutableRef)),
+    );
     let destination = Value::Parameter(builder.add_parameter(Type::unit(), ParameterKind::Return));
     let entry = builder.add_block();
     let zero = builder.add_constant(int_type(), LiteralValue::new_native(0isize), &env);
@@ -2127,7 +2128,7 @@ fn value_drop_variant(
         .filter(|(_, parameter)| {
             matches!(
                 parameter.kind,
-                ParameterKind::Parameter(ArgConvention::MutableRef)
+                ParameterKind::Place(ArgConvention::MutableRef)
             )
         });
     let (index, _) = mutable_parameters.next()?;
@@ -2205,10 +2206,9 @@ fn build_variant_payload_allocation(
             ParameterKind::Dictionary,
         ))
     });
-    let base = Value::Parameter(builder.add_parameter(
-        variant_ty,
-        ParameterKind::Parameter(ArgConvention::MutableRef),
-    ));
+    let base = Value::Parameter(
+        builder.add_parameter(variant_ty, ParameterKind::Place(ArgConvention::MutableRef)),
+    );
     let destination = Value::Parameter(builder.add_parameter(Type::unit(), ParameterKind::Return));
     let entry = builder.add_block();
     let done = builder.add_block();
@@ -2290,10 +2290,9 @@ fn build_variant_payload_addressor(
             ParameterKind::Dictionary,
         ))
     });
-    let base = Value::Parameter(builder.add_parameter(
-        variant_ty,
-        ParameterKind::Parameter(ArgConvention::MutableRef),
-    ));
+    let base = Value::Parameter(
+        builder.add_parameter(variant_ty, ParameterKind::Place(ArgConvention::MutableRef)),
+    );
     let destination = Value::Parameter(builder.add_parameter(payload_ty, ParameterKind::Return));
     let entry = builder.add_block();
     let (inline, indirect) = match storage {
@@ -2379,10 +2378,9 @@ fn build_variant_payload_release(
     let span = Location::new_synthesized();
     let name = Ustr::from(&format!("#physical:variant_payload_release:{helper_index}"));
     let mut builder = FunctionBuilder::new(name, CallResultConvention::Value);
-    let base = Value::Parameter(builder.add_parameter(
-        variant_ty,
-        ParameterKind::Parameter(ArgConvention::MutableRef),
-    ));
+    let base = Value::Parameter(
+        builder.add_parameter(variant_ty, ParameterKind::Place(ArgConvention::MutableRef)),
+    );
     let destination = Value::Parameter(builder.add_parameter(Type::unit(), ParameterKind::Return));
     let entry = builder.add_block();
     let done = builder.add_block();
@@ -2547,7 +2545,7 @@ fn build_product_addressor(
         .collect::<Vec<_>>();
     let base = Value::Parameter(builder.add_parameter(
         key.aggregate_ty,
-        ParameterKind::Parameter(ArgConvention::MutableRef),
+        ParameterKind::Place(ArgConvention::MutableRef),
     ));
     let field = spec.members[key.field_index.as_index()];
     let destination = Value::Parameter(builder.add_parameter(field.ty, ParameterKind::Return));
@@ -3809,11 +3807,11 @@ mod tests {
     fn physical_calls_reject_malformed_later_callee_signatures() {
         for kinds in [
             vec![],
-            vec![ParameterKind::Parameter(ArgConvention::MutableRef)],
+            vec![ParameterKind::Place(ArgConvention::MutableRef)],
             vec![ParameterKind::Return, ParameterKind::Return],
             vec![
                 ParameterKind::Return,
-                ParameterKind::Parameter(ArgConvention::MutableRef),
+                ParameterKind::Place(ArgConvention::MutableRef),
             ],
         ] {
             let mut session = CompilerSession::new();
@@ -3907,10 +3905,9 @@ mod tests {
             let (mut artifacts, _) = lower(&mut session, module).unwrap();
             let span = Location::new_synthesized();
             let mut builder = FunctionBuilder::new("yielding".into(), convention);
-            let place = Value::Parameter(builder.add_parameter(
-                int_type(),
-                ParameterKind::Parameter(ArgConvention::MutableRef),
-            ));
+            let place = Value::Parameter(
+                builder.add_parameter(int_type(), ParameterKind::Place(ArgConvention::MutableRef)),
+            );
             builder.add_parameter(int_type(), ParameterKind::Return);
             let entry = builder.add_block();
             let resume = builder.add_block();
@@ -3967,10 +3964,7 @@ mod tests {
         let span = Location::new_synthesized();
         let target = FunctionId::new(module, LocalFunctionId::from_index(artifacts.entries.len()));
         let mut callee = FunctionBuilder::new("scoped".into(), CallResultConvention::YIELDED_ONCE);
-        callee.add_parameter(
-            int_type(),
-            ParameterKind::Parameter(ArgConvention::MutableRef),
-        );
+        callee.add_parameter(int_type(), ParameterKind::Place(ArgConvention::MutableRef));
         callee.add_parameter(int_type(), ParameterKind::Return);
         let block = callee.add_block();
         callee.set_terminator(block, Terminator::ret(span));

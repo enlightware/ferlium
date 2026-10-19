@@ -54,6 +54,7 @@ pub(crate) fn read_before(
 pub(crate) fn spill_value_arguments(
     func: &Function,
     takes_value: impl Fn(&Operation, usize) -> bool,
+    env: ModuleEnv<'_>,
 ) -> Option<Function> {
     // A read-only scalar argument is a value exactly when the call-site type says so, as the
     // semantic verifier requires.
@@ -64,7 +65,8 @@ pub(crate) fn spill_value_arguments(
         let visible_start = operation.call_visible_start();
         (0..ty.fn_ty.args.len())
             .filter(|&offset| {
-                accepts_value_argument(ty, metadata, offset) && !takes_value(operation, offset)
+                accepts_value_argument(ty, metadata, offset, &env)
+                    && !takes_value(operation, offset)
             })
             .map(|offset| visible_start + offset)
             .collect()
@@ -168,7 +170,7 @@ pub(crate) fn normalize_call_result(
         call.operands = operands.into_boxed_slice();
         return Some(Operation::store(call.span, value, place));
     }
-    if *result_transport != ResultTransport::Place || !accepts_value_result(ty) {
+    if *result_transport != ResultTransport::Place || !accepts_value_result(ty, &env) {
         return None;
     }
     *result_transport = ResultTransport::Value;

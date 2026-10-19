@@ -736,7 +736,7 @@ fn inline_at(
     marker.assign_result_id(Some(marker_id));
     edit.block_mut(site.block()).operations.push(marker);
 
-    let mut arguments = bind_arguments(edit, site.block(), &call, body);
+    let mut arguments = bind_arguments(edit, site.block(), &call, body, env);
     // Where a callee returning its result as a value leaves it: the call's result slot or its own
     // slot, or nowhere when the call's register takes it directly.
     let mut destination = None;
@@ -800,6 +800,7 @@ fn bind_arguments(
     block: BlockId,
     call: &Operation,
     body: &Function,
+    env: ModuleEnv<'_>,
 ) -> Vec<mir::Value> {
     let mut arguments = call.operands[1..].to_vec();
     let OperationKind::Call { ty, metadata, .. } = &call.kind else {
@@ -810,10 +811,13 @@ fn bind_arguments(
     let conversions = (0..ty.fn_ty.args.len())
         .filter_map(|offset| {
             let parameter = &body.parameters()[visible_start + offset - 1];
-            if parameter.kind != ParameterKind::Parameter(ArgConvention::Let) {
+            if !matches!(
+                parameter.kind,
+                ParameterKind::Value | ParameterKind::Place(ArgConvention::Let)
+            ) {
                 return None;
             }
-            let is_value = accepts_value_argument(ty, metadata.as_deref(), offset);
+            let is_value = accepts_value_argument(ty, metadata.as_deref(), offset, &env);
             (is_value != parameter.is_value()).then_some((offset, is_value))
         })
         .collect::<Vec<_>>();
@@ -898,7 +902,7 @@ pub(crate) fn cleanup_template(
     let receiver = source
         .parameters()
         .iter()
-        .find(|p| matches!(p.kind, ParameterKind::Parameter(_)))?;
+        .find(|p| matches!(p.kind, ParameterKind::Place(_) | ParameterKind::Value))?;
     let mut substitution = FxHashMap::default();
     if !bind_call_type_instantiation(
         receiver.ty,

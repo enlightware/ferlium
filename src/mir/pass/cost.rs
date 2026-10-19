@@ -356,13 +356,17 @@ mod tests {
             .find(|body| body.name.ends_with("float_kernel"))
             .expect("`float_kernel` has a body");
         // Constants stay values: a literal argument was never a read.
-        let places = spill_value_arguments(body, |call, offset| {
-            let visible_start = call.call_visible_start();
-            matches!(
-                call.operands[visible_start + offset],
-                mir::Value::Constant(_)
-            )
-        })
+        let places = spill_value_arguments(
+            body,
+            |call, offset| {
+                let visible_start = call.call_visible_start();
+                matches!(
+                    call.operands[visible_start + offset],
+                    mir::Value::Constant(_)
+                )
+            },
+            session.module_env(),
+        )
         .expect("`float_kernel` reads scalar arguments");
         // A local read before a later argument's call, as the evaluation order requires, costs
         // its load; passing the place instead stores it into a slot.

@@ -699,9 +699,11 @@ mod tests {
         // Speculation runs in physical lowering, after scalar value arguments the callee takes
         // through a pointer are passed as places again.
         let transports = Transports::of(source, artifacts, env);
-        let source = scalar_arguments::spill_value_arguments(source, |call, offset| {
-            transports.takes_value(call, offset)
-        })
+        let source = scalar_arguments::spill_value_arguments(
+            source,
+            |call, offset| transports.takes_value(call, offset),
+            env,
+        )
         .unwrap_or_else(|| source.clone());
         // Give the tuple an explicit scoped lifetime, as inlining does. Keep arithmetic result
         // cells outside that region so the original body remains valid after its restoration.

@@ -1093,7 +1093,7 @@ fn scalar_constants(
         };
         // Restrict this to primitive literals; pointer slots and aggregate/tag representations
         // require their own materialization and ownership rules.
-        if super::ScalarType::of(body.constant(constant).ty).is_ok() {
+        if super::ScalarType::host_primitive(body.constant(constant).ty).is_ok() {
             constants.insert(ValueId::from_index(index - scan.parameter_count), constant);
         }
     }
@@ -1748,9 +1748,8 @@ mod tests {
             "clear",
         ] {
             let mut builder = FunctionBuilder::new(case.into(), CallResultConvention::Value);
-            let condition = Value::Parameter(
-                builder.add_parameter(bool_type(), ParameterKind::Parameter(ArgConvention::Let)),
-            );
+            let condition =
+                Value::Parameter(builder.add_parameter(bool_type(), ParameterKind::Value));
             let id = builder.add_parameter(int_type(), ParameterKind::Return);
             let output = Value::Parameter(id);
             let entry = builder.add_block();
@@ -2000,12 +1999,10 @@ mod tests {
                     let mut builder =
                         FunctionBuilder::new(case.into(), CallResultConvention::NoValue);
                     let base = Value::Parameter(
-                        builder
-                            .add_parameter(ty, ParameterKind::Parameter(ArgConvention::MutableRef)),
+                        builder.add_parameter(ty, ParameterKind::Place(ArgConvention::MutableRef)),
                     );
                     let other = Value::Parameter(
-                        builder
-                            .add_parameter(ty, ParameterKind::Parameter(ArgConvention::MutableRef)),
+                        builder.add_parameter(ty, ParameterKind::Place(ArgConvention::MutableRef)),
                     );
                     let block = builder.add_block();
                     let zero = Value::Constant(builder.add_constant(
@@ -2157,7 +2154,7 @@ mod tests {
                 FunctionBuilder::new("field_result".into(), CallResultConvention::NoValue);
             let base = Value::Parameter(builder.add_parameter(
                 Type::tuple([int_type(), int_type()]),
-                ParameterKind::Parameter(ArgConvention::MutableRef),
+                ParameterKind::Place(ArgConvention::MutableRef),
             ));
             let block = builder.add_block();
             let inputs = [5_isize, 3_isize].map(|value| {
@@ -2255,7 +2252,7 @@ mod tests {
                     FunctionBuilder::new("selected_field".into(), CallResultConvention::NoValue);
                 let destination = Value::Parameter(builder.add_parameter(
                     Type::tuple([ty, ty]),
-                    ParameterKind::Parameter(ArgConvention::MutableRef),
+                    ParameterKind::Place(ArgConvention::MutableRef),
                 ));
                 let block = builder.add_block();
                 let source = if selected {
@@ -2276,8 +2273,7 @@ mod tests {
                         .unwrap()
                 } else {
                     Value::Parameter(
-                        builder
-                            .add_parameter(ty, ParameterKind::Parameter(ArgConvention::MutableRef)),
+                        builder.add_parameter(ty, ParameterKind::Place(ArgConvention::MutableRef)),
                     )
                 };
                 let source = if kind == OperationKind::Store {
@@ -2346,11 +2342,9 @@ mod tests {
                 FunctionBuilder::new("metadata_guard".into(), CallResultConvention::NoValue);
             let buffer = Value::Parameter(builder.add_parameter(
                 buffer_type(int_type()),
-                ParameterKind::Parameter(ArgConvention::Let),
+                ParameterKind::Place(ArgConvention::Let),
             ));
-            let input = Value::Parameter(
-                builder.add_parameter(int_type(), ParameterKind::Parameter(ArgConvention::Let)),
-            );
+            let input = Value::Parameter(builder.add_parameter(int_type(), ParameterKind::Value));
             // A runtime value, so literal rematerialization does not replace store deferral.
             let block = builder.add_block();
             let zero = Value::Constant(builder.add_constant(

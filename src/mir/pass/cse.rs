@@ -1669,11 +1669,9 @@ mod tests {
         let mut builder = FunctionBuilder::new(ustr("physical_addresses"), Default::default());
         let base = mir::Value::Parameter(builder.add_parameter(
             Type::tuple(vec![Type::unit(), Type::unit()]),
-            ParameterKind::Parameter(ArgConvention::MutableRef),
+            ParameterKind::Place(ArgConvention::MutableRef),
         ));
-        let offset = mir::Value::Parameter(
-            builder.add_parameter(int_type(), ParameterKind::Parameter(ArgConvention::Let)),
-        );
+        let offset = mir::Value::Parameter(builder.add_parameter(int_type(), ParameterKind::Value));
         let entry = builder.add_block();
         let next = builder.add_block();
         let offset = offset.clone();

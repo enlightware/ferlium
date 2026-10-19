@@ -268,7 +268,7 @@ fn build_adapter(
             .map(|p| {
                 (
                     p.ty,
-                    p.kind == ParameterKind::Parameter(ArgConvention::MutableRef),
+                    p.kind == ParameterKind::Place(ArgConvention::MutableRef),
                 )
             }),
         result_ty,

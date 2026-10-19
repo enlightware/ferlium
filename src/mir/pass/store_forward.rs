@@ -296,8 +296,7 @@ impl Census<'_> {
     fn outlives(&self, func: &Function, place: &mir::Value, cell: ValueId) -> bool {
         match place {
             mir::Value::Parameter(id) => {
-                func.parameters()[id.as_index()].kind
-                    == ParameterKind::Parameter(ArgConvention::Let)
+                func.parameters()[id.as_index()].kind == ParameterKind::Place(ArgConvention::Let)
             }
             mir::Value::Register(id) => {
                 let (Some(place), Some(cell)) = (self.allocation(*id), self.allocation(cell))
@@ -452,8 +451,7 @@ mod tests {
         let env = session.module_env();
         let span = Location::new_synthesized();
         let mut builder = FunctionBuilder::new("stored_then_read".into(), Default::default());
-        let argument =
-            builder.add_parameter(bool_type(), ParameterKind::Parameter(ArgConvention::Let));
+        let argument = builder.add_parameter(bool_type(), ParameterKind::Value);
         let entry = builder.add_block();
         let exit = builder.add_block();
         let cell = builder
@@ -518,9 +516,7 @@ mod tests {
         let env = session.module_env();
         let span = Location::new_synthesized();
         let mut builder = FunctionBuilder::new("chain".into(), Default::default());
-        let root = Value::Parameter(
-            builder.add_parameter(bool_type(), ParameterKind::Parameter(ArgConvention::Let)),
-        );
+        let root = Value::Parameter(builder.add_parameter(bool_type(), ParameterKind::Value));
         let entry = builder.add_block();
         let exit = builder.add_block();
         let mut stored = root.clone();
@@ -815,9 +811,7 @@ mod tests {
         let env = session.module_env();
         let span = Location::new_synthesized();
         let mut builder = FunctionBuilder::new("copies".into(), Default::default());
-        let root = Value::Parameter(
-            builder.add_parameter(bool_type(), ParameterKind::Parameter(ArgConvention::Let)),
-        );
+        let root = Value::Parameter(builder.add_parameter(bool_type(), ParameterKind::Value));
         let entry = builder.add_block();
         let body = builder.add_block();
         let exit = builder.add_block();
@@ -860,10 +854,8 @@ mod tests {
         let env = session.module_env();
         let span = Location::new_synthesized();
         let mut builder = FunctionBuilder::new("parameter".into(), Default::default());
-        let argument = builder.add_parameter(
-            raw_float_type(),
-            ParameterKind::Parameter(ArgConvention::Let),
-        );
+        let argument =
+            builder.add_parameter(raw_float_type(), ParameterKind::Place(ArgConvention::Let));
         let output = builder.add_parameter(raw_float_type(), ParameterKind::Return);
         let entry = builder.add_block();
         let cell = builder
@@ -903,9 +895,7 @@ mod tests {
         let env = session.module_env();
         let span = Location::new_synthesized();
         let mut builder = FunctionBuilder::new("late_write".into(), Default::default());
-        let root = Value::Parameter(
-            builder.add_parameter(bool_type(), ParameterKind::Parameter(ArgConvention::Let)),
-        );
+        let root = Value::Parameter(builder.add_parameter(bool_type(), ParameterKind::Value));
         let entry = builder.add_block();
         let body = builder.add_block();
         let exit = builder.add_block();

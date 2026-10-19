@@ -50,7 +50,8 @@ use crate::{
         string::StaticStr,
         value::{
             TypeLayoutEnv, VALUE_ALIGN_ASSOC_CONST_INDEX, VALUE_CLONE_METHOD_INDEX,
-            VALUE_DROP_METHOD_INDEX, VALUE_SIZE_ASSOC_CONST_INDEX, is_tag_scalar,
+            VALUE_DROP_METHOD_INDEX, VALUE_SIZE_ASSOC_CONST_INDEX, is_abi_scalar,
+            is_primitive_scalar,
         },
     },
     types::{
@@ -90,33 +91,23 @@ fn is_elided_stack_operation(
     }
 }
 
-/// A Ferlium type checked to belong to the emitter's supported scalar subset.
+/// A Ferlium type checked to be unit or to have a scalar ABI representation ([`is_abi_scalar`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ScalarType(Type);
 
 impl ScalarType {
-    /// Primitive host bindings do not require a module environment.
-    pub(super) fn of(ty: Type) -> Result<Self, String> {
-        [
-            Type::unit(),
-            bool_type(),
-            int_type(),
-            float_type(),
-            raw_float_type(),
-        ]
-        .contains(&ty)
-        .then_some(Self(ty))
-        .ok_or_else(|| format!("unsupported Wasm storage type {ty:?}"))
+    /// Unit or a primitive scalar, which host bindings and literal constants use; this needs no
+    /// type definitions, unlike a tag.
+    pub(super) fn host_primitive(ty: Type) -> Result<Self, String> {
+        (ty == Type::unit() || is_primitive_scalar(ty))
+            .then_some(Self(ty))
+            .ok_or_else(|| format!("unsupported Wasm storage type {ty:?}"))
     }
 
     pub(super) fn in_env(ty: Type, env: &impl TypeLayoutEnv) -> Result<Self, String> {
-        Self::of(ty).or_else(|error| {
-            if is_tag_scalar(ty, env) {
-                Ok(Self(ty))
-            } else {
-                Err(error)
-            }
-        })
+        (ty == Type::unit() || is_abi_scalar(ty, env))
+            .then_some(Self(ty))
+            .ok_or_else(|| format!("unsupported Wasm storage type {ty:?}"))
     }
 
     fn unit() -> Self {
@@ -135,16 +126,13 @@ impl ScalarType {
         self.0 == Type::unit()
     }
 
+    fn is_bool(self) -> bool {
+        self.0 == bool_type()
+    }
+
     fn is_tag(self) -> bool {
         // Construction already proved that every non-primitive scalar is a closed unit variant.
-        ![
-            Type::unit(),
-            bool_type(),
-            int_type(),
-            float_type(),
-            raw_float_type(),
-        ]
-        .contains(&self.0)
+        !self.is_unit() && !is_primitive_scalar(self.0)
     }
 
     /// `float` and the compiler-internal `raw_float` are both a Wasm `f64`.
@@ -168,7 +156,7 @@ impl ScalarType {
         let instruction = if self.is_unit() {
             code.instruction(&I::Drop);
             I::I32Const(0)
-        } else if self.0 == bool_type() {
+        } else if self.is_bool() {
             I::I32Load8U(memarg_at(0, offset))
         } else if self.is_f64() {
             I::F64Load(memarg_at(3, offset))
@@ -187,7 +175,7 @@ impl ScalarType {
         let instruction = if self.is_unit() {
             code.instruction(&I::Drop);
             I::Drop
-        } else if self.0 == bool_type() {
+        } else if self.is_bool() {
             I::I32Store8(memarg_at(0, offset))
         } else if self.is_f64() {
             I::F64Store(memarg_at(3, offset))
@@ -208,7 +196,7 @@ impl ScalarType {
     fn size(self) -> u32 {
         if self.is_unit() {
             0
-        } else if self.0 == bool_type() {
+        } else if self.is_bool() {
             1
         } else if self.is_f64() {
             8
@@ -428,7 +416,8 @@ fn script_abi(body: &Function, env: ModuleEnv<'_>) -> Result<CallAbi, String> {
     for parameter in body.parameters() {
         match parameter.kind {
             ParameterKind::Return => result = Some(parameter.ty),
-            ParameterKind::Parameter(mode) => {
+            ParameterKind::Value => parameters.push(value_transport(parameter.ty, &env)),
+            ParameterKind::Place(mode) => {
                 parameters.push(if mode == ArgConvention::Let {
                     value_transport(parameter.ty, &env)
                 } else {
@@ -645,7 +634,7 @@ pub(super) fn host_signature(
     if body.parameters().iter().any(|p| {
         !matches!(
             p.kind,
-            ParameterKind::Return | ParameterKind::Parameter(ArgConvention::Let)
+            ParameterKind::Return | ParameterKind::Value | ParameterKind::Place(ArgConvention::Let)
         )
     }) {
         return Err(diagnostic(
@@ -662,14 +651,14 @@ pub(super) fn host_signature(
         .find(|parameter| parameter.kind == ParameterKind::Return)
         .map(|parameter| parameter.ty)
         .or(body.value_result())
-        .map(ScalarType::of)
+        .map(ScalarType::host_primitive)
         .transpose()?
         .unwrap_or_else(ScalarType::unit);
     let parameters = body
         .parameters()
         .iter()
         .filter(|p| p.kind != ParameterKind::Return)
-        .map(|p| ScalarType::of(p.ty))
+        .map(|p| ScalarType::host_primitive(p.ty))
         .collect::<Result<Vec<_>, _>>()?;
     Ok((parameters, result))
 }
@@ -1619,11 +1608,11 @@ fn is_trivial_runtime_body(body: &Function, signature: &CallAbi) -> bool {
         && body
             .parameters()
             .iter()
-            .all(|parameter| ScalarType::of(parameter.ty).is_ok())
+            .all(|parameter| ScalarType::host_primitive(parameter.ty).is_ok())
         && body
             .constants()
             .iter()
-            .all(|constant| ScalarType::of(constant.ty).is_ok())
+            .all(|constant| ScalarType::host_primitive(constant.ty).is_ok())
         && body
             .block(body.entry())
             .operations()

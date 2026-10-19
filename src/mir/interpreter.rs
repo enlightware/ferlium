@@ -33,12 +33,8 @@ use crate::{
     },
     mir::{
         self, BlockId, Function, Operation, OperationKind, Parameter, ParameterId, ParameterKind,
-        ResultTransport,
-        operation::{CallMetadata, accepts_value_argument},
-        profile::MirExecutionProfile,
-        results::zero_sized_result,
-        terminator::TerminatorKind,
-        value::StaticEvidence,
+        ResultTransport, profile::MirExecutionProfile, results::zero_sized_result,
+        terminator::TerminatorKind, value::StaticEvidence,
     },
     module::{
         FunctionId, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, TraitDictionaryEntry,
@@ -330,7 +326,7 @@ impl<'a> Interpreter<'a> {
         assert!(
             parameter_tags[..arguments.len()]
                 .iter()
-                .all(|tag| matches!(tag, ParameterKind::Parameter(_))),
+                .all(|tag| matches!(tag, ParameterKind::Place(_) | ParameterKind::Value)),
             "MIR entry functions cannot require hidden dictionary parameters"
         );
         if !no_value_result {
@@ -971,8 +967,8 @@ impl<'a> Interpreter<'a> {
             }
             OperationKind::Call {
                 ty,
-                metadata,
                 result_transport,
+                ..
             } => {
                 // A value argument stays a value as far as the callee takes one; a cell given to a
                 // callee taking a place, or holding a value result, is reclaimed after the call,
@@ -980,7 +976,7 @@ impl<'a> Interpreter<'a> {
                 // `project` completing at once).
                 let frame_top = self.ctx.environment.len();
                 let (rebound, has_values) =
-                    self.bind_constant_arguments(func, slots, operation, ty, metadata.as_deref());
+                    self.bind_constant_arguments(func, slots, operation, ty);
                 let result =
                     self.exec_call(slots, &operation.operands, *result_transport, span.location);
                 Self::unbind_constant_arguments(slots, rebound);
@@ -1003,7 +999,7 @@ impl<'a> Interpreter<'a> {
                 // argument gets a cell where the accessor takes a place, as for a call, which the
                 // accessor frame then owns.
                 let frame_top = self.ctx.environment.len();
-                let (rebound, _) = self.bind_constant_arguments(func, slots, operation, ty, None);
+                let (rebound, _) = self.bind_constant_arguments(func, slots, operation, ty);
                 let result = self.exec_project(
                     slots,
                     &operation.operands,
@@ -1590,16 +1586,14 @@ impl<'a> Interpreter<'a> {
         slots: &mut FxHashMap<mir::Value, Binding>,
         operation: &Operation,
         ty: &CallImplType,
-        metadata: Option<&CallMetadata>,
     ) -> (Vec<(mir::Value, Option<Binding>)>, bool) {
         let operands = &operation.operands;
         let visible_start = operation.call_visible_start();
         let mut rebound = Vec::new();
         let mut has_values = false;
+        // A constant operand, or a register bound to a value, is a value argument: the verifier
+        // admits these only where the call-site type takes a value.
         for offset in 0..ty.fn_ty.args.len() {
-            if !accepts_value_argument(ty, metadata, offset) {
-                continue;
-            }
             let operand = &operands[visible_start + offset];
             if let mir::Value::Constant(_) = operand {
                 has_values = true;
@@ -2000,13 +1994,19 @@ impl<'a> Interpreter<'a> {
                 .is_none_or(|value| value.as_boxed().is_some_and(is_drop_husk));
             match tag {
                 // A `&mut`/`&`/trivial-copy argument must point at a live value, before and after.
-                ParameterKind::Parameter(passing) => assert!(
+                ParameterKind::Place(passing) => assert!(
                     !is_husk
                         || (drop_target_may_be_consumed
                             && matches!(phase, CallPhase::After)
                             && passing == &ArgConvention::MutableRef),
                     "MIR call boundary: an argument passed as {passing:?} is a husk {phase} the \
                      call; a `&mut`/`&`/trivial-copy argument must point at a live value",
+                ),
+                // A value parameter bound to a place reads it; the place stays live.
+                ParameterKind::Value => assert!(
+                    !is_husk,
+                    "MIR call boundary: a value argument read from a place is a husk {phase} the \
+                     call",
                 ),
                 ParameterKind::Owned => match phase {
                     CallPhase::Before => assert!(

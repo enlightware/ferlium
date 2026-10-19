@@ -559,7 +559,7 @@ fn simple_functions() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn t(x: int) {x}"),
-        r#"fn t(%p0: @arg let int) -> int:
+        r#"fn t(%p0: @arg value int) -> int:
   b0:
     ret %p0
 "#,
@@ -572,7 +572,7 @@ fn call_functions() {
 
     assert_eq_sans_flake!(
         session.emit_mir("fn a0(x: int) { x + 1 }"),
-        r#"fn a0(%p0: @arg let int) -> int:
+        r#"fn a0(%p0: @arg value int) -> int:
   @c0: int = 1
   b0:
     %r0: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c0)
@@ -583,7 +583,7 @@ fn call_functions() {
 
     assert_eq_sans_flake!(
         session.emit_mir("fn a0(x: int) { let y: int = 2 * x; y }"),
-        r#"fn a0(%p0: @arg let int) -> int:
+        r#"fn a0(%p0: @arg value int) -> int:
   @c0: int = 2
   b0:
     %r0: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c0)
@@ -599,7 +599,7 @@ fn match_case_functions() {
 
     assert_eq_sans_flake!(
         session.emit_mir("fn a0(x:int) {if true {x} else {2}}"),
-        r#"fn a0(%p0: @arg let int) -> int:
+        r#"fn a0(%p0: @arg value int) -> int:
   @c0: bool = true
   @c1: int = 2
   b0:
@@ -614,7 +614,7 @@ fn match_case_functions() {
 
     assert_eq_sans_flake!(
         session.emit_mir("fn a0(x:int) {match x { 0 => x, 1 => x - 1, _ => -1 }}"),
-        r#"fn a0(%p0: @arg let int) -> int:
+        r#"fn a0(%p0: @arg value int) -> int:
   @c0: int = 1
   b0:
     %r0: bool = comp_eq %p0 0
@@ -731,7 +731,7 @@ fn user_function_call() {
 
     assert_eq_sans_flake!(
         sessions.emit_mir("fn a0(x: int) { a0(x) }"),
-        r#"fn a0(%p0: @arg let int, %p1: @ret never):
+        r#"fn a0(%p0: @arg value int, %p1: @ret never):
   b0:
     check_call_depth
     call <test>::a0(%p0, %p1)
@@ -983,7 +983,7 @@ fn factorial() {
 
     assert_eq_sans_flake!(
         sessions.emit_mir("fn factorial(x: int) {if x > 1 {x * factorial(x - 1)} else {1}}"),
-        r#"fn factorial(%p0: @arg let int) -> int:
+        r#"fn factorial(%p0: @arg value int) -> int:
   @c0: int = 1
   b0:
     check_call_depth
@@ -1047,7 +1047,7 @@ fn iter1_multi_param_value() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn f(x: int, y: int) { x + y }"),
-        r#"fn f(%p0: @arg let int, %p1: @arg let int) -> int:
+        r#"fn f(%p0: @arg value int, %p1: @arg value int) -> int:
   b0:
     %r0: int = call std::Num<std::int>::add#impl:7665d3ee(%p0, %p1)
     ret %r0
@@ -1063,7 +1063,7 @@ fn iter1_mut_local_copy() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn add_one(mut x: int) -> int { x = x + 1; x }"),
-        r#"fn add_one(%p0: @arg let int) -> int:
+        r#"fn add_one(%p0: @arg value int) -> int:
   @c0: int = 1
   b0:
     %r0: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c0)
@@ -1081,7 +1081,7 @@ fn iter1_let_mut_move_return() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn f(x: int) { let mut y = x; y = y + 1; y }"),
-        r#"fn f(%p0: @arg let int) -> int:
+        r#"fn f(%p0: @arg value int) -> int:
   @c0: int = 1
   b0:
     %r0: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c0)
@@ -1323,7 +1323,7 @@ fn place_call_value_in_branches() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn f(a: [int], c: bool) -> int { if c { a[0] } else { a[1] } }"),
-        r#"fn f(%p0: @arg let [int], %p1: @arg let bool, %p2: @ret int):
+        r#"fn f(%p0: @arg let [int], %p1: @arg value bool, %p2: @ret int):
   @c0: int = 0
   @c1: int = 1
   b0:
@@ -1378,7 +1378,7 @@ fn iter1_apply() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn f(x: int) { f(x) }"),
-        r#"fn f(%p0: @arg let int, %p1: @ret never):
+        r#"fn f(%p0: @arg value int, %p1: @ret never):
   b0:
     check_call_depth
     call <test>::f(%p0, %p1)
@@ -1449,7 +1449,7 @@ fn recursive_trivial_copy_call_uses_let_convention() {
             }
         "#
         ),
-        r#"fn f(%p0: @arg let int, %p1: @ret never):
+        r#"fn f(%p0: @arg value int, %p1: @ret never):
   @c0: int = 1
   b0:
     check_call_depth
@@ -1467,7 +1467,7 @@ fn trivial_copy_call_uses_let_convention() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn f(a: int) { f(a) }"),
-        r#"fn f(%p0: @arg let int, %p1: @ret never):
+        r#"fn f(%p0: @arg value int, %p1: @ret never):
   b0:
     check_call_depth
     call <test>::f(%p0, %p1)
@@ -1524,7 +1524,7 @@ fn call_passes_all_argument_conventions() {
             }
             "#,
         ),
-        r#"fn callee(%p0: @arg let int, %p1: @arg &mut int, %p2: @arg let string) no_value:
+        r#"fn callee(%p0: @arg value int, %p1: @arg &mut int, %p2: @arg let string) no_value:
   b0:
     ret
 
@@ -1584,7 +1584,7 @@ fn dynamic_apply() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn apply_fn(f, x: int) { f(x) }"),
-        r#"fn apply_fn(%p0: @arg let (int) -> A ! e₀, %p1: @arg let int, %p2: @ret A):
+        r#"fn apply_fn(%p0: @arg let (int) -> A ! e₀, %p1: @arg value int, %p2: @ret A):
   b0:
     check_call_depth
     invoke call %p0(%p1, %p2) -> b1 error b2
@@ -1844,7 +1844,7 @@ fn copy_int() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn f(x: int) { let y = x; y + 1 }"),
-        r#"fn f(%p0: @arg let int) -> int:
+        r#"fn f(%p0: @arg value int) -> int:
   @c0: int = 1
   b0:
     %r0: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c0)
@@ -2391,7 +2391,7 @@ fn reassign_local_from_param() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn f(x: int) -> int { let mut y: int = 0; y = x; y }"),
-        r#"fn f(%p0: @arg let int) -> int:
+        r#"fn f(%p0: @arg value int) -> int:
   @c0: int = 0
   b0:
     ret %p0
@@ -2408,7 +2408,7 @@ fn reassign_in_branches() {
         session.emit_mir(
             "fn f(c: bool) -> int { let mut y: int = 0; if c { y = 1 } else { y = 2 }; y }"
         ),
-        r#"fn f(%p0: @arg let bool) -> int:
+        r#"fn f(%p0: @arg value bool) -> int:
   @c0: int = 0
   @c1: int = 1
   @c2: () = ()
@@ -2457,7 +2457,7 @@ fn reassign_array_element_from_param() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn f(a: &mut [int], v: int) { a[0] = v; }"),
-        r#"fn f(%p0: @arg &mut [int], %p1: @arg let int) no_value:
+        r#"fn f(%p0: @arg &mut [int], %p1: @arg value int) no_value:
   @c0: int = 0
   b0:
     %r0: place *int = alloca_place int
@@ -2505,7 +2505,7 @@ fn unit_body_tail_assignment_omits_result_transport() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn set(a: &mut int, v: int) { a = v }"),
-        r#"fn set(%p0: @arg &mut int, %p1: @arg let int) no_value:
+        r#"fn set(%p0: @arg &mut int, %p1: @arg value int) no_value:
   b0:
     store %p1 to %p0
     ret
@@ -2637,7 +2637,7 @@ fn copy_int_param_to_local() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn f(x: int) { let mut y = x; y = y + 1; y }"),
-        r#"fn f(%p0: @arg let int) -> int:
+        r#"fn f(%p0: @arg value int) -> int:
   @c0: int = 1
   b0:
     %r0: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c0)
@@ -2702,7 +2702,7 @@ fn named_subscript_assign() {
         session.emit_mir(
             "subscript first(values: &mut [int]) -> int { ref mut { return values[0] } }\nfn f(a: &mut [int], v: int) { a->[first] = v }",
         ),
-        r#"fn f(%p0: @arg &mut [int], %p1: @arg let int) no_value:
+        r#"fn f(%p0: @arg &mut [int], %p1: @arg value int) no_value:
   b0:
     %r0: place *int = alloca_place int
     invoke call <test>::first::ref_mut#subscript:19d196cf(%p0, %r0) -> b1 error b2
@@ -2736,7 +2736,7 @@ fn named_subscript_compound_assign() {
         session.emit_mir(
             "subscript first(values: &mut [int]) -> int { ref mut { return values[0] } }\nfn f(a: &mut [int], v: int) { a->[first] += v }",
         ),
-        r#"fn f(%p0: @arg &mut [int], %p1: @arg let int) no_value:
+        r#"fn f(%p0: @arg &mut [int], %p1: @arg value int) no_value:
   b0:
     %r0: place *int = alloca_place int
     invoke call <test>::first::ref_mut#subscript:19d196cf(%p0, %r0) -> b1 error b2
@@ -2769,7 +2769,7 @@ fn explicit_return_value() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn g(x: int) -> int { return x }"),
-        r#"fn g(%p0: @arg let int) -> int:
+        r#"fn g(%p0: @arg value int) -> int:
   b0:
     ret %p0
 "#,
@@ -2877,7 +2877,7 @@ fn yielded_subscript_scalar_arguments_are_values() {
                 x + y + a->[shifted](3)
             }
         "}),
-        r#"fn f(%p0: @arg &mut int, %p1: @arg let int) -> int:
+        r#"fn f(%p0: @arg &mut int, %p1: @arg value int) -> int:
   @c0: int = 2
   @c1: int = 3
   b0:
@@ -2901,7 +2901,7 @@ fn yielded_subscript_scalar_arguments_are_values() {
     end_project %r7
     ret %r12
 
-fn shifted::ref_mut#subscript:80901f28(%p0: @arg &mut int, %p1: @arg let int, %p2: @ret int):
+fn shifted::ref_mut#subscript:80901f28(%p0: @arg &mut int, %p1: @arg value int, %p2: @ret int):
   b0:
     %r0: place int = alloca int
     %r1: int = load %p0
@@ -2936,7 +2936,7 @@ fn yielded_subscript_assign() {
     store %r1 to %p0
     ret
 
-fn f(%p0: @arg &mut int, %p1: @arg let int) no_value:
+fn f(%p0: @arg &mut int, %p1: @arg value int) no_value:
   b0:
     %r0: open place int = project <test>::cell::ref_mut#subscript:f3d0ec43(%p0)
     store %p1 to %r0
@@ -2977,7 +2977,7 @@ fn yielded_subscript_compound_assign() {
     store %r1 to %p0
     ret
 
-fn f(%p0: @arg &mut int, %p1: @arg let int) no_value:
+fn f(%p0: @arg &mut int, %p1: @arg value int) no_value:
   b0:
     %r0: open place int = project <test>::cell::ref_mut#subscript:f3d0ec43(%p0)
     %r1: int = load %r0
@@ -3010,7 +3010,7 @@ fn yielded_subscript_compound_assignment_closes_on_error() {
     store %r1 to %p0
     ret
 
-fn f(%p0: @arg &mut float, %p1: @arg let float) no_value:
+fn f(%p0: @arg &mut float, %p1: @arg value float) no_value:
   b0:
     %r0: open place float = project <test>::cell::ref_mut#subscript:1840c74b(%p0)
     %r1: place float = alloca float
@@ -3046,7 +3046,7 @@ fn yielded_subscript_assignment_opens_after_evaluating_fallible_rhs() {
     store %r1 to %p0
     ret
 
-fn f(%p0: @arg &mut int, %p1: @arg let int, %p2: @arg let int) no_value:
+fn f(%p0: @arg &mut int, %p1: @arg value int, %p2: @arg value int) no_value:
   b0:
     %r0: place int = alloca int
     invoke call std::idiv(%p1, %p2, %r0) -> b1 error b2
@@ -3200,7 +3200,7 @@ fn discarded_tuple_construction_lowers_into_throwaway_temp() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn f(x: int) { (x, x); x }"),
-        r#"fn f(%p0: @arg let int) -> int:
+        r#"fn f(%p0: @arg value int) -> int:
   @c0: int = 0
   @c1: int = 1
   b0:
@@ -3221,7 +3221,7 @@ fn discarded_record_construction_lowers_into_throwaway_temp() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn f(x: int) { { a: x, b: x }; x }"),
-        r#"fn f(%p0: @arg let int) -> int:
+        r#"fn f(%p0: @arg value int) -> int:
   @c0: int = 0
   @c1: int = 1
   b0:
@@ -3305,7 +3305,7 @@ fn role_annotation_distinguishes_a_place_slot_from_a_value_slot() {
 
     assert_eq_sans_flake!(
         session.emit_mir("fn a0(a: [int], i: int) -> int { let mut j = i; a[j] }"),
-        r#"fn a0(%p0: @arg let [int], %p1: @arg let int, %p2: @ret int):
+        r#"fn a0(%p0: @arg let [int], %p1: @arg value int, %p2: @ret int):
   b0:
     %r1: place int = alloca int
     %r0: place *int = alloca_place int

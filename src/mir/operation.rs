@@ -41,7 +41,11 @@ use crate::{
     mir,
     mir::{DebugLocation, ResultTransport, ValueId},
     module::{FunctionId, ModuleEnv, ProjectionIndex, TraitDictionaryId, TraitId},
-    std::{logic::bool_type, math::float_type, math::int_type},
+    std::{
+        logic::bool_type,
+        math::{float_type, int_type},
+        value::TypeLayoutEnv,
+    },
     types::{
         effects::{EffType, Effect, PrimitiveEffect},
         r#trait::TraitDictionaryEntryIndex,
@@ -1265,14 +1269,22 @@ pub(crate) fn accepts_value_argument(
     ty: &CallImplType,
     metadata: Option<&CallMetadata>,
     offset: usize,
+    env: &impl TypeLayoutEnv,
 ) -> bool {
-    let argument = &ty.fn_ty.args[offset];
-    argument
+    reads_argument(ty, metadata, offset) && is_scalar_value_type(ty.fn_ty.args[offset].ty, env)
+}
+
+/// Whether visible argument `offset` of a `call` is only read: neither mutable nor owned.
+pub(crate) fn reads_argument(
+    ty: &CallImplType,
+    metadata: Option<&CallMetadata>,
+    offset: usize,
+) -> bool {
+    ty.fn_ty.args[offset]
         .mut_ty
         .as_resolved()
         .is_some_and(|mutability| !mutability.is_mutable())
         && !metadata.is_some_and(|metadata| metadata.owned_arguments.contains(offset))
-        && is_scalar_value_type(argument.ty)
 }
 
 /// Whether a call of type `ty`, or a definition of that type, carries its result as a value: a
@@ -1282,14 +1294,18 @@ pub(crate) fn accepts_value_argument(
 /// and writes the result through a pointer, so a fallible call keeps its result place. In semantic
 /// MIR the form follows this type alone, whatever the callee; physical MIR keeps the place where
 /// the callee's entry returns through a pointer.
-pub(crate) fn accepts_value_result(ty: &CallImplType) -> bool {
+pub(crate) fn accepts_value_result(ty: &CallImplType, env: &impl TypeLayoutEnv) -> bool {
     ty.result_convention == CallResultConvention::Value
-        && is_scalar_value_type(ty.fn_ty.ret)
+        && is_scalar_value_type(ty.fn_ty.ret, env)
         && ty.effects().cannot_fail()
 }
 
 /// Whether `ty` is a concrete scalar that call boundaries may carry as a value.
-pub(crate) fn is_scalar_value_type(ty: Type) -> bool {
+///
+/// So far the primitive scalars other than `raw_float`; unit-only variant tags and `raw_float`,
+/// which also have a scalar ABI representation, still travel through places (see
+/// `doc/plans/scalar-types.md`). The environment classifies tags.
+pub(crate) fn is_scalar_value_type(ty: Type, _env: &impl TypeLayoutEnv) -> bool {
     ty == int_type() || ty == float_type() || ty == bool_type()
 }
 

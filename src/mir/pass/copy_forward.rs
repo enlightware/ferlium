@@ -964,10 +964,10 @@ mod tests {
             for address_kind in ["direct", "offset", "loaded"] {
                 let mut builder =
                     FunctionBuilder::new("aliased_physical_result".into(), Default::default());
-                let base = mir::Value::Parameter(builder.add_parameter(
-                    int_type(),
-                    ParameterKind::Parameter(ArgConvention::MutableRef),
-                ));
+                let base = mir::Value::Parameter(
+                    builder
+                        .add_parameter(int_type(), ParameterKind::Place(ArgConvention::MutableRef)),
+                );
                 let result =
                     mir::Value::Parameter(builder.add_parameter(int_type(), ParameterKind::Return));
                 let block = builder.add_block();
@@ -1087,10 +1087,8 @@ mod tests {
     fn staged_memcpy(env: ModuleEnv<'_>) -> Function {
         let span = Location::new_synthesized();
         let mut builder = FunctionBuilder::new("staged_memcpy".into(), Default::default());
-        let source = builder.add_parameter(
-            raw_float_type(),
-            ParameterKind::Parameter(ArgConvention::Let),
-        );
+        let source =
+            builder.add_parameter(raw_float_type(), ParameterKind::Place(ArgConvention::Let));
         let result = builder.add_parameter(raw_float_type(), ParameterKind::Return);
         let block = builder.add_block();
         let temporary = builder
@@ -1298,8 +1296,7 @@ mod tests {
         let env = session.modules().env_for(module);
         let span = Location::new_synthesized();
         let mut builder = FunctionBuilder::new("staged_clone".into(), Default::default());
-        let source =
-            builder.add_parameter(string_type(), ParameterKind::Parameter(ArgConvention::Let));
+        let source = builder.add_parameter(string_type(), ParameterKind::Place(ArgConvention::Let));
         let result = builder.add_parameter(string_type(), ParameterKind::Return);
         let block = builder.add_block();
         let temporary = builder
@@ -1383,10 +1380,8 @@ mod tests {
         let span = Location::new_synthesized();
         let tuple_ty = tuple_type([int_type()]);
         let mut builder = FunctionBuilder::new("overlapping_transfer".into(), Default::default());
-        let tuple = builder.add_parameter(
-            tuple_ty,
-            ParameterKind::Parameter(ArgConvention::MutableRef),
-        );
+        let tuple =
+            builder.add_parameter(tuple_ty, ParameterKind::Place(ArgConvention::MutableRef));
         let block = builder.add_block();
         let index = builder.add_constant(int_type(), LiteralValue::new_native(0isize), &env);
         let address = || {

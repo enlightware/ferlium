@@ -3261,8 +3261,8 @@ mod tests {
         };
 
         let mut builder = FunctionBuilder::new("below".into(), Default::default());
-        let left = builder.add_parameter(int_type(), ParameterKind::Parameter(ArgConvention::Let));
-        let right = builder.add_parameter(int_type(), ParameterKind::Parameter(ArgConvention::Let));
+        let left = builder.add_parameter(int_type(), ParameterKind::Value);
+        let right = builder.add_parameter(int_type(), ParameterKind::Value);
         let entry = builder.add_block();
         let less = builder.add_block();
         let other = builder.add_block();

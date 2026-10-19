@@ -392,11 +392,20 @@ fn declared(id: LocalFunctionId, env: ModuleEnv<'_>) -> AddressorSummary {
 /// either has no argument to name and stays unknown.
 fn argument_of(parameters: &[mir::Parameter], id: ParameterId) -> Option<ArgumentId> {
     let index = id.as_index();
-    matches!(parameters.get(index)?.kind, ParameterKind::Parameter(_)).then(|| {
+    matches!(
+        parameters.get(index)?.kind,
+        ParameterKind::Place(_) | ParameterKind::Value
+    )
+    .then(|| {
         ArgumentId::from_index(
             parameters[..index]
                 .iter()
-                .filter(|parameter| matches!(parameter.kind, ParameterKind::Parameter(_)))
+                .filter(|parameter| {
+                    matches!(
+                        parameter.kind,
+                        ParameterKind::Place(_) | ParameterKind::Value
+                    )
+                })
                 .count(),
         )
     })
@@ -1067,10 +1076,8 @@ mod tests {
             let span = Location::new_synthesized();
             let mut function =
                 FunctionBuilder::new(ustr("addressor"), CallResultConvention::ADDRESSOR_PLACE);
-            let argument = function.add_parameter(
-                int_type(),
-                ParameterKind::Parameter(ArgConvention::MutableRef),
-            );
+            let argument =
+                function.add_parameter(int_type(), ParameterKind::Place(ArgConvention::MutableRef));
             let result = function.add_parameter(int_type(), ParameterKind::Return);
             let zero = function.add_constant(int_type(), LiteralValue::new_native(0isize), &env);
             let block = function.add_block();
@@ -1119,10 +1126,8 @@ mod tests {
             Type::subscript_type(SubscriptType::new(vec![], Type::unit(), None, None));
         let mut function =
             FunctionBuilder::new(ustr("addressor"), CallResultConvention::ADDRESSOR_PLACE);
-        let argument = function.add_parameter(
-            int_type(),
-            ParameterKind::Parameter(ArgConvention::MutableRef),
-        );
+        let argument =
+            function.add_parameter(int_type(), ParameterKind::Place(ArgConvention::MutableRef));
         let result = function.add_parameter(int_type(), ParameterKind::Return);
         let block = function.add_block();
         function.append_operation(

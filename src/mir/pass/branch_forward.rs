@@ -1199,7 +1199,7 @@ mod tests {
         let mut builder = FunctionBuilder::new("escaped_variant".into(), Default::default());
         let mutator = builder.add_parameter(
             Type::function_type(mutator_ty.clone()),
-            ParameterKind::Parameter(ArgConvention::Let),
+            ParameterKind::Place(ArgConvention::Let),
         );
         let condition = builder.add_constant(
             Type::primitive::<bool>(),
@@ -1409,7 +1409,7 @@ mod tests {
         let span = Location::new_synthesized();
         let bool_ty = Type::primitive::<bool>();
         let mut builder = FunctionBuilder::new("computed_join".into(), Default::default());
-        let argument = builder.add_parameter(bool_ty, ParameterKind::Parameter(ArgConvention::Let));
+        let argument = builder.add_parameter(bool_ty, ParameterKind::Value);
         let true_value = builder.add_constant(bool_ty, LiteralValue::new_native(true), &env);
         let entry = builder.add_block();
         let left = builder.add_block();
@@ -1482,7 +1482,7 @@ mod tests {
         let (less, greater) = (ustr("Less"), ustr("Greater"));
         let variant_ty = Type::variant([(less, Type::unit()), (greater, Type::unit())]);
         let mut builder = FunctionBuilder::new("shadowed_tag".into(), Default::default());
-        let argument = builder.add_parameter(bool_ty, ParameterKind::Parameter(ArgConvention::Let));
+        let argument = builder.add_parameter(bool_ty, ParameterKind::Value);
         let entry = builder.add_block();
         let left = builder.add_block();
         let right = builder.add_block();

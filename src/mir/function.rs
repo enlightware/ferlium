@@ -16,14 +16,18 @@ use crate::{
         value::{Constant, ConstantId},
     },
     module::{FunctionId, ModuleEnv, id::Id},
+    std::value::TypeLayoutEnv,
     types::r#type::{CallResultConvention, Type},
 };
 
 /// The origin of a MIR function parameter.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ParameterKind {
-    /// A source-visible runtime parameter and its semantic call convention.
-    Parameter(ArgConvention),
+    /// A source-visible runtime parameter passed as a place, and its semantic call convention.
+    Place(ArgConvention),
+    /// A source-visible `Let` parameter of a concrete scalar type, which the direct entry receives
+    /// as a value (`doc/abi.md`).
+    Value,
     /// An optimized-MIR-only visible parameter that takes ownership of the caller's value.
     /// The callee must leave its incoming place moved out on every exit.
     Owned,
@@ -31,6 +35,23 @@ pub enum ParameterKind {
     Dictionary,
     /// The caller-allocated out-pointer through which the function returns its result.
     Return,
+}
+
+impl ParameterKind {
+    /// The kind of a source-visible parameter of type `ty`: a value for a `Let` parameter of a
+    /// concrete scalar type, as the direct entry receives it, and a place otherwise.
+    pub(crate) fn visible(convention: ArgConvention, ty: Type, env: &impl TypeLayoutEnv) -> Self {
+        if convention == ArgConvention::Let && operation::is_scalar_value_type(ty, env) {
+            Self::Value
+        } else {
+            Self::Place(convention)
+        }
+    }
+
+    /// Whether the parameter carries a source-visible argument, in whatever transport.
+    pub fn is_visible(self) -> bool {
+        matches!(self, Self::Place(_) | Self::Value | Self::Owned)
+    }
 }
 
 /// A parameter in a MIR function signature.
@@ -41,12 +62,9 @@ pub struct Parameter {
 }
 
 impl Parameter {
-    /// Whether the parameter arrives as a value rather than as a place: a `Let` parameter of a
-    /// concrete scalar type, as the direct entry receives it (`doc/abi.md`). A generic parameter
-    /// stays a place, so specializing it to a scalar turns it into a value.
+    /// Whether the parameter arrives as a value rather than as a place.
     pub fn is_value(&self) -> bool {
-        self.kind == ParameterKind::Parameter(ArgConvention::Let)
-            && operation::is_scalar_value_type(self.ty)
+        self.kind == ParameterKind::Value
     }
 }
 
@@ -232,8 +250,9 @@ impl Function {
                     write!(text, ", ")?;
                 }
                 let kind = match parameter.kind {
-                    ParameterKind::Parameter(ArgConvention::Let) => "arg let",
-                    ParameterKind::Parameter(ArgConvention::MutableRef) => "arg &mut",
+                    ParameterKind::Place(ArgConvention::Let) => "arg let",
+                    ParameterKind::Place(ArgConvention::MutableRef) => "arg &mut",
+                    ParameterKind::Value => "arg value",
                     ParameterKind::Owned => "arg owned",
                     ParameterKind::Dictionary => "extra",
                     ParameterKind::Return => "ret",

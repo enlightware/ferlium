@@ -63,7 +63,7 @@ pub(super) fn verify(
     }
     if !lifecycle {
         for (index, parameter) in body.parameters().iter().enumerate() {
-            if parameter.kind == ParameterKind::Parameter(ArgConvention::MutableRef) {
+            if parameter.kind == ParameterKind::Place(ArgConvention::MutableRef) {
                 places.insert(Value::Parameter(ParameterId::from_index(index)), LIVE);
             }
         }
@@ -311,7 +311,7 @@ mod tests {
                 let mut f =
                     FunctionBuilder::new("shared_borrow".into(), CallResultConvention::Value);
                 let receiver = Value::Parameter(
-                    f.add_parameter(layout.ty, ParameterKind::Parameter(ArgConvention::Let)),
+                    f.add_parameter(layout.ty, ParameterKind::Place(ArgConvention::Let)),
                 );
                 let block = f.add_block();
                 let slot = append_result(&mut f, block, Operation::alloca_place(span, layout.ty));
@@ -660,7 +660,7 @@ mod tests {
         let mut f = FunctionBuilder::new("generic_clear".into(), CallResultConvention::Value);
         let parameter = Value::Parameter(f.add_parameter(
             Type::variable_id(0),
-            ParameterKind::Parameter(ArgConvention::MutableRef),
+            ParameterKind::Place(ArgConvention::MutableRef),
         ));
         let block = f.add_block();
         f.append_operation(

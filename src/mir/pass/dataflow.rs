@@ -41,7 +41,7 @@ use crate::{
         value::LiteralValue,
     },
     mir::{
-        self, BlockId, Function, Operation, OperationKind, ParameterKind,
+        self, BlockId, Function, Operation, OperationKind,
         terminator::TerminatorKind,
         value::{Constant, ParameterId, StaticEvidence, ValueId, same_literal_representation},
     },
@@ -816,10 +816,7 @@ fn entry_state(
 ) -> State {
     let mut state = State::default();
     for (index, parameter) in func.parameters().iter().enumerate() {
-        if matches!(
-            parameter.kind,
-            ParameterKind::Parameter(_) | ParameterKind::Owned
-        ) {
+        if parameter.kind.is_visible() {
             let place = bindings.parameters[index];
             if !escaped.contains(&bindings.root_of_place(place)) {
                 let fact = type_fact(parameter.ty, env);

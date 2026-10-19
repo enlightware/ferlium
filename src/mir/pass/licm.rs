@@ -476,7 +476,7 @@ fn hoist_invariant_loads(
                 Root::Parameter(id)
                     if matches!(
                         func.parameters()[id.as_index()].kind,
-                        ParameterKind::Parameter(ArgConvention::Let)
+                        ParameterKind::Place(ArgConvention::Let)
                     ) => {}
                 Root::Alloca(id) => {
                     let Some(alloca) = allocas.get(&id) else {
@@ -664,7 +664,7 @@ fn invariant_place(
     let mir::Value::Register(id) = source else {
         return matches!(source, mir::Value::Parameter(id)
             if matches!(func.parameters()[id.as_index()].kind,
-                ParameterKind::Parameter(ArgConvention::Let)));
+                ParameterKind::Place(ArgConvention::Let)));
     };
     let Some(site) = definitions.get(id).copied() else {
         return false;
@@ -1327,7 +1327,7 @@ mod tests {
             let mut builder = FunctionBuilder::new("scalar_read".into(), Default::default());
             let int_ty = place_type();
             let input = mir::Value::Parameter(
-                builder.add_parameter(int_ty, ParameterKind::Parameter(ArgConvention::Let)),
+                builder.add_parameter(int_ty, ParameterKind::Place(ArgConvention::Let)),
             );
             let entry = builder.add_block();
             let head = builder.add_block();
@@ -1393,7 +1393,7 @@ mod tests {
         let int_ty = place_type();
         let mut builder = FunctionBuilder::new("read_then_call".into(), Default::default());
         let input = mir::Value::Parameter(
-            builder.add_parameter(int_ty, ParameterKind::Parameter(ArgConvention::Let)),
+            builder.add_parameter(int_ty, ParameterKind::Place(ArgConvention::Let)),
         );
         let entry = builder.add_block();
         let head = builder.add_block();
@@ -1539,7 +1539,7 @@ mod tests {
         let int_ty = place_type();
         let mut builder = FunctionBuilder::new("local_boundary".into(), Default::default());
         let input = mir::Value::Parameter(
-            builder.add_parameter(int_ty, ParameterKind::Parameter(ArgConvention::Let)),
+            builder.add_parameter(int_ty, ParameterKind::Place(ArgConvention::Let)),
         );
         let entry = builder.add_block();
         let head = builder.add_block();
@@ -1620,11 +1620,10 @@ mod tests {
         let mut builder = FunctionBuilder::new("nested_reads".into(), Default::default());
         let int_ty = place_type();
         let input = mir::Value::Parameter(
-            builder.add_parameter(int_ty, ParameterKind::Parameter(ArgConvention::Let)),
+            builder.add_parameter(int_ty, ParameterKind::Place(ArgConvention::Let)),
         );
-        let condition = mir::Value::Parameter(
-            builder.add_parameter(bool_type(), ParameterKind::Parameter(ArgConvention::Let)),
-        );
+        let condition =
+            mir::Value::Parameter(builder.add_parameter(bool_type(), ParameterKind::Value));
         let entry = builder.add_block();
         let outer = builder.add_block();
         let inner_preheader = builder.add_block();
@@ -1665,11 +1664,10 @@ mod tests {
         let int_ty = place_type();
         let mut builder = FunctionBuilder::new("copy_used_after_loop".into(), Default::default());
         let input = mir::Value::Parameter(
-            builder.add_parameter(int_ty, ParameterKind::Parameter(ArgConvention::Let)),
+            builder.add_parameter(int_ty, ParameterKind::Place(ArgConvention::Let)),
         );
-        let condition = mir::Value::Parameter(
-            builder.add_parameter(bool_type(), ParameterKind::Parameter(ArgConvention::Let)),
-        );
+        let condition =
+            mir::Value::Parameter(builder.add_parameter(bool_type(), ParameterKind::Value));
         let entry = builder.add_block();
         let head = builder.add_block();
         let exit = builder.add_block();
