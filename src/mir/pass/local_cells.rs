@@ -76,6 +76,8 @@ pub(crate) enum Read {
     Load,
     /// The scrutinee of `comp_eq`.
     Compare,
+    /// The variant `extract_tag` reads.
+    Tag,
     /// `memcpy cell to place`.
     Copy,
     /// A visible call argument passed under the `Let` convention.
@@ -124,6 +126,7 @@ pub(crate) fn access(operation: &Operation, position: usize) -> Access {
         (OperationKind::MoveRange { .. }, 2..=7) => Access::Read(Read::Other),
         (OperationKind::Load, 0) => Access::Read(Read::Load),
         (OperationKind::CompareEqual, 0) => Access::Read(Read::Compare),
+        (OperationKind::ExtractTag, 0) => Access::Read(Read::Tag),
         (
             OperationKind::CompareEqual
             | OperationKind::ExtractTag

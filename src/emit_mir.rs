@@ -2248,9 +2248,12 @@ impl<'a> Emitter<'a> {
     /// booleans.
     fn lower_case_scrutinee(&mut self, node: &ENode, variant_tag_case: bool) -> (mir::Value, bool) {
         if variant_tag_case {
-            let place = self.lower_as_place(node);
+            // A tag value is read directly, any other variant in place.
+            let variant = self
+                .lower_scalar_value(node)
+                .unwrap_or_else(|| self.lower_as_place(node));
             let tag = self
-                .insert(Operation::extract_tag(node.span, place))
+                .insert(Operation::extract_tag(node.span, variant))
                 .unwrap();
             return (tag, false);
         }
@@ -2883,6 +2886,23 @@ impl<'a> Emitter<'a> {
                 self.lower_scalar_value(source)
             }
             K::Immediate(value) => Some(self.immediate_constant(node.ty, value.clone())),
+            // A case of a unit-only variant is its tag, so its shell is the whole value.
+            K::Variant(n)
+                if let Some(hir::VariantPayloadStorageSource::Static(storage)) =
+                    n.payload_storage =>
+            {
+                let payload = &self.hir_arena[n.payload];
+                self.lower_value_into(payload, None);
+                self.insert(Operation::variant(
+                    node.span,
+                    n.tag,
+                    node.ty,
+                    payload.ty,
+                    Some(storage),
+                    None,
+                    None,
+                ))
+            }
             K::LoadLocal(n) => self.load_local(node.span, n.id),
             K::TakeLocalValue(n)
                 if matches!(

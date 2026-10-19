@@ -708,8 +708,15 @@ pub(crate) fn check_operand_roles(
                  {role:?}"
             );
         }
-        OperationKind::ExtractTag
-        | OperationKind::ExtractPayloadIndirection
+        OperationKind::ExtractTag => {
+            let variant = role(0);
+            assert!(
+                variant.is_place_operand() || variant.materialized_type().is_some(),
+                "MIR function `{func_name}` {at}: extract_tag reads a variant place or tag value, \
+                 got {variant:?}"
+            );
+        }
+        OperationKind::ExtractPayloadIndirection
         | OperationKind::IsInitialized
         | OperationKind::Clear
         | OperationKind::DropSubscriptEnv

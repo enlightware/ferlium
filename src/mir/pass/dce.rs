@@ -221,7 +221,8 @@ pub(crate) fn remove_dead_trivial_results(func: &Function) -> Option<Function> {
     for block in func.blocks() {
         let basic_block = func.block(block);
         for (index, operation) in basic_block.operations().iter().enumerate() {
-            if matches!(
+            // A complete variant shell is a tag, as pure as a constant.
+            if (matches!(
                 operation.kind,
                 OperationKind::CompareEqual
                     | OperationKind::Load
@@ -229,7 +230,8 @@ pub(crate) fn remove_dead_trivial_results(func: &Function) -> Option<Function> {
                     | OperationKind::ExtractPayloadIndirection
                     | OperationKind::IsInitialized
                     | OperationKind::StackSave
-            ) && let Some(result) = operation.result_id()
+            ) || operation.is_complete_variant())
+                && let Some(result) = operation.result_id()
             {
                 debug_assert!(!operation.result_requires_consuming_use());
                 candidates.insert(
@@ -421,7 +423,8 @@ pub(crate) fn remove_discarded_trivial_copy_results(
             let Some(result) = operation.result_id() else {
                 continue;
             };
-            if operation.result_requires_consuming_use() {
+            // A complete shell needs no consuming use, but goes with the stores it fed.
+            if operation.result_requires_consuming_use() || operation.is_complete_variant() {
                 let removable = matches!(
                     &operation.kind,
                     OperationKind::Variant { metadata, .. }

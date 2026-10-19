@@ -496,10 +496,7 @@ mod tests {
     use super::{super::dce::remove_dead_trivial_results, *};
     use crate::{
         CompilerSession, ExecutionTarget, Location, MirOptimization, Path,
-        hir::{
-            function::ArgConvention,
-            native_functions::{NativeFnNN, NativeVariantFnNN},
-        },
+        hir::native_functions::{NativeFnNN, NativeVariantFnNN},
         mir::{Operation, ParameterKind, builder::FunctionBuilder},
         module::{Module, Visibility},
         std::{logic::bool_type, ordering::ordering_type},
@@ -522,12 +519,10 @@ mod tests {
     fn chain(session: &CompilerSession, shape: Shape) -> Function {
         let span = Location::new_synthesized();
         let mut builder = FunctionBuilder::new("chain".into(), Default::default());
-        let input = mir::Value::Parameter(
-            builder.add_parameter(ordering_type(), ParameterKind::Place(ArgConvention::Let)),
-        );
-        let other = mir::Value::Parameter(
-            builder.add_parameter(ordering_type(), ParameterKind::Place(ArgConvention::Let)),
-        );
+        let input =
+            mir::Value::Parameter(builder.add_parameter(ordering_type(), ParameterKind::Value));
+        let other =
+            mir::Value::Parameter(builder.add_parameter(ordering_type(), ParameterKind::Value));
         let root = builder.add_block();
         let next = builder.add_block();
         let yes = builder.add_block();
@@ -841,12 +836,10 @@ mod tests {
         let span = Location::new_synthesized();
         let env = session.module_env();
         let mut builder = FunctionBuilder::new("boolean_tail".into(), Default::default());
-        let input = mir::Value::Parameter(
-            builder.add_parameter(ordering_type(), ParameterKind::Place(ArgConvention::Let)),
-        );
-        let other = mir::Value::Parameter(
-            builder.add_parameter(ordering_type(), ParameterKind::Place(ArgConvention::Let)),
-        );
+        let input =
+            mir::Value::Parameter(builder.add_parameter(ordering_type(), ParameterKind::Value));
+        let other =
+            mir::Value::Parameter(builder.add_parameter(ordering_type(), ParameterKind::Value));
         let flag = mir::Value::Parameter(builder.add_parameter(bool_type(), ParameterKind::Value));
         let destination =
             mir::Value::Parameter(builder.add_parameter(bool_type(), ParameterKind::Return));

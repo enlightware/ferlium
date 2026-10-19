@@ -536,6 +536,14 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     OperationKind::Variant { metadata, .. } => {
                         self.memory.prepare_type(types.resolve(metadata.ty), &env)?
                     }
+                    // A value result is received in a cell of its own.
+                    OperationKind::Call {
+                        ty,
+                        result_transport: ResultTransport::Value,
+                        ..
+                    } => self
+                        .memory
+                        .prepare_type(types.resolve(ty.fn_ty.ret), &env)?,
                     _ => (),
                 }
                 evidence.extend(
@@ -1604,15 +1612,17 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     // A function returning its result as a value writes it into the result place
                     // its caller passed past its parameters.
                     if let Some(value) = value {
-                        let Binding::Scalar(scalar) = self.operand(body, args, registers, value)?
-                        else {
-                            return Err(invalid("returned value is not a scalar"));
-                        };
+                        let value = self.operand(body, args, registers, value)?;
                         let place = args
                             .get(body.parameters().len())
                             .ok_or_else(|| invalid("value result place missing"))?
                             .place()?;
-                        self.memory.write(place, scalar)?;
+                        match value {
+                            Binding::Scalar(scalar) => self.memory.write(place, scalar)?,
+                            // A tag travels as its complete variant shell.
+                            Binding::Aggregate(shell) => self.memory.write_value(place, &shell)?,
+                            _ => return Err(invalid("returned value is not a scalar")),
+                        }
                     }
                     return Ok(FrameExit::Returned);
                 }
@@ -1693,7 +1703,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 };
                 let result = self.invoke(callable, values);
                 let value = match (&result, result_cell) {
-                    (Ok(()), Some(cell)) => Some(Binding::Scalar(self.memory.read(cell)?)),
+                    (Ok(()), Some(cell)) => Some(self.read_value_binding(cell)?),
                     _ => None,
                 };
                 self.memory.restore(marker);
@@ -2143,10 +2153,8 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     let address = source.place()?;
                     Some(if self.memory.is_pointer_slot(address)? {
                         Binding::Place(self.memory.read_pointer(address)?)
-                    } else if ScalarKind::for_type(address.ty).is_ok() {
-                        Binding::Scalar(self.memory.read(address)?)
                     } else {
-                        Binding::Aggregate(Rc::new(self.memory.read_value(address, false)?))
+                        self.read_value_binding(address)?
                     })
                 }
             },
@@ -2340,7 +2348,12 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     }
                 },
             )?))),
-            ExtractTag => Some(Binding::Tag(self.memory.tag(place(0)?)?.0)),
+            ExtractTag => Some(Binding::Tag(match operand(0)? {
+                Binding::Aggregate(value) => value
+                    .variant_tag()
+                    .ok_or_else(|| invalid("expected a variant value"))?,
+                variant => self.memory.tag(variant.place()?)?.0,
+            })),
             ExtractPayloadIndirection => Some(Binding::Scalar(Scalar::Bool(
                 self.memory.tag(place(0)?)?.1.is_indirect(),
             ))),
@@ -2381,6 +2394,16 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             _ => unreachable!("capability check rejected this operation"),
         };
         Ok(result)
+    }
+
+    /// Reads the value at `address` into a register: a primitive scalar, or else the stored value,
+    /// such as the shell that is a tag's whole value.
+    fn read_value_binding(&self, address: Address) -> Result<Binding, RuntimeError> {
+        Ok(if ScalarKind::for_type(address.ty).is_ok() {
+            Binding::Scalar(self.memory.read(address)?)
+        } else {
+            Binding::Aggregate(Rc::new(self.memory.read_value(address, false)?))
+        })
     }
 
     fn call_native(&mut self, id: FunctionId, args: &[Binding]) -> Result<(), RuntimeError> {

@@ -681,11 +681,36 @@ pub(crate) fn is_primitive_scalar(ty: Type) -> bool {
 /// A closed variant whose complete representation is just its canonical u32 tag.
 /// Unit payloads have no storage or ownership obligations; larger aggregates never become
 /// scalars merely because their layout happens to fit in a machine register.
-fn is_tag_scalar(ty: Type, env: &impl TypeLayoutEnv) -> bool {
-    ty.is_constant()
-        && structural_variant(ty, env).is_some_and(|(_, cases)| {
-            !cases.is_empty() && cases.iter().all(|(_, payload)| *payload == Type::unit())
-        })
+pub(crate) fn is_tag_scalar(ty: Type, env: &impl TypeLayoutEnv) -> bool {
+    if !ty.is_constant() {
+        return false;
+    }
+    // A named variant answers from its definition's shape, without instantiating it: a payload is
+    // unit after substitution only if it is unit, or a parameter whose argument is unit. Any other
+    // named type, such as a record, is no variant at all.
+    let named = match &*ty.data() {
+        TypeKind::Named(named) => Some((named.def, named.params.clone())),
+        TypeKind::Variant(_) => None,
+        _ => return false,
+    };
+    if let Some((def, params)) = named {
+        match &*env.type_def(def).shape_ty().data() {
+            TypeKind::Variant(cases) => {
+                return !cases.is_empty()
+                    && cases.iter().all(|(_, payload)| match &*payload.data() {
+                        TypeKind::Variable(parameter) => {
+                            params[parameter.name() as usize] == Type::unit()
+                        }
+                        _ => *payload == Type::unit(),
+                    });
+            }
+            TypeKind::Variable(_) | TypeKind::Named(_) => {}
+            _ => return false,
+        }
+    }
+    structural_variant(ty, env).is_some_and(|(_, cases)| {
+        !cases.is_empty() && cases.iter().all(|(_, payload)| *payload == Type::unit())
+    })
 }
 
 /// Return the storage mode shared by occurrences of `payload_ty` in `variant_ty`.

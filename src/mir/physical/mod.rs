@@ -683,6 +683,9 @@ fn expand_physical_mir(
             let body = scalar_arguments::place_value_results(&body, |call| transports.result(call))
                 .unwrap_or(body);
             let transports = Transports::of(&body, semantic, env);
+            let body = scalar_arguments::value_place_results(&body, |call| transports.result(call))
+                .unwrap_or(body);
+            let transports = Transports::of(&body, semantic, env);
             let body =
                 scalar_arguments::place_no_value_results(&body, |call| transports.result(call))
                     .unwrap_or(body);
@@ -1543,9 +1546,12 @@ impl<'a> PhysicalLowerer<'a> {
             .blocks()
             .flat_map(|block| body.block(block).operations())
             .filter_map(|operation| {
-                let OperationKind::Variant { .. } = operation.kind else {
+                // A complete shell is an ordinary value, used like any other.
+                if !matches!(operation.kind, OperationKind::Variant { .. })
+                    || operation.is_complete_variant()
+                {
                     return None;
-                };
+                }
                 Some((operation.result_id()?, operation.clone()))
             })
             .collect::<FxHashMap<_, _>>();
@@ -2572,13 +2578,18 @@ fn build_product_addressor(
         );
         let add = builder.add_block();
         let next = builder.add_block();
-        let ordering = binary_call(
+        // `Ordering` is a tag, which the comparison's entry returns directly.
+        let (int_cmp, cmp_ty) = known.int_cmp();
+        let ordering = append_result(
             &mut builder,
             block,
-            known.int_cmp(),
-            candidate_align,
-            target_align.clone(),
-            span,
+            Operation::call(
+                span,
+                Value::Function(int_cmp),
+                [candidate_align, target_align.clone()],
+                cmp_ty.clone(),
+            )
+            .with_value_result(),
         );
         let tag = append_result(&mut builder, block, Operation::extract_tag(span, ordering));
         let mut cases = vec![(Ustr::from(ORDERING_GREATER), add)];
@@ -4883,7 +4894,7 @@ mod tests {
                     Location::new_synthesized(),
                     ustr("Only"),
                     variant_ty,
-                    Type::unit(),
+                    int_type(),
                     Some(VariantPayloadStorage::Inline),
                     None,
                     None,
@@ -4897,7 +4908,8 @@ mod tests {
         let mut session = CompilerSession::new();
         let module = compile(&mut session, "fn anchor() {}", "duplicate_shell_store");
         let span = Location::new_synthesized();
-        let variant_ty = Type::variant([(ustr("Only"), Type::unit())]);
+        // A shell with a payload; a unit-only one is an ordinary value.
+        let variant_ty = Type::variant([(ustr("Only"), int_type())]);
         let mut builder = FunctionBuilder::new(ustr("duplicate"), CallResultConvention::Value);
         let destination =
             Value::Parameter(builder.add_parameter(variant_ty, ParameterKind::Return));
@@ -4925,7 +4937,8 @@ mod tests {
         let mut session = CompilerSession::new();
         let module = compile(&mut session, "fn anchor() {}", "invoked_shell_store");
         let span = Location::new_synthesized();
-        let variant_ty = Type::variant([(ustr("Only"), Type::unit())]);
+        // A shell with a payload; a unit-only one is an ordinary value.
+        let variant_ty = Type::variant([(ustr("Only"), int_type())]);
         let mut builder = FunctionBuilder::new(ustr("invoked"), CallResultConvention::Value);
         let destination =
             Value::Parameter(builder.add_parameter(variant_ty, ParameterKind::Return));
@@ -5083,35 +5096,37 @@ mod tests {
         case_counts.sort_unstable();
         assert_eq!(case_counts, [1, 2]);
 
+        // Each comparison returns its `Ordering` as a value, whose tag selects the order.
         let mut checked_comparisons = 0;
         for index in first_helper.as_index()..physical.entry_count() {
             let helper = physical.get(LocalFunctionId::from_index(index)).unwrap();
-            let comparison_result = helper
-                .blocks()
-                .flat_map(|block| helper.block(block).operations())
-                .find_map(|operation| {
-                    let OperationKind::Call { ty, .. } = &operation.kind else {
-                        return None;
-                    };
-                    (ty.ret() == ordering_type())
-                        .then(|| operation.operands.last().cloned())
-                        .flatten()
-                });
-            let Some(Value::Register(comparison_result)) = comparison_result else {
+            let operations = || {
+                helper
+                    .blocks()
+                    .flat_map(|block| helper.block(block).operations())
+            };
+            let Some(comparison_result) = operations().find_map(|operation| {
+                let OperationKind::Call {
+                    ty,
+                    result_transport,
+                    ..
+                } = &operation.kind
+                else {
+                    return None;
+                };
+                if ty.ret() != ordering_type() {
+                    return None;
+                }
+                assert_eq!(*result_transport, ResultTransport::Value);
+                operation.result_id()
+            }) else {
                 continue;
             };
             checked_comparisons += 1;
-            let comparison_slot_ty = helper
-                .blocks()
-                .flat_map(|block| helper.block(block).operations())
-                .find_map(|operation| {
-                    (operation.result_id() == Some(comparison_result)).then_some(&operation.kind)
-                })
-                .and_then(|kind| match kind {
-                    OperationKind::Alloca { ty } => Some(*ty),
-                    _ => None,
-                });
-            assert_eq!(comparison_slot_ty, Some(ordering_type()));
+            assert!(operations().any(|operation| {
+                operation.kind == OperationKind::ExtractTag
+                    && operation.operands.as_ref() == [Value::Register(comparison_result)]
+            }));
         }
         assert_eq!(checked_comparisons, 2);
     }

@@ -109,7 +109,8 @@ pub(crate) fn forward_stored_values(func: &Function, env: ModuleEnv<'_>) -> Opti
                     cell_use.access,
                     Access::Read(local_cells::Read::Copy) | Access::MoveOut(Transfer::Sized)
                 ),
-                // Loads, comparisons and copies accept either a register or a pool constant.
+                // Loads, comparisons, tag extractions and copies accept either a register or a
+                // pool constant.
                 (Some(Read::Value), _) => true,
                 (Some(Read::Callee), Target::Function(_)) => true,
                 // Only an operation in the block can be removed; an invoked drop stays.
@@ -208,7 +209,9 @@ pub(crate) fn forward_stored_values(func: &Function, env: ModuleEnv<'_>) -> Opti
         };
         match operation.kind {
             // The callee read through the cell is called directly.
-            OperationKind::CompareEqual | OperationKind::Call { .. } => {
+            OperationKind::CompareEqual
+            | OperationKind::ExtractTag
+            | OperationKind::Call { .. } => {
                 operation.operands[0] = stored;
             }
             // A copy out of a cell holding a value stores that value.
@@ -266,7 +269,7 @@ enum Target {
 
 /// How a forwardable access reads a cell named by its first operand.
 enum Read {
-    /// A load, a comparison or a copy out of it.
+    /// A load, a comparison, a tag extraction or a copy out of it.
     Value,
     /// A call through the function the cell holds.
     Callee,
@@ -317,7 +320,10 @@ impl Census<'_> {
 fn read_kind(access: Access) -> Option<Read> {
     match access {
         Access::Read(
-            local_cells::Read::Load | local_cells::Read::Compare | local_cells::Read::Copy,
+            local_cells::Read::Load
+                | local_cells::Read::Compare
+                | local_cells::Read::Tag
+                | local_cells::Read::Copy,
         )
         // Without a layout witness, a `move` transfers a statically sized representation.
         | Access::MoveOut(Transfer::Sized) => Some(Read::Value),

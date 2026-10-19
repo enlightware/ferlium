@@ -1782,7 +1782,7 @@ fn generic_higher_order_function_param() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn apply(f: (A) -> A, x) { f(x) }"),
-        r#"fn apply(%p0: @arg let (A) -> A ! e₀, %p1: @arg let A, %p2: @ret A):
+        r#"fn apply(%p0: @arg let (A) -> A ! e₀, %p1: @arg value A, %p2: @ret A):
   b0:
     check_call_depth
     invoke call %p0(%p1, %p2) -> b1 error b2

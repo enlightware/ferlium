@@ -225,6 +225,57 @@ pub(crate) fn forward_variant_branches(func: &Function, env: ModuleEnv<'_>) -> O
         return None;
     }
 
+    // A tag read of the variant held in a slot may load it first: `%v = load %slot` followed, past
+    // stack restores only, by `extract_tag %v`, its only use, reads the slot's tag.
+    let mut tag_loads = FxHashMap::<ValueId, (ValueId, OperationSite)>::default();
+    for block in func.blocks() {
+        let operations = func.block(block).operations();
+        for (index, extract) in operations.iter().enumerate() {
+            if !matches!(extract.kind, OperationKind::ExtractTag) {
+                continue;
+            }
+            let [mir::Value::Register(loaded)] = extract.operands.as_ref() else {
+                continue;
+            };
+            let Some(load_index) = operations[..index]
+                .iter()
+                .rposition(|operation| !matches!(operation.kind, OperationKind::StackRestore))
+            else {
+                continue;
+            };
+            let load = &operations[load_index];
+            if matches!(load.kind, OperationKind::Load)
+                && load.result_id() == Some(*loaded)
+                && let [mir::Value::Register(storage)] = load.operands.as_ref()
+            {
+                let read = OperationSite {
+                    block,
+                    index: OperationIndex::from_index(index),
+                };
+                tag_loads.insert(*loaded, (*storage, read));
+            }
+        }
+    }
+    if !tag_loads.is_empty() {
+        let mut load_uses = FxHashMap::<ValueId, usize>::default();
+        for block in func.blocks() {
+            let basic_block = func.block(block);
+            for operand in basic_block
+                .operations()
+                .iter()
+                .flat_map(|operation| operation.operands.iter())
+                .chain(basic_block.terminator().operands())
+            {
+                if let mir::Value::Register(id) = operand
+                    && tag_loads.contains_key(id)
+                {
+                    *load_uses.entry(*id).or_default() += 1;
+                }
+            }
+        }
+        tag_loads.retain(|loaded, _| load_uses.get(loaded) == Some(&1));
+    }
+
     let mut variant_store_counts = FxHashMap::<ValueId, usize>::default();
     for operation in func
         .blocks()
@@ -294,6 +345,14 @@ pub(crate) fn forward_variant_branches(func: &Function, env: ModuleEnv<'_>) -> O
                         }
                     }
                     OperationKind::ExtractTag if operand_index == 0 => summary.reads.push(site),
+                    // The tag extraction that follows reads the slot.
+                    OperationKind::Load
+                        if let Some(&(_, read)) = operation
+                            .result_id()
+                            .and_then(|loaded| tag_loads.get(&loaded)) =>
+                    {
+                        summary.reads.push(read);
+                    }
                     OperationKind::Subfield {
                         variant_payload: true,
                         ..
@@ -332,7 +391,9 @@ pub(crate) fn forward_variant_branches(func: &Function, env: ModuleEnv<'_>) -> O
     let incoming = incoming_predecessors(func);
     let forwards: Vec<_> = func
         .blocks()
-        .filter_map(|join| plan_variant_join(func, join, &incoming, &uses, &extract_uses))
+        .filter_map(|join| {
+            plan_variant_join(func, join, &incoming, &uses, &extract_uses, &tag_loads)
+        })
         .collect();
     if forwards.is_empty() {
         return None;
@@ -359,6 +420,7 @@ fn plan_variant_join(
     incoming: &[Vec<BlockId>],
     uses: &FxHashMap<ValueId, VariantUses>,
     extract_uses: &FxHashMap<ValueId, usize>,
+    tag_loads: &FxHashMap<ValueId, (ValueId, OperationSite)>,
 ) -> Option<Forward> {
     let block = func.block(join);
     let read_index = block.operations().len().checked_sub(1)?;
@@ -384,23 +446,35 @@ fn plan_variant_join(
         return None;
     }
 
-    let [mir::Value::Register(storage)] = read.operands.as_ref() else {
+    let [mir::Value::Register(variant)] = read.operands.as_ref() else {
         return None;
     };
+    // The slot is read in place, or through a load earlier in the join.
+    let storage = tag_loads
+        .get(variant)
+        .map_or(variant, |(storage, _)| storage);
     let summary = uses.get(storage)?;
     let read_site = OperationSite {
         block: join,
         index: OperationIndex::from_index(read_index),
     };
+    let is_load = |operation: &Operation| {
+        matches!(operation.kind, OperationKind::Load) && operation.result_id() == Some(*variant)
+    };
     if summary.reads.as_slice() != [read_site]
-        || !block.operations()[..read_index]
-            .iter()
-            .all(|operation| matches!(operation.kind, OperationKind::StackRestore))
+        || !block.operations()[..read_index].iter().all(|operation| {
+            matches!(operation.kind, OperationKind::StackRestore) || is_load(operation)
+        })
     {
         return None;
     }
 
-    let join_prefix = &block.operations()[..read_index];
+    // The arms replay the join's stack restores; the load goes with the read.
+    let join_prefix = block.operations()[..read_index]
+        .iter()
+        .filter(|operation| !is_load(operation))
+        .cloned()
+        .collect::<Vec<_>>();
     let mut arms = Vec::with_capacity(summary.stores.len());
     // The tag each path leaves decides its consumer, however far up it was stored: paths that
     // meet before the join with one tag need no duplication, and the join's predecessors are

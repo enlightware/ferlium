@@ -963,7 +963,7 @@ impl<'a> Interpreter<'a> {
                 self.exec_build_array(func, slots, &operation.operands)?;
             }
             OperationKind::ExtractTag => {
-                self.exec_extract_tag(slots, &operation.operands, def.unwrap());
+                self.exec_extract_tag(func, slots, &operation.operands, def.unwrap());
             }
             OperationKind::Call {
                 ty,
@@ -1352,19 +1352,33 @@ impl<'a> Interpreter<'a> {
     #[inline(never)]
     fn exec_extract_tag(
         &mut self,
+        func: &Function,
         slots: &mut FxHashMap<mir::Value, Binding>,
         operands: &[mir::Value],
         def: mir::Value,
     ) {
-        let place = self.place_operand(slots, &operands[0]);
-        let value = place
-            .target_ref(&self.ctx)
-            .expect("extract_tag of an invalid place");
-        let tag = value
-            .as_boxed()
-            .expect("variant requires boxed storage")
-            .variant_tag()
-            .expect("extract_tag of a non-variant value");
+        let variant_tag = |value: ValueRef<'_>| {
+            value
+                .as_boxed()
+                .expect("variant requires boxed storage")
+                .variant_tag()
+                .expect("extract_tag of a non-variant value")
+        };
+        let tag = match &operands[0] {
+            // A variant place, including one an addressor returned.
+            operand @ (mir::Value::Register(_) | mir::Value::Parameter(_))
+                if Self::value_argument(slots, operand).is_none() =>
+            {
+                let place = self.place_operand(slots, operand);
+                variant_tag(
+                    place
+                        .target_ref(&self.ctx)
+                        .expect("extract_tag of an invalid place"),
+                )
+            }
+            // A tag value, or a pool constant holding one.
+            operand => self.with_runtime_value(func, slots, operand, variant_tag),
+        };
         Self::bind(slots, def, Binding::VariantTag(tag));
     }
 

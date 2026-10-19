@@ -9,7 +9,9 @@
 //! `Let` argument, and defines a scalar result register, whenever its call-site type says so,
 //! whatever the callee. Physical MIR states the transport: it keeps a value only where the entry
 //! takes the parameter or returns the result directly, so physical lowering passes a place for the
-//! others.
+//! others. A call type more conservative than its callee, such as a devirtualized trait method
+//! declared fallible, keeps a result place in semantic MIR, which physical lowering turns into a
+//! value where the entry returns one.
 //!
 //! The entry follows from the callee operand. A static function takes a parameter directly if its
 //! own type, before instantiation, is a concrete scalar: a generic parameter is indirect even where

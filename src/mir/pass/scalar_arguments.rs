@@ -250,6 +250,62 @@ pub(crate) fn place_value_results(
     Some(edit.finish_unverified())
 }
 
+/// Defines the result register of each `call` passing a result place where `result_transport`
+/// says its callee's entry returns that result directly, and stores it into the place after the
+/// call. A call type more conservative than its callee, such as a devirtualized trait method
+/// declared fallible, keeps a place in semantic MIR. `None` if no call needs a register.
+pub(crate) fn value_place_results(
+    func: &Function,
+    result_transport: impl Fn(&Operation) -> ResultTransport,
+) -> Option<Function> {
+    let needs_value = |operation: &Operation| {
+        matches!(
+            operation.kind,
+            OperationKind::Call {
+                result_transport: ResultTransport::Place,
+                ..
+            }
+        ) && result_transport(operation) == ResultTransport::Value
+    };
+    if !func
+        .blocks()
+        .any(|block| func.block(block).operations().iter().any(&needs_value))
+    {
+        return None;
+    }
+    let mut edit = FunctionEdit::new(func.clone());
+    for block in edit.blocks().collect::<Vec<_>>() {
+        let operations = std::mem::take(&mut edit.block_mut(block).operations);
+        let mut rewritten = Vec::with_capacity(operations.len());
+        for mut operation in operations {
+            if !needs_value(&operation) {
+                rewritten.push(operation);
+                continue;
+            }
+            let OperationKind::Call {
+                result_transport, ..
+            } = &mut operation.kind
+            else {
+                unreachable!("only a call passes a result place");
+            };
+            *result_transport = ResultTransport::Value;
+            let mut operands = operation.operands.to_vec();
+            let place = operands
+                .pop()
+                .expect("a call returning through a place has one");
+            operation.operands = operands.into_boxed_slice();
+            let value = edit
+                .assign_new_result(&mut operation)
+                .expect("a value call defines its result");
+            let span = operation.span;
+            rewritten.push(operation);
+            rewritten.push(Operation::store(span, value, place));
+        }
+        edit.block_mut(block).operations = rewritten;
+    }
+    Some(edit.finish_unverified())
+}
+
 /// Supplies output storage where a semantic NoValue call reaches an indirect result interface.
 /// Invokes keep that storage private: no value is read on either successor.
 pub(crate) fn place_no_value_results(

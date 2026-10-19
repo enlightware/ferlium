@@ -481,6 +481,22 @@ fn ord_predicates_agree_with_cmp() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn comparing_a_value_with_itself_is_equal() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+            fn same(x: int) -> Ordering { cmp(x, x) }
+            fn equal(x: int) -> bool { match cmp(x, x) { Equal => true, _ => false } }
+            match same(black_box(3)) { Equal => equal(black_box(4)), _ => false }
+        "#
+        ),
+        bool(true)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn ord_operators_use_overrides_through_generic_evidence() {
     let mut session = TestSession::new();
     assert_val_eq!(

@@ -529,10 +529,24 @@ fn define_call_rewrite(
             source,
             mir::Value::Pattern(b(LiteralValue::new_native(false))),
         )),
-        CallRewrite::Reification(_) | CallRewrite::EqualOrdering => {
-            unreachable!("a scalar result reifies as a constant")
+        CallRewrite::EqualOrdering => {
+            defined(tag_shell(span, ustr(ORDERING_EQUAL), ordering_type()))
         }
+        CallRewrite::Reification(_) => unreachable!("a scalar result reifies as a constant"),
     }
+}
+
+/// The complete shell that is the whole value of `tag`, of the unit-only variant type `ty`.
+fn tag_shell(span: DebugLocation, tag: Ustr, ty: Type) -> Operation {
+    Operation::variant(
+        span,
+        tag,
+        ty,
+        Type::unit(),
+        Some(VariantPayloadStorage::Inline),
+        None,
+        None,
+    )
 }
 
 /// Replaces each use of a register `renamed` maps by what it maps to, following chains: a folded
@@ -597,15 +611,7 @@ fn materialize_call_rewrite(
             ]
         }
         CallRewrite::EqualOrdering => {
-            let mut variant = Operation::variant(
-                span,
-                ustr(ORDERING_EQUAL),
-                ordering_type(),
-                Type::unit(),
-                Some(VariantPayloadStorage::Inline),
-                None,
-                None,
-            );
+            let mut variant = tag_shell(span, ustr(ORDERING_EQUAL), ordering_type());
             let value = edit.new_value();
             variant.assign_result_id(Some(value));
             vec![

@@ -693,7 +693,8 @@ impl<'a, 's> Body<'a, 's> {
                             tag,
                             storage: Some(storage),
                             ..
-                        } if this.only_stored(id) => {
+                        } if this.only_stored(id) || operation.is_complete_variant() => {
+                            // A complete shell is its tag word, read wherever it is used.
                             let word = storage.encode_tag_id(this.session.variant_tag_id(tag));
                             this.stored_variants.insert(id, word as i32);
                             continue;
@@ -3992,7 +3993,15 @@ impl<'a, 's> Body<'a, 's> {
                 return Ok(());
             }
             ExtractTag | ExtractPayloadIndirection => {
-                let ty = self.pointee_type(&args[0])?;
+                // A tag value is read as it is; a variant place has the scalar type of its pointee.
+                let ty = match self.pointee_type(&args[0]) {
+                    Ok(ty) => ty,
+                    Err(_) => self
+                        .roles
+                        .get(&args[0], self.body.constants())
+                        .and_then(|role| role.materialized_type().cloned())
+                        .ok_or("extract_tag reads a variant place or tag value")?,
+                };
                 let tag_scalar = scalar(&ty, &self.env).is_ok_and(ScalarType::is_tag);
                 if tag_scalar {
                     self.read(&args[0])?;
@@ -4133,7 +4142,8 @@ impl<'a, 's> Body<'a, 's> {
         call: &Operation,
         mask: u8,
     ) -> Result<(), String> {
-        let [_, left, right, _] = &*call.operands else {
+        // The ordering's output place, if any, follows the operands.
+        let (Some(left), Some(right)) = (call.operands.get(1), call.operands.get(2)) else {
             return Err("comparison call operands".into());
         };
         if mask == 0 || mask == 7 {

@@ -773,11 +773,12 @@ to the join; and the join may contain only `stack_restore`s besides that read. O
 additional uses, unknown stores and self-edges all refuse the rewrite.
 
 The same pass forwards a concrete `TrivialCopy` variant when every whole-place definition stores a
-statically tagged shell and its sole tag read feeds `switch_variant`. Each constructor path jumps
-directly to the selected case, retaining payload storage and replaying intervening stack restores.
-The variant place must not escape; managed variants, other whole-place uses and general aggregate
-scalar replacement remain outside the rule. Place CSE runs after a successful rewrite so identical
-payload projections share one address calculation.
+statically tagged shell and its sole tag read, of the place or of a load of it, feeds
+`switch_variant`. Each constructor path jumps directly to the selected case, retaining payload
+storage and replaying intervening stack restores. The variant place must not escape; managed
+variants, other whole-place uses and general aggregate scalar replacement remain outside the rule.
+Place CSE runs after a successful rewrite so identical payload projections share one address
+calculation.
 
 A one-case tag test, `comp_eq (extract_tag v) C`, is instead reduced to the boolean rule. A local
 `TrivialCopy` variant written only by whole stores of tagged shells holds, at every read, the tag of

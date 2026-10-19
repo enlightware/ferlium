@@ -230,6 +230,16 @@ enum StoredData {
     Callable(Option<CallableReference>),
 }
 
+impl StoredValue {
+    /// The tag of a variant value, such as the shell that is a tag's whole value.
+    pub(super) fn variant_tag(&self) -> Option<Ustr> {
+        match &self.data {
+            StoredData::Variant(Some((tag, _))) => Some(*tag),
+            _ => None,
+        }
+    }
+}
+
 /// ABI callable identity with checked provenance for its uniquely owned environment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct CallableReference {

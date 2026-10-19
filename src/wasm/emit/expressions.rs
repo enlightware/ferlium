@@ -116,6 +116,7 @@ impl OperationLayout {
 enum ComparisonFusion {
     Test(KnownCallee),
     Switch(KnownCallee),
+    /// The ordering register or its tag, which the fused predicate never materializes.
     Tag,
 }
 
@@ -527,13 +528,24 @@ impl Plan {
                     })
                     .unwrap_or(consumer);
                 ultimate_roots[source_index] = Some(ultimate_root);
+                // A materialized ordering reads both inputs twice, so its operands are a group of
+                // their own, which the check below keeps in locals.
+                let rereads_operands = matches!(
+                    inputs.intrinsic(layout, candidate.consumer),
+                    Some(KnownCallee::IntCmp | KnownCallee::FloatCmp)
+                ) && !fused_comparison_call(
+                    body.block(candidate.consumer.block),
+                    candidate.consumer.operation_id(),
+                    comparison_fusions,
+                );
                 let root = definitions[consumer.as_index()]
                     .filter(|&next| {
-                        matches!(
-                            (candidate.target, candidates[next.as_index()].target),
-                            (Target::Value(_), Target::Value(_))
-                                | (Target::Place(_), Target::Place(_))
-                        )
+                        !rereads_operands
+                            && matches!(
+                                (candidate.target, candidates[next.as_index()].target),
+                                (Target::Value(_), Target::Value(_))
+                                    | (Target::Place(_), Target::Place(_))
+                            )
                     })
                     .and_then(|next| {
                         roots[layout.index(candidates[next.as_index()].source).as_index()]
@@ -1295,10 +1307,13 @@ fn observes_address(
     env: ModuleEnv<'_>,
 ) -> bool {
     match &operation.kind {
+        // A tag value has no address; a variant place is read whole only when it is a tag.
         OperationKind::ExtractTag | OperationKind::ExtractPayloadIndirection => roles
             .get(&operation.operands[index], body.constants())
-            .and_then(|role| role.place_pointee_type())
-            .is_none_or(|ty| scalar(&ty, &env).is_err()),
+            .is_none_or(|role| match role.place_pointee_type() {
+                Some(ty) => scalar(&ty, &env).is_err(),
+                None => role.materialized_type().is_none(),
+            }),
         OperationKind::Load
         | OperationKind::Clear
         | OperationKind::Memcpy
@@ -1629,30 +1644,36 @@ fn comparison_fusions(
             else {
                 continue;
             };
-            if !call.kind.call_has_result_place()
-                || !matches!(extract.kind, OperationKind::ExtractTag)
-                || call.operands.len() != 4
-            {
+            if !matches!(extract.kind, OperationKind::ExtractTag) {
                 continue;
             }
-            let output = &call.operands[3];
-            let Value::Register(output_id) = output else {
-                continue;
+            // The ordering is a fresh output place, written by the call and read by the tag
+            // extraction only, or a register the extraction alone reads.
+            let fused_output = if call.kind.call_has_result_place() {
+                let [_, _, _, output @ Value::Register(output_id)] = &*call.operands else {
+                    continue;
+                };
+                let fresh_output = inputs.definitions[output_id.as_index()].is_some_and(|source| {
+                    matches!(
+                        body.block(source.block).operations()[source.operation_id().as_index()]
+                            .kind,
+                        OperationKind::Alloca { .. }
+                    )
+                });
+                extract.operands[0] == *output
+                    && inputs.value_uses[output_id.as_index()].is_two()
+                    && fresh_output
+            } else {
+                call.operands.len() == 3
+                    && call.result_id().is_some_and(|output_id| {
+                        extract.operands[0] == Value::Register(output_id)
+                            && inputs.value_uses[output_id.as_index()].one().is_some()
+                    })
             };
             let Some(tag_id) = extract.result_id() else {
                 continue;
             };
-            let fresh_output = inputs.definitions[output_id.as_index()].is_some_and(|source| {
-                matches!(
-                    body.block(source.block).operations()[source.operation_id().as_index()].kind,
-                    OperationKind::Alloca { .. }
-                )
-            });
-            if extract.operands[0] != *output
-                || inputs.value_uses[tag_id.as_index()].one().is_none()
-                || !inputs.value_uses[output_id.as_index()].is_two()
-                || !fresh_output
-            {
+            if !fused_output || inputs.value_uses[tag_id.as_index()].one().is_none() {
                 continue;
             }
             if let Some(test) = operations.get(index + 2) {
@@ -1674,6 +1695,9 @@ fn comparison_fusions(
                 if let Some(result) = test.result_id() {
                     fused[result.as_index()] = Some(ComparisonFusion::Test(intrinsic));
                     fused[tag_id.as_index()] = Some(ComparisonFusion::Tag);
+                    if let Some(ordering) = call.result_id() {
+                        fused[ordering.as_index()] = Some(ComparisonFusion::Tag);
+                    }
                 }
             } else {
                 let terminator = &body.block(block_id).terminator().kind;
@@ -1696,6 +1720,9 @@ fn comparison_fusions(
                     && conditional_targets(terminator).is_some_and(|(yes, no)| yes != no)
                 {
                     fused[tag_id.as_index()] = Some(ComparisonFusion::Switch(intrinsic));
+                    if let Some(ordering) = call.result_id() {
+                        fused[ordering.as_index()] = Some(ComparisonFusion::Tag);
+                    }
                 }
             }
         }

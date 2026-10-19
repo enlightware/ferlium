@@ -234,6 +234,7 @@ fn shape(
             Access::Read(
                 local_cells::Read::Load
                 | local_cells::Read::Compare
+                | local_cells::Read::Tag
                 | local_cells::Read::Copy
                 | local_cells::Read::Argument,
             )

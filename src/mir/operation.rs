@@ -44,7 +44,7 @@ use crate::{
     std::{
         logic::bool_type,
         math::{float_type, int_type},
-        value::TypeLayoutEnv,
+        value::{TypeLayoutEnv, is_tag_scalar},
     },
     types::{
         effects::{EffType, Effect, PrimitiveEffect},
@@ -119,6 +119,16 @@ impl Operation {
         self.kind.result(self)
     }
 
+    /// Whether this operation is a variant shell that is already the whole value: its payload is
+    /// unit and stored inline, so it owns nothing and needs no payload initialization.
+    pub fn is_complete_variant(&self) -> bool {
+        matches!(
+            &self.kind,
+            OperationKind::Variant { metadata, storage: Some(VariantPayloadStorage::Inline), .. }
+                if metadata.payload_ty == Type::unit()
+        )
+    }
+
     /// Whether this operation's result carries ownership which must be consumed exactly once on
     /// every returning control-flow path that executes the definition.
     ///
@@ -127,8 +137,8 @@ impl Operation {
     /// deallocation; removing that consuming operation must retain or redirect the obligation.
     pub fn result_requires_consuming_use(&self) -> bool {
         match &self.kind {
+            OperationKind::Variant { .. } => !self.is_complete_variant(),
             OperationKind::RuntimeAlloc { .. }
-            | OperationKind::Variant { .. }
             | OperationKind::BuildSubscript { .. }
             | OperationKind::CloneSubscriptEnv { .. }
             | OperationKind::CloneClosureEnv { .. } => true,
@@ -816,8 +826,9 @@ impl Operation {
         }
     }
 
-    /// Creates an `extract_tag` operation, which reads the semantic tag of the variant at the
-    /// `variant` place and yields it as an opaque MIR `tag` value.
+    /// Creates an `extract_tag` operation, which reads the semantic tag of `variant`, the place of
+    /// a variant or a tag value (see [`is_scalar_value_type`]), and yields it as an opaque MIR `tag`
+    /// value.
     ///
     /// The result is the *semantic* tag — the session-local interned identity a `VariantTag` pattern
     /// compares against — not the raw ABI field. The canonical layout stores a `u32` whose high bit
@@ -1302,11 +1313,10 @@ pub(crate) fn accepts_value_result(ty: &CallImplType, env: &impl TypeLayoutEnv) 
 
 /// Whether `ty` is a concrete scalar that call boundaries may carry as a value.
 ///
-/// So far the primitive scalars other than `raw_float`; unit-only variant tags and `raw_float`,
-/// which also have a scalar ABI representation, still travel through places (see
-/// `doc/plans/scalar-types.md`). The environment classifies tags.
-pub(crate) fn is_scalar_value_type(ty: Type, _env: &impl TypeLayoutEnv) -> bool {
-    ty == int_type() || ty == float_type() || ty == bool_type()
+/// So far the ABI scalars other than `raw_float`, which still travels through places. The
+/// environment classifies unit-only variant tags.
+pub(crate) fn is_scalar_value_type(ty: Type, env: &impl TypeLayoutEnv) -> bool {
+    ty == int_type() || ty == float_type() || ty == bool_type() || is_tag_scalar(ty, env)
 }
 
 /// Static types needed to lower a variant shell and its selected payload.
@@ -1907,7 +1917,7 @@ impl OperationKind {
             ExtractTag => assert_eq!(
                 whole.operands.len(),
                 1,
-                "extract_tag takes exactly the variant place"
+                "extract_tag takes exactly the variant place or tag value"
             ),
             ExtractPayloadIndirection => assert_eq!(
                 whole.operands.len(),

@@ -101,11 +101,12 @@ distinguishes an `alloca` slot from an `alloca_place` one:
 Compile-time match patterns are not runtime constants. They may describe values, such as strings,
 whose runtime representation requires owned storage.
 
-Variant tags are not Ferlium integers. `extract_tag` yields an opaque, symbolic `tag` value; its
-physical encoding is specified in [abi.md](abi.md#tag-representation). A tag can only be compared
-with symbolic variant patterns or consumed by `switch_variant`; it cannot enter Ferlium storage,
-calls, boolean branches, or arithmetic. Variant matches use `switch_variant`; other literal
-matches use `comp_eq` and conditional branches.
+Variant tags are not Ferlium integers. `extract_tag` reads a variant place, or the value of a
+variant whose cases all carry unit, and yields an opaque, symbolic `tag` value; its physical
+encoding is specified in [abi.md](abi.md#tag-representation). A tag can only be compared with
+symbolic variant patterns or consumed by `switch_variant`; it cannot enter Ferlium storage, calls,
+boolean branches, or arithmetic. Variant matches use `switch_variant`; other literal matches use
+`comp_eq` and conditional branches.
 
 ## Function boundaries
 
@@ -121,15 +122,14 @@ access, `MutableRef` is exclusive mutable access, and `owned` transfers the poin
 callee variant which must consume it on every exit. Raw semantic MIR uses only the first two
 conventions; an optimized `owned` argument requires proof that the caller relinquishes ownership.
 
-A `Let` parameter of a concrete scalar type (`int`, `float` or `bool`) is a value, as the ABI passes
-it, and its signature says so (`@arg value`): a value's role is read from MIR, never from its type,
-and the verifier checks the type. A generic parameter is a place, so specializing it to a scalar
-turns it into a value. A `Let`
-argument of such a type is a value whatever the callee takes, read where the argument is evaluated;
-the verifier rejects the place form. This holds for the visible arguments of a `project` too, such
-as a scoped subscript's index. A substitution that makes an argument's type such a scalar
-reads it before its call, which is equivalent to the callee reading it, since overlapping mutable
-arguments are invalid.
+A `Let` parameter of a concrete scalar type (`int`, `float`, `bool`, or a closed variant whose cases
+all carry unit) is a value, as the ABI passes it, and its signature says so (`@arg value`): a
+value's role is read from MIR, never from its type, and the verifier checks the type. A generic
+parameter is a place, so specializing it to a scalar turns it into a value. A `Let` argument of such
+a type is a value whatever the callee takes, read where the argument is evaluated; the verifier
+rejects the place form. This holds for the visible arguments of a `project` too, such as a scoped
+subscript's index. A substitution that makes an argument's type such a scalar reads it before its
+call, which is equivalent to the callee reading it, since overlapping mutable arguments are invalid.
 
 A non-fallible call whose result has such a concrete scalar type defines that result as a register,
 and has no result place. A function of such a type returns its result as a value: it has no `@ret`,
@@ -187,7 +187,7 @@ itself leaves it unchanged. The main groups are:
 | Group | Operations | Contract |
 |---|---|---|
 | storage | `alloca`, `alloca_place`, `runtime_alloc`, `runtime_dealloc`, `is_initialized`, `load`, `store`, `clear`, `memcpy`, `move`, `move_bytes`, `move_range`, `replace` | Stack storage follows stack regions; runtime storage has an explicit lifetime. `is_initialized` exposes a physical drop flag without fixing its storage layout. `store` never drops; `memcpy` requires a concrete `TrivialCopy` pointee; moves leave their source absent. `move_bytes` carries an already-materialized byte extent instead of a layout dictionary. `move_range` transfers initialized elements between disjoint sequence allocations, making only the source range absent and initializing only the destination range; it carries byte offsets and extent plus interpreter-only element indices and count. `replace` installs a fully initialized whole owned value without an observable initialization gap, retaining the displaced state for cleanup. Its destination may be a projection, absent, or partially initialized. |
-| aggregates | `subfield`, `variant`, `extract_tag`, `extract_payload_indirection`, `build_array` | Aggregate construction and ownership remain field-addressable. Product `subfield` records its aggregate type and carries `Value` witnesses for direct members with open inline layouts. A variant operation first builds an uninitialized payload shell. Generic variant construction and payload-marked `subfield` operations carry the selected payload's `Value<B>` layout witness; projection reads inline/indirect classification from the stored tag. `extract_tag` yields an opaque semantic tag, while physical `extract_payload_indirection` yields the representation bit as `bool`. `build_array` initializes fresh canonical array storage from borrowed `TrivialCopy` elements. |
+| aggregates | `subfield`, `variant`, `extract_tag`, `extract_payload_indirection`, `build_array` | Aggregate construction and ownership remain field-addressable. Product `subfield` records its aggregate type and carries `Value` witnesses for direct members with open inline layouts. A variant operation first builds an uninitialized payload shell, which a store must consume; when every case carries unit, the shell is the whole value and an ordinary register. Generic variant construction and payload-marked `subfield` operations carry the selected payload's `Value<B>` layout witness; projection reads inline/indirect classification from the stored tag. `extract_tag` yields an opaque semantic tag, while physical `extract_payload_indirection` yields the representation bit as `bool`. `build_array` initializes fresh canonical array storage from borrowed `TrivialCopy` elements. |
 | evidence | `dict_entry`, `build_dictionary`, `subscript_member`, `build_subscript_evidence` | Evidence remains symbolic. Construction closes a definition over evidence operands; dictionary entries are closed function places. |
 | calls/projections | `call`, `project`, `end_project` | Proven source-infallible forms are ordinary operations. Potentially source-fallible forms occur only inside `invoke`. |
 | ownership | `clone`, `drop`, `build_closure`, `clone_closure_env`, `drop_closure_env`, `build_subscript`, `clone_subscript_env`, `drop_subscript_env` | Semantic ownership actions are explicit. `Value::clone` and `Value::drop` are source-infallible by contract. |

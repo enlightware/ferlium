@@ -2549,11 +2549,18 @@ fn transfer(
             let Some(result) = operation.result_id() else {
                 return;
             };
-            // An `Ordering` has no payload, so its tag *is* the comparison it stands for.
-            let fact = tracked_place(state, &operation.operands[0], escaped, interner)
-                .map(|place| state.symbol_of(place, interner))
-                .and_then(|symbol| state.fact(symbol).cloned())
-                .filter(|fact| matches!(fact, Fact::Ordering { .. } | Fact::Yield { .. }));
+            // An `Ordering` has no payload, so its tag *is* the comparison it stands for, whether
+            // it is read in place or as a value.
+            let variant = &operation.operands[0];
+            let fact = match state.place_of(variant, interner) {
+                Some(place) if !escaped.contains(&interner.places().root_of(place)) => {
+                    let symbol = state.symbol_of(place, interner);
+                    state.fact(symbol).cloned()
+                }
+                Some(_) => None,
+                None => value_fact(variant, func, interner, state),
+            }
+            .filter(|fact| matches!(fact, Fact::Ordering { .. } | Fact::Yield { .. }));
             let symbol = interner.symbol(Symbol::Register(result));
             state.set_fact(symbol, fact);
         }
@@ -3242,7 +3249,7 @@ mod tests {
             containers::b,
             hir::value::LiteralValue,
             mir::{ParameterKind, builder::FunctionBuilder, terminator::Terminator},
-            std::{STD_MODULE_ID, math::int_type, ordering::ordering_type},
+            std::{STD_MODULE_ID, math::int_type},
             types::r#type::CallImplType,
         };
         let session = CompilerSession::new();
@@ -3267,19 +3274,15 @@ mod tests {
         let less = builder.add_block();
         let other = builder.add_block();
         let ordering = builder
-            .append_operation(entry, Operation::alloca(span, ordering_type()))
+            .append_operation(
+                entry,
+                std_call(
+                    "compare_int",
+                    vec![mir::Value::Parameter(left), mir::Value::Parameter(right)],
+                )
+                .with_value_result(),
+            )
             .unwrap();
-        builder.append_operation(
-            entry,
-            std_call(
-                "compare_int",
-                vec![
-                    mir::Value::Parameter(left),
-                    mir::Value::Parameter(right),
-                    ordering.clone(),
-                ],
-            ),
-        );
         let tag = builder
             .append_operation(entry, Operation::extract_tag(span, ordering))
             .unwrap();

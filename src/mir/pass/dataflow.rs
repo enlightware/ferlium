@@ -981,7 +981,16 @@ fn transfer(
             if !tracked(place) {
                 return;
             }
-            let fact = value_operand_fact(&operation.operands[0], func.constants(), state);
+            // A value parameter's slot holds the value it arrived with.
+            let fact = match &operation.operands[0] {
+                mir::Value::Parameter(id) if func.parameters()[id.as_index()].is_value() => {
+                    match place_of(&operation.operands[0]) {
+                        Some(source) if tracked(source) => state.place(source),
+                        _ => Fact::Unknown,
+                    }
+                }
+                source => value_operand_fact(source, func.constants(), state),
+            };
             state.set_place(place, fact, register_places);
         }
         OperationKind::BuildArray { element_ty } => {
@@ -1046,12 +1055,14 @@ fn transfer(
             let Some(result) = operation.result_id() else {
                 return;
             };
-            let fact = match place_of(&operation.operands[0]) {
-                Some(place) if tracked(place) => match state.place(place) {
-                    fact @ Fact::Known(Const::VariantTag(_)) => fact,
-                    fact @ Fact::Outcomes(_) => fact,
-                    _ => Fact::Unknown,
-                },
+            // The variant is read in place, or as a tag value.
+            let variant = match place_of(&operation.operands[0]) {
+                Some(place) if tracked(place) => state.place(place),
+                Some(_) => Fact::Unknown,
+                None => value_operand_fact(&operation.operands[0], func.constants(), state),
+            };
+            let fact = match variant {
+                fact @ (Fact::Known(Const::VariantTag(_)) | Fact::Outcomes(_)) => fact,
                 _ => Fact::Unknown,
             };
             state.registers.insert(result, fact);
@@ -1399,6 +1410,12 @@ pub(crate) fn escaping_roots(
 
     let mut escaped = FxHashSet::default();
     let escape_operand = |operand: &mir::Value, escaped: &mut FxHashSet<Root>| {
+        // A value parameter is no storage, so passing or storing it exposes nothing.
+        if let mir::Value::Parameter(id) = operand
+            && func.parameters()[id.as_index()].is_value()
+        {
+            return;
+        }
         if let Some(root) = register_places.root_of(operand) {
             escaped.insert(root);
         }
