@@ -3,6 +3,9 @@ import typescriptEslint from 'typescript-eslint';
 import vueParser from 'vue-eslint-parser';
 
 export default typescriptEslint.config(
+	{
+		ignores: ['dist/**', 'script-api/pkg/**'],
+	},
 	...typescriptEslint.configs.recommended,
 	...pluginVue.configs['flat/recommended'],
 

@@ -1004,7 +1004,6 @@ mod tests {
     use super::*;
     use crate::{
         Location, MirOptimization,
-        hir::function::ArgConvention,
         mir::{
             ParameterKind,
             builder::FunctionBuilder,

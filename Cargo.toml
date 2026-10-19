@@ -95,6 +95,9 @@ unused_assignments = "allow"
 
 [lints.clippy]
 collapsible_if = "allow"
+# Temporary workaround for Clippy linting derive-generated field initializers.
+# Remove once https://github.com/rust-lang/rust-clippy/issues/17525 is fixed in stable.
+redundant_field_names = "allow"
 
 [[bench]]
 name = "benches"

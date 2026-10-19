@@ -13,7 +13,7 @@ use super::diagnostics::ErrorData;
 /// All four positions use the [`PositionEncoding`](super::PositionEncoding) configured on the IDE
 /// compiler. Several entries may share a rendered range, one for each source range whose work its
 /// code does, and one for each call site that code was inlined through.
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 #[derive(Clone)]
 pub struct TextSourceMapEntry {
     pub from: u32,

@@ -10,7 +10,7 @@ It achieves so by borrowing the type system from Haskell, the syntax from Rust, 
 - Run all native tests efficiently: `cargo nextest run`
 - Also run test subsets with `nextest`: `cargo nextest run <substring>`
 - Run language tests under Wasm in Node: `make test-wasm-release`
-- Run the Rust linter: `cargo clippy`
+- Run the linters: `make lint`
 - Validate IDE Lezer grammar: `make validate-grammar` in `playground/`
 - Format the code: `cargo fmt`
 - Print content of std: `cargo run --example ferlium -- --print-std`

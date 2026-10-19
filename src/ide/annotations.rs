@@ -26,9 +26,10 @@ use wasm_bindgen::prelude::*;
 /// An annotation to display at an absolute source position.
 ///
 /// `pos` uses the [`PositionEncoding`](super::PositionEncoding) configured on the IDE compiler.
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 pub struct AnnotationData {
     pub pos: usize,
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
     pub hint: String,
 }
 

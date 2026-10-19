@@ -22,13 +22,15 @@ use wasm_bindgen::prelude::*;
 ///
 /// `from` and `to` use the [`PositionEncoding`](super::PositionEncoding) configured on the IDE
 /// compiler.
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 #[derive(Debug, Clone)]
 pub struct ErrorData {
     pub(super) source_id: SourceId,
     pub from: u32,
     pub to: u32,
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
     pub file: String,
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
     pub text: String,
     pub severity: DiagnosticSeverity,
 }
@@ -71,10 +73,11 @@ impl ErrorData {
 }
 
 /// Diagnostics and success state from one IDE compilation attempt.
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 #[derive(Debug, Clone)]
 pub struct CompilationReport {
     pub succeeded: bool,
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
     pub diagnostics: Vec<ErrorData>,
 }
 
