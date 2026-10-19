@@ -18,7 +18,7 @@ use crate::{
     hir::{function::ArgConvention, value::VariantPayloadStorage},
     mir::{
         self, BasicBlock, DebugLocation, Function, InlineSite, InlineSites, Operation,
-        OperationKind, Parameter, ParameterKind,
+        OperationKind, Parameter, ParameterKind, ResultTransport,
         operation::{ProductProjectionMetadata, VariantMetadata},
         pass::OptimizationStats,
         terminator::{Terminator, TerminatorKind},
@@ -75,6 +75,9 @@ impl CompiledStdMirSnapshot {
         inline_sites: &InlineSites,
         module: &Module,
     ) -> Result<Self, SnapshotError> {
+        if let Some(error) = artifacts.limit_error() {
+            return Err(SnapshotError::InvalidMir(error.to_string()));
+        }
         Ok(Self {
             module: module.module_id(),
             module_path: module.path().to_string(),
@@ -175,7 +178,7 @@ struct SnapshotSpecialization {
 pub(super) struct SnapshotMirFunction {
     name: String,
     result_convention: CallResultConvention,
-    value_result: Option<SnapshotTypeId>,
+    direct_result_type: Option<SnapshotTypeId>,
     parameters: Vec<SnapshotParameter>,
     constants: Vec<SnapshotConstant>,
     blocks: Vec<SnapshotBasicBlock>,
@@ -284,7 +287,7 @@ enum SnapshotOperationKind {
     Call {
         ty: SnapshotCallImplType,
         metadata: Option<SnapshotCallMetadata>,
-        value_result: bool,
+        result_transport: ResultTransport,
     },
     Project {
         yielded: SnapshotTypeId,
@@ -622,8 +625,8 @@ impl SnapshotMirFunction {
         Ok(Self {
             name: function.name.to_string(),
             result_convention: function.result_convention(),
-            value_result: function
-                .value_result()
+            direct_result_type: function
+                .direct_result_type()
                 .map(|ty| graph.capture(ty))
                 .transpose()?,
             parameters: function
@@ -658,7 +661,7 @@ impl SnapshotMirFunction {
         Ok(Function::new(
             self.name.as_str().into(),
             self.result_convention,
-            self.value_result
+            self.direct_result_type
                 .map(|ty| resolve_type(types, ty))
                 .transpose()?,
             self.parameters
@@ -873,14 +876,14 @@ impl SnapshotOperationKind {
             Source::Call {
                 ty,
                 metadata,
-                value_result,
+                result_transport,
             } => Stored::Call {
                 ty: SnapshotCallImplType::capture(ty, graph)?,
                 metadata: metadata
                     .as_deref()
                     .map(|m| SnapshotCallMetadata::capture(m, graph))
                     .transpose()?,
-                value_result: *value_result,
+                result_transport: *result_transport,
             },
             Source::Project { yielded, ty } => Stored::Project {
                 yielded: graph.capture(*yielded)?,
@@ -1029,14 +1032,14 @@ impl SnapshotOperationKind {
             Stored::Call {
                 ty,
                 metadata,
-                value_result,
+                result_transport,
             } => Runtime::Call {
                 ty: Box::new(ty.materialize(types)?),
                 metadata: metadata
                     .as_ref()
                     .map(|m| m.materialize(types).map(Box::new))
                     .transpose()?,
-                value_result: *value_result,
+                result_transport: *result_transport,
             },
             Stored::Project { yielded, ty } => Runtime::Project {
                 yielded: resolve_type(types, *yielded)?,

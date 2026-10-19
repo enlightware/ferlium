@@ -21,7 +21,7 @@ use crate::{
     std::STD_MODULE_ID,
 };
 use crate::{
-    compiler::{CompilerSession, Modules},
+    compiler::{CompilerSession, Modules, error::CompilerLimit},
     emit_mir::build_mir_function,
     mir::{
         self, InlineSites,
@@ -251,6 +251,8 @@ pub(crate) struct Specialization {
 /// always exactly the HIR table. That is what makes a `FunctionId` meaningful only in a
 /// `(module, stage)` context, and what lets the two stages be told apart without a flag.
 pub(crate) struct MirArtifacts {
+    /// Failed construction is private and cannot be installed or written to a snapshot.
+    limit_error: Option<CompilerLimit>,
     functions: Vec<Option<mir::Function>>,
     specializations: Vec<Specialization>,
     /// Specializations the optimizer built and then found nothing calling.
@@ -281,6 +283,10 @@ pub(crate) struct MirArtifacts {
 }
 
 impl MirArtifacts {
+    pub(crate) fn limit_error(&self) -> Option<CompilerLimit> {
+        self.limit_error
+    }
+
     pub(crate) fn build(module: &Module, modules: &Modules) -> Self {
         let env = ModuleEnv::new(module, modules);
         for index in 0..module.impl_count() {
@@ -372,6 +378,7 @@ impl MirArtifacts {
             &external_will_return,
         );
         Self {
+            limit_error: None,
             functions,
             specializations: Vec::new(),
             pruned_specializations: 0,
@@ -493,6 +500,7 @@ impl MirArtifacts {
             next += 1;
         }
         optimization_stats.add(specializations.kept_ahead_stats());
+        let limit_error = specializations.limit_error();
         let mut functions = specializations.take_finished();
 
         // Share the copies that became identical only under optimization. Creation-time sharing
@@ -554,6 +562,7 @@ impl MirArtifacts {
         }
 
         Self {
+            limit_error,
             functions,
             specializations,
             pruned_specializations,
@@ -587,6 +596,7 @@ impl MirArtifacts {
         raw: &MirArtifacts,
     ) -> Self {
         Self {
+            limit_error: None,
             functions,
             specializations,
             pruned_specializations,
@@ -669,7 +679,8 @@ pub(crate) fn ensure_physical_mir_artifacts(
     {
         return Ok(());
     }
-    ensure_optimized_mir_artifacts(session, module_id);
+    ensure_optimized_mir_artifacts(session, module_id)
+        .map_err(BackendReadinessError::CompilerLimit)?;
     let optimized = artifacts
         .optimized_mir
         .get()
@@ -785,7 +796,10 @@ pub(crate) fn ensure_mir_artifacts(modules: &Modules, module_id: ModuleId) {
 /// module being compiled is not yet registered — it runs against fully installed module entries, so
 /// a pass may consult the bodies of the module it is optimizing as well as those of its
 /// dependencies.
-pub(crate) fn ensure_optimized_mir_artifacts(session: &CompilerSession, module_id: ModuleId) {
+pub(crate) fn ensure_optimized_mir_artifacts(
+    session: &CompilerSession,
+    module_id: ModuleId,
+) -> Result<(), CompilerLimit> {
     let modules = session.raw_modules();
     ensure_mir_artifacts(modules, module_id);
 
@@ -793,7 +807,7 @@ pub(crate) fn ensure_optimized_mir_artifacts(session: &CompilerSession, module_i
         .get(module_id)
         .unwrap_or_else(|| panic!("module {module_id} is not registered"));
     if entry.artifacts().optimized_mir.get().is_some() {
-        return;
+        return Ok(());
     }
 
     let dependencies = entry
@@ -802,7 +816,7 @@ pub(crate) fn ensure_optimized_mir_artifacts(session: &CompilerSession, module_i
         .deps()
         .collect::<Vec<_>>();
     for dependency in dependencies {
-        ensure_optimized_mir_artifacts(session, dependency);
+        ensure_optimized_mir_artifacts(session, dependency)?;
     }
 
     let entry = modules.get(module_id).unwrap();
@@ -831,6 +845,9 @@ pub(crate) fn ensure_optimized_mir_artifacts(session: &CompilerSession, module_i
         not(all(target_arch = "wasm32", target_os = "unknown"))
     )))]
     let optimized = MirArtifacts::optimize(raw, module, session);
+    if let Some(error) = optimized.limit_error() {
+        return Err(error);
+    }
     entry.artifacts().set_optimized_mir(optimized);
     #[cfg(all(
         feature = "std-snapshot",
@@ -846,4 +863,5 @@ pub(crate) fn ensure_optimized_mir_artifacts(session: &CompilerSession, module_i
         .optimized_mir_cache_checksum
         .set(checksum)
         .unwrap_or_else(|_| panic!("optimized MIR cache lineage may only be installed once"));
+    Ok(())
 }

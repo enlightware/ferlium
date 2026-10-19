@@ -10,7 +10,7 @@ use crate::{
     format::FormatWith,
     hir::function::ArgConvention,
     mir::{
-        self, DebugLocation, Operation, ParameterId, ValueId, operation,
+        self, DebugLocation, Operation, ParameterId, ResultTransport, ValueId, operation,
         role::ValueRoles,
         terminator::{Terminator, TerminatorKind},
         value::{Constant, ConstantId},
@@ -97,10 +97,9 @@ impl BasicBlock {
 pub struct Function {
     pub name: Ustr,
     result_convention: CallResultConvention,
-    /// The result type of a definition carrying its result as a value, which each `return`
-    /// passes, instead of writing it through a result parameter. See
-    /// [`accepts_value_result`](operation::accepts_value_result).
-    value_result: Option<Type>,
+    /// The result type when no output parameter carries it: a scalar returned as a value or
+    /// an omitted zero-sized product. Physical helpers may omit this metadata.
+    direct_result_type: Option<Type>,
     parameters: Vec<Parameter>,
     constants: Vec<Constant>,
     blocks: Vec<BasicBlock>,
@@ -123,7 +122,7 @@ impl Function {
     pub(crate) fn new(
         name: Ustr,
         result_convention: CallResultConvention,
-        value_result: Option<Type>,
+        direct_result_type: Option<Type>,
         parameters: Vec<Parameter>,
         constants: Vec<Constant>,
         blocks: Vec<BasicBlock>,
@@ -131,7 +130,7 @@ impl Function {
         Self {
             name,
             result_convention,
-            value_result,
+            direct_result_type,
             parameters,
             constants,
             blocks,
@@ -144,7 +143,26 @@ impl Function {
 
     /// The result type, if each `return` passes the result as a value.
     pub fn value_result(&self) -> Option<Type> {
-        self.value_result
+        (self.result_convention == CallResultConvention::Value)
+            .then_some(self.direct_result_type)
+            .flatten()
+    }
+
+    /// How this function's entry transports its result.
+    pub fn result_transport(&self) -> ResultTransport {
+        if self.result_convention == CallResultConvention::NoValue {
+            ResultTransport::NoValue
+        } else if self.value_result().is_some() {
+            ResultTransport::Value
+        } else {
+            ResultTransport::Place
+        }
+    }
+
+    /// Type of a result carried without an output parameter, including NoValue. Retained for
+    /// typed callable adapters and to distinguish specializations returning different products.
+    pub(crate) fn direct_result_type(&self) -> Option<Type> {
+        self.direct_result_type
     }
 
     pub fn parameters(&self) -> &[Parameter] {
@@ -230,7 +248,7 @@ impl Function {
             }
             if self.result_convention == CallResultConvention::NoValue {
                 write!(text, ") no_value:")?;
-            } else if let Some(ty) = self.value_result {
+            } else if let Some(ty) = self.direct_result_type {
                 write!(text, ") -> {}:", ty.format_with(env))?;
             } else {
                 write!(text, "):")?;
@@ -352,7 +370,7 @@ impl Function {
         (
             self.name,
             self.result_convention,
-            self.value_result,
+            self.direct_result_type,
             self.parameters,
             self.constants,
             self.blocks,

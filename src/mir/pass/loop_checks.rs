@@ -57,7 +57,7 @@ use crate::{
     },
     types::{
         effects::{Effect, PrimitiveEffect},
-        r#type::{CallImplType, Type},
+        r#type::{CallImplType, CallResultConvention, Type},
     },
 };
 
@@ -732,13 +732,14 @@ pub(crate) fn apply(
         let end = emitter.quantity(&guard.end);
         let inclusive = emitter.boolean(guard.inclusive);
         let length = emitter.quantity(&guard.length);
-        let result = emitter.place(Type::unit());
         let (callee, ty) = known.array_loop_indices_check();
+        let mut ty = ty.clone();
+        ty.result_convention = CallResultConvention::NoValue;
         let call = Operation::call(
             span,
             mir::Value::Function(callee),
-            [base, stride, start, end, inclusive, length, result],
-            ty.clone(),
+            [base, stride, start, end, inclusive, length],
+            ty,
         );
         let next = edit.add_block(Terminator::goto(span, guard.header));
         let cleanup = edit.add_block(guard.cleanup_terminator);

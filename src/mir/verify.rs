@@ -20,12 +20,10 @@ use crate::{
     format::FormatWith,
     mir::{
         self, BlockId, CallMetadata, Function, Instantiation, Operation, OperationKind,
-        OperationResult, ParameterId, ParameterKind, ValueId,
+        OperationResult, ParameterId, ParameterKind, ResultTransport, ValueId,
         dominance::Dominance,
-        operation::{
-            SourceFallibility, accepts_value_argument, accepts_value_result, is_scalar_value_type,
-        },
-        physical::is_zero_sized_result,
+        operation::{SourceFallibility, accepts_value_argument, is_scalar_value_type},
+        results::{call_result_transport, is_zero_sized_result},
         role::{self, MirType, ValueRole, ValueRoles},
         terminator::TerminatorKind,
     },
@@ -521,11 +519,6 @@ impl<'a> Verifier<'a> {
     fn verify(mut self, semantic_storage: bool, roles: Option<ValueRoles>) {
         self.semantic = semantic_storage;
         if semantic_storage {
-            assert_ne!(
-                self.func.result_convention(),
-                CallResultConvention::NoValue,
-                "NoValue entries belong to physical MIR"
-            );
             assert!(
                 !self.func.blocks().any(|block| {
                     let block = self.func.block(block);
@@ -563,6 +556,24 @@ impl<'a> Verifier<'a> {
     /// each `return` passes a value exactly when it does.
     fn verify_result_form(&self) {
         let value_result = self.func.value_result();
+        if self.func.result_convention() == CallResultConvention::NoValue {
+            if let Some(ty) = self.func.direct_result_type() {
+                assert!(
+                    is_zero_sized_result(ty, &self.env),
+                    "NoValue definition must declare a zero-sized result"
+                );
+            }
+            assert!(
+                value_result.is_none()
+                    && !self
+                        .func
+                        .parameters()
+                        .iter()
+                        .any(|p| p.kind == ParameterKind::Return),
+                "NoValue definitions have no result parameter or value"
+            );
+        }
+
         if let Some(ty) = value_result {
             assert!(
                 self.func.result_convention() == CallResultConvention::Value
@@ -1016,25 +1027,31 @@ impl<'a> Verifier<'a> {
             OperationKind::Call {
                 ty,
                 metadata,
-                value_result,
+                result_transport,
             } => {
                 // Semantic MIR carries a call's result as a value exactly where the call-site type
                 // says so; physical MIR keeps the place where the callee's entry needs it.
-                let canonical = accepts_value_result(ty);
+                let canonical = call_result_transport(ty, &self.env);
                 assert!(
                     if self.semantic {
-                        *value_result == canonical
+                        *result_transport == canonical
                     } else {
-                        !value_result || canonical
+                        *result_transport != ResultTransport::Value
+                            || canonical == ResultTransport::Value
                     },
-                    "MIR function `{}` node {}: call result of type {} is {} a value\n{}",
+                    "MIR function `{}` node {}: call result of type {} uses {:?} transport, expected {:?}\n{}",
                     self.func.name,
                     node,
                     ty.fn_ty.ret.format_with(&self.env),
-                    if *value_result { "wrongly" } else { "not" },
+                    result_transport,
+                    canonical,
                     self.func.format_with(&self.env)
                 );
                 if ty.result_convention == CallResultConvention::NoValue {
+                    assert!(
+                        self.semantic || matches!(operands[0], mir::Value::Function(_)),
+                        "physical NoValue calls require a direct entry"
+                    );
                     assert!(
                         is_zero_sized_result(ty.fn_ty.ret, &self.env),
                         "NoValue requires an inhabited, statically zero-sized product result"

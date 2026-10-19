@@ -436,7 +436,9 @@ mod tests {
                 .compile_for(ExecutionTarget::Mir, src, name, Path::single_str(name))
                 .unwrap_or_else(|_| panic!("`{name}` compiles"))
                 .module_id;
-            session.prepare_execution_target(ExecutionTarget::Mir, module);
+            session
+                .prepare_execution_target(ExecutionTarget::Mir, module)
+                .expect("MIR preparation failed");
             let mut grown = overgrown(&session, module);
             // Every session builds the same standard library, so one check covers it.
             if index == 0 {

@@ -1919,7 +1919,9 @@ mod tests {
                 .any(|op| matches!(op.kind, OperationKind::Replace))
         }));
         session.set_mir_optimization(MirOptimization::Enabled);
-        session.prepare_execution_target(ExecutionTarget::Mir, module);
+        session
+            .prepare_execution_target(ExecutionTarget::Mir, module)
+            .expect("MIR preparation failed");
         let id = session
             .expect_fresh_module(module)
             .get_local_function_id(ustr("choose"))

@@ -125,8 +125,8 @@ fn a_reified_unit_formatter_fuses_into_a_static_append() {
         rendered_function_with_prefix(&optimized, "std::Value<(std::(),)>::to_string#impl:");
     assert!(
         tuple.contains("StaticStr = \"()\"")
-            && tuple.contains("call std::string_push_static_str")
-            && !tuple.contains("call std::string_push_str"),
+            && tuple.contains("call no_value std::string_push_static_str")
+            && !tuple.contains("call no_value std::string_push_str"),
         "the reified unit string must append without an owned temporary:
 {tuple}"
     );
@@ -148,7 +148,11 @@ fn generated_trivial_value_glue_uses_representation_operations() {
     for ty in ["(std::(),)", "None | Other | Some (std::())"] {
         let clone = rendered_function_with_prefix(&raw, &format!("std::Value<{ty}>::clone#impl:"));
         assert!(
-            clone.contains("memcpy %p0 to %p1"),
+            clone.contains(if ty == "(std::(),)" {
+                "memcpy %p0 to %r0"
+            } else {
+                "memcpy %p0 to %p1"
+            }),
             "generated clone for `{ty}` must copy the whole representation:\n{clone}"
         );
         assert_eq!(

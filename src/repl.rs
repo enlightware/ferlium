@@ -6,7 +6,7 @@
 use ustr::Ustr;
 
 use crate::{
-    CompilerSession, FxHashSet, Location, Path,
+    CompilerSession, ExecutionTarget, FxHashSet, Location, Path,
     format::FormatWith,
     hir::native_functions::NativeFnR,
     module::{LocalFunctionId, Module, ModuleId, ShowModuleWithOptions, UseData, Uses, id::Id},
@@ -150,6 +150,14 @@ pub fn history_text(session: &CompilerSession, counter: usize) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Render semantic MIR, reporting compiler limits exposed during target preparation.
+pub fn mir_text(session: &mut CompilerSession, module: ModuleId) -> Result<String, String> {
+    session
+        .prepare_execution_target(ExecutionTarget::Mir, module)
+        .map_err(|error| error.format_with(session.source_table()).to_string())?;
+    Ok(session.emit_mir_module(module))
 }
 
 /// Render physical MIR without exposing compiler-internal source map APIs to frontends.

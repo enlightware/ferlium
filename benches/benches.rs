@@ -68,7 +68,9 @@ fn compile_user_code_corpus(session: &mut CompilerSession, target: ExecutionTarg
             .compile_for(target, src, &file, Path::single_str(name))
             .unwrap()
             .module_id;
-        session.prepare_execution_target(target, module_id);
+        session
+            .prepare_execution_target(target, module_id)
+            .expect("MIR preparation failed");
         black_box(module_id);
     }
 }
@@ -88,7 +90,9 @@ fn bench_session_for_target(target: BenchTarget) -> (CompilerSession, ExecutionT
     session.set_allow_experimental(true);
     if target.target() == ExecutionTarget::Mir {
         let std_id = session.std_module().module_id();
-        session.prepare_execution_target(target.target(), std_id);
+        session
+            .prepare_execution_target(target.target(), std_id)
+            .expect("MIR preparation failed");
     }
     (session, target.target())
 }
@@ -100,7 +104,9 @@ fn warm_initial_session_state() {
 fn prepared_std_mir_session() -> CompilerSession {
     let mut session = CompilerSession::new();
     let std_id = session.std_module().module_id();
-    session.prepare_execution_target(ExecutionTarget::Mir, std_id);
+    session
+        .prepare_execution_target(ExecutionTarget::Mir, std_id)
+        .expect("MIR preparation failed");
     session
 }
 
@@ -152,7 +158,11 @@ fn bench_warm_session_load(_: ()) -> BenchOutput<()> {
 #[library_benchmark(setup = bench_session, teardown = teardown_benchmark)]
 fn bench_std_mir_build(mut session: CompilerSession) -> BenchOutput<()> {
     let std_id = session.std_module().module_id();
-    measure(|| session.prepare_execution_target(ExecutionTarget::Mir, std_id));
+    measure(|| {
+        session
+            .prepare_execution_target(ExecutionTarget::Mir, std_id)
+            .unwrap()
+    });
     BenchOutput {
         session,
         result: (),
@@ -166,7 +176,11 @@ fn bench_std_mir_build(mut session: CompilerSession) -> BenchOutput<()> {
 fn bench_std_mir_optimize(mut session: CompilerSession) -> BenchOutput<()> {
     session.set_mir_optimization(MirOptimization::Enabled);
     let std_id = session.std_module().module_id();
-    measure(|| session.prepare_execution_target(ExecutionTarget::Mir, std_id));
+    measure(|| {
+        session
+            .prepare_execution_target(ExecutionTarget::Mir, std_id)
+            .unwrap()
+    });
     BenchOutput {
         session,
         result: (),

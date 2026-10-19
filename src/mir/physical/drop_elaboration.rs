@@ -20,7 +20,7 @@ use crate::{
     std::{logic::bool_type, value::variant_indirect_payload_type},
     types::{
         effects::no_effects,
-        r#type::{CallImplType, FnType, Type},
+        r#type::{CallImplType, CallResultConvention, FnType, Type},
     },
 };
 
@@ -119,19 +119,15 @@ pub(super) fn elaborate(
         } else {
             edit.block_mut(block).terminator = Terminator::goto(op.span, cleanup);
         }
-        let result = edit
-            .append_operation(cleanup, Operation::alloca(op.span, Type::unit()))
-            .expect("allocation produces a result");
-        captures.extend([op.operands[0].clone(), result]);
+        captures.push(op.operands[0].clone());
         let call = Operation::call(
             op.span,
             Value::Function(callee),
             captures,
-            CallImplType::value(FnType::new_mut_resolved(
-                [(ty, true)],
-                Type::unit(),
-                no_effects(),
-            )),
+            CallImplType::new(
+                FnType::new_mut_resolved([(ty, true)], Type::unit(), no_effects()),
+                CallResultConvention::NoValue,
+            ),
         );
         edit.block_mut(cleanup).operations.push(call);
         if variant && let Some(payload) = variant_indirect_payload_type(ty, &env) {
@@ -147,7 +143,7 @@ pub(super) fn elaborate(
         edit.block_mut(cleanup)
             .operations
             .push(Operation::clear(op.span, op.operands[0].clone()));
-        expand_cleanup(&mut edit, &template, callee.module, cleanup, 1, env);
+        expand_cleanup(&mut edit, &template, callee.module, cleanup, 0, env);
         edit.remove_unreachable_blocks();
         edit.reorder_blocks_in_reverse_postorder();
         body = edit.finish_unverified();
@@ -579,7 +575,9 @@ mod tests {
             )
             .unwrap()
             .module_id;
-        session.prepare_execution_target(ExecutionTarget::Mir, module);
+        session
+            .prepare_execution_target(ExecutionTarget::Mir, module)
+            .expect("MIR preparation failed");
         let source = session.expect_fresh_module(module);
         let callee = FunctionId::new(
             module,
@@ -745,7 +743,9 @@ mod tests {
             )
             .unwrap()
             .module_id;
-        session.prepare_execution_target(ExecutionTarget::Mir, module);
+        session
+            .prepare_execution_target(ExecutionTarget::Mir, module)
+            .expect("MIR preparation failed");
         let source = session.expect_fresh_module(module);
         let callee = FunctionId::new(
             module,
@@ -861,7 +861,9 @@ mod tests {
             )
             .unwrap()
             .module_id;
-        session.prepare_execution_target(ExecutionTarget::Mir, module);
+        session
+            .prepare_execution_target(ExecutionTarget::Mir, module)
+            .expect("MIR preparation failed");
         let source = session.expect_fresh_module(module);
         let semantic = session
             .mir_artifacts_for(module, MirOptimization::Disabled)
@@ -1059,7 +1061,9 @@ mod tests {
             )
             .unwrap()
             .module_id;
-        session.prepare_execution_target(ExecutionTarget::Mir, module);
+        session
+            .prepare_execution_target(ExecutionTarget::Mir, module)
+            .expect("MIR preparation failed");
         let source = session.expect_fresh_module(module);
         let callee = FunctionId::new(
             module,
@@ -1169,7 +1173,9 @@ mod tests {
             )
             .unwrap()
             .module_id;
-        session.prepare_execution_target(ExecutionTarget::Mir, module);
+        session
+            .prepare_execution_target(ExecutionTarget::Mir, module)
+            .expect("MIR preparation failed");
         let source = session.expect_fresh_module(module);
         let ty = session
             .mir_artifacts_for(module, MirOptimization::Disabled)

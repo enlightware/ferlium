@@ -87,8 +87,9 @@ fn remove_dead_results(
     func: &Function,
     candidates: FxHashMap<ValueId, DeadResultCandidate>,
     dead_at: impl Fn(&ValueId) -> usize,
+    mut no_results: Vec<DeadResultCandidate>,
 ) -> Option<Function> {
-    if candidates.is_empty() {
+    if candidates.is_empty() && no_results.is_empty() {
         return None;
     }
 
@@ -135,20 +136,27 @@ fn remove_dead_results(
         .keys()
         .copied()
         .filter(|result| remaining_uses(&uses, result) == dead_at(result))
+        .map(Some)
+        .chain((!no_results.is_empty()).then_some(None))
         .collect();
     let mut removed_results = FxHashSet::default();
     let mut removed = FxHashMap::<BlockId, FxHashSet<OperationIndex>>::default();
     while let Some(result) = pending.pop() {
-        if !removed_results.insert(result) || remaining_uses(&uses, &result) != dead_at(&result) {
-            continue;
-        }
-        for load in unread_loads.remove(&result).into_iter().flatten() {
-            removed
-                .entry(load.block)
-                .or_default()
-                .insert(load.operation);
-        }
-        let mut released = vec![candidates[&result]];
+        let mut released = if let Some(result) = result {
+            if !removed_results.insert(result) || remaining_uses(&uses, &result) != dead_at(&result)
+            {
+                continue;
+            }
+            for load in unread_loads.remove(&result).into_iter().flatten() {
+                removed
+                    .entry(load.block)
+                    .or_default()
+                    .insert(load.operation);
+            }
+            vec![candidates[&result]]
+        } else {
+            mem::take(&mut no_results)
+        };
         while let Some(definition) = released.pop() {
             removed
                 .entry(definition.block)
@@ -177,7 +185,7 @@ fn remove_dead_results(
                 if candidates.contains_key(operand)
                     && remaining_uses(&uses, operand) == dead_at(operand)
                 {
-                    pending.push(*operand);
+                    pending.push(Some(*operand));
                 }
             }
         }
@@ -234,7 +242,7 @@ pub(crate) fn remove_dead_trivial_results(func: &Function) -> Option<Function> {
             }
         }
     }
-    remove_dead_results(func, candidates, |_| 0)
+    remove_dead_results(func, candidates, |_| 0, Vec::new())
 }
 
 /// Removes unused calls known to return without source-visible effects.
@@ -245,7 +253,8 @@ pub(crate) fn remove_dead_trivial_results(func: &Function) -> Option<Function> {
 /// raw-MIR `will_return` proof. Its authoritative parameter conventions must all be passive `Let`,
 /// it may have no hidden evidence inputs, and its concrete result must be `TrivialCopy`; together
 /// these conditions exclude mutation through an argument and a managed result's ownership
-/// lifetime. Its result must be a local whole-place `alloca` with no surviving read. A backwards
+/// lifetime. Its result must be a local whole-place `alloca` or a register with no surviving read,
+/// or absent (`NoValue`). A backwards
 /// use-count worklist removes chains in one pass: deleting a dead consumer can make the total call
 /// that produced one of its arguments dead in turn.
 pub(crate) fn remove_dead_proven_calls(
@@ -257,6 +266,7 @@ pub(crate) fn remove_dead_proven_calls(
 ) -> Option<Function> {
     let mut allocas = FxHashSet::default();
     let mut value_results = FxHashSet::default();
+    let mut no_results = Vec::new();
     let mut candidates = FxHashMap::<ValueId, DeadResultCandidate>::default();
     let mut trivial_copy = FxHashMap::default();
     for block in func.blocks() {
@@ -269,7 +279,12 @@ pub(crate) fn remove_dead_proven_calls(
             let OperationKind::Call { ty, metadata, .. } = &operation.kind else {
                 continue;
             };
-            if !ty.effects().is_empty() || ty.result_convention != CallResultConvention::Value {
+            if !ty.effects().is_empty()
+                || !matches!(
+                    ty.result_convention,
+                    CallResultConvention::Value | CallResultConvention::NoValue
+                )
+            {
                 continue;
             }
             let Some(mut call) = dataflow::call_operands(operation) else {
@@ -323,6 +338,13 @@ pub(crate) fn remove_dead_proven_calls(
             if !eligible {
                 continue;
             }
+            if ty.result_convention == CallResultConvention::NoValue {
+                no_results.push(DeadResultCandidate {
+                    block,
+                    operation: OperationIndex::from_index(index),
+                });
+                continue;
+            }
             let result = match call.result {
                 // A result register is dead once nothing reads it.
                 None => match operation.result_id() {
@@ -348,9 +370,12 @@ pub(crate) fn remove_dead_proven_calls(
     // The shared use census is the more expensive part and starts only after the semantic scan
     // above found an eligible call whose result is a register or local storage, which the call
     // itself uses.
-    remove_dead_results(func, candidates, |result| {
-        usize::from(!value_results.contains(result))
-    })
+    remove_dead_results(
+        func,
+        candidates,
+        |result| usize::from(!value_results.contains(result)),
+        no_results,
+    )
 }
 
 #[derive(Clone)]
@@ -1267,8 +1292,8 @@ mod tests {
         format::FormatWith,
         hir::value::LiteralValue,
         mir::{
-            Operation, OperationKind, ParameterKind, Value, builder::FunctionBuilder,
-            edit::FunctionEdit, role::ValueRoles, terminator::Terminator,
+            Operation, OperationKind, ParameterKind, ResultTransport, Value,
+            builder::FunctionBuilder, edit::FunctionEdit, role::ValueRoles, terminator::Terminator,
         },
         module::{FunctionId, LocalFunctionId, LocalSubscriptId, ModuleId, SubscriptId, id::Id},
         std::{logic::bool_type, math::int_type},
@@ -1789,10 +1814,16 @@ mod tests {
 
         let mut edit = FunctionEdit::new(function);
         let call = &mut edit.block_mut(block).operations[1];
-        let OperationKind::Call { ty, .. } = &mut call.kind else {
+        let OperationKind::Call {
+            ty,
+            result_transport,
+            ..
+        } = &mut call.kind
+        else {
             unreachable!()
         };
         ty.result_convention = CallResultConvention::NoValue;
+        *result_transport = ResultTransport::NoValue;
         ty.fn_ty.ret = Type::unit();
         call.operands = call.operands[..call.operands.len() - 1].into();
         let function = edit.finish_unverified();

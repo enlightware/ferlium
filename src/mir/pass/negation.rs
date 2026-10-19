@@ -62,7 +62,7 @@ use crate::{
     containers::b,
     hir::value::LiteralValue,
     mir::{
-        self, BlockId, Function, Operation, OperationKind,
+        self, BlockId, Function, Operation, OperationKind, ResultTransport,
         dominance::Dominance,
         edit::FunctionEdit,
         role::{MirType, ValueRoles},
@@ -375,7 +375,7 @@ impl<'a> Resolver<'a> {
                     OperationKind::Load
                         | OperationKind::CompareEqual
                         | OperationKind::Call {
-                            value_result: true,
+                            result_transport: ResultTransport::Value,
                             ..
                         }
                 ) && self.is_boolean(value)

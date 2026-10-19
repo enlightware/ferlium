@@ -27,8 +27,9 @@ use crate::{
         value::{LiteralValue, Value, VariantPayloadStorage},
     },
     mir::{
-        self, BlockId, Function, Operation, OperationKind, ValueId, function::ParameterKind,
-        interpreter::FunctionKey, profile::MirExecutionProfile, terminator::TerminatorKind,
+        self, BlockId, Function, Operation, OperationKind, ResultTransport, ValueId,
+        function::ParameterKind, interpreter::FunctionKey, profile::MirExecutionProfile,
+        terminator::TerminatorKind,
     },
     module::{
         DictionaryEntryEvidence, FunctionId, ModuleEnv, SubscriptId, TraitDictionaryId, id::Id,
@@ -1658,7 +1659,9 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         use OperationKind::*;
         let result = match &operation.kind {
             Call {
-                ty, value_result, ..
+                ty,
+                result_transport,
+                ..
             } => {
                 let mut callable = self.resolve_callable(self.operand(
                     body,
@@ -1679,7 +1682,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 let marker = self.memory.len();
                 // A call passes its result place too: a value result gets a cell of its own, read
                 // once the call returns.
-                let result_cell = if *value_result {
+                let result_cell = if *result_transport == ResultTransport::Value {
                     let cell = self
                         .memory
                         .allocate(ty.fn_ty.ret, Some(operation.span.location))?;
@@ -2386,6 +2389,17 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             return Err(unsupported("this native adapter"));
         }
         let signature = native.signature();
+        if signature.result == NativeResult::Unit && args.len() == signature.parameters.len() {
+            // The interpreter's native protocol writes a logical unit even when the entry ABI
+            // omits output storage. Keep this private cell out of physical MIR.
+            let marker = self.memory.len();
+            let output = self.memory.allocate(Type::unit(), None)?;
+            let mut args = args.to_vec();
+            args.push(Binding::Place(output));
+            let result = self.call_native(id, &args);
+            self.memory.restore(marker);
+            return result;
+        }
         let (output, inputs) = args
             .split_last()
             .ok_or_else(|| invalid("native result missing"))?;
@@ -2799,7 +2813,9 @@ mod tests {
              pub subscript cell<T>(x: &mut T) -> T where T: Value { ref { let v = x; yield v; } mut { let mut v = x; yield v; x = v; } }",
             "generic_traits", Path::single_str("generic_traits"),
         ).unwrap().module_id;
-        session.prepare_execution_target(ExecutionTarget::Mir, support);
+        session
+            .prepare_execution_target(ExecutionTarget::Mir, support)
+            .expect("MIR preparation failed");
         // Keep this invariant test: ordinary optimized execution can specialize away every
         // dictionary parameter, even after the physical backend joins the full language suite.
         for source in [
@@ -2830,7 +2846,9 @@ mod tests {
                 .compile(source, "generic", Path::single_str("generic"))
                 .unwrap()
                 .module_id;
-            session.prepare_execution_target(ExecutionTarget::Mir, module);
+            session
+                .prepare_execution_target(ExecutionTarget::Mir, module)
+                .expect("MIR preparation failed");
             let entry = session
                 .expect_fresh_module(module)
                 .get_local_function_id(ustr("compute"))

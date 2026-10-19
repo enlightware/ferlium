@@ -61,7 +61,7 @@ pub(crate) struct EditBlock {
 pub(crate) struct FunctionEdit {
     name: Ustr,
     result_convention: CallResultConvention,
-    value_result: Option<Type>,
+    direct_result_type: Option<Type>,
     parameters: Vec<Parameter>,
     constants: ConstantPool,
     blocks: Vec<EditBlock>,
@@ -96,7 +96,7 @@ impl FunctionEdit {
             .max()
             .unwrap_or(0);
 
-        let (name, result_convention, value_result, parameters, constants, blocks) =
+        let (name, result_convention, direct_result_type, parameters, constants, blocks) =
             func.into_parts();
         let blocks = blocks
             .into_iter()
@@ -111,7 +111,7 @@ impl FunctionEdit {
         Self {
             name,
             result_convention,
-            value_result,
+            direct_result_type,
             parameters,
             constants: ConstantPool::new(constants),
             blocks,
@@ -206,7 +206,32 @@ impl FunctionEdit {
             block.operations.push(load);
             block.terminator = Terminator::ret_value(span, value);
         }
-        self.value_result = Some(ty);
+        self.direct_result_type = Some(ty);
+    }
+
+    /// Removes a zero-sized result parameter while preserving any body-local uses of its place.
+    pub(crate) fn return_result_as_no_value(&mut self, ty: Type) {
+        let Some(index) = self
+            .parameters
+            .iter()
+            .position(|p| p.kind == ParameterKind::Return)
+        else {
+            return;
+        };
+        let parameter = mir::Value::Parameter(ParameterId::from_index(index));
+        let span = self.blocks[self.entry().as_index()].terminator.span;
+        let mut alloca = Operation::alloca(span, ty);
+        let slot = self.assign_new_result(&mut alloca).unwrap();
+        self.visit_operands_mut(|operand| {
+            if *operand == parameter {
+                *operand = slot.clone();
+            }
+        });
+        self.remove_parameters(|p| p.kind == ParameterKind::Return);
+        self.result_convention = CallResultConvention::NoValue;
+        self.direct_result_type = Some(ty);
+        let entry = self.entry();
+        self.block_mut(entry).operations.insert(0, alloca);
     }
 
     /// The constant pool, for a pass that rewrites the *types* of existing entries. Adding one goes
@@ -245,7 +270,9 @@ impl FunctionEdit {
     }
 
     pub(crate) fn value_result(&self) -> Option<Type> {
-        self.value_result
+        (self.result_convention == CallResultConvention::Value)
+            .then_some(self.direct_result_type)
+            .flatten()
     }
 
     pub(crate) fn blocks(&self) -> impl Iterator<Item = BlockId> + '_ {
@@ -628,7 +655,7 @@ impl FunctionEdit {
         Function::new(
             self.name,
             self.result_convention,
-            self.value_result,
+            self.direct_result_type,
             self.parameters,
             self.constants.into_vec(),
             blocks,

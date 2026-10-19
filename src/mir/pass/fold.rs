@@ -432,7 +432,7 @@ pub(crate) fn fold_function(
         let span = block.terminator.span;
         block.terminator = Terminator::goto(span, normal);
         // An infallible call carries a scalar result as a value.
-        let store = scalar_arguments::return_value_from_call(&mut edit, &mut operation);
+        let store = scalar_arguments::normalize_call_result(&mut edit, &mut operation, env);
         let block = edit.block_mut(block_id);
         block.operations.push(operation);
         block.operations.extend(store);

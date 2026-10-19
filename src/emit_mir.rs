@@ -17,12 +17,12 @@ use crate::{
         value::LiteralValue,
     },
     mir::{
-        self, BlockId, Instantiation, Operation,
+        self, BlockId, Instantiation, Operation, ResultTransport,
         builder::FunctionBuilder,
         operation::{
-            SourceFallibility, accepts_value_argument, accepts_value_result,
-            definition_returns_value, is_scalar_value_type,
+            SourceFallibility, accepts_value_argument, accepts_value_result, is_scalar_value_type,
         },
+        results::{call_result_transport, definition_result_transport, zero_sized_result},
         ssa_construction::Variables,
         terminator::Terminator,
     },
@@ -345,7 +345,13 @@ impl<'a> Emitter<'a> {
             .expect("function should be a script");
 
         let name = module.get_function_name_by_id(source).unwrap();
-        let mut lowered = FunctionBuilder::new(name, f.definition.return_convention());
+        let result_transport = definition_result_transport(&f.definition, env);
+        let convention = if result_transport == ResultTransport::NoValue {
+            CallResultConvention::NoValue
+        } else {
+            f.definition.return_convention()
+        };
+        let mut lowered = FunctionBuilder::new(name, convention);
 
         // The function signature is laid out as `[extra dictionary/evidence params..., runtime
         // args...]`. Extra parameters occupy the leading slots and the visible runtime arguments,
@@ -413,13 +419,9 @@ impl<'a> Emitter<'a> {
             }
         }
 
-        // Append the return out-pointer as the last parameter. It is present even when the return
-        // type is `()`: the function writes its result through this pointer and then returns with
-        // no operand. A function returning its result as a value (`accepts_value_result`) writes
-        // it into a local instead, which each `return` reads and passes.
+        // Only indirect results have a trailing output parameter.
         let return_type = f.definition.ty_scheme.ty.ret;
-        let value_result = definition_returns_value(&f.definition);
-        let return_parameter = (!value_result).then(|| {
+        let return_parameter = (result_transport == ResultTransport::Place).then(|| {
             mir::Value::Parameter(lowered.add_parameter(return_type, mir::ParameterKind::Return))
         });
 
@@ -427,8 +429,10 @@ impl<'a> Emitter<'a> {
         let entry = lowered.add_block();
         let code = &module.hir_arena[syntax.entry_node_id];
         let span = code.span;
-        if value_result {
-            lowered.set_value_result(return_type);
+        match result_transport {
+            ResultTransport::Value => lowered.set_value_result(return_type),
+            ResultTransport::NoValue => lowered.set_no_value_result(return_type),
+            ResultTransport::Place => {}
         }
 
         // Instantiate an emitter to generate the function's contents.
@@ -452,7 +456,7 @@ impl<'a> Emitter<'a> {
                 static_layouts: FxHashMap::default(),
                 loops: FxHashMap::default(),
                 return_destination: return_parameter,
-                value_result: value_result.then_some(return_type),
+                result_transport,
                 returns_place: f.definition.returns_place(),
                 scopes: Vec::new(),
                 pending_pads: Vec::new(),
@@ -470,11 +474,13 @@ impl<'a> Emitter<'a> {
         emitter.allocate_owned_locals(place_locals);
 
         // Lower the body, dispatching on the function's return convention.
-        match f.definition.return_convention() {
-            CallResultConvention::NoValue => unreachable!("NoValue is physical-only"),
+        match convention {
+            CallResultConvention::NoValue => emitter.lower_no_value_result(code),
             // A function returning its result as a value returns it from each path; any other
             // value-returning function stores its result into the return out-pointer.
-            CallResultConvention::Value if value_result => emitter.lower_return(code),
+            CallResultConvention::Value if result_transport == ResultTransport::Value => {
+                emitter.lower_return(code)
+            }
             CallResultConvention::Value => {
                 let ret_dest = emitter.return_destination();
                 emitter.lower_value_into(code, Some(ret_dest));
@@ -517,7 +523,7 @@ impl<'a> Emitter<'a> {
     /// Returns from the function, passing the result written into its local when it returns its
     /// result as a value.
     fn terminate_return(&mut self, span: Location) {
-        let terminator = if self.context.value_result.is_some() {
+        let terminator = if self.context.result_transport == ResultTransport::Value {
             let result = self.return_destination();
             let result = self
                 .insert(Operation::load(span, result))
@@ -535,10 +541,18 @@ impl<'a> Emitter<'a> {
         if let Some(destination) = &self.context.return_destination {
             return destination.clone();
         }
+        // Only direct results allocate a local lazily. Dead HIR paths can also request one
+        // after a NoValue return has terminated the block.
+        assert_ne!(self.context.result_transport, ResultTransport::Place);
         let ty = self
-            .context
-            .value_result
-            .expect("a function without a result parameter returns a value");
+            .env
+            .current
+            .get_function_by_id(self.context.source)
+            .unwrap()
+            .definition
+            .ty_scheme
+            .ty
+            .ret;
         let local = self
             .context
             .function
@@ -1186,8 +1200,13 @@ impl<'a> Emitter<'a> {
         ty: &CallImplType,
         instantiation: Option<Instantiation>,
     ) -> Option<mir::Value> {
-        let call = Operation::instantiated_call(span, callee, arguments, ty.clone(), instantiation);
-        if accepts_value_result(ty) {
+        let mut ty = ty.clone();
+        let result_transport = call_result_transport(&ty, &self.env);
+        if result_transport == ResultTransport::NoValue {
+            ty.result_convention = CallResultConvention::NoValue;
+        }
+        let call = Operation::instantiated_call(span, callee, arguments, ty, instantiation);
+        if result_transport == ResultTransport::Value {
             self.insert(call.with_value_result())
         } else {
             self.insert(call)
@@ -1232,7 +1251,16 @@ impl<'a> Emitter<'a> {
         destination: Option<mir::Value>,
         instantiation: Option<Instantiation>,
     ) {
-        if accepts_value_result(ty) {
+        let result_transport = call_result_transport(ty, &self.env);
+        if result_transport == ResultTransport::NoValue {
+            self.emit_call(node.span, callee, arguments, ty, instantiation);
+            if let Some(destination) = destination {
+                let value = self.zero_sized_constant(ty.fn_ty.ret);
+                self.store(node.span, value, destination);
+            }
+            return;
+        }
+        if result_transport == ResultTransport::Value {
             let value = self
                 .emit_call(node.span, callee, arguments, ty, instantiation)
                 .expect("a value call defines its result");
@@ -1258,7 +1286,14 @@ impl<'a> Emitter<'a> {
         instantiation: Option<Instantiation>,
     ) -> mir::Value {
         let result_storage = self.allocate_result(node, ty);
-        if accepts_value_result(ty) {
+        let result_transport = call_result_transport(ty, &self.env);
+        if result_transport == ResultTransport::NoValue {
+            self.emit_call(node.span, callee, arguments, ty, instantiation);
+            let value = self.zero_sized_constant(ty.fn_ty.ret);
+            self.store(node.span, value, result_storage.clone());
+            return result_storage;
+        }
+        if result_transport == ResultTransport::Value {
             let value = self
                 .emit_call(node.span, callee, arguments, ty, instantiation)
                 .expect("a value call defines its result");
@@ -1273,6 +1308,29 @@ impl<'a> Emitter<'a> {
         } else {
             result_storage
         }
+    }
+
+    /// Products still need their construction and ownership transfers, even without transport.
+    /// Unit has neither fields nor destruction obligations and needs no destination.
+    fn lower_no_value_result(&mut self, node: &ENode) {
+        let result_ty = self
+            .env
+            .current
+            .get_function_by_id(self.context.source)
+            .unwrap()
+            .definition
+            .ty_scheme
+            .ty
+            .ret;
+        let destination = (result_ty != Type::unit()).then(|| self.return_destination());
+        self.lower_value_into(node, destination);
+    }
+
+    fn zero_sized_constant(&mut self, ty: Type) -> mir::Value {
+        self.immediate_constant(
+            ty,
+            zero_sized_result(ty, &self.env).expect("eligible zero-sized result"),
+        )
     }
 
     /// Allocates frame storage for every
@@ -2444,11 +2502,13 @@ impl<'a> Emitter<'a> {
 
     /// Writes `()` into the result slot of a `()`-yielding tail (an assignment, a `let`, a closure-env
     /// drop) that produces no value itself, so a `()`-returning body ending in one still initializes
-    /// its (husk) `@ret`. A no-op for a `None` destination (statement position) or a terminated block.
+    /// its (husk) `@ret` where it keeps one. A no-op for a `None` destination (statement position) or a terminated block.
     fn store_unit_result(&mut self, span: Location, destination: Option<mir::Value>) {
-        if !self.current_block_is_terminated() {
+        if !self.current_block_is_terminated()
+            && let Some(destination) = destination
+        {
             let unit = self.immediate_constant(Type::unit(), LiteralValue::new_native(()));
-            self.store_into_if_needed(span, unit, destination);
+            self.store(span, unit, destination);
         }
     }
 
@@ -2550,9 +2610,9 @@ impl<'a> Emitter<'a> {
     /// its address. `node` supplies the span and the concrete result type for the allocation.
     ///
     /// The allocation depends on `f`'s result convention:
-    /// - [`CallResultConvention::Value`] allocates storage for the returned value (`alloca`) — including
-    ///   a unit return, which allocates a (zero-sized) `()` cell the callee initializes with the live
-    ///   unit value, so every result, unit or not, flows through a real cell;
+    /// - [`CallResultConvention::Value`] and [`CallResultConvention::NoValue`] allocate a place for
+    ///   a consumer needing addressable storage. A NoValue call itself receives no output place;
+    ///   its success path initializes the consumer's place from the typed constant;
     /// - [`SubscriptResultConvention::AddressorPlace`] allocates a slot holding the returned place
     ///   pointer (`alloca_place`).
     ///
@@ -2561,8 +2621,9 @@ impl<'a> Emitter<'a> {
     /// for a result through this helper.
     fn allocate_result(&mut self, node: &ENode, f: &CallImplType) -> mir::Value {
         match f.result_convention {
-            CallResultConvention::NoValue => unreachable!("NoValue is physical-only"),
-            CallResultConvention::Value => self.alloca_storage(node.span, node.ty),
+            CallResultConvention::NoValue | CallResultConvention::Value => {
+                self.alloca_storage(node.span, node.ty)
+            }
             CallResultConvention::Subscript(SubscriptResultConvention::AddressorPlace) => self
                 .insert(Operation::alloca_place(node.span, node.ty))
                 .unwrap(),
@@ -2984,8 +3045,10 @@ impl<'a> Emitter<'a> {
             K::Case(n) => self.lower_case(node, n, ArmLowering::Into(destination)),
 
             K::Immediate(n) => {
-                let value = self.immediate_constant(node.ty, n.clone());
-                self.store_into_if_needed(node.span, value, destination);
+                if let Some(destination) = destination {
+                    let value = self.immediate_constant(node.ty, n.clone());
+                    self.store(node.span, value, destination);
+                }
             }
 
             K::Assign(n) => {
@@ -3638,8 +3701,14 @@ impl<'a> Emitter<'a> {
                 // ignoring the ambient `destination`. Mirrors the interpreter's `eval_return`:
                 // a place-returning function returns the `*T` place pointer; otherwise the value.
                 let operand = &self.hir_arena[*n];
-                if self.context.value_result.is_some() {
+                if self.context.result_transport == ResultTransport::Value {
                     self.lower_return(operand);
+                    return;
+                }
+                if self.context.result_transport == ResultTransport::NoValue {
+                    self.lower_no_value_result(operand);
+                    self.emit_return_drops(node.span);
+                    self.terminate_return(node.span);
                     return;
                 }
                 let dest = self.return_destination();
@@ -3863,9 +3932,8 @@ struct InsertionContext {
     /// the local a `return` reads when the function returns its result as a value, until
     /// `Emitter::return_destination` allocates it.
     return_destination: Option<mir::Value>,
-
-    /// The result type of a function returning its result as a value.
-    value_result: Option<Type>,
+    /// How this function returns its result. NoValue expressions still run for effects.
+    result_transport: ResultTransport,
 
     /// Whether the lowered function itself returns a place (`SubscriptResultConvention::AddressorPlace`).
     /// When set, `return <expr>` lowers `<expr>` as a place and stores that pointer into the

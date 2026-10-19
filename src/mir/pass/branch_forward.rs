@@ -1269,16 +1269,16 @@ mod tests {
             some_source,
             Operation::store(span, Value::Constant(zero), element.clone()),
         );
-        let call_result = builder
-            .append_operation(some_source, Operation::alloca(span, Type::unit()))
-            .unwrap();
         builder.append_operation(
             some_source,
             Operation::call(
                 span,
                 Value::Parameter(mutator),
-                [element, call_result],
-                CallImplType::value(mutator_ty),
+                [element],
+                CallImplType::new(
+                    mutator_ty,
+                    crate::types::r#type::CallResultConvention::NoValue,
+                ),
             ),
         );
         builder.set_terminator(some_source, Terminator::goto(span, join));

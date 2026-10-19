@@ -54,14 +54,16 @@ use super::{
 use crate::{
     CompilerSession,
     compiler::Specialization,
+    compiler::error::CompilerLimit,
     format::FormatWith,
     hir::function::ArgConvention,
     mir::{
         self, Function, Instantiation, Operation, OperationKind, ParameterId, ParameterKind,
-        ValueId,
+        ResultTransport, ValueId,
         debug_location::InlineRebase,
         edit::FunctionEdit,
-        operation::{SourceFallibility, accepts_value_argument, accepts_value_result},
+        operation::{SourceFallibility, accepts_value_argument},
+        results::{call_result_transport, check_result_limits},
         role::MirType,
         terminator::{Terminator, TerminatorKind, TerminatorKindDiscriminant},
         value::StaticEvidence,
@@ -159,6 +161,7 @@ pub(super) fn structure_digest(
     let mut state = FxHasher::default();
     original.hash(&mut state);
     body.result_convention().hash(&mut state);
+    body.direct_result_type().hash(&mut state);
     body.parameters().hash(&mut state);
     body.constants().hash(&mut state);
     // Lengths are hashed alongside the sequences they precede, as a derived slice hash would do:
@@ -239,6 +242,7 @@ pub(super) fn structurally_identical(
         normalize_function(operand, canonical) == normalize_function(other, existing_canonical)
     };
     body.result_convention() == existing.result_convention()
+        && body.direct_result_type() == existing.direct_result_type()
         && body.parameters() == existing.parameters()
         && body.constants() == existing.constants()
         && body.blocks().count() == existing.blocks().count()
@@ -326,6 +330,8 @@ struct CallbackGrowth {
 /// because recognizing them means substituting first.
 #[derive(Default)]
 pub(crate) struct Specializations {
+    /// A fatal substitution failure, reported before these artifacts can be installed.
+    limit_error: RefCell<Option<CompilerLimit>>,
     /// The module whose optimized artifacts will hold these, which is not in general the module a
     /// specialized callee came from: the identities below index *this* module's table.
     module: ModuleId,
@@ -396,6 +402,7 @@ impl Specializations {
     /// and `declared_body_count` script bodies.
     pub(crate) fn new(module: ModuleId, function_count: usize, declared_body_count: usize) -> Self {
         Self {
+            limit_error: RefCell::new(None),
             module,
             finished: vec![None; function_count],
             created: Vec::new(),
@@ -416,6 +423,10 @@ impl Specializations {
             callback_limit: budget::callback_specialization_limit(declared_body_count),
             callback_growth: FxHashMap::default(),
         }
+    }
+
+    pub(crate) fn limit_error(&self) -> Option<CompilerLimit> {
+        *self.limit_error.borrow()
     }
 
     /// The module being optimized, whose table this is.
@@ -643,17 +654,17 @@ impl Specializations {
     /// site that has been seen before without substituting anything; the structural digest answers a
     /// *new* key whose residual MIR turns out to be one already created, which needs the body built
     /// to be recognized. Both lookups map to the retained copy, so later call sites take the cheap
-    /// path. Ordinary type/evidence construction cannot be refused.
+    /// path. Type/evidence construction has no optimization budget; a compiler-limit failure
+    /// records a fatal diagnostic instead.
     pub(crate) fn get_or_create(
         &mut self,
         key: SpecializationKey,
         scheme: &TypeScheme<FnType>,
         body: &Function,
         env: ModuleEnv<'_>,
-    ) -> LocalFunctionId {
+    ) -> Option<LocalFunctionId> {
         debug_assert!(key.callbacks.is_empty());
         self.create(key, scheme, body, env)
-            .expect("type/evidence copies do not spend callback growth")
     }
 
     /// A conservative preflight for novel callback keys. A different binding or published body
@@ -705,7 +716,13 @@ impl Specializations {
             module: self.module,
             function: id,
         };
-        let specialized = specialize(body, scheme, &key, own, env);
+        let specialized = match specialize(body, scheme, &key, own, env) {
+            Ok(body) => body,
+            Err(error) => {
+                self.limit_error.borrow_mut().get_or_insert(error);
+                return None;
+            }
+        };
         // Source locations participate in structural identity; candidates and retained copies
         // must use the same inline-site table before comparing. Interning deduplicates moves.
         let specialized = move_inline_sites(specialized, key.callee.module, self.module, env);
@@ -827,16 +844,22 @@ impl Specializations {
         scheme: &TypeScheme<FnType>,
         body: &Function,
         env: ModuleEnv<'_>,
-    ) -> Function {
+    ) -> Option<Function> {
         let key = (callee, instantiation.clone());
         if let Some(existing) = self.substituted.borrow().get(&key) {
-            return existing.clone();
+            return Some(existing.clone());
         }
-        let substituted = substitute_body(body, scheme, instantiation, env);
+        let substituted = match substitute_body(body, scheme, instantiation, env) {
+            Ok(body) => body,
+            Err(error) => {
+                self.limit_error.borrow_mut().get_or_insert(error);
+                return None;
+            }
+        };
         self.substituted
             .borrow_mut()
             .insert(key, substituted.clone());
-        substituted
+        Some(substituted)
     }
 
     /// A specialization's generated name.
@@ -939,22 +962,22 @@ pub(crate) fn specialize(
     key: &SpecializationKey,
     own: FunctionId,
     env: ModuleEnv<'_>,
-) -> Function {
+) -> Result<Function, CompilerLimit> {
     let subst = key.instantiation.substitution(scheme);
     // Bitmap rather than simple: one mapper is reused across every type in the body, which is what
     // makes its `affects_type` constant-time construction cost pay for itself.
     let mut mapper = BitmapInstantiationMapper::new(&subst);
 
     let mut edit = FunctionEdit::new(body.clone());
-    map_types(&mut edit, &mut mapper);
+    map_types(&mut edit, &mut mapper, env)?;
     bind_dictionaries(&mut edit, &key.dictionaries);
     // Check callback forwarding while operands still name the original parameters.
     resolve_recursion(&mut edit, key, own);
     bind_callbacks(&mut edit, &key.callbacks);
     store_value_parameters(&mut edit, body);
     simplify_after_substitution(&mut edit, env);
-    settle_exits(&mut edit, scheme, &mut mapper);
-    edit.finish(env)
+    settle_exits(&mut edit, scheme, &mut mapper, env)?;
+    Ok(edit.finish(env))
 }
 
 /// Materialize bound callable values in private places, preserving the visible call ABI.
@@ -1029,16 +1052,16 @@ pub(crate) fn substitute_body(
     scheme: &TypeScheme<FnType>,
     instantiation: &Instantiation,
     env: ModuleEnv<'_>,
-) -> Function {
+) -> Result<Function, CompilerLimit> {
     let subst = instantiation.substitution(scheme);
     let mut mapper = BitmapInstantiationMapper::new(&subst);
 
     let mut edit = FunctionEdit::new(body.clone());
-    map_types(&mut edit, &mut mapper);
+    map_types(&mut edit, &mut mapper, env)?;
     store_value_parameters(&mut edit, body);
     simplify_after_substitution(&mut edit, env);
-    settle_exits(&mut edit, scheme, &mut mapper);
-    edit.finish(env)
+    settle_exits(&mut edit, scheme, &mut mapper, env)?;
+    Ok(edit.finish(env))
 }
 
 /// Settles a body's exits on its substituted type, as HIR emission would have lowered them for
@@ -1046,14 +1069,17 @@ pub(crate) fn substitute_body(
 /// [`EffType::cannot_fail`]), so a
 /// source failure still reaching its exit, which only `effects_unsafe` makes possible, becomes an
 /// effect violation; and specializing a generic result or effect can make it return its result
-/// as a value (see [`accepts_value_result`]), so its result parameter becomes a local, which each
+/// as a value (see [`call_result_transport`]), so its result parameter becomes a local, which each
 /// `return` reads.
 fn settle_exits(
     edit: &mut FunctionEdit,
     scheme: &TypeScheme<FnType>,
     mapper: &mut impl TypeMapper,
-) {
+    env: ModuleEnv<'_>,
+) -> Result<(), CompilerLimit> {
     let ty = CallImplType::new(scheme.ty.clone(), edit.result_convention()).map(mapper);
+    let span = edit.block(edit.entry()).terminator.span.location;
+    check_result_limits(ty.fn_ty.ret, &env, span)?;
     if ty.effects().cannot_fail() {
         let exits: Vec<_> = edit
             .blocks()
@@ -1069,9 +1095,14 @@ fn settle_exits(
             *terminator = Terminator::effect_violation(terminator.span);
         }
     }
-    if edit.value_result().is_none() && accepts_value_result(&ty) {
-        edit.return_result_as_value(ty.fn_ty.ret);
+    match call_result_transport(&ty, &env) {
+        ResultTransport::NoValue => edit.return_result_as_no_value(ty.fn_ty.ret),
+        ResultTransport::Value if edit.value_result().is_none() => {
+            edit.return_result_as_value(ty.fn_ty.ret);
+        }
+        ResultTransport::Value | ResultTransport::Place => {}
     }
+    Ok(())
 }
 
 /// Stores each parameter the substitution turned into a value into a local of its own, which the
@@ -1117,7 +1148,7 @@ pub(crate) fn store_value_parameters(edit: &mut FunctionEdit, original: &Functio
 /// variable resolved to a concrete effect can make a conservatively-fallible call infallible, a
 /// concrete type can have a static layout, and a concrete type can own nothing.
 fn simplify_after_substitution(edit: &mut FunctionEdit, env: ModuleEnv<'_>) {
-    demote_infallible_invokes(edit);
+    demote_infallible_invokes(edit, env);
     drop_redundant_layout_witnesses(edit, env);
     elide_trivial_ownership_operations(edit, env);
 }
@@ -1487,7 +1518,7 @@ fn static_evidence_operand(value: &mir::Value) -> Option<StaticEvidence> {
 /// applies to an `invoke` it evaluated away: the operation moves into the block, the terminator
 /// becomes a jump, and the dead error edge leaves its cleanup pad for
 /// [`FunctionEdit::remove_unreachable_blocks`].
-fn demote_infallible_invokes(edit: &mut FunctionEdit) {
+fn demote_infallible_invokes(edit: &mut FunctionEdit, env: ModuleEnv<'_>) {
     let projections = open_projection_fallibility(edit);
     let mut demoted = false;
     for block_id in edit.blocks().collect::<Vec<_>>() {
@@ -1508,7 +1539,7 @@ fn demote_infallible_invokes(edit: &mut FunctionEdit) {
         else {
             unreachable!("the terminator was just matched as an invoke");
         };
-        let store = scalar_arguments::return_value_from_call(edit, &mut operation);
+        let store = scalar_arguments::normalize_call_result(edit, &mut operation, env);
         let block = edit.block_mut(block_id);
         block.operations.push(operation);
         block.operations.extend(store);
@@ -1578,9 +1609,17 @@ fn open_projection_fallibility(edit: &FunctionEdit) -> FxHashMap<ValueId, bool> 
 /// enumerate a body's per-operation types through this same traversal. They deliberately do *not*
 /// do that for the signature and the constant pool, which they read directly — a check sharing the
 /// traversal it checks cannot see what the traversal skips.
-pub(crate) fn map_types(edit: &mut FunctionEdit, mapper: &mut impl TypeMapper) {
+pub(crate) fn map_types(
+    edit: &mut FunctionEdit,
+    mapper: &mut impl TypeMapper,
+    env: ModuleEnv<'_>,
+) -> Result<(), CompilerLimit> {
+    let span = edit.block(edit.entry()).terminator.span.location;
     for parameter in edit.parameters_mut() {
         parameter.ty = parameter.ty.map(mapper);
+        if parameter.kind == ParameterKind::Return {
+            check_result_limits(parameter.ty, &env, span)?;
+        }
     }
     for constant in edit.constants_mut() {
         constant.ty = constant.ty.map(mapper);
@@ -1590,18 +1629,33 @@ pub(crate) fn map_types(edit: &mut FunctionEdit, mapper: &mut impl TypeMapper) {
         let mut rewritten = Vec::with_capacity(operations.len());
         for mut operation in operations {
             substitute_reading_arguments(edit, &mut operation, mapper, &mut rewritten);
-            let store = scalar_arguments::return_value_from_call(edit, &mut operation);
+            if let OperationKind::Call { ty, .. } = &operation.kind {
+                check_result_limits(ty.fn_ty.ret, &env, operation.span.location)?;
+            }
+            let store = scalar_arguments::normalize_call_result(edit, &mut operation, env);
             rewritten.push(operation);
             rewritten.extend(store);
         }
         let mut terminator = edit.block(block).terminator.clone();
-        if let TerminatorKind::Invoke { operation, .. } = &mut terminator.kind {
+        if let TerminatorKind::Invoke {
+            operation, normal, ..
+        } = &mut terminator.kind
+        {
             substitute_reading_arguments(edit, operation, mapper, &mut rewritten);
+            if let OperationKind::Call { ty, .. } = &operation.kind {
+                check_result_limits(ty.fn_ty.ret, &env, operation.span.location)?;
+            }
+            if let Some(store) = scalar_arguments::normalize_call_result(edit, operation, env) {
+                let success = edit.add_block(Terminator::goto(store.span, *normal));
+                edit.block_mut(success).operations.push(store);
+                *normal = success;
+            }
         }
         let block = edit.block_mut(block);
         block.operations = rewritten;
         block.terminator = terminator;
     }
+    Ok(())
 }
 
 /// Rewrites the types `operation` carries. An argument of a call or a projection that the
@@ -2171,7 +2225,7 @@ fn specialization_for(
         let scheme = scheme.clone();
         let body = body.clone();
         if !callback {
-            return Some(specializations.get_or_create(key, &scheme, &body, env));
+            return specializations.get_or_create(key, &scheme, &body, env);
         }
         if let Some(id) = specializations.get_or_create_callback(key.clone(), &scheme, &body, env) {
             return Some(id);
@@ -2455,18 +2509,38 @@ mod tests {
 
     use super::*;
     use crate::{
-        CompilerSession, ExecutionTarget, MirOptimization,
+        CompilerSession, ExecutionTarget, Location, MirOptimization,
         compiler::ensure_mir_artifacts,
         hir::value::LiteralValue,
-        mir::{Value, terminator::TerminatorKind},
+        mir::{BasicBlock, Value, terminator::TerminatorKind},
         module::{ModuleId, Path},
         std::math::Float,
         types::{
             effects::{EffType, EffectVar},
             mutability::MutType,
-            r#type::{FnType, Type, TypeVar},
+            r#type::{CallResultConvention, FnType, Type, TypeVar},
         },
     };
+
+    #[test]
+    fn omitted_result_types_distinguish_specializations() {
+        let body = |ty| {
+            Function::new(
+                "empty".into(),
+                CallResultConvention::NoValue,
+                Some(ty),
+                vec![],
+                vec![],
+                vec![BasicBlock::new(
+                    vec![],
+                    Terminator::ret(Location::new_synthesized()),
+                )],
+            )
+        };
+        let unit = body(Type::unit());
+        let product = body(Type::tuple([Type::unit()]));
+        assert!(!structurally_identical(&unit, &|id| id, &product, &|id| id));
+    }
 
     /// A generic callee, its declared scheme, and how one concrete call site instantiated it —
     /// everything specialization consumes, harvested from real lowering rather than hand-built.
@@ -2483,7 +2557,7 @@ mod tests {
                 module: self.key.callee.module,
                 function: LocalFunctionId::from_index(1000),
             };
-            specialize(&self.body, &self.scheme, &self.key, own, env)
+            specialize(&self.body, &self.scheme, &self.key, own, env).unwrap()
         }
     }
 
@@ -2734,7 +2808,7 @@ mod tests {
     fn free_ty_vars(func: &Function, env: ModuleEnv<'_>) -> Vec<TypeVar> {
         let mut collector = Collector::default();
         let mut edit = FunctionEdit::new(func.clone());
-        map_types(&mut edit, &mut collector);
+        map_types(&mut edit, &mut collector, env).unwrap();
         edit.finish(env);
         func.parameters()
             .iter()
@@ -3355,7 +3429,9 @@ fn use_it(x: int) { with_zero(x) }",
                 .clone();
             (function, module.function_count(), scheme)
         };
-        session.prepare_execution_target(ExecutionTarget::Mir, module_id);
+        session
+            .prepare_execution_target(ExecutionTarget::Mir, module_id)
+            .expect("MIR preparation failed");
         let body = body(&session, module_id, "identity").clone();
         scheme.eff_quantifiers.insert(EffectVar::new(0));
         let callee = FunctionId::new(module_id, function);
@@ -3369,18 +3445,17 @@ fn use_it(x: int) { with_zero(x) }",
             callbacks: Vec::new(),
         };
         let mut specializations = Specializations::new(module_id, function_count, 1);
-        let pure = specializations.get_or_create(
-            key(EffType::empty()),
-            &scheme,
-            &body,
-            session.module_env(),
-        );
-        let reading = specializations.get_or_create(
-            key(EffType::single_primitive(PrimitiveEffect::Read)),
-            &scheme,
-            &body,
-            session.module_env(),
-        );
+        let pure = specializations
+            .get_or_create(key(EffType::empty()), &scheme, &body, session.module_env())
+            .unwrap();
+        let reading = specializations
+            .get_or_create(
+                key(EffType::single_primitive(PrimitiveEffect::Read)),
+                &scheme,
+                &body,
+                session.module_env(),
+            )
+            .unwrap();
 
         assert_eq!(pure, reading);
         assert_eq!(specializations.len(), 1);
@@ -3402,7 +3477,9 @@ fn use_it(x: int) { with_zero(x) }",
             )
             .unwrap()
             .module_id;
-        session.prepare_execution_target(ExecutionTarget::Mir, dependency);
+        session
+            .prepare_execution_target(ExecutionTarget::Mir, dependency)
+            .expect("MIR preparation failed");
         let function = session
             .expect_fresh_module(dependency)
             .get_local_function_id(ustr("callee"))
@@ -3459,18 +3536,22 @@ fn use_it(x: int) { with_zero(x) }",
             session.expect_fresh_module(destination).function_count(),
             1,
         );
-        let pure = table.get_or_create(key(EffType::empty()), &scheme, &body, env);
+        let pure = table
+            .get_or_create(key(EffType::empty()), &scheme, &body, env)
+            .unwrap();
         let moved_sites = env.inline_sites(destination).borrow().len();
         let mut rebased = None;
         let mut inspect = FunctionEdit::new(table.raw[0].clone());
         inspect.visit_spans_mut(|span| rebased = rebased.or(span.inlined_at));
         assert_ne!(rebased.unwrap(), source_inline);
-        let reading = table.get_or_create(
-            key(EffType::single_primitive(PrimitiveEffect::Read)),
-            &scheme,
-            &body,
-            env,
-        );
+        let reading = table
+            .get_or_create(
+                key(EffType::single_primitive(PrimitiveEffect::Read)),
+                &scheme,
+                &body,
+                env,
+            )
+            .unwrap();
         assert_eq!(
             pure, reading,
             "equivalent dependency bodies must share after relocation"
@@ -3501,7 +3582,9 @@ fn use_it(x: int) { with_zero(x) }",
                 .clone();
             (function, module.function_count(), scheme)
         };
-        session.prepare_execution_target(ExecutionTarget::Mir, module_id);
+        session
+            .prepare_execution_target(ExecutionTarget::Mir, module_id)
+            .expect("MIR preparation failed");
         let body = body(&session, module_id, "identity").clone();
         let callee = FunctionId::new(module_id, function);
         let key = |effects| SpecializationKey {
@@ -3516,7 +3599,9 @@ fn use_it(x: int) { with_zero(x) }",
         let mut specializations = Specializations::new(module_id, function_count, 1);
         let created = key(EffType::empty());
         let rejected = key(EffType::single_primitive(PrimitiveEffect::Read));
-        specializations.get_or_create(created.clone(), &scheme, &body, session.module_env());
+        specializations
+            .get_or_create(created.clone(), &scheme, &body, session.module_env())
+            .unwrap();
         specializations.reject(rejected.clone());
 
         specializations.finish(vec![(function, body)]);
@@ -3555,7 +3640,9 @@ fn use_it(x: int) { with_zero(x) }",
             });
             (ids, module.function_count(), schemes)
         };
-        session.prepare_execution_target(ExecutionTarget::Mir, module_id);
+        session
+            .prepare_execution_target(ExecutionTarget::Mir, module_id)
+            .expect("MIR preparation failed");
         let bodies =
             ["identity", "twice", "unfinished"].map(|name| body(&session, module_id, name).clone());
         let key = |index: usize| SpecializationKey {
@@ -3569,13 +3656,19 @@ fn use_it(x: int) { with_zero(x) }",
         };
         let env = session.module_env();
         let mut specializations = Specializations::new(module_id, function_count, 3);
-        let from_raw = specializations.get_or_create(key(2), &schemes[2], &bodies[2], env);
+        let from_raw = specializations
+            .get_or_create(key(2), &schemes[2], &bodies[2], env)
+            .unwrap();
         specializations.finish(vec![
             (ids[0], bodies[0].clone()),
             (ids[1], bodies[1].clone()),
         ]);
-        let settled = specializations.get_or_create(key(0), &schemes[0], &bodies[0], env);
-        let unsettled = specializations.get_or_create(key(1), &schemes[1], &bodies[1], env);
+        let settled = specializations
+            .get_or_create(key(0), &schemes[0], &bodies[0], env)
+            .unwrap();
+        let unsettled = specializations
+            .get_or_create(key(1), &schemes[1], &bodies[1], env)
+            .unwrap();
         let spec = |id| FunctionId::new(module_id, id);
         assert!(!specializations.is_ready(spec(from_raw)));
         assert!(specializations.needs_worklist(from_raw));
@@ -3741,7 +3834,7 @@ fn use_it(x: int) { with_zero(x) }",
                         module: std_id,
                         function: LocalFunctionId::from_index(artifacts.bodies().len()),
                     };
-                    specialize(body, scheme, &key, own, session.module_env());
+                    specialize(body, scheme, &key, own, session.module_env()).unwrap();
                     specialized += 1;
                 }
             }
@@ -4214,12 +4307,14 @@ fn use_it(x: int) { with_zero(x) }",
             2,
         );
         table.limit = 1;
-        let base = table.get_or_create(
-            site.key.clone(),
-            &site.scheme,
-            &site.body,
-            session.module_env(),
-        );
+        let base = table
+            .get_or_create(
+                site.key.clone(),
+                &site.scheme,
+                &site.body,
+                session.module_env(),
+            )
+            .unwrap();
         let check_fallback = |table: &mut Specializations| {
             let result = specialize_call_sites(
                 body(&session, module, "run"),

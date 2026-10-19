@@ -33,8 +33,10 @@ use crate::{
     },
     mir::{
         self, BlockId, Function, Operation, OperationKind, Parameter, ParameterId, ParameterKind,
+        ResultTransport,
         operation::{CallMetadata, accepts_value_argument},
         profile::MirExecutionProfile,
+        results::zero_sized_result,
         terminator::TerminatorKind,
         value::StaticEvidence,
     },
@@ -49,7 +51,7 @@ use crate::{
     },
     types::{
         r#trait::TraitDictionaryEntryIndex,
-        r#type::{CallImplType, Type, TypeKind},
+        r#type::{CallImplType, CallResultConvention, Type, TypeKind},
     },
 };
 
@@ -319,9 +321,10 @@ impl<'a> Interpreter<'a> {
         };
         let func = self.function(key);
         let parameter_tags = call_parameter_kinds(func);
+        let no_value_result = func.result_convention() == CallResultConvention::NoValue;
         assert_eq!(
             parameter_tags.len(),
-            arguments.len() + 1,
+            arguments.len() + usize::from(!no_value_result),
             "MIR entry arguments must match its visible parameters"
         );
         assert!(
@@ -330,10 +333,12 @@ impl<'a> Interpreter<'a> {
                 .all(|tag| matches!(tag, ParameterKind::Parameter(_))),
             "MIR entry functions cannot require hidden dictionary parameters"
         );
-        assert_eq!(parameter_tags.last(), Some(&ParameterKind::Return));
+        if !no_value_result {
+            assert_eq!(parameter_tags.last(), Some(&ParameterKind::Return));
+        }
 
         let entry_top = self.ctx.environment.len();
-        let required_cells = arguments.len() + 1;
+        let required_cells = arguments.len() + usize::from(!no_value_result);
         if entry_top.saturating_add(required_cells) > self.ctx.environment_cell_limit {
             for argument in arguments {
                 argument.discard_storage();
@@ -361,11 +366,16 @@ impl<'a> Interpreter<'a> {
             .ty_scheme
             .ty
             .ret;
-        let init = self.shaped_uninitialized_value(ret_ty);
-        let ret = self
-            .alloc_cell(init, span)
-            .expect("entry return capacity was checked above");
-        bindings.push(Binding::Place(ret.clone()));
+        let ret = if no_value_result {
+            None
+        } else {
+            let init = self.shaped_uninitialized_value(ret_ty);
+            let ret = self
+                .alloc_cell(init, span)
+                .expect("entry return capacity was checked above");
+            bindings.push(Binding::Place(ret.clone()));
+            Some(ret)
+        };
 
         #[cfg(debug_assertions)]
         let boundary = Self::call_boundary(&parameter_tags, &bindings);
@@ -377,10 +387,14 @@ impl<'a> Interpreter<'a> {
         }
         #[cfg(debug_assertions)]
         self.check_call_boundary(&boundary, CallPhase::After, false);
-        let slot = ret
-            .boxed_mut(&mut self.ctx)
-            .expect("return cell must be addressable");
-        let value = mem::replace(slot, Value::uninit());
+        let value = if let Some(ret) = ret {
+            let slot = ret
+                .boxed_mut(&mut self.ctx)
+                .expect("return cell must be addressable");
+            mem::replace(slot, Value::uninit())
+        } else {
+            self.zero_sized_value(ret_ty)
+        };
         self.reclaim_frame_storage(entry_top);
         Ok(value)
     }
@@ -449,9 +463,14 @@ impl<'a> Interpreter<'a> {
                 CallArgument::Dictionary(id) => bindings.push(Binding::Dictionary(id)),
             }
         }
-        let init = self.shaped_uninitialized_value(result_ty);
-        let ret = self.alloc_cell(init, span)?;
-        bindings.push(Binding::Place(ret.clone()));
+        let ret = if self.function(key).result_convention() == CallResultConvention::NoValue {
+            None
+        } else {
+            let init = self.shaped_uninitialized_value(result_ty);
+            let ret = self.alloc_cell(init, span)?;
+            bindings.push(Binding::Place(ret.clone()));
+            Some(ret)
+        };
 
         debug_assert_eq!(
             bindings.len(),
@@ -459,10 +478,24 @@ impl<'a> Interpreter<'a> {
             "known-argument call must bind every parameter of its callee"
         );
         self.run_function(key, bindings)?;
-        let slot = ret
-            .boxed_mut(&mut self.ctx)
-            .expect("return cell must be addressable");
-        Ok(mem::replace(slot, Value::uninit()))
+        Ok(if let Some(ret) = ret {
+            let slot = ret
+                .boxed_mut(&mut self.ctx)
+                .expect("return cell must be addressable");
+            mem::replace(slot, Value::uninit())
+        } else {
+            self.zero_sized_value(result_ty)
+        })
+    }
+
+    fn zero_sized_value(&self, ty: Type) -> Value {
+        let env = ModuleEnv::new(
+            self.session.expect_fresh_module(self.ctx.module_id),
+            self.session.raw_modules(),
+        );
+        zero_sized_result(ty, &env)
+            .expect("NoValue result is eligible")
+            .into_value()
     }
 
     /// The native branch of [`call_with_known_arguments`](Self::call_with_known_arguments).
@@ -939,7 +972,7 @@ impl<'a> Interpreter<'a> {
             OperationKind::Call {
                 ty,
                 metadata,
-                value_result,
+                result_transport,
             } => {
                 // A value argument stays a value as far as the callee takes one; a cell given to a
                 // callee taking a place, or holding a value result, is reclaimed after the call,
@@ -949,9 +982,11 @@ impl<'a> Interpreter<'a> {
                 let (rebound, has_values) =
                     self.bind_constant_arguments(func, slots, operation, ty, metadata.as_deref());
                 let result =
-                    self.exec_call(slots, &operation.operands, *value_result, span.location);
+                    self.exec_call(slots, &operation.operands, *result_transport, span.location);
                 Self::unbind_constant_arguments(slots, rebound);
-                if (has_values && !ty.returns_place()) || *value_result {
+                if (has_values && !ty.returns_place())
+                    || *result_transport != ResultTransport::Place
+                {
                     self.reclaim_frame_storage(frame_top);
                 }
                 if let Some(value) = result? {
@@ -1393,7 +1428,16 @@ impl<'a> Interpreter<'a> {
         );
         let leading = self.hidden_evidence_bindings(&hidden_args, span)?;
         let operands = &operands[0..2];
-        self.exec_resolved_call(slots, module, identity, leading, 0, operands, false, span)?;
+        self.exec_resolved_call(
+            slots,
+            module,
+            identity,
+            leading,
+            0,
+            operands,
+            ResultTransport::Place,
+            span,
+        )?;
         Ok(())
     }
 
@@ -1425,16 +1469,15 @@ impl<'a> Interpreter<'a> {
         );
         let f = self.hir_function(module, identity);
         let drop_result = if f.code.as_script().is_some() {
-            // A script `Value::drop(&mut self)` in the uniform by-pointer ABI: `drop(self, ())`. Its
-            // `()` out-pointer starts a husk like any `@ret`; the drop body writes it (discarded after).
-            match self.alloc_cell(Value::uninit(), span) {
-                Ok(unit_ret) => {
-                    let mut args = self.hidden_evidence_bindings(&hidden_args, span)?;
-                    args.extend([Binding::Place(target.clone()), Binding::Place(unit_ret)]);
-                    self.run_function(FunctionKey { module, identity }, args)
+            (|| {
+                let key = FunctionKey { module, identity };
+                let mut args = self.hidden_evidence_bindings(&hidden_args, span)?;
+                args.push(Binding::Place(target.clone()));
+                if self.function(key).result_convention() != CallResultConvention::NoValue {
+                    args.push(Binding::Place(self.alloc_cell(Value::uninit(), span)?));
                 }
-                Err(error) => Err(error),
-            }
+                self.run_function(key, args)
+            })()
         } else {
             // Delegate to the shared runtime with the callee's module given explicitly; the
             // delegate rotates its own ambient module internally, so the MIR interpreter never
@@ -1468,7 +1511,7 @@ impl<'a> Interpreter<'a> {
         drop_result
     }
 
-    /// Executes a `call` operation whose operands are `[callee, args.., return-out-pointer]`.
+    /// Executes a `call` operation using its explicit result transport.
     ///
     /// Per the `call` contract (see [`mir::Operation::call`]), the callee operand is either a
     /// constant [`mir::Value::Function`] (a direct static call) or the **place** of a first-class
@@ -1478,13 +1521,13 @@ impl<'a> Interpreter<'a> {
     /// function value is called directly; a closure is applied by cloning its captured environment
     /// and prepending the environment slots (see [`exec_closure_call`](Self::exec_closure_call)),
     /// leaving the closure itself in place for its scope-cleanup drop.
-    /// Executes a call's operands `[callee, args..]`, followed by the return out-pointer unless
-    /// `value_result`, in which case the result value is returned.
+    /// Operands are `[callee, args..]`, with a trailing output place only for `Place` transport.
+    /// `Value` transport returns the result to bind to the call's register; `NoValue` omits it.
     fn exec_call(
         &mut self,
         slots: &mut FxHashMap<mir::Value, Binding>,
         operands: &[mir::Value],
-        value_result: bool,
+        result_transport: ResultTransport,
         span: Location,
     ) -> Result<Option<Value>, RuntimeError> {
         let arg_ops = &operands[1..];
@@ -1499,7 +1542,7 @@ impl<'a> Interpreter<'a> {
                 Vec::new(),
                 0,
                 arg_ops,
-                value_result,
+                result_transport,
                 span,
             );
         }
@@ -1522,7 +1565,7 @@ impl<'a> Interpreter<'a> {
             )
         };
         if is_closure {
-            self.exec_closure_call(slots, &place, arg_ops, value_result, span)
+            self.exec_closure_call(slots, &place, arg_ops, result_transport, span)
         } else {
             self.exec_resolved_call(
                 slots,
@@ -1531,7 +1574,7 @@ impl<'a> Interpreter<'a> {
                 Vec::new(),
                 0,
                 arg_ops,
-                value_result,
+                result_transport,
                 span,
             )
         }
@@ -2041,7 +2084,7 @@ impl<'a> Interpreter<'a> {
     /// Calls the resolved function `(callee_module, callee_identity)` with `leading` (a closure's
     /// prepended `@extra` dictionary evidence and captured-environment slots, in signature order;
     /// empty for a non-closure call) ahead of the visible arguments `arg_ops` (the last of which is
-    /// the return out-pointer, unless `value_result`: the result value is then returned).
+    /// the return out-pointer only for `Place` transport).
     /// `closure_env_len` identifies the trailing value-capture bindings in `leading`, keeping them
     /// distinct from evidence bindings even though both may be places.
     #[allow(clippy::too_many_arguments)]
@@ -2053,7 +2096,7 @@ impl<'a> Interpreter<'a> {
         leading: Vec<Binding>,
         closure_env_len: usize,
         arg_ops: &[mir::Value],
-        value_result: bool,
+        result_transport: ResultTransport,
         span: Location,
     ) -> Result<Option<Value>, RuntimeError> {
         let key = FunctionKey {
@@ -2073,11 +2116,24 @@ impl<'a> Interpreter<'a> {
             // runtime binding) is essential: a value operand must bind as a place even if it could
             // superficially resolve to a dictionary.
             let func = self.function(key);
+            // Semantic clone/capture callbacks still supply an output place explicitly.
+            let (arg_ops, omitted_output) = if func.result_convention()
+                == CallResultConvention::NoValue
+                && result_transport == ResultTransport::Place
+            {
+                let (output, inputs) = arg_ops.split_last().expect("callback output place");
+                (inputs, Some(self.place_operand(slots, output)))
+            } else {
+                (arg_ops, None)
+            };
             #[cfg(debug_assertions)]
             let offset = leading.len();
             let mut args = self.script_arguments(slots, func, leading, arg_ops, span)?;
             // A value result gets a cell of its own, read once the call returns.
-            let result_cell = if value_result {
+            let result_cell = if result_transport == ResultTransport::Value
+                || (result_transport == ResultTransport::NoValue
+                    && func.result_convention() != CallResultConvention::NoValue)
+            {
                 match self.alloc_cell(Value::uninit(), span) {
                     Ok(cell) => {
                         args.push(Binding::Place(cell.clone()));
@@ -2107,7 +2163,17 @@ impl<'a> Interpreter<'a> {
             let is_value_drop = self.is_value_drop_function(key);
             #[cfg(debug_assertions)]
             self.check_call_boundary(&boundary, CallPhase::After, is_value_drop);
-            return Ok(result_cell.map(|cell| self.load_copy(&cell)));
+            if let Some(output) = omitted_output {
+                self.store(
+                    self.zero_sized_value(f.definition.ty_scheme.ty.ret),
+                    &output,
+                )?;
+            }
+            return Ok(if result_transport == ResultTransport::NoValue {
+                None
+            } else {
+                result_cell.map(|cell| self.load_copy(&cell))
+            });
         }
 
         self.exec_resolved_native_call(
@@ -2117,7 +2183,7 @@ impl<'a> Interpreter<'a> {
             leading,
             closure_env_len,
             arg_ops,
-            value_result,
+            result_transport,
             span,
         )
     }
@@ -2136,7 +2202,7 @@ impl<'a> Interpreter<'a> {
         leading: Vec<Binding>,
         closure_env_len: usize,
         arg_ops: &[mir::Value],
-        value_result: bool,
+        result_transport: ResultTransport,
         span: Location,
     ) -> Result<Option<Value>, RuntimeError> {
         let f = self.hir_function(callee_module, callee_identity);
@@ -2157,7 +2223,7 @@ impl<'a> Interpreter<'a> {
         let n_vis = passing.len();
         let operand_extra_count = arg_ops
             .len()
-            .checked_sub(n_vis + usize::from(!value_result))
+            .checked_sub(n_vis + usize::from(result_transport == ResultTransport::Place))
             .expect("a native call must pass the visible arguments and its result place");
         let extra_count = leading.len() + operand_extra_count;
         if let Some(runtime_passing) = f.code.runtime_argument_passing() {
@@ -2221,12 +2287,19 @@ impl<'a> Interpreter<'a> {
             args,
             span,
         )?;
-        match ret_place {
-            Some(ret_place) => {
-                self.store(value, &ret_place)?;
+        match result_transport {
+            ResultTransport::NoValue => {
+                value.discard_storage();
                 Ok(None)
             }
-            None => Ok(Some(value)),
+            ResultTransport::Place => {
+                self.store(
+                    value,
+                    &ret_place.expect("an indirect result has its output place"),
+                )?;
+                Ok(None)
+            }
+            ResultTransport::Value => Ok(Some(value)),
         }
     }
 
@@ -2240,11 +2313,11 @@ impl<'a> Interpreter<'a> {
         slots: &mut FxHashMap<mir::Value, Binding>,
         place: &Place,
         arg_ops: &[mir::Value],
-        value_result: bool,
+        result_transport: ResultTransport,
         span: Location,
     ) -> Result<Option<Value>, RuntimeError> {
         let marker = self.ctx.environment.len();
-        let result = self.exec_closure_call_inner(slots, place, arg_ops, value_result, span);
+        let result = self.exec_closure_call_inner(slots, place, arg_ops, result_transport, span);
         self.reclaim_frame_storage(marker);
         result
     }
@@ -2254,7 +2327,7 @@ impl<'a> Interpreter<'a> {
         slots: &mut FxHashMap<mir::Value, Binding>,
         place: &Place,
         arg_ops: &[mir::Value],
-        value_result: bool,
+        result_transport: ResultTransport,
         span: Location,
     ) -> Result<Option<Value>, RuntimeError> {
         let (module_id, function_id, hidden_args, env_len, env_dict, env_ptr) = {
@@ -2308,7 +2381,7 @@ impl<'a> Interpreter<'a> {
             leading,
             env_len,
             arg_ops,
-            value_result,
+            result_transport,
             span,
         );
 
@@ -2559,7 +2632,7 @@ impl<'a> Interpreter<'a> {
             leading,
             0,
             &operands,
-            false,
+            ResultTransport::Place,
             span,
         )?;
         Ok(())
@@ -3516,7 +3589,13 @@ mod capture_tests {
             let operand = mir::Value::Parameter(ParameterId::from_index(0));
             let mut slots = FxHashMap::from_iter([(operand.clone(), Binding::Place(output))]);
             let error = interpreter
-                .exec_closure_call(&mut slots, &source, &[operand], false, span)
+                .exec_closure_call(
+                    &mut slots,
+                    &source,
+                    &[operand],
+                    ResultTransport::Place,
+                    span,
+                )
                 .unwrap_err();
             assert_eq!(
                 error.kind(),

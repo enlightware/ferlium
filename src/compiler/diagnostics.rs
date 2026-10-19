@@ -132,6 +132,7 @@ pub(crate) fn diagnostics_from_error(
 
     use CompilationErrorImpl::*;
     let locations: Vec<Location> = match error.deref() {
+        CompilerLimitExceeded(error) => vec![error.span],
         ParsingFailed(errors) => {
             return errors
                 .iter()

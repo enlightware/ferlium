@@ -40,7 +40,7 @@ use crate::{
     std::value::{structural_variant, variant_payload_storage_for_payload_type},
     types::{
         effects::no_effects,
-        r#type::{CallImplType, FnType, Type, TypeKind},
+        r#type::{CallImplType, CallResultConvention, FnType, Type, TypeKind},
         type_properties::{TypePropertyEnv, concrete_type_is_trivial_copy},
     },
 };
@@ -407,24 +407,20 @@ fn expand_drops(
         };
         let span = operation.span;
         let target = operation.operands[0].clone();
-        let result = edit.new_value();
-        let mut allocation = Operation::alloca(span, Type::unit());
-        allocation.assign_result_id(Some(result));
-        arguments.extend([target.clone(), mir::Value::Register(result)]);
+        arguments.push(target.clone());
         let call = Operation::call(
             span,
             mir::Value::Function(callee),
             arguments,
-            CallImplType::value(FnType::new_mut_resolved(
-                [(ty, true)],
-                Type::unit(),
-                no_effects(),
-            )),
+            CallImplType::new(
+                FnType::new_mut_resolved([(ty, true)], Type::unit(), no_effects()),
+                CallResultConvention::NoValue,
+            ),
         );
         edit.block_mut(block)
             .operations
-            .splice(index..=index, [allocation, call]);
-        inline::expand_cleanup(&mut edit, &template, callee.module, block, index + 1, env);
+            .splice(index..=index, [call]);
+        inline::expand_cleanup(&mut edit, &template, callee.module, block, index, env);
     }
     edit.merge_blocks_into_predecessors();
     edit.reorder_blocks_in_reverse_postorder();

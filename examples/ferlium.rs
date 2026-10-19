@@ -537,7 +537,15 @@ fn process_input(
         }
     }
     if inspection.mir {
-        println!("{}", session.emit_mir_module(module_id));
+        match repl::mir_text(session, module_id) {
+            Ok(text) => println!("{text}"),
+            Err(error) => {
+                eprintln!("Inspection error: {error}");
+                if !is_repl {
+                    return Err(2);
+                }
+            }
+        }
     }
     if inspection.physical_mir {
         let before = session.physical_mir_optimization();
@@ -1074,7 +1082,10 @@ fn run_interactive_repl(
                                 session.set_mir_optimization(MirOptimization::Disabled);
                             }
                             if args[0] == "mir" {
-                                println!("{}", session.emit_mir_module(module));
+                                match repl::mir_text(&mut session, module) {
+                                    Ok(text) => println!("{text}"),
+                                    Err(error) => println!("{error}"),
+                                }
                             } else {
                                 let physical_optimization = session.physical_mir_optimization();
                                 session.set_physical_mir_optimization(session.mir_optimization());

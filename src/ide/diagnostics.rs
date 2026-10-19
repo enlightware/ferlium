@@ -555,6 +555,9 @@ pub(super) fn compilation_error_to_data(
                 ),
             )]
         }
+        CompilerLimitExceeded(error) => {
+            vec![error_data_from_location(&error.span, error.to_string())]
+        }
         TraitSolverRecursionLimitExceeded {
             trait_ref,
             input_tys,

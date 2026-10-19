@@ -3935,7 +3935,8 @@ fn wasm_codegen_cleanup_failures_and_immediate_propagation() {
             .map(|index| module.get(LocalFunctionId::from_index(index)).cloned())
             .collect::<Vec<_>>();
         let body = entries[entry.function.as_index()].take().unwrap();
-        let (name, convention, value_result, parameters, constants, mut blocks) = body.into_parts();
+        let (name, convention, direct_result_type, parameters, constants, mut blocks) =
+            body.into_parts();
         let shared = BlockId::from_index(blocks.len());
         // Join the propagation exits explicitly, preserving all preceding cleanup and stack work.
         // This fixes the fixture's shape independently of the optimizer's block-merging policy.
@@ -3959,7 +3960,7 @@ fn wasm_codegen_cleanup_failures_and_immediate_propagation() {
         entries[entry.function.as_index()] = Some(crate::mir::Function::new(
             name,
             convention,
-            value_result,
+            direct_result_type,
             parameters,
             constants,
             blocks,

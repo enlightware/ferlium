@@ -30,11 +30,11 @@ use crate::std::std_module;
 use crate::{
     FxHashMap, FxHashSet, Location, SourceId, SourceTable, ast, compilation_error,
     compiler::{
-        diagnostics::ModuleDiagnostic,
+        diagnostics::{ModuleDiagnostic, diagnostics_from_error},
         error::{CompilationError, InternalCompilationError, LocatedError},
         pipeline::{
-            ModuleRef, compile_with_source_id, new_ast_arena_sized_from_source,
-            parse_module_and_expr,
+            ModuleRef, compile_with_source_id, mark_stale_transitively,
+            new_ast_arena_sized_from_source, parse_module_and_expr,
         },
     },
     define_id_type, emit_mir,
@@ -1243,6 +1243,10 @@ impl CompilerSession {
         target: ExecutionTarget,
         ast_inspector: Option<AstInspectorCb<'_>>,
     ) -> Result<CompilationOutput, CompilationError> {
+        let old_revision = self
+            .modules
+            .get_by_name(&module_path)
+            .and_then(|(_, entry)| entry.revision.clone());
         let src_info = self
             .modules
             .get_by_name(&module_path)
@@ -1250,7 +1254,7 @@ impl CompilerSession {
         let (source_id, source_version) =
             self.add_or_reuse_module_source(src_info.as_ref(), Some(source_name), src_code);
 
-        compile_with_source_id(
+        let output = compile_with_source_id(
             source_id,
             source_version,
             &self.source_table,
@@ -1260,7 +1264,31 @@ impl CompilerSession {
             self.capabilities,
             target,
             ast_inspector,
-        )
+        )?;
+        if let Err(error) = self.prepare_execution_target(target, output.module_id) {
+            let entry = self.modules.get_mut(output.module_id).unwrap();
+            let src_info = entry.src_info.clone().unwrap();
+            let revision = entry.compilation_revision;
+            let mut diagnostics = entry.diagnostics.clone();
+            diagnostics.extend(diagnostics_from_error(
+                output.module_id,
+                source_version,
+                revision,
+                source_id,
+                &error,
+                &self.source_table,
+            ));
+            entry.update_with_compilation_error(
+                src_info,
+                old_revision,
+                error.clone(),
+                revision,
+                diagnostics,
+            );
+            mark_stale_transitively(&mut self.modules, output.module_id);
+            return Err(error);
+        }
+        Ok(output)
     }
 
     /// Compiles `src` with std-only uses and emits its MIR form. Panics on compilation failure;
@@ -1285,7 +1313,8 @@ impl CompilerSession {
         &mut self,
         module_id: ModuleId,
     ) -> emit_mir::MirText {
-        self.prepare_execution_target(ExecutionTarget::Mir, module_id);
+        self.prepare_execution_target(ExecutionTarget::Mir, module_id)
+            .expect("MIR preparation failed");
         let entry = self.expect_module_entry(module_id);
         let module = entry.module().unwrap();
         let artifacts = entry
@@ -1383,7 +1412,8 @@ impl CompilerSession {
         let value = {
             // Compilation installed raw MIR; this additionally installs the optimized bodies when
             // the session asks for them, exactly as `run_entry` does.
-            self.prepare_execution_target(ExecutionTarget::Mir, module_id);
+            self.prepare_execution_target(ExecutionTarget::Mir, module_id)
+                .expect("MIR preparation failed");
             let mut interp = Interpreter::new(module_id, self);
             interp.run_main(module_id, main_id).unwrap_or_else(|error| {
                 panic!("MIR interpretation raised a runtime error: {error:?}")
@@ -1450,7 +1480,14 @@ impl CompilerSession {
             }
             return result;
         }
-        self.prepare_execution_target(target, module_id);
+        if let Err(error) = self.prepare_execution_target(target, module_id) {
+            for argument in arguments {
+                argument.discard_storage();
+            }
+            return Err(RuntimeError::Backend(
+                error.format_with(&self.source_table).to_string(),
+            ));
+        }
         match target {
             ExecutionTarget::Hir => {
                 let mut ctx = EvalCtx::with_limits(module_id, self, limits);
@@ -1497,7 +1534,14 @@ impl CompilerSession {
         arguments: Vec<Value>,
         limits: ReferenceInterpreterLimits,
     ) -> Result<(Value, MirExecutionProfile), RuntimeError> {
-        self.prepare_execution_target(ExecutionTarget::Mir, module_id);
+        if let Err(error) = self.prepare_execution_target(ExecutionTarget::Mir, module_id) {
+            for argument in arguments {
+                argument.discard_storage();
+            }
+            return Err(RuntimeError::Backend(
+                error.format_with(&self.source_table).to_string(),
+            ));
+        }
         let mut interpreter = Interpreter::with_profile(module_id, self, limits);
         let value = interpreter.run_entry(module_id, entry, arguments)?;
         let profile = interpreter
@@ -1561,24 +1605,32 @@ impl CompilerSession {
 
     /// Ensure that `module_id` and its dependencies have the semantic artifacts needed by `target`.
     /// Physical targets always prepare optimized MIR; fallible physical lowering and resolution
-    /// happen on inspection or execution. Existing artifacts for the same revision are reused.
-    pub fn prepare_execution_target(&mut self, target: ExecutionTarget, module_id: ModuleId) {
+    /// happen on inspection or execution. Compiler limits exposed by specialization are reported
+    /// here. Existing artifacts for the same revision are reused.
+    pub fn prepare_execution_target(
+        &mut self,
+        target: ExecutionTarget,
+        module_id: ModuleId,
+    ) -> Result<(), CompilationError> {
         if target == ExecutionTarget::Hir {
-            return;
+            return Ok(());
         }
         // Physical lowering is fallible and is performed by prepare_physical_program. This
-        // infallible preparation API only ensures its optimized semantic input.
+        // preparation API ensures its optimized semantic input.
         if target == ExecutionTarget::PhysicalMir {
-            ensure_optimized_mir_artifacts(&*self, module_id);
-            return;
+            ensure_optimized_mir_artifacts(&*self, module_id)
+                .map_err(|error| compilation_error!(CompilerLimitExceeded(error)))?;
+            return Ok(());
         }
         match self.mir_optimization {
             MirOptimization::Disabled => ensure_mir_artifacts(&self.modules, module_id),
             // Driven from the session rather than from `Modules`: the optimization passes
             // const-evaluate through the interpreter, which needs the whole session. Artifact
             // installation goes through `OnceCell`, so a shared borrow suffices.
-            MirOptimization::Enabled => ensure_optimized_mir_artifacts(&*self, module_id),
+            MirOptimization::Enabled => ensure_optimized_mir_artifacts(&*self, module_id)
+                .map_err(|error| compilation_error!(CompilerLimitExceeded(error)))?,
         }
+        Ok(())
     }
 
     /// The MIR bodies of `module_id` at an explicitly chosen stage.
@@ -1622,7 +1674,7 @@ impl CompilerSession {
     /// specialization. It is never a diagnostic: an unfolded call is ordinary.
     pub fn optimization_report(&mut self, module_id: ModuleId) -> OptimizationReport {
         ensure_mir_artifacts(&self.modules, module_id);
-        ensure_optimized_mir_artifacts(&*self, module_id);
+        ensure_optimized_mir_artifacts(&*self, module_id).expect("MIR preparation failed");
         let raw = self
             .mir_artifacts_for(module_id, MirOptimization::Disabled)
             .expect("raw MIR must be prepared");
@@ -2063,7 +2115,9 @@ mod tests {
         let mut first = CompilerSession::new();
         let second = CompilerSession::new();
 
-        first.prepare_execution_target(ExecutionTarget::Mir, STD_MODULE_ID);
+        first
+            .prepare_execution_target(ExecutionTarget::Mir, STD_MODULE_ID)
+            .expect("MIR preparation failed");
         let third = CompilerSession::new();
 
         let first_mir = first.modules.get(STD_MODULE_ID).unwrap().raw_mir().unwrap();

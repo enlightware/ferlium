@@ -171,12 +171,13 @@ mod tests {
         let body = raw_mir("fn greet(n: int) -> string { f\"item {n} of list\" }");
 
         assert_eq!(
-            body.matches("call std::string_push_static_str").count(),
+            body.matches("call no_value std::string_push_static_str")
+                .count(),
             2,
             "both literal segments must append from constant data:\n{body}"
         );
         assert_eq!(
-            body.matches("call std::string_push_str").count(),
+            body.matches("call no_value std::string_push_str").count(),
             1,
             "only the interpolation must append a materialized string:\n{body}"
         );

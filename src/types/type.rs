@@ -541,16 +541,12 @@ pub enum CallResultConvention {
     /// A normal value return.
     #[default]
     Value,
-    /// Physical-only statically zero-sized result, with no caller-provided result storage.
+    /// Statically zero-sized result, with no caller-provided result storage.
     NoValue,
     Subscript(SubscriptResultConvention),
 }
 
 impl CallResultConvention {
-    pub fn has_result_place(self) -> bool {
-        self != Self::NoValue
-    }
-
     pub const YIELDED_ONCE: Self = Self::Subscript(SubscriptResultConvention::YieldedOnce);
     pub const ADDRESSOR_PLACE: Self = Self::Subscript(SubscriptResultConvention::AddressorPlace);
 

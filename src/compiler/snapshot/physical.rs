@@ -194,20 +194,20 @@ impl NativeBindings {
                     })
                     .collect::<Result<_, SnapshotError>>()?;
                 let result = match signature.result {
-                    NativeResult::Unit => ResultTransport::Unit,
-                    NativeResult::Never => ResultTransport::Never,
+                    NativeResult::Unit => NativeResultTransport::Unit,
+                    NativeResult::Never => NativeResultTransport::Never,
                     NativeResult::Scalar(value, scalar) => {
-                        ResultTransport::Scalar(layout(value)?, scalar)
+                        NativeResultTransport::Scalar(layout(value)?, scalar)
                     }
-                    NativeResult::Output(value) => ResultTransport::Output(layout(value)?),
+                    NativeResult::Output(value) => NativeResultTransport::Output(layout(value)?),
                     NativeResult::Optional { payload, .. } => {
-                        ResultTransport::Optional(layout(payload)?)
+                        NativeResultTransport::Optional(layout(payload)?)
                     }
                     NativeResult::Addressor {
                         pointee,
                         root,
                         mutable,
-                    } => ResultTransport::Addressor {
+                    } => NativeResultTransport::Addressor {
                         pointee: layout(pointee)?,
                         root,
                         mutable,
@@ -262,7 +262,7 @@ impl Layout {
 struct Signature {
     failure: NativeFailureConvention,
     parameters: Vec<Parameter>,
-    result: ResultTransport,
+    result: NativeResultTransport,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -276,7 +276,7 @@ enum Parameter {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ResultTransport {
+enum NativeResultTransport {
     Unit,
     Never,
     Scalar(Layout, NativeScalar),
@@ -301,7 +301,7 @@ mod tests {
     #[test]
     fn physical_snapshot_round_trip_and_compatibility() {
         let session = CompilerSession::new();
-        ensure_optimized_mir_artifacts(&session, STD_MODULE_ID);
+        ensure_optimized_mir_artifacts(&session, STD_MODULE_ID).unwrap();
         let module = session.std_module();
         let optimized = session
             .expect_module_entry(STD_MODULE_ID)

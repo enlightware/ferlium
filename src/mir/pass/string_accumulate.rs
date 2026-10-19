@@ -753,12 +753,12 @@ mod tests {
         );
         let body = body_of(&module, "append");
         assert!(
-            body.contains("call std::string_push_static_str"),
+            body.contains("call no_value std::string_push_static_str"),
             "the literal should append directly from its StaticStr:\n{body}"
         );
         assert!(
             !body.contains("call std::string_from_static")
-                && !body.contains("call std::string_push_str"),
+                && !body.contains("call no_value std::string_push_str"),
             "the owned literal temporary should disappear:\n{body}"
         );
     }
@@ -788,7 +788,14 @@ mod tests {
                 span,
                 mir::Value::Function(callee),
                 operands,
-                CallImplType::value(ty),
+                CallImplType::new(
+                    ty,
+                    if ret == Type::unit() {
+                        crate::types::r#type::CallResultConvention::NoValue
+                    } else {
+                        Default::default()
+                    },
+                ),
             )
         };
 
@@ -826,14 +833,11 @@ mod tests {
             ),
         );
         builder.append_operation(entry, Operation::stack_restore(span, marker));
-        let unit = builder
-            .append_operation(entry, Operation::alloca(span, Type::unit()))
-            .unwrap();
         builder.append_operation(
             entry,
             call(
                 functions.push,
-                vec![out, rendered.clone(), unit],
+                vec![out, rendered.clone()],
                 vec![string_type(), string_type()],
                 Type::unit(),
             ),
@@ -862,8 +866,8 @@ mod tests {
         let body = body_of(&module, "append");
         assert!(
             body.contains("call std::string_from_static")
-                && body.contains("call std::string_push_str")
-                && !body.contains("call std::string_push_static_str"),
+                && body.contains("call no_value std::string_push_str")
+                && !body.contains("call no_value std::string_push_static_str"),
             "an escaping owned string must retain its materialization and ordinary append:\n{body}"
         );
     }
@@ -877,8 +881,8 @@ mod tests {
         let body = body_of(&module, "append");
         assert!(
             body.contains("call std::string_from_static")
-                && body.contains("call std::string_push_str")
-                && !body.contains("call std::string_push_static_str"),
+                && body.contains("call no_value std::string_push_str")
+                && !body.contains("call no_value std::string_push_static_str"),
             "cross-block construction and append must not be fused:\n{body}"
         );
     }
@@ -896,7 +900,7 @@ mod tests {
             "only the suffix should still be rendered:\n{body}"
         );
         assert_eq!(
-            count(body, "call std::string_push_str"),
+            count(body, "call no_value std::string_push_str"),
             1,
             "only the suffix should still be appended:\n{body}"
         );
@@ -921,7 +925,7 @@ mod tests {
             "a literal between the interpolations must not block the forwarding:\n{body}"
         );
         assert_eq!(
-            count(body, "call std::string_push_static_str"),
+            count(body, "call no_value std::string_push_static_str"),
             1,
             "the literal segment must still be appended:\n{body}"
         );

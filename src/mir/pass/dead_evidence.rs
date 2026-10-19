@@ -311,7 +311,9 @@ mod tests {
                     }
                     assert_eq!(
                         operation.operands.len(),
-                        ty.fn_ty.args.len() + 2,
+                        ty.fn_ty.args.len()
+                            + 1
+                            + usize::from(operation.kind.call_has_result_place()),
                         "MIR function `{}` passes hidden evidence to a specialization",
                         body.name
                     );

@@ -26,6 +26,7 @@ use ustr::Ustr;
 use crate::{
     Location,
     compiler::MirArtifacts,
+    compiler::error::CompilerLimit,
     hir::{
         dictionary::DictionaryReq,
         function::{ArgConvention, CallableDefinition},
@@ -36,12 +37,12 @@ use crate::{
     },
     mir::{
         BlockId, DebugLocation, Function, Operation, OperationKind, ParameterId, ParameterKind,
-        Value, ValueId,
+        ResultTransport, Value, ValueId,
         builder::FunctionBuilder,
         edit::FunctionEdit,
         pass::{
             dataflow::{Root, escaping_roots},
-            dce, float_speculation,
+            float_speculation,
             known_callee::{KnownCallee, KnownCallees},
             physical::optimize,
             scalar_arguments, scalar_replace,
@@ -87,7 +88,7 @@ pub(crate) use dictionary::{
 };
 use evidence::{PhysicalEvidenceReferences, try_for_each_static_evidence};
 use native::{NativeRequirementError, NativeRequirements};
-pub(crate) use results::{DirectEntries, is_zero_sized_result};
+pub(crate) use results::DirectEntries;
 use subscript::PhysicalSubscriptCatalog;
 pub(crate) use subscript::{PhysicalSubscriptDefinition, PhysicalSubscriptMember};
 use transport::Transports;
@@ -156,6 +157,7 @@ pub(super) fn same_storage_type(left: Type, right: Type) -> bool {
 /// A physical-lowering or readiness failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BackendReadinessError {
+    CompilerLimit(CompilerLimit),
     InvalidPhysicalEntry {
         owner: FunctionId,
         target: FunctionId,
@@ -254,6 +256,7 @@ pub(crate) enum BackendReadinessError {
 impl fmt::Display for BackendReadinessError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::CompilerLimit(error) => error.fmt(f),
             Self::InvalidPhysicalProtocol { function, reason } => write!(
                 f,
                 "physical entry {function:?} has an invalid execution protocol: {reason}"
@@ -537,14 +540,7 @@ pub(crate) fn lower_physical_mir(
 ) -> Result<BackendReadyMirArtifacts, BackendReadinessError> {
     let entries = expand_physical_mir(module, semantic, env, known, true)?;
     let entries = optimize(&entries, semantic, env, known);
-    let (mut entries, direct) = results::select(entries, env);
-    // Result selection exposes dead zero-sized storage. Keep this cleanup out of the unoptimized
-    // differential path so it independently exercises the lifetimes before storage DCE.
-    for body in entries.iter_mut().flatten() {
-        if let Some(cleaned) = dce::remove_dead_storage(body) {
-            *body = cleaned;
-        }
-    }
+    let (entries, direct) = results::select(entries, env);
     prepare_physical_mir(entries, direct, semantic, env)
 }
 
@@ -682,8 +678,11 @@ fn expand_physical_mir(
             })
             .unwrap_or(body);
             let transports = Transports::of(&body, semantic, env);
+            let body = scalar_arguments::place_value_results(&body, |call| transports.result(call))
+                .unwrap_or(body);
+            let transports = Transports::of(&body, semantic, env);
             let body =
-                scalar_arguments::place_value_results(&body, |call| transports.returns_value(call))
+                scalar_arguments::place_no_value_results(&body, |call| transports.result(call))
                     .unwrap_or(body);
             let body = lowerer.lower_body(function, original, body)?;
             *entry = Some(
@@ -2847,7 +2846,7 @@ fn int_unary(
 /// none. A Project supplies its result through the yield protocol rather than an explicit
 /// out-pointer.
 fn physical_call_arity(body: &Function, projection: bool) -> Option<usize> {
-    if body.result_convention() == CallResultConvention::NoValue || body.value_result().is_some() {
+    if body.result_transport() != ResultTransport::Place {
         return (!projection
             && body
                 .parameters()
@@ -3520,7 +3519,10 @@ fn verify_direct_call(
         if actual != expected
             || (!operation.kind.call_has_result_place()
                 && !projection
-                && !matches!(signature.result, NativeResult::Scalar(..)))
+                && !matches!(
+                    signature.result,
+                    NativeResult::Scalar(..) | NativeResult::Unit
+                ))
         {
             return Err(BackendReadinessError::InvalidPhysicalCall {
                 owner,
@@ -3531,7 +3533,14 @@ fn verify_direct_call(
         }
         let mut definition =
             CallableDefinition::new_infer_quantifiers(ty.fn_ty.clone(), [], "physical native call");
-        definition.result_convention = ty.result_convention;
+        // NoValue describes this call's transport; a native Unit entry still declares Value.
+        definition.result_convention = if ty.result_convention == CallResultConvention::NoValue
+            && signature.result == NativeResult::Unit
+        {
+            CallResultConvention::Value
+        } else {
+            ty.result_convention
+        };
         if let NativeResult::Addressor { root, .. } = signature.result {
             definition.result_rooted_in = Some(root);
         }
@@ -3647,7 +3656,9 @@ mod tests {
         module: ModuleId,
     ) -> Result<(BackendReadyMirArtifacts, LocalFunctionId), BackendReadinessError> {
         session.set_mir_optimization(MirOptimization::Enabled);
-        session.prepare_execution_target(ExecutionTarget::Mir, module);
+        session
+            .prepare_execution_target(ExecutionTarget::Mir, module)
+            .expect("MIR preparation failed");
         let semantic = session
             .mir_artifacts_for(module, MirOptimization::Enabled)
             .expect("optimized MIR was just prepared");

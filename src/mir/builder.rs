@@ -44,7 +44,7 @@ struct PendingBlock {
 pub(crate) struct FunctionBuilder {
     name: Ustr,
     result_convention: CallResultConvention,
-    value_result: Option<Type>,
+    direct_result_type: Option<Type>,
     parameters: Vec<Parameter>,
     constants: ConstantPool,
     blocks: Vec<PendingBlock>,
@@ -62,7 +62,7 @@ impl FunctionBuilder {
         Self {
             name,
             result_convention,
-            value_result: None,
+            direct_result_type: None,
             parameters: Vec::new(),
             constants: ConstantPool::default(),
             blocks: Vec::new(),
@@ -75,7 +75,12 @@ impl FunctionBuilder {
     /// Makes the function carry its result, of type `ty`, as a value: each `return` passes it, and
     /// there is no result parameter.
     pub(crate) fn set_value_result(&mut self, ty: Type) {
-        self.value_result = Some(ty);
+        self.direct_result_type = Some(ty);
+    }
+
+    pub(crate) fn set_no_value_result(&mut self, ty: Type) {
+        assert_eq!(self.result_convention, CallResultConvention::NoValue);
+        self.direct_result_type = Some(ty);
     }
 
     pub(crate) fn add_parameter(&mut self, ty: Type, tag: ParameterKind) -> ParameterId {
@@ -324,7 +329,7 @@ impl FunctionBuilder {
         Function::new(
             self.name,
             self.result_convention,
-            self.value_result,
+            self.direct_result_type,
             self.parameters,
             self.constants.into_vec(),
             blocks,

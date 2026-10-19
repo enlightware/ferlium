@@ -267,9 +267,8 @@ impl Compiler {
     }
 
     /// Returns the MIR for the current successfully compiled source, with source-link metadata.
-    pub fn mir_text(&mut self, optimized: bool) -> IrText {
+    pub fn mir_text(&mut self, optimized: bool) -> Result<IrText, String> {
         self.mir_text_at(optimized, false)
-            .expect("semantic MIR preparation is infallible")
     }
 
     /// Returns the Wasm text of the current successfully compiled module, with source-link
@@ -304,6 +303,14 @@ impl Compiler {
                     .emit_physical_mir_module_with_source_map(module_id)
                     .map_err(|error| compiler.format_runtime_error(error))?
             } else {
+                compiler
+                    .session
+                    .prepare_execution_target(ExecutionTarget::Mir, module_id)
+                    .map_err(|error| {
+                        error
+                            .format_with(compiler.session.source_table())
+                            .to_string()
+                    })?;
                 compiler.session.emit_mir_module_with_source_map(module_id)
             };
             Ok(compiler.ir_text(text, source_id))
@@ -653,7 +660,7 @@ impl Compiler {
             if physical {
                 crate::repl::physical_mir_text(&compiler.session, module)
             } else {
-                Ok(compiler.session.emit_mir_module(module))
+                crate::repl::mir_text(&mut compiler.session, module)
             }
         })
     }
@@ -956,7 +963,7 @@ mod tests {
         compiler
             .session
             .set_physical_mir_optimization(MirOptimization::Disabled);
-        assert!(!compiler.mir_text(true).text.is_empty());
+        assert!(!compiler.mir_text(true).unwrap().text.is_empty());
         assert!(
             !compiler
                 .physical_mir_text_optimized(true)
@@ -1044,7 +1051,7 @@ mod tests {
             .run_expr_mir(false)
             .expect("expression should exist");
         assert_eq!(raw_result.html_message(), "42: int");
-        let raw_mir = compiler.mir_text(false);
+        let raw_mir = compiler.mir_text(false).unwrap();
         assert!(raw_mir.text.contains("b0:"), "{}", raw_mir.text);
         assert!(raw_mir.source_map.iter().all(|entry| {
             entry.from < entry.to
@@ -1061,7 +1068,7 @@ mod tests {
             .run_expr_mir(true)
             .expect("expression should exist");
         assert_eq!(optimized_result.html_message(), "42: int");
-        let optimized_mir = compiler.mir_text(true);
+        let optimized_mir = compiler.mir_text(true).unwrap();
         assert!(optimized_mir.text.contains("b0:"), "{}", optimized_mir.text);
     }
 
@@ -1142,7 +1149,7 @@ mod tests {
 
         let mir_source = "\"😀é\"";
         assert!(compiler.compile(mir_source).is_none());
-        let mir = compiler.mir_text(false);
+        let mir = compiler.mir_text(false).unwrap();
         let mir_utf16_len = mir.text.encode_utf16().count();
         let source_utf16_len = mir_source.encode_utf16().count();
         assert!(!mir.source_map.is_empty());
@@ -1167,7 +1174,7 @@ mod tests {
         let mut compiler = build("40 + 2");
         assert!(compiler.compile("fn broken() -> bool { 1 }").is_some());
 
-        let mir = compiler.mir_text(false);
+        let mir = compiler.mir_text(false).unwrap();
         assert!(mir.text.is_empty());
         assert!(mir.source_map.is_empty());
     }
@@ -1407,5 +1414,27 @@ mod tests {
         let compiler = build("fn main(x) { string_len(x) }");
         let signature = compiler.fn_signature("main").unwrap();
         assert_eq!(signature, "(string) -> int");
+    }
+    #[test]
+    fn compiler_limits_in_mir_inspection_are_reported_without_a_panic() {
+        let mut source = "struct E0 {}\n".to_string();
+        for level in 1..=10 {
+            let member = level - 1;
+            source.push_str(&format!(
+                "struct E{level} {{ left: E{member}, right: E{member} }}\n"
+            ));
+        }
+        source.push_str(
+            "fn inner<T>(x: T) -> (T, T, T) { (x, x, x) }
+            fn outer<T>(x: T, count: &mut int) -> int { count += 1; inner(x); 1 }
+            fn run(x: E10, count: &mut int) -> int { outer(x, count) }",
+        );
+        let mut compiler = Compiler::new();
+        assert!(compiler.compile_report(&source).succeeded);
+        let Err(error) = compiler.mir_text(true) else {
+            panic!("MIR inspection should report the compiler limit");
+        };
+        assert!(error.contains("Compiler limit exceeded"), "{error}");
+        assert!(!compiler.mir_text(false).unwrap().text.is_empty());
     }
 }

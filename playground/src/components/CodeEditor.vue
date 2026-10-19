@@ -160,9 +160,7 @@ function refreshIr() {
 		reportEngineTrap(error);
 		emit("irChanged", props.executionMode === "wasm"
 			? { text: `Unable to generate Wasm: ${String(error)}`, source_map: [] }
-			: props.executionMode === "physical-mir"
-				? { text: `Unable to prepare MIR: ${String(error)}`, source_map: [] }
-				: undefined);
+			: { text: `Unable to prepare MIR: ${String(error)}`, source_map: [] });
 	}
 }
 

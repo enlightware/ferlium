@@ -17,11 +17,13 @@
 use rustc_hash::FxHashMap;
 
 use crate::mir::{
-    self, Function, Operation, OperationKind, ValueId,
+    self, Function, Operation, OperationKind, ResultTransport, ValueId,
     edit::FunctionEdit,
     operation::{accepts_value_argument, accepts_value_result},
+    results::{accepts_no_value_result, zero_sized_result},
     terminator::TerminatorKind,
 };
+use crate::{module::ModuleEnv, types::r#type::CallResultConvention};
 
 /// Appends a `load` of each operand at `reads` to `operations`, and passes its value instead.
 pub(crate) fn read_before(
@@ -138,24 +140,38 @@ pub(crate) fn spill_value_arguments(
     Some(edit.finish_unverified())
 }
 
-/// Makes a call writing its result through a place define it as a register instead, if its type
-/// now carries the result as a value (see [`accepts_value_result`]): substituting a generic result
-/// or effect, or making a fallible call infallible, can make it one. Returns the store of the
-/// register into the former result place, which follows the call.
-pub(crate) fn return_value_from_call(
+/// Restores canonical result form after substitution or invoke demotion: a scalar register or
+/// NoValue with a typed zero-sized constant. Returns the store initializing the former output
+/// place, which must follow the call on its success path only.
+pub(crate) fn normalize_call_result(
     edit: &mut FunctionEdit,
     call: &mut Operation,
+    env: ModuleEnv<'_>,
 ) -> Option<Operation> {
     let OperationKind::Call {
-        ty, value_result, ..
+        ty,
+        result_transport,
+        ..
     } = &mut call.kind
     else {
         return None;
     };
-    if *value_result || !accepts_value_result(ty) {
+    if ty.result_convention == CallResultConvention::Value && accepts_no_value_result(ty, &env) {
+        let constant = zero_sized_result(ty.fn_ty.ret, &env).expect("eligible result");
+        let value = mir::Value::Constant(edit.add_constant(ty.fn_ty.ret, constant, &env));
+        ty.result_convention = CallResultConvention::NoValue;
+        *result_transport = ResultTransport::NoValue;
+        let mut operands = call.operands.to_vec();
+        let place = operands
+            .pop()
+            .expect("an indirect result has its output place");
+        call.operands = operands.into_boxed_slice();
+        return Some(Operation::store(call.span, value, place));
+    }
+    if *result_transport != ResultTransport::Place || !accepts_value_result(ty) {
         return None;
     }
-    *value_result = true;
+    *result_transport = ResultTransport::Value;
     let mut operands = call.operands.to_vec();
     let place = operands
         .pop()
@@ -167,21 +183,21 @@ pub(crate) fn return_value_from_call(
     Some(Operation::store(call.span, value, place))
 }
 
-/// Passes a result place to each `call` defining its result register where `returns_value` says its
+/// Passes a result place to each `call` defining its result register where `result_transport` says its
 /// callee's entry returns that result through a pointer. The place is a frame slot of its own in the
 /// entry block, which a `load` after the call reads into the register. `None` if no call needs one.
 pub(crate) fn place_value_results(
     func: &Function,
-    returns_value: impl Fn(&Operation) -> bool,
+    result_transport: impl Fn(&Operation) -> ResultTransport,
 ) -> Option<Function> {
     let needs_place = |operation: &Operation| {
         matches!(
             operation.kind,
             OperationKind::Call {
-                value_result: true,
+                result_transport: ResultTransport::Value,
                 ..
             }
-        ) && !returns_value(operation)
+        ) && result_transport(operation) != ResultTransport::Value
     };
     if !func
         .blocks()
@@ -218,7 +234,7 @@ pub(crate) fn place_value_results(
                 OperationKind::Call {
                     ty: ty.clone(),
                     metadata: metadata.clone(),
-                    value_result: false,
+                    result_transport: ResultTransport::Place,
                 },
             ));
             let mut load = Operation::load(operation.span, slot);
@@ -226,6 +242,71 @@ pub(crate) fn place_value_results(
             rewritten.push(load);
         }
         edit.block_mut(block).operations = rewritten;
+    }
+    let entry = edit.entry();
+    edit.block_mut(entry).operations.splice(0..0, slots);
+    Some(edit.finish_unverified())
+}
+
+/// Supplies output storage where a semantic NoValue call reaches an indirect result interface.
+/// Invokes keep that storage private: no value is read on either successor.
+pub(crate) fn place_no_value_results(
+    func: &Function,
+    result_transport: impl Fn(&Operation) -> ResultTransport,
+) -> Option<Function> {
+    let needs_place = |op: &Operation| {
+        matches!(&op.kind,
+        OperationKind::Call { ty, .. } if ty.result_convention == CallResultConvention::NoValue)
+            && result_transport(op) != ResultTransport::NoValue
+    };
+    if !func.blocks().any(|block| {
+        let block = func.block(block);
+        block
+            .operations()
+            .iter()
+            .chain(match &block.terminator().kind {
+                TerminatorKind::Invoke { operation, .. } => Some(operation),
+                _ => None,
+            })
+            .any(&needs_place)
+    }) {
+        return None;
+    }
+    let mut edit = FunctionEdit::new(func.clone());
+    let mut slots = Vec::new();
+    for block in edit.blocks().collect::<Vec<_>>() {
+        let mut operations = std::mem::take(&mut edit.block_mut(block).operations);
+        let mut terminator = edit.block(block).terminator.clone();
+        let invoked = match &mut terminator.kind {
+            TerminatorKind::Invoke { operation, .. } => Some(operation),
+            _ => None,
+        };
+        for op in operations.iter_mut().chain(invoked) {
+            if !needs_place(op) {
+                continue;
+            }
+            let OperationKind::Call {
+                ty,
+                result_transport,
+                ..
+            } = &mut op.kind
+            else {
+                unreachable!()
+            };
+            let mut alloca = Operation::alloca(op.span, ty.fn_ty.ret);
+            let slot = edit.assign_new_result(&mut alloca).unwrap();
+            slots.push(alloca);
+            ty.result_convention = CallResultConvention::Value;
+            *result_transport = ResultTransport::Place;
+            let mut operands = op.operands.to_vec();
+            operands.push(slot);
+            op.operands = operands.into_boxed_slice();
+        }
+        edit.block_mut(block).operations = operations;
+        edit.block_mut(block).terminator = terminator;
+    }
+    if slots.is_empty() {
+        return None;
     }
     let entry = edit.entry();
     edit.block_mut(entry).operations.splice(0..0, slots);

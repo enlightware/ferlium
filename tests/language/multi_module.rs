@@ -1772,7 +1772,9 @@ fn mir_artifacts_follow_the_published_module_revision() {
     assert_eq!(module_mir_function_slots(&session, module_id), Some(1));
     let initial_revision = module_compilation_revision(&session, module_id).unwrap();
 
-    session.prepare_execution_target(ExecutionTarget::Mir, module_id);
+    session
+        .prepare_execution_target(ExecutionTarget::Mir, module_id)
+        .expect("MIR preparation failed");
     assert_eq!(
         module_compilation_revision(&session, module_id),
         Some(initial_revision),

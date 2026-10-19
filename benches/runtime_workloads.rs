@@ -477,7 +477,9 @@ fn prepare_entry(
         .expect_fresh_module(module_id)
         .get_local_function_id(ferlium::ustr(BENCHMARK_ENTRY))
         .expect("benchmark wrapper must define its entry");
-    session.prepare_execution_target(target, module_id);
+    session
+        .prepare_execution_target(target, module_id)
+        .expect("MIR preparation failed");
     PreparedRuntimeWorkload {
         target,
         session,

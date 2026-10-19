@@ -665,7 +665,8 @@ fn generated_value_to_string_appends_static_pieces_without_materializing_them() 
         "only the initial builder string should be materialized:\n{body}"
     );
     assert_eq!(
-        body.matches("call std::string_push_static_str").count(),
+        body.matches("call no_value std::string_push_static_str")
+            .count(),
         2,
         "tuple delimiter pieces should append as StaticStr:\n{body}"
     );
@@ -685,11 +686,11 @@ fn generated_value_hash_writes_static_markers_without_materializing_strings() {
     let body = mir_function(&module, "fn std::Value<<test>::Flag>::hash");
 
     assert!(
-        body.contains("call std::hasher_write_static_str"),
+        body.contains("call no_value std::hasher_write_static_str"),
         "variant tags should be written as StaticStr:\n{body}"
     );
     assert!(
-        !body.contains("call std::hasher_write_string"),
+        !body.contains("call no_value std::hasher_write_string"),
         "generated hash markers should not materialize owned strings:\n{body}"
     );
     assert!(

@@ -28,6 +28,41 @@ use crate::{
 
 pub type LocatedError = (String, Location);
 
+/// The compiler resource whose implementation limit was exceeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompilerLimitKind {
+    ZeroSizedResultNodes,
+    ZeroSizedResultDepth,
+}
+
+impl Display for CompilerLimitKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::ZeroSizedResultNodes => "zero-sized result reconstruction nodes",
+            Self::ZeroSizedResultDepth => "zero-sized result nesting depth",
+        })
+    }
+}
+
+/// A bounded compiler operation could not complete within its implementation limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompilerLimit {
+    pub kind: CompilerLimitKind,
+    pub actual: usize,
+    pub limit: usize,
+    pub span: Location,
+}
+
+impl Display for CompilerLimit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Compiler limit exceeded: {} ({} > {})",
+            self.kind, self.actual, self.limit
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ADTAccessType {
     RecordAccess,
@@ -850,6 +885,7 @@ impl InvalidRecursiveTypeKind {
 
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum CompilationErrorImpl<S: Scope> {
+    CompilerLimitExceeded(CompilerLimit),
     ParsingFailed(Vec<LocatedError>),
     NameDefinedMultipleTimes {
         name: Ustr,
@@ -1346,6 +1382,7 @@ impl FormatWith<SourceTable> for CompilationError {
         let fmt_span = |loc: &Location| span_to_string(loc, data);
         use CompilationErrorImpl::*;
         match self.deref() {
+            CompilerLimitExceeded(error) => write!(f, "{error} at {}", fmt_span(&error.span)),
             ParsingFailed(errors) => {
                 write!(f, "Parsing failed: ")?;
                 for (i, (msg, span)) in errors.iter().enumerate() {
@@ -2169,6 +2206,7 @@ impl CompilationError {
     ) -> Self {
         use CompilationErrorImpl::*;
         match error.into_inner() {
+            CompilerLimitExceeded(error) => compilation_error!(CompilerLimitExceeded(error)),
             ParsingFailed(errors) => compilation_error!(ParsingFailed(errors)),
             NameDefinedMultipleTimes {
                 name,

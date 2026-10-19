@@ -24,12 +24,13 @@ use rustc_hash::FxHashMap;
 
 use crate::{
     compiler::MirArtifacts,
-    hir::function::ArgConvention,
+    hir::{function::ArgConvention, native_functions::NativeResult},
     mir::{
-        Function, Operation, OperationKind, Parameter, ParameterKind, Value, ValueId, operation,
+        Function, Operation, OperationKind, Parameter, ParameterKind, ResultTransport, Value,
+        ValueId, operation, results::definition_result_transport,
     },
     module::{CallableOrigin, FunctionId, ModuleEnv, TraitId, id::Id},
-    types::r#trait::TraitDictionaryEntryIndex,
+    types::{r#trait::TraitDictionaryEntryIndex, r#type::CallImplType},
 };
 
 /// The entries the calls of one body reach.
@@ -90,28 +91,45 @@ impl<'a> Transports<'a> {
         }
     }
 
-    /// Whether the entry `call` reaches returns its result as a value.
-    pub(crate) fn returns_value(&self, call: &Operation) -> bool {
+    /// How the selected entry transports its result. Dynamic entries use an output place.
+    pub(crate) fn result(&self, call: &Operation) -> ResultTransport {
         let Value::Function(callee) = &call.operands[0] else {
-            return false;
+            return ResultTransport::Place;
         };
         if callee.module == self.env.current.module_id()
             && let Some(specialization) = self.semantic.specialization(callee.function)
         {
-            return specialization.body.value_result().is_some();
+            return specialization.body.result_transport();
         }
-        let Some(function) = self
-            .env
-            .module_by_id(callee.module)
-            .and_then(|module| module.get_function_by_id(callee.function))
-        else {
-            return false;
+        let Some(module) = self.env.module_by_id(callee.module) else {
+            return ResultTransport::Place;
+        };
+        let Some(function) = module.get_function_by_id(callee.function) else {
+            return ResultTransport::Place;
         };
         // A storage primitive is expanded in place, from its result place.
         if matches!(function.origin, CallableOrigin::BufferPrimitive(_)) {
-            return false;
+            return ResultTransport::Place;
         }
-        operation::definition_returns_value(&function.definition)
+        if function.code.as_script().is_some() {
+            definition_result_transport(
+                &function.definition,
+                ModuleEnv::new(module, self.env.modules),
+            )
+        } else if function
+            .code
+            .native_entry()
+            .is_some_and(|entry| entry.signature().result == NativeResult::Unit)
+        {
+            ResultTransport::NoValue
+        } else if operation::accepts_value_result(&CallImplType::new(
+            function.definition.ty_scheme.ty.clone(),
+            function.definition.return_convention(),
+        )) {
+            ResultTransport::Value
+        } else {
+            ResultTransport::Place
+        }
     }
 
     fn function_takes_value(&self, callee: FunctionId, offset: usize) -> bool {

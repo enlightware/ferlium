@@ -23,7 +23,7 @@ use crate::{
     },
     mir::{
         BlockId, DebugLocation, Function, Operation, OperationKind, ParameterId, ParameterKind,
-        Value, ValueId,
+        ResultTransport, Value, ValueId,
         operation::OperationKindDiscriminant,
         pass::{known_callee::KnownCallee, stack_region::no_op_stack_markers},
         physical::{
@@ -1946,11 +1946,13 @@ impl<'a, 's> Body<'a, 's> {
         let callee = callee(op).ok_or("unsupported fallible operation")?;
         // A call defining its result register leaves the result on the operand stack, which
         // `finish_operation_result` takes.
-        let value_result = op.result_id().is_some();
-        let (inputs, output): (Vec<_>, _) = match &op.kind {
-            OperationKind::Call { .. } => {
+        let (result_transport, inputs, output): (_, Vec<_>, _) = match &op.kind {
+            OperationKind::Call {
+                result_transport, ..
+            } => {
                 let output = op.call_result_place();
                 (
+                    *result_transport,
                     op.operands[1..op.operands.len() - usize::from(output.is_some())]
                         .iter()
                         .collect(),
@@ -1958,17 +1960,19 @@ impl<'a, 's> Body<'a, 's> {
                 )
             }
             OperationKind::Clone { .. } => (
+                ResultTransport::Place,
                 op.operands[3..].iter().chain([&op.operands[0]]).collect(),
                 Some(&op.operands[1]),
             ),
             OperationKind::Drop { .. } | OperationKind::DropInitialized { .. } => (
+                ResultTransport::NoValue,
                 op.operands[2..].iter().chain([&op.operands[0]]).collect(),
                 None,
             ),
             _ => return Err("unsupported call operation".into()),
         };
         let Value::Function(target) = callee else {
-            if value_result {
+            if result_transport == ResultTransport::Value {
                 return Err("a dynamic callee returns its result through a pointer".into());
             }
             if let Value::Register(id) = callee
@@ -1993,10 +1997,10 @@ impl<'a, 's> Body<'a, 's> {
             return Err("hidden call evidence".into());
         }
         let direct = !abi.fallible && matches!(abi.result, ResultKind::Direct(_));
-        if value_result && !direct {
+        if result_transport == ResultTransport::Value && !direct {
             return Err("a value result from an entry returning through a pointer".into());
         }
-        let direct_result = if direct && !value_result {
+        let direct_result = if direct && result_transport == ResultTransport::Place {
             Some(self.pointee(output.ok_or("missing result")?)?)
         } else {
             None

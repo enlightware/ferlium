@@ -37,9 +37,9 @@ use crate::{
     cached_primitive_ty,
     containers::{B, DenseBitSet, b},
     format::FormatWith,
-    hir::{function::CallableDefinition, value::VariantPayloadStorage},
+    hir::value::VariantPayloadStorage,
     mir,
-    mir::{DebugLocation, ValueId},
+    mir::{DebugLocation, ResultTransport, ValueId},
     module::{FunctionId, ModuleEnv, ProjectionIndex, TraitDictionaryId, TraitId},
     std::{logic::bool_type, math::float_type, math::int_type},
     types::{
@@ -310,7 +310,7 @@ impl Operation {
 
     /// Creates a `call` operation with the given properties.
     ///
-    /// The call yields no register: its last operand is the result out-pointer, except for physical
+    /// The call yields no register: its last operand is the result out-pointer, except for
     /// `NoValue` calls, which return statically zero-sized products without result storage.
     /// [`with_value_result`](Self::with_value_result) makes a call built without that operand
     /// define its result as a register instead.
@@ -355,6 +355,11 @@ impl Operation {
     ) -> Self {
         let mut operands = vec![callee];
         operands.extend(arguments);
+        let result_transport = if ty.result_convention == CallResultConvention::NoValue {
+            ResultTransport::NoValue
+        } else {
+            ResultTransport::Place
+        };
         Operation {
             result_id: None,
             span: span.into(),
@@ -367,7 +372,7 @@ impl Operation {
                         owned_arguments: DenseBitSet::empty(),
                     })
                 }),
-                value_result: false,
+                result_transport,
             },
         }
     }
@@ -375,7 +380,9 @@ impl Operation {
     /// Makes this `call`, built without a trailing result place, define its result as a register.
     pub(crate) fn with_value_result(mut self) -> Self {
         let OperationKind::Call {
-            ty, value_result, ..
+            ty,
+            result_transport,
+            ..
         } = &mut self.kind
         else {
             panic!("only a call defines a value result");
@@ -385,7 +392,7 @@ impl Operation {
             CallResultConvention::Value,
             "only a value-returning call defines a value result"
         );
-        *value_result = true;
+        *result_transport = ResultTransport::Value;
         self
     }
 
@@ -1281,16 +1288,6 @@ pub(crate) fn accepts_value_result(ty: &CallImplType) -> bool {
         && ty.effects().cannot_fail()
 }
 
-/// Whether `definition` returns its result as a value: its type carries the result as a value (see
-/// [`accepts_value_result`]). Every site deciding a definition's result form, at its lowering or at
-/// a call to it, reads this one rule.
-pub(crate) fn definition_returns_value(definition: &CallableDefinition) -> bool {
-    accepts_value_result(&CallImplType::new(
-        definition.ty_scheme.ty.clone(),
-        definition.return_convention(),
-    ))
-}
-
 /// Whether `ty` is a concrete scalar that call boundaries may carry as a value.
 pub(crate) fn is_scalar_value_type(ty: Type) -> bool {
     ty == int_type() || ty == float_type() || ty == bool_type()
@@ -1374,12 +1371,12 @@ pub enum OperationKind {
     /// Optional metadata records generic instantiation and optimized ownership transfer. Both are
     /// boxed to keep every operation compact; most calls need no metadata at all.
     ///
-    /// A call with `value_result` defines its result as a register instead of writing a trailing
-    /// result place; see [`accepts_value_result`].
+    /// The result transport selects a trailing output place, a result register or no storage;
+    /// see [`ResultTransport`] and [`accepts_value_result`].
     Call {
         ty: B<CallImplType>,
         metadata: Option<B<CallMetadata>>,
-        value_result: bool,
+        result_transport: ResultTransport,
     },
     /// Enter a scoped subscript accessor and expose its yielded place.
     /// The call-site type is boxed for the same compactness reason as [`Self::Call`].
@@ -1563,8 +1560,13 @@ impl OperationKind {
     /// function stops both compiling.
     /// Whether this is a `call` whose last operand is its caller-provided result place.
     pub(crate) fn call_has_result_place(&self) -> bool {
-        matches!(self, OperationKind::Call { ty, value_result, .. }
-            if !value_result && ty.result_convention.has_result_place())
+        matches!(
+            self,
+            OperationKind::Call {
+                result_transport: ResultTransport::Place,
+                ..
+            }
+        )
     }
 
     pub(crate) fn function_id(&self) -> Option<FunctionId> {
@@ -1712,7 +1714,7 @@ impl OperationKind {
             StackSave => OperationResult::StackMarker,
             Call {
                 ty,
-                value_result: true,
+                result_transport: ResultTransport::Value,
                 ..
             } => OperationResult::Lowered(ty.fn_ty.ret),
             Call { .. }
@@ -1763,7 +1765,9 @@ impl OperationKind {
                 "black_box takes the value place and optional layout evidence"
             ),
             Call {
-                ty, value_result, ..
+                ty,
+                result_transport,
+                ..
             } => {
                 assert!(
                     whole.operands.len()
@@ -1771,15 +1775,15 @@ impl OperationKind {
                     "call needs its callee, arguments and convention-specific result place"
                 );
                 assert!(
-                    !value_result || ty.result_convention == CallResultConvention::Value,
+                    *result_transport != ResultTransport::Value
+                        || ty.result_convention == CallResultConvention::Value,
                     "only a value-returning call defines a value result"
                 );
-                if !ty.result_convention.has_result_place() {
-                    assert!(
-                        matches!(whole.operands[0], mir::Value::Function(_)),
-                        "NoValue requires a direct physical call"
-                    );
-                }
+                assert_eq!(
+                    *result_transport == ResultTransport::NoValue,
+                    ty.result_convention == CallResultConvention::NoValue,
+                    "NoValue transport and calling convention must agree"
+                );
             }
             Project { .. } => assert!(
                 !whole.operands.is_empty(),
@@ -2008,9 +2012,13 @@ impl OperationKind {
                 }
                 Ok(())
             }
-            Call { ty, metadata, .. } => {
+            Call {
+                ty,
+                metadata,
+                result_transport,
+            } => {
                 write!(f, "call ")?;
-                if !ty.result_convention.has_result_place() {
+                if *result_transport == ResultTransport::NoValue {
                     write!(f, "no_value ")?;
                 }
                 fmt_callee_and_args(

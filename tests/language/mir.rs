@@ -23,7 +23,8 @@ use wasm_bindgen_test::*;
 fn prepare_mir(session: &mut TestSession, module_id: ferlium::module::ModuleId) {
     session
         .session_mut()
-        .prepare_execution_target(ExecutionTarget::Mir, module_id);
+        .prepare_execution_target(ExecutionTarget::Mir, module_id)
+        .expect("MIR preparation failed");
 }
 
 #[test]
@@ -584,7 +585,6 @@ fn call_functions() {
         session.emit_mir("fn a0(x: int) { let y: int = 2 * x; y }"),
         r#"fn a0(%p0: @arg let int) -> int:
   @c0: int = 2
-  @c1: () = ()
   b0:
     %r0: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c0)
     %r1: int = call std::Num<std::int>::mul#impl:a3604103(%r0, %p0)
@@ -805,6 +805,7 @@ fn sandbox_violation_during_closure_environment_drop_reclaims_the_temporary() {
     let module_id = session
         .compile(
             r#"
+                fn keep_place(value: &mut int) {}
                 struct Bomb(string)
 
                 impl Value for Bomb {
@@ -813,10 +814,14 @@ fn sandbox_violation_during_closure_environment_drop_reclaims_the_temporary() {
                     fn hash(value: Bomb, state: &mut hasher) { hash(value.0, state) }
                     fn clone(source: Bomb) -> Bomb { Bomb(source.0) }
                     fn drop(target: &mut Bomb) {
-                        let a00 = 0; let a01 = 0; let a02 = 0; let a03 = 0;
-                        let a04 = 0; let a05 = 0; let a06 = 0; let a07 = 0;
-                        let a08 = 0; let a09 = 0; let a10 = 0; let a11 = 0;
-                        let a12 = 0; let a13 = 0; let a14 = 0; let a15 = 0;
+                        let mut a00 = 0; let mut a01 = 0; let mut a02 = 0; let mut a03 = 0;
+                        let mut a04 = 0; let mut a05 = 0; let mut a06 = 0; let mut a07 = 0;
+                        let mut a08 = 0; let mut a09 = 0; let mut a10 = 0; let mut a11 = 0;
+                        let mut a12 = 0; let mut a13 = 0; let mut a14 = 0; let mut a15 = 0;
+                        keep_place(a00); keep_place(a01); keep_place(a02); keep_place(a03);
+                        keep_place(a04); keep_place(a05); keep_place(a06); keep_place(a07);
+                        keep_place(a08); keep_place(a09); keep_place(a10); keep_place(a11);
+                        keep_place(a12); keep_place(a13); keep_place(a14); keep_place(a15);
                     }
                 }
 
@@ -1010,7 +1015,6 @@ fn place_call_into_alias_local_branch() {
   @c0: bool = true
   @c1: int = 6
   @c2: int = 4
-  @c3: () = ()
   b0:
     %r0: place int = alloca int
     condbr @c0, b1, b2
@@ -1060,10 +1064,9 @@ fn iter1_mut_local_copy() {
     assert_eq_sans_flake!(
         session.emit_mir("fn add_one(mut x: int) -> int { x = x + 1; x }"),
         r#"fn add_one(%p0: @arg let int) -> int:
-  @c0: () = ()
-  @c1: int = 1
+  @c0: int = 1
   b0:
-    %r0: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c1)
+    %r0: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c0)
     %r1: int = call std::Num<std::int>::add#impl:7665d3ee(%p0, %r0)
     ret %r1
 "#,
@@ -1079,10 +1082,9 @@ fn iter1_let_mut_move_return() {
     assert_eq_sans_flake!(
         session.emit_mir("fn f(x: int) { let mut y = x; y = y + 1; y }"),
         r#"fn f(%p0: @arg let int) -> int:
-  @c0: () = ()
-  @c1: int = 1
+  @c0: int = 1
   b0:
-    %r0: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c1)
+    %r0: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c0)
     %r1: int = call std::Num<std::int>::add#impl:7665d3ee(%p0, %r0)
     ret %r1
 "#,
@@ -1096,9 +1098,8 @@ fn array_index_read() {
         session.emit_mir("fn r(a: [bool]) -> int { if a[0] { 1 } else { 2 } }"),
         r#"fn r(%p0: @arg let [bool], %p1: @ret int):
   @c0: int = 0
-  @c1: () = ()
-  @c2: int = 1
-  @c3: int = 2
+  @c1: int = 1
+  @c2: int = 2
   b0:
     %r0: place *bool = alloca_place bool
     invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::bool>), %p0, @c0, %r0) -> b1 error b2
@@ -1109,11 +1110,11 @@ fn array_index_read() {
   b2:
     propagate_error
   b3:
-    %r3: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c2)
+    %r3: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c1)
     store %r3 to %p1
     br b5
   b4:
-    %r4: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c3)
+    %r4: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c2)
     store %r4 to %p1
     br b5
   b5:
@@ -1127,17 +1128,15 @@ fn array_index_assign() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn s(a: &mut [bool]) { a[1] = true; }"),
-        r#"fn s(%p0: @arg &mut [bool], %p1: @ret ()):
+        r#"fn s(%p0: @arg &mut [bool]) no_value:
   @c0: int = 1
   @c1: bool = true
-  @c2: () = ()
   b0:
     %r0: place *bool = alloca_place bool
     invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::bool>), %p0, @c0, %r0) -> b1 error b2
   b1:
     %r1: *bool = load %r0
     store @c1 to %r1
-    store @c2 to %p1
     ret
   b2:
     propagate_error
@@ -1177,15 +1176,14 @@ fn place_call_into_owned_local() {
         session.emit_mir("fn f(a: [int]) -> int { let mut x = a[0]; x = x + 1; x }"),
         r#"fn f(%p0: @arg let [int], %p1: @ret int):
   @c0: int = 0
-  @c1: () = ()
-  @c2: int = 1
+  @c1: int = 1
   b0:
     %r0: place *int = alloca_place int
     invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, @c0, %r0) -> b1 error b2
   b1:
     %r1: *int = load %r0
     %r2: int = load %r1
-    %r3: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c2)
+    %r3: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c1)
     %r4: int = call std::Num<std::int>::add#impl:7665d3ee(%r2, %r3)
     store %r4 to %p1
     ret
@@ -1202,16 +1200,14 @@ fn place_call_discarded() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn f(a: [int]) { a[0]; }"),
-        r#"fn f(%p0: @arg let [int], %p1: @ret ()):
+        r#"fn f(%p0: @arg let [int]) no_value:
   @c0: int = 0
-  @c1: () = ()
   b0:
     %r0: place *int = alloca_place int
     invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, @c0, %r0) -> b1 error b2
   b1:
     %r1: *int = load %r0
     %r2: int = load %r1
-    store @c1 to %p1
     ret
   b2:
     propagate_error
@@ -1253,22 +1249,20 @@ fn place_call_as_let_argument() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         source_mir(session.emit_mir("fn g(s: [int]) { } fn f(a: [[int]]) { g(a[0]) }")),
-        r#"fn f(%p0: @arg let [[int]], %p1: @ret ()):
+        r#"fn f(%p0: @arg let [[int]]) no_value:
   @c0: int = 0
   b0:
     %r0: place *[int] = alloca_place [int]
     invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(<test>::std::Value<[std::int]>; captures: [dict(std::Value<std::int>)]), %p0, @c0, %r0) -> b1 error b2
   b1:
     %r1: *[int] = load %r0
-    call <test>::g(%r1, %p1)
+    call no_value <test>::g(%r1)
     ret
   b2:
     propagate_error
 
-fn g(%p0: @arg let [int], %p1: @ret ()):
-  @c0: () = ()
+fn g(%p0: @arg let [int]) no_value:
   b0:
-    store @c0 to %p1
     ret
 "#,
     );
@@ -1281,22 +1275,20 @@ fn place_call_as_mutable_ref_argument() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         source_mir(session.emit_mir("fn g(s: &mut [int]) { } fn f(a: &mut [[int]]) { g(a[0]) }")),
-        r#"fn f(%p0: @arg &mut [[int]], %p1: @ret ()):
+        r#"fn f(%p0: @arg &mut [[int]]) no_value:
   @c0: int = 0
   b0:
     %r0: place *[int] = alloca_place [int]
     invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(<test>::std::Value<[std::int]>; captures: [dict(std::Value<std::int>)]), %p0, @c0, %r0) -> b1 error b2
   b1:
     %r1: *[int] = load %r0
-    call <test>::g(%r1, %p1)
+    call no_value <test>::g(%r1)
     ret
   b2:
     propagate_error
 
-fn g(%p0: @arg &mut [int], %p1: @ret ()):
-  @c0: () = ()
+fn g(%p0: @arg &mut [int]) no_value:
   b0:
-    store @c0 to %p1
     ret
 "#,
     );
@@ -1367,7 +1359,6 @@ fn place_call_into_alias_local() {
         session.emit_mir("fn f(a: [int]) -> int { let x = a[0]; x }"),
         r#"fn f(%p0: @arg let [int], %p1: @ret int):
   @c0: int = 0
-  @c1: () = ()
   b0:
     %r0: place *int = alloca_place int
     invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, @c0, %r0) -> b1 error b2
@@ -1402,10 +1393,8 @@ fn let_param_non_trivial() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn f(s: string) { }"),
-        r#"fn f(%p0: @arg let string, %p1: @ret ()):
-  @c0: () = ()
+        r#"fn f(%p0: @arg let string) no_value:
   b0:
-    store @c0 to %p1
     ret
 "#,
     );
@@ -1434,15 +1423,13 @@ fn let_argument_forwards_existing_place() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn u(s: string) { } fn caller(s: string) { u(s) }"),
-        r#"fn caller(%p0: @arg let string, %p1: @ret ()):
+        r#"fn caller(%p0: @arg let string) no_value:
   b0:
-    call <test>::u(%p0, %p1)
+    call no_value <test>::u(%p0)
     ret
 
-fn u(%p0: @arg let string, %p1: @ret ()):
-  @c0: () = ()
+fn u(%p0: @arg let string) no_value:
   b0:
-    store @c0 to %p1
     ret
 "#,
     );
@@ -1464,7 +1451,6 @@ fn recursive_trivial_copy_call_uses_let_convention() {
         ),
         r#"fn f(%p0: @arg let int, %p1: @ret never):
   @c0: int = 1
-  @c1: () = ()
   b0:
     check_call_depth
     %r0: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c0)
@@ -1505,20 +1491,17 @@ fn call_mutable_reference_argument_passes_owned_local_place() {
         }
         "#
         ),
-        r#"fn callee(%p0: @arg &mut int, %p1: @ret ()):
-  @c0: () = ()
+        r#"fn callee(%p0: @arg &mut int) no_value:
   b0:
-    store @c0 to %p1
     ret
 
-fn caller(%p0: @ret ()):
+fn caller() no_value:
   @c0: int = 0
-  @c1: () = ()
   b0:
     %r0: place int = alloca int
     %r1: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c0)
     store %r1 to %r0
-    call <test>::callee(%r0, %p0)
+    call no_value <test>::callee(%r0)
     ret
 "#,
     );
@@ -1541,22 +1524,19 @@ fn call_passes_all_argument_conventions() {
             }
             "#,
         ),
-        r#"fn callee(%p0: @arg let int, %p1: @arg &mut int, %p2: @arg let string, %p3: @ret ()):
-  @c0: () = ()
+        r#"fn callee(%p0: @arg let int, %p1: @arg &mut int, %p2: @arg let string) no_value:
   b0:
-    store @c0 to %p3
     ret
 
-fn caller(%p0: @arg let string, %p1: @ret ()):
+fn caller(%p0: @arg let string) no_value:
   @c0: int = 0
-  @c1: () = ()
-  @c2: int = 1
+  @c1: int = 1
   b0:
     %r0: place int = alloca int
     %r1: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c0)
     store %r1 to %r0
-    %r2: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c2)
-    call <test>::callee(%r2, %r0, %p0, %p1)
+    %r2: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c1)
+    call no_value <test>::callee(%r2, %r0, %p0)
     ret
 "#,
     );
@@ -1567,13 +1547,11 @@ fn mutable_reference_parameter() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn f(x: &mut int) { x = 2; }"),
-        r#"fn f(%p0: @arg &mut int, %p1: @ret ()):
+        r#"fn f(%p0: @arg &mut int) no_value:
   @c0: int = 2
-  @c1: () = ()
   b0:
     %r0: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c0)
     store %r0 to %p0
-    store @c1 to %p1
     ret
 "#,
     );
@@ -1587,7 +1565,6 @@ fn generic_apply() {
         session.emit_mir("fn f(x) { x * 2 }"),
         r#"fn f(%p0: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p1: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), (A, A) -> bool, () -> int, () -> int), %p2: @arg let A, %p3: @ret A):
   @c0: int = 2
-  @c1: () = ()
   b0:
     %r0: place A = alloca A using %p1
     check_call_depth
@@ -1692,7 +1669,6 @@ fn $lambda$1(%p0: @arg &mut int) -> int:
 
 fn capture() -> int:
   @c0: int = 1
-  @c1: () = ()
   b0:
     %r0: place (() -> int) = alloca () -> int
     check_call_depth
@@ -1720,10 +1696,8 @@ fn std::Value<(std::int,)>::clone#impl:7414fc52(%p0: @arg let (int,), %p1: @ret 
     memcpy %p0 to %p1
     ret
 
-fn std::Value<(std::int,)>::drop#impl:d5ec4f8c(%p0: @arg &mut (int,), %p1: @ret ()):
-  @c0: () = ()
+fn std::Value<(std::int,)>::drop#impl:d5ec4f8c(%p0: @arg &mut (int,)) no_value:
   b0:
-    store @c0 to %p1
     ret
 
 fn std::Value<(std::int,)>::eq#impl:b00d2abd(%p0: @arg let (int,), %p1: @arg let (int,)) -> bool:
@@ -1742,15 +1716,12 @@ fn std::Value<(std::int,)>::eq#impl:b00d2abd(%p0: @arg let (int,), %p1: @arg let
   b2:
     ret @c2
 
-fn std::Value<(std::int,)>::hash#impl:58218263(%p0: @arg let (int,), %p1: @arg &mut hasher, %p2: @ret ()):
+fn std::Value<(std::int,)>::hash#impl:58218263(%p0: @arg let (int,), %p1: @arg &mut hasher) no_value:
   @c0: int = 0
-  @c1: () = ()
   b0:
     %r0: place int = subfield @c0 from %p0
     %r1: int = load %r0
-    %r2: place () = alloca ()
-    call std::Value<std::int>::hash#impl:bdc2934a(%r1, %p1, %r2)
-    store @c1 to %p2
+    call no_value std::Value<std::int>::hash#impl:bdc2934a(%r1, %p1)
     ret
 
 fn std::Value<(std::int,)>::ne#impl:f3a9fd5c(%p0: @extra (((int,), (int,)) -> bool, ((int,)) -> string, ((int,), &mut hasher) -> (), ((int,)) -> (int,), (&mut (int,)) -> (), ((int,), (int,)) -> bool, () -> int, () -> int), %p1: @arg let (int,), %p2: @arg let (int,)) -> bool:
@@ -1760,25 +1731,22 @@ fn std::Value<(std::int,)>::ne#impl:f3a9fd5c(%p0: @extra (((int,), (int,)) -> bo
 
 fn std::Value<(std::int,)>::to_string#impl:30b07f9c(%p0: @arg let (int,), %p1: @ret string):
   @c0: StaticStr = "("
-  @c1: () = ()
-  @c2: int = 0
-  @c3: StaticStr = ")"
+  @c1: int = 0
+  @c2: StaticStr = ")"
   b0:
     %r0: place string = alloca string
     %r1: place string = alloca string
     %r2: place StaticStr = alloca StaticStr
     store @c0 to %r2
     call std::string_from_static(%r2, %r0)
-    %r3: place int = subfield @c2 from %p0
+    %r3: place int = subfield @c1 from %p0
     %r4: int = load %r3
     call std::Value<std::int>::to_string#impl:a5db1d9f(%r4, %r1)
-    %r5: place () = alloca ()
-    call std::string_push_str(%r0, %r1, %r5)
+    call no_value std::string_push_str(%r0, %r1)
     drop string %r1 via std::Value<std::string>::drop#impl:1d429675
-    %r6: place StaticStr = alloca StaticStr
-    store @c3 to %r6
-    %r7: place () = alloca ()
-    call std::string_push_static_str(%r0, %r6, %r7)
+    %r5: place StaticStr = alloca StaticStr
+    store @c2 to %r5
+    call no_value std::string_push_static_str(%r0, %r5)
     move %r0 to %p1
     ret
 "#,
@@ -1835,7 +1803,6 @@ fn generic_multiple_ops_reuse_witness() {
     assert_eq_sans_flake!(
         session.emit_mir("fn f(x) { x * x + x }"),
         r#"fn f(%p0: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p1: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), (A, A) -> bool, () -> int, () -> int), %p2: @arg let A, %p3: @ret A):
-  @c0: () = ()
   b0:
     %r0: place A = alloca A using %p1
     check_call_depth
@@ -1878,10 +1845,9 @@ fn copy_int() {
     assert_eq_sans_flake!(
         session.emit_mir("fn f(x: int) { let y = x; y + 1 }"),
         r#"fn f(%p0: @arg let int) -> int:
-  @c0: () = ()
-  @c1: int = 1
+  @c0: int = 1
   b0:
-    %r0: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c1)
+    %r0: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c0)
     %r1: int = call std::Num<std::int>::add#impl:7665d3ee(%p0, %r0)
     ret %r1
 "#,
@@ -1946,10 +1912,8 @@ fn std::Value<<test>::A>::clone#impl:3b26fee6(%p0: @arg let A, %p1: @ret A):
     memcpy %p0 to %p1
     ret
 
-fn std::Value<<test>::A>::drop#impl:e48f46c8(%p0: @arg &mut A, %p1: @ret ()):
-  @c0: () = ()
+fn std::Value<<test>::A>::drop#impl:e48f46c8(%p0: @arg &mut A) no_value:
   b0:
-    store @c0 to %p1
     ret
 
 fn std::Value<<test>::A>::eq#impl:601557a9(%p0: @arg let A, %p1: @arg let A) -> bool:
@@ -1978,20 +1942,16 @@ fn std::Value<<test>::A>::eq#impl:601557a9(%p0: @arg let A, %p1: @arg let A) -> 
   b4:
     ret @c3
 
-fn std::Value<<test>::A>::hash#impl:2d1a24bf(%p0: @arg let A, %p1: @arg &mut hasher, %p2: @ret ()):
+fn std::Value<<test>::A>::hash#impl:2d1a24bf(%p0: @arg let A, %p1: @arg &mut hasher) no_value:
   @c0: int = 0
   @c1: int = 1
-  @c2: () = ()
   b0:
     %r0: place int = subfield @c0 from %p0
     %r1: int = load %r0
-    %r2: place () = alloca ()
-    call std::Value<std::int>::hash#impl:bdc2934a(%r1, %p1, %r2)
-    %r3: place int = subfield @c1 from %p0
-    %r4: int = load %r3
-    %r5: place () = alloca ()
-    call std::Value<std::int>::hash#impl:bdc2934a(%r4, %p1, %r5)
-    store @c2 to %p2
+    call no_value std::Value<std::int>::hash#impl:bdc2934a(%r1, %p1)
+    %r2: place int = subfield @c1 from %p0
+    %r3: int = load %r2
+    call no_value std::Value<std::int>::hash#impl:bdc2934a(%r3, %p1)
     ret
 
 fn std::Value<<test>::A>::ne#impl:8939a6d8(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), (A, A) -> bool, () -> int, () -> int), %p1: @arg let A, %p2: @arg let A) -> bool:
@@ -2001,14 +1961,13 @@ fn std::Value<<test>::A>::ne#impl:8939a6d8(%p0: @extra ((A, A) -> bool, (A) -> s
 
 fn std::Value<<test>::A>::to_string#impl:78412598(%p0: @arg let A, %p1: @ret string):
   @c0: StaticStr = "A { "
-  @c1: () = ()
-  @c2: StaticStr = "x"
-  @c3: StaticStr = ": "
-  @c4: int = 0
-  @c5: StaticStr = ", "
-  @c6: StaticStr = "y"
-  @c7: int = 1
-  @c8: StaticStr = " }"
+  @c1: StaticStr = "x"
+  @c2: StaticStr = ": "
+  @c3: int = 0
+  @c4: StaticStr = ", "
+  @c5: StaticStr = "y"
+  @c6: int = 1
+  @c7: StaticStr = " }"
   b0:
     %r0: place string = alloca string
     %r1: place string = alloca string
@@ -2017,41 +1976,33 @@ fn std::Value<<test>::A>::to_string#impl:78412598(%p0: @arg let A, %p1: @ret str
     store @c0 to %r3
     call std::string_from_static(%r3, %r0)
     %r4: place StaticStr = alloca StaticStr
-    store @c2 to %r4
-    %r5: place () = alloca ()
-    call std::string_push_static_str(%r0, %r4, %r5)
-    %r6: place StaticStr = alloca StaticStr
-    store @c3 to %r6
-    %r7: place () = alloca ()
-    call std::string_push_static_str(%r0, %r6, %r7)
-    %r8: place int = subfield @c4 from %p0
-    %r9: int = load %r8
-    call std::Value<std::int>::to_string#impl:a5db1d9f(%r9, %r1)
-    %r10: place () = alloca ()
-    call std::string_push_str(%r0, %r1, %r10)
+    store @c1 to %r4
+    call no_value std::string_push_static_str(%r0, %r4)
+    %r5: place StaticStr = alloca StaticStr
+    store @c2 to %r5
+    call no_value std::string_push_static_str(%r0, %r5)
+    %r6: place int = subfield @c3 from %p0
+    %r7: int = load %r6
+    call std::Value<std::int>::to_string#impl:a5db1d9f(%r7, %r1)
+    call no_value std::string_push_str(%r0, %r1)
     drop string %r1 via std::Value<std::string>::drop#impl:1d429675
-    %r11: place StaticStr = alloca StaticStr
-    store @c5 to %r11
-    %r12: place () = alloca ()
-    call std::string_push_static_str(%r0, %r11, %r12)
-    %r13: place StaticStr = alloca StaticStr
-    store @c6 to %r13
-    %r14: place () = alloca ()
-    call std::string_push_static_str(%r0, %r13, %r14)
-    %r15: place StaticStr = alloca StaticStr
-    store @c3 to %r15
-    %r16: place () = alloca ()
-    call std::string_push_static_str(%r0, %r15, %r16)
-    %r17: place int = subfield @c7 from %p0
-    %r18: int = load %r17
-    call std::Value<std::int>::to_string#impl:a5db1d9f(%r18, %r2)
-    %r19: place () = alloca ()
-    call std::string_push_str(%r0, %r2, %r19)
+    %r8: place StaticStr = alloca StaticStr
+    store @c4 to %r8
+    call no_value std::string_push_static_str(%r0, %r8)
+    %r9: place StaticStr = alloca StaticStr
+    store @c5 to %r9
+    call no_value std::string_push_static_str(%r0, %r9)
+    %r10: place StaticStr = alloca StaticStr
+    store @c2 to %r10
+    call no_value std::string_push_static_str(%r0, %r10)
+    %r11: place int = subfield @c6 from %p0
+    %r12: int = load %r11
+    call std::Value<std::int>::to_string#impl:a5db1d9f(%r12, %r2)
+    call no_value std::string_push_str(%r0, %r2)
     drop string %r2 via std::Value<std::string>::drop#impl:1d429675
-    %r20: place StaticStr = alloca StaticStr
-    store @c8 to %r20
-    %r21: place () = alloca ()
-    call std::string_push_static_str(%r0, %r20, %r21)
+    %r13: place StaticStr = alloca StaticStr
+    store @c7 to %r13
+    call no_value std::string_push_static_str(%r0, %r13)
     move %r0 to %p1
     ret
 
@@ -2070,10 +2021,8 @@ fn std::Value<<test>::Wrapper>::clone#impl:e02c4c62(%p0: @arg let Wrapper, %p1: 
     memcpy %p0 to %p1
     ret
 
-fn std::Value<<test>::Wrapper>::drop#impl:c2860560(%p0: @arg &mut Wrapper, %p1: @ret ()):
-  @c0: () = ()
+fn std::Value<<test>::Wrapper>::drop#impl:c2860560(%p0: @arg &mut Wrapper) no_value:
   b0:
-    store @c0 to %p1
     ret
 
 fn std::Value<<test>::Wrapper>::eq#impl:d6883255(%p0: @arg let Wrapper, %p1: @arg let Wrapper) -> bool:
@@ -2098,18 +2047,14 @@ fn std::Value<<test>::Wrapper>::eq#impl:d6883255(%p0: @arg let Wrapper, %p1: @ar
   b4:
     ret @c3
 
-fn std::Value<<test>::Wrapper>::hash#impl:65f26de7(%p0: @arg let Wrapper, %p1: @arg &mut hasher, %p2: @ret ()):
+fn std::Value<<test>::Wrapper>::hash#impl:65f26de7(%p0: @arg let Wrapper, %p1: @arg &mut hasher) no_value:
   @c0: int = 0
   @c1: int = 1
-  @c2: () = ()
   b0:
     %r0: place A = subfield @c0 from %p0
-    %r1: place () = alloca ()
-    call <test>::std::Value<<test>::A>::hash#impl:2d1a24bf(%r0, %p1, %r1)
-    %r2: place A = subfield @c1 from %p0
-    %r3: place () = alloca ()
-    call <test>::std::Value<<test>::A>::hash#impl:2d1a24bf(%r2, %p1, %r3)
-    store @c2 to %p2
+    call no_value <test>::std::Value<<test>::A>::hash#impl:2d1a24bf(%r0, %p1)
+    %r1: place A = subfield @c1 from %p0
+    call no_value <test>::std::Value<<test>::A>::hash#impl:2d1a24bf(%r1, %p1)
     ret
 
 fn std::Value<<test>::Wrapper>::ne#impl:eb6b5990(%p0: @extra ((Wrapper, Wrapper) -> bool, (Wrapper) -> string, (Wrapper, &mut hasher) -> (), (Wrapper) -> Wrapper, (&mut Wrapper) -> (), (Wrapper, Wrapper) -> bool, () -> int, () -> int), %p1: @arg let Wrapper, %p2: @arg let Wrapper) -> bool:
@@ -2119,14 +2064,13 @@ fn std::Value<<test>::Wrapper>::ne#impl:eb6b5990(%p0: @extra ((Wrapper, Wrapper)
 
 fn std::Value<<test>::Wrapper>::to_string#impl:7f6f6750(%p0: @arg let Wrapper, %p1: @ret string):
   @c0: StaticStr = "Wrapper { "
-  @c1: () = ()
-  @c2: StaticStr = "left"
-  @c3: StaticStr = ": "
-  @c4: int = 0
-  @c5: StaticStr = ", "
-  @c6: StaticStr = "right"
-  @c7: int = 1
-  @c8: StaticStr = " }"
+  @c1: StaticStr = "left"
+  @c2: StaticStr = ": "
+  @c3: int = 0
+  @c4: StaticStr = ", "
+  @c5: StaticStr = "right"
+  @c6: int = 1
+  @c7: StaticStr = " }"
   b0:
     %r0: place string = alloca string
     %r1: place string = alloca string
@@ -2135,39 +2079,31 @@ fn std::Value<<test>::Wrapper>::to_string#impl:7f6f6750(%p0: @arg let Wrapper, %
     store @c0 to %r3
     call std::string_from_static(%r3, %r0)
     %r4: place StaticStr = alloca StaticStr
-    store @c2 to %r4
-    %r5: place () = alloca ()
-    call std::string_push_static_str(%r0, %r4, %r5)
-    %r6: place StaticStr = alloca StaticStr
-    store @c3 to %r6
-    %r7: place () = alloca ()
-    call std::string_push_static_str(%r0, %r6, %r7)
-    %r8: place A = subfield @c4 from %p0
-    call <test>::std::Value<<test>::A>::to_string#impl:78412598(%r8, %r1)
-    %r9: place () = alloca ()
-    call std::string_push_str(%r0, %r1, %r9)
+    store @c1 to %r4
+    call no_value std::string_push_static_str(%r0, %r4)
+    %r5: place StaticStr = alloca StaticStr
+    store @c2 to %r5
+    call no_value std::string_push_static_str(%r0, %r5)
+    %r6: place A = subfield @c3 from %p0
+    call <test>::std::Value<<test>::A>::to_string#impl:78412598(%r6, %r1)
+    call no_value std::string_push_str(%r0, %r1)
     drop string %r1 via std::Value<std::string>::drop#impl:1d429675
-    %r10: place StaticStr = alloca StaticStr
-    store @c5 to %r10
-    %r11: place () = alloca ()
-    call std::string_push_static_str(%r0, %r10, %r11)
-    %r12: place StaticStr = alloca StaticStr
-    store @c6 to %r12
-    %r13: place () = alloca ()
-    call std::string_push_static_str(%r0, %r12, %r13)
-    %r14: place StaticStr = alloca StaticStr
-    store @c3 to %r14
-    %r15: place () = alloca ()
-    call std::string_push_static_str(%r0, %r14, %r15)
-    %r16: place A = subfield @c7 from %p0
-    call <test>::std::Value<<test>::A>::to_string#impl:78412598(%r16, %r2)
-    %r17: place () = alloca ()
-    call std::string_push_str(%r0, %r2, %r17)
+    %r7: place StaticStr = alloca StaticStr
+    store @c4 to %r7
+    call no_value std::string_push_static_str(%r0, %r7)
+    %r8: place StaticStr = alloca StaticStr
+    store @c5 to %r8
+    call no_value std::string_push_static_str(%r0, %r8)
+    %r9: place StaticStr = alloca StaticStr
+    store @c2 to %r9
+    call no_value std::string_push_static_str(%r0, %r9)
+    %r10: place A = subfield @c6 from %p0
+    call <test>::std::Value<<test>::A>::to_string#impl:78412598(%r10, %r2)
+    call no_value std::string_push_str(%r0, %r2)
     drop string %r2 via std::Value<std::string>::drop#impl:1d429675
-    %r18: place StaticStr = alloca StaticStr
-    store @c8 to %r18
-    %r19: place () = alloca ()
-    call std::string_push_static_str(%r0, %r18, %r19)
+    %r11: place StaticStr = alloca StaticStr
+    store @c7 to %r11
+    call no_value std::string_push_static_str(%r0, %r11)
     move %r0 to %p1
     ret
 "#
@@ -2226,10 +2162,8 @@ fn std::Value<<test>::Probe>::clone#impl:a879cee3(%p0: @arg let Probe, %p1: @ret
     store %r4 to %r0
     ret
 
-fn std::Value<<test>::Probe>::drop#impl:c816a941(%p0: @arg &mut Probe, %p1: @ret ()):
-  @c0: () = ()
+fn std::Value<<test>::Probe>::drop#impl:c816a941(%p0: @arg &mut Probe) no_value:
   b0:
-    store @c0 to %p1
     ret
 
 fn std::Value<<test>::Probe>::eq#impl:938075a8(%p0: @arg let Probe, %p1: @arg let Probe) -> bool:
@@ -2242,12 +2176,12 @@ fn std::Value<<test>::Probe>::eq#impl:938075a8(%p0: @arg let Probe, %p1: @arg le
     %r4: bool = call std::Value<std::int>::eq#impl:87044288(%r1, %r3)
     ret %r4
 
-fn std::Value<<test>::Probe>::hash#impl:d7e4d34a(%p0: @arg let Probe, %p1: @arg &mut hasher, %p2: @ret ()):
+fn std::Value<<test>::Probe>::hash#impl:d7e4d34a(%p0: @arg let Probe, %p1: @arg &mut hasher) no_value:
   @c0: int = 0
   b0:
     %r0: place int = subfield @c0 from %p0
     %r1: int = load %r0
-    call std::Value<std::int>::hash#impl:bdc2934a(%r1, %p1, %p2)
+    call no_value std::Value<std::int>::hash#impl:bdc2934a(%r1, %p1)
     ret
 
 fn std::Value<<test>::Probe>::ne#impl:1ce4c351(%p0: @extra ((Probe, Probe) -> bool, (Probe) -> string, (Probe, &mut hasher) -> (), (Probe) -> Probe, (&mut Probe) -> (), (Probe, Probe) -> bool, () -> int, () -> int), %p1: @arg let Probe, %p2: @arg let Probe) -> bool:
@@ -2401,11 +2335,10 @@ fn store_local_generic_clone_dictionary() {
     check_call_depth
     %r1: place ((A) -> A) = dict_entry 3 from %p0
     clone A %p1 to %r0 via %r1
-    %r2: place () = alloca ()
-    call <test>::g(%r0, %r2)
+    call no_value <test>::g(%r0)
     store @c0 to %p2
-    %r3: place ((&mut A) -> ()) = dict_entry 4 from %p0
-    drop A %r0 via %r3
+    %r2: place ((&mut A) -> ()) = dict_entry 4 from %p0
+    drop A %r0 via %r2
     ret
 
 fn g(%p0: @arg &mut A, %p1: @ret ()):
@@ -2425,7 +2358,6 @@ fn return_local_int_move() {
         session.emit_mir("fn f() { let x: int = 42; x }"),
         r#"fn f() -> int:
   @c0: int = 42
-  @c1: () = ()
   b0:
     ret @c0
 "#,
@@ -2445,10 +2377,9 @@ fn reassign_local_literal() {
         session.emit_mir("fn f() -> int { let mut y: int = 1; y = 2; y }"),
         r#"fn f() -> int:
   @c0: int = 1
-  @c1: () = ()
-  @c2: int = 2
+  @c1: int = 2
   b0:
-    %r0: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c2)
+    %r0: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c1)
     ret %r0
 "#,
     );
@@ -2462,7 +2393,6 @@ fn reassign_local_from_param() {
         session.emit_mir("fn f(x: int) -> int { let mut y: int = 0; y = x; y }"),
         r#"fn f(%p0: @arg let int) -> int:
   @c0: int = 0
-  @c1: () = ()
   b0:
     ret %p0
 "#,
@@ -2480,8 +2410,8 @@ fn reassign_in_branches() {
         ),
         r#"fn f(%p0: @arg let bool) -> int:
   @c0: int = 0
-  @c1: () = ()
-  @c2: int = 1
+  @c1: int = 1
+  @c2: () = ()
   @c3: int = 2
   b0:
     %r1: place int = alloca int
@@ -2489,13 +2419,13 @@ fn reassign_in_branches() {
     store @c0 to %r1
     condbr %p0, b1, b2
   b1:
-    %r2: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c2)
-    store @c1 to %r0
+    %r2: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c1)
+    store @c2 to %r0
     store %r2 to %r1
     br b3
   b2:
     %r3: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c3)
-    store @c1 to %r0
+    store @c2 to %r0
     store %r3 to %r1
     br b3
   b3:
@@ -2512,12 +2442,10 @@ fn reassign_mutable_ref_param_from_local() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn f(x: &mut int) { let y: int = 1; x = y; }"),
-        r#"fn f(%p0: @arg &mut int, %p1: @ret ()):
+        r#"fn f(%p0: @arg &mut int) no_value:
   @c0: int = 1
-  @c1: () = ()
   b0:
     store @c0 to %p0
-    store @c1 to %p1
     ret
 "#,
     );
@@ -2529,16 +2457,14 @@ fn reassign_array_element_from_param() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn f(a: &mut [int], v: int) { a[0] = v; }"),
-        r#"fn f(%p0: @arg &mut [int], %p1: @arg let int, %p2: @ret ()):
-  @c0: () = ()
-  @c1: int = 0
+        r#"fn f(%p0: @arg &mut [int], %p1: @arg let int) no_value:
+  @c0: int = 0
   b0:
     %r0: place *int = alloca_place int
-    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, @c1, %r0) -> b1 error b2
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, @c0, %r0) -> b1 error b2
   b1:
     %r1: *int = load %r0
     store %p1 to %r1
-    store @c0 to %p2
     ret
   b2:
     propagate_error
@@ -2574,16 +2500,14 @@ fn reassign_generic() {
 // value itself (an assignment, a closure-env drop) still initializes `@ret`.
 
 #[test]
-fn void_body_tail_assignment_writes_ret() {
+fn unit_body_tail_assignment_omits_result_transport() {
     // Body tail is a bare assignment (no trailing `;`), so the assignment is the `()`-typed tail.
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn set(a: &mut int, v: int) { a = v }"),
-        r#"fn set(%p0: @arg &mut int, %p1: @arg let int, %p2: @ret ()):
-  @c0: () = ()
+        r#"fn set(%p0: @arg &mut int, %p1: @arg let int) no_value:
   b0:
     store %p1 to %p0
-    store @c0 to %p2
     ret
 "#,
     );
@@ -2714,10 +2638,9 @@ fn copy_int_param_to_local() {
     assert_eq_sans_flake!(
         session.emit_mir("fn f(x: int) { let mut y = x; y = y + 1; y }"),
         r#"fn f(%p0: @arg let int) -> int:
-  @c0: () = ()
-  @c1: int = 1
+  @c0: int = 1
   b0:
-    %r0: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c1)
+    %r0: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c0)
     %r1: int = call std::Num<std::int>::add#impl:7665d3ee(%p0, %r0)
     ret %r1
 "#,
@@ -2730,10 +2653,8 @@ fn variants() {
 
     assert_eq_sans_flake!(
         session.emit_mir("fn f(x: Y | X(string)) { let r = x; } "),
-        r#"fn f(%p0: @arg let X (string) | Y, %p1: @ret ()):
-  @c0: () = ()
+        r#"fn f(%p0: @arg let X (string) | Y) no_value:
   b0:
-    store @c0 to %p1
     ret
 "#
     );
@@ -2781,15 +2702,13 @@ fn named_subscript_assign() {
         session.emit_mir(
             "subscript first(values: &mut [int]) -> int { ref mut { return values[0] } }\nfn f(a: &mut [int], v: int) { a->[first] = v }",
         ),
-        r#"fn f(%p0: @arg &mut [int], %p1: @arg let int, %p2: @ret ()):
-  @c0: () = ()
+        r#"fn f(%p0: @arg &mut [int], %p1: @arg let int) no_value:
   b0:
     %r0: place *int = alloca_place int
     invoke call <test>::first::ref_mut#subscript:19d196cf(%p0, %r0) -> b1 error b2
   b1:
     %r1: *int = load %r0
     store %p1 to %r1
-    store @c0 to %p2
     ret
   b2:
     propagate_error
@@ -2817,8 +2736,7 @@ fn named_subscript_compound_assign() {
         session.emit_mir(
             "subscript first(values: &mut [int]) -> int { ref mut { return values[0] } }\nfn f(a: &mut [int], v: int) { a->[first] += v }",
         ),
-        r#"fn f(%p0: @arg &mut [int], %p1: @arg let int, %p2: @ret ()):
-  @c0: () = ()
+        r#"fn f(%p0: @arg &mut [int], %p1: @arg let int) no_value:
   b0:
     %r0: place *int = alloca_place int
     invoke call <test>::first::ref_mut#subscript:19d196cf(%p0, %r0) -> b1 error b2
@@ -2827,7 +2745,6 @@ fn named_subscript_compound_assign() {
     %r2: int = load %r1
     %r3: int = call std::Num<std::int>::add#impl:7665d3ee(%r2, %p1)
     store %r3 to %r1
-    store @c0 to %p2
     ret
   b2:
     propagate_error
@@ -2897,7 +2814,6 @@ fn yielded_subscript_member_emitted_standalone() {
             "subscript cell(slot: &mut int) -> int { ref mut { let mut local = slot; yield local; slot = local } }",
         ),
         r#"fn cell::ref_mut#subscript:f3d0ec43(%p0: @arg &mut int, %p1: @ret int):
-  @c0: () = ()
   b0:
     %r0: place int = alloca int
     memcpy %p0 to %r0
@@ -2924,7 +2840,6 @@ fn yielded_subscript_read() {
             "{CELL_SUBSCRIPT}fn f(a: &mut int) -> int {{ a->[cell] }}"
         )),
         r#"fn cell::ref_mut#subscript:f3d0ec43(%p0: @arg &mut int, %p1: @ret int):
-  @c0: () = ()
   b0:
     %r0: place int = alloca int
     memcpy %p0 to %r0
@@ -2963,21 +2878,20 @@ fn yielded_subscript_scalar_arguments_are_values() {
             }
         "}),
         r#"fn f(%p0: @arg &mut int, %p1: @arg let int) -> int:
-  @c0: () = ()
-  @c1: int = 2
-  @c2: int = 3
+  @c0: int = 2
+  @c1: int = 3
   b0:
     %r2: place int = alloca int
     %r0: place int = alloca int
     %r1: open place int = project <test>::shifted::ref_mut#subscript:80901f28(%p0, %p1)
     memcpy %r1 to %r0
     end_project %r1
-    %r3: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c1)
+    %r3: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c0)
     %r4: int = call std::Num<std::int>::mul#impl:a3604103(%p1, %r3)
     %r5: open place int = project <test>::shifted::ref_mut#subscript:80901f28(%p0, %r4)
     memcpy %r5 to %r2
     end_project %r5
-    %r6: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c2)
+    %r6: int = call std::Num<std::int>::from_int#impl:25eabc6b(@c1)
     %r7: open place int = project <test>::shifted::ref_mut#subscript:80901f28(%p0, %r6)
     %r8: int = load %r0
     %r9: int = load %r2
@@ -2988,7 +2902,6 @@ fn yielded_subscript_scalar_arguments_are_values() {
     ret %r12
 
 fn shifted::ref_mut#subscript:80901f28(%p0: @arg &mut int, %p1: @arg let int, %p2: @ret int):
-  @c0: () = ()
   b0:
     %r0: place int = alloca int
     %r1: int = load %p0
@@ -3014,7 +2927,6 @@ fn yielded_subscript_assign() {
             "{CELL_SUBSCRIPT}fn f(a: &mut int, v: int) {{ a->[cell] = v }}"
         )),
         r#"fn cell::ref_mut#subscript:f3d0ec43(%p0: @arg &mut int, %p1: @ret int):
-  @c0: () = ()
   b0:
     %r0: place int = alloca int
     memcpy %p0 to %r0
@@ -3024,12 +2936,10 @@ fn yielded_subscript_assign() {
     store %r1 to %p0
     ret
 
-fn f(%p0: @arg &mut int, %p1: @arg let int, %p2: @ret ()):
-  @c0: () = ()
+fn f(%p0: @arg &mut int, %p1: @arg let int) no_value:
   b0:
     %r0: open place int = project <test>::cell::ref_mut#subscript:f3d0ec43(%p0)
     store %p1 to %r0
-    store @c0 to %p2
     end_project %r0
     ret
 "#,
@@ -3058,7 +2968,6 @@ fn yielded_subscript_compound_assign() {
             "#
         ),
         r#"fn cell::ref_mut#subscript:f3d0ec43(%p0: @arg &mut int, %p1: @ret int):
-  @c0: () = ()
   b0:
     %r0: place int = alloca int
     memcpy %p0 to %r0
@@ -3068,14 +2977,12 @@ fn yielded_subscript_compound_assign() {
     store %r1 to %p0
     ret
 
-fn f(%p0: @arg &mut int, %p1: @arg let int, %p2: @ret ()):
-  @c0: () = ()
+fn f(%p0: @arg &mut int, %p1: @arg let int) no_value:
   b0:
     %r0: open place int = project <test>::cell::ref_mut#subscript:f3d0ec43(%p0)
     %r1: int = load %r0
     %r2: int = call std::Num<std::int>::add#impl:7665d3ee(%r1, %p1)
     store %r2 to %r0
-    store @c0 to %p2
     end_project %r0
     ret
 "#,
@@ -3094,7 +3001,6 @@ fn yielded_subscript_compound_assignment_closes_on_error() {
     assert_eq_sans_flake!(
         mir,
         r#"fn cell::ref_mut#subscript:1840c74b(%p0: @arg &mut float, %p1: @ret float):
-  @c0: () = ()
   b0:
     %r0: place float = alloca float
     memcpy %p0 to %r0
@@ -3104,8 +3010,7 @@ fn yielded_subscript_compound_assignment_closes_on_error() {
     store %r1 to %p0
     ret
 
-fn f(%p0: @arg &mut float, %p1: @arg let float, %p2: @ret ()):
-  @c0: () = ()
+fn f(%p0: @arg &mut float, %p1: @arg let float) no_value:
   b0:
     %r0: open place float = project <test>::cell::ref_mut#subscript:1840c74b(%p0)
     %r1: place float = alloca float
@@ -3113,7 +3018,6 @@ fn f(%p0: @arg &mut float, %p1: @arg let float, %p2: @ret ()):
     invoke call std::Div<std::float>::div#impl:a765c8d2(%r2, %p1, %r1) -> b1 error b2
   b1:
     move %r1 to %r0
-    store @c0 to %p2
     end_project %r0
     ret
   b2:
@@ -3133,7 +3037,6 @@ fn yielded_subscript_assignment_opens_after_evaluating_fallible_rhs() {
             "{CELL_SUBSCRIPT}fn f(a: &mut int, v: int, w: int) {{ a->[cell] = idiv(v, w) }}"
         )),
         r#"fn cell::ref_mut#subscript:f3d0ec43(%p0: @arg &mut int, %p1: @ret int):
-  @c0: () = ()
   b0:
     %r0: place int = alloca int
     memcpy %p0 to %r0
@@ -3143,8 +3046,7 @@ fn yielded_subscript_assignment_opens_after_evaluating_fallible_rhs() {
     store %r1 to %p0
     ret
 
-fn f(%p0: @arg &mut int, %p1: @arg let int, %p2: @arg let int, %p3: @ret ()):
-  @c0: () = ()
+fn f(%p0: @arg &mut int, %p1: @arg let int, %p2: @arg let int) no_value:
   b0:
     %r0: place int = alloca int
     invoke call std::idiv(%p1, %p2, %r0) -> b1 error b2
@@ -3152,7 +3054,6 @@ fn f(%p0: @arg &mut int, %p1: @arg let int, %p2: @arg let int, %p3: @ret ()):
     %r1: open place int = project <test>::cell::ref_mut#subscript:f3d0ec43(%p0)
     %r2: int = load %r0
     store %r2 to %r1
-    store @c0 to %p3
     end_project %r1
     ret
   b2:
@@ -3405,7 +3306,6 @@ fn role_annotation_distinguishes_a_place_slot_from_a_value_slot() {
     assert_eq_sans_flake!(
         session.emit_mir("fn a0(a: [int], i: int) -> int { let mut j = i; a[j] }"),
         r#"fn a0(%p0: @arg let [int], %p1: @arg let int, %p2: @ret int):
-  @c0: () = ()
   b0:
     %r1: place int = alloca int
     %r0: place *int = alloca_place int
@@ -3550,5 +3450,129 @@ fn invariant_array_length_reads_match_an_explicit_scalar_cache() {
             "#
         ),
         expected_tuple([int(0), int(0), int(364), int(364), int(5135), int(5135)])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn zero_sized_call_results_have_no_transport_in_raw_mir() {
+    let mut session = TestSession::new();
+    let body = session.emit_mir(
+        "fn bump(x: &mut int) { x += 1; }
+         fn checked(x: int) { let n = idiv(1, x); }
+         fn through(f: (&mut int) -> (), x: &mut int) { f(x); }
+         fn take(unit: ()) -> int { 7 }
+         fn use_result(x: &mut int) -> int { take(bump(x)) }
+         fn tail(x: int) { checked(x) }",
+    );
+    assert!(
+        body.contains("fn bump(%p0: @arg &mut int) no_value:"),
+        "{body}"
+    );
+    assert!(body.contains("call no_value %p0(%p1)"), "{body}");
+    assert!(
+        body.contains("invoke call no_value <test>::checked(%p0)"),
+        "{body}"
+    );
+    let used = body
+        .split("fn use_result")
+        .nth(1)
+        .unwrap()
+        .split("\nfn ")
+        .next()
+        .unwrap();
+    assert_eq!(
+        used.matches("alloca ()").count(),
+        1,
+        "only take's indirect unit argument needs a place: {used}"
+    );
+    assert!(used.contains("call no_value <test>::bump(%p0)"), "{used}");
+    assert!(
+        used.contains("store @c0 to %r0"),
+        "the argument is initialized from unit: {used}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn zero_sized_result_compiler_limits_report_source_diagnostics() {
+    use ferlium::{
+        CompilerSession, Path,
+        compiler::error::{CompilationErrorImpl, CompilerLimitKind},
+    };
+
+    let mut deep = "()".to_string();
+    for _ in 0..65 {
+        deep = format!("({deep},)");
+    }
+    let wide = format!("({})", vec!["()"; 4096].join(","));
+    for (ty, kind, actual, limit) in [
+        (deep, CompilerLimitKind::ZeroSizedResultDepth, 65, 64),
+        (wide, CompilerLimitKind::ZeroSizedResultNodes, 4097, 4096),
+    ] {
+        let mut session = CompilerSession::new();
+        let source = format!("fn oversized() -> {ty} {{ loop {{}} }}");
+        let path = Path::single_str("limit_test");
+        let error = session
+            .compile(&source, "limit_test", path.clone())
+            .unwrap_err();
+        let CompilationErrorImpl::CompilerLimitExceeded(error) = &*error else {
+            panic!("{error:?}");
+        };
+        assert_eq!(error.kind, kind);
+        assert_eq!((error.actual, error.limit), (actual, limit));
+        assert!(!error.span.is_synthesized());
+        let modules = session.modules();
+        let module = modules.id_by_path(&path).unwrap();
+        let diagnostics = modules.info(module).unwrap().diagnostics();
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("Compiler limit exceeded"));
+        assert_eq!(diagnostics[0].location, error.span);
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn zero_sized_result_limits_reached_during_substitution_are_compilation_errors() {
+    use ferlium::{
+        CompilerSession, MirOptimization, Path,
+        compiler::error::{CompilationErrorImpl, CompilerLimitKind},
+    };
+
+    let mut source = "struct E0 {}\n".to_string();
+    for level in 1..=10 {
+        let member = level - 1;
+        source.push_str(&format!(
+            "struct E{level} {{ left: E{member}, right: E{member} }}\n"
+        ));
+    }
+    source.push_str(
+        "fn inner<T>(x: T) -> (T, T, T) { (x, x, x) }
+         fn outer<T>(x: T, count: &mut int) -> int { count += 1; inner(x); 1 }
+         fn run(x: E10, count: &mut int) -> int { outer(x, count) }",
+    );
+    let mut session = CompilerSession::new();
+    session.set_mir_optimization(MirOptimization::Enabled);
+    let path = Path::single_str("substituted_limit");
+    let error = session
+        .compile_for(
+            ExecutionTarget::Mir,
+            &source,
+            "substituted_limit",
+            path.clone(),
+        )
+        .unwrap_err();
+    let CompilationErrorImpl::CompilerLimitExceeded(error) = &*error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(error.kind, CompilerLimitKind::ZeroSizedResultNodes);
+    assert_eq!((error.actual, error.limit), (6142, 4096));
+    let modules = session.modules();
+    let info = modules.info(modules.id_by_path(&path).unwrap()).unwrap();
+    assert!(info.is_stale());
+    assert!(
+        info.diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.location == error.span)
     );
 }

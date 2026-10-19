@@ -63,7 +63,11 @@ use crate::{
         terminator::{Terminator, TerminatorKind},
     },
     module::{FunctionId, ModuleEnv, ModuleId, id::Id},
-    types::{r#type::Type, type_like::TypeLike, type_mapper::SimpleInstantiationMapper},
+    types::{
+        r#type::{CallResultConvention, Type},
+        type_like::TypeLike,
+        type_mapper::SimpleInstantiationMapper,
+    },
 };
 
 /// Where the call to inline sits in the caller.
@@ -504,12 +508,13 @@ fn concrete_body<'a>(
     };
     let scheme = &function.definition.ty_scheme;
     Ok(Cow::Owned(match specializations {
-        Some(specializations) => {
-            specializations.substituted_body(callee, instantiation, scheme, body, env)
-        }
+        Some(specializations) => specializations
+            .substituted_body(callee, instantiation, scheme, body, env)
+            .ok_or(NotInlinable::Generic)?,
         // The optimization report runs after the table is consumed, and makes one pass, so it has
         // nothing to memoize into and nothing to gain from it.
-        None => monomorphize::substitute_body(body, scheme, instantiation, env),
+        None => monomorphize::substitute_body(body, scheme, instantiation, env)
+            .map_err(|_| NotInlinable::Generic)?,
     }))
 }
 
@@ -680,23 +685,49 @@ fn inline_at(
             )
         })
         .count();
-    let result_slot = call.result_id().and_then(|result| {
-        if body.value_result().is_some() && returns == 1 {
-            return None;
-        }
-        let OperationKind::Call { ty, .. } = &call.kind else {
-            unreachable!("only a call defines a result register here");
-        };
-        let mut alloca = Operation::alloca(span, ty.ret());
-        let slot = edit
-            .assign_new_result(&mut alloca)
-            .expect("an alloca defines its place");
-        edit.block_mut(site.block()).operations.push(alloca);
-        let mut load = Operation::load(span, slot.clone());
-        load.assign_result_id(Some(result));
-        edit.block_mut(normal).operations.insert(0, load);
-        Some(slot)
-    });
+    let result_slot = call
+        .result_id()
+        .and_then(|result| {
+            if body.value_result().is_some() && returns == 1 {
+                return None;
+            }
+            let OperationKind::Call { ty, .. } = &call.kind else {
+                unreachable!("only a call defines a result register here");
+            };
+            let mut alloca = Operation::alloca(span, ty.ret());
+            let slot = edit
+                .assign_new_result(&mut alloca)
+                .expect("an alloca defines its place");
+            edit.block_mut(site.block()).operations.push(alloca);
+            let mut load = Operation::load(span, slot.clone());
+            load.assign_result_id(Some(result));
+            edit.block_mut(normal).operations.insert(0, load);
+            Some(slot)
+        })
+        // A NoValue call can reach a concrete body that keeps `@ret` because it takes hidden
+        // evidence; that body's writes go to a private slot.
+        .or_else(|| {
+            if call.call_result_place().is_some()
+                || !body
+                    .parameters()
+                    .iter()
+                    .any(|p| p.kind == ParameterKind::Return)
+            {
+                return None;
+            }
+            let OperationKind::Call { ty, .. } = &call.kind else {
+                unreachable!("only a call is inlined");
+            };
+            if ty.result_convention != CallResultConvention::NoValue {
+                return None;
+            }
+            let mut alloca = Operation::alloca(span, ty.fn_ty.ret);
+            let slot = edit
+                .assign_new_result(&mut alloca)
+                .expect("an alloca defines its place");
+            edit.block_mut(site.block()).operations.push(alloca);
+            Some(slot)
+        });
 
     // The callee's `alloca`s land in the caller's frame; the bracket is what reclaims them where
     // the callee's own frame used to end.
@@ -882,7 +913,9 @@ pub(crate) fn cleanup_template(
     monomorphize::map_types(
         &mut template,
         &mut SimpleInstantiationMapper::new(&(substitution, FxHashMap::default())),
-    );
+        env,
+    )
+    .ok()?;
     monomorphize::store_value_parameters(&mut template, source);
     monomorphize::drop_redundant_layout_witnesses(&mut template, env);
     Some(template.finish_unverified())

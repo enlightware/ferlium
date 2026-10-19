@@ -64,7 +64,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     mir::{
-        self, BlockId, DebugLocation, Function, Operation, OperationKind, ValueId,
+        self, BlockId, DebugLocation, Function, Operation, OperationKind, ResultTransport, ValueId,
         edit::FunctionEdit,
         role::{MirType, ValueRole, ValueRoles},
         terminator::Terminator,
@@ -194,7 +194,8 @@ fn arithmetic(
     original_of: &impl Fn(FunctionId) -> Option<FunctionId>,
 ) -> Option<Arithmetic> {
     let OperationKind::Call {
-        value_result: true, ..
+        result_transport: ResultTransport::Value,
+        ..
     } = operation.kind
     else {
         return None;

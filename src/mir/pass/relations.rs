@@ -3155,7 +3155,9 @@ mod tests {
             .compile_for(ExecutionTarget::Mir, src, "test", Path::single_str("test"))
             .expect("the test source compiles")
             .module_id;
-        session.prepare_execution_target(ExecutionTarget::Mir, module_id);
+        session
+            .prepare_execution_target(ExecutionTarget::Mir, module_id)
+            .expect("MIR preparation failed");
         let known = session.known_callees();
         let artifacts = session
             .mir_artifacts_for(module_id, stage)

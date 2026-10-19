@@ -113,8 +113,8 @@ Parameters appear in this order:
 
 1. `@extra`: dictionaries and other hidden evidence;
 2. `@arg`: runtime arguments tagged `let`, `&mut`, or optimized-MIR-only `owned`; and
-3. `@ret`: the caller-provided result storage, present in semantic MIR, including for `()`
-   results, unless the function returns its result as a value (see below).
+3. `@ret`: the caller-provided result storage, absent for a scalar value result or a `NoValue`
+   result (see below).
 
 Arguments and parameters are places, except for concrete scalars. `Let` is immutable non-escaping
 access, `MutableRef` is exclusive mutable access, and `owned` transfers the pointee into a private
@@ -134,6 +134,14 @@ and has no result place. A function of such a type returns its result as a value
 and each `return` passes the value. A fallible call keeps its result place, as the ABI returns a
 status and writes the result through a pointer. Specializing a generic result or effect can turn a
 function's result into a value.
+
+A call returning an inhabited, statically zero-sized product (`()`, or a product of such types)
+uses `NoValue`: it has neither a result place nor a result register, also as an `invoke`. Where the
+value is consumed, it is a constant of the declared type, available only on success. A concrete
+definition without hidden evidence has no `@ret` and ends in `ret`; specializing a generic result
+can select this form too. Construction effects and ownership transfers remain in the body. Unit
+arguments still use places. Reconstructing such a result is bounded in size and depth; exceeding the
+bound is a compilation error.
 
 Raw MIR names an owned local of such a concrete scalar type by its value where it can: an
 immutable one by its initializer's value, a mutable one by its current value within a block, with
@@ -356,13 +364,14 @@ The diagnostic layout remains opaque; its ownership and lifetime are specified i
 
 ### Physical call results
 
-Semantic MIR gives every call a result place or a result register, including calls returning `()`,
-which use a place. Physical lowering
-assigns a result convention to each lowered function artifact after specialization. A direct
-artifact returning a statically zero-sized Ferlium product may use `NoValue`, omitting both its
-`@ret` parameter and the corresponding call operand. This includes unit, empty structs, tuples and
-records, and products composed of them. A shared generic artifact retains `Value`; a concrete
-specialization may independently use `NoValue`.
+A call records its result transport: a trailing output place (`Place`), a result register
+(`Value`), or nothing (`NoValue`). It is separate from `CallResultConvention`, which also describes
+borrowing.
+
+Physical MIR keeps a semantic `NoValue` call where the entry omits the result; otherwise lowering
+supplies private output storage, for a generic entry, a dictionary entry, a stored callable or a
+native output contract. A shared generic artifact retains `Value`; a concrete specialization may
+independently use `NoValue`.
 
 The convention belongs to the artifact rather than an individual call site, and every direct call
 must match it. First-class callables always expose `Value`. When a `NoValue` implementation is used

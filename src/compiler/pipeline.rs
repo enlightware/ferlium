@@ -258,6 +258,20 @@ pub(crate) fn compile_with_source_id(
         None
     };
 
+    if let Err(limit) = super::limits::check_module_result_limits(ModuleEnv::new(&module, modules))
+    {
+        let error = compilation_error!(CompilerLimitExceeded(limit));
+        process_compilation_failed(
+            modules,
+            module_ref.into_path(),
+            src_info,
+            old_revision,
+            &error,
+            &warnings,
+        );
+        return Err(error);
+    }
+
     // Detect cycles in the module dependency graph.
     if let Some(cycle) = find_module_deps_cycle(modules, module_id, &module, old_revision.is_some())
     {
@@ -388,7 +402,7 @@ fn direct_deps(modules: &Modules, target: ModuleId) -> Vec<ModuleId> {
         .collect()
 }
 
-fn mark_stale_transitively(modules: &mut Modules, root: ModuleId) {
+pub(super) fn mark_stale_transitively(modules: &mut Modules, root: ModuleId) {
     let mut stack = vec![root];
     while let Some(id) = stack.pop() {
         for dep_id in direct_deps(modules, id) {
