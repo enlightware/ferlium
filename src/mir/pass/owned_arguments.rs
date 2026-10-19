@@ -1314,9 +1314,10 @@ mod tests {
     fn map_pipeline_moves_last_use_array_and_mapper_after_thunk_inlining() {
         // A fully constant array pipeline now folds to `build_array` before this pass. Make the
         // array depend on a parameter while constructing a fresh owned local, so this test keeps
-        // exercising transfer of both the array and mapper rather than resource reification.
+        // exercising transfer of both the array and mapper rather than resource reification. The
+        // mapper captures, as a bare function owns nothing to transfer.
         let module = optimized(
-            "fn apply(xs: [int]) -> [int] { let mut ys = [len(xs)]; ys |> map(|x| x*x) }",
+            "fn apply(xs: [int]) -> [int] { let n = len(xs); let mut ys = [n]; ys |> map(|x| x*n) }",
         );
         let entry = body_of(&module, "apply");
         assert!(
@@ -1333,8 +1334,10 @@ mod tests {
 
     #[test]
     fn read_only_array_clone_keeps_the_input_borrowed_and_transfers_the_mapper() {
-        let module =
-            optimized("fn apply(xs: [int]) -> [int] { let mut ys = xs; ys |> map(|x| x*x) }");
+        // The mapper captures, as a bare function owns nothing to transfer.
+        let module = optimized(
+            "fn apply(xs: [int], n: int) -> [int] { let mut ys = xs; ys |> map(|x| x*n) }",
+        );
         let entry = body_of(&module, "apply");
         assert!(
             !entry.contains("clone [int]") && !entry.contains("move %p0"),
