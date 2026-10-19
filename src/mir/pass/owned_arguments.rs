@@ -216,7 +216,9 @@ pub(crate) fn forward_owned_arguments(
 /// This form requires a clone and its sole subsequent source drop in one block. Consequently the
 /// removed drop cannot be reached without executing the clone, even when earlier error exits
 /// bypass that block. No exit-dominance requirement is needed. Outside a return block, no block
-/// reachable from it may use the source, such as a temporary built only to be cloned.
+/// reachable from it may use the old source lifetime. Whole-place-only temporaries may be
+/// allocated afresh on a later loop iteration; derived aliases retain the conservative rule.
+/// Stack restores after the matched source drop do not extend that lifetime.
 pub(crate) fn forward_terminal_clones(
     source: &Function,
     env: ModuleEnv<'_>,
@@ -242,6 +244,10 @@ pub(crate) fn forward_terminal_clones(
             }
         }
     }
+    let aliased: FxHashSet<_> = origins
+        .iter()
+        .filter_map(|(alias, root)| (alias != root).then_some(*root))
+        .collect();
     let mut escaped = FxHashSet::default();
     for (_, operation) in all_operations(source) {
         for (position, operand) in operation.operands.iter().enumerate() {
@@ -302,14 +308,10 @@ pub(crate) fn forward_terminal_clones(
             continue;
         }
         // Unknown aliases and scoped accessors must not leave a hidden later reader.
-        if escaped.contains(&root)
-            || basic.operations()[index.as_index() + 1..]
-                .iter()
-                .any(|operation| matches!(operation.kind, OperationKind::StackRestore))
-        {
+        if escaped.contains(&root) {
             continue;
         }
-        let Some(index) = sole_drop_in_operations(
+        let Some(drop_index) = sole_drop_in_operations(
             basic.operations(),
             index.as_index() + 1,
             operand,
@@ -318,12 +320,31 @@ pub(crate) fn forward_terminal_clones(
         ) else {
             continue;
         };
-        if !matches!(basic.terminator().kind, TerminatorKind::Return { .. })
-            && used_after(source, block, root, &origins)
+        // A restore before the drop can invalidate the source; after its last drop the
+        // source no longer owns a value, so restoring storage is harmless.
+        if basic.operations()[index.as_index() + 1..drop_index.as_index()]
+            .iter()
+            .any(|operation| matches!(operation.kind, OperationKind::StackRestore))
         {
             continue;
         }
-        let drop = Site::Operation { block, index };
+        // A loop may allocate this temporary again. Only whole-place users can treat that
+        // allocation as a new lifetime: a derived address might still name the old incarnation.
+        let fresh_lifetimes = !aliased.contains(&root);
+        if basic
+            .terminator()
+            .operands()
+            .iter()
+            .any(|operand| operand_root(operand, &origins) == Some(root))
+            || (!matches!(basic.terminator().kind, TerminatorKind::Return { .. })
+                && used_after(source, block, root, &origins, fresh_lifetimes))
+        {
+            continue;
+        }
+        let drop = Site::Operation {
+            block,
+            index: drop_index,
+        };
         if !removed.insert(drop) {
             continue;
         }
@@ -885,7 +906,7 @@ fn terminal_drops(
             if !matches!(
                 function.block(block).terminator().kind,
                 TerminatorKind::Return { .. }
-            ) && used_after(function, block, root, origins)
+            ) && used_after(function, block, root, origins, false)
             {
                 return None;
             }
@@ -951,12 +972,14 @@ fn sole_drop_in_operations(
     found
 }
 
-/// Whether a block reachable from `block`, including `block` itself through a loop, uses `root`.
+/// Whether a successor uses the old source lifetime. A whole-place-only local can end the
+/// search at reallocation; aliases require the conservative search across all loop iterations.
 fn used_after(
     function: &Function,
     block: BlockId,
     root: ValueId,
     origins: &FxHashMap<ValueId, ValueId>,
+    fresh_lifetimes: bool,
 ) -> bool {
     let mut visited = FxHashSet::default();
     let mut pending: Vec<_> = function.block(block).terminator().successors().collect();
@@ -970,9 +993,29 @@ fn used_after(
             TerminatorKind::Invoke { operation, .. } => Some(operation),
             _ => None,
         });
-        if operations
-            .flat_map(|operation| operation.operands.iter())
-            .chain(terminator.operands())
+        let mut reallocated = false;
+        for operation in operations {
+            if fresh_lifetimes
+                && matches!(operation.kind, OperationKind::Alloca { .. })
+                && operation.result_id() == Some(root)
+            {
+                reallocated = true;
+                break;
+            }
+            if operation
+                .operands
+                .iter()
+                .any(|operand| operand_root(operand, origins) == Some(root))
+            {
+                return true;
+            }
+        }
+        if reallocated {
+            continue;
+        }
+        if terminator
+            .operands()
+            .iter()
             .any(|operand| operand_root(operand, origins) == Some(root))
         {
             return true;
@@ -1146,6 +1189,7 @@ mod tests {
     use crate::{
         CompilerSession, Location, MirOptimization,
         mir::{BasicBlock, BlockId, Function, Operation, Value, ValueId, terminator::Terminator},
+        module::{ModuleEnv, id::Id},
     };
 
     #[test]
@@ -1179,6 +1223,14 @@ mod tests {
     }
 
     fn check_terminal_clone(source: &str, expected: bool) {
+        check_terminal_clone_with(source, expected, |body, _| body.clone());
+    }
+
+    fn check_terminal_clone_with(
+        source: &str,
+        expected: bool,
+        prepare: impl FnOnce(&Function, ModuleEnv<'_>) -> Function,
+    ) {
         use super::{AddressorSummary, all_operations, forward_terminal_clones};
         use crate::{
             ExecutionTarget, Path,
@@ -1213,6 +1265,9 @@ mod tests {
                     artifacts.addressor_summary(callee.module, callee.function)
                 })
         };
+        let prepared = prepare(body, env);
+        let body = &prepared;
+        verify_function(body, env);
         if super::terminal_clone_candidates(body).is_empty() {
             assert!(
                 forward_terminal_clones(body, env, &|_| panic!("prefilter must skip analysis"))
@@ -1379,6 +1434,236 @@ mod tests {
             ),
             "[1, 4, 9, 16]"
         );
+    }
+
+    #[test]
+    fn filtered_acceptance_adds_no_clones_or_allocations() {
+        use crate::{
+            ExecutionTarget, Path,
+            hir::value::Value,
+            mir::{
+                operation::OperationKindDiscriminant as Op, profile::MirInstructionKind as Kind,
+            },
+        };
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        session.set_physical_mir_optimization(MirOptimization::Enabled);
+        for (ty, input) in [
+            (
+                "[int]",
+                "let mut row = []; for j in 0..n { array_append(row, j) }; let mut rows = []; for i in 0..20 { array_append(rows, row) }; rows",
+            ),
+            (
+                "string",
+                "let mut row = \"\"; for j in 0..n { string_push_str(row, \"a\") }; let mut rows = []; for i in 0..20 { array_append(rows, row) }; rows",
+            ),
+        ] {
+            let source = format!("fn input(n: int) -> [{ty}] {{ {input} }}
+                fn accepted(rows: [{ty}]) -> int {{ let mut n = 0; for row in iter(rows) |> filter(|row| len(row) > 0) {{ n += len(row) }}; n }}
+                fn rejected(rows: [{ty}]) -> int {{ let mut n = 0; for row in iter(rows) |> filter(|row| len(row) == 0) {{ n += len(row) }}; n }}");
+            let module = session
+                .compile(
+                    &source,
+                    "filtered_counts",
+                    Path::single_str("filtered_counts"),
+                )
+                .unwrap()
+                .module_id;
+            let entry = |name| {
+                session
+                    .expect_fresh_module(module)
+                    .get_local_function_id(ustr::ustr(name))
+                    .unwrap()
+            };
+            let input = entry("input");
+            let accepted = entry("accepted");
+            let rejected = entry("rejected");
+            for physical in [false, true] {
+                for size in [8isize, 128] {
+                    let mut counts = Vec::new();
+                    for (function, expected) in [(accepted, 20 * size), (rejected, 0)] {
+                        // Setup is outside the counters, including all input payload copies.
+                        let rows = session
+                            .run_entry(
+                                ExecutionTarget::Mir,
+                                module,
+                                input,
+                                vec![Value::native(size)],
+                            )
+                            .unwrap();
+                        let (result, profile) = if physical {
+                            session.run_physical_mir_entry_profiled(module, function, vec![rows])
+                        } else {
+                            session.run_mir_entry_profiled(module, function, vec![rows])
+                        }
+                        .unwrap();
+                        assert_eq!(result.into_primitive_ty::<isize>().unwrap(), expected);
+                        counts.push(
+                            [Op::Clone, Op::RuntimeAlloc]
+                                .map(|op| profile.total().get(Kind::Operation(op))),
+                        );
+                    }
+                    // Both paths still copy the collection and each inspected element. Accepting
+                    // an element must transfer it without another clone or allocation.
+                    assert_eq!(
+                        counts[0], counts[1],
+                        "{ty}, physical={physical}, size={size}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn filtered_iteration_moves_accepted_payloads() {
+        for ty in ["[int]", "string"] {
+            let module = optimized(&format!(
+                "fn view(rows: [{ty}]) -> int {{ let mut total = 0; for row in iter(rows) |> filter(|row| len(row) > 0) {{ total += len(row) }}; total }}"
+            ));
+            let body = body_of(&module, "view(");
+            assert_eq!(
+                body.matches(&format!("clone {ty} ")).count(),
+                1,
+                "only the original element copy should remain:\n{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_clones_retain_sources_across_intervening_restores() {
+        use crate::mir::{OperationKind, edit::FunctionEdit};
+
+        for restore_before_drop in [false, true] {
+            check_terminal_clone_with(
+                "fn view(n: int) -> ([int], int) { let mut a = [n]; (a, n) }",
+                !restore_before_drop,
+                |body, _| {
+                    let candidates = super::terminal_clone_candidates(body);
+                    assert_eq!(candidates.len(), 1);
+                    let (Site::Operation { block, index }, root) = candidates[0] else {
+                        unreachable!()
+                    };
+                    let mut edit = FunctionEdit::new(body.clone());
+                    let mut save = Operation::stack_save(Location::new_synthesized());
+                    let marker = edit.assign_new_result(&mut save).unwrap();
+                    let operations = &mut edit.block_mut(block).operations;
+                    let drop_index = operations
+                        .iter()
+                        .position(|op| {
+                            matches!(op.kind, OperationKind::Drop { .. })
+                                && op.operands[0] == Value::Register(root)
+                        })
+                        .unwrap();
+                    let restore = Operation::stack_restore(Location::new_synthesized(), marker);
+                    operations.insert(drop_index + usize::from(!restore_before_drop), restore);
+                    // The source was allocated before the marker, so either placement is valid.
+                    operations.insert(index.as_index(), save);
+                    edit.finish_unverified()
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_clones_retain_aliased_loop_temporaries() {
+        use crate::{
+            hir::value::LiteralValue,
+            mir::{OperationKind, edit::FunctionEdit},
+            std::math::{Int, int_type},
+        };
+
+        for aliased in [false, true] {
+            check_terminal_clone_with(
+                "fn view(x: ([int], int)) -> (([int], int), int) { let mut a = x; (a, 1) }",
+                !aliased,
+                |body, env| {
+                    let candidates = super::terminal_clone_candidates(body);
+                    assert_eq!(candidates.len(), 1);
+                    let (Site::Operation { block, index }, _) = candidates[0] else {
+                        unreachable!()
+                    };
+                    let clone = &body.block(block).operations()[index.as_index()];
+                    let OperationKind::Clone { ty } = clone.kind else {
+                        unreachable!()
+                    };
+                    let mut edit = FunctionEdit::new(body.clone());
+                    if aliased {
+                        let field =
+                            edit.add_constant(int_type(), LiteralValue::new_native(1 as Int), &env);
+                        let mut project = Operation::product_subfield(
+                            clone.span,
+                            clone.operands[0].clone(),
+                            Value::Constant(field),
+                            int_type(),
+                            ty,
+                            [],
+                        );
+                        let alias = edit.assign_new_result(&mut project).unwrap();
+                        let mut read = Operation::load(clone.span, alias);
+                        edit.assign_new_result(&mut read);
+                        // This fresh, read-only alias is deliberately conservative: it must disable
+                        // the new-allocation stopping rule even though it is used before the clone.
+                        edit.block_mut(block)
+                            .operations
+                            .splice(index.as_index()..index.as_index(), [project, read]);
+                    }
+                    let source_drop = body
+                        .block(block)
+                        .operations()
+                        .iter()
+                        .find(|op| {
+                            matches!(op.kind, OperationKind::Drop { .. })
+                                && op.operands[0] == clone.operands[0]
+                        })
+                        .unwrap();
+                    // Consume the result before repeating the allocation and clone on the backedge.
+                    edit.block_mut(block).operations.push(Operation::drop(
+                        clone.span,
+                        clone.operands[1].clone(),
+                        source_drop.operands[1].clone(),
+                        ty,
+                    ));
+                    edit.block_mut(block).terminator = Terminator::goto(clone.span, body.entry());
+                    edit.finish_unverified()
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_source_search_respects_allocation_lifetimes() {
+        use crate::types::r#type::Type;
+        let span = Location::new_synthesized();
+        let root = ValueId::new(0);
+        let entry = BlockId::new(0);
+        let next = BlockId::new(1);
+        let origins = FxHashMap::from_iter([(root, root)]);
+        for read_before_allocation in [false, true] {
+            let mut allocation = Operation::alloca(span, Type::unit());
+            allocation.assign_result_id(Some(root));
+            let read = Operation::load(span, Value::Register(root));
+            let operations = if read_before_allocation {
+                vec![read, allocation]
+            } else {
+                vec![allocation, read]
+            };
+            let function = Function::new(
+                "source_lifetimes".into(),
+                Default::default(),
+                None,
+                vec![],
+                vec![],
+                vec![
+                    BasicBlock::new(vec![], Terminator::goto(span, next)),
+                    BasicBlock::new(operations, Terminator::goto(span, entry)),
+                ],
+            );
+            assert!(super::used_after(&function, entry, root, &origins, false));
+            assert_eq!(
+                super::used_after(&function, entry, root, &origins, true),
+                read_before_allocation
+            );
+        }
     }
 
     #[test]

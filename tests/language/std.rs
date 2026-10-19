@@ -1589,6 +1589,50 @@ fn managed_iteration_payload_lifetimes() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn filtered_managed_payload_lifetimes() {
+    let mut session = TestSession::new();
+    for (source, expected) in [
+        (
+            "let mut n = 0; for row in iter([[1, 2], [], [3]]) |> filter(|row| len(row) > 0) { n += len(row) }; n",
+            3,
+        ),
+        (
+            "let mut n = 0; for row in iter(([]: [[int]])) |> filter(|row| len(row) > 0) { n += len(row) }; n",
+            0,
+        ),
+        (
+            "let mut n = 0; for row in iter(([[], []]: [[int]])) |> filter(|row| len(row) > 0) { n += len(row) }; n",
+            0,
+        ),
+        (
+            r#"iter(["ab", "", "c"]) |> filter(|row| len(row) > 0) |> map(|row| len(row)) |> sum()"#,
+            3,
+        ),
+        (
+            "let mut n = 0; for row in iter([[], [1], [2, 3], [4, 5, 6]]) |> filter(|row| len(row) > 0) { if len(row) == 1 { continue }; n += len(row); break }; n",
+            2,
+        ),
+        // Accepted results keep independent ownership when they escape and the source changes.
+        (
+            "fn first(rows: [[int]]) -> [int] { for row in iter(rows) |> filter(|row| len(row) > 0) { return row }; [] } let mut rows = [[], [1, 2]]; let mut row = first(rows); row[0] = 7; rows[1][1] = 9; row[0] + row[1] + rows[1][0] + rows[1][1]",
+            19,
+        ),
+        // Iteration must retain its original snapshot across source mutation.
+        (
+            "let mut rows = [[1], [2, 3]]; let mut n = 0; for row in iter(rows) |> filter(|row| len(row) > 0) { rows[1] = [4]; n += len(row) }; n + len(rows[1])",
+            4,
+        ),
+    ] {
+        assert_val_eq!(session.run(source), int(expected));
+    }
+    assert_eq!(
+        session.fail_run("fn f(d: int) -> int { let mut n = 0; for row in iter([[1], [2, 3]]) |> filter(|row| len(row) > 0) { n += idiv(len(row), d) }; n } f(0)"),
+        SourceFailureKind::DivisionByZero,
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_casts() {
     let mut session = TestSession::new();
     // Identity casts
