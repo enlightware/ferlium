@@ -128,7 +128,6 @@ pub(super) struct Analysis {
     addressed: Vec<bool>,
     intrinsics: Vec<Option<KnownCallee>>,
     comparison_fusions: Vec<Option<ComparisonFusion>>,
-    value_uses: Vec<Uses>,
     metadata_loads: Vec<bool>,
     definitions: Vec<Option<Source>>,
     integer_constants: FxHashMap<ValueId, i32>,
@@ -186,7 +185,6 @@ impl Analysis {
             addressed: inputs.addressed,
             intrinsics: inputs.intrinsics,
             comparison_fusions,
-            value_uses: inputs.value_uses,
             metadata_loads,
             definitions: inputs.definitions,
             integer_constants: inputs.integer_constants,
@@ -239,14 +237,6 @@ impl Analysis {
             self.operation_bases[source.block.as_index()].as_index()
                 + source.operation_id().as_index(),
         )
-    }
-
-    /// The only operation or terminator reading register `id`, if exactly one does and emission
-    /// cannot skip it.
-    pub(super) fn sole_use(&self, id: ValueId) -> Option<Source> {
-        self.value_uses
-            .get(id.as_index())
-            .and_then(|uses| uses.one())
     }
 
     pub(super) fn comparison_fusion(&self, id: ValueId) -> Option<KnownCallee> {
@@ -754,7 +744,6 @@ enum Uses {
     /// Uses exist only in operands that Wasm never reads.
     Metadata,
     One(Source),
-    Two,
     Multiple,
     /// Emission may skip one of the uses, so the value cannot be deferred to its consumer.
     Elidable,
@@ -764,8 +753,7 @@ impl Uses {
     fn add(&mut self, source: Source) {
         *self = match *self {
             Self::None | Self::Metadata => Self::One(source),
-            Self::One(_) => Self::Two,
-            Self::Two | Self::Multiple => Self::Multiple,
+            Self::One(_) | Self::Multiple => Self::Multiple,
             Self::Elidable => Self::Elidable,
         };
     }
@@ -773,12 +761,8 @@ impl Uses {
     fn one(self) -> Option<Source> {
         match self {
             Self::One(source) => Some(source),
-            Self::None | Self::Metadata | Self::Two | Self::Multiple | Self::Elidable => None,
+            Self::None | Self::Metadata | Self::Multiple | Self::Elidable => None,
         }
-    }
-
-    fn is_two(self) -> bool {
-        matches!(self, Self::Two)
     }
 }
 
@@ -1622,11 +1606,10 @@ fn fused_comparison_call(
                 }))
 }
 
-/// Finds comparison calls whose fresh, unaliased output is tested immediately.
+/// Finds comparison calls whose ordering is tested immediately.
 ///
-/// Adjacency keeps the comparison inputs live until the test is emitted. Requiring a fresh
-/// `Alloca` output and exactly the call plus test uses permits omission of the materialized
-/// ordering tag without leaving observable stale memory behind.
+/// Adjacency keeps the comparison inputs live until the test is emitted. The ordering register and
+/// its tag each have that one use, so neither is materialized.
 fn comparison_fusions(
     body: &Function,
     layout: &OperationLayout,
@@ -1647,29 +1630,12 @@ fn comparison_fusions(
             if !matches!(extract.kind, OperationKind::ExtractTag) {
                 continue;
             }
-            // The ordering is a fresh output place, written by the call and read by the tag
-            // extraction only, or a register the extraction alone reads.
-            let fused_output = if call.kind.call_has_result_place() {
-                let [_, _, _, output @ Value::Register(output_id)] = &*call.operands else {
-                    continue;
-                };
-                let fresh_output = inputs.definitions[output_id.as_index()].is_some_and(|source| {
-                    matches!(
-                        body.block(source.block).operations()[source.operation_id().as_index()]
-                            .kind,
-                        OperationKind::Alloca { .. }
-                    )
+            // The ordering is a register the tag extraction alone reads.
+            let fused_output = call.operands.len() == 3
+                && call.result_id().is_some_and(|output_id| {
+                    extract.operands[0] == Value::Register(output_id)
+                        && inputs.value_uses[output_id.as_index()].one().is_some()
                 });
-                extract.operands[0] == *output
-                    && inputs.value_uses[output_id.as_index()].is_two()
-                    && fresh_output
-            } else {
-                call.operands.len() == 3
-                    && call.result_id().is_some_and(|output_id| {
-                        extract.operands[0] == Value::Register(output_id)
-                            && inputs.value_uses[output_id.as_index()].one().is_some()
-                    })
-            };
             let Some(tag_id) = extract.result_id() else {
                 continue;
             };

@@ -13,12 +13,15 @@
 //! time). Resource values need constructive forms instead. Arrays keep immutable elements in the
 //! pool and use `build_array`; strings keep immutable text as a `StaticStr` and call
 //! `string_from_static`. Both allocate fresh mutable storage at run time. A captureless function
-//! has a bare MIR operand; other resource values — a list, variant, or capturing closure — are
-//! refused and left as runtime calls.
+//! has a bare MIR operand, and so has a tag, a variant whose cases all carry unit, as the shell
+//! that is its whole value. Other resource values — a list, other variants, or a capturing closure
+//! — are refused and left as runtime calls.
 //!
 //! Refusal is always a normal outcome: it costs an optimization, never a program.
 //!
 #![allow(dead_code)]
+
+use ustr::Ustr;
 
 use crate::{
     containers::SVec2,
@@ -31,6 +34,7 @@ use crate::{
     std::{
         array::{array_type_def, array_value_elements},
         string::{StaticStr, String as FerliumString, string_type},
+        value::is_tag_scalar,
     },
     types::{r#type::Type, type_properties::concrete_type_is_trivial_copy},
 };
@@ -55,6 +59,8 @@ pub(crate) enum Reification {
     },
     /// A fresh owned string materialized from immutable compiler text at run time.
     String(StaticStr),
+    /// A tag of type `ty`: its complete `variant` shell.
+    Tag { tag: Ustr, ty: Type },
 }
 
 /// Expresses `value`, of instantiated type `ty`, as MIR — or explains why it cannot be.
@@ -77,6 +83,12 @@ pub(crate) fn reify(
             // the prototype machinery, not an operand.
             Err(NotFoldable::NotReifiable)
         };
+    }
+
+    if let Value::Variant { tag, .. } = value
+        && is_tag_scalar(ty, env)
+    {
+        return Ok(Reification::Tag { tag: *tag, ty });
     }
 
     // Like an array, a string is a mutable-semantics resource and cannot live in the constant
@@ -211,6 +223,7 @@ mod tests {
             }
             Ok(Reification::Array { .. }) => panic!("expected an immediate constant, got an array"),
             Ok(Reification::String(_)) => panic!("expected an immediate constant, got a string"),
+            Ok(Reification::Tag { tag, .. }) => panic!("expected an immediate constant, got {tag}"),
             Err(reason) => panic!("{ty:?} must be reifiable, got {reason:?}"),
         };
         assert_eq!(reified.ty, ty);

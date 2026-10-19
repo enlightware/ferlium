@@ -1041,7 +1041,7 @@ fn emit_with_export_kind(
             .any(|export| matches!(export.kind, HostExportKind::Boxed { .. }))
         || bodies
             .iter()
-            .any(|(_, body, signature, _)| !is_trivial_runtime_body(body, signature));
+            .any(|(_, body, signature, _)| !is_trivial_runtime_body(body, signature, &env));
     let runtime_globals = RuntimeGlobals::new(needs_base, !depth_tracked.is_empty(), needs_fuel);
     let mut types = FunctionTypes::default();
     let mut import_section = ImportSection::new();
@@ -1597,7 +1597,7 @@ fn depth_tracked_bodies<'a>(
 ///
 /// This intentionally recognizes only the small scalar leaf shape. More bodies can be admitted as
 /// their storage requirements become explicit emitter metadata.
-fn is_trivial_runtime_body(body: &Function, signature: &CallAbi) -> bool {
+fn is_trivial_runtime_body(body: &Function, signature: &CallAbi, env: &ModuleEnv<'_>) -> bool {
     !signature.fallible
         && body.result_convention() != CallResultConvention::YIELDED_ONCE
         && body.blocks().count() == 1
@@ -1608,11 +1608,11 @@ fn is_trivial_runtime_body(body: &Function, signature: &CallAbi) -> bool {
         && body
             .parameters()
             .iter()
-            .all(|parameter| ScalarType::host_primitive(parameter.ty).is_ok())
+            .all(|parameter| ScalarType::in_env(parameter.ty, env).is_ok())
         && body
             .constants()
             .iter()
-            .all(|constant| ScalarType::host_primitive(constant.ty).is_ok())
+            .all(|constant| ScalarType::in_env(constant.ty, env).is_ok())
         && body
             .block(body.entry())
             .operations()

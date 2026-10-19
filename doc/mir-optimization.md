@@ -216,15 +216,16 @@ symbolic functions, recursive static evidence, closed functions and variant tags
 `TrivialCopy` elements; the latter is not a mutable array stored in the constant pool.
 
 A call folds when the callee is statically known, every visible argument arrives by `Let`, every
-argument place holds a known literal, captureless function or constructive array, every evidence
-operand is recursively static, the effects and result convention permit compile-time evaluation,
-and the result can be reified as MIR. `call f(a, b, ret)` becomes `store @cN to ret` for an immediate
+argument holds a known literal, tag, captureless function or constructive array, every evidence
+operand is recursively static, the effects and result convention permit compile-time evaluation, and
+the result can be reified as MIR. `call f(a, b, ret)` becomes `store @cN to ret` for an immediate
 result, `store function to ret` for a captureless function, or `build_array` directly into `ret` for
-an array of `TrivialCopy` elements. An owned string becomes a bounded `StaticStr` constant plus the
-terminal `string_from_static` call that constructs a fresh value in `ret`; that constructor is not
-itself folded back into the same recipe. A capturing closure cannot be named by a bare function
-operand without losing its environment and remains a runtime call. The surrounding scaffolding is
-left correct but dead for `dce`.
+an array of `TrivialCopy` elements. A tag, a variant whose cases all carry unit, becomes its shell.
+An owned string becomes a bounded `StaticStr` constant plus the terminal `string_from_static` call
+that constructs a fresh value in `ret`; that constructor is not itself folded back into the same
+recipe. A capturing closure cannot be named by a bare function operand without losing its
+environment and remains a runtime call. The surrounding scaffolding is left correct but dead for
+`dce`.
 
 Unit arguments are the one case that needs no place fact: every initialized value of type `()` is
 the same literal. This lets a native call such as `Value<()>::to_string` fold even when its operand

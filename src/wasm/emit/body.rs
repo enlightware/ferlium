@@ -276,10 +276,11 @@ pub(super) struct Body<'a, 's> {
     selections: &'s FxHashMap<ValueId, (TraitId, TraitDictionaryEntryIndex)>,
     owned_evidence: Vec<ValueId>,
     capture_slots: FxHashMap<ValueId, u32>,
+    /// Shells whose tag word depends on storage evidence, built in a slot of their own.
     variant_shells: FxHashSet<ValueId>,
-    /// Shells with a constant tag word whose only use stores them: the store writes the word
-    /// directly, so the shell needs no slot.
-    stored_variants: FxHashMap<ValueId, i32>,
+    /// Shells with a constant tag word, which needs no slot: a complete shell is that word, and
+    /// physical MIR stores any other once, writing the word directly.
+    variant_words: FxHashMap<ValueId, i32>,
     layout_slot: Option<u32>,
     helpers: HelperLocals,
     /// Error continuations needing no work before propagation.
@@ -410,7 +411,7 @@ impl<'a, 's> Body<'a, 's> {
             owned_evidence: Vec::new(),
             capture_slots: FxHashMap::default(),
             variant_shells: FxHashSet::default(),
-            stored_variants: FxHashMap::default(),
+            variant_words: FxHashMap::default(),
             layout_slot: None,
             helpers: HelperLocals::default(),
             immediate_propagation: DenseBitSet::empty(),
@@ -693,10 +694,9 @@ impl<'a, 's> Body<'a, 's> {
                             tag,
                             storage: Some(storage),
                             ..
-                        } if this.only_stored(id) || operation.is_complete_variant() => {
-                            // A complete shell is its tag word, read wherever it is used.
+                        } => {
                             let word = storage.encode_tag_id(this.session.variant_tag_id(tag));
-                            this.stored_variants.insert(id, word as i32);
+                            this.variant_words.insert(id, word as i32);
                             continue;
                         }
                         OperationKind::Variant { .. } => {
@@ -2631,20 +2631,6 @@ impl<'a, 's> Body<'a, 's> {
         }
     }
 
-    /// Whether register `id` is read only as the value of one `store`.
-    fn only_stored(&self, id: ValueId) -> bool {
-        self.analysis.sole_use(id).is_some_and(|source| {
-            self.body
-                .block(source.block)
-                .operations()
-                .get(source.operation_id().as_index())
-                .is_some_and(|operation| {
-                    operation.kind == OperationKind::Store
-                        && operation.operands[0] == Value::Register(id)
-                })
-        })
-    }
-
     fn slot(&mut self, value: Value, size: u32) -> Result<(), String> {
         // All slots are 8-aligned, including distinct zero-sized places.
         let offset = self.reserve_bytes(size)?;
@@ -2750,18 +2736,9 @@ impl<'a, 's> Body<'a, 's> {
             self.i(I::I32Add);
             return Ok(());
         }
-        if matches!(value, Value::Register(id) if self.variant_shells.contains(id))
-            && self.roles.get(value, self.body.constants()).is_some_and(
-                |r| matches!(&*r, ValueRole::Materialized(ty) if scalar(ty, &self.env).is_ok_and(ScalarType::is_tag)),
-            )
-        {
-            self.address(value)?;
-            self.i(I::I32Load(memarg(2)));
-            return Ok(());
-        }
-        // A variant whose only use is a store has no local; a forwarded direct result reads it here.
+        // A shell with a constant tag word has no local, as a tag value or the source of its store.
         if let Value::Register(id) = value
-            && let Some(&word) = self.stored_variants.get(id)
+            && let Some(&word) = self.variant_words.get(id)
         {
             self.i(I::I32Const(word));
             return Ok(());
@@ -3826,7 +3803,7 @@ impl<'a, 's> Body<'a, 's> {
                     return Ok(());
                 }
                 if let Value::Register(id) = &args[0]
-                    && let Some(&word) = self.stored_variants.get(id)
+                    && let Some(&word) = self.variant_words.get(id)
                 {
                     let offset = self.prepare_store(&args[1])?;
                     self.i(I::I32Const(word));
@@ -3971,8 +3948,8 @@ impl<'a, 's> Body<'a, 's> {
                 self.value(&args[0])?;
                 self.i(I::GlobalSet(Global::Stack as u32));
             }
-            Variant { .. } if self.stored_variants.contains_key(&op.result_id().unwrap()) => {
-                // Written by its store.
+            Variant { .. } if self.variant_words.contains_key(&op.result_id().unwrap()) => {
+                // Read where it is used.
                 return Ok(());
             }
             Variant { tag, storage, .. } => {

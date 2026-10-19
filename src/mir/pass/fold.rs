@@ -69,6 +69,7 @@ use crate::{
         math::Float,
         ordering::{ORDERING_EQUAL, ordering_type},
         string::{static_str_type, string_type},
+        value::is_tag_scalar,
     },
     types::r#type::{CallImplType, CallResultConvention, Type},
 };
@@ -529,6 +530,7 @@ fn define_call_rewrite(
             source,
             mir::Value::Pattern(b(LiteralValue::new_native(false))),
         )),
+        CallRewrite::Reification(Reification::Tag { tag, ty }) => defined(tag_shell(span, tag, ty)),
         CallRewrite::EqualOrdering => {
             defined(tag_shell(span, ustr(ORDERING_EQUAL), ordering_type()))
         }
@@ -662,6 +664,15 @@ fn materialize_reification(
                 destination,
             )]
         }
+        Reification::Tag { tag, ty } => {
+            let mut shell = tag_shell(span, tag, ty);
+            let value = edit.new_value();
+            shell.assign_result_id(Some(value));
+            vec![
+                shell,
+                Operation::store(span, mir::Value::Register(value), destination),
+            ]
+        }
         Reification::String(text) => {
             let constant =
                 edit.add_constant(static_str_type(), LiteralValue::new_native(text), &env);
@@ -689,6 +700,7 @@ fn materialize_reification(
 fn reification_operation_count(reification: &Reification) -> usize {
     match reification {
         Reification::Constant(_) | Reification::Array { .. } | Reification::BareFunction(_) => 1,
+        Reification::Tag { .. } => 2,
         Reification::String(_) => 3,
     }
 }
@@ -1124,7 +1136,10 @@ fn plan_folds_with(
 fn warrants_another_fold_round(rewrite: &CallRewrite, state: &State, analysis: &Analysis) -> bool {
     match rewrite {
         CallRewrite::Reification(
-            Reification::Constant(_) | Reification::BareFunction(_) | Reification::Array { .. },
+            Reification::Constant(_)
+            | Reification::BareFunction(_)
+            | Reification::Array { .. }
+            | Reification::Tag { .. },
         )
         | CallRewrite::EqualOrdering => true,
         // A constructed string is deliberately unknown to the literal dataflow. Its constructor
@@ -1695,6 +1710,7 @@ fn fact_for_reification(reification: &Reification) -> Fact {
             elements: Rc::from(&elements[..]),
         }),
         Reification::BareFunction(function) => Fact::Known(Const::Function(*function)),
+        Reification::Tag { tag, .. } => Fact::Known(Const::VariantTag(*tag)),
         // Owned strings are not constants: the recipe constructs a fresh value at run time.
         Reification::String(_) => Fact::Unknown,
     }
@@ -1984,6 +2000,11 @@ fn try_fold_call(
             Some(Fact::Known(Const::Function(function))) if parameter.ty.is_function() => {
                 arguments.push(ConstArgument::Value(Value::function(function)))
             }
+            Some(Fact::Known(Const::VariantTag(tag)))
+                if is_tag_scalar(parameter.ty, &context.env) =>
+            {
+                arguments.push(ConstArgument::Value(Value::unit_variant(tag)))
+            }
             Some(Fact::Known(_)) => return discard(arguments, NotFoldable::ArgumentNotLiteral),
             _ => {
                 // The reason is irrelevant to the rewrite. Detailed provenance is computed only
@@ -2110,6 +2131,30 @@ mod tests {
             1,
             "only the unknown element keeps a slot:\n{body}"
         );
+    }
+
+    /// An evaluated comparison is a tag, which folds to its shell; a comparison of a value with
+    /// itself is `Equal` even when the value is unknown. A known tag is an argument evaluation
+    /// accepts, even for a callee kept out of line.
+    #[test]
+    fn evaluated_tags_fold_to_their_shells() {
+        let flip = "#[inline(never)] fn flip(o: Ordering) -> Ordering {
+            match o { Less => Greater, Equal => Equal, Greater => Less }
+        }";
+        for (source, tag) in [
+            ("fn main() -> Ordering { cmp(1, 2) }", "Less"),
+            ("fn main(x: int) -> Ordering { cmp(x, x) }", "Equal"),
+            (
+                &format!("{flip}\nfn main() -> Ordering {{ flip(Less) }}"),
+                "Greater",
+            ),
+        ] {
+            let body = optimized_main(source);
+            assert!(
+                body.contains(&format!("variant {tag}")) && !body.contains("call "),
+                "{source}:\n{body}"
+            );
+        }
     }
 
     /// A locally constructed variant has a symbolic tag fact, so its semantic switch reduces to
