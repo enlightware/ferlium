@@ -479,7 +479,7 @@ pub(crate) fn optimize_function(
     // each statically tagged construction path to the selected consumer while retaining payload
     // storage for that consumer's projections.
     let source = current.as_ref().unwrap_or(function);
-    if let Some(forwarded) = branch_forward::forward_variant_branches(source, env) {
+    if let Some(forwarded) = branch_forward::forward_variant_branches(source) {
         current = Some(forwarded);
         // Redirecting the constructor paths puts payload initialization and consumption on one
         // straight-line path. Reuse place CSE for their address calculations and let ordinary

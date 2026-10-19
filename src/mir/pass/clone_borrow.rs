@@ -441,7 +441,8 @@ fn lifetime(
         unreachable!("candidate is a clone")
     };
     let is_cleanup = |operation: &Operation| {
-        matches!(operation.kind, OperationKind::Drop { ty } if ty == cloned)
+        (matches!(operation.kind, OperationKind::Drop { ty } if ty == cloned)
+            || operation.kind == OperationKind::Clear)
             && operation.operands[0] == mir::Value::Register(destination)
     };
     let mut drops = FxHashSet::default();
@@ -794,6 +795,115 @@ mod tests {
         let start = module.find("fn view(").expect("fixture defines view");
         let body = &module[start..];
         body[..body[1..].find("\nfn ").map_or(body.len(), |end| end + 1)].to_string()
+    }
+
+    #[test]
+    fn managed_traversal_copy_counts_do_not_grow_with_payload_size() {
+        use crate::{
+            hir::value::Value,
+            mir::{
+                operation::OperationKindDiscriminant as Op, profile::MirInstructionKind as Kind,
+            },
+        };
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        session.set_physical_mir_optimization(MirOptimization::Enabled);
+        for (ty, input) in [
+            (
+                "[int]",
+                "let mut row = []; for j in 0..n { array_append(row, j) }; let mut rows = []; for i in 0..200 { array_append(rows, row) }; rows",
+            ),
+            (
+                "string",
+                "let mut row = \"\"; for j in 0..n { string_push_str(row, \"a\") }; let mut rows = []; for i in 0..200 { array_append(rows, row) }; rows",
+            ),
+        ] {
+            let source = format!("fn input(n: int) -> [{ty}] {{ {input} }}
+                fn direct(rows: [{ty}]) -> int {{ let mut n = 0; for row in rows {{ n += len(row) }}; n }}
+                fn folded(rows: [{ty}]) -> int {{ fold(rows, 0, |n, row| n + len(row)) }}
+                fn indexed(rows: [{ty}]) -> int {{ let mut n = 0; for i in 0..len(rows) {{ n += len(rows[i]) }}; n }}");
+            let module = session
+                .compile(
+                    &source,
+                    "traversal_profile",
+                    Path::single_str("traversal_profile"),
+                )
+                .unwrap()
+                .module_id;
+            let entry = |name: &str| {
+                session
+                    .expect_fresh_module(module)
+                    .get_local_function_id(ustr(name))
+                    .unwrap()
+            };
+            let input = entry("input");
+            let entries = [entry("direct"), entry("folded"), entry("indexed")];
+            for entry in entries {
+                for physical in [false, true] {
+                    let mut previous = None;
+                    for size in [8isize, 128] {
+                        // Construct inputs before enabling the traversal counters.
+                        let rows = session
+                            .run_entry(
+                                ExecutionTarget::Mir,
+                                module,
+                                input,
+                                vec![Value::native(size)],
+                            )
+                            .unwrap();
+                        let (result, profile) = if physical {
+                            session.run_physical_mir_entry_profiled(module, entry, vec![rows])
+                        } else {
+                            session.run_mir_entry_profiled(module, entry, vec![rows])
+                        }
+                        .unwrap();
+                        assert_eq!(result.into_primitive_ty::<isize>().unwrap(), 200 * size);
+                        for op in [Op::Clone, Op::RuntimeAlloc] {
+                            assert_eq!(
+                                profile.total().get(Kind::Operation(op)),
+                                0,
+                                "{ty}, physical={physical}, size={size}, {op:?}"
+                            );
+                        }
+                        let copies = profile.total().get(Kind::Operation(Op::Memcpy));
+                        if let Some(previous) = previous {
+                            assert_eq!(copies, previous);
+                        }
+                        previous = Some(copies);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn borrows_managed_iteration_payloads() {
+        for ty in ["string", "[int]"] {
+            for expression in [
+                "let mut n = 0; for row in x { n += len(row) }; n",
+                "fold(x, 0, |n, row| n + len(row))",
+            ] {
+                let body = optimized_body(&format!("fn view(x: [{ty}]) -> int {{ {expression} }}"));
+                assert!(
+                    !body.contains("clone "),
+                    "read-only traversal must borrow all payloads:\n{body}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn borrows_managed_payloads_of_general_local_variants() {
+        for source in [
+            "fn view(flag: bool, text: string, rows: [int]) -> int { let v = if flag { Text(text) } else { Rows(rows) }; match v { Text(s) => len(s), Rows(r) => len(r) } }",
+            "fn view(flag: bool, text: string, rows: [int]) -> int { let v = if flag { Both(text, rows) } else { Neither }; match v { Both(s, r) => len(s) + len(r), _ => 0 } }",
+        ] {
+            let body = optimized_body(source);
+            assert!(
+                !body.contains("clone "),
+                "managed cases must borrow independently:\n{body}"
+            );
+        }
     }
 
     #[test]

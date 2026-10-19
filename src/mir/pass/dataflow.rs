@@ -1261,6 +1261,63 @@ pub(super) fn dictionary_entry(
     ))
 }
 
+fn dictionary<'a>(
+    value: &mir::Value,
+    definition_of: &dyn Fn(mir::ValueId) -> Option<&'a Operation>,
+) -> Option<(TraitDictionaryId, Vec<mir::Value>)> {
+    match value {
+        mir::Value::Dictionary(id) => Some((*id, vec![])),
+        mir::Value::Evidence(evidence) => match &**evidence {
+            StaticEvidence::Dictionary {
+                definition,
+                captures,
+            } => Some((
+                *definition,
+                captures
+                    .iter()
+                    .map(|c| mir::Value::Evidence(Box::new(c.clone())))
+                    .collect(),
+            )),
+            _ => None,
+        },
+        mir::Value::Register(id) => {
+            let operation = definition_of(*id)?;
+            let OperationKind::BuildDictionary { definition, .. } = operation.kind else {
+                return None;
+            };
+            Some((definition, operation.operands.to_vec()))
+        }
+        _ => None,
+    }
+}
+
+/// Resolves direct functions and dictionary entries, preserving dynamic evidence captures.
+pub(crate) fn resolve_dictionary_callee<'a>(
+    value: &mir::Value,
+    definition_of: &dyn Fn(mir::ValueId) -> Option<&'a Operation>,
+    env: ModuleEnv<'_>,
+) -> Option<(FunctionId, Vec<mir::Value>)> {
+    if let mir::Value::Function(id) = value {
+        return Some((*id, vec![]));
+    }
+    let mir::Value::Register(id) = value else {
+        return None;
+    };
+    let operation = definition_of(*id)?;
+    let OperationKind::DictEntry { entry_index, .. } = operation.kind else {
+        return None;
+    };
+    let (id, captures) = dictionary(&operation.operands[0], definition_of)?;
+    let definition = &env
+        .module_by_id(id.module_id)?
+        .get_impl_data(id.impl_id)?
+        .dictionary_value;
+    let TraitDictionaryEntry::Function(function) = definition.entry(entry_index);
+    let captures = definition
+        .project_entry_captures(entry_index, &captures, || operation.operands[0].clone())?;
+    Some((FunctionId::new(id.module_id, function), captures))
+}
+
 pub(super) fn static_evidence_operand(value: &mir::Value) -> Option<StaticEvidence> {
     match value {
         mir::Value::Dictionary(definition) => Some(StaticEvidence::bare_dictionary(*definition)),

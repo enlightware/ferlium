@@ -8,9 +8,10 @@
 //! clears may observe a split product. Scalar fields retain their own identity and typed readers.
 //! Whole-value readers, address arithmetic, opaque projections and managed products are excluded.
 //!
-//! A separate mode splits local products owning managed fields, without variants. Their fields keep
-//! their clones, drops and projections, and a whole product's drop is spliced into field drops
-//! first; see [`split_managed_local_products`].
+//! A separate mode splits local aggregates owning managed fields, including inline variants.
+//! Their fields keep their clones, drops and projections. Structural drops are spliced first;
+//! known-tag forwarding then exposes conditional payload lifetimes. Rejected splits roll back
+//! their cleanup expansion; see [`split_managed_local_products`].
 //!
 //! A variant splits into a tag place, of the unit-only variant with the same cases, and one place
 //! per distinct inline payload type. Storage is a function of the payload type rather than the
@@ -21,14 +22,15 @@
 
 use std::{collections::VecDeque, mem, ops::Range, rc::Rc};
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use ustr::Ustr;
 
 use super::{
-    OptimizationStage,
-    dataflow::{dictionary_entry, field_index, static_evidence_operand},
+    OptimizationStage, branch_forward,
+    dataflow::{field_index, resolve_dictionary_callee},
     dce, inline,
     site::{OperationIndex, OperationSite},
+    stack_region,
 };
 use crate::{
     hir::value::{LiteralValue, VariantPayloadStorage},
@@ -142,7 +144,7 @@ fn variant_parts(ty: Type, env: ModuleEnv<'_>) -> Option<Parts> {
 }
 
 impl Shape {
-    /// A `TrivialCopy` shape, or with `managed`, a shape owning managed fields and no variant.
+    /// A `TrivialCopy` shape, or with `managed`, a shape owning managed fields.
     fn of(ty: Type, env: ModuleEnv<'_>, managed: bool) -> Option<Self> {
         let mut root_parts = Some(parts(ty, env)?);
         let mut shape = Self {
@@ -224,11 +226,7 @@ impl Shape {
         // Reject oversized shapes before the recursive ownership query: compact named types
         // can otherwise describe exponentially many structural fields.
         let trivial_copy = concrete_type_is_trivial_copy(ty, &env);
-        let accepted = if managed {
-            !trivial_copy && !shape.nodes[0].has_variant
-        } else {
-            trivial_copy
-        };
+        let accepted = if managed { !trivial_copy } else { trivial_copy };
         accepted.then_some(shape)
     }
 }
@@ -309,14 +307,20 @@ fn literal_fields<'a>(
 /// rewriting is additionally proportional to the fieldwise copies it emits. Copy dependencies
 /// propagate rejection once per root/edge, rather than rescanning the function to a fixed point.
 pub(crate) fn split_local_products(func: &Function, env: ModuleEnv<'_>) -> Option<Function> {
-    match split(func, env, None) {
+    match split(
+        func,
+        env,
+        None,
+        &FxHashSet::default(),
+        &FxHashSet::default(),
+    ) {
         Split::Done(split) => Some(split),
-        Split::Unchanged | Split::Expand(_) => None,
+        Split::Unchanged | Split::Expand(_, _) | Split::Rejected(_) => None,
     }
 }
 
-/// Splits local products owning managed fields, such as an iterator holding a copy of the array
-/// it reads, so that each field's lifetime is a whole local.
+/// Splits local aggregates owning managed fields, including inline variant payloads, so that
+/// each field's lifetime is a whole local.
 ///
 /// A whole product is only dropped through its structural destructor, which is spliced first:
 /// the drop becomes one initialization-aware drop per field, which the split then gives to each
@@ -328,14 +332,26 @@ pub(crate) fn split_managed_local_products(
     stage: OptimizationStage<'_>,
 ) -> Option<Function> {
     let mut current: Option<Function> = None;
+    let mut expanded_roots = FxHashSet::default();
+    let mut excluded = FxHashSet::default();
     for _ in 0..MAX_NODES {
         let source = current.as_ref().unwrap_or(func);
-        match split(source, env, Some(stage)) {
+        match split(source, env, Some(stage), &excluded, &expanded_roots) {
             Split::Done(split) => return Some(split),
             // Splices are made only for products otherwise accepted; discard them if the split
             // still fails, as they only grow the body.
             Split::Unchanged => return None,
-            Split::Expand(drops) => current = Some(expand_drops(source, &drops, env, stage)?),
+            Split::Rejected(roots) => {
+                excluded.extend(roots);
+                expanded_roots.clear();
+                current = None;
+            }
+            Split::Expand(drops, roots) => {
+                expanded_roots.extend(roots);
+                let expanded = expand_drops(source, &drops, env, stage)?;
+                current =
+                    Some(branch_forward::forward_variant_branches(&expanded).unwrap_or(expanded));
+            }
         }
     }
     None
@@ -343,8 +359,10 @@ pub(crate) fn split_managed_local_products(
 
 enum Split {
     Unchanged,
-    /// Whole-product drops to splice before the products they drop can split.
-    Expand(Vec<OperationSite>),
+    /// Retry without these roots: their expanded cleanup cannot survive a failed split.
+    Rejected(Vec<ValueId>),
+    /// Whole-product drops to splice, and their roots, before those products can split.
+    Expand(Vec<OperationSite>, Vec<ValueId>),
     Done(Function),
 }
 
@@ -355,23 +373,11 @@ fn destructor(
     definitions: &FxHashMap<ValueId, &Operation>,
     env: ModuleEnv<'_>,
 ) -> Option<(FunctionId, Vec<mir::Value>)> {
-    let (callee, mut evidence) = match &operation.operands[1] {
-        mir::Value::Function(callee) => (*callee, Vec::new()),
-        mir::Value::Register(entry) => {
-            let entry = definitions.get(entry)?;
-            let OperationKind::DictEntry { entry_index, .. } = entry.kind else {
-                return None;
-            };
-            let dictionary = static_evidence_operand(&entry.operands[0])?;
-            let (callee, hidden) = dictionary_entry(&dictionary, entry_index, env)?;
-            let hidden = hidden
-                .into_iter()
-                .map(|evidence| mir::Value::Evidence(Box::new(evidence)))
-                .collect();
-            (callee, hidden)
-        }
-        _ => return None,
-    };
+    let (callee, mut evidence) = resolve_dictionary_callee(
+        &operation.operands[1],
+        &|id| definitions.get(&id).copied(),
+        env,
+    )?;
     evidence.extend_from_slice(&operation.operands[2..]);
     Some((callee, evidence))
 }
@@ -434,7 +440,13 @@ fn definitions(func: &Function) -> FxHashMap<ValueId, &Operation> {
         .collect()
 }
 
-fn split(func: &Function, env: ModuleEnv<'_>, managed: Option<OptimizationStage<'_>>) -> Split {
+fn split(
+    func: &Function,
+    env: ModuleEnv<'_>,
+    managed: Option<OptimizationStage<'_>>,
+    excluded: &FxHashSet<ValueId>,
+    expanded_roots: &FxHashSet<ValueId>,
+) -> Split {
     let mut shapes = FxHashMap::<Type, Option<Rc<Shape>>>::default();
     let mut candidates = FxHashMap::<ValueId, Candidate>::default();
     let mut projections = FxHashMap::<ValueId, Projection>::default();
@@ -451,7 +463,9 @@ fn split(func: &Function, env: ModuleEnv<'_>, managed: Option<OptimizationStage<
                     let shape = shapes
                         .entry(ty)
                         .or_insert_with(|| Shape::of(ty, env, managed.is_some()).map(Rc::new));
-                    if let Some(shape) = shape {
+                    if let Some(shape) = shape
+                        && !excluded.contains(&result)
+                    {
                         candidates.insert(
                             result,
                             Candidate {
@@ -628,27 +642,48 @@ fn split(func: &Function, env: ModuleEnv<'_>, managed: Option<OptimizationStage<
         }
     }
     reject_families(&mut candidates);
-    if candidates
-        .values()
-        .any(|candidate| candidate.shape.nodes[0].has_variant)
-    {
-        for root in uninitialized_payload_reads(func, &bindings, &candidates) {
-            candidates.get_mut(&root).unwrap().invalid = true;
-        }
-        reject_families(&mut candidates);
-    }
-    if candidates.is_empty() {
-        return Split::Unchanged;
-    }
+    // Rejected roots must not postpone the final initialization/lifetime proof when
+    // their speculative drops are the only expansions left in the worklist.
+    let mut roots_to_expand = Vec::new();
     expanded.retain(|site| {
         binding(
             &func.block(site.block).operations()[site.index.as_index()].operands[0],
             &bindings,
         )
-        .is_some_and(|place| candidates.contains_key(&place.root))
+        .is_some_and(|place| {
+            if candidates.contains_key(&place.root) {
+                roots_to_expand.push(place.root);
+                true
+            } else {
+                false
+            }
+        })
     });
+    if expanded.is_empty()
+        && candidates
+            .values()
+            .any(|candidate| candidate.shape.nodes[0].has_variant)
+    {
+        for root in
+            uninitialized_payload_reads(func, &bindings, &candidates, managed.is_some(), env)
+        {
+            candidates.get_mut(&root).unwrap().invalid = true;
+        }
+        reject_families(&mut candidates);
+    }
+    let rejected: Vec<_> = expanded_roots
+        .iter()
+        .filter(|root| !candidates.contains_key(root))
+        .copied()
+        .collect();
+    if !rejected.is_empty() {
+        return Split::Rejected(rejected);
+    }
+    if candidates.is_empty() {
+        return Split::Unchanged;
+    }
     if !expanded.is_empty() {
-        return Split::Expand(expanded);
+        return Split::Expand(expanded, roots_to_expand);
     }
     // Shared shells were rejected together, so a shell's first root decides for all of them.
     let tag_shells: FxHashMap<ValueId, (Ustr, Type)> = shells
@@ -706,6 +741,14 @@ fn split(func: &Function, env: ModuleEnv<'_>, managed: Option<OptimizationStage<
                 && let Some(candidate) = candidates.get(&place.root)
                 && let Some(tag) = candidate.shape.nodes[place.node].tag
             {
+                for leaf in candidate.shape.nodes[place.node].leaves.clone() {
+                    if managed.is_some() && leaf != tag {
+                        operations.push(Operation::clear(
+                            operation.span,
+                            mir::Value::Register(candidate.fields[leaf]),
+                        ));
+                    }
+                }
                 operations.push(Operation::store(
                     operation.span,
                     operation.operands[0].clone(),
@@ -850,7 +893,15 @@ fn payload_effects(
     bases: &FxHashMap<ValueId, usize>,
     mut effect: impl FnMut(ValueId, Range<usize>, Effect),
 ) {
-    let last = operation.operands.len().wrapping_sub(1);
+    if let Some(root) = operation.result_id()
+        && let Some(&base) = bases.get(&root)
+    {
+        effect(
+            root,
+            base..base + candidates[&root].shape.leaf_types.len(),
+            Effect::Kill,
+        );
+    }
     for pass in [Effect::Read, Effect::Kill, Effect::Write] {
         for (index, operand) in operation.operands.iter().enumerate() {
             let Some(place) = binding(operand, bindings) else {
@@ -861,20 +912,42 @@ fn payload_effects(
             };
             let role = match (&operation.kind, index) {
                 (OperationKind::Load | OperationKind::CompareEqual, 0) => Effect::Read,
-                (OperationKind::Memcpy, 0) => Effect::Read,
+                (OperationKind::Memcpy | OperationKind::Clone { .. }, 0) => Effect::Read,
                 (OperationKind::Move, 0) if pass == Effect::Kill => Effect::Kill,
                 (OperationKind::Move, 0) => Effect::Read,
-                (OperationKind::Memcpy | OperationKind::Move | OperationKind::Store, 1) => {
+                (
+                    OperationKind::Memcpy
+                    | OperationKind::Move
+                    | OperationKind::Store
+                    | OperationKind::Clone { .. },
+                    1,
+                ) => Effect::Write,
+                (OperationKind::Clear | OperationKind::Drop { .. }, 0) => Effect::Kill,
+                (OperationKind::ExtractTag, 0) => Effect::Read,
+                (OperationKind::Call { .. }, index)
+                    if Some(index) == operation.call_result_place_index() =>
+                {
                     Effect::Write
                 }
-                (OperationKind::Clear, 0) => Effect::Kill,
-                (OperationKind::Call { .. }, index) if index == last => Effect::Write,
                 (OperationKind::Call { .. }, index) if index > 0 => Effect::Read,
                 _ => continue,
             };
             let node = &candidates[&place.root].shape.nodes[place.node];
-            // A shell store initializes only the tag, which is not tracked.
-            if role == pass && node.tag.is_none() {
+            if let Some(tag) = node.tag {
+                if operation.kind == OperationKind::Store && index == 1 {
+                    if pass == Effect::Kill {
+                        effect(
+                            place.root,
+                            base + node.leaves.start..base + node.leaves.end,
+                            Effect::Kill,
+                        );
+                    } else if pass == Effect::Write {
+                        effect(place.root, base + tag..base + tag + 1, Effect::Write);
+                    }
+                } else if operation.kind == OperationKind::ExtractTag && pass == Effect::Read {
+                    effect(place.root, base + tag..base + tag + 1, Effect::Read);
+                }
+            } else if role == pass {
                 effect(
                     place.root,
                     base + node.leaves.start..base + node.leaves.end,
@@ -890,12 +963,16 @@ fn payload_effects(
 /// A whole variant's tag proves which payload is initialized; once split, each payload place must
 /// be initialized on every path to its reads by itself, as for any other local. This is a forward
 /// must-analysis over the tracked payload leaves of all variant candidates. A payload only known
-/// initialized from a tag test therefore keeps its variant whole. An invoke's result is
+/// initialized from a tag test therefore keeps its variant whole. Tags must also be initialized
+/// before expanded cleanup reads them. Shell stores reset payload initialization, and a separate
+/// may-analysis rejects resets that could discard live ownership. An invoke's result is
 /// conservatively not counted, as it is initialized only on its normal edge.
 fn uninitialized_payload_reads(
     func: &Function,
     bindings: &Bindings,
     candidates: &FxHashMap<ValueId, Candidate>,
+    managed: bool,
+    env: ModuleEnv<'_>,
 ) -> Vec<ValueId> {
     let mut bases = FxHashMap::<ValueId, usize>::default();
     let mut payload = Vec::<bool>::new();
@@ -908,6 +985,7 @@ fn uninitialized_payload_reads(
         bases.insert(*root, base);
         payload.resize(base + shape.leaf_types.len(), false);
         for node in shape.nodes.iter().filter(|node| node.tag.is_some()) {
+            payload[base + node.tag.unwrap()] = true;
             for child in &node.children {
                 for leaf in shape.nodes[*child].leaves.clone() {
                     payload[base + leaf] = true;
@@ -998,6 +1076,117 @@ fn uninitialized_payload_reads(
             meet(&predecessors[block.as_index()], &outputs, words)
         };
         transfer(&mut state, block, Some(&mut rejected));
+    }
+    if !managed {
+        return rejected;
+    }
+    // A shell resets its union payload. After splitting, do not clear a managed local
+    // that can still own a value. In particular, a tag-dependent drop at a join may
+    // need control-flow specialization before this independent-place proof succeeds. The same
+    // may-live facts must show that stack restoration and exits leave no owned payload behind.
+    let managed: Vec<bool> = {
+        let mut managed = vec![false; payload.len()];
+        for (root, base) in &bases {
+            for (leaf, ty) in candidates[root].shape.leaf_types.iter().enumerate() {
+                managed[base + leaf] = !concrete_type_is_trivial_copy(*ty, &env);
+            }
+        }
+        managed
+    };
+    if !managed.iter().any(|managed| *managed) {
+        return rejected;
+    }
+    let preserving: FxHashMap<_, _> = bases
+        .keys()
+        .map(|&root| (root, stack_region::restores_preserving_alloca(func, root)))
+        .collect();
+    let may_transfer = |state: &mut Vec<u64>, block, mut rejected: Option<&mut Vec<ValueId>>| {
+        for (index, (operation, _)) in operations(block).enumerate() {
+            if operation.kind == OperationKind::StackRestore {
+                let site = OperationSite {
+                    block,
+                    index: OperationIndex::from_index(index),
+                };
+                for (&root, &base) in &bases {
+                    if !preserving[&root].contains(&site) {
+                        let range = base..base + candidates[&root].shape.leaf_types.len();
+                        if let Some(rejected) = rejected.as_deref_mut()
+                            && range
+                                .clone()
+                                .any(|bit| managed[bit] && state[bit / 64] & (1 << (bit % 64)) != 0)
+                        {
+                            rejected.push(root);
+                        }
+                        set(state, range, false);
+                    }
+                }
+            }
+            if operation.kind == OperationKind::Store
+                && let Some(place) = binding(&operation.operands[1], bindings)
+                && let Some(&base) = bases.get(&place.root)
+                && candidates[&place.root].shape.nodes[place.node]
+                    .tag
+                    .is_some()
+                && let Some(rejected) = rejected.as_deref_mut()
+                && candidates[&place.root].shape.nodes[place.node]
+                    .leaves
+                    .clone()
+                    .any(|leaf| {
+                        let bit = base + leaf;
+                        managed[bit] && state[bit / 64] & (1 << (bit % 64)) != 0
+                    })
+            {
+                rejected.push(place.root);
+            }
+            payload_effects(
+                operation,
+                bindings,
+                candidates,
+                &bases,
+                |_, range, effect| match effect {
+                    Effect::Read => {}
+                    Effect::Kill => set(state, range, false),
+                    Effect::Write => set(state, range, true),
+                },
+            );
+        }
+        if func.block(block).terminator().successors().next().is_none()
+            && let Some(rejected) = rejected.as_deref_mut()
+        {
+            for (&root, &base) in &bases {
+                if (base..base + candidates[&root].shape.leaf_types.len())
+                    .any(|bit| managed[bit] && state[bit / 64] & (1 << (bit % 64)) != 0)
+                {
+                    rejected.push(root);
+                }
+            }
+        }
+    };
+    let union = |predecessors: &[BlockId], outputs: &[Vec<u64>]| {
+        let mut state = vec![0; words];
+        for predecessor in predecessors {
+            for (word, output) in state.iter_mut().zip(&outputs[predecessor.as_index()]) {
+                *word |= output;
+            }
+        }
+        state
+    };
+    let mut outputs = vec![vec![0; words]; block_count];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in func.blocks() {
+            let mut state = union(&predecessors[block.as_index()], &outputs);
+            may_transfer(&mut state, block, None);
+            if state != outputs[block.as_index()] {
+                outputs[block.as_index()] = state;
+                changed = true;
+            }
+        }
+    }
+    for block in func.blocks() {
+        let mut state = union(&predecessors[block.as_index()], &outputs);
+        may_transfer(&mut state, block, Some(&mut rejected));
     }
     rejected
 }

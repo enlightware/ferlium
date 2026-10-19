@@ -12,11 +12,13 @@ use crate::{
     mir::{
         BlockId, Function, Operation, OperationKind, Value,
         edit::FunctionEdit,
-        pass::inline::{cleanup_template, expand_cleanup},
+        pass::{
+            dataflow::resolve_dictionary_callee,
+            inline::{cleanup_template, expand_cleanup},
+        },
         terminator::{Terminator, TerminatorKind},
-        value::StaticEvidence,
     },
-    module::{FunctionId, ModuleEnv, TraitDictionaryEntry, TraitDictionaryId, id::Id},
+    module::{FunctionId, ModuleEnv, id::Id},
     std::{logic::bool_type, value::variant_indirect_payload_type},
     types::{
         effects::no_effects,
@@ -83,8 +85,9 @@ pub(super) fn elaborate(
         let OperationKind::Drop { ty } = op.kind else {
             unreachable!()
         };
-        let (callee, mut captures) = resolve_callee(&op.operands[1], &places, env)
-            .expect("partial cleanup must have a structural destructor");
+        let (callee, mut captures) =
+            resolve_dictionary_callee(&op.operands[1], &|id| places.definitions.get(&id), env)
+                .expect("partial cleanup must have a structural destructor");
         captures.extend_from_slice(&op.operands[2..]);
         // Both sources are semantic MIR: semantic optimization must preserve initialization-
         // aware field Drops unless it proves them unnecessary. Only physical elaboration may
@@ -147,59 +150,6 @@ pub(super) fn elaborate(
         edit.reorder_blocks_in_reverse_postorder();
         body = edit.finish_unverified();
     }
-}
-
-fn dictionary(value: &Value, places: &Places) -> Option<(TraitDictionaryId, Vec<Value>)> {
-    match value {
-        Value::Dictionary(id) => Some((*id, vec![])),
-        Value::Evidence(evidence) => match &**evidence {
-            StaticEvidence::Dictionary {
-                definition,
-                captures,
-            } => Some((
-                *definition,
-                captures
-                    .iter()
-                    .map(|c| Value::Evidence(Box::new(c.clone())))
-                    .collect(),
-            )),
-            _ => None,
-        },
-        Value::Register(id) => {
-            let operation = places.definitions.get(id)?;
-            let OperationKind::BuildDictionary { definition, .. } = operation.kind else {
-                return None;
-            };
-            Some((definition, operation.operands.to_vec()))
-        }
-        _ => None,
-    }
-}
-
-fn resolve_callee(
-    value: &Value,
-    places: &Places,
-    env: ModuleEnv<'_>,
-) -> Option<(FunctionId, Vec<Value>)> {
-    if let Value::Function(id) = value {
-        return Some((*id, vec![]));
-    }
-    let Value::Register(id) = value else {
-        return None;
-    };
-    let operation = places.definitions.get(id)?;
-    let OperationKind::DictEntry { entry_index, .. } = operation.kind else {
-        return None;
-    };
-    let (id, captures) = dictionary(&operation.operands[0], places)?;
-    let definition = &env
-        .module_by_id(id.module_id)?
-        .get_impl_data(id.impl_id)?
-        .dictionary_value;
-    let TraitDictionaryEntry::Function(function) = definition.entry(entry_index);
-    let captures = definition
-        .project_entry_captures(entry_index, &captures, || operation.operands[0].clone())?;
-    Some((FunctionId::new(id.module_id, function), captures))
 }
 
 fn tested_nodes(places: &Places, op: &Operation) -> Vec<LogicalPlaceId> {

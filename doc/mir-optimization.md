@@ -161,7 +161,9 @@ structural storage, retaining a copy when the source is an addressor referent wi
 For example, a local string copy used only by `len` can read the original instead, including across
 read-only loops. A two-state CFG walk checks both absent and active lifetimes at joins, rejecting
 reconstruction while active and requiring cleanup before every finite exit. It does not require
-loops to terminate. Stack restores preserve parameter storage; local sources use a lazy, cached
+loops to terminate. A `clear` of the clone's destination also ends its lifetime: by contract, that
+place has no pending drop. Those clears disappear with the clone's drops, so they cannot invalidate
+the borrowed source. Stack restores preserve parameter storage; local sources use a lazy, cached
 must-analysis of markers that protect the current allocation incarnation. Reallocation invalidates
 older marker facts, and joins intersect them. Unresolved aliases, consuming uses, unproved storage
 preservation and suspension inside the borrowed lifetime retain the copy.
@@ -774,11 +776,15 @@ incoming predecessor and the final read; every predecessor must jump uncondition
 to the join; and the join may contain only `stack_restore`s besides that read. Other operations,
 additional uses, unknown stores and self-edges all refuse the rewrite.
 
-The same pass forwards a concrete `TrivialCopy` variant when every whole-place definition stores a
-statically tagged shell and its sole tag read, of the place or of a load of it, feeds
-`switch_variant`. Each constructor path jumps directly to the selected case, retaining payload
-storage and replaying intervening stack restores. The variant place must not escape; managed
-variants, other whole-place uses and general aggregate scalar replacement remain outside the rule.
+The same pass forwards a local variant, including one owning managed payloads, whose whole-place
+definitions store statically tagged shells. Multiple tag reads may feed `switch_variant`, either
+directly from the place or through an immediately preceding load. A forward analysis tracks known
+tags through joins; drops, clears and re-executed allocations reset that knowledge. Constructor
+paths with known tags jump directly to the selected case, retaining payload storage and replaying
+intervening stack restores. A switch whose tag is already known within its own block becomes a
+direct jump even when other work precedes the tag read; that work remains in place. The variant
+place must not escape, and other whole-place uses still block forwarding. Payload ownership
+operations remain intact; aggregate scalar replacement is a separate rule.
 Place CSE runs after a successful rewrite so identical payload projections share one address
 calculation.
 
@@ -1213,10 +1219,20 @@ above), splits local products owning managed fields, after clone borrowing, so t
 lifetime becomes a local of its own: an iterator over two arrays then borrows each array and keeps
 each cursor in a local. Such a product is dropped whole only through its structural destructor,
 which is spliced first, as physical drop elaboration does for a partially initialized product; its
-field drops remain initialization-aware. Products with a variant, or whose initialization is
-queried, keep their storage. Storage forwarding, clone borrowing and terminal moves then run again
-on what the split exposed. LLVM similarly runs SROA before the passes that remove copies and move
-code.
+field drops remain initialization-aware. Inline variants split into a tag place and independent
+payload places, including when nested in products. The pass expands structural cleanup, forwards
+known-tag branches and retries splitting until the independent fields can be proved safe. If a
+root becomes ineligible after expansion, it restarts from the original body excluding that root,
+so rejected roots do not retain speculative cleanup expansion.
+
+Payload reads must be definitely initialized without relying on a remaining tag test. Managed
+payloads must also have no live ownership at a shell store, a stack restore that releases their
+storage, or a function exit. Shell stores clear the separate payload places in managed mode.
+Initialization queries that would observe aggregate or payload state retain the original storage;
+whole-value uses and escaping addresses likewise prevent splitting. Initialization through an
+`invoke` result remains conservative because it occurs only on the normal edge. Storage forwarding,
+clone borrowing and terminal moves then run again on what the split exposed. LLVM similarly runs
+SROA before the passes that remove copies and move code.
 
 ## Post-expansion optimization
 

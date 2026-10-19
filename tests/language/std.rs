@@ -1532,6 +1532,63 @@ fn array_iterators() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn managed_iteration_payload_lifetimes() {
+    let mut session = TestSession::new();
+    for (source, expected) in [
+        (
+            "fn lengths(rows: [[int]]) -> int { let mut n = 0; for row in rows { n += len(row) }; n } lengths([[1, 2], [], [3]])",
+            3,
+        ),
+        (
+            "fn lengths(rows: [[int]]) -> int { let mut n = 0; for row in rows { n += len(row) }; n } lengths([])",
+            0,
+        ),
+        (
+            r#"fn lengths(rows: [string]) -> int { fold(rows, 0, |n, row| n + len(row)) } lengths(["ab", "", "c"])"#,
+            3,
+        ),
+        (
+            "fn lengths(rows: [[int]]) -> int { fold(rows, 0, |n, row| n + len(row)) } lengths([[1, 2], [], [3]])",
+            3,
+        ),
+        (
+            "fn lengths(rows: [[int]]) -> int { let mut n = 0; for row in rows { if len(row) == 0 { continue }; n += len(row); if n > 2 { break } }; n } lengths([[], [1, 2], [3], [4, 5]])",
+            3,
+        ),
+        (
+            "fn first(rows: [[int]]) -> int { for row in rows { if len(row) > 0 { return len(row) } }; 0 } first([[], [1, 2], [3]])",
+            2,
+        ),
+        // An iterator retains its snapshot when the source changes during traversal.
+        (
+            "let mut rows = [[1], [2, 3]]; let mut n = 0; for row in rows { rows[1] = [4]; n += len(row) }; n + len(rows[1])",
+            4,
+        ),
+        // A yielded value can escape its iterator and mutate independently.
+        (
+            "fn first(rows: [[int]]) -> [int] { for row in rows { return row }; [] } let mut rows = [[1, 2]]; let mut row = first(rows); row[0] = 7; rows[0][1] = 9; row[0] + row[1] + rows[0][0] + rows[0][1]",
+            19,
+        ),
+        // Distinct managed cases exercise the general variant path, beyond Option.
+        (
+            r#"fn choose(flag: bool, a: string, b: [int]) { if flag { Text(a) } else { Rows(b) } } fn size(flag: bool, a: string, b: [int]) -> int { match choose(flag, a, b) { Text(s) => len(s), Rows(r) => len(r) } } size(true, "abc", [1]) + size(false, "abc", [1])"#,
+            4,
+        ),
+    ] {
+        assert_val_eq!(session.run(source), int(expected));
+    }
+    assert_eq!(
+        session.fail_run("fn lengths(rows: [[int]], d: int) -> int { let mut n = 0; for row in rows { n += idiv(len(row), d) }; n } lengths([[1, 2]], 0)"),
+        SourceFailureKind::DivisionByZero,
+    );
+    assert_eq!(
+        session.fail_run(r#"fn consume(a: string, d: int) -> int { let value = Some((a, idiv(1, d))); match value { Some(pair) => len(pair.0) + pair.1, _ => 0 } } consume("abc", 0)"#),
+        SourceFailureKind::DivisionByZero,
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_casts() {
     let mut session = TestSession::new();
     // Identity casts
