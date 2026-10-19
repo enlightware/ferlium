@@ -45,7 +45,7 @@ use crate::{
     types::{
         effects::{EffType, Effect, PrimitiveEffect},
         r#trait::TraitDictionaryEntryIndex,
-        r#type::{CallImplType, CallResultConvention, Type},
+        r#type::{CallImplType, CallResultConvention, FnArgType, Type},
         type_inference::substitution::InstSubst,
         type_like::TypeLike,
         type_scheme::TypeScheme,
@@ -1287,11 +1287,20 @@ pub(crate) fn reads_argument(
     metadata: Option<&CallMetadata>,
     offset: usize,
 ) -> bool {
-    ty.fn_ty.args[offset]
+    is_read_only(&ty.fn_ty.args[offset])
+        && !metadata.is_some_and(|metadata| metadata.owned_arguments.contains(offset))
+}
+
+/// Whether an entry declaring `argument` takes it as a value: a read-only concrete scalar.
+pub(crate) fn is_value_argument(argument: &FnArgType, env: &impl TypeLayoutEnv) -> bool {
+    is_read_only(argument) && is_scalar_value_type(argument.ty, env)
+}
+
+fn is_read_only(argument: &FnArgType) -> bool {
+    argument
         .mut_ty
         .as_resolved()
         .is_some_and(|mutability| !mutability.is_mutable())
-        && !metadata.is_some_and(|metadata| metadata.owned_arguments.contains(offset))
 }
 
 /// Whether a call of type `ty`, or a definition of that type, carries its result as a value: a

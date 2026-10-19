@@ -13,12 +13,13 @@
 //! declared fallible, keeps a result place in semantic MIR, which physical lowering turns into a
 //! value where the entry returns one.
 //!
-//! The entry follows from the callee operand. A static function takes a parameter directly if its
-//! own type, before instantiation, is a concrete scalar: a generic parameter is indirect even where
-//! the call instantiates it to `int`. It returns its result directly under the same condition on
-//! its result and effects. A dictionary entry is the trait method's declared type for its
-//! parameters, and returns through a pointer. Every other dynamic callee, such as a stored
-//! callable, has a uniform entry that takes and returns everything indirectly.
+//! The entry follows from the callee operand. A native function's entry is its native signature.
+//! A script function takes a parameter directly if its own type, before instantiation, is a
+//! concrete scalar: a generic parameter is indirect even where the call instantiates it to `int`.
+//! It returns its result directly under the same condition on its result and effects. A dictionary
+//! entry is the trait method's declared type for its parameters, and returns through a pointer.
+//! Every other dynamic callee, such as a stored callable, has a uniform entry that takes and
+//! returns everything indirectly. The Wasm emitter derives the same entries.
 
 use std::cell::OnceCell;
 
@@ -26,13 +27,16 @@ use rustc_hash::FxHashMap;
 
 use crate::{
     compiler::MirArtifacts,
-    hir::{function::ArgConvention, native_functions::NativeResult},
+    hir::{
+        function::ArgConvention,
+        native_functions::{NativeParameter, NativeResult},
+    },
     mir::{
         Function, Operation, OperationKind, Parameter, ResultTransport, Value, ValueId, operation,
         results::definition_result_transport,
     },
     module::{CallableOrigin, FunctionId, ModuleEnv, TraitId, id::Id},
-    types::{r#trait::TraitDictionaryEntryIndex, r#type::CallImplType},
+    types::r#trait::TraitDictionaryEntryIndex,
 };
 
 /// The entries the calls of one body reach.
@@ -81,13 +85,7 @@ impl<'a> Transports<'a> {
                     .methods
                     .get(entry.as_index())
                     .and_then(|(_, method)| method.ty_scheme.ty.args.get(offset))
-                    .is_some_and(|argument| {
-                        !argument
-                            .mut_ty
-                            .as_resolved()
-                            .is_none_or(|mutability| mutability.is_mutable())
-                            && operation::is_scalar_value_type(argument.ty, &self.env)
-                    })
+                    .is_some_and(|argument| operation::is_value_argument(argument, &self.env))
             }),
             _ => false,
         }
@@ -120,26 +118,19 @@ impl<'a> Transports<'a> {
             return ResultTransport::Place;
         }
         if function.code.as_script().is_some() {
-            definition_result_transport(
+            return definition_result_transport(
                 &function.definition,
                 ModuleEnv::new(module, self.env.modules),
-            )
-        } else if function
+            );
+        }
+        match function
             .code
             .native_entry()
-            .is_some_and(|entry| entry.signature().result == NativeResult::Unit)
+            .map(|entry| entry.signature().result)
         {
-            ResultTransport::NoValue
-        } else if operation::accepts_value_result(
-            &CallImplType::new(
-                function.definition.ty_scheme.ty.clone(),
-                function.definition.return_convention(),
-            ),
-            &self.env,
-        ) {
-            ResultTransport::Value
-        } else {
-            ResultTransport::Place
+            Some(NativeResult::Unit) => ResultTransport::NoValue,
+            Some(NativeResult::Scalar(..)) => ResultTransport::Value,
+            _ => ResultTransport::Place,
         }
     }
 
@@ -162,13 +153,15 @@ impl<'a> Transports<'a> {
         else {
             return false;
         };
-        let definition = &function.definition;
-        // A native addressor borrows its root through a pointer, whatever the root's type.
-        if matches!(function.origin, CallableOrigin::Native { .. })
-            && definition.result_rooted_in == Some(offset as u32)
-        {
-            return false;
+        // A native entry states its transports, such as an addressor borrowing its root through a
+        // pointer whatever the root's type.
+        if let Some(entry) = function.code.native_entry() {
+            return matches!(
+                entry.signature().parameters.get(offset),
+                Some(NativeParameter::Scalar(..))
+            );
         }
+        let definition = &function.definition;
         function.parameter_passing.get(offset) == Some(&ArgConvention::Let)
             && definition
                 .ty_scheme

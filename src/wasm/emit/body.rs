@@ -1676,9 +1676,7 @@ impl<'a, 's> Body<'a, 's> {
     ) -> Result<(), String> {
         for (input, transport) in inputs.into_iter().zip(transports) {
             match transport {
-                ParameterTransport::Direct(_) => {
-                    self.read(input)?;
-                }
+                ParameterTransport::Direct(_) => self.direct_argument(input)?,
                 ParameterTransport::Indirect => self.argument_address(input)?,
             }
         }
@@ -2657,6 +2655,19 @@ impl<'a, 's> Body<'a, 's> {
 
     /// Pushes the address of an argument its callee's entry takes through a pointer. Physical
     /// lowering passes such an argument as a place, never as a value.
+    /// Physical MIR passes a value exactly where the entry takes one.
+    fn direct_argument(&mut self, value: &Value) -> Result<(), String> {
+        if self
+            .roles
+            .get(value, self.body.constants())
+            .is_some_and(|role| role.place_pointee_type().is_some())
+        {
+            return Err("place argument to a direct parameter".into());
+        }
+        self.read(value)?;
+        Ok(())
+    }
+
     pub(super) fn argument_address(&mut self, value: &Value) -> Result<(), String> {
         if self
             .roles

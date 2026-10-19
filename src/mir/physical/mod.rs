@@ -670,6 +670,7 @@ fn expand_physical_mir(
             let body = drop_elaboration::elaborate(body, semantic, env, |variant, payload| {
                 lowerer.intern_variant_payload_release(variant, payload)
             });
+            let body = scalar_arguments::call_scalar_clones(&body, env).unwrap_or(body);
             // Physical MIR keeps a scalar value only where the callee's entry takes or returns it
             // directly.
             let transports = Transports::of(&body, semantic, env);

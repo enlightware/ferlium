@@ -12,18 +12,25 @@
 //!
 //! Physical MIR passes such an argument as a place where the callee's entry takes it through a
 //! pointer ([`spill_value_arguments`]), and such a result as a place where the entry returns it
-//! through one ([`place_value_results`]).
+//! through one ([`place_value_results`]). A `clone` of a scalar through a known function is an
+//! ordinary call ([`call_scalar_clones`]), so these apply to it too.
 
 use rustc_hash::FxHashMap;
 
 use crate::mir::{
     self, Function, Operation, OperationKind, ResultTransport, ValueId,
     edit::FunctionEdit,
-    operation::{accepts_value_argument, accepts_value_result},
+    operation::{accepts_value_argument, accepts_value_result, is_scalar_value_type},
     results::{accepts_no_value_result, zero_sized_result},
     terminator::TerminatorKind,
 };
-use crate::{module::ModuleEnv, types::r#type::CallResultConvention};
+use crate::{
+    module::ModuleEnv,
+    types::{
+        effects::EffType,
+        r#type::{CallImplType, CallResultConvention, FnType},
+    },
+};
 
 /// Appends a `load` of each operand at `reads` to `operations`, and passes its value instead.
 pub(crate) fn read_before(
@@ -139,6 +146,54 @@ pub(crate) fn spill_value_arguments(
     let entry = edit.entry();
     let operations = &mut edit.block_mut(entry).operations;
     operations.splice(0..0, slots);
+    Some(edit.finish_unverified())
+}
+
+/// Rewrites each `clone` of a scalar value type whose callee is a known function into a call of
+/// that function, reading the source and initializing the destination: its entry takes and
+/// returns a value, which a `clone`'s places do not match. `None` if there is no such `clone`.
+pub(crate) fn call_scalar_clones(func: &Function, env: ModuleEnv<'_>) -> Option<Function> {
+    let is_scalar_clone = |operation: &Operation| {
+        matches!(operation.kind, OperationKind::Clone { ty } if is_scalar_value_type(ty, &env))
+            && matches!(operation.operands[2], mir::Value::Function(_))
+    };
+    if !func
+        .blocks()
+        .any(|block| func.block(block).operations().iter().any(is_scalar_clone))
+    {
+        return None;
+    }
+    let mut edit = FunctionEdit::new(func.clone());
+    for block in edit.blocks().collect::<Vec<_>>() {
+        let operations = std::mem::take(&mut edit.block_mut(block).operations);
+        let mut rewritten = Vec::with_capacity(operations.len());
+        for operation in operations {
+            if !is_scalar_clone(&operation) {
+                rewritten.push(operation);
+                continue;
+            }
+            let OperationKind::Clone { ty } = operation.kind else {
+                unreachable!("only a clone is rewritten");
+            };
+            let [source, destination, callee, evidence @ ..] = &*operation.operands else {
+                unreachable!("a clone has a source, a destination and a callee");
+            };
+            let mut load = Operation::load(operation.span, source.clone());
+            let value = edit
+                .assign_new_result(&mut load)
+                .expect("a load defines its value");
+            rewritten.push(load);
+            // The hidden evidence precedes the visible argument, as in the `clone`.
+            let arguments = evidence.iter().cloned().chain([value, destination.clone()]);
+            rewritten.push(Operation::call(
+                operation.span,
+                callee.clone(),
+                arguments,
+                CallImplType::value(FnType::new_by_val([ty], ty, EffType::empty())),
+            ));
+        }
+        edit.block_mut(block).operations = rewritten;
+    }
     Some(edit.finish_unverified())
 }
 

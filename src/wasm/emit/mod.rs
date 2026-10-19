@@ -36,7 +36,7 @@ use crate::{
     hir::{function::ArgConvention, native_functions::NativeScalar},
     mir::{
         BasicBlock, Function, Operation, OperationKind, ParameterKind, Value, ValueId,
-        operation::SourceFallibility,
+        operation::{SourceFallibility, is_value_argument},
         pass::known_callee::KnownCallee,
         physical::{constructed_subscript_definitions, program::ResolvedPhysicalProgram},
         role::MirType,
@@ -56,7 +56,6 @@ use crate::{
     },
     types::{
         effects::{EffType, Effect, PrimitiveEffect},
-        mutability::MutType,
         r#trait::TraitDictionaryEntryIndex,
         r#type::{CallResultConvention, FnType, Type},
     },
@@ -369,13 +368,11 @@ fn allocate_frame(
     code.instruction(&I::LocalGet(base.as_u32()));
 }
 
-fn value_transport(ty: Type, env: &impl TypeLayoutEnv) -> ParameterTransport {
-    ScalarType::in_env(ty, env)
-        .ok()
-        .filter(|scalar| !scalar.is_unit())
-        .map_or(ParameterTransport::Indirect, |scalar| {
-            ParameterTransport::Direct(scalar.wasm())
-        })
+/// A value parameter of scalar type `ty`.
+fn value_transport(ty: Type, env: &impl TypeLayoutEnv) -> Result<ParameterTransport, String> {
+    Ok(ParameterTransport::Direct(
+        ScalarType::in_env(ty, env)?.wasm(),
+    ))
 }
 
 /// Replace a dictionary pointer with its image-relative entry table's absolute address.
@@ -416,18 +413,10 @@ fn script_abi(body: &Function, env: ModuleEnv<'_>) -> Result<CallAbi, String> {
     for parameter in body.parameters() {
         match parameter.kind {
             ParameterKind::Return => result = Some(parameter.ty),
-            ParameterKind::Value => parameters.push(value_transport(parameter.ty, &env)),
-            ParameterKind::Place(mode) => {
-                parameters.push(if mode == ArgConvention::Let {
-                    value_transport(parameter.ty, &env)
-                } else {
-                    ParameterTransport::Indirect
-                });
-            }
-            ParameterKind::Owned => {
+            ParameterKind::Value => parameters.push(value_transport(parameter.ty, &env)?),
+            ParameterKind::Place(_) | ParameterKind::Owned | ParameterKind::Dictionary => {
                 parameters.push(ParameterTransport::Indirect);
             }
-            ParameterKind::Dictionary => parameters.push(ParameterTransport::Indirect),
         }
     }
     let result_kind = match result {
@@ -596,15 +585,15 @@ fn dictionary_abi(
     };
     Ok(CallAbi {
         // The leading pointer borrows the complete dictionary reference, including self evidence.
-        parameters: iter::once(ParameterTransport::Indirect)
+        parameters: iter::once(Ok(ParameterTransport::Indirect))
             .chain(ty.args.iter().map(|arg| {
-                if arg.mut_ty != MutType::constant() {
-                    ParameterTransport::Indirect
-                } else {
+                if is_value_argument(arg, &env) {
                     value_transport(arg.ty, &env)
+                } else {
+                    Ok(ParameterTransport::Indirect)
                 }
             }))
-            .collect(),
+            .collect::<Result<_, _>>()?,
         result: ResultKind::Output,
         fallible: ty.effects.has_variables()
             || ty

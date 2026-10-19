@@ -486,6 +486,94 @@ fn mutable_let_initialization_uses_value_clone() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn mutable_let_initialization_uses_value_clone_of_a_tag() {
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    // This dispatch probe deliberately violates clone's value-preservation contract.
+    session.without_optimized_mode();
+    assert_val_eq!(
+        session.run(
+            r#"
+            enum Light { Red, Green }
+
+            impl Value for Light {
+                fn eq(left: Light, right: Light) -> bool {
+                    to_string(left) == to_string(right)
+                }
+
+                fn to_string(value: Light) -> string {
+                    match value {
+                        Light::Red => "red",
+                        Light::Green => "green",
+                    }
+                }
+
+                fn hash(value: Light, state: &mut hasher) {}
+
+                fn clone(source: Light) -> Light {
+                    match source {
+                        Light::Red => Light::Green,
+                        Light::Green => Light::Red,
+                    }
+                }
+
+                fn drop(target: &mut Light) {}
+            }
+
+            let original = Light::Red;
+            let mut cloned = original;
+            (to_string(original), to_string(cloned))
+            "#
+        ),
+        tuple!(string("red"), string("green"))
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_tag_with_a_custom_value_clone_is_copied_through_it() {
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    assert_val_eq!(
+        session.run(
+            r#"
+            enum Light { Red, Green }
+
+            impl Value for Light {
+                fn eq(left: Light, right: Light) -> bool {
+                    to_string(left) == to_string(right)
+                }
+
+                fn to_string(value: Light) -> string {
+                    match value {
+                        Light::Red => "red",
+                        Light::Green => "green",
+                    }
+                }
+
+                fn hash(value: Light, state: &mut hasher) {}
+
+                fn clone(source: Light) -> Light {
+                    match source {
+                        Light::Red => Light::Red,
+                        Light::Green => Light::Green,
+                    }
+                }
+
+                fn drop(target: &mut Light) {}
+            }
+
+            let original = black_box(Light::Green);
+            let mut cloned = original;
+            (to_string(original), to_string(cloned))
+            "#
+        ),
+        tuple!(string("green"), string("green"))
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn mutable_let_clone_does_not_clone_more_than_needed() {
     let mut session = TestSession::new();
     assert_val_eq!(
