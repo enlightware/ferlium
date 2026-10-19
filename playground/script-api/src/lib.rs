@@ -58,7 +58,7 @@ impl PlaygroundCompiler {
         self.inner.run_expr_mir(optimized)
     }
 
-    pub fn mir_text(&mut self, optimized: bool) -> IrText {
+    pub fn mir_text(&mut self, optimized: bool) -> Result<IrText, String> {
         self.inner.mir_text(optimized)
     }
 
