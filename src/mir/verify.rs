@@ -1297,6 +1297,16 @@ impl<'a> Verifier<'a> {
             instantiation.ty_args.len(),
             scheme.ty_quantifiers.len()
         );
+        assert_eq!(
+            instantiation.eff_args.len(),
+            scheme.eff_quantifiers.len(),
+            "MIR function `{}` node {}: call records {} effect arguments for a callee with {} \
+             effect quantifiers",
+            self.func.name,
+            node,
+            instantiation.eff_args.len(),
+            scheme.eff_quantifiers.len()
+        );
 
         // The same substitution monomorphization applies to the callee's body, so the two cannot
         // disagree about what the recorded arguments mean.

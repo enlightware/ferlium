@@ -1633,6 +1633,78 @@ fn filtered_managed_payload_lifetimes() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn filter_predicate_failure_propagates() {
+    let mut session = TestSession::new();
+    // The failure occurs in the predicate, not in the consuming loop body.
+    // Regression: the blanket thunk lost the predicate's effect variable, so optimized
+    // execution treated the call as infallible and panicked instead of propagating the failure.
+    assert_eq!(
+        session.fail_run(
+            r#"
+            fn f(d: int) -> int {
+                let mut n = 0;
+                for row in iter([[1], [2, 3]]) |> filter(|row| idiv(len(row), d) > 0) {
+                    n += len(row)
+                };
+                n
+            }
+            f(0)
+            "#,
+        ),
+        SourceFailureKind::DivisionByZero,
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn zip_keeps_independent_adaptor_effects() {
+    let mut session = TestSession::new();
+    // Regression: the generic zip body defaulted the effects of its calls to the two source
+    // iterators to pure, as they are determined only by the impl constraints. Only the right
+    // predicate fails, so its failure must propagate through that call.
+    let code = r#"
+        fn f(d: int) -> int {
+            let left = iter([[1], [2, 3]]) |> filter(|row| len(row) > 0);
+            let right = iter([[4], [5, 6]]) |> filter(|row| idiv(len(row), d) > 0);
+            let mut n = 0;
+            for (a, b) in zip(left, right) {
+                n += len(a) + len(b)
+            };
+            n
+        }
+    "#;
+    assert_eq!(
+        session.fail_run(&format!("{code} f(0)")),
+        SourceFailureKind::DivisionByZero,
+    );
+    assert_val_eq!(session.run(&format!("{code} f(1)")), int(6));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn filter_source_failure_propagates() {
+    let mut session = TestSession::new();
+    // The failure occurs in the filtered source, whose effect only the filter impl's
+    // constraint determines.
+    assert_eq!(
+        session.fail_run(
+            r#"
+            fn f(d: int) -> int {
+                let mut n = 0;
+                for x in iter([[1], [2, 3]]) |> map(|row| idiv(len(row), d)) |> filter(|x| x > 0) {
+                    n += x
+                };
+                n
+            }
+            f(0)
+            "#,
+        ),
+        SourceFailureKind::DivisionByZero,
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_casts() {
     let mut session = TestSession::new();
     // Identity casts

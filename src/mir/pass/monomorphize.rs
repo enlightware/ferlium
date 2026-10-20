@@ -3521,7 +3521,7 @@ fn use_it(x: int) { with_zero(x) }",
     fn publishing_a_callee_forgets_decisions_taken_from_its_raw_body() {
         let mut session = CompilerSession::new();
         let module_id = compile(&mut session, "fn identity(value: int) -> int { value }");
-        let (function, function_count, scheme) = {
+        let (function, function_count, mut scheme) = {
             let module = session.expect_fresh_module(module_id);
             let function = module
                 .get_local_function_id(ustr("identity"))
@@ -3538,6 +3538,7 @@ fn use_it(x: int) { with_zero(x) }",
             .prepare_execution_target(ExecutionTarget::Mir, module_id)
             .expect("MIR preparation failed");
         let body = body(&session, module_id, "identity").clone();
+        scheme.eff_quantifiers.insert(EffectVar::new(0));
         let callee = FunctionId::new(module_id, function);
         let key = |effects| SpecializationKey {
             callee,

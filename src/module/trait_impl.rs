@@ -6,6 +6,7 @@ use std::{fmt, hash::Hash};
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
+use rustc_hash::FxHashSet;
 use ustr::Ustr;
 
 use crate::{
@@ -956,14 +957,18 @@ impl TraitImpls {
         );
 
         // Every method callable in a blanket implementation quantifies all of that
-        // implementation's type variables, in their canonical numeric order. Some variables are
-        // introduced only through impl constraints and cannot be recovered from the trait method
-        // signature alone.
+        // implementation's type and effect variables, in their canonical numeric order. Some
+        // variables are introduced only through impl constraints and cannot be recovered from the
+        // trait method signature alone.
         let method_ty_quantifiers = (0..sub_key.ty_var_count)
             .map(TypeVar::new)
             .collect::<Vec<_>>();
+        let method_eff_quantifiers = (0..sub_key.eff_var_count)
+            .map(EffectVar::new)
+            .collect::<FxHashSet<_>>();
         for function in &mut functions {
             function.definition.ty_scheme.ty_quantifiers = method_ty_quantifiers.clone();
+            function.definition.ty_scheme.eff_quantifiers = method_eff_quantifiers.clone();
         }
 
         // Add to local functions, collect their IDs and build the overall interface hash.

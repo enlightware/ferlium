@@ -42,14 +42,18 @@ coinciding numbers alone do not establish a correspondence.
 Compiler-generated blanket-method thunks have a second, analogous source: matching the blanket
 implementation already computes its substitution. The trait solver preserves that result and
 projects the generic method's quantifiers through it when building the forwarding call. Blanket
-implementation normalization gives type variables canonical numeric identities, and registration
-requires every blanket method callable to quantify all implementation type variables in
-`0..ty_var_count` order. “All” matters: a variable introduced through an implementation constraint
-need not occur in the trait-reconstructed method signature, but it remains a quantifier of the actual
-callable. Effect quantifiers are unordered in `TypeScheme`, so every instantiation encodes them in
+implementation normalization gives type and effect variables canonical numeric identities, and
+registration requires every blanket method callable to quantify all implementation type variables
+in `0..ty_var_count` and all implementation effect variables in `0..eff_var_count`. “All” matters:
+a variable introduced through an implementation constraint need not occur in the
+trait-reconstructed method signature, but it remains a quantifier of the actual callable, which the
+constraint determines. An effect variable occurring only in `I: Iterator<NextEffect = e>` is such a
+variable. Effect quantifiers are unordered in `TypeScheme`, so every instantiation encodes them in
 sorted `EffectVar` order, as described under Encoding below. The thunk can therefore build the
 application from the blanket key and matched substitution without duplicating the callable's
-quantifier list in the implementation record or matching concrete signatures.
+quantifier list in the implementation record or matching concrete signatures. Matching reserves the
+requested application's own type and effect variables before instantiating the implementation's, so
+that the two scopes cannot alias.
 
 This is the mainstream choice: rustc carries `GenericArgs` in the type of the callee operand, and
 Swift's SIL carries a `SubstitutionMap` on `apply`.

@@ -242,26 +242,6 @@ impl UnifiedTypeInference {
             .collect()
     }
 
-    /// Build a substitution mapping every effect variable occurring in the given
-    /// constraints and effect types to a fresh inference effect variable.
-    pub(crate) fn fresh_effect_var_subst_for(
-        &mut self,
-        constraints: &[PubTypeConstraint],
-        effs: &[EffType],
-    ) -> EffectsInstSubst {
-        let mut eff_vars = FxHashSet::default();
-        for constraint in constraints {
-            constraint.fill_with_inner_effect_vars(&mut eff_vars);
-        }
-        for eff in effs {
-            eff.fill_with_inner_effect_vars(&mut eff_vars);
-        }
-        eff_vars
-            .into_iter()
-            .map(|var| (var, EffType::single_variable(self.fresh_effect_var())))
-            .collect()
-    }
-
     pub(crate) fn snapshot(&mut self) -> UnifiedTypeInferenceSnapshot {
         UnifiedTypeInferenceSnapshot {
             evidence_uses: self.evidence_uses.clone(),

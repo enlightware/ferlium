@@ -1359,6 +1359,13 @@ impl Instantiation {
             self.ty_args.len(),
             scheme.ty_quantifiers.len()
         );
+        assert_eq!(
+            self.eff_args.len(),
+            scheme.eff_quantifiers.len(),
+            "instantiation records {} effect arguments for {} quantifiers",
+            self.eff_args.len(),
+            scheme.eff_quantifiers.len()
+        );
         (
             scheme
                 .ty_quantifiers

@@ -515,11 +515,17 @@ pub(super) fn refresh_debug_info_for_functions(
     }
 }
 
+/// Default output effect variables that nothing outside the function determines.
+///
+/// `determined_effect_vars` are fixed by context the schemes do not carry yet, such as the
+/// constraints of an enclosing implementation; they are retained like those of the scheme's own
+/// constraints.
 pub(super) fn default_output_effects_in_functions(
     output: &mut Module,
     pending_functions: &mut PendingModuleFunctions,
     associated_lambdas: &FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
     function_ids: &[LocalFunctionId],
+    determined_effect_vars: &FxHashSet<EffectVar>,
 ) {
     for &id in function_ids {
         let effect_subst: FxHashMap<_, _> = {
@@ -532,6 +538,7 @@ pub(super) fn default_output_effects_in_functions(
                 .into_iter()
                 .collect::<FxHashSet<_>>();
             let mut retained_effect_vars = descr.definition.ty_scheme.ty.input_effect_vars();
+            retained_effect_vars.extend(determined_effect_vars.iter().copied());
             for constraint in &descr.definition.ty_scheme.constraints {
                 let constraint_mentions_public_signature_ty = constraint
                     .inner_ty_vars()

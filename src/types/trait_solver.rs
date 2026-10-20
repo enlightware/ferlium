@@ -1391,12 +1391,12 @@ impl<'a> TraitSolver<'a> {
                 output_effs: candidate_output_effs,
                 ty_var_count,
                 eff_var_count,
-                constraints,
+                constraints: _,
             } => {
-                let mut eff_subst = ty_inf.fresh_effect_var_subst(*eff_var_count);
-                eff_subst
-                    .extend(ty_inf.fresh_effect_var_subst_for(constraints, candidate_output_effs));
-                let inst_subst = (ty_inf.fresh_type_var_subst(*ty_var_count), eff_subst);
+                let inst_subst = (
+                    ty_inf.fresh_type_var_subst(*ty_var_count),
+                    ty_inf.fresh_effect_var_subst(*eff_var_count),
+                );
                 let mut mapper = BitmapInstantiationMapper::new(&inst_subst);
                 let candidate_inputs = instantiate_types(candidate_inputs, &mut mapper);
                 let candidate_outputs = instantiate_types(candidate_outputs, &mut mapper);
@@ -1463,6 +1463,19 @@ impl<'a> TraitSolver<'a> {
         types
             .into_iter()
             .flat_map(TypeLike::inner_ty_vars)
+            .map(|var| var.name() + 1)
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn effect_var_capacity<'t>(
+        types: impl IntoIterator<Item = &'t Type>,
+        effects: &[EffType],
+    ) -> u32 {
+        types
+            .into_iter()
+            .flat_map(TypeLike::inner_effect_vars)
+            .chain(effects.iter().flat_map(EffType::inner_vars))
             .map(|var| var.name() + 1)
             .max()
             .unwrap_or(0)
@@ -1832,9 +1845,11 @@ impl<'a> TraitSolver<'a> {
     #[cfg(debug_assertions)]
     fn assert_blanket_impl_is_well_formed(
         imp_input_tys: &[Type],
+        imp_output_tys: &[Type],
+        imp_output_effs: &[EffType],
         imp_constraints: &[PubTypeConstraint],
         imp_ty_var_count: u32,
-        _imp_eff_var_count: u32,
+        imp_eff_var_count: u32,
         input_tys: &[Type],
     ) {
         assert_eq!(imp_input_tys.len(), input_tys.len());
@@ -1847,7 +1862,7 @@ impl<'a> TraitSolver<'a> {
                 mut_vars: &mut mut_vars,
                 effect_vars: &mut eff_vars,
             };
-            for ty in imp_input_tys {
+            for ty in imp_input_tys.iter().chain(imp_output_tys) {
                 ty.visit(&mut collector);
             }
         }
@@ -1863,6 +1878,14 @@ impl<'a> TraitSolver<'a> {
         }
         assert!(mut_vars.is_empty());
         assert_eq!(ty_vars.len(), imp_ty_var_count as usize);
+        // Every effect variable of the impl, wherever it occurs, is one of its quantifiers.
+        for eff in imp_output_effs {
+            eff.fill_with_inner_effect_vars(&mut eff_vars);
+        }
+        assert_eq!(
+            eff_vars,
+            (0..imp_eff_var_count).map(EffectVar::new).collect()
+        );
     }
 
     /// Match a blanket impl head plus its impl constraints against a requested
@@ -1893,9 +1916,10 @@ impl<'a> TraitSolver<'a> {
     ) -> Result<BlanketImplMatch, InternalCompilationError> {
         // First instantiate the blanket-local type and effect variables with
         // fresh inference variables in the caller-provided unifier.
-        let mut eff_subst = ty_inf.fresh_effect_var_subst(imp_eff_var_count);
-        eff_subst.extend(ty_inf.fresh_effect_var_subst_for(imp_constraints, imp_output_effs));
-        let inst_subst = (ty_inf.fresh_type_var_subst(imp_ty_var_count), eff_subst);
+        let inst_subst = (
+            ty_inf.fresh_type_var_subst(imp_ty_var_count),
+            ty_inf.fresh_effect_var_subst(imp_eff_var_count),
+        );
         let mut mapper = BitmapInstantiationMapper::new(&inst_subst);
         let imp_input_tys = instantiate_types(imp_input_tys, &mut mapper);
         let mut imp_output_tys = instantiate_types(imp_output_tys, &mut mapper);
@@ -2462,9 +2486,9 @@ impl<'a> TraitSolver<'a> {
     }
 
     fn blanket_method_inst_data(
-        generic_definition: &CallableDefinition,
         concrete_definition: &CallableDefinition,
         blanket_ty_var_count: u32,
+        blanket_eff_var_count: u32,
         blanket_instantiation: &InstSubst,
         runtime_requirements: Vec<DictionaryReq>,
         fn_span: Location,
@@ -2490,15 +2514,10 @@ impl<'a> TraitSolver<'a> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let close_effect_rows = concrete_definition.ty_scheme.ty.is_constant();
-        let mut effect_quantifiers = generic_definition
-            .ty_scheme
-            .eff_quantifiers
-            .iter()
-            .copied()
-            .collect::<Vec<_>>();
-        effect_quantifiers.sort_unstable();
-        let eff_args = effect_quantifiers
-            .into_iter()
+        // Registration likewise quantifies all blanket effect variables, including those visible
+        // only in impl constraints.
+        let eff_args = (0..blanket_eff_var_count)
+            .map(EffectVar::new)
             .map(|quantifier| {
                 let effect = blanket_instantiation
                     .1
@@ -2512,10 +2531,11 @@ impl<'a> TraitSolver<'a> {
                             span: fn_span,
                         })
                     })?;
-                // Open-row matching may retain an unconstrained tail. A fully concrete target
-                // signature proves that tail is pure; an effect-polymorphic target must retain it.
-                // This includes quantifiers occurring only in impl constraints: after constraint
-                // solving reaches a ground method, no caller-provided binding can remain.
+                // Open-row matching may retain an unconstrained tail. Matching has expanded the
+                // effect dependencies of the solved constraints into this row, so for a fully
+                // concrete target no caller can bind the tail and its least solution is pure; an
+                // effect-polymorphic target must retain it. This includes quantifiers occurring
+                // only in impl constraints.
                 Ok(if close_effect_rows {
                     EffType::multiple_primitive(&effect.inner_non_vars())
                 } else {
@@ -2586,9 +2606,9 @@ impl<'a> TraitSolver<'a> {
         &mut self,
         function: LocalFunctionId,
         source_module: Option<ModuleId>,
-        generic_definition: &CallableDefinition,
         definition: &CallableDefinition,
         type_var_count: u32,
+        effect_var_count: u32,
         instantiation: &InstSubst,
         requirements: &BlanketMethodRequirements,
         span: Location,
@@ -2598,9 +2618,9 @@ impl<'a> TraitSolver<'a> {
             function,
         );
         let inst_data = Self::blanket_method_inst_data(
-            generic_definition,
             definition,
             type_var_count,
+            effect_var_count,
             instantiation,
             requirements.callee.clone(),
             span,
@@ -3341,6 +3361,8 @@ impl<'a> TraitSolver<'a> {
                 #[cfg(debug_assertions)]
                 Self::assert_blanket_impl_is_well_formed(
                     imp_input_tys,
+                    &imp_output_tys,
+                    &imp_output_effs,
                     imp_constraints,
                     imp_ty_var_count,
                     imp_eff_var_count,
@@ -3355,6 +3377,16 @@ impl<'a> TraitSolver<'a> {
                             .iter()
                             .chain(requested_output_tys.unwrap_or_default()),
                     ));
+                // Likewise reserve the requested application's effect variables, so that the
+                // impl's fresh effect variables cannot alias them.
+                for _ in 0..Self::effect_var_capacity(
+                    input_tys
+                        .iter()
+                        .chain(requested_output_tys.unwrap_or_default()),
+                    requested_output_effs.unwrap_or_default(),
+                ) {
+                    ty_inf.fresh_effect_var();
+                }
                 let blanket_constraint_mode = if trait_id == value_trait_id {
                     BlanketConstraintMode::DeferConcreteObligations
                 } else {
@@ -3464,19 +3496,11 @@ impl<'a> TraitSolver<'a> {
                         trait_def_from_parts(self.current_type_items, self.others, trait_id);
                     let definitions =
                         trait_def.instantiate_for_tys(input_tys, &output_tys, &output_effs);
-                    let generic_definitions = trait_def.instantiate_for_tys(
-                        imp_input_tys,
-                        &imp_output_tys,
-                        &imp_output_effs,
-                    );
                     let gen_functions = imp.methods.clone(); // clone to avoid borrowing issues
                     let mut methods = Vec::with_capacity(gen_functions.len());
                     let mut tys = Vec::with_capacity(gen_functions.len());
-                    for (method_index, ((fn_id, generic_def), def)) in gen_functions
-                        .iter()
-                        .zip(generic_definitions)
-                        .zip(definitions)
-                        .enumerate()
+                    for (method_index, (fn_id, def)) in
+                        gen_functions.iter().zip(definitions).enumerate()
                     {
                         let requirements = &method_requirements[method_index];
                         let method_index = TraitMethodIndex::from_index(method_index);
@@ -3491,9 +3515,9 @@ impl<'a> TraitSolver<'a> {
                             let function = self.materialize_blanket_method_thunk(
                                 *fn_id,
                                 imp_module_id,
-                                &generic_def,
                                 &def,
                                 imp_ty_var_count,
+                                imp_eff_var_count,
                                 &blanket_instantiation,
                                 requirements,
                                 fn_span,
@@ -3669,21 +3693,17 @@ impl<'a> TraitSolver<'a> {
                 let definitions =
                     trait_def_from_parts(self.current_type_items, self.others, trait_id)
                         .instantiate_for_tys(input_tys, &output_tys, &output_effs);
-                let generic_definitions =
-                    trait_def_from_parts(self.current_type_items, self.others, trait_id)
-                        .instantiate_for_tys(imp_input_tys, &imp_output_tys, &imp_output_effs);
                 let functions = gen_functions
                     .iter()
-                    .zip(generic_definitions)
                     .zip(definitions)
                     .zip(&method_requirements)
-                    .map(|(((fn_id, generic_def), def), requirements)| {
+                    .map(|((fn_id, def), requirements)| {
                         self.materialize_blanket_method_thunk(
                             *fn_id,
                             imp_module_id,
-                            &generic_def,
                             &def,
                             imp_ty_var_count,
+                            imp_eff_var_count,
                             &blanket_instantiation,
                             requirements,
                             fn_span,

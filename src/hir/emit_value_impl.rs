@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use indexmap::IndexSet;
+use itertools::Itertools;
 use ustr::{Ustr, ustr};
 
 use crate::{
@@ -36,12 +37,13 @@ use crate::{
     },
     types::{
         coherence::check_trait_impl,
-        effects::{EffType, EffectVar},
+        effects::{EffType, EffectVar, EffectsInstSubst},
         r#trait::{TraitAssociatedConstIndex, TraitMethodIndex},
         trait_solver::{TraitSolver, alpha_canonicalize_types, trait_solver_from_module},
         r#type::{Type, TypeDef, TypeKind, TypeVar},
         type_constraints::named_type_constraints_in_types,
-        type_like::TypeLike,
+        type_like::{TypeLike, instantiate_types_in_place},
+        type_mapper::BitmapInstantiationMapper,
         type_scheme::{PubTypeConstraint, TypeScheme, extra_parameters_from_constraints},
     },
 };
@@ -368,12 +370,25 @@ pub(super) fn emit_auto_value_impls(
                 .collect::<Vec<_>>(),
         );
         let public = output.is_trait_impl_exportable(value_trait_id, &[input_ty], &[], others);
-        let constraints = {
+        let mut constraints = {
             let env = ModuleEnv::new(output, others);
             auto_value_constraints(type_def, input_ty, &env)
         };
         let ty_var_count = TypeScheme::list_ty_vars(&input_ty, constraints.iter()).len() as u32;
-        let eff_var_count = input_ty.inner_effect_vars().len() as u32;
+        // Effect variables occurring only in the type's where clause are impl variables too, as
+        // that clause determines them. They follow the effect parameters, so renumbering them
+        // canonically leaves the input type unchanged.
+        let eff_subst: EffectsInstSubst = TypeScheme::list_eff_vars(&input_ty, constraints.iter())
+            .into_iter()
+            .sorted()
+            .enumerate()
+            .map(|(index, var)| (var, EffType::single_variable(EffectVar::new(index as u32))))
+            .collect();
+        let eff_var_count = eff_subst.len() as u32;
+        instantiate_types_in_place(
+            &mut constraints,
+            &mut BitmapInstantiationMapper::new(&(FxHashMap::default(), eff_subst)),
+        );
         let associated_const_values = {
             let solver = trait_solver_from_module!(output, others);
             emitted_associated_const_values(
@@ -462,9 +477,7 @@ pub(super) fn emit_auto_value_impls(
             let method_index = TraitMethodIndex::from_index(method_index);
             let mut definition = definition;
             definition.ty_scheme.ty_quantifiers = quantifiers.clone();
-            // Keep each generated method's effect quantifiers aligned with the impl header's
-            // `eff_var_count`: effects occurring only in constraints do not belong to either.
-            definition.ty_scheme.eff_quantifiers = definition.ty_scheme.ty.input_effect_vars();
+            definition.ty_scheme.eff_quantifiers = (0..eff_var_count).map(EffectVar::new).collect();
             definition.ty_scheme.constraints = constraints.clone();
             if method_index.as_index() >= supplied_count {
                 definition

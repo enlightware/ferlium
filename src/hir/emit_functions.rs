@@ -1392,11 +1392,25 @@ where
             &local_fns,
             &mut ty_inf,
         );
+        // The impl constraints are not yet part of the method schemes, but they determine the
+        // effects of the methods' calls to their evidence, so these effects must be retained.
+        let impl_constraint_effect_vars = {
+            ty_inf.normalize_remaining_constraints();
+            let mut head_tys = ty_inf.substitute_in_types(&trait_output.input_tys);
+            head_tys.extend(ty_inf.substitute_in_types(&trait_output.output_tys));
+            let head_boundary = ConstraintBoundary::from_seed_ty_vars(collect_ty_vars(&head_tys));
+            let mut vars = FxHashSet::default();
+            for constraint in head_boundary.accessible_constraints(ty_inf.remaining_constraints()) {
+                constraint.fill_with_inner_effect_vars(&mut vars);
+            }
+            vars
+        };
         default_output_effects_in_functions(
             output,
             &mut pending_functions,
             &associated_lambdas,
             &local_fns,
+            &impl_constraint_effect_vars,
         );
 
         // Resolve input and output types and output effects.
@@ -1545,6 +1559,8 @@ where
             }
         }
 
+        // Effect variables are quantified like type variables: those occurring only in the impl
+        // constraints are determined by those constraints' output effects.
         let mut effect_quantifiers = FxHashSet::default();
         for ty in &trait_output.input_tys {
             ty.fill_with_inner_effect_vars(&mut effect_quantifiers);
@@ -1555,6 +1571,9 @@ where
         for eff in &trait_output.output_effs {
             eff.fill_with_inner_effect_vars(&mut effect_quantifiers);
         }
+        trait_output
+            .constraints
+            .fill_with_inner_effect_vars(&mut effect_quantifiers);
         let mut effect_quantifiers = effect_quantifiers.into_iter().sorted().collect::<Vec<_>>();
         trait_output.eff_var_count = effect_quantifiers.len() as u32;
 
@@ -1591,8 +1610,8 @@ where
                 let descr = &mut output.functions[function_id.as_index()];
                 descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
                 descr.definition.ty_scheme.ty_quantifiers = quantifiers.clone();
-                let eff_quantifiers = descr.definition.ty_scheme.ty.input_effect_vars();
-                descr.definition.ty_scheme.eff_quantifiers = eff_quantifiers;
+                descr.definition.ty_scheme.eff_quantifiers =
+                    effect_quantifiers.iter().copied().collect();
                 descr.definition.ty_scheme.constraints = trait_output.constraints.clone();
                 if uses_self {
                     descr
@@ -1600,12 +1619,15 @@ where
                         .ty_scheme
                         .constraints
                         .push(method_self_constraint.map(&mut mapper));
-                    descr.definition.ty_scheme.eff_quantifiers =
-                        TypeScheme::<FnType>::list_eff_vars(
-                            &descr.definition.ty_scheme.ty,
-                            descr.definition.ty_scheme.constraints.iter(),
-                        );
                 }
+                debug_assert!(
+                    TypeScheme::<FnType>::list_eff_vars(
+                        &descr.definition.ty_scheme.ty,
+                        descr.definition.ty_scheme.constraints.iter(),
+                    )
+                    .is_subset(&descr.definition.ty_scheme.eff_quantifiers),
+                    "impl method mentions an effect variable the impl does not quantify"
+                );
                 let pending = pending_functions
                     .get_mut(&function_id)
                     .expect("expected pending function body");
@@ -1965,6 +1987,7 @@ where
             &mut pending_functions,
             &associated_lambdas,
             &local_fns,
+            &FxHashSet::default(),
         );
 
         // Safety check: make sure that there are no unused constraints.

@@ -14,7 +14,7 @@ use crate::{
     },
     std::value::{NO_DERIVE_VALUE_ATTRIBUTE, is_value_trait},
     types::{
-        effects::{EffType, EffectsInstSubst},
+        effects::EffType,
         r#trait::TraitImplPolicy,
         trait_solver::TraitSolverProbe,
         r#type::{Type, TypeKind, TypeVar},
@@ -74,14 +74,6 @@ impl CoherenceTypeUnifier {
     ) -> Result<(), InternalCompilationError> {
         self.inner
             .unify_same_effect(current, current_span, expected, expected_span)
-    }
-
-    fn fresh_effect_var_subst_for(
-        &mut self,
-        constraints: &[PubTypeConstraint],
-        effs: &[EffType],
-    ) -> EffectsInstSubst {
-        self.inner.fresh_effect_var_subst_for(constraints, effs)
     }
 
     fn substitute_in_constraint(&mut self, constraint: &PubTypeConstraint) -> PubTypeConstraint {
@@ -335,8 +327,7 @@ fn blanket_impls_overlap(
 
     // Both sides use raw effect variable indices, so each side is renamed to
     // its own fresh inference effect variables before unification.
-    let mut lhs_eff_subst = ty_inf.inner.fresh_effect_var_subst(lhs.eff_var_count);
-    lhs_eff_subst.extend(ty_inf.fresh_effect_var_subst_for(&lhs.constraints, lhs_output_effs));
+    let lhs_eff_subst = ty_inf.inner.fresh_effect_var_subst(lhs.eff_var_count);
     let lhs_inst_subst = (FxHashMap::default(), lhs_eff_subst);
     let mut lhs_mapper = SimpleInstantiationMapper::new(&lhs_inst_subst);
     let lhs_inputs = instantiate_types(&lhs.input_tys, &mut lhs_mapper);
@@ -354,8 +345,7 @@ fn blanket_impls_overlap(
             (var, shifted)
         })
         .collect();
-    let mut rhs_eff_subst = ty_inf.inner.fresh_effect_var_subst(rhs.eff_var_count);
-    rhs_eff_subst.extend(ty_inf.fresh_effect_var_subst_for(&rhs.constraints, rhs_output_effs));
+    let rhs_eff_subst = ty_inf.inner.fresh_effect_var_subst(rhs.eff_var_count);
     let inst_subst = (rhs_ty_subst, rhs_eff_subst);
     let mut mapper = SimpleInstantiationMapper::new(&inst_subst);
     let rhs_inputs = instantiate_types(&rhs.input_tys, &mut mapper);
@@ -656,8 +646,9 @@ fn blanket_impl_may_match_constraint(
             (var, shifted)
         })
         .collect();
-    let candidate_eff_subst =
-        ty_inf.fresh_effect_var_subst_for(&key.sub_key.constraints, &imp.output_effs);
+    let candidate_eff_subst = ty_inf
+        .inner
+        .fresh_effect_var_subst(key.sub_key.eff_var_count);
     let inst_subst = (candidate_ty_subst, candidate_eff_subst);
     let mut mapper = BitmapInstantiationMapper::new(&inst_subst);
     let candidate_inputs = instantiate_types(&key.sub_key.input_tys, &mut mapper);
