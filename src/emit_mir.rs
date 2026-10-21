@@ -46,7 +46,7 @@ use crate::{
         },
     },
     types::{
-        effects::{EffType, Effect, PrimitiveEffect, no_effects},
+        effects::{EffType, no_effects},
         mutability::MutType,
         r#trait::{TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex},
         r#type::{
@@ -4163,9 +4163,7 @@ struct DropObligation {
 /// fallibly still runs its caller's cleanup on the error path. Sandbox violations bypass this
 /// source-error classification.
 fn call_type_is_fallible(ty: &CallImplType) -> bool {
-    ty.effects()
-        .contains(Effect::Primitive(PrimitiveEffect::Fallible))
-        || ty.effects().has_variables()
+    !ty.effects().cannot_fail()
 }
 
 /// How a `Value::drop` is dispatched for a drop obligation.

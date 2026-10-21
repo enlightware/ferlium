@@ -39,6 +39,13 @@ that may raise a source failure:
   `failure_during_cleanup`; both failures are retained, the executor is poisoned, and no further
   guest cleanup runs.
 
+A slide runs after its body, so a value leaving the body, as the projection's result or carried by
+a `return` or `break`, would already be in its destination when the slide fails, whereas a failure
+leaves no live result. When a slide may fail, HIR elaboration therefore holds such values in locals
+of the block around the projection and re-issues the transfer after it; a failing slide drops them
+like any other local. Partial results are likewise built in temporaries, so a failed result holds
+at most a variant shell, which owns nothing and is cleared.
+
 A sandbox violation during either ordinary execution or cleanup bypasses all MIR successors. If it
 interrupts source cleanup, the pending source failure is retained as diagnostic context.
 

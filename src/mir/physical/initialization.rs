@@ -574,6 +574,15 @@ impl Places {
     }
 
     pub fn analyze(&self, body: &Function) -> Vec<Option<Vec<InitState>>> {
+        self.analyze_with(body, |state, op, success| self.transfer(state, op, success))
+    }
+
+    /// [`Self::analyze`] with `transfer` as the effect of an operation.
+    pub fn analyze_with(
+        &self,
+        body: &Function,
+        transfer: impl Fn(&mut [InitState], &Operation, bool),
+    ) -> Vec<Option<Vec<InitState>>> {
         let mut entries = vec![None; body.blocks().count()];
         entries[body.entry().as_index()] =
             Some(self.nodes.iter().map(|n| n.initial).collect::<Vec<_>>());
@@ -585,7 +594,7 @@ impl Places {
             let mut state = entries[id.as_index()].clone().unwrap();
             let block = body.block(id);
             for op in block.operations() {
-                self.transfer(&mut state, op, true);
+                transfer(&mut state, op, true);
             }
             let edges = match &block.terminator().kind {
                 TerminatorKind::Invoke {
@@ -594,8 +603,8 @@ impl Places {
                     error,
                 } => {
                     let mut failed = state.clone();
-                    self.transfer(&mut failed, operation, false);
-                    self.transfer(&mut state, operation, true);
+                    transfer(&mut failed, operation, false);
+                    transfer(&mut state, operation, true);
                     vec![(*normal, state), (*error, failed)]
                 }
                 TerminatorKind::Goto { target } => vec![(*target, state)],

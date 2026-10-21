@@ -31,7 +31,6 @@ use crate::{
     module::{ModuleEnv, id::Id},
     std::{array::array_type, math::readable_as},
     types::{
-        effects::{Effect, PrimitiveEffect},
         r#type::{CallImplType, CallResultConvention, Type, TypeKind},
         type_like::TypeLike,
         type_mapper::EffectErasingMapper,
@@ -40,9 +39,7 @@ use crate::{
 };
 
 fn call_type_is_fallible(ty: &CallImplType) -> bool {
-    ty.effects()
-        .contains(Effect::Primitive(PrimitiveEffect::Fallible))
-        || ty.effects().has_variables()
+    !ty.effects().cannot_fail()
 }
 
 /// Verifies all machine-checkable per-function MIR contracts.

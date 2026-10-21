@@ -28,7 +28,7 @@ use crate::{
 };
 
 use super::{
-    initialization::{InitState, LogicalPlaceId, Places, Update},
+    initialization::{Field, InitState, LogicalPlaceId, Places, Update},
     variant_payload_release_call,
 };
 
@@ -154,11 +154,12 @@ pub(super) fn elaborate(
 }
 
 /// A failing callee leaves no live result. Construction in place may already have written parts
-/// of the result, such as a variant's shell or a product's leading fields, before a later part
-/// fails; for a trivially copyable result, forgetting those parts is its whole cleanup.
-///
-/// A result owning resources is left as is: its completed parts would need to be dropped, which
-/// is not done yet, so they leak when a later part fails.
+/// of the result before a later part fails. Lowering builds owned parts in temporaries, dropped on
+/// the error path, and moves them into the result only once all succeeded; a value returned from
+/// inside a projection whose slide may fail is likewise held until the slide has run. What may
+/// remain is a variant's shell, written first so that its payload can be built inside it. A shell
+/// owns nothing itself (an indirect payload has its own release), so forgetting it is the whole
+/// cleanup.
 pub(super) fn clear_failed_results(body: Function, env: ModuleEnv<'_>) -> Function {
     let Some(index) = body
         .parameters()
@@ -167,9 +168,6 @@ pub(super) fn clear_failed_results(body: Function, env: ModuleEnv<'_>) -> Functi
     else {
         return body;
     };
-    if !concrete_type_is_trivial_copy(body.parameters()[index].ty, &env) {
-        return body;
-    }
     let result = Value::Parameter(ParameterId::from_index(index));
     let failing = body
         .blocks()
@@ -185,7 +183,9 @@ pub(super) fn clear_failed_results(body: Function, env: ModuleEnv<'_>) -> Functi
     }
     let places = Places::of(&body, env);
     let root = places.values[&result];
-    let entries = places.analyze(&body);
+    let entries = places.analyze_with(&body, |state, op, success| {
+        transfer_owned_parts(&places, state, op, success)
+    });
     let cleared = failing
         .into_iter()
         .filter(|&block| {
@@ -193,9 +193,17 @@ pub(super) fn clear_failed_results(body: Function, env: ModuleEnv<'_>) -> Functi
                 return false;
             };
             for op in body.block(block).operations() {
-                places.transfer(&mut state, op, true);
+                transfer_owned_parts(&places, &mut state, op, true);
             }
-            places.status(&state, root) != Absent
+            if places.status(&state, root) == Absent {
+                return false;
+            }
+            let owned = may_own_live_resources(&places, &state, root, env);
+            debug_assert!(
+                !owned,
+                "a failing path leaves an owned part of the result live"
+            );
+            !owned
         })
         .collect::<Vec<_>>();
     if cleared.is_empty() {
@@ -209,6 +217,45 @@ pub(super) fn clear_failed_results(body: Function, env: ModuleEnv<'_>) -> Functi
             .push(Operation::clear(span, result.clone()));
     }
     edit.finish_unverified()
+}
+
+/// Whether a part of `id` owning resources may be live in `state`, as computed by
+/// [`transfer_owned_parts`]. A variant's own state is its shell, which owns nothing.
+fn may_own_live_resources(
+    places: &Places,
+    state: &[InitState],
+    id: LogicalPlaceId,
+    env: ModuleEnv<'_>,
+) -> bool {
+    let node = &places.nodes[id.as_index()];
+    if node.split && !node.children.is_empty() {
+        return node
+            .children
+            .iter()
+            .any(|&(_, child)| may_own_live_resources(places, state, child, env));
+    }
+    state[id.as_index()] != Absent && !concrete_type_is_trivial_copy(node.ty, &env)
+}
+
+/// [`Places::transfer`], also marking absent the payloads of the cases a stored shell excludes.
+/// [`Places::transfer`] marks them live, which is vacuous for destruction but would mix with real
+/// payloads of other paths at joins.
+fn transfer_owned_parts(places: &Places, state: &mut [InitState], op: &Operation, success: bool) {
+    places.transfer(state, op, success);
+    if matches!(op.kind, OperationKind::Store)
+        && let Value::Register(value) = op.operands[0]
+        && let Some(Operation {
+            kind: OperationKind::Variant { metadata, .. },
+            ..
+        }) = places.definitions.get(&value)
+        && let Some(&id) = places.values.get(&op.operands[1])
+    {
+        for &(field, child) in &places.nodes[id.as_index()].children {
+            if field != Field::Payload(metadata.payload_ty) {
+                places.set(state, child, Absent);
+            }
+        }
+    }
 }
 
 fn tested_nodes(places: &Places, op: &Operation) -> Vec<LogicalPlaceId> {

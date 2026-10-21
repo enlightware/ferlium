@@ -43,7 +43,7 @@ use crate::{
     module::{FunctionId, ModuleEnv, ProjectionIndex, TraitDictionaryId, TraitId},
     std::value::{TypeLayoutEnv, is_abi_scalar},
     types::{
-        effects::{EffType, Effect, PrimitiveEffect},
+        effects::EffType,
         r#trait::TraitDictionaryEntryIndex,
         r#type::{CallImplType, CallResultConvention, FnArgType, Type},
         type_inference::substitution::InstSubst,
@@ -213,8 +213,7 @@ impl Operation {
             OperationKind::EndProject => return SourceFallibility::FromOpenProjection,
             _ => return SourceFallibility::Infallible,
         };
-        if effects.contains(Effect::Primitive(PrimitiveEffect::Fallible)) || effects.has_variables()
-        {
+        if !effects.cannot_fail() {
             SourceFallibility::Fallible
         } else {
             SourceFallibility::Infallible

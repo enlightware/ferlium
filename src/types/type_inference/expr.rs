@@ -1289,6 +1289,9 @@ impl TypeInference {
                     // Return cleanup is represented by the lexical `Block.cleanup` scopes that the
                     // transfer exits. Function-entry locals are non-owning views governed by their
                     // `ArgConvention`, so they are not wrapped in an extra cleanup scope here.
+                    if env.failing_projections > 0 {
+                        self.require_drop_of_held_value(env, node_id, expr_span);
+                    }
                     self.prepare_value_for_exit(env, node_id, 0, expr_span)
                 };
                 let node = K::Return(return_value);
@@ -1874,6 +1877,7 @@ impl TypeInference {
                     result_ty,
                     local_scope_start,
                     false,
+                    env.failing_projections,
                 ));
                 let mut body_id = self.check_expr(
                     env,
@@ -1927,6 +1931,8 @@ impl TypeInference {
                 let label = loop_frame.label;
                 let result_ty = loop_frame.result_ty;
                 let local_scope_start = loop_frame.local_scope_start;
+                let crosses_failing_projection =
+                    env.failing_projections > loop_frame.failing_projections;
                 loop_frame.saw_break = true;
                 let value = if let Some(value) = data.value {
                     let value = self.check_expr(
@@ -1936,6 +1942,9 @@ impl TypeInference {
                         MutType::constant(),
                         sp(value),
                     )?;
+                    if crosses_failing_projection {
+                        self.require_drop_of_held_value(env, value, expr_span);
+                    }
                     self.prepare_value_for_exit(env, value, local_scope_start, expr_span)
                 } else {
                     let value = env.ir_arena.alloc(N::new(
@@ -3168,13 +3177,22 @@ impl TypeInference {
         let (env_size, binding) = self.push_yielded_binding(env, accessor.ty, expr_span);
         let place = self.yielded_binding_load(env, binding, accessor.ty, expr_span);
         let previous = env.place_aliases.insert(binding, accessor.node);
+        // If the accessor's slide may fail, elaboration holds the values leaving the body, as its
+        // result or through a transfer, in locals until the slide has run, which drop them if it
+        // fails. Effects are not final here, so this is a superset of the projections it holds.
+        let slide_may_fail = !accessor.effects.cannot_fail();
+        env.failing_projections += usize::from(slide_may_fail);
         let result = build_body(self, env, place, accessor.ty, true);
+        env.failing_projections -= usize::from(slide_may_fail);
         if let Some(previous) = previous {
             env.place_aliases.insert(binding, previous);
         } else {
             env.place_aliases.remove(&binding);
         }
         let (body, result_ty) = result?;
+        if slide_may_fail {
+            self.require_drop_of_held_value(env, body, expr_span);
+        }
         let body_effects = env.ir_arena[body].effects.clone();
         let effects = self.make_dependent_effect([&accessor.effects, &body_effects]);
         Self::close_yielded_binding_scope(env, env_size, expr_span);
@@ -5426,6 +5444,15 @@ impl TypeInference {
         }
     }
 
+    /// Require `Value` for `value` if it needs a drop: it is held while a slide that may fail runs,
+    /// and must be dropped if the slide does fail.
+    fn require_drop_of_held_value(&mut self, env: &mut TypingEnv, value: NodeId, span: Location) {
+        let ty = env.ir_arena[value].ty;
+        if ty != Type::never() && self.node_value_needs_semantic_drop(env, value, ty) {
+            self.add_value_constraint_for_unknown_drop(value_trait_id(env), ty, span);
+        }
+    }
+
     fn add_value_constraint_for_unknown_drop(
         &mut self,
         value_trait_id: TraitId,
@@ -6256,7 +6283,13 @@ impl TypeInference {
                 current_arg.ty,
                 current_span,
             );
-            // A mutable argument is also written back, so its type is invariant.
+            // A mutable argument is also written back, so its type is invariant. One of the two
+            // signatures is declared, so its mutability is known; the same-mutability constraint
+            // below makes the other one match it.
+            debug_assert!(
+                !expected_arg.mut_ty.is_variable() || !current_arg.mut_ty.is_variable(),
+                "neither signature declares the mutability of an argument"
+            );
             if expected_arg.mut_ty.is_mutable() || current_arg.mut_ty.is_mutable() {
                 self.add_same_type_with_sub_effects_constraint(
                     current_arg.ty,

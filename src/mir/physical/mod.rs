@@ -1773,6 +1773,15 @@ impl<'a> PhysicalLowerer<'a> {
         for exit in exits {
             let span = edit.block(exit).terminator.span;
             let mut next = edit.add_block(Terminator::propagate_error(span));
+            // Forgetting a failed result comes last: releasing a payload reads its shell's tag.
+            if let Some(last) = edit.block(exit).operations.last()
+                && matches!(last.kind, OperationKind::Clear)
+                && matches!(&last.operands[0], Value::Parameter(parameter)
+                    if edit.parameters()[parameter.as_index()].kind == ParameterKind::Return)
+            {
+                let clear = edit.block_mut(exit).operations.pop().unwrap();
+                edit.block_mut(next).operations.push(clear);
+            }
             // `cleanups` is deepest-first. Building the chain backwards preserves that execution
             // order, so no containing allocation is freed before an address stored inside it.
             for cleanup in cleanups.iter().rev() {

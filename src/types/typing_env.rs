@@ -64,6 +64,8 @@ pub struct LoopFrame {
     pub(crate) result_ty: TypeVar,
     pub(crate) local_scope_start: usize,
     pub(crate) saw_break: bool,
+    /// The number of projections whose slide may fail open when the loop was entered.
+    pub(crate) failing_projections: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -148,6 +150,9 @@ pub struct TypingEnv<'m> {
     pub(crate) compilation_capabilities: CompilationCapabilities,
     #[new(default)]
     pub(crate) yield_context: Option<YieldTypingContext>,
+    /// The number of open projections whose slide may fail.
+    #[new(default)]
+    pub(crate) failing_projections: usize,
 }
 
 impl<'m> TypingEnv<'m> {

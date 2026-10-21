@@ -85,9 +85,9 @@ use itertools::{Itertools, process_results};
 use crate::{
     containers::{SVec2, b},
     hir::{
-        self, ArgConvention, CallArgument, ENodeArena, ENodeId, Elaborated, Node, NodeArena,
-        NodeKind, Project as HirProject, StaticApplication, UNodeArena, UNodeId, Unelaborated,
-        VariantPayloadStorageSource, elaborated_node_is_place_reference,
+        self, ArgConvention, CallArgument, ENodeArena, ENodeId, Elaborated, LoopId, Node,
+        NodeArena, NodeKind, Project as HirProject, StaticApplication, UNodeArena, UNodeId,
+        Unelaborated, VariantPayloadStorageSource, elaborated_node_is_place_reference,
         emit_value_impl::function_value_method, value::LiteralValue,
     },
     std::value::{
@@ -97,7 +97,7 @@ use crate::{
         value_layout_associated_const_values, variant_payload_storage_for_type,
     },
     types::{
-        effects::{EffType, Effect, EffectsInstSubst, PrimitiveEffect, no_effects},
+        effects::{EffType, Effect, EffectsInstSubst, no_effects},
         mutability::MutType,
         trait_solver::alpha_canonicalize_types_with_instantiation,
         r#type::{CallImplType, CallResultConvention, FnArgType, FnType, Type, TypeKind, TypeVar},
@@ -1298,19 +1298,16 @@ pub struct ElaboratedHir {
 
 /// Whether evaluation can leave a construction needing guest cleanup (poisoning does not).
 fn can_interrupt(arena: &UNodeArena, node: UNodeId) -> bool {
-    arena[node].effects.iter().any(|effect| {
-        matches!(
-            effect,
-            Effect::Variable(_) | Effect::Primitive(PrimitiveEffect::Fallible)
+    !arena[node].effects.cannot_fail()
+        || matches!(
+            arena[node].kind,
+            NodeKind::Return(_) | NodeKind::Break(_) | NodeKind::Continue(_)
         )
-    }) || matches!(
-        arena[node].kind,
-        NodeKind::Return(_) | NodeKind::Break(_) | NodeKind::Continue(_)
-    ) || arena[node]
-        .kind
-        .child_node_ids()
-        .iter()
-        .any(|child| can_interrupt(arena, *child))
+        || arena[node]
+            .kind
+            .child_node_ids()
+            .iter()
+            .any(|child| can_interrupt(arena, *child))
 }
 
 fn node_contains_yield(arena: &UNodeArena, root: UNodeId) -> bool {
@@ -1456,6 +1453,45 @@ struct HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
     place_aliases: FxHashMap<LocalDeclId, UNodeId>,
     in_progress: FxHashSet<UNodeId>,
     warnings: &'w mut Vec<CompilationWarning>,
+    /// The open projections whose slide may fail, innermost last.
+    failing_projections: Vec<FailingProjection>,
+    /// The number of failing projections open when each loop was entered.
+    loop_projection_depths: FxHashMap<LoopId, usize>,
+    /// The next loop label unused in the source function, computed when first needed.
+    next_loop_id: Option<LoopId>,
+}
+
+/// The values transferred out of the body of an open projection whose slide may fail.
+///
+/// A `return` or `break` leaving the body stores its value in a local owned by the block around
+/// the projection, then leaves the projection by breaking out of its own loop around it. After
+/// that loop, where the slide has run, the transfer is re-issued from the local; if the slide
+/// fails, the block drops the local instead.
+#[derive(Default)]
+struct FailingProjection {
+    transfers: Vec<HeldTransfer>,
+}
+
+/// A transfer out of a failing projection, held until its slide has run.
+struct HeldTransfer {
+    local: LocalDeclId,
+    target: TransferTarget,
+    exit: LoopId,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TransferTarget {
+    Return,
+    Break(LoopId),
+}
+
+impl TransferTarget {
+    fn transfer(self, value: ENodeId) -> NodeKind<Elaborated> {
+        match self {
+            Self::Return => NodeKind::Return(value),
+            Self::Break(label) => NodeKind::Break(hir::Break { label, value }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1491,6 +1527,9 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             place_aliases: FxHashMap::default(),
             in_progress: FxHashSet::default(),
             warnings,
+            failing_projections: Vec::new(),
+            loop_projection_depths: FxHashMap::default(),
+            next_loop_id: None,
         }
     }
 
@@ -1551,6 +1590,244 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
         );
         local.set_owned_storage(PendingLocalDrop::Resolved(drop));
         LocalDecl::push_with_next_slot(&mut self.locals, local)
+    }
+
+    /// A loop label unused in the source function.
+    fn fresh_loop_id(&mut self, src: &UNodeArena) -> LoopId {
+        let next = *self.next_loop_id.get_or_insert_with(|| {
+            let used = src.iter().filter_map(|(_, node)| match &node.kind {
+                NodeKind::Loop(node) => Some(node.label.as_index() + 1),
+                _ => None,
+            });
+            LoopId::from_index(used.max().unwrap_or(0))
+        });
+        self.next_loop_id = Some(LoopId::from_index(next.as_index() + 1));
+        next
+    }
+
+    /// Build a transfer of `value` to `target`. If it leaves failing projections and its value
+    /// needs a drop, hold the value until their slides have run (see `FailingProjection`).
+    fn transfer_value(
+        &mut self,
+        src: &UNodeArena,
+        value: ENodeId,
+        target: TransferTarget,
+        span: Location,
+    ) -> Result<NodeKind<Elaborated>, InternalCompilationError> {
+        let crossed = match target {
+            TransferTarget::Return => 0,
+            TransferTarget::Break(label) => self.loop_projection_depths[&label],
+        };
+        let value_ty = self.dst[value].ty;
+        if crossed >= self.failing_projections.len() || value_ty == Type::never() {
+            return Ok(target.transfer(value));
+        }
+        let drop =
+            resolve_local_drop(&mut self.generated, self.ctx, value_ty, span)?.into_elaborated();
+        if drop == ResolvedLocalDrop::Skip {
+            return Ok(target.transfer(value));
+        }
+        let local = self.push_owned_temp(value_ty, drop, span, ustr("$transferred"));
+        let exit = self.fresh_loop_id(src);
+        // Leave through the outermost crossed projection: its exits are outside all the others.
+        self.failing_projections[crossed]
+            .transfers
+            .push(HeldTransfer {
+                local,
+                target,
+                exit,
+            });
+        let value_effects = self.dst[value].effects.clone();
+        let store = self.alloc_elaborated_node(
+            NodeKind::StoreLocal(hir::StoreLocal { value, id: local }),
+            Type::unit(),
+            value_effects,
+            span,
+        );
+        let unit = self.alloc_elaborated_node(
+            NodeKind::Immediate(LiteralValue::new_native(())),
+            Type::unit(),
+            no_effects(),
+            span,
+        );
+        let exit = self.alloc_elaborated_node(
+            NodeKind::Break(hir::Break {
+                label: exit,
+                value: unit,
+            }),
+            Type::never(),
+            no_effects(),
+            span,
+        );
+        Ok(NodeKind::Block(b(hir::Block {
+            body: b(SVec2::from_vec(vec![store, exit])),
+            cleanup: Vec::new(),
+        })))
+    }
+
+    /// Lower `projection`, whose slide may fail, so that no value leaving it is in its destination
+    /// before the slide has run: its body's value is held in a local, as are the values its
+    /// transfers carry, and the transfers are re-issued after it:
+    /// `loop 'done { loop 'exit_1 { … projection; break 'done result … }; transfer_1 }`.
+    fn elaborate_failing_projection(
+        &mut self,
+        src: &UNodeArena,
+        mut projection: hir::WithYielded<Elaborated>,
+        exits: FailingProjection,
+        ty: Type,
+        effects: &EffType,
+        span: Location,
+    ) -> Result<NodeKind<Elaborated>, InternalCompilationError> {
+        let result = if ty == Type::never() {
+            None
+        } else {
+            let drop =
+                resolve_local_drop(&mut self.generated, self.ctx, ty, span)?.into_elaborated();
+            (drop != ResolvedLocalDrop::Skip)
+                .then(|| self.push_owned_temp(ty, drop, span, ustr("$yielded")))
+        };
+        if result.is_none() && exits.transfers.is_empty() {
+            return Ok(NodeKind::WithYielded(projection));
+        }
+        let mut cleanup = Vec::new();
+        // The projection, then its value.
+        let nodes = if let Some(result) = result {
+            let body_effects = self.dst[projection.body].effects.clone();
+            projection.body = self.alloc_elaborated_node(
+                NodeKind::StoreLocal(hir::StoreLocal {
+                    value: projection.body,
+                    id: result,
+                }),
+                Type::unit(),
+                body_effects,
+                span,
+            );
+            cleanup.push(result);
+            let projection = self.alloc_elaborated_node(
+                NodeKind::WithYielded(projection),
+                Type::unit(),
+                effects.clone(),
+                span,
+            );
+            let value = self.alloc_elaborated_node(
+                NodeKind::TakeLocalValue(hir::TakeLocalValue {
+                    id: result,
+                    mode: ResolvedTakeLocalValueMode::MoveOwned,
+                }),
+                ty,
+                no_effects(),
+                span,
+            );
+            vec![projection, value]
+        } else {
+            vec![self.alloc_elaborated_node(
+                NodeKind::WithYielded(projection),
+                ty,
+                effects.clone(),
+                span,
+            )]
+        };
+        if exits.transfers.is_empty() {
+            return Ok(NodeKind::Block(b(hir::Block {
+                body: b(SVec2::from_vec(nodes)),
+                cleanup,
+            })));
+        }
+        let mut node = match nodes[..] {
+            [node] => node,
+            _ => self.alloc_elaborated_node(
+                NodeKind::Block(b(hir::Block {
+                    body: b(SVec2::from_vec(nodes)),
+                    cleanup: Vec::new(),
+                })),
+                ty,
+                effects.clone(),
+                span,
+            ),
+        };
+        let mut held_locals = Vec::with_capacity(exits.transfers.len());
+        let done = (ty != Type::never()).then(|| self.fresh_loop_id(src));
+        if let Some(done) = done {
+            node = self.alloc_elaborated_node(
+                NodeKind::Break(hir::Break {
+                    label: done,
+                    value: node,
+                }),
+                Type::never(),
+                effects.clone(),
+                span,
+            );
+        }
+        for held in exits.transfers.into_iter().rev() {
+            let exit = self.alloc_elaborated_node(
+                NodeKind::Loop(hir::Loop {
+                    label: held.exit,
+                    body: node,
+                }),
+                Type::unit(),
+                effects.clone(),
+                span,
+            );
+            let held_ty = self.locals[held.local.as_index()].ty;
+            let value = self.alloc_elaborated_node(
+                NodeKind::TakeLocalValue(hir::TakeLocalValue {
+                    id: held.local,
+                    mode: ResolvedTakeLocalValueMode::MoveOwned,
+                }),
+                held_ty,
+                no_effects(),
+                span,
+            );
+            let transfer = self.alloc_elaborated_node(
+                held.target.transfer(value),
+                Type::never(),
+                no_effects(),
+                span,
+            );
+            node = self.alloc_elaborated_node(
+                NodeKind::Block(b(hir::Block {
+                    body: b(SVec2::from_vec(vec![exit, transfer])),
+                    cleanup: Vec::new(),
+                })),
+                Type::never(),
+                effects.clone(),
+                span,
+            );
+            held_locals.push(held.local);
+        }
+        if let Some(done) = done {
+            node = self.alloc_elaborated_node(
+                NodeKind::Loop(hir::Loop {
+                    label: done,
+                    body: node,
+                }),
+                ty,
+                effects.clone(),
+                span,
+            );
+        }
+        // The held values are stored inside nested blocks but owned by this one: give them their
+        // storage here, before entering those blocks.
+        let mut nodes = Vec::with_capacity(held_locals.len() + 1);
+        for &local in &held_locals {
+            let local_ty = self.locals[local.as_index()].ty;
+            let uninit = self.alloc_elaborated_node(NodeKind::Uninit, local_ty, no_effects(), span);
+            nodes.push(self.alloc_elaborated_node(
+                NodeKind::StoreLocal(hir::StoreLocal {
+                    value: uninit,
+                    id: local,
+                }),
+                Type::unit(),
+                no_effects(),
+                span,
+            ));
+        }
+        nodes.push(node);
+        cleanup.extend(held_locals);
+        Ok(NodeKind::Block(b(hir::Block {
+            body: b(SVec2::from_vec(nodes)),
+            cleanup,
+        })))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2699,7 +2976,10 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 }));
                 self.wrap_call_cleanup(call, arguments.cleanup, node_ty, node_effects, node_span)
             }
-            Return(node) => Return(self.elaborate_node(src, *node)?),
+            Return(node) => {
+                let value = self.elaborate_node(src, *node)?;
+                self.transfer_value(src, value, TransferTarget::Return, node_span)?
+            }
             Block(block) => {
                 let cleanup = block.cleanup.clone();
                 let mut body = Vec::with_capacity(block.body.len());
@@ -2942,20 +3222,32 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     default: self.elaborate_node(src, default)?,
                 }))
             }
-            Loop(node) => Loop(hir::Loop {
-                label: node.label,
-                body: self.elaborate_node(src, node.body)?,
-            }),
-            Break(node) => Break(hir::Break {
-                label: node.label,
-                value: self.elaborate_node(src, node.value)?,
-            }),
+            Loop(node) => {
+                self.loop_projection_depths
+                    .insert(node.label, self.failing_projections.len());
+                Loop(hir::Loop {
+                    label: node.label,
+                    body: self.elaborate_node(src, node.body)?,
+                })
+            }
+            Break(node) => {
+                let value = self.elaborate_node(src, node.value)?;
+                self.transfer_value(src, value, TransferTarget::Break(node.label), node_span)?
+            }
             Continue(node) => Continue(hir::Continue { label: node.label }),
             Yield(node) => Yield(self.elaborate_node(src, *node)?),
             WithYielded(node) => {
                 let accessor = self.elaborate_node(src, node.accessor)?;
+                // The accessor's slide runs after the body. If it can fail, values leaving the
+                // body, as its result or through a transfer, stay owned until it has run.
+                let slide_may_fail = !elaborated_node_is_place_reference(self.dst, accessor)
+                    && !self.dst[accessor].effects.cannot_fail();
+                if slide_may_fail {
+                    self.failing_projections.push(FailingProjection::default());
+                }
                 let previous = self.place_aliases.insert(node.binding, node.accessor);
                 let body = self.elaborate_node(src, node.body);
+                let exits = slide_may_fail.then(|| self.failing_projections.pop().unwrap());
                 if let Some(previous) = previous {
                     self.place_aliases.insert(node.binding, previous);
                 } else {
@@ -2989,12 +3281,23 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     if elaborated_node_is_place_reference(self.dst, body) {
                         body = self.materialize_elaborated_place_value(body, node_ty, node_span)?;
                     }
-                    WithYielded(hir::WithYielded {
+                    let projection = hir::WithYielded {
                         accessor,
                         binding: node.binding,
                         body,
                         access: node.access,
-                    })
+                    };
+                    match exits {
+                        Some(exits) => self.elaborate_failing_projection(
+                            src,
+                            projection,
+                            exits,
+                            node_ty,
+                            node_effects,
+                            node_span,
+                        )?,
+                        None => WithYielded(projection),
+                    }
                 }
             }
             WithPlace(node) => {

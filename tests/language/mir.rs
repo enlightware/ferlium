@@ -3608,6 +3608,142 @@ fn known_callable_places_survive_read_only_calls_and_scoped_lifetimes() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn failing_slide_after_an_owned_read_propagates() {
+    let mut session = TestSession::new();
+    session.allow_experimental();
+    // The read clones the yielded array; the slide then fails, and the clone must be dropped.
+    let src = "subscript cell(slot: &mut [int], d: int) -> [int] { ref mut { let mut local = slot; yield local; slot = local; idiv(1, d); () } }\n\
+        fn read(a: &mut [int], d: int) -> [int] { a->[cell](d) }\n\
+        let mut a = [1, 2]; read(a, 0)";
+    assert_eq!(session.fail_run(src), SourceFailureKind::DivisionByZero);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn transfers_out_of_a_failing_projection_propagate() {
+    let mut session = TestSession::new();
+    session.allow_experimental();
+    // `p.y` stays open while the later argument transfers out; its slide then fails, and the
+    // transferred value must be dropped.
+    let head = "struct P { a: [int], d: int, e: int }\n\
+        subscript P.y(self) -> [int] { ref { let local = self.a; yield local; idiv(1, self.d); () } }\n\
+        subscript P.z(self) -> [int] { ref { let local = self.a; yield local; idiv(1, self.e); () } }\n\
+        fn combine(a: [int], b: [int]) -> [int] { a }\n";
+    for body in [
+        "fn read(p: P) -> [int] { combine(p.y, return [3]) }",
+        "fn read(p: P) -> [int] { loop { combine(p.y, break [p.d]) } }",
+        "fn read(p: P) -> Option<[int]> { combine(p.y, return Some([p.d])); None }",
+        "fn read(p: P) -> [int] { loop { combine(p.y, if p.d == 0 { break [1] } else { return [2] }) } }",
+        // Nested projections, the inner one succeeding: a transfer leaves through the outermost
+        // projection it crosses.
+        "fn read(p: P) -> [int] { combine(p.y, combine(p.z, return [3])) }",
+        "fn read(p: P) -> [int] { combine(p.y, loop { combine(p.z, break [p.d]) }) }",
+    ] {
+        let src = format!("{head}{body}\nread(P {{ a: [1], d: 0, e: 1 }})");
+        assert_eq!(
+            session.fail_run(&src),
+            SourceFailureKind::DivisionByZero,
+            "{body}"
+        );
+    }
+    // When the slides succeed, the transfers complete.
+    for (body, expected) in [
+        ("fn read(p: P) -> [int] { combine(p.y, return [3]) }", 3),
+        (
+            "fn read(p: P) -> [int] { loop { combine(p.y, break [p.d + 1]) } }",
+            2,
+        ),
+        (
+            "fn read(p: P) -> [int] { loop { combine(p.y, if p.d == 0 { break [1] } else { return [4] }) } }",
+            4,
+        ),
+        (
+            "fn read(p: P) -> [int] { combine(p.y, combine(p.z, return [3])) }",
+            3,
+        ),
+        (
+            "fn read(p: P) -> [int] { combine(p.z, loop { combine(p.y, break [p.d]) }) }",
+            5,
+        ),
+    ] {
+        let src = format!("{head}{body}\nread(P {{ a: [5], d: 1, e: 1 }})[0]");
+        assert_val_eq!(session.run(&src), int(expected), "{body}");
+    }
+    // A generic function needs `Value` for the transferred value only to drop it then.
+    let src = format!(
+        "{head}trait Comb<T> {{ fn comb(a: T, b: T) -> T; }}\n\
+        impl Comb for [int] {{ fn comb(a: [int], b: [int]) -> [int] {{ a }} }}\n\
+        fn read(r, f) {{ comb(r.y, return f()) }}\n\
+        read(P {{ a: [1], d: 0, e: 1 }}, || [5])"
+    );
+    assert_eq!(session.fail_run(&src), SourceFailureKind::DivisionByZero);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn values_transferred_out_of_a_failing_projection_are_destroyed() {
+    let mut session = TestSession::new();
+    session.allow_experimental();
+    session.allow_unsafe();
+    // The destructor never returns, so running it exhausts the fuel instead of reporting the
+    // slide's failure. A zero-sized value needs its destructor too.
+    for probe in ["Probe(int)", "Probe {}"] {
+        let value = if probe == "Probe {}" {
+            "Probe {}"
+        } else {
+            "Probe(3)"
+        };
+        let src = format!(
+            "struct {probe}\n\
+            impl Value for Probe {{\n\
+                fn eq(a: Probe, b: Probe) -> bool {{ true }}\n\
+                fn to_string(a: Probe) -> string {{ \"probe\" }}\n\
+                fn hash(a: Probe, s: &mut hasher) {{ () }}\n\
+                fn clone(a: Probe) -> Probe {{ {value} }}\n\
+                fn drop(a: &mut Probe) {{ loop {{}} }}\n\
+            }}\n\
+            struct P {{ a: [int], d: int }}\n\
+            subscript P.y(self) -> [int] {{ ref {{ let local = self.a; yield local; idiv(1, self.d); () }} }}\n\
+            fn combine(a: [int], b: [int]) -> [int] {{ a }}\n\
+            fn read(p: P) -> Probe {{ combine(p.y, return {value}); {value} }}\n\
+            read(P {{ a: [1], d: 0 }})"
+        );
+        let output = session.compile(&src);
+        let entry = output.expr.expect("test source should have an expression");
+        let limits = ReferenceInterpreterLimits::default().with_fuel_limit(Some(10_000));
+        for target in ExecutionTarget::ALL {
+            let error = session
+                .session_mut()
+                .run_entry_with_limits(target, output.module_id, entry, vec![], limits)
+                .expect_err("the destructor must run");
+            assert_eq!(
+                error.kind(),
+                RuntimeErrorKind::SandboxViolation(SandboxViolationKind::FuelExhausted),
+                "{probe} on {target:?}"
+            );
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn failing_projection_slide_after_a_generic_result_propagates() {
+    let mut session = TestSession::new();
+    session.allow_experimental();
+    // `s` is generic over the field type and needs only `Comb` for it: dropping its result when
+    // `y`'s slide fails requires `Value` too.
+    let src = "struct P { a: [int], d: int }\n\
+        subscript P.x(self) -> [int] { ref { let local = self.a; yield local; () } }\n\
+        subscript P.y(self) -> [int] { ref { let local = self.a; yield local; idiv(1, self.d); () } }\n\
+        trait Comb<T> { fn comb(a: T, b: T) -> T; }\n\
+        impl Comb for [int] { fn comb(a: [int], b: [int]) -> [int] { a } }\n\
+        fn s(r) { comb(r.x, r.y) }\n\
+        s(P { a: [1], d: 0 })";
+    assert_eq!(session.fail_run(src), SourceFailureKind::DivisionByZero);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn failure_after_partial_result_construction_propagates() {
     let mut session = TestSession::new();
     for src in [
@@ -3615,6 +3751,14 @@ fn failure_after_partial_result_construction_propagates() {
         "fn t(f: (int) -> int ! fallible) -> (int, int) { (1, f(1)) }\nt(|x| idiv(x, 0))",
         "fn u(f: (int) -> int ! fallible) -> Option<(int, int)> { Some((1, f(1))) }\nu(|x| idiv(x, 0))",
         "fn k(d) { let mut it = iter([1, 2]) |> map(|x| idiv(x, d)); next(it) }\nk(0)",
+        // Results owning resources.
+        "fn t(f: (int) -> int ! fallible) -> ([int], int) { ([1, 2], f(1)) }\nt(|x| idiv(x, 0))",
+        "fn u(f: (int) -> int ! fallible) -> Option<([int], int)> { Some(([1], f(1))) }\nu(|x| idiv(x, 0))",
+        "fn v(f: (int) -> [int] ! fallible) -> Option<[int]> { Some(f(1)) }\nv(|x| [idiv(x, 0)])",
+        "fn h(f: (int) -> int ! fallible) -> Option<Option<[int]>> { Some(Some([f(1)])) }\nh(|x| idiv(x, 0))",
+        "fn g(x, f: (int) -> int ! fallible) { Some((x, f(1))) }\ng([1], |x| idiv(x, 0))",
+        // A recursive payload is allocated separately and released before the result is cleared.
+        "enum Tree { Leaf, Node(Tree, [int], int) }\nfn mk(f: (int) -> int ! fallible) -> Tree { Tree::Node(Tree::Node(Tree::Leaf, [2], 3), [1], f(1)) }\nmk(|x| idiv(x, 0))",
     ] {
         assert_eq!(session.fail_run(src), SourceFailureKind::DivisionByZero);
     }

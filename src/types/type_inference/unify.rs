@@ -238,6 +238,17 @@ impl UnifiedTypeInference {
         self.effects.fresh_var()
     }
 
+    /// Whether `mut_ty` is mutable. Mutability is solved before types are related, so it is
+    /// known whenever a relation depends on it.
+    fn is_resolved_mutable(&mut self, mut_ty: MutType) -> bool {
+        let mut_ty = self.normalize_mut_type(mut_ty);
+        debug_assert!(
+            !mut_ty.is_variable(),
+            "unresolved mutability when relating types"
+        );
+        mut_ty.is_mutable()
+    }
+
     /// A fresh effect variable that solving may not constrain, standing for one fixed elsewhere.
     pub(crate) fn fresh_rigid_effect_var(&mut self) -> EffectVar {
         self.effects.fresh_rigid_var(None)
@@ -755,8 +766,8 @@ impl UnifiedTypeInference {
                         sub_or_same,
                     )?;
                     // A mutable argument is also written back, so its type is invariant.
-                    if self.normalize_mut_type(cur_arg.mut_ty).is_mutable()
-                        || self.normalize_mut_type(exp_arg.mut_ty).is_mutable()
+                    if self.is_resolved_mutable(cur_arg.mut_ty)
+                        || self.is_resolved_mutable(exp_arg.mut_ty)
                     {
                         self.unify_sub_or_same_type(
                             cur_arg.ty,
@@ -807,8 +818,8 @@ impl UnifiedTypeInference {
                         sub_or_same,
                     )?;
                     // A mutable argument is also written back, so its type is invariant.
-                    if self.normalize_mut_type(cur_arg.mut_ty).is_mutable()
-                        || self.normalize_mut_type(exp_arg.mut_ty).is_mutable()
+                    if self.is_resolved_mutable(cur_arg.mut_ty)
+                        || self.is_resolved_mutable(exp_arg.mut_ty)
                     {
                         self.unify_sub_or_same_type(
                             cur_arg.ty,
