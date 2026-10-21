@@ -69,6 +69,7 @@ pub(crate) fn register_value_ne(module: &mut Module, trait_id: TraitId) {
             CallArgument::from_values_and_passing(args, arg_conventions_for_args(&eq_ty.args)),
             definition.arg_names.clone(),
             CallImplType::value(eq_ty),
+            None,
         ),
         bool_type(),
     );

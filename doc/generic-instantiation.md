@@ -101,7 +101,7 @@ recursive occurrences use the dictionary itself. Thus `Value<Tree<T>>` is constr
 named type owned by another module is an opaque leaf supplied by its owner's dictionary. The
 `SIZE` and `ALIGN` entries are generated functions over the same captures when the layout is open.
 Function fields remain opaque to the structural code. Blanket trait applications can likewise be
-materialized with output effect variables that the unconstrained query later defaults.
+materialized with open output effects, as described below.
 
 Caller-local variable identities do not distinguish such generated code. Before using an open
 input as a generated-artifact cache key, the compiler alpha-canonicalizes type, mutability and effect
@@ -120,20 +120,31 @@ caller's semantic type or ordinary trait-impl lookup. A reused dictionary expres
 the caller's actual input; its stored methods remain generic over the canonical variables.
 
 Trait-output resolution during inference and defaulting is not a runtime-artifact retention point.
-Such a query uses the ordinary trait-selection rules in a scratch HIR arena, copies the associated
-type and effect outputs, then rolls back any dictionaries, methods, getters, or cache entries that
-selection provisionally generated. The final HIR elaboration of a dictionary or method reference
-performs the materializing query. Consequently, effect rows considered and later rejected or
-defaulted during inference cannot leave orphaned module functions that the MIR optimizer would
-treat as roots.
+Such a query uses the ordinary trait-selection rules in a scratch HIR arena, then rolls back any
+dictionaries, methods, getters, or cache entries that selection provisionally generated. When it
+selects a blanket implementation, it instantiates the implementation's head in the caller's own
+inference rather than copying materialized outputs. The output types and effects then keep the
+caller's variables, and the implementation's constraints that determine outputs become obligations
+of the caller. Output effects relate to the requested ones by polarity (see
+[effect-inference.md](effect-inference.md#where-constraints-come-from)). Only the final HIR
+elaboration of a dictionary or method reference performs the materializing query. Consequently,
+effect rows considered and later rejected or defaulted during inference cannot leave orphaned
+module functions that the MIR optimizer would treat as roots.
 
-Materialized blanket applications whose output effects depend on the application use a separate
-cache from concrete trait implementations. The concrete cache is keyed only by input types, so
-putting a defaulted output there could leak that default into a later query with explicit output
-bindings. Inference-only output queries populate neither cache. When final HIR actually requires a
-runtime dictionary, applications with no requested outputs can share through the
-unconstrained-application cache; materializations carrying explicit output bindings remain
-independent.
+A dictionary is requested for the full application it serves: its inputs together with the output
+effects the use was inferred with, including the caller's effect variables. Materializing it gives
+the implementation's own effect variables their least solution, so its methods have the effects
+that application needs and no more. Effects that depend on the caller's variables stay open rather
+than being closed at the implementation's least effects.
+
+Reuse follows the same full application. Materialized blanket applications whose output effects
+depend on the application use a separate cache from concrete trait implementations, whose cache is
+keyed by input types only. A dictionary found there is reused only if its output effects relate to
+the requested ones by polarity: one generated for a pure callback does not serve a fallible one,
+and a caller's own effect variables are not specialized to fit it. Open applications share through
+the unconstrained-application cache, keyed by the alpha-canonicalized full application and indexed
+both under the request and under the outputs the generated dictionary has. Inference-only output
+queries populate neither cache.
 
 ## Trait defaults and enclosing-impl evidence
 

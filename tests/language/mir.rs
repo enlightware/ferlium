@@ -3605,3 +3605,17 @@ fn known_callable_places_survive_read_only_calls_and_scoped_lifetimes() {
         expected_tuple([int(0), int(72), int(34)])
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn failure_after_partial_result_construction_propagates() {
+    let mut session = TestSession::new();
+    for src in [
+        "fn s(f: (int) -> int ! fallible) -> Option<int> { Some(f(1)) }\ns(|x| idiv(x, 0))",
+        "fn t(f: (int) -> int ! fallible) -> (int, int) { (1, f(1)) }\nt(|x| idiv(x, 0))",
+        "fn u(f: (int) -> int ! fallible) -> Option<(int, int)> { Some((1, f(1))) }\nu(|x| idiv(x, 0))",
+        "fn k(d) { let mut it = iter([1, 2]) |> map(|x| idiv(x, d)); next(it) }\nk(0)",
+    ] {
+        assert_eq!(session.fail_run(src), SourceFailureKind::DivisionByZero);
+    }
+}

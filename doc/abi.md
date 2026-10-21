@@ -138,6 +138,7 @@ There are three return value classes:
 - **Caller-allocated value**: aggregates, address-only values, and polymorphic results
 
 First-class Ferlium callables use a uniform caller-allocated result convention, including for `()`.
+Since this convention carries the failure state, widening the effects of a first-class callable needs no adapter.
 A concrete direct implementation omits a statically zero-sized product result; an adapter
 preserves the callable interface and initializes the declared result type on success. Zero size
 does not remove construction effects or destruction obligations. Shared generic implementations

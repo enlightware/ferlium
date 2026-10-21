@@ -11,6 +11,7 @@ pub mod type_scheme;
 pub mod typing_env;
 
 pub(crate) mod coherence;
+pub(crate) mod effect_polarity;
 pub(crate) mod never;
 pub(crate) mod recursive_equation;
 pub(crate) mod type_constraints;

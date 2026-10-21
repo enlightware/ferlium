@@ -264,16 +264,16 @@ pub fn collect(value) {
 
 /// An iterator that maps a function over another iterator.
 #[private_repr]
-pub struct MapIterator<I, T, O ! MapperEffect> {
+pub struct MapIterator<I, T, O ! E> {
 	iterator: I,
-	mapper: (T) -> O ! MapperEffect,
+	mapper: (T) -> O ! E,
 }
 
-impl<I, T, O ! SourceEffect, MapperEffect> Iterator for <Self = MapIterator<I, T, O ! MapperEffect> |-> Item = O ! NextEffect = (SourceEffect, MapperEffect)>
+impl<I, T, O ! E> Iterator for <Self = MapIterator<I, T, O ! E> |-> Item = O ! NextEffect = E>
 where
-	I: Iterator<Item = T ! NextEffect = SourceEffect>
+	I: Iterator<Item = T ! NextEffect = E>
 {
-	fn next(it: &mut MapIterator<I, T, O ! MapperEffect>) -> Option<O> {
+	fn next(it: &mut MapIterator<I, T, O ! E>) -> Option<O> {
 		match next(it.iterator) {
 			Some(data) => Some(it.mapper(data)),
 			None => None,
@@ -281,27 +281,27 @@ where
 	}
 }
 
-impl<I, T, O ! SourceEffect, MapperEffect> Map for <Self = I, Mapped = O |-> Item = T, Output = MapIterator<I, T, O ! MapperEffect> ! MapperEffect = MapperEffect, MapEffect = ()>
+impl<I, T, O ! E> Map for <Self = I, Mapped = O |-> Item = T, Output = MapIterator<I, T, O ! E> ! MapperEffect = E, MapEffect = ()>
 where
-	I: Iterator<Item = T ! NextEffect = SourceEffect>
+	I: Iterator<Item = T ! NextEffect = E>
 {
-	fn map(value: I, mapper: (T) -> O ! MapperEffect) -> MapIterator<I, T, O ! MapperEffect> {
+	fn map(value: I, mapper: (T) -> O ! E) -> MapIterator<I, T, O ! E> {
 		MapIterator { iterator: value, mapper }
 	}
 }
 
 /// An iterator that filters another iterator with a predicate.
 #[private_repr]
-pub struct FilterIterator<I, T ! PredicateEffect> {
+pub struct FilterIterator<I, T ! E> {
 	iterator: I,
-	filter: (T) -> bool ! PredicateEffect,
+	filter: (T) -> bool ! E,
 }
 
-impl<I, T ! SourceEffect, PredicateEffect> Iterator for <Self = FilterIterator<I, T ! PredicateEffect> |-> Item = T ! NextEffect = (fallible, SourceEffect, PredicateEffect)>
+impl<I, T ! E> Iterator for <Self = FilterIterator<I, T ! E> |-> Item = T ! NextEffect = (fallible, E)>
 where
-	I: Iterator<Item = T ! NextEffect = SourceEffect>
+	I: Iterator<Item = T ! NextEffect = E>
 {
-	fn next(it: &mut FilterIterator<I, T ! PredicateEffect>) -> Option<T> {
+	fn next(it: &mut FilterIterator<I, T ! E>) -> Option<T> {
 		loop {
 			match next(it.iterator) {
 				Some(data) => if it.filter(data) {
@@ -315,27 +315,27 @@ where
 	}
 }
 
-impl<I, T ! SourceEffect, PredicateEffect> Filter for <Self = I |-> Item = T, Output = FilterIterator<I, T ! PredicateEffect> ! PredicateEffect = PredicateEffect, FilterEffect = ()>
+impl<I, T ! E> Filter for <Self = I |-> Item = T, Output = FilterIterator<I, T ! E> ! PredicateEffect = E, FilterEffect = ()>
 where
-	I: Iterator<Item = T ! NextEffect = SourceEffect>
+	I: Iterator<Item = T ! NextEffect = E>
 {
-	fn filter(value: I, predicate: (T) -> bool ! PredicateEffect) -> FilterIterator<I, T ! PredicateEffect> {
+	fn filter(value: I, predicate: (T) -> bool ! E) -> FilterIterator<I, T ! E> {
 		FilterIterator { iterator: value, filter: predicate }
 	}
 }
 
 /// An iterator that uses a function to both filter and map another iterator.
 #[private_repr]
-pub struct FilterMapIterator<I, T, O ! MapperEffect> {
+pub struct FilterMapIterator<I, T, O ! E> {
 	iterator: I,
-	filter_map: (T) -> Option<O> ! MapperEffect,
+	filter_map: (T) -> Option<O> ! E,
 }
 
-impl<I, T, O ! SourceEffect, MapperEffect> Iterator for <Self = FilterMapIterator<I, T, O ! MapperEffect> |-> Item = O ! NextEffect = (fallible, SourceEffect, MapperEffect)>
+impl<I, T, O ! E> Iterator for <Self = FilterMapIterator<I, T, O ! E> |-> Item = O ! NextEffect = (fallible, E)>
 where
-	I: Iterator<Item = T ! NextEffect = SourceEffect>
+	I: Iterator<Item = T ! NextEffect = E>
 {
-	fn next(it: &mut FilterMapIterator<I, T, O ! MapperEffect>) -> Option<O> {
+	fn next(it: &mut FilterMapIterator<I, T, O ! E>) -> Option<O> {
 		loop {
 			match next(it.iterator) {
 				Some(data) => match it.filter_map(data) {
@@ -350,11 +350,11 @@ where
 	}
 }
 
-impl<I, T, O ! SourceEffect, MapperEffect> FilterMap for <Self = I, Mapped = O |-> Item = T, Output = FilterMapIterator<I, T, O ! MapperEffect> ! MapperEffect = MapperEffect, FilterMapEffect = ()>
+impl<I, T, O ! E> FilterMap for <Self = I, Mapped = O |-> Item = T, Output = FilterMapIterator<I, T, O ! E> ! MapperEffect = E, FilterMapEffect = ()>
 where
-	I: Iterator<Item = T ! NextEffect = SourceEffect>
+	I: Iterator<Item = T ! NextEffect = E>
 {
-	fn filter_map(value: I, mapper: (T) -> Option<O> ! MapperEffect) -> FilterMapIterator<I, T, O ! MapperEffect> {
+	fn filter_map(value: I, mapper: (T) -> Option<O> ! E) -> FilterMapIterator<I, T, O ! E> {
 		FilterMapIterator { iterator: value, filter_map: mapper }
 	}
 }
@@ -366,10 +366,10 @@ pub struct ZipIterator<I, J, A, B> {
 	right: J,
 }
 
-impl<I, J, A, B ! LeftEffect, RightEffect> Iterator for <Self = ZipIterator<I, J, A, B> |-> Item = (A, B) ! NextEffect = (LeftEffect, RightEffect)>
+impl<I, J, A, B ! E> Iterator for <Self = ZipIterator<I, J, A, B> |-> Item = (A, B) ! NextEffect = E>
 where
-	I: Iterator<Item = A ! NextEffect = LeftEffect>,
-	J: Iterator<Item = B ! NextEffect = RightEffect>
+	I: Iterator<Item = A ! NextEffect = E>,
+	J: Iterator<Item = B ! NextEffect = E>
 {
 	fn next(it: &mut ZipIterator<I, J, A, B>) -> Option<(A, B)> {
 		match next(it.left) {
@@ -484,10 +484,10 @@ pub struct ChainIterator<I, J, T> {
 	first_done: bool,
 }
 
-impl<I, J, T ! FirstEffect, SecondEffect> Iterator for <Self = ChainIterator<I, J, T> |-> Item = T ! NextEffect = (FirstEffect, SecondEffect)>
+impl<I, J, T ! E> Iterator for <Self = ChainIterator<I, J, T> |-> Item = T ! NextEffect = E>
 where
-	I: Iterator<Item = T ! NextEffect = FirstEffect>,
-	J: Iterator<Item = T ! NextEffect = SecondEffect>
+	I: Iterator<Item = T ! NextEffect = E>,
+	J: Iterator<Item = T ! NextEffect = E>
 {
 	fn next(it: &mut ChainIterator<I, J, T>) -> Option<T> {
 		if it.first_done {

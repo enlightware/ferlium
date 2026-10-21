@@ -183,6 +183,16 @@ pub(super) fn compilation_error_to_data(
             span,
             format!("Cannot find effect `{name}` in this scope"),
         )],
+        EffectVariablesCombined {
+            first,
+            second,
+            span,
+        } => vec![error_data_from_location(
+            span,
+            format!(
+                "Effect variables `{first}` and `{second}` are combined, but an effect set holds at most one effect variable: use a single effect parameter for both"
+            ),
+        )],
         TraitNotFound(span) => vec![error_data_from_location(
             span,
             format!("Cannot find trait `{}` in this scope", fmt_span(span)),

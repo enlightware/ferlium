@@ -31,6 +31,23 @@ pub trait TypeMapper {
     }
 }
 
+/// Replace every effect row by the pure one, keeping the shape of the types.
+pub(crate) struct EffectErasingMapper;
+
+impl TypeMapper for EffectErasingMapper {
+    fn map_type(&mut self, ty: Type) -> Type {
+        ty
+    }
+
+    fn map_mut_type(&mut self, mut_ty: MutType) -> MutType {
+        mut_ty
+    }
+
+    fn map_effect_type(&mut self, _eff_ty: &EffType) -> EffType {
+        EffType::empty()
+    }
+}
+
 /// Map a type using the given (ty_var, eff_var) instantiation substitution.
 ///
 /// Cheap to construct (just stores a pointer), suited for one-shot calls on

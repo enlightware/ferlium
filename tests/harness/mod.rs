@@ -1436,8 +1436,8 @@ impl TestSession {
                 fn eff_project(value: Option<A>) -> B { loop {} }
             }
             pub struct EffPair<A, B>(A, B)
-            impl<A, B, X, Y ! F, G> TestEffJoin for <Self = EffPair<A, B> |-> ! E = (F, G)>
-                where A: TestEff<Output = X ! E = F>, B: TestEff<Output = Y ! E = G> {
+            impl<A, B, X, Y ! F> TestEffJoin for <Self = EffPair<A, B> |-> ! E = F>
+                where A: TestEff<Output = X ! E = F>, B: TestEff<Output = Y ! E = F> {
                 fn eff_join(value: EffPair<A, B>) -> int { 0 }
             }
             pub fn constrained_probe<T>(value: T) -> int where T: Value { 42 }

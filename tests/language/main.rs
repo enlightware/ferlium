@@ -9,6 +9,7 @@ mod annotations;
 mod attributes;
 mod bits;
 mod complex;
+mod effect_inference;
 mod effects;
 mod math;
 mod mir;

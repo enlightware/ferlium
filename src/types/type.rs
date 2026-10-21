@@ -38,6 +38,7 @@ use crate::{
     std::array::array_type_def,
     sync::SyncPhantomData,
     types::{
+        effect_polarity::EffectVarPolarities,
         effects::{EffType, Effect, EffectVar, PrimitiveEffect, format_effect_binding_value},
         mutability::{FormatInFnArg, MutType, MutVar},
         type_like::{CastableToType, TypeLike},
@@ -595,6 +596,15 @@ impl FnType {
         Self { args, ret, effects }
     }
 
+    /// The effect variables occurring only in effects that a value of this type performs,
+    /// never in effects it receives or in invariant positions. Nothing can observe more of such
+    /// a variable than its least solution.
+    pub fn positive_only_effect_vars(&self) -> FxHashSet<EffectVar> {
+        let mut polarities = EffectVarPolarities::default();
+        polarities.visit_fn(self, true);
+        polarities.positive_only()
+    }
+
     pub fn new_mut_resolved(
         args: impl IntoIterator<Item = (Type, bool)>,
         ret: Type,
@@ -699,7 +709,7 @@ pub struct SubscriptType {
 }
 
 impl SubscriptType {
-    fn members(&self) -> impl Iterator<Item = &SubscriptMemberType> {
+    pub(crate) fn members(&self) -> impl Iterator<Item = &SubscriptMemberType> {
         self.ref_member.iter().chain(self.mut_member.iter())
     }
 

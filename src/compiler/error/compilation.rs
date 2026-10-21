@@ -907,6 +907,12 @@ pub enum CompilationErrorImpl<S: Scope> {
         name: Ustr,
         span: Location,
     },
+    /// An effect set would hold two effect variables; it can hold at most one.
+    EffectVariablesCombined {
+        first: Ustr,
+        second: Ustr,
+        span: Location,
+    },
     TraitNotFound(Location),
     InvalidGenericParams {
         owner: GenericParamsOwner,
@@ -1421,6 +1427,17 @@ impl FormatWith<SourceTable> for CompilationError {
             }
             EffectNotFound { name, span } => {
                 write!(f, "Cannot find effect `{name}` in {}", fmt_span(span))
+            }
+            EffectVariablesCombined {
+                first,
+                second,
+                span,
+            } => {
+                write!(
+                    f,
+                    "Effect variables `{first}` and `{second}` are combined in {}, but an effect set holds at most one effect variable: use a single effect parameter for both",
+                    fmt_span(span)
+                )
             }
             TraitNotFound(span) => {
                 write!(f, "Cannot find trait {} in this scope", fmt_span(span))
@@ -2234,6 +2251,15 @@ impl CompilationError {
             }
             TypeNotFound(span) => compilation_error!(TypeNotFound(span)),
             EffectNotFound { name, span } => compilation_error!(EffectNotFound { name, span }),
+            EffectVariablesCombined {
+                first,
+                second,
+                span,
+            } => compilation_error!(EffectVariablesCombined {
+                first,
+                second,
+                span
+            }),
             TraitNotFound(span) => compilation_error!(TraitNotFound(span)),
             AmbiguousTraitMethod {
                 method_name,

@@ -199,6 +199,7 @@ enum CheckedStaticCallee {
         method_span: Location,
         arguments_unnamed: UnnamedArg,
         input_tys: Vec<Type>,
+        output_effs: Vec<EffType>,
     },
 }
 
@@ -488,6 +489,11 @@ impl TypeInference {
 
     pub fn fresh_effect_var_ty(&mut self) -> EffType {
         self.effects.fresh_var_ty()
+    }
+
+    /// A fresh variable for a declared effect parameter, which the body may not constrain.
+    pub fn fresh_rigid_effect_var_ty(&mut self, name: Option<Ustr>) -> EffType {
+        EffType::single_variable(self.effects.fresh_rigid_var(name))
     }
 
     pub fn fresh_fn_arg(&mut self) -> FnArgType {
@@ -1148,10 +1154,27 @@ impl TypeInference {
                 let owns_storage = node_ty != Type::never()
                     && !defer_storage
                     && (needs_clone || !initializer_is_borrow || initializer_is_known_trivial_copy);
+                // A mutable callable local joins the effects of its initializer with those of
+                // the callables later written to it.
+                let local_ty = if !mut_val.is_mutable() {
+                    node_ty
+                } else if node_ty.data().is_function() {
+                    let local_ty = self
+                        .effects
+                        .generalize_effectful_callable_type(node_ty, true);
+                    self.add_sub_type_constraint(node_ty, sp(data.expr), local_ty, expr_span);
+                    local_ty
+                } else if node_ty.data().is_variable() {
+                    let local_ty = self.fresh_type_var_ty();
+                    self.add_sub_type_constraint(node_ty, sp(data.expr), local_ty, expr_span);
+                    local_ty
+                } else {
+                    node_ty
+                };
                 let mut local = LocalDecl::new(
                     name,
                     MutType::resolved(mut_val),
-                    node_ty,
+                    local_ty,
                     data.ty_ascription,
                     expr_span,
                 );
@@ -1770,12 +1793,11 @@ impl TypeInference {
                         self.diverging_prefix_result(env, nodes, effects)
                     } else {
                         let nodes = self.materialize_owned_values(env, nodes, expr_span);
-                        // The element type is the first element's type
-                        // All elements must be of the first element's type
-                        let element_ty = types[0];
-                        // Infer the type of the elements and collect their code and constraints
-                        for (ty, expr) in types.into_iter().skip(1).zip(exprs.iter().skip(1)) {
-                            self.add_sub_type_constraint(ty, sp(*expr), element_ty, sp(exprs[0]));
+                        // The element type joins the elements' types: each element is of a
+                        // subtype of it, so that their effects are kept apart.
+                        let element_ty = self.fresh_type_var_ty();
+                        for (ty, expr) in types.into_iter().zip(exprs.iter()) {
+                            self.add_sub_type_constraint(ty, sp(*expr), element_ty, expr_span);
                         }
                         // A non-empty array literal allocates physical Buffer slots. Keep the
                         // obligation inferred rather than exposing a source-level `where` clause;
@@ -4262,6 +4284,7 @@ impl TypeInference {
                     method_span: path_span,
                     arguments_unnamed,
                     input_tys,
+                    output_effs,
                 },
                 abi_arg_tys: inst_fn_ty.args.clone(),
                 inst_fn_ty,
@@ -4345,6 +4368,7 @@ impl TypeInference {
                 method_span,
                 arguments_unnamed,
                 input_tys,
+                output_effs,
             } => NodeKind::TraitMethodApply(b(hir::TraitMethodApplication {
                 trait_id,
                 method_index,
@@ -4354,6 +4378,7 @@ impl TypeInference {
                 arguments_unnamed,
                 ty: CallImplType::new(call.inst_fn_ty, call.result_convention),
                 input_tys,
+                output_effs,
                 inst_data: call.inst_data,
             })),
         };
@@ -6129,24 +6154,6 @@ impl TypeInference {
             });
     }
 
-    pub(crate) fn add_same_type_constraint(
-        &mut self,
-        current: Type,
-        current_span: Location,
-        expected: Type,
-        expected_span: Location,
-    ) {
-        if current == expected {
-            return;
-        }
-        self.ty_constraints.push(TypeConstraint::SameType {
-            current,
-            current_span,
-            expected,
-            expected_span,
-        });
-    }
-
     pub(crate) fn add_sub_type_constraint(
         &mut self,
         current: Type,
@@ -6232,54 +6239,32 @@ impl TypeInference {
             .add_effect_dep_with_origin(current, current_span, target, target_span, origin)
     }
 
-    /// Add a constraint that the two function types must be equal.
-    /// They must have the same number of arguments.
-    #[allow(dead_code)]
-    pub(crate) fn add_same_fn_type_constraint(
+    /// Add a constraint that the function type `current` is a subtype of `expected`, except for
+    /// their own effects, which the caller relates: parameters are contravariant and the return
+    /// type covariant. They must have the same number of arguments.
+    pub(crate) fn add_fn_subtype_constraint_without_effects(
         &mut self,
         current: &FnType,
         current_span: Location,
         expected: &FnType,
         expected_span: Location,
-    ) {
-        self.add_same_fn_type_constraint_impl(current, current_span, expected, expected_span, true);
-    }
-
-    /// Add a constraint that the two function types must be equal, optionally skipping effects.
-    /// They must have the same number of arguments.
-    /// When `include_effects` is false, the effect constraint is not added. This is used for
-    /// trait implementations where effects are validated separately.
-    pub(crate) fn add_same_fn_type_constraint_without_effects(
-        &mut self,
-        current: &FnType,
-        current_span: Location,
-        expected: &FnType,
-        expected_span: Location,
-    ) {
-        self.add_same_fn_type_constraint_impl(
-            current,
-            current_span,
-            expected,
-            expected_span,
-            false,
-        );
-    }
-
-    fn add_same_fn_type_constraint_impl(
-        &mut self,
-        current: &FnType,
-        current_span: Location,
-        expected: &FnType,
-        expected_span: Location,
-        include_effects: bool,
     ) {
         for (current_arg, expected_arg) in current.args.iter().zip(expected.args.iter()) {
             self.add_same_type_with_sub_effects_constraint(
-                current_arg.ty,
-                current_span,
                 expected_arg.ty,
                 expected_span,
+                current_arg.ty,
+                current_span,
             );
+            // A mutable argument is also written back, so its type is invariant.
+            if expected_arg.mut_ty.is_mutable() || current_arg.mut_ty.is_mutable() {
+                self.add_same_type_with_sub_effects_constraint(
+                    current_arg.ty,
+                    current_span,
+                    expected_arg.ty,
+                    expected_span,
+                );
+            }
             self.add_same_mut_constraint(
                 current_arg.mut_ty,
                 current_span,
@@ -6293,14 +6278,6 @@ impl TypeInference {
             expected.ret,
             expected_span,
         );
-        if include_effects {
-            self.add_same_effect_constraint(
-                &current.effects,
-                current_span,
-                &expected.effects,
-                expected_span,
-            );
-        }
     }
 
     /// Make a new effect depending on the given effects
@@ -6312,8 +6289,13 @@ impl TypeInference {
     }
 
     /// Make the two effects equal and fuse their dependencies
-    pub fn unify_effects(&mut self, eff1: &EffType, eff2: &EffType) -> EffType {
-        self.effects.unify_effects(eff1, eff2)
+    pub fn unify_effects(
+        &mut self,
+        eff1: &EffType,
+        eff2: &EffType,
+        span: Location,
+    ) -> Result<EffType, InternalCompilationError> {
+        self.effects.unify_effects(eff1, eff2, span)
     }
 
     pub fn unify(

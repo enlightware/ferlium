@@ -196,6 +196,7 @@ enum SnapshotNodeKind {
         arguments: Vec<SnapshotCallArgument>,
         argument_names: Vec<String>,
         ty: SnapshotCallImplType,
+        output_effs: Option<Vec<Vec<Effect>>>,
     },
     CheckCallDepth,
     CheckFuel,
@@ -657,6 +658,10 @@ impl SnapshotNodeKind {
                     .map(ToString::to_string)
                     .collect(),
                 ty: SnapshotCallImplType::capture(&value.ty, graph)?,
+                output_effs: value
+                    .output_effs
+                    .as_ref()
+                    .map(|output_effs| output_effs.iter().map(effects).collect()),
             },
             NodeKind::CheckCallDepth => Self::CheckCallDepth,
             NodeKind::CheckFuel => Self::CheckFuel,
@@ -895,6 +900,7 @@ impl SnapshotNodeKind {
                 arguments,
                 argument_names,
                 ty,
+                output_effs,
             } => NodeKind::CallDictionaryFunction(b(hir::CallDictionaryFunction {
                 dictionary: id(*dictionary)?,
                 entry_index: *entry_index,
@@ -904,6 +910,12 @@ impl SnapshotNodeKind {
                     .map(|name| name.as_str().into())
                     .collect(),
                 ty: ty.materialize(types)?,
+                output_effs: output_effs.as_ref().map(|output_effs| {
+                    output_effs
+                        .iter()
+                        .map(|effects| live_effects(effects))
+                        .collect()
+                }),
             })),
             Self::CheckCallDepth => NodeKind::CheckCallDepth,
             Self::CheckFuel => NodeKind::CheckFuel,

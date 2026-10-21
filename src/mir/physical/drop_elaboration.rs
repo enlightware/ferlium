@@ -10,7 +10,7 @@ use crate::{
     compiler::{MirArtifacts, MirOptimization},
     hir::value::LiteralValue,
     mir::{
-        BlockId, Function, Operation, OperationKind, Value,
+        BlockId, Function, Operation, OperationKind, ParameterId, ParameterKind, Value,
         edit::FunctionEdit,
         pass::{
             dataflow::resolve_dictionary_callee,
@@ -23,6 +23,7 @@ use crate::{
     types::{
         effects::no_effects,
         r#type::{CallImplType, CallResultConvention, FnType, Type},
+        type_properties::concrete_type_is_trivial_copy,
     },
 };
 
@@ -150,6 +151,64 @@ pub(super) fn elaborate(
         edit.reorder_blocks_in_reverse_postorder();
         body = edit.finish_unverified();
     }
+}
+
+/// A failing callee leaves no live result. Construction in place may already have written parts
+/// of the result, such as a variant's shell or a product's leading fields, before a later part
+/// fails; for a trivially copyable result, forgetting those parts is its whole cleanup.
+///
+/// A result owning resources is left as is: its completed parts would need to be dropped, which
+/// is not done yet, so they leak when a later part fails.
+pub(super) fn clear_failed_results(body: Function, env: ModuleEnv<'_>) -> Function {
+    let Some(index) = body
+        .parameters()
+        .iter()
+        .position(|parameter| parameter.kind == ParameterKind::Return)
+    else {
+        return body;
+    };
+    if !concrete_type_is_trivial_copy(body.parameters()[index].ty, &env) {
+        return body;
+    }
+    let result = Value::Parameter(ParameterId::from_index(index));
+    let failing = body
+        .blocks()
+        .filter(|&block| {
+            matches!(
+                body.block(block).terminator().kind,
+                TerminatorKind::PropagateError
+            )
+        })
+        .collect::<Vec<_>>();
+    if failing.is_empty() {
+        return body;
+    }
+    let places = Places::of(&body, env);
+    let root = places.values[&result];
+    let entries = places.analyze(&body);
+    let cleared = failing
+        .into_iter()
+        .filter(|&block| {
+            let Some(mut state) = entries[block.as_index()].clone() else {
+                return false;
+            };
+            for op in body.block(block).operations() {
+                places.transfer(&mut state, op, true);
+            }
+            places.status(&state, root) != Absent
+        })
+        .collect::<Vec<_>>();
+    if cleared.is_empty() {
+        return body;
+    }
+    let mut edit = FunctionEdit::new(body);
+    for block in cleared {
+        let span = edit.block(block).terminator.span;
+        edit.block_mut(block)
+            .operations
+            .push(Operation::clear(span, result.clone()));
+    }
+    edit.finish_unverified()
 }
 
 fn tested_nodes(places: &Places, op: &Operation) -> Vec<LogicalPlaceId> {

@@ -86,7 +86,7 @@ use crate::{
         r#type::{Type, TypeKind, TypeVar},
         type_inference::unify::UnifiedTypeInference,
         type_like::TypeLike,
-        type_mapper::{BitmapInstantiationMapper, TypeMapper},
+        type_mapper::{BitmapInstantiationMapper, EffectErasingMapper, TypeMapper},
         type_scheme::PubTypeConstraint,
         type_visitor::{collect_effect_vars, collect_ty_vars},
     },
@@ -230,7 +230,7 @@ pub(super) fn default_body_only_effects_in_function_descr(descr: &mut UModuleFun
     instantiate_function_descr_in_place(descr, &mut mapper);
 }
 
-fn fill_node_effect_vars(
+pub(super) fn fill_node_effect_vars(
     arena: &hir::NodeArena,
     node_id: hir::NodeId,
     vars: &mut FxHashSet<EffectVar>,
@@ -251,6 +251,9 @@ fn fill_node_effect_vars(
             app.input_tys
                 .iter()
                 .for_each(|ty| ty.fill_with_inner_effect_vars(vars));
+            app.output_effs
+                .iter()
+                .for_each(|eff| eff.fill_with_inner_effect_vars(vars));
             fill_fn_inst_data_effect_vars(&app.inst_data, vars);
         }
         GetFunction(get_fn) => fill_fn_inst_data_effect_vars(&get_fn.inst_data, vars),
@@ -291,7 +294,13 @@ fn fill_node_effect_vars(
                 .iter()
                 .for_each(|eff| eff.fill_with_inner_effect_vars(vars));
         }
-        CallDictionaryFunction(call) => call.ty.fill_with_inner_effect_vars(vars),
+        CallDictionaryFunction(call) => {
+            call.ty.fill_with_inner_effect_vars(vars);
+            call.output_effs
+                .iter()
+                .flatten()
+                .for_each(|eff| eff.fill_with_inner_effect_vars(vars));
+        }
         _ => {}
     }
 
@@ -323,6 +332,10 @@ fn fill_elaborated_node_effect_vars(
         }
         ENodeKind::CallDictionaryFunction(call) => {
             call.ty.fill_with_inner_effect_vars(vars);
+            call.output_effs
+                .iter()
+                .flatten()
+                .for_each(|eff| eff.fill_with_inner_effect_vars(vars));
         }
         ENodeKind::TraitMethodApply(value) => match *value {},
         ENodeKind::GetTraitMethod(value) => match *value {},
@@ -357,7 +370,14 @@ fn instantiate_elaborated_node_effects<M: TypeMapper>(
         ENodeKind::GetSubscript(get_subscript) => {
             get_subscript.inst_data.instantiate_in_place(mapper);
         }
-        ENodeKind::CallDictionaryFunction(call) => call.ty = call.ty.map(mapper),
+        ENodeKind::CallDictionaryFunction(call) => {
+            call.ty = call.ty.map(mapper);
+            if let Some(output_effs) = &mut call.output_effs {
+                for eff in output_effs {
+                    *eff = mapper.map_effect_type(eff);
+                }
+            }
+        }
         ENodeKind::TraitMethodApply(value) => match *value {},
         ENodeKind::GetTraitMethod(value) => match *value {},
         ENodeKind::GetTraitAssociatedConst(value) => match *value {},
@@ -515,7 +535,8 @@ pub(super) fn refresh_debug_info_for_functions(
     }
 }
 
-/// Default output effect variables that nothing outside the function determines.
+/// Default to pure the effect variables that occur only in effects the function performs and
+/// that nothing outside the function determines: their least solution is all callers can see.
 ///
 /// `determined_effect_vars` are fixed by context the schemes do not carry yet, such as the
 /// constraints of an enclosing implementation; they are retained like those of the scheme's own
@@ -530,29 +551,16 @@ pub(super) fn default_output_effects_in_functions(
     for &id in function_ids {
         let effect_subst: FxHashMap<_, _> = {
             let descr = &output.functions[id.as_index()];
-            let public_signature_ty_vars = descr
-                .definition
-                .ty_scheme
-                .ty
-                .inner_ty_vars()
-                .into_iter()
-                .collect::<FxHashSet<_>>();
-            let mut retained_effect_vars = descr.definition.ty_scheme.ty.input_effect_vars();
-            retained_effect_vars.extend(determined_effect_vars.iter().copied());
+            // The published constraints are observable by callers, like the type.
+            let mut retained_effect_vars = determined_effect_vars.clone();
             for constraint in &descr.definition.ty_scheme.constraints {
-                let constraint_mentions_public_signature_ty = constraint
-                    .inner_ty_vars()
-                    .into_iter()
-                    .any(|var| public_signature_ty_vars.contains(&var));
-                if constraint_mentions_public_signature_ty {
-                    constraint.fill_with_inner_effect_vars(&mut retained_effect_vars);
-                }
+                constraint.fill_with_inner_effect_vars(&mut retained_effect_vars);
             }
             descr
                 .definition
                 .ty_scheme
                 .ty
-                .output_effect_vars()
+                .positive_only_effect_vars()
                 .into_iter()
                 .filter(|var| !retained_effect_vars.contains(var))
                 .map(|var| (var, EffType::empty()))
@@ -590,40 +598,6 @@ pub(super) fn substitute_and_canonicalize_functions(
                 .expect("expected pending function body");
             ty_inf.substitute_in_pending_module_function(descr);
             output.functions[function_id.as_index()].definition = descr.definition.clone();
-        }
-
-        // Union duplicated effects from function arguments, and build a substitution
-        // for the fully unioned effects, to remove duplications.
-        let descr = &mut output.functions[id.as_index()];
-        ty_inf.unify_fn_arg_effects(&descr.definition.ty_scheme.ty);
-        let effect_subst: FxHashMap<_, _> = descr
-            .definition
-            .ty_scheme
-            .ty
-            .inner_effect_vars()
-            .iter()
-            .filter_map(|var| {
-                ty_inf
-                    .effect_unioned(*var)
-                    .map(|target| (*var, EffType::single_variable(target)))
-            })
-            .collect();
-        if !effect_subst.is_empty() {
-            let subst = (FxHashMap::default(), effect_subst);
-            let mut mapper = BitmapInstantiationMapper::new(&subst);
-            for function_id in function_and_associated_lambdas(id, associated_lambdas) {
-                let descr = &mut output.functions[function_id.as_index()];
-                descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
-                let pending = pending_functions
-                    .get_mut(&function_id)
-                    .expect("expected pending function body");
-                pending.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.clone();
-                hir::instantiate_node_in_place(
-                    &mut pending.code.arena,
-                    pending.code.entry_node_id,
-                    &mut mapper,
-                );
-            }
         }
     }
 }
@@ -1278,7 +1252,12 @@ fn emit_module_contents(
             span: imp.span,
             stub_data: concrete_impl_stubs.get(&imp_idx),
             generic_param_count: imp.generic_params.type_params().len(),
-            generic_effect_param_count: imp.generic_params.effect_params().len(),
+            generic_effect_param_names: imp
+                .generic_params
+                .effect_params()
+                .iter()
+                .map(|(name, _)| *name)
+                .collect(),
             for_trait: imp.for_trait.as_ref(),
             impl_constraints: &imp.where_clause,
         };
@@ -1321,7 +1300,12 @@ fn emit_module_contents(
             let new_dictionary_ty =
                 output.computer_dictionary_ty(&emit_output.functions, associated_const_tys);
             let impl_data = output.impls.data.get_mut(stub_data.id.as_index()).unwrap();
-            assert_eq!(new_dictionary_ty, impl_data.dictionary_ty);
+            // A method may accept wider callbacks than the trait requires; the dictionary keeps
+            // the trait's contract, which differs only in effects.
+            assert_eq!(
+                new_dictionary_ty.map(&mut EffectErasingMapper),
+                impl_data.dictionary_ty.map(&mut EffectErasingMapper)
+            );
             let requirements = emit_output.method_requirements;
             let (captures, mut mappings) =
                 dictionary_capture_plan(trait_id, &emit_output.input_tys, &requirements);

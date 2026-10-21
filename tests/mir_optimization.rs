@@ -306,11 +306,11 @@ fn constant_array_pipeline_reifies_to_one_build_array() {
     );
 }
 
-/// The iterator pipeline retains one concrete closed `Value` family and one reusable generic
-/// structural helper family. Provisional caller-local effect rows must not create further copies;
-/// the open helper's row is alpha-canonicalized independently.
+/// The iterator pipeline retains one concrete closed family of each kind: its implementations'
+/// own effect variables take their least solution, so no open helper family is needed, and
+/// provisional caller-local effect rows create no further copies.
 #[test]
-fn final_effect_rows_share_one_concrete_and_one_generic_iterator_artifact_family() {
+fn final_effect_rows_share_one_closed_iterator_artifact_family() {
     let raw = emit(
         "effect_instantiation_sharing",
         "fn main() -> [int] { [1, 2] |> concat([3, 4]) |> map(|x| x*x) }",
@@ -335,64 +335,34 @@ fn final_effect_rows_share_one_concrete_and_one_generic_iterator_artifact_family
         .filter(|line| line.contains("FromIterator<") && line.contains("std::MapIterator"))
         .copied()
         .collect::<Vec<_>>();
-
-    let concrete_value = value
-        .iter()
-        .filter(|line| line.contains("int ! ()>"))
-        .collect::<Vec<_>>();
-    let generic_value = value
-        .iter()
-        .filter(|line| !line.contains("int ! ()>"))
-        .collect::<Vec<_>>();
     let value_entry_count = CompilerSession::new()
         .std_module()
         .get_trait_str("Value")
         .unwrap()
         .runtime_dictionary_entry_count();
+    assert!(
+        value
+            .iter()
+            .chain(iterator.iter())
+            .chain(from_iterator.iter())
+            .all(|line| line.contains("int ! ()>")),
+        "expected only closed families:\nvalue={value:#?}\niterator={iterator:#?}\n\
+         from_iterator={from_iterator:#?}"
+    );
     assert_eq!(
-        concrete_value.len(),
+        value.len(),
         value_entry_count,
         "expected one closed Value family:\n{value:#?}"
     );
     assert_eq!(
-        generic_value.len(),
-        value_entry_count,
-        "expected one canonical generic Value helper family:\n{value:#?}"
-    );
-    assert_eq!(
-        value.len(),
-        2 * value_entry_count,
-        "unexpected additional Value family:\n{value:#?}"
-    );
-    assert_eq!(
         iterator.len(),
-        2,
-        "expected one concrete and one generic Iterator thunk:\n{iterator:#?}"
-    );
-    assert_eq!(
-        iterator
-            .iter()
-            .filter(|line| line.contains("int ! ()>"))
-            .count(),
         1,
-        "expected exactly one concrete Iterator thunk:\n{iterator:#?}"
+        "expected one Iterator thunk:\n{iterator:#?}"
     );
     assert_eq!(
         from_iterator.len(),
-        2,
-        "expected one concrete and one generic FromIterator thunk:\n{from_iterator:#?}"
-    );
-    assert_eq!(
-        from_iterator
-            .iter()
-            .filter(|line| line.contains("int ! ()>"))
-            .count(),
         1,
-        "expected exactly one concrete FromIterator thunk:\n{from_iterator:#?}"
-    );
-    assert!(
-        value.iter().all(|line| !line.contains("e₂")),
-        "canonical families must number their own variables from zero:\n{value:#?}"
+        "expected one FromIterator thunk:\n{from_iterator:#?}"
     );
     assert!(
         value
@@ -428,10 +398,39 @@ fn provisional_effect_queries_do_not_materialize_trait_artifacts() {
         1,
         "only the final pure map application may materialize a dictionary method:\n{map_thunks:#?}"
     );
+    // Hidden requirements may be fallible: they follow the adaptor impls' declared effects.
     assert!(
-        !map_thunks[0].contains("! fallible"),
+        map_thunks[0].contains("@arg let (int) -> int,"),
         "the retained map thunk must use the lambda's final pure effect:\n{}",
         map_thunks[0]
+    );
+}
+
+/// A generic function passing its callback to an adaptor over a concrete input needs a dictionary
+/// whose effects remain the callback's variable. Closing it at the implementation's least effects
+/// would compile the callback's call as unable to fail.
+#[test]
+fn open_output_effects_keep_generated_dictionaries_open() {
+    let raw = emit(
+        "open_output_effects",
+        "fn g(a: [int], f) { a |> filter(f) }\ng([1, 2], |x| idiv(x, 0) > 0)",
+        MirOptimization::Disabled,
+    );
+    let filter_iterator_families = raw
+        .lines()
+        .filter(|line| {
+            line.starts_with("fn std::Iterator<std::FilterIterator<") && line.contains("-thunk")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        filter_iterator_families.len(),
+        1,
+        "expected one generated `next` for the open application:\n{filter_iterator_families:#?}"
+    );
+    assert!(
+        filter_iterator_families[0].contains("std::int ! e₀>"),
+        "the generated `next` must stay open in the callback's effect:\n{}",
+        filter_iterator_families[0]
     );
 }
 

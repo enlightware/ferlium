@@ -157,7 +157,7 @@ fn trait_dictionary_node_kind(
         ));
     }
 
-    let (input_tys, output_tys, _) = default_unquantified_trait_application_effects(
+    let (input_tys, output_tys, output_effs) = default_unquantified_trait_application_effects(
         input_tys,
         output_tys,
         output_effs,
@@ -199,9 +199,15 @@ fn trait_dictionary_node_kind(
             ctx.dicts.requirements
         )
     }
-    let dictionary = ctx
-        .trait_solver
-        .solve_impl(trait_id, &input_tys, span, arena)?;
+    let dictionary = ctx.trait_solver.solve_impl_for_application(
+        trait_id,
+        &input_tys,
+        &output_tys,
+        &output_effs,
+        &ctx.retained_effect_vars,
+        span,
+        arena,
+    )?;
     let impl_data = ctx.trait_solver.get_impl_data_by_id(dictionary);
     let ty = impl_data.dictionary_ty;
     let capture_schema = impl_data.dictionary_value.capture_schema().to_vec();
@@ -297,9 +303,15 @@ pub(crate) fn trait_dictionary_evidence_binding(
         }));
     }
 
-    let selected = ctx
-        .trait_solver
-        .solve_impl(trait_id, &input_tys, span, arena)?;
+    let selected = ctx.trait_solver.solve_impl_for_application(
+        trait_id,
+        &input_tys,
+        &output_tys,
+        &output_effs,
+        &ctx.retained_effect_vars,
+        span,
+        arena,
+    )?;
     let definition = TraitDictionaryId::new(selected.module, selected.impl_id);
     let impl_data = ctx.trait_solver.get_impl_data_by_id(selected);
     let capture_schema = impl_data.dictionary_value.capture_schema().to_vec();
@@ -2361,6 +2373,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 let arguments_unnamed = app.arguments_unnamed;
                 let ty = app.ty.clone();
                 let input_tys = app.input_tys.clone();
+                let output_effs = app.output_effs.clone();
                 let inst_data = app.inst_data.clone();
                 assert!(
                     inst_data.dicts_req.is_empty(),
@@ -2405,7 +2418,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                         trait_id,
                         &input_tys,
                         &[],
-                        &[],
+                        &output_effs,
                         method_span,
                         self.ctx,
                     )?;
@@ -2426,6 +2439,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                         arguments.arguments,
                         argument_names,
                         ty,
+                        Some(output_effs),
                     )
                 };
                 self.wrap_call_cleanup(call, arguments.cleanup, node_ty, node_effects, node_span)
@@ -2597,6 +2611,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                         Vec::new(),
                         Vec::new(),
                         CallImplType::value(FnType::new_by_val([], node_ty, no_effects())),
+                        None,
                     )
                 }
             }
@@ -2667,6 +2682,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 let dictionary = call.dictionary;
                 let entry_index = call.entry_index;
                 let ty = call.ty.clone();
+                let output_effs = call.output_effs.clone();
                 let arguments = self.elaborate_call_arguments(
                     src,
                     &call.arguments,
@@ -2679,6 +2695,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     arguments: arguments.arguments,
                     argument_names: call.argument_names.clone(),
                     ty,
+                    output_effs,
                 }));
                 self.wrap_call_cleanup(call, arguments.cleanup, node_ty, node_effects, node_span)
             }

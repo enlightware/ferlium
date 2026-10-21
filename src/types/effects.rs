@@ -181,11 +181,13 @@ impl EffType {
     pub fn empty() -> Self {
         Self::default()
     }
+
     pub fn single(effect: Effect) -> Self {
         let mut effects = Self::empty();
         effects.insert(effect);
         effects
     }
+
     pub fn single_primitive(effect: PrimitiveEffect) -> Self {
         let mut primitives = PrimitiveEffects::default();
         primitives.insert(effect);
@@ -194,6 +196,7 @@ impl EffType {
             var_bits: 0,
         })
     }
+
     pub fn single_variable(var: EffectVar) -> Self {
         if let Some(var_bit) = inline_var_bit(var) {
             Self(Effects::Inline {
@@ -207,12 +210,15 @@ impl EffType {
             })))
         }
     }
+
     pub fn single_variable_id(id: u32) -> Self {
         Self::single_variable(EffectVar::new(id))
     }
+
     pub fn multiple(effects: &[Effect]) -> Self {
         effects.iter().copied().collect()
     }
+
     pub fn multiple_primitive(effects: &[PrimitiveEffect]) -> Self {
         let mut primitives = PrimitiveEffects::default();
         for effect in effects {
@@ -223,6 +229,7 @@ impl EffType {
             var_bits: 0,
         })
     }
+
     pub fn multiple_variable(vars: &[EffectVar]) -> Self {
         vars.iter().copied().map(Effect::Variable).collect()
     }
@@ -310,6 +317,43 @@ impl EffType {
         } else {
             None
         }
+    }
+
+    /// The primitive effects of self, without its variables.
+    pub fn primitive_effects(&self) -> Self {
+        Self::from_primitive_bits(self.primitives())
+    }
+
+    /// The effects of self, primitives and variables, that are not in other.
+    pub fn difference(&self, other: &Self) -> Self {
+        let mut result = Self::from_primitive_bits(PrimitiveEffects(
+            self.primitives().0 & !other.primitives().0,
+        ));
+        for var in self.variables() {
+            if !other.contains_variable(var) {
+                result.insert_variable(var);
+            }
+        }
+        result
+    }
+
+    /// The effects, primitives and variables, in both self and other.
+    pub fn intersection(&self, other: &Self) -> Self {
+        let mut result =
+            Self::from_primitive_bits(PrimitiveEffects(self.primitives().0 & other.primitives().0));
+        for var in self.variables() {
+            if other.contains_variable(var) {
+                result.insert_variable(var);
+            }
+        }
+        result
+    }
+
+    fn from_primitive_bits(primitive_bits: PrimitiveEffects) -> Self {
+        Self(Effects::Inline {
+            primitive_bits,
+            var_bits: 0,
+        })
     }
 
     pub fn inner_vars(&self) -> Vec<EffectVar> {

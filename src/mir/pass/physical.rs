@@ -4,6 +4,7 @@
 //! Post-expansion scheduling of the shared MIR passes.
 
 use crate::{
+    FxHashSet,
     compiler::MirArtifacts,
     mir::Function,
     module::{FunctionId, ModuleEnv},
@@ -55,6 +56,7 @@ pub(crate) fn optimize(
                 let mut current = body.clone();
                 for _ in 0..budget::MAX_ROUNDS {
                     let mut changed = false;
+                    let mut reified_places = FxHashSet::default();
                     macro_rules! apply {
                         ($result:expr) => {
                             if let Some(next) = $result {
@@ -75,6 +77,7 @@ pub(crate) fn optimize(
                     ) {
                         current = folded.body;
                         changed |= folded.warrants_another_round;
+                        reified_places = folded.reified_places;
                     }
                     apply!(cse::eliminate_common_calls(
                         &current,
@@ -89,7 +92,13 @@ pub(crate) fn optimize(
                         &current, env, stage
                     ));
                     apply!(store_forward::forward_stored_values(&current, env));
-                    apply!(inline::inline_function(&current, growth_base, env, stage));
+                    apply!(inline::inline_function(
+                        &current,
+                        growth_base,
+                        env,
+                        stage,
+                        &reified_places
+                    ));
                     apply!(branch_forward::forward_boolean_branches(&current));
                     apply!(peephole::materialize_boolean_results(&current));
                     apply!(dead_store::remove_overwritten_trivial_copy_stores(

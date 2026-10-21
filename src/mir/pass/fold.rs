@@ -334,6 +334,11 @@ pub(crate) struct Folded {
     /// dispatch uniform. Naming the selected entry exposes script callees, their hidden static
     /// evidence, and known natives to the rest of the optimizer.
     pub warrants_another_round: bool,
+    /// The places this rewrite initialized with a compile-time result.
+    ///
+    /// A call reading one may have become foldable as a whole, which the next round's analysis
+    /// decides; inlining it first would replace that evaluation with a body to fold piecemeal.
+    pub reified_places: FxHashSet<ValueId>,
 }
 
 /// Folds what can be folded in `func`, returning a rewritten function if anything was.
@@ -375,18 +380,26 @@ pub(crate) fn fold_function(
     // A reflexive comparison expands one call into `variant Equal; store`, so apply sites in
     // reverse order and splice without invalidating a later index planned in the same block.
     let mut renamed = FxHashMap::default();
+    let mut reified_places = FxHashSet::default();
     for fold in plan.calls.into_iter().rev() {
         let index = fold.index.as_index();
         let span = edit.block(fold.block).operations[index].span;
         let replacements = match fold.destination {
-            FoldDestination::Place(destination) => materialize_call_rewrite(
-                &mut edit,
-                span,
-                fold.result,
-                destination,
-                env,
-                string_materializer,
-            ),
+            FoldDestination::Place(destination) => {
+                if let (CallRewrite::Reification(_), mir::Value::Register(place)) =
+                    (&fold.result, &destination)
+                {
+                    reified_places.insert(*place);
+                }
+                materialize_call_rewrite(
+                    &mut edit,
+                    span,
+                    fold.result,
+                    destination,
+                    env,
+                    string_materializer,
+                )
+            }
             FoldDestination::Register(register) => {
                 define_call_rewrite(&mut edit, span, fold.result, register, &mut renamed, env)
             }
@@ -398,6 +411,9 @@ pub(crate) fn fold_function(
     rename_registers(&mut edit, &renamed);
     for invoke in plan.invokes {
         let span = edit.block(invoke.block).terminator.span;
+        if let mir::Value::Register(place) = &invoke.destination {
+            reified_places.insert(*place);
+        }
         // The call becomes an ordinary store at the end of the block, and the terminator loses its
         // error edge: an evaluated call cannot fail. Appending keeps the indices the operation
         // folds above were planned against.
@@ -452,6 +468,7 @@ pub(crate) fn fold_function(
     Some(Folded {
         body: edit.finish_unverified(),
         warrants_another_round,
+        reified_places,
     })
 }
 

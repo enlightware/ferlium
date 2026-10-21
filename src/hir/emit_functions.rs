@@ -78,7 +78,7 @@ pub(super) struct EmitTraitCtx<'a> {
     pub(super) span: Location,
     pub(super) stub_data: Option<&'a ImplStubData>,
     pub(super) generic_param_count: usize,
-    pub(super) generic_effect_param_count: usize,
+    pub(super) generic_effect_param_names: Vec<Ustr>,
     pub(super) for_trait: Option<&'a ast::DTraitImplFor>,
     pub(super) impl_constraints: &'a [PubTypeConstraint],
 }
@@ -571,14 +571,22 @@ where
         // Reserve the leading annotation placeholder indices for explicit impl-level generics,
         // so any function-level generics in this shared path start after them.
         outer_annotation_var_count = explicit_quantifiers.len();
-        let explicit_eff_quantifiers = (0..trait_ctx.generic_effect_param_count)
-            .map(|index| EffectVar::new(index as u32))
-            .collect::<FxHashSet<_>>();
-        outer_annotation_eff_var_count = trait_ctx.generic_effect_param_count;
+        let explicit_eff_quantifiers = &trait_ctx.generic_effect_param_names;
+        outer_annotation_eff_var_count = explicit_eff_quantifiers.len();
         if !explicit_quantifiers.is_empty() || !explicit_eff_quantifiers.is_empty() {
+            let eff_subst = explicit_eff_quantifiers
+                .iter()
+                .enumerate()
+                .map(|(index, name)| {
+                    (
+                        EffectVar::new(index as u32),
+                        ty_inf.fresh_rigid_effect_var_ty(Some(*name)),
+                    )
+                })
+                .collect();
             impl_annotation_subst = Some((
                 ty_inf.fresh_type_var_subst(&explicit_quantifiers),
-                ty_inf.fresh_effect_var_subst(&explicit_eff_quantifiers),
+                eff_subst,
             ));
         }
         explicit_trait_impl = trait_ctx.for_trait.map(|for_trait| {
@@ -832,9 +840,9 @@ where
                     fresh_ty
                 })
                 .collect::<Vec<_>>();
-            for (index, _) in generic_params.effect_params().iter().enumerate() {
+            for (index, (name, _)) in generic_params.effect_params().iter().enumerate() {
                 let source_var = EffectVar::new((outer_annotation_eff_var_count + index) as u32);
-                let fresh_eff = ty_inf.fresh_effect_var_ty();
+                let fresh_eff = ty_inf.fresh_rigid_effect_var_ty(Some(*name));
                 annotation_subst.1.insert(source_var, fresh_eff);
             }
             explicit_root_tys
@@ -928,18 +936,13 @@ where
                     subst
                         .1
                         .entry(*var)
-                        .or_insert_with(|| ty_inf.fresh_effect_var_ty());
+                        .or_insert_with(|| ty_inf.fresh_rigid_effect_var_ty(None));
                 }
                 Ok::<_, InternalCompilationError>(scheme.instantiate_simple(&subst))
             })
             .transpose()?;
         if let Some(declared) = &declared_signature {
-            ty_inf.add_same_fn_type_constraint_without_effects(
-                &fn_type,
-                *span,
-                &declared.ty,
-                *span,
-            );
+            ty_inf.add_fn_subtype_constraint_without_effects(&fn_type, *span, &declared.ty, *span);
             for constraint in &declared.constraints {
                 ty_inf.add_given_constraint(constraint.clone());
             }
@@ -965,7 +968,7 @@ where
             // TODO: get span from the trait method definition, when available
             // Note: we use the variant without effects because trait impl effects are validated
             // separately after type inference (they must be a subset of trait definition effects).
-            ty_inf.add_same_fn_type_constraint_without_effects(
+            ty_inf.add_fn_subtype_constraint_without_effects(
                 &fn_type,
                 *span,
                 &instantiated_method_def.ty_scheme.ty,
@@ -1122,10 +1125,11 @@ where
                 None,
                 module_env,
             );
-            ty_inf.add_same_fn_type_constraint_without_effects(
-                &descr.definition.ty_scheme.ty,
-                function.span,
+            // The forwarder calls the default, so the default must be usable as the forwarder.
+            ty_inf.add_fn_subtype_constraint_without_effects(
                 &ty,
+                function.span,
+                &descr.definition.ty_scheme.ty,
                 function.span,
             );
             let arguments: Vec<_> = ty
@@ -1228,7 +1232,8 @@ where
         descr.definition.ty_scheme.ty.effects = ty_inf.unify_effects(
             &fn_arena[fn_node_id].effects,
             &descr.definition.ty_scheme.ty.effects,
-        );
+            function.span,
+        )?;
         let mut pending = PendingModuleFunction::from_body_with_name(
             Some(function.name.0),
             descr.definition.clone(),
@@ -1355,6 +1360,20 @@ where
             );
             elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
 
+            let mut head_effect_vars = trait_output
+                .input_tys
+                .iter()
+                .chain(&trait_output.output_tys)
+                .flat_map(|ty| ty_inf.substitute_in_type(*ty).inner_effect_vars())
+                .collect::<FxHashSet<_>>();
+            for eff in &trait_output.output_effs {
+                ty_inf
+                    .substitute_in_effect_type(eff)
+                    .fill_with_inner_effect_vars(&mut head_effect_vars);
+            }
+            // Implementation methods are quantified over the head only, so their own effect
+            // variables, such as that of a callback parameter written without effects, are fixed.
+            minimize_body_effects(output, &[], head_effect_vars, &mut ty_inf)?;
             ty_inf.finalize_effect_dependencies()?;
 
             // Check for remaining orphans.
@@ -1392,6 +1411,7 @@ where
             &local_fns,
             &mut ty_inf,
         );
+        check_declared_effects_not_combined(output, &associated_lambdas, &local_fns, &mut ty_inf)?;
         // The impl constraints are not yet part of the method schemes, but they determine the
         // effects of the methods' calls to their evidence, so these effects must be retained.
         let impl_constraint_effect_vars = {
@@ -1787,6 +1807,7 @@ where
             }
         }
 
+        minimize_body_effects(output, &local_fns, FxHashSet::default(), &mut ty_inf)?;
         ty_inf.finalize_effect_dependencies()?;
 
         // Substitute everything using ty_inf (single pass, includes all defaults).
@@ -1797,6 +1818,7 @@ where
             &local_fns,
             &mut ty_inf,
         );
+        check_declared_effects_not_combined(output, &associated_lambdas, &local_fns, &mut ty_inf)?;
 
         // Recursive-return defaulting inspects the final constraints.
         ty_inf.normalize_remaining_constraints();
@@ -2133,4 +2155,50 @@ pub(super) fn check_unbounds(
         }
     }
     Ok(uninstantiated_unbound)
+}
+
+/// Reject functions whose published types combine two declared effect variables in one effect.
+/// The effect variables that neither the generalized `signatures`, the given `observable` variables
+/// nor a pending constraint can observe take their least solution, so values inside a body keep
+/// the effects they were built with.
+fn minimize_body_effects(
+    output: &Module,
+    signatures: &[LocalFunctionId],
+    mut observable: FxHashSet<EffectVar>,
+    ty_inf: &mut UnifiedTypeInference,
+) -> Result<(), InternalCompilationError> {
+    for id in signatures {
+        let fn_ty = &output.functions[id.as_index()].definition.ty_scheme.ty;
+        observable.extend(ty_inf.substitute_in_fn_type(fn_ty).inner_effect_vars());
+    }
+    ty_inf.normalize_remaining_constraints();
+    for constraint in ty_inf.remaining_constraints() {
+        constraint.fill_with_inner_effect_vars(&mut observable);
+    }
+    ty_inf.minimize_unobservable_effects(observable)
+}
+
+fn check_declared_effects_not_combined(
+    output: &Module,
+    associated_lambdas: &FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
+    local_fns: &[LocalFunctionId],
+    ty_inf: &mut UnifiedTypeInference,
+) -> Result<(), InternalCompilationError> {
+    for id in local_fns {
+        let span = output.functions[id.as_index()]
+            .spans
+            .as_ref()
+            .map(|spans| spans.span);
+        for function_id in function_and_associated_lambdas(id, associated_lambdas) {
+            let descr = &output.functions[function_id.as_index()];
+            let span = descr
+                .spans
+                .as_ref()
+                .map(|spans| spans.span)
+                .or(span)
+                .unwrap_or_else(Location::new_synthesized);
+            ty_inf.check_declared_effects_not_combined(&descr.definition.ty_scheme.ty, span)?;
+        }
+    }
+    Ok(())
 }

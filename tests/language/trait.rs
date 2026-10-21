@@ -1484,10 +1484,6 @@ fn trait_default_checked_without_an_impl() {
             "trait Bad<Self> { fn bad(x: Self) -> Self { -x } }",
             InvalidDefaultMethodKind::UndeclaredConstraint,
         ),
-        (
-            "trait Bad<Self |-> ! E> { fn bad(x: Self) ! E { effects::write() } }",
-            InvalidDefaultMethodKind::RestrictedEffectParameter,
-        ),
     ] {
         let error = session.fail_compilation(source).into_inner();
         let CompilationErrorImpl::InvalidTraitDefinition {
@@ -1510,19 +1506,24 @@ fn trait_default_checked_without_an_impl() {
             source.find("fn bad").unwrap()..source.len() - 2
         );
     }
-    let source = "trait Bad<Self> { fn bad(x: Self) { effects::write() } }";
-    let error = session.fail_compilation(source).into_inner();
-    let CompilationErrorImpl::TraitMethodEffectMismatch {
-        method_name, span, ..
-    } = error
-    else {
-        panic!("unexpected diagnostic: {error:?}")
-    };
-    assert_eq!(method_name, ustr("bad"));
-    assert_eq!(
-        span.as_range(),
-        source.find("fn bad").unwrap()..source.len() - 2
-    );
+    // A declared effect parameter is checked like a declared effect.
+    for source in [
+        "trait Bad<Self> { fn bad(x: Self) { effects::write() } }",
+        "trait Bad<Self |-> ! E> { fn bad(x: Self) ! E { effects::write() } }",
+    ] {
+        let error = session.fail_compilation(source).into_inner();
+        let CompilationErrorImpl::TraitMethodEffectMismatch {
+            method_name, span, ..
+        } = error
+        else {
+            panic!("unexpected diagnostic: {error:?}")
+        };
+        assert_eq!(method_name, ustr("bad"));
+        assert_eq!(
+            span.as_range(),
+            source.find("fn bad").unwrap()..source.len() - 2
+        );
+    }
 
     let source = "trait Bad<Self> { fn bad(x: Self) -> bool { 1 } }";
     let error = session.fail_compilation(source).into_inner();

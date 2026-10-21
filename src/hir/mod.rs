@@ -750,6 +750,8 @@ pub struct TraitMethodApplication<P: HirPhase = Unelaborated> {
     pub arguments_unnamed: UnnamedArg,
     pub ty: CallImplType,
     pub input_tys: Vec<Type>,
+    /// The trait application's output effects, as instantiated at this call.
+    pub output_effs: Vec<EffType>,
     pub inst_data: FnInstData,
 }
 impl<P: HirPhase> TraitMethodApplication<P> {
@@ -837,6 +839,11 @@ pub struct CallDictionaryFunction<P: HirPhase = Unelaborated> {
     pub arguments: Vec<CallArgument<P>>,
     pub argument_names: Vec<Ustr>,
     pub ty: CallImplType,
+    /// The trait application's output effects at this call, when known.
+    ///
+    /// A dictionary serves every instantiation of its trait's output effects, so an entry that
+    /// stays generic over them takes its effect arguments from these.
+    pub output_effs: Option<Vec<EffType>>,
 }
 
 // Control flow payloads.
@@ -2220,6 +2227,7 @@ pub(crate) fn instantiate_node_in_place<M: TypeMapper>(
         TraitMethodApply(app) => {
             app.ty = app.ty.map(mapper);
             instantiate_types_in_place(&mut app.input_tys, mapper);
+            instantiate_effect_types_in_place(&mut app.output_effs, mapper);
             app.inst_data.instantiate_in_place(mapper);
         }
         GetFunction(get_fn) => {
@@ -2246,6 +2254,9 @@ pub(crate) fn instantiate_node_in_place<M: TypeMapper>(
         }
         CallDictionaryFunction(call) => {
             call.ty = call.ty.map(mapper);
+            if let Some(output_effs) = &mut call.output_effs {
+                instantiate_effect_types_in_place(output_effs, mapper);
+            }
         }
         _ => {}
     }

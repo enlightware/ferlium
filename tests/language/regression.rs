@@ -508,17 +508,9 @@ fn recursive_trait_improvement_probe_from_grammar_fuzzer_does_not_overflow_stack
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn inferred_function_value_derivation_from_grammar_fuzzer_does_not_panic() {
     let mut session = TestSession::new();
-    let error = session
-        .fail_compilation("|a| a = for a in [] { a() }")
-        .into_inner();
-    match error {
-        CompilationErrorImpl::TraitImplNotFound { trait_ref, .. } => {
-            // Function values are compiler-derived, so inference proceeds to the malformed
-            // iteration and reports its actual unsatisfied operation.
-            assert_eq!(trait_ref, "Iterator");
-        }
-        other => panic!("expected TraitImplNotFound, got {other:?}"),
-    }
+    // Function values are compiler-derived, whatever their effects: iterating an empty array of
+    // callables is well typed.
+    session.compile("|a| a = for a in [] { a() }");
 }
 
 #[test]

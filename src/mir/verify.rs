@@ -34,6 +34,7 @@ use crate::{
         effects::{Effect, PrimitiveEffect},
         r#type::{CallImplType, CallResultConvention, Type, TypeKind},
         type_like::TypeLike,
+        type_mapper::EffectErasingMapper,
         type_properties::concrete_type_is_trivial_copy,
     },
 };
@@ -340,7 +341,11 @@ impl StorageState {
         let Some(target) = self.at_path_mut(path) else {
             return false;
         };
-        debug_assert_eq!(target.ty, replacement.ty);
+        // A place may hold a callable whose effects are included in those of its type.
+        debug_assert_eq!(
+            target.ty.map(&mut EffectErasingMapper),
+            replacement.ty.map(&mut EffectErasingMapper)
+        );
         *target = replacement.clone();
         self.recompute();
         true

@@ -208,6 +208,7 @@ pub fn call_dictionary_function<P: HirPhase>(
     arguments: Vec<CallArgument<P>>,
     argument_names: Vec<Ustr>,
     ty: CallImplType,
+    output_effs: Option<Vec<EffType>>,
 ) -> NodeKind<P> {
     K::CallDictionaryFunction(b(hir::CallDictionaryFunction {
         dictionary,
@@ -215,6 +216,7 @@ pub fn call_dictionary_function<P: HirPhase>(
         arguments,
         argument_names,
         ty,
+        output_effs,
     }))
 }
 

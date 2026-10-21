@@ -1,10 +1,11 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-use ena::unify::{EqUnifyValue, UnifyKey, UnifyValue};
+use ena::unify::{EqUnifyValue, UnifyKey};
 
+use super::effect_solver::EffectClass;
 use crate::types::{
-    effects::{EffType, EffectVarKey},
+    effects::EffectVarKey,
     mutability::{MutVal, MutVarKey},
     r#type::{TyVarKey, Type},
 };
@@ -46,7 +47,7 @@ impl UnifyKey for MutVarKey {
 impl EqUnifyValue for MutVal {}
 
 impl UnifyKey for EffectVarKey {
-    type Value = Option<EffType>;
+    type Value = EffectClass;
 
     fn index(&self) -> u32 {
         self.name()
@@ -58,14 +59,5 @@ impl UnifyKey for EffectVarKey {
 
     fn tag() -> &'static str {
         "EffectVarKey"
-    }
-}
-
-/// Effects can always be unified through the union operation.
-impl UnifyValue for EffType {
-    type Error = ena::unify::NoError;
-
-    fn unify_values(a: &Self, b: &Self) -> Result<Self, Self::Error> {
-        Ok(a.union(b))
     }
 }

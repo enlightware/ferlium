@@ -42,13 +42,14 @@ use crate::{
         },
     },
     types::{
+        effect_polarity::{EffectPolarity, trait_output_effect_polarities},
         effects::{EffType, Effect, EffectVar},
         mutability::{MutType, MutVar},
         r#trait::{Trait, TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex},
-        r#type::{CallImplType, SubscriptType, Type, TypeDef, TypeKind, TypeVar},
+        r#type::{CallImplType, FnType, SubscriptType, Type, TypeDef, TypeKind, TypeVar},
         type_inference::{substitution::InstSubst, unify::UnifiedTypeInference},
         type_like::{TypeLike, instantiate_types},
-        type_mapper::{BitmapInstantiationMapper, TypeMapper},
+        type_mapper::{BitmapInstantiationMapper, SimpleInstantiationMapper, TypeMapper},
         type_properties::{TypePropertyEnv, concrete_type_is_trivial_copy, trivial_copy_impl_key},
         type_scheme::{PubTypeConstraint, TypeScheme},
     },
@@ -57,6 +58,7 @@ use crate::{
 /// Evidence for the generic call and the canonical hidden arguments of its thunk.
 /// Keeping these together prevents materialization and capture planning from
 /// disagreeing about the callable entry's ABI.
+#[derive(Clone)]
 struct BlanketMethodRequirements {
     callee: Vec<DictionaryReq>,
     entry: DictionaryEntryRequirements,
@@ -120,6 +122,9 @@ pub struct TraitSolver<'a> {
     /// This is deliberately per-solver. A [`TraitSolverProbe`] can hide private implementations
     /// from its source solver, so it must not inherit answers from this cache.
     unmaterialized_output_cache: FxHashMap<TraitId, Vec<TraitOutputCacheEntry>>,
+    /// While requesting a dictionary for a callable, the effect variables it quantifies: a reused
+    /// dictionary must serve every value they may take. Taken by the request's top-level frame.
+    quantified_request_effect_vars: FxHashSet<EffectVar>,
 }
 
 /// The trait selection context that can affect a probe's semantic answer.
@@ -159,6 +164,7 @@ impl<'a> TraitSolver<'a> {
             private_impl_scope: Vec::new(),
             privileged_impl_module: None,
             unmaterialized_output_cache: FxHashMap::default(),
+            quantified_request_effect_vars: FxHashSet::default(),
         }
     }
 
@@ -358,6 +364,34 @@ pub(crate) fn alpha_canonicalize_types(types: &[Type]) -> Vec<Type> {
     types.iter().map(|ty| ty.map(&mut mapper)).collect()
 }
 
+/// The identity of a dictionary generated for an application whose output effects stay open in
+/// the caller's variables: its inputs and requested outputs, renamed together by first occurrence.
+/// Each requested output effect is encoded as the effect of a nullary function type, so the key
+/// shares the representation of input-keyed applications without colliding with them.
+fn open_application_key(
+    trait_id: TraitId,
+    input_tys: &[Type],
+    output_tys: Option<&[Type]>,
+    output_effs: Option<&[EffType]>,
+) -> ConcreteTraitImplKey {
+    let mut mapper = AlphaCanonicalTypeMapper::default();
+    let mut tys = input_tys
+        .iter()
+        .chain(output_tys.unwrap_or_default())
+        .map(|ty| ty.map(&mut mapper))
+        .collect::<Vec<_>>();
+    if let Some(output_effs) = output_effs {
+        tys.extend(output_effs.iter().map(|eff| {
+            Type::function_type(FnType::new_by_val(
+                [],
+                Type::unit(),
+                mapper.map_effect_type(eff),
+            ))
+        }));
+    }
+    ConcreteTraitImplKey::new(trait_id, tys)
+}
+
 /// Alpha-canonicalize types and return the instantiation from canonical variables back to the
 /// caller's variables. Generated dictionary definitions use the canonical side; construction
 /// sites apply the returned substitution to their capture schemas.
@@ -469,6 +503,10 @@ pub(crate) fn current_projection_subscript_type_map(
 struct NeverProbe;
 
 impl TraitOutputQuery for NeverProbe {
+    fn output_effect_polarities_query(&mut self, _trait_id: TraitId) -> Vec<EffectPolarity> {
+        unreachable!("concrete candidate matching never queries nested trait outputs")
+    }
+
     fn unify_non_trait_constraint_query(
         &mut self,
         ty_inf: &mut UnifiedTypeInference,
@@ -493,6 +531,7 @@ impl TraitOutputQuery for NeverProbe {
         &mut self,
         _trait_id: TraitId,
         _input_tys: &[Type],
+        _output_effs: Option<&[EffType]>,
         _fn_span: Location,
         _arena: &mut NodeArena,
     ) -> Result<(Vec<Type>, Vec<EffType>), InternalCompilationError> {
@@ -540,13 +579,19 @@ trait TraitOutputQuery {
         output_effs: &[EffType],
     ) -> bool;
 
+    /// The outputs of the implementation selected for `input_tys`; requested output effects, if
+    /// any, take part in matching it.
     fn solve_outputs_query(
         &mut self,
         trait_id: TraitId,
         input_tys: &[Type],
+        output_effs: Option<&[EffType]>,
         fn_span: Location,
         arena: &mut NodeArena,
     ) -> Result<(Vec<Type>, Vec<EffType>), InternalCompilationError>;
+
+    /// The polarity of each output effect of `trait_id`.
+    fn output_effect_polarities_query(&mut self, trait_id: TraitId) -> Vec<EffectPolarity>;
 
     /// Attempt to improve a trait application. `output_tys` and `output_effs`
     /// are `None` only for solver queries that intentionally ask for outputs
@@ -590,6 +635,10 @@ impl<'solver, 'a> LazyTraitSolverProbe<'solver, 'a> {
 }
 
 impl TraitOutputQuery for LazyTraitSolverProbe<'_, '_> {
+    fn output_effect_polarities_query(&mut self, trait_id: TraitId) -> Vec<EffectPolarity> {
+        self.solver.output_effect_polarities(trait_id)
+    }
+
     fn unify_non_trait_constraint_query(
         &mut self,
         ty_inf: &mut UnifiedTypeInference,
@@ -620,11 +669,12 @@ impl TraitOutputQuery for LazyTraitSolverProbe<'_, '_> {
         &mut self,
         trait_id: TraitId,
         input_tys: &[Type],
+        output_effs: Option<&[EffType]>,
         fn_span: Location,
         arena: &mut NodeArena,
     ) -> Result<(Vec<Type>, Vec<EffType>), InternalCompilationError> {
         self.probe()
-            .solve_outputs_query(trait_id, input_tys, fn_span, arena)
+            .solve_outputs_query(trait_id, input_tys, output_effs, fn_span, arena)
     }
 
     fn improve_trait_application_query(
@@ -772,6 +822,10 @@ impl<'a> TraitSolverProbe<'a> {
 }
 
 impl TraitOutputQuery for TraitSolverProbe<'_> {
+    fn output_effect_polarities_query(&mut self, trait_id: TraitId) -> Vec<EffectPolarity> {
+        self.with_solver(|solver| solver.output_effect_polarities(trait_id))
+    }
+
     fn unify_non_trait_constraint_query(
         &mut self,
         ty_inf: &mut UnifiedTypeInference,
@@ -807,10 +861,19 @@ impl TraitOutputQuery for TraitSolverProbe<'_> {
         &mut self,
         trait_id: TraitId,
         input_tys: &[Type],
+        output_effs: Option<&[EffType]>,
         fn_span: Location,
-        arena: &mut NodeArena,
+        _arena: &mut NodeArena,
     ) -> Result<(Vec<Type>, Vec<EffType>), InternalCompilationError> {
-        self.solve_outputs(trait_id, input_tys, fn_span, arena)
+        self.with_solver(|solver| {
+            solver.solve_application_outputs_without_materializing(
+                trait_id,
+                input_tys,
+                None,
+                output_effs,
+                fn_span,
+            )
+        })
     }
 
     fn improve_trait_application_query(
@@ -859,6 +922,18 @@ enum TraitImprovementCandidate {
         eff_var_count: u32,
         constraints: Vec<PubTypeConstraint>,
     },
+}
+
+/// An application resolved symbolically by a blanket implementation: the implementation's
+/// outputs and constraints in terms of the application's variables. Type and effect variables
+/// from `type_var_base` and `effect_var_base` on are the implementation's own, which the caller
+/// renames to fresh variables.
+pub(crate) struct SymbolicApplication {
+    pub(crate) output_tys: Vec<Type>,
+    pub(crate) output_effs: Vec<EffType>,
+    pub(crate) obligations: Vec<PubTypeConstraint>,
+    pub(crate) type_var_base: u32,
+    pub(crate) effect_var_base: u32,
 }
 
 /// A runtime hidden requirement from a matched blanket impl after substitution.
@@ -1244,6 +1319,7 @@ impl<'a> TraitSolver<'a> {
         query: &mut Q,
         ty_inf: &mut UnifiedTypeInference,
         candidate: &TraitImprovementCandidate,
+        output_polarities: &[EffectPolarity],
         input_tys: &[Type],
         output_tys: Option<&[Type]>,
         output_effs: Option<&[EffType]>,
@@ -1288,13 +1364,16 @@ impl<'a> TraitSolver<'a> {
                     }
                 }
                 if let Some(output_effs) = output_effs {
-                    for (candidate_eff, output_eff) in
-                        candidate_output_effs.iter().zip(output_effs.iter())
+                    for ((candidate_eff, output_eff), polarity) in candidate_output_effs
+                        .iter()
+                        .zip(output_effs.iter())
+                        .zip(output_polarities)
                     {
                         if Self::match_trait_output_effect(
                             ty_inf,
                             candidate_eff,
                             output_eff,
+                            *polarity,
                             fn_span,
                         )
                         .is_err()
@@ -1319,6 +1398,7 @@ impl<'a> TraitSolver<'a> {
                     candidate_inputs,
                     candidate_outputs,
                     candidate_output_effs,
+                    output_polarities,
                     *ty_var_count,
                     *eff_var_count,
                     constraints,
@@ -1341,6 +1421,7 @@ impl<'a> TraitSolver<'a> {
     fn improve_trait_application_with_candidate_head(
         ty_inf: &mut UnifiedTypeInference,
         candidate: &TraitImprovementCandidate,
+        output_polarities: &[EffectPolarity],
         input_tys: &[Type],
         output_tys: Option<&[Type]>,
         output_effs: Option<&[EffType]>,
@@ -1373,13 +1454,16 @@ impl<'a> TraitSolver<'a> {
                     }
                 }
                 if let Some(output_effs) = output_effs {
-                    for (candidate_eff, output_eff) in
-                        candidate_output_effs.iter().zip(output_effs.iter())
+                    for ((candidate_eff, output_eff), polarity) in candidate_output_effs
+                        .iter()
+                        .zip(output_effs.iter())
+                        .zip(output_polarities)
                     {
                         Self::match_trait_output_effect(
                             ty_inf,
                             candidate_eff,
                             output_eff,
+                            *polarity,
                             fn_span,
                         )?;
                     }
@@ -1425,13 +1509,16 @@ impl<'a> TraitSolver<'a> {
                     }
                 }
                 if let Some(output_effs) = output_effs {
-                    for (candidate_eff, output_eff) in
-                        candidate_output_effs.iter().zip(output_effs.iter())
+                    for ((candidate_eff, output_eff), polarity) in candidate_output_effs
+                        .iter()
+                        .zip(output_effs.iter())
+                        .zip(output_polarities)
                     {
                         Self::match_trait_output_effect(
                             ty_inf,
                             candidate_eff,
                             output_eff,
+                            *polarity,
                             fn_span,
                         )?;
                     }
@@ -1441,22 +1528,31 @@ impl<'a> TraitSolver<'a> {
         Ok(())
     }
 
+    /// Relate an implementation's output effect to the requested one by the output's polarity:
+    /// an effect the methods perform may be smaller than requested, one they receive larger.
     fn match_trait_output_effect(
         ty_inf: &mut UnifiedTypeInference,
         impl_eff: &EffType,
         requested_eff: &EffType,
+        polarity: EffectPolarity,
         fn_span: Location,
     ) -> Result<(), InternalCompilationError> {
-        let impl_eff = ty_inf.substitute_in_effect_type(impl_eff);
-        let requested_eff = ty_inf.substitute_in_effect_type(requested_eff);
-        // A single impl-side effect variable is an associated-effect alias and
-        // must stay equal to the requested slot. Concrete or composite effects
-        // are lower bounds: the requested slot may contain additional effects.
-        if impl_eff.to_single_variable().is_some() {
-            ty_inf.unify_same_effect(impl_eff, fn_span, requested_eff, fn_span)
-        } else {
-            ty_inf.add_effect_dep(&impl_eff, fn_span, &requested_eff, fn_span)
+        match polarity {
+            EffectPolarity::Positive => {
+                ty_inf.add_effect_dep(impl_eff, fn_span, requested_eff, fn_span)
+            }
+            EffectPolarity::Negative => {
+                ty_inf.add_effect_dep(requested_eff, fn_span, impl_eff, fn_span)
+            }
+            EffectPolarity::Invariant => {
+                ty_inf.unify_same_effect(impl_eff.clone(), fn_span, requested_eff.clone(), fn_span)
+            }
         }
+    }
+
+    /// The polarity of each output effect of `trait_id`.
+    pub(crate) fn output_effect_polarities(&self, trait_id: TraitId) -> Vec<EffectPolarity> {
+        trait_output_effect_polarities(trait_id, &|id| self.trait_def(id))
     }
 
     fn type_var_capacity_for_types<'t>(types: impl IntoIterator<Item = &'t Type>) -> u32 {
@@ -1486,6 +1582,7 @@ impl<'a> TraitSolver<'a> {
         imp: &TraitImpl,
         requested_output_tys: Option<&[Type]>,
         requested_output_effs: Option<&[EffType]>,
+        quantified_effect_vars: &FxHashSet<EffectVar>,
         fn_span: Location,
     ) -> bool {
         if requested_output_tys.is_none() && requested_output_effs.is_none() {
@@ -1502,7 +1599,58 @@ impl<'a> TraitSolver<'a> {
                 .iter()
                 .chain(requested_output_tys.unwrap_or_default()),
         ));
-        if let Some(requested_output_tys) = requested_output_tys {
+        // The request's effect variables are renamed apart from the dictionary's. Those its caller
+        // quantifies are rigid: the dictionary must serve every value they may take.
+        let mut requested_vars = FxHashSet::default();
+        for ty in requested_output_tys.unwrap_or_default() {
+            requested_vars.extend(ty.inner_effect_vars());
+        }
+        for eff in requested_output_effs.unwrap_or_default() {
+            eff.fill_with_inner_effect_vars(&mut requested_vars);
+        }
+        let mut impl_vars = FxHashSet::default();
+        for ty in &imp.output_tys {
+            impl_vars.extend(ty.inner_effect_vars());
+        }
+        for eff in &imp.output_effs {
+            eff.fill_with_inner_effect_vars(&mut impl_vars);
+        }
+        let used = requested_vars
+            .iter()
+            .chain(&impl_vars)
+            .map(|var| var.name() + 1)
+            .max()
+            .unwrap_or(0);
+        while ty_inf.effect_var_count() < used {
+            ty_inf.fresh_effect_var();
+        }
+        let mut requested_vars = requested_vars.into_iter().collect::<Vec<_>>();
+        requested_vars.sort_by_key(|var| var.name());
+        let renaming: InstSubst = (
+            FxHashMap::default(),
+            requested_vars
+                .into_iter()
+                .map(|var| {
+                    let renamed = if quantified_effect_vars.contains(&var) {
+                        ty_inf.fresh_rigid_effect_var()
+                    } else {
+                        ty_inf.fresh_effect_var()
+                    };
+                    (var, EffType::single_variable(renamed))
+                })
+                .collect(),
+        );
+        let requested_output_tys = requested_output_tys.map(|tys| {
+            tys.iter()
+                .map(|ty| ty.map(&mut SimpleInstantiationMapper::new(&renaming)))
+                .collect::<Vec<_>>()
+        });
+        let requested_output_effs = requested_output_effs.map(|effs| {
+            effs.iter()
+                .map(|eff| eff.instantiate(&renaming.1))
+                .collect::<Vec<_>>()
+        });
+        if let Some(requested_output_tys) = &requested_output_tys {
             for (impl_ty, requested_ty) in imp.output_tys.iter().zip(requested_output_tys.iter()) {
                 if ty_inf
                     .unify_same_type_with_sub_effects(*impl_ty, fn_span, *requested_ty, fn_span)
@@ -1512,12 +1660,22 @@ impl<'a> TraitSolver<'a> {
                 }
             }
         }
-        if let Some(requested_output_effs) = requested_output_effs {
-            for (impl_eff, requested_eff) in
-                imp.output_effs.iter().zip(requested_output_effs.iter())
+        if let Some(requested_output_effs) = &requested_output_effs {
+            let polarities = self.output_effect_polarities(imp.trait_id);
+            for ((impl_eff, requested_eff), polarity) in imp
+                .output_effs
+                .iter()
+                .zip(requested_output_effs.iter())
+                .zip(polarities)
             {
-                if Self::match_trait_output_effect(&mut ty_inf, impl_eff, requested_eff, fn_span)
-                    .is_err()
+                if Self::match_trait_output_effect(
+                    &mut ty_inf,
+                    impl_eff,
+                    requested_eff,
+                    polarity,
+                    fn_span,
+                )
+                .is_err()
                 {
                     return false;
                 }
@@ -1600,6 +1758,7 @@ impl<'a> TraitSolver<'a> {
         arena: &mut NodeArena,
     ) -> Result<TraitImprovementMatch, InternalCompilationError> {
         let candidates = self.improvement_candidates(trait_id);
+        let output_polarities = self.output_effect_polarities(trait_id);
         let original_vars = input_tys
             .iter()
             .chain(output_tys.unwrap_or_default().iter())
@@ -1623,6 +1782,7 @@ impl<'a> TraitSolver<'a> {
                     &mut NeverProbe,
                     ty_inf,
                     &candidate,
+                    &output_polarities,
                     input_tys,
                     output_tys,
                     output_effs,
@@ -1636,6 +1796,7 @@ impl<'a> TraitSolver<'a> {
                         &mut query,
                         ty_inf,
                         &candidate,
+                        &output_polarities,
                         input_tys,
                         output_tys,
                         output_effs,
@@ -1725,6 +1886,7 @@ impl<'a> TraitSolver<'a> {
                     Self::improve_trait_application_with_candidate_head(
                         ty_inf,
                         &candidate,
+                        &output_polarities,
                         input_tys,
                         output_tys,
                         output_effs,
@@ -1737,6 +1899,7 @@ impl<'a> TraitSolver<'a> {
                 self,
                 ty_inf,
                 &candidate,
+                &output_polarities,
                 input_tys,
                 output_tys,
                 output_effs,
@@ -1903,6 +2066,7 @@ impl<'a> TraitSolver<'a> {
         imp_input_tys: &[Type],
         imp_output_tys: &[Type],
         imp_output_effs: &[EffType],
+        output_polarities: &[EffectPolarity],
         imp_ty_var_count: u32,
         imp_eff_var_count: u32,
         imp_constraints: &[PubTypeConstraint],
@@ -1916,6 +2080,7 @@ impl<'a> TraitSolver<'a> {
     ) -> Result<BlanketImplMatch, InternalCompilationError> {
         // First instantiate the blanket-local type and effect variables with
         // fresh inference variables in the caller-provided unifier.
+        let local_effects_start = ty_inf.effect_var_count();
         let inst_subst = (
             ty_inf.fresh_type_var_subst(imp_ty_var_count),
             ty_inf.fresh_effect_var_subst(imp_eff_var_count),
@@ -1956,9 +2121,19 @@ impl<'a> TraitSolver<'a> {
             }
         }
         if let Some(output_effs) = output_effs {
-            for (imp_output_eff, output_eff) in imp_output_effs.iter().zip(output_effs.iter()) {
-                if Self::match_trait_output_effect(ty_inf, imp_output_eff, output_eff, fn_span)
-                    .is_err()
+            for ((imp_output_eff, output_eff), polarity) in imp_output_effs
+                .iter()
+                .zip(output_effs.iter())
+                .zip(output_polarities)
+            {
+                if Self::match_trait_output_effect(
+                    ty_inf,
+                    imp_output_eff,
+                    output_eff,
+                    *polarity,
+                    fn_span,
+                )
+                .is_err()
                 {
                     return Ok(BlanketImplMatch::No);
                 }
@@ -2074,7 +2249,13 @@ impl<'a> TraitSolver<'a> {
                     ) {
                     (Vec::new(), Vec::new())
                 } else {
-                    match query.solve_outputs_query(trait_id, &constraint_inputs, fn_span, arena) {
+                    match query.solve_outputs_query(
+                        trait_id,
+                        &constraint_inputs,
+                        Some(&constraint_output_effs),
+                        fn_span,
+                        arena,
+                    ) {
                         Ok(outputs) => outputs,
                         Err(_)
                             if matches!(mode, BlanketConstraintMode::DeferConcreteObligations) =>
@@ -2100,12 +2281,22 @@ impl<'a> TraitSolver<'a> {
                         return Ok(BlanketImplMatch::No);
                     }
                 }
-                for (solved_output_eff, constraint_output_eff) in
-                    solved_output_effs.iter().zip(constraint_output_effs.iter())
+                // The nested implementation's outputs relate to the constraint's by their
+                // polarity, as at the top level.
+                let polarities = query.output_effect_polarities_query(trait_id);
+                for ((solved_output_eff, constraint_output_eff), polarity) in solved_output_effs
+                    .iter()
+                    .zip(constraint_output_effs.iter())
+                    .zip(polarities)
                 {
-                    if ty_inf
-                        .add_effect_dep(solved_output_eff, fn_span, constraint_output_eff, fn_span)
-                        .is_err()
+                    if Self::match_trait_output_effect(
+                        ty_inf,
+                        solved_output_eff,
+                        constraint_output_eff,
+                        polarity,
+                        fn_span,
+                    )
+                    .is_err()
                     {
                         return Ok(BlanketImplMatch::No);
                     }
@@ -2194,15 +2385,35 @@ impl<'a> TraitSolver<'a> {
             }
         }
         if let Some(output_effs) = output_effs {
-            for (imp_output_eff, output_eff) in imp_output_effs.iter().zip(output_effs.iter()) {
-                if Self::match_trait_output_effect(ty_inf, imp_output_eff, output_eff, fn_span)
-                    .is_err()
+            for ((imp_output_eff, output_eff), polarity) in imp_output_effs
+                .iter()
+                .zip(output_effs.iter())
+                .zip(output_polarities)
+            {
+                if Self::match_trait_output_effect(
+                    ty_inf,
+                    imp_output_eff,
+                    output_eff,
+                    *polarity,
+                    fn_span,
+                )
+                .is_err()
                 {
                     return Ok(BlanketImplMatch::No);
                 }
             }
         }
 
+        // In a scratch match, the implementation's own effect variables take their least
+        // solution; the caller's own inference, matching for improvement, may still bound them.
+        if !matches!(mode, BlanketConstraintMode::AllowUnknown)
+            && ty_inf.minimize_effects_from(local_effects_start).is_err()
+        {
+            return Ok(BlanketImplMatch::No);
+        }
+        // The match reads its results through the published effects, but `ty_inf` may be the
+        // caller's own inference, which goes on afterwards.
+        let effects_finalized = ty_inf.effects_finalized();
         if ty_inf.finalize_effect_dependencies().is_err() {
             return Ok(BlanketImplMatch::No);
         }
@@ -2241,6 +2452,7 @@ impl<'a> TraitSolver<'a> {
         for eff in instantiation.1.values_mut() {
             *eff = ty_inf.substitute_in_effect_type(eff);
         }
+        ty_inf.restore_effects_finalized(effects_finalized);
         Ok(BlanketImplMatch::Yes {
             output_tys: imp_output_tys,
             output_effs: imp_output_effs,
@@ -2486,7 +2698,6 @@ impl<'a> TraitSolver<'a> {
     }
 
     fn blanket_method_inst_data(
-        concrete_definition: &CallableDefinition,
         blanket_ty_var_count: u32,
         blanket_eff_var_count: u32,
         blanket_instantiation: &InstSubst,
@@ -2513,13 +2724,12 @@ impl<'a> TraitSolver<'a> {
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let close_effect_rows = concrete_definition.ty_scheme.ty.is_constant();
         // Registration likewise quantifies all blanket effect variables, including those visible
         // only in impl constraints.
         let eff_args = (0..blanket_eff_var_count)
             .map(EffectVar::new)
             .map(|quantifier| {
-                let effect = blanket_instantiation
+                blanket_instantiation
                     .1
                     .get(&quantifier)
                     .cloned()
@@ -2530,17 +2740,7 @@ impl<'a> TraitSolver<'a> {
                             ),
                             span: fn_span,
                         })
-                    })?;
-                // Open-row matching may retain an unconstrained tail. Matching has expanded the
-                // effect dependencies of the solved constraints into this row, so for a fully
-                // concrete target no caller can bind the tail and its least solution is pure; an
-                // effect-polymorphic target must retain it. This includes quantifiers occurring
-                // only in impl constraints.
-                Ok(if close_effect_rows {
-                    EffType::multiple_primitive(&effect.inner_non_vars())
-                } else {
-                    effect
-                })
+                    })
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(FnInstData::new(runtime_requirements, ty_args, eff_args))
@@ -2618,7 +2818,6 @@ impl<'a> TraitSolver<'a> {
             function,
         );
         let inst_data = Self::blanket_method_inst_data(
-            definition,
             type_var_count,
             effect_var_count,
             instantiation,
@@ -3159,6 +3358,42 @@ impl<'a> TraitSolver<'a> {
     /// If matching blanket implementation is found, a derivation is attempted, if available.
     /// Otherwise an error is returned.
     /// This is the trait solver's core function.
+    /// The implementation for the application `trait_id` at `input_tys`, requested with the
+    /// outputs it was inferred with: a dictionary is for the application it is requested for.
+    /// Outputs that are missing or still open are left out of the request.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn solve_impl_for_application(
+        &mut self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        output_tys: &[Type],
+        output_effs: &[EffType],
+        quantified_effect_vars: &FxHashSet<EffectVar>,
+        fn_span: Location,
+        arena: &mut NodeArena,
+    ) -> Result<TraitImplId, InternalCompilationError> {
+        let trait_def = self.trait_def(trait_id);
+        let requested_output_tys = (output_tys.len() == trait_def.output_type_count() as usize
+            && output_tys.iter().all(|ty| ty.is_constant()))
+        .then_some(output_tys);
+        let requested_output_effs =
+            (output_effs.len() == trait_def.output_effect_count() as usize).then_some(output_effs);
+        let previous = mem::replace(
+            &mut self.quantified_request_effect_vars,
+            quantified_effect_vars.clone(),
+        );
+        let result = self.solve_impl_application(
+            trait_id,
+            input_tys,
+            requested_output_tys,
+            requested_output_effs,
+            fn_span,
+            arena,
+        );
+        self.quantified_request_effect_vars = previous;
+        result
+    }
+
     pub fn solve_impl(
         &mut self,
         trait_id: TraitId,
@@ -3184,6 +3419,9 @@ impl<'a> TraitSolver<'a> {
             input_tys.iter().all(|ty| ty.is_trait_input_resolved()),
             "Getting trait implementation for unresolved input type shapes"
         );
+        // The quantified variables name the top-level request's variables only; nested requests
+        // made while materializing are in the implementation's variables.
+        let quantified_effect_vars = mem::take(&mut self.quantified_request_effect_vars);
 
         // Cycle detection
         let key = (trait_id, input_tys.to_vec());
@@ -3193,14 +3431,19 @@ impl<'a> TraitSolver<'a> {
                 self.get_impl_data_by_id(imp),
                 requested_output_tys,
                 requested_output_effs,
+                &quantified_effect_vars,
                 fn_span,
             ) {
                 return Ok(imp);
             }
         }
-        if requested_output_tys.is_none() && requested_output_effs.is_none() {
-            let canonical_key =
-                ConcreteTraitImplKey::new(trait_id, alpha_canonicalize_types(input_tys));
+        {
+            let canonical_key = open_application_key(
+                trait_id,
+                input_tys,
+                requested_output_tys,
+                requested_output_effs,
+            );
             if let Some(local_impl_id) = self
                 .impls
                 .unconstrained_application_key_to_id
@@ -3240,6 +3483,7 @@ impl<'a> TraitSolver<'a> {
             input_tys,
             requested_output_tys,
             requested_output_effs,
+            &quantified_effect_vars,
             fn_span,
             arena,
         );
@@ -3249,12 +3493,14 @@ impl<'a> TraitSolver<'a> {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn solve_impl_actual(
         &mut self,
         trait_id: TraitId,
         input_tys: &[Type],
         requested_output_tys: Option<&[Type]>,
         requested_output_effs: Option<&[EffType]>,
+        quantified_effect_vars: &FxHashSet<EffectVar>,
         fn_span: Location,
         arena: &mut NodeArena,
     ) -> Result<TraitImplId, InternalCompilationError> {
@@ -3304,6 +3550,7 @@ impl<'a> TraitSolver<'a> {
                 self.get_impl_data_by_id(imp),
                 requested_output_tys,
                 requested_output_effs,
+                quantified_effect_vars,
                 fn_span,
             ) {
                 return Ok(imp);
@@ -3311,6 +3558,7 @@ impl<'a> TraitSolver<'a> {
         }
 
         // No concrete implementation found, search for a matching blanket implementation.
+        let output_polarities = self.output_effect_polarities(trait_id);
         // We first clone all blanket implementations to avoid borrowing issues.
         let blankets = self
             .get_blanket_impls(trait_id)
@@ -3398,6 +3646,7 @@ impl<'a> TraitSolver<'a> {
                     imp_input_tys,
                     &imp_output_tys,
                     &imp_output_effs,
+                    &output_polarities,
                     imp_ty_var_count,
                     imp_eff_var_count,
                     imp_constraints,
@@ -3418,23 +3667,12 @@ impl<'a> TraitSolver<'a> {
                 else {
                     continue_impl_loop!();
                 };
+                // The match fixed the implementation's own effect variables at their least
+                // solution, so the variables left in the outputs are the application's: the
+                // dictionary is open in them.
                 let output_effs_depend_on_application =
                     output_effs.iter().any(EffType::has_variables);
-                let defaulted_output_effect_vars: FxHashSet<_> = output_effs
-                    .iter()
-                    .flat_map(EffType::iter)
-                    .filter_map(|effect| match effect {
-                        Effect::Variable(var) => Some(var),
-                        Effect::Primitive(_) => None,
-                    })
-                    .collect();
-                // The matched impl is being materialized for constant input types:
-                // any output effect variable left unbound by the head and constraint
-                // solving is unconstrained, so it resolves to the empty (pure) effect.
-                let output_effs: Vec<_> = output_effs
-                    .iter()
-                    .map(|eff| EffType::multiple_primitive(&eff.inner_non_vars()))
-                    .collect();
+                let defaulted_output_effect_vars = FxHashSet::default();
 
                 // Non-Value blanket impls can materialize all constraint dictionaries up front.
                 if trait_id != value_trait_id {
@@ -3579,6 +3817,14 @@ impl<'a> TraitSolver<'a> {
                         &associated_const_getters,
                         &method_requirements,
                     );
+                    let resulting_key = output_effs_depend_on_application.then(|| {
+                        open_application_key(
+                            trait_id,
+                            input_tys,
+                            Some(&output_tys),
+                            Some(&output_effs),
+                        )
+                    });
                     let imp = TraitImpl::new(
                         trait_id,
                         output_tys,
@@ -3598,14 +3844,18 @@ impl<'a> TraitSolver<'a> {
                         // impl would make that default leak into later
                         // applications with different output-effect bindings.
                         let local_impl_id = self.impls.add_anonymous_dictionary_struct(imp);
-                        if requested_output_tys.is_none() && requested_output_effs.is_none() {
-                            let canonical_key = ConcreteTraitImplKey::new(
-                                trait_id,
-                                alpha_canonicalize_types(input_tys),
-                            );
+                        // Index the record by its request and by the outputs it has, so that a later
+                        // request naming those outputs finds it.
+                        let requested_key = open_application_key(
+                            trait_id,
+                            input_tys,
+                            requested_output_tys,
+                            requested_output_effs,
+                        );
+                        for key in [Some(requested_key), resulting_key].into_iter().flatten() {
                             self.impls
                                 .unconstrained_application_key_to_id
-                                .insert(canonical_key, local_impl_id);
+                                .insert(key, local_impl_id);
                         }
                         local_impl_id
                     } else {
@@ -3738,6 +3988,34 @@ impl<'a> TraitSolver<'a> {
             let trait_def = self.trait_def(trait_id);
             (trait_def.name, trait_def.derivers.clone())
         };
+        // Derived implementations do not depend on the effects of the callables in their input
+        // types: derive them for these effects at their least solution, which any row includes.
+        let effect_vars = input_tys
+            .iter()
+            .flat_map(TypeLike::inner_effect_vars)
+            .collect::<FxHashSet<_>>();
+        let erased_input_tys;
+        let input_tys = if effect_vars.is_empty() {
+            input_tys
+        } else {
+            let subst = (
+                FxHashMap::default(),
+                effect_vars
+                    .into_iter()
+                    .map(|var| (var, EffType::empty()))
+                    .collect(),
+            );
+            let mut mapper = BitmapInstantiationMapper::new(&subst);
+            erased_input_tys = input_tys
+                .iter()
+                .map(|ty| ty.map(&mut mapper))
+                .collect::<Vec<_>>();
+            let key = ConcreteTraitImplKey::new(trait_id, erased_input_tys.clone());
+            if let Some(impl_id) = self.get_concrete_impl(&key) {
+                return Ok(impl_id);
+            }
+            &erased_input_tys
+        };
         for derive in derivers {
             if let Some(impl_id) = derive.derive_impl(trait_id, input_tys, fn_span, arena, self)? {
                 return Ok(impl_id);
@@ -3817,6 +4095,169 @@ impl<'a> TraitSolver<'a> {
     /// associated output types and effects are application parameters. They are
     /// matched against the selected impl for this application and must not be
     /// treated as canonical values of the input-keyed impl cache.
+    /// Resolve an application by the blanket implementation the solver selects for it,
+    /// symbolically: return that implementation's outputs and constraints in terms of the
+    /// application's own variables, without materializing a dictionary. `None` if no blanket
+    /// implementation applies.
+    pub(crate) fn resolve_application_symbolically(
+        &mut self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        requested_output_tys: &[Type],
+        requested_output_effs: &[EffType],
+        fn_span: Location,
+    ) -> Result<Option<SymbolicApplication>, InternalCompilationError> {
+        if trait_id == self.std_trait_id(VALUE_TRAIT_NAME)
+            || trait_id == self.std_trait_id(REPR_TRAIT_NAME)
+        {
+            return Ok(None);
+        }
+        let snapshot = self.snapshot_derived_impl_state();
+        let result = self.resolve_application_symbolically_inner(
+            trait_id,
+            input_tys,
+            requested_output_tys,
+            requested_output_effs,
+            fn_span,
+        );
+        self.rollback_derived_impl_state(snapshot);
+        result
+    }
+
+    fn resolve_application_symbolically_inner(
+        &mut self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        requested_output_tys: &[Type],
+        requested_output_effs: &[EffType],
+        fn_span: Location,
+    ) -> Result<Option<SymbolicApplication>, InternalCompilationError> {
+        let output_polarities = self.output_effect_polarities(trait_id);
+        let type_var_base =
+            Self::type_var_capacity_for_types(input_tys.iter().chain(requested_output_tys));
+        let effect_var_base = Self::effect_var_capacity(
+            input_tys.iter().chain(requested_output_tys),
+            requested_output_effs,
+        );
+        let scratch_inference = || {
+            let mut ty_inf = UnifiedTypeInference::new_with_ty_vars(type_var_base);
+            for _ in 0..effect_var_base {
+                ty_inf.fresh_effect_var();
+            }
+            ty_inf
+        };
+        let mut arena = NodeArena::default();
+        let blankets = self
+            .get_blanket_impls(trait_id)
+            .map(|(module_id, blankets)| (module_id, blankets.clone()))
+            .collect::<Vec<_>>();
+        for (imp_module_id, blanket_impls) in blankets {
+            for (sub_key, impl_id) in blanket_impls.iter() {
+                let (imp_public, imp_output_tys, imp_output_effs) = match imp_module_id {
+                    Some(module_id) => {
+                        let imp = &self
+                            .others
+                            .get(module_id)
+                            .unwrap()
+                            .module()
+                            .unwrap()
+                            .impls
+                            .data[impl_id.as_index()];
+                        (
+                            self.can_use_other_impl(module_id, imp),
+                            imp.output_tys.clone(),
+                            imp.output_effs.clone(),
+                        )
+                    }
+                    None => {
+                        let imp = &self.impls.data[impl_id.as_index()];
+                        (true, imp.output_tys.clone(), imp.output_effs.clone())
+                    }
+                };
+                if !imp_public {
+                    continue;
+                }
+                if let Some(module_id) = imp_module_id {
+                    self.private_impl_scope.push(module_id);
+                }
+                // Select the implementation as `solve_impl_actual` does...
+                let mut ty_inf = scratch_inference();
+                let selected = Self::match_blanket_impl(
+                    self,
+                    &mut ty_inf,
+                    &sub_key.input_tys,
+                    &imp_output_tys,
+                    &imp_output_effs,
+                    &output_polarities,
+                    sub_key.ty_var_count,
+                    sub_key.eff_var_count,
+                    &sub_key.constraints,
+                    input_tys,
+                    Some(requested_output_tys),
+                    Some(requested_output_effs),
+                    ConstraintAssumptions::all(&[]),
+                    fn_span,
+                    &mut arena,
+                    BlanketConstraintMode::RequireAllResolved,
+                );
+                if imp_module_id.is_some() {
+                    self.private_impl_scope.pop();
+                }
+                if !matches!(selected?, BlanketImplMatch::Yes { .. }) {
+                    continue;
+                }
+                // ...then instantiate its head alone, keeping its constraints as obligations.
+                let mut ty_inf = scratch_inference();
+                let inst_subst = (
+                    ty_inf.fresh_type_var_subst(sub_key.ty_var_count),
+                    ty_inf.fresh_effect_var_subst(sub_key.eff_var_count),
+                );
+                let mut mapper = BitmapInstantiationMapper::new(&inst_subst);
+                let imp_input_tys = instantiate_types(&sub_key.input_tys, &mut mapper);
+                let output_tys = instantiate_types(&imp_output_tys, &mut mapper);
+                let output_effs = imp_output_effs
+                    .iter()
+                    .map(|eff| mapper.map_effect_type(eff))
+                    .collect::<Vec<_>>();
+                let constraints = sub_key
+                    .constraints
+                    .iter()
+                    // Selection checked the constraints; they matter here only for the outputs
+                    // they determine, which keep the variables of the application.
+                    .filter(|constraint| match constraint {
+                        PubTypeConstraint::HaveTrait {
+                            output_tys,
+                            output_effs,
+                            ..
+                        } => !output_tys.is_empty() || !output_effs.is_empty(),
+                        PubTypeConstraint::VariantPayloadLayout { .. } => false,
+                        _ => true,
+                    })
+                    .map(|constraint| constraint.map(&mut mapper))
+                    .collect::<Vec<_>>();
+                for (imp_input_ty, input_ty) in imp_input_tys.iter().zip(input_tys) {
+                    ty_inf.unify_same_type_with_sub_effects(
+                        *imp_input_ty,
+                        fn_span,
+                        *input_ty,
+                        fn_span,
+                    )?;
+                }
+                return Ok(Some(SymbolicApplication {
+                    output_tys: ty_inf.substitute_in_types(&output_tys),
+                    output_effs: ty_inf.substitute_in_effect_types(&output_effs),
+                    obligations: constraints
+                        .iter()
+                        .map(|constraint| ty_inf.substitute_in_constraint(constraint))
+                        .collect(),
+                    type_var_base,
+                    effect_var_base,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
     pub fn solve_application_outputs(
         &mut self,
         trait_id: TraitId,
@@ -4133,6 +4574,10 @@ impl<'a> TraitSolver<'a> {
 }
 
 impl TraitOutputQuery for TraitSolver<'_> {
+    fn output_effect_polarities_query(&mut self, trait_id: TraitId) -> Vec<EffectPolarity> {
+        self.output_effect_polarities(trait_id)
+    }
+
     fn unify_non_trait_constraint_query(
         &mut self,
         ty_inf: &mut UnifiedTypeInference,
@@ -4164,10 +4609,17 @@ impl TraitOutputQuery for TraitSolver<'_> {
         &mut self,
         trait_id: TraitId,
         input_tys: &[Type],
+        output_effs: Option<&[EffType]>,
         fn_span: Location,
-        arena: &mut NodeArena,
+        _arena: &mut NodeArena,
     ) -> Result<(Vec<Type>, Vec<EffType>), InternalCompilationError> {
-        self.solve_outputs(trait_id, input_tys, fn_span, arena)
+        self.solve_application_outputs_without_materializing(
+            trait_id,
+            input_tys,
+            None,
+            output_effs,
+            fn_span,
+        )
     }
 
     fn improve_trait_application_query(
@@ -4411,7 +4863,8 @@ mod tests {
                 &mut arena,
             )
             .unwrap();
-        assert_eq!(output_effs, vec![read]);
+        // The implementation's own effect takes its least solution, which the request includes.
+        assert_eq!(output_effs, vec![EffType::empty()]);
 
         let (_, output_effs) = solver
             .solve_outputs(

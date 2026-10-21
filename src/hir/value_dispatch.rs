@@ -286,6 +286,7 @@ pub(crate) fn trait_apply_generated_with_locals(
             arguments_unnamed: UnnamedArg::All,
             ty: CallImplType::new(definition.ty_scheme.ty, definition.result_convention),
             input_tys,
+            output_effs: Vec::new(),
             inst_data: hir::FnInstData::none(),
         })),
         ret_ty,

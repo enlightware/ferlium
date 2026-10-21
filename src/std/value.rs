@@ -853,7 +853,7 @@ fn value_layout_formula_inner(
             // A representation-open foreign type is an opaque layout leaf supplied by its
             // owner-provided Value dictionary. Effect variables confined to callable fields do
             // not make the representation open, so their fixed layout remains computable here.
-            if !ty.is_constant()
+            if !ty.is_trait_input_resolved()
                 && (type_def.has_custom_value_impl
                     || type_def
                         .attributes
@@ -1391,6 +1391,7 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
                 arguments_unnamed: UnnamedArg::All,
                 ty: CallImplType::value(fn_ty),
                 input_tys: vec![input_ty],
+                output_effs: Vec::new(),
                 inst_data: hir::FnInstData::none(),
             })),
             ret_ty,
@@ -1485,6 +1486,7 @@ fn value_layout_expr_node(
                     Vec::new(),
                     Vec::new(),
                     CallImplType::value(FnType::new_by_val([], int_type(), EffType::empty())),
+                    None,
                 ),
                 int_type(),
             )

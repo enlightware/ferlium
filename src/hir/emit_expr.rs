@@ -21,7 +21,7 @@ use crate::{
         emit_functions::check_unbounds,
         emit_hir::{
             PendingModuleFunctions, PubTypeConstraintPtr, add_pending_function_anonymous,
-            borrow_check_and_elaborate_pending_function, constraint_ptr,
+            borrow_check_and_elaborate_pending_function, constraint_ptr, fill_node_effect_vars,
             first_unbound_type_in_constraints, log_dropped_constraints_expr,
         },
     },
@@ -33,6 +33,7 @@ use crate::{
     },
     std::core_traits_names::VALUE_TRAIT_NAME,
     types::{
+        effect_polarity::EffectVarPolarities,
         effects::EffType,
         trait_solver::{TraitSolver, trait_solver_from_module},
         r#type::{CallResultConvention, FnType, Type, TypeInstSubst},
@@ -265,6 +266,17 @@ fn emit_expr_unsafe_inner(
         elaborate_generated_functions(module, others, &mut pending_functions, generated)?;
     }
 
+    // An expression is not generalized over effects it only performs: they and the effects of
+    // its body take their least solution.
+    let node_ty = ty_inf.substitute_in_type(expr_arena[node_id].ty);
+    let mut polarities = EffectVarPolarities::default();
+    polarities.visit(node_ty, true);
+    let positive_only_effect_vars = polarities.positive_only();
+    let mut observable_effect_vars = node_ty.inner_effect_vars();
+    observable_effect_vars.retain(|var| !positive_only_effect_vars.contains(var));
+    ty_inf.minimize_unobservable_effects(observable_effect_vars)?;
+    ty_inf.finalize_effect_dependencies()?;
+
     // Substitute everything using ty_inf (single pass, includes all defaults).
     ty_inf.substitute_in_node(expr_arena, node_id);
     for lambda_id in lambda_functions.iter() {
@@ -407,20 +419,34 @@ fn emit_expr_unsafe_inner(
 
     // Normalize the type scheme.
     let node_ty = expr_arena[node_id].ty;
+    // Effect variables that the value only performs take their least solution, as for functions.
+    let mut polarities = EffectVarPolarities::default();
+    polarities.visit(node_ty, true);
+    let positive_only_effect_vars = polarities.positive_only();
+    let mut effect_quantifiers = node_ty.inner_effect_vars();
+    effect_quantifiers.retain(|var| !positive_only_effect_vars.contains(var));
+    let mut scheme_effect_vars = effect_quantifiers.clone();
+    for constraint in &constraints {
+        constraint.fill_with_inner_effect_vars(&mut scheme_effect_vars);
+    }
     let mut ty_scheme = TypeScheme {
         ty: node_ty,
-        eff_quantifiers: node_ty.inner_effect_vars(),
+        eff_quantifiers: effect_quantifiers,
         ty_quantifiers: quantifiers,
         constraints,
     };
     let mut subst = ty_scheme.normalize();
 
-    // Remove output effects of the expression (i.e. not in the type of the expression).
-    for effect in expr_arena[node_id].effects.iter() {
-        if let Some(var) = effect.as_variable() {
-            if !subst.1.contains_key(var) {
-                subst.1.insert(*var, EffType::empty());
-            }
+    // The other effect variables of the expression, including its own effects, are not
+    // observable from its scheme: they take their least solution, the pure row.
+    let mut body_effect_vars = FxHashSet::default();
+    fill_node_effect_vars(expr_arena, node_id, &mut body_effect_vars);
+    for local in locals.iter().skip(initial_local_count) {
+        local.ty.fill_with_inner_effect_vars(&mut body_effect_vars);
+    }
+    for var in body_effect_vars {
+        if !scheme_effect_vars.contains(&var) {
+            subst.1.entry(var).or_insert_with(EffType::empty);
         }
     }
 

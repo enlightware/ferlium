@@ -183,13 +183,17 @@ pub(crate) struct Refusal {
 }
 
 /// Inlines what can be inlined in `func`, returning a rewritten function if anything was.
+///
+/// A call reading one of `deferred` is left for the next round: those places were just given a
+/// compile-time value, and folding the call as a whole subsumes copying its body in.
 pub(crate) fn inline_function(
     func: &Function,
     base: GrowthBase,
     env: ModuleEnv<'_>,
     stage: OptimizationStage<'_>,
+    deferred: &FxHashSet<ValueId>,
 ) -> Option<Function> {
-    let sites = plan_inlinings(func, base, env, stage, &mut None);
+    let sites = plan_inlinings(func, base, env, stage, deferred, &mut None);
     if sites.is_empty() {
         return None;
     }
@@ -238,6 +242,7 @@ fn plan_inlinings<'a>(
     base: GrowthBase,
     env: ModuleEnv<'_>,
     stage: OptimizationStage<'a>,
+    deferred: &FxHashSet<ValueId>,
     refusals: &mut Option<&mut Vec<Refusal>>,
 ) -> Vec<Inlining<'a>> {
     let mut growth = Growth::new(base, func);
@@ -290,6 +295,12 @@ fn plan_inlinings<'a>(
             // An `AddressorPlace` callee is an ordinary function that happens to return a pointer:
             // its `@ret` is `**T` rather than `*T`, which the splice never inspects, and it exits
             // through a plain `return`. Only a yield driver is beyond the splice.
+            if operation.operands[1..]
+                .iter()
+                .any(|operand| matches!(operand, mir::Value::Register(id) if deferred.contains(id)))
+            {
+                continue;
+            }
             if ty.result_convention.requires_yield_driver() {
                 refuse(NotInlinable::UnsupportedConvention);
                 continue;
@@ -404,6 +415,7 @@ pub(crate) fn refusals_of(
         GrowthBase::of(func),
         env,
         OptimizationStage::Semantic(SemanticCallees::new(session, None)),
+        &FxHashSet::default(),
         &mut Some(&mut refusals),
     );
     refusals

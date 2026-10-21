@@ -80,6 +80,7 @@ pub(crate) use monomorphize::Specializations;
 pub(crate) use stage::{OptimizationStage, SemanticCallees};
 
 use crate::{
+    FxHashSet,
     compiler::CompilerSession,
     mir::{self, Function, OperationKind, edit::FunctionEdit, terminator::TerminatorKind},
     module::{FunctionId, LocalFunctionId, ModuleEnv, ModuleId},
@@ -312,6 +313,7 @@ pub(crate) fn optimize_function(
         // whole-function growth budget. Inlining then hands the next round a body whose parameters
         // have become the caller's places.
         let mut changed = false;
+        let mut reified_places = FxHashSet::default();
         // Scalar arguments are values read at their calls. Merging the loads of a place nothing
         // wrote in between, those of the body arriving and those the last round's inlining
         // exposed, makes a place read twice one value, which folding's identities and call CSE
@@ -335,6 +337,7 @@ pub(crate) fn optimize_function(
             current = Some(folded.body);
             // A rewrite that cannot enable another one must not buy a round; see `Folded`.
             changed |= folded.warrants_another_round;
+            reified_places = folded.reified_places;
         }
         // Specialization before inlining: it rewrites a generic call into a call on a concrete
         // copy, whose dictionaries are constants the *next* round's folding resolves. That is what
@@ -423,6 +426,7 @@ pub(crate) fn optimize_function(
             growth_base,
             env,
             OptimizationStage::Semantic(callees),
+            &reified_places,
         ) {
             current = Some(inlined);
             changed = true;

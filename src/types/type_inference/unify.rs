@@ -31,6 +31,7 @@ use crate::{
         value::{is_compiler_provided_value_trait_application, type_has_static_layout},
     },
     types::{
+        effect_polarity::EffectPolarity,
         effects::{EffType, EffectVar, EffectsInstSubst, no_effects},
         mutability::{MutType, MutVal, MutVar, MutVarKey},
         recursive_equation::{RecursiveEquationError, try_intern_recursive_equation},
@@ -39,8 +40,11 @@ use crate::{
             FnArgType, FnType, SubscriptMemberType, SubscriptResultConvention, SubscriptType,
             TyVarKey, Type, TypeInstSubst, TypeKind, TypeVar,
         },
-        type_like::TypeLike,
+        type_inference::substitution::InstSubst,
+        type_like::{TypeLike, instantiate_types},
+        type_mapper::{BitmapInstantiationMapper, TypeMapper},
         type_scheme::{ConstraintOrigin, PubTypeConstraint},
+        type_visitor::TypeInnerVisitor,
     },
 };
 
@@ -64,6 +68,7 @@ pub(crate) struct UnifiedTypeInferenceSnapshot {
     mut_unification_table: Snapshot<InPlace<MutVarKey>>,
     effects: EffectSolverSnapshot,
     remaining_ty_constraints_len: usize,
+    obligations_len: usize,
 }
 
 /// The type inference after unification, with only public constraints remaining
@@ -76,6 +81,8 @@ pub struct UnifiedTypeInference {
     pub(super) remaining_ty_constraints: Vec<PubTypeConstraint>,
     pub(super) mut_unification_table: InPlaceUnificationTable<MutVarKey>,
     pub(super) effects: EffectSolver,
+    /// Constraints of the implementations that resolved trait applications, still to solve.
+    obligations: Vec<PubTypeConstraint>,
 }
 
 /// Lexical owner for deferred obligations. Restores the enclosing owner on every
@@ -231,6 +238,11 @@ impl UnifiedTypeInference {
         self.effects.fresh_var()
     }
 
+    /// A fresh effect variable that solving may not constrain, standing for one fixed elsewhere.
+    pub(crate) fn fresh_rigid_effect_var(&mut self) -> EffectVar {
+        self.effects.fresh_rigid_var(None)
+    }
+
     pub(crate) fn fresh_effect_var_subst(&mut self, count: u32) -> EffectsInstSubst {
         (0..count)
             .map(|old_var| {
@@ -249,6 +261,7 @@ impl UnifiedTypeInference {
             mut_unification_table: self.mut_unification_table.snapshot(),
             effects: self.effects.snapshot(),
             remaining_ty_constraints_len: self.remaining_ty_constraints.len(),
+            obligations_len: self.obligations.len(),
         }
     }
 
@@ -261,6 +274,7 @@ impl UnifiedTypeInference {
         self.effects.rollback_to(snapshot.effects);
         self.remaining_ty_constraints
             .truncate(snapshot.remaining_ty_constraints_len);
+        self.obligations.truncate(snapshot.obligations_len);
     }
 
     pub fn unify_type_inference(
@@ -287,6 +301,7 @@ impl UnifiedTypeInference {
             remaining_ty_constraints: vec![],
             mut_unification_table,
             effects,
+            obligations: vec![],
         };
         // Keep source/inference order stable. Constraint equality deliberately ignores spans, so
         // iterating a hash set here made the diagnostic span and dictionary order depend on the
@@ -349,40 +364,13 @@ impl UnifiedTypeInference {
             }
         }
 
-        // Then, solve all type equalities.
+        // Then, solve all type equalities. Subtyping between two unknown types is deferred until
+        // one of them is known: binding it then relates their effects by inclusion, whereas
+        // binding the variables to each other would equate them.
+        let mut deferred_subtypes = Vec::new();
         for constraint in ty_constraints {
             use TypeConstraint::*;
             match constraint {
-                SameTypeWithSubEffects {
-                    current,
-                    current_span,
-                    expected,
-                    expected_span,
-                } => unified_ty_inf.unify_same_type_with_sub_effects(
-                    current,
-                    current_span,
-                    expected,
-                    expected_span,
-                )?,
-                SameType {
-                    current,
-                    current_span,
-                    expected,
-                    expected_span,
-                } => unified_ty_inf.unify_same_type(
-                    current,
-                    current_span,
-                    expected,
-                    expected_span,
-                )?,
-                SubType {
-                    current,
-                    current_span,
-                    expected,
-                    expected_span,
-                } => {
-                    unified_ty_inf.unify_sub_type(current, current_span, expected, expected_span)?
-                }
                 Pub(cst) => {
                     let destination =
                         if matches!(cst, PubTypeConstraint::VariantPayloadLayout { .. }) {
@@ -392,7 +380,27 @@ impl UnifiedTypeInference {
                         };
                     destination.push(cst);
                 }
+                constraint if unified_ty_inf.relates_unknown_types(&constraint) => {
+                    deferred_subtypes.push(constraint);
+                }
+                constraint => unified_ty_inf.unify_type_relation(constraint)?,
             }
+        }
+        loop {
+            let count = deferred_subtypes.len();
+            for constraint in mem::take(&mut deferred_subtypes) {
+                if unified_ty_inf.relates_unknown_types(&constraint) {
+                    deferred_subtypes.push(constraint);
+                } else {
+                    unified_ty_inf.unify_type_relation(constraint)?;
+                }
+            }
+            if deferred_subtypes.len() == count {
+                break;
+            }
+        }
+        for constraint in deferred_subtypes {
+            unified_ty_inf.unify_type_relation(constraint)?;
         }
 
         // Then, solve all effect equalities.
@@ -503,12 +511,49 @@ impl UnifiedTypeInference {
         Ok(unified_ty_inf)
     }
 
-    pub fn unify_fn_arg_effects(&mut self, fn_type: &FnType) {
-        self.effects.unify_fn_arg_effects(fn_type);
+    /// Whether `constraint` relates two types that are both still unknown.
+    fn relates_unknown_types(&mut self, constraint: &TypeConstraint) -> bool {
+        use TypeConstraint::*;
+        let (SameTypeWithSubEffects {
+            current, expected, ..
+        }
+        | SubType {
+            current, expected, ..
+        }) = constraint
+        else {
+            return false;
+        };
+        let current = self.normalize_type(*current);
+        let expected = self.normalize_type(*expected);
+        current != expected && current.data().is_variable() && expected.data().is_variable()
     }
 
-    pub fn effect_unioned(&mut self, var: EffectVar) -> Option<EffectVar> {
-        self.effects.effect_unioned(var)
+    /// Solve a type relation, a constraint other than a public one.
+    fn unify_type_relation(
+        &mut self,
+        constraint: TypeConstraint,
+    ) -> Result<(), InternalCompilationError> {
+        use TypeConstraint::*;
+        match constraint {
+            SameTypeWithSubEffects {
+                current,
+                current_span,
+                expected,
+                expected_span,
+            } => self.unify_same_type_with_sub_effects(
+                current,
+                current_span,
+                expected,
+                expected_span,
+            ),
+            SubType {
+                current,
+                current_span,
+                expected,
+                expected_span,
+            } => self.unify_sub_type(current, current_span, expected, expected_span),
+            Pub(_) => unreachable!("public constraints are solved later"),
+        }
     }
 
     pub fn effect_var_root(&mut self, var: EffectVar) -> EffectVar {
@@ -547,180 +592,6 @@ impl UnifiedTypeInference {
         )
     }
 
-    fn unify_same_type(
-        &mut self,
-        current: Type,
-        current_span: Location,
-        expected: Type,
-        expected_span: Location,
-    ) -> Result<(), InternalCompilationError> {
-        self.unify_same_type_with_sub_effects(current, current_span, expected, expected_span)?;
-        self.unify_equal_callable_effects(current, current_span, expected, expected_span)
-    }
-
-    fn unify_equal_callable_effects(
-        &mut self,
-        current: Type,
-        current_span: Location,
-        expected: Type,
-        expected_span: Location,
-    ) -> Result<(), InternalCompilationError> {
-        self.unify_equal_callable_effects_inner(
-            current,
-            current_span,
-            expected,
-            expected_span,
-            &mut FxHashSet::default(),
-        )
-    }
-
-    fn unify_equal_callable_effects_inner(
-        &mut self,
-        current: Type,
-        current_span: Location,
-        expected: Type,
-        expected_span: Location,
-        visited: &mut FxHashSet<(Type, Type)>,
-    ) -> Result<(), InternalCompilationError> {
-        let current_ty = self.normalize_type(current);
-        let expected_ty = self.normalize_type(expected);
-        if current_ty == Type::never() || expected_ty == Type::never() {
-            return Ok(());
-        }
-        if !visited.insert((current_ty, expected_ty)) {
-            return Ok(());
-        }
-
-        let current_data = current_ty.data().clone();
-        let expected_data = expected_ty.data().clone();
-        use TypeKind::*;
-        match (current_data, expected_data) {
-            (Function(current_fn), Function(expected_fn)) => {
-                self.unify_same_effect(
-                    current_fn.effects.clone(),
-                    current_span,
-                    expected_fn.effects.clone(),
-                    expected_span,
-                )?;
-                for (current_arg, expected_arg) in current_fn.args.iter().zip(&expected_fn.args) {
-                    self.unify_equal_callable_effects_inner(
-                        current_arg.ty,
-                        current_span,
-                        expected_arg.ty,
-                        expected_span,
-                        visited,
-                    )?;
-                }
-                self.unify_equal_callable_effects_inner(
-                    current_fn.ret,
-                    current_span,
-                    expected_fn.ret,
-                    expected_span,
-                    visited,
-                )
-            }
-            (Subscript(current_subscript), Subscript(expected_subscript)) => {
-                self.unify_equal_subscript_member_effects(
-                    current_subscript.ref_member.as_ref(),
-                    current_span,
-                    expected_subscript.ref_member.as_ref(),
-                    expected_span,
-                )?;
-                self.unify_equal_subscript_member_effects(
-                    current_subscript.mut_member.as_ref(),
-                    current_span,
-                    expected_subscript.mut_member.as_ref(),
-                    expected_span,
-                )?;
-                for (current_arg, expected_arg) in
-                    current_subscript.args.iter().zip(&expected_subscript.args)
-                {
-                    self.unify_equal_callable_effects_inner(
-                        current_arg.ty,
-                        current_span,
-                        expected_arg.ty,
-                        expected_span,
-                        visited,
-                    )?;
-                }
-                self.unify_equal_callable_effects_inner(
-                    current_subscript.ret,
-                    current_span,
-                    expected_subscript.ret,
-                    expected_span,
-                    visited,
-                )
-            }
-            (Tuple(current_items), Tuple(expected_items)) => {
-                for (current_item, expected_item) in current_items.into_iter().zip(expected_items) {
-                    self.unify_equal_callable_effects_inner(
-                        current_item,
-                        current_span,
-                        expected_item,
-                        expected_span,
-                        visited,
-                    )?;
-                }
-                Ok(())
-            }
-            (Record(current_fields), Record(expected_fields)) => {
-                for ((_, current_field), (_, expected_field)) in
-                    current_fields.into_iter().zip(expected_fields)
-                {
-                    self.unify_equal_callable_effects_inner(
-                        current_field,
-                        current_span,
-                        expected_field,
-                        expected_span,
-                        visited,
-                    )?;
-                }
-                Ok(())
-            }
-            (Variant(current_variants), Variant(expected_variants)) => {
-                for ((_, current_payload), (_, expected_payload)) in
-                    current_variants.into_iter().zip(expected_variants)
-                {
-                    self.unify_equal_callable_effects_inner(
-                        current_payload,
-                        current_span,
-                        expected_payload,
-                        expected_span,
-                        visited,
-                    )?;
-                }
-                Ok(())
-            }
-            (Named(current_named), Named(expected_named)) => {
-                for (current_param, expected_param) in
-                    current_named.params.into_iter().zip(expected_named.params)
-                {
-                    self.unify_equal_callable_effects_inner(
-                        current_param,
-                        current_span,
-                        expected_param,
-                        expected_span,
-                        visited,
-                    )?;
-                }
-                for (current_effect, expected_effect) in current_named
-                    .effect_params
-                    .into_iter()
-                    .zip(expected_named.effect_params)
-                {
-                    self.unify_same_effect(
-                        current_effect,
-                        current_span,
-                        expected_effect,
-                        expected_span,
-                    )?;
-                }
-                Ok(())
-            }
-            _ => Ok(()),
-        }
-    }
-
     fn unify_sub_or_same_type(
         &mut self,
         current: Type,
@@ -757,10 +628,10 @@ impl UnifiedTypeInference {
                     })
                 }),
             (Variable(var), _) => {
-                self.unify_type_variable(var, current_span, expected_ty, expected_span)
+                self.unify_type_variable(var, current_span, expected_ty, expected_span, false)
             }
             (_, Variable(var)) => {
-                self.unify_type_variable(var, expected_span, current_ty, current_span)
+                self.unify_type_variable(var, expected_span, current_ty, current_span, true)
             }
             (Native(cur), Native(exp)) => {
                 if cur.bare_ty != exp.bare_ty {
@@ -883,6 +754,18 @@ impl UnifiedTypeInference {
                         expected_span,
                         sub_or_same,
                     )?;
+                    // A mutable argument is also written back, so its type is invariant.
+                    if self.normalize_mut_type(cur_arg.mut_ty).is_mutable()
+                        || self.normalize_mut_type(exp_arg.mut_ty).is_mutable()
+                    {
+                        self.unify_sub_or_same_type(
+                            cur_arg.ty,
+                            current_span,
+                            exp_arg.ty,
+                            expected_span,
+                            sub_or_same,
+                        )?;
+                    }
                 }
                 // Covariant effects.
                 self.add_effect_dep(&cur.effects, current_span, &exp.effects, expected_span)?;
@@ -923,6 +806,18 @@ impl UnifiedTypeInference {
                         expected_span,
                         sub_or_same,
                     )?;
+                    // A mutable argument is also written back, so its type is invariant.
+                    if self.normalize_mut_type(cur_arg.mut_ty).is_mutable()
+                        || self.normalize_mut_type(exp_arg.mut_ty).is_mutable()
+                    {
+                        self.unify_sub_or_same_type(
+                            cur_arg.ty,
+                            current_span,
+                            exp_arg.ty,
+                            expected_span,
+                            sub_or_same,
+                        )?;
+                    }
                 }
                 self.add_subscript_member_effect_dep(
                     cur.ref_member.as_ref(),
@@ -988,12 +883,14 @@ impl UnifiedTypeInference {
         }
     }
 
+    /// Bind `var` to `ty`; `var_is_supertype` tells whether values of type `ty` flow into `var`.
     fn unify_type_variable(
         &mut self,
         var: TypeVar,
         var_span: Location,
         ty: Type,
         ty_span: Location,
+        var_is_supertype: bool,
     ) -> Result<(), InternalCompilationError> {
         let ty = if ty.contains_any_type_var(var) {
             // A recursive type equation: intern it as a recursive type when it
@@ -1017,11 +914,11 @@ impl UnifiedTypeInference {
                 })
             })?
         } else {
-            // If the type is a first-class callable-like type with concrete effects,
-            // we need to generalize those effects to preserve effect polymorphism.
-            // Otherwise, the concrete effects would be "baked in" and the value
-            // couldn't contribute its effect variable to the parent function.
-            self.generalize_effectful_callable_type(ty)
+            // A variable bound to a callable gets its own effect variable, related to the
+            // callable's by inclusion in the direction of the subtyping, so that the other values
+            // related to `var` do not share effects with this callable.
+            self.effects
+                .generalize_effectful_callable_type(ty, var_is_supertype)
         };
         self.ty_unification_table
             .unify_var_value(var, Some(ty))
@@ -1034,10 +931,6 @@ impl UnifiedTypeInference {
                     sub_or_same: SubOrSameType::SameTypeWithSubEffects
                 })
             })
-    }
-
-    fn generalize_effectful_callable_type(&mut self, ty: Type) -> Type {
-        self.effects.generalize_effectful_callable_type(ty)
     }
 
     fn unify_tuple_project(
@@ -1236,8 +1129,9 @@ impl UnifiedTypeInference {
                 for (actual, expected) in output_tys.iter().zip(&given_outputs) {
                     self.unify_same_type_with_sub_effects(*actual, span, *expected, span)?;
                 }
+                // Applications with equal trait and inputs in one scope are equal.
                 for (actual, expected) in output_effs.iter().zip(&given_effects) {
-                    self.resolve_trait_output_effect(actual, expected, span)?;
+                    self.unify_same_effect(actual.clone(), span, expected.clone(), span)?;
                 }
                 self.evidence_uses.record(origin, given);
             }
@@ -1349,23 +1243,15 @@ impl UnifiedTypeInference {
                 return Ok(None);
             }
             // Fully resolved, validate the trait implementation.
-            let (impl_output_tys, impl_output_effs) = trait_solver.solve_application_outputs(
+            self.resolve_trait_application(
                 trait_id,
                 &input_tys,
                 &output_tys,
                 &output_effs,
                 span,
+                trait_solver,
                 arena,
             )?;
-            // Found, unify the output types and resolve the output effects.
-            assert_eq!(output_tys.len(), impl_output_tys.len());
-            for (cur_ty, exp_ty) in output_tys.iter().zip(impl_output_tys.iter()) {
-                self.unify_same_type_with_sub_effects(*cur_ty, span, *exp_ty, span)?;
-            }
-            assert_eq!(output_effs.len(), impl_output_effs.len());
-            for (cur_eff, exp_eff) in output_effs.iter().zip(impl_output_effs.iter()) {
-                self.resolve_trait_output_effect(cur_eff, exp_eff, span)?;
-            }
             None
         } else {
             // Partially resolved, we can progress a bit.
@@ -1385,22 +1271,15 @@ impl UnifiedTypeInference {
                 self.substitute_in_effect_types_in_place(&mut output_effs);
             }
             if input_tys.iter().all(|ty| ty.is_trait_input_resolved()) {
-                let (impl_output_tys, impl_output_effs) = trait_solver.solve_application_outputs(
+                self.resolve_trait_application(
                     trait_id,
                     &input_tys,
                     &output_tys,
                     &output_effs,
                     span,
+                    trait_solver,
                     arena,
                 )?;
-                assert_eq!(output_tys.len(), impl_output_tys.len());
-                for (cur_ty, exp_ty) in output_tys.iter().zip(impl_output_tys.iter()) {
-                    self.unify_same_type_with_sub_effects(*cur_ty, span, *exp_ty, span)?;
-                }
-                assert_eq!(output_effs.len(), impl_output_effs.len());
-                for (cur_eff, exp_eff) in output_effs.iter().zip(impl_output_effs.iter()) {
-                    self.resolve_trait_output_effect(cur_eff, exp_eff, span)?;
-                }
                 None
             } else {
                 // Not fully resolved, defer the unification.
@@ -1441,6 +1320,7 @@ impl UnifiedTypeInference {
             if let Some(new_constraint) = unified_constraint {
                 new_constraints.push(new_constraint);
             }
+            new_constraints.append(&mut self.obligations);
         }
         Ok(new_constraints)
     }
@@ -2132,14 +2012,102 @@ impl UnifiedTypeInference {
         }
     }
 
-    fn resolve_trait_output_effect(
+    /// Resolve a trait application whose inputs are known: relate its outputs to those of the
+    /// implementation the solver selects, output effects by their polarity. A blanket
+    /// implementation is instantiated here, its constraints becoming obligations, so that its
+    /// outputs keep their variables; other implementations have constant outputs.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_trait_application(
         &mut self,
-        constraint_eff: &EffType,
-        solved_eff: &EffType,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        output_tys: &[Type],
+        output_effs: &[EffType],
         span: Location,
+        trait_solver: &mut TraitSolver<'_>,
+        arena: &mut NodeArena,
     ) -> Result<(), InternalCompilationError> {
-        self.effects
-            .resolve_trait_output_effect(constraint_eff, solved_eff, span)
+        let (impl_output_tys, impl_output_effs) = match trait_solver
+            .resolve_application_symbolically(trait_id, input_tys, output_tys, output_effs, span)?
+        {
+            Some(application) => {
+                let mut subst: InstSubst = Default::default();
+                let mut add_fresh_vars =
+                    |ty_vars: Vec<TypeVar>, eff_vars: FxHashSet<EffectVar>, this: &mut Self| {
+                        for var in ty_vars {
+                            if var.name() >= application.type_var_base
+                                && !subst.0.contains_key(&var)
+                            {
+                                subst.0.insert(var, Type::variable(this.fresh_type_var()));
+                            }
+                        }
+                        for var in eff_vars {
+                            if var.name() >= application.effect_var_base
+                                && !subst.1.contains_key(&var)
+                            {
+                                subst
+                                    .1
+                                    .insert(var, EffType::single_variable(this.fresh_effect_var()));
+                            }
+                        }
+                    };
+                for ty in &application.output_tys {
+                    add_fresh_vars(ty.inner_ty_vars(), ty.inner_effect_vars(), self);
+                }
+                for eff in &application.output_effs {
+                    let mut vars = FxHashSet::default();
+                    eff.fill_with_inner_effect_vars(&mut vars);
+                    add_fresh_vars(vec![], vars, self);
+                }
+                for obligation in &application.obligations {
+                    let mut vars = FxHashSet::default();
+                    obligation.fill_with_inner_effect_vars(&mut vars);
+                    add_fresh_vars(obligation.inner_ty_vars(), vars, self);
+                }
+                let mut mapper = BitmapInstantiationMapper::new(&subst);
+                let impl_output_tys = instantiate_types(&application.output_tys, &mut mapper);
+                let impl_output_effs = application
+                    .output_effs
+                    .iter()
+                    .map(|eff| mapper.map_effect_type(eff))
+                    .collect::<Vec<_>>();
+                self.obligations.extend(
+                    application
+                        .obligations
+                        .iter()
+                        .map(|obligation| obligation.map(&mut mapper)),
+                );
+                (impl_output_tys, impl_output_effs)
+            }
+            None => trait_solver.solve_application_outputs(
+                trait_id,
+                input_tys,
+                output_tys,
+                output_effs,
+                span,
+                arena,
+            )?,
+        };
+        assert_eq!(output_tys.len(), impl_output_tys.len());
+        for (cur_ty, exp_ty) in output_tys.iter().zip(impl_output_tys.iter()) {
+            self.unify_same_type_with_sub_effects(*cur_ty, span, *exp_ty, span)?;
+        }
+        assert_eq!(output_effs.len(), impl_output_effs.len());
+        let polarities = trait_solver.output_effect_polarities(trait_id);
+        for ((cur_eff, exp_eff), polarity) in output_effs
+            .iter()
+            .zip(impl_output_effs.iter())
+            .zip(polarities)
+        {
+            match polarity {
+                EffectPolarity::Positive => self.add_effect_dep(exp_eff, span, cur_eff, span)?,
+                EffectPolarity::Negative => self.add_effect_dep(cur_eff, span, exp_eff, span)?,
+                EffectPolarity::Invariant => {
+                    self.unify_same_effect(cur_eff.clone(), span, exp_eff.clone(), span)?
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Make current and target the same effect type.
@@ -2181,26 +2149,77 @@ impl UnifiedTypeInference {
         self.add_effect_dep(&current.effects, current_span, &target.effects, target_span)
     }
 
-    fn unify_equal_subscript_member_effects(
-        &mut self,
-        current: Option<&SubscriptMemberType>,
-        current_span: Location,
-        target: Option<&SubscriptMemberType>,
-        target_span: Location,
-    ) -> Result<(), InternalCompilationError> {
-        match (current, target) {
-            (Some(current), Some(target)) => self.unify_same_effect(
-                current.effects.clone(),
-                current_span,
-                target.effects.clone(),
-                target_span,
-            ),
-            _ => Ok(()),
-        }
+    pub fn finalize_effect_dependencies(&mut self) -> Result<(), InternalCompilationError> {
+        self.effects.finalize()
     }
 
-    pub fn finalize_effect_dependencies(&mut self) -> Result<(), InternalCompilationError> {
-        self.effects.expand_pending_dependencies()
+    /// The number of effect variables, which is the name of the next fresh one.
+    pub(crate) fn effect_var_count(&self) -> u32 {
+        self.effects.var_count()
+    }
+
+    /// Fix the effect variables named from `start` on, which nothing else observes, at their
+    /// least solution.
+    pub(crate) fn minimize_effects_from(
+        &mut self,
+        start: u32,
+    ) -> Result<(), InternalCompilationError> {
+        let observable = (0..start).map(EffectVar::new).collect();
+        self.effects.minimize_except(&observable)
+    }
+
+    /// Fix the effect variables that nothing outside the inferred code observes at their least
+    /// solution: all but `observable` and the variables of constraints with type variables.
+    pub(crate) fn minimize_unobservable_effects(
+        &mut self,
+        mut observable: FxHashSet<EffectVar>,
+    ) -> Result<(), InternalCompilationError> {
+        self.normalize_remaining_constraints();
+        for constraint in &self.remaining_ty_constraints {
+            if !constraint.inner_ty_vars().is_empty() {
+                constraint.fill_with_inner_effect_vars(&mut observable);
+            }
+        }
+        self.effects.minimize_except(&observable)
+    }
+
+    /// Reject a type whose effects would combine two declared effect variables in one row, which
+    /// no effect set can express.
+    pub(crate) fn check_declared_effects_not_combined(
+        &mut self,
+        ty: &FnType,
+        span: Location,
+    ) -> Result<(), InternalCompilationError> {
+        struct Rows(Vec<EffType>);
+        impl TypeInnerVisitor for Rows {
+            fn visit_eff_ty(&mut self, eff_ty: &EffType) {
+                self.0.push(eff_ty.clone());
+            }
+        }
+        let mut rows = Rows(Vec::new());
+        ty.visit(&mut rows);
+        for row in rows.0 {
+            if let Some((first, second)) = self.effects.combined_declared_variables(&row) {
+                return Err(internal_compilation_error!(EffectVariablesCombined {
+                    first,
+                    second,
+                    span,
+                }));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether effects are read through their publication view, see
+    /// [`Self::finalize_effect_dependencies`].
+    pub(crate) fn effects_finalized(&self) -> bool {
+        self.effects.is_finalized()
+    }
+
+    /// Return to reading effects as before [`Self::finalize_effect_dependencies`], for a
+    /// solver whose inference goes on after a query read its published effects.
+    pub(crate) fn restore_effects_finalized(&mut self, finalized: bool) {
+        self.effects.set_finalized(finalized);
     }
 }
 

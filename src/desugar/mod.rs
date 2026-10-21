@@ -85,6 +85,7 @@ fn desugar_fn_effects(
         PFnEffects::ImplicitGeneric => Ok(EffType::single_variable_id(0)),
         PFnEffects::Explicit(effects) => {
             let mut result = EffType::empty();
+            let mut first_var_name = None;
             for effect in effects {
                 let (name, span) = effect.name;
                 if let Some(primitive) = primitive_effect_by_name(name) {
@@ -92,6 +93,16 @@ fn desugar_fn_effects(
                 } else if let Some(var) =
                     generic_eff_params.and_then(|params| params.get(&name).copied())
                 {
+                    match first_var_name {
+                        Some(first) if first != name => {
+                            return Err(internal_compilation_error!(EffectVariablesCombined {
+                                first,
+                                second: name,
+                                span,
+                            }));
+                        }
+                        _ => first_var_name = Some(name),
+                    }
                     result.insert(Effect::Variable(var));
                 } else {
                     return Err(internal_compilation_error!(EffectNotFound { name, span }));

@@ -36,7 +36,8 @@ Ferlium shows effects in function type displays when the effect set is non-empty
 This `! …` suffix appears in inferred function signatures and IDE annotations.
 Effect-related compilation errors also report effect sets (for example, incompatible effect dependencies).
 
-You can also write effect annotations in function types when you need to constrain inference.
+You can also write effect annotations in function types.
+An annotation is a contract that the compiler checks, not a hint for inference.
 Ordinary function definitions still infer their own effects; explicit source annotations are used for function types, trait method declarations, and trait or type effect bindings.
 Most code still relies on inference.
 
@@ -50,6 +51,34 @@ This propagation is transitive: effects flow through chains of calls.
 
 Generic code can abstract over effects in the same way it abstracts over types.
 For example, a function parameter may have type `(int) -> int ! E`, where `E` stands for the callback's effect set.
+
+## Effect variables and callbacks
+
+A function with fewer effects can be used wherever one with more effects is allowed.
+For example, a pure callback can be passed to a parameter of type `(int) -> int ! fallible`.
+
+An effect set holds at most one effect variable.
+When a function calls several callbacks, its signature uses a single effect variable for all of them:
+
+```ferlium
+fn both<! E>(f: () -> int ! E, g: () -> int ! E) -> int {
+    f() + g()
+}
+```
+
+Sharing `E` does not force callers to pass callbacks with the same effects: each callback only needs effects included in `E`, so `both` performs the effects of both callbacks.
+Writing two effect variables in one effect set, such as `! (A, B)`, is an error, and so is a function whose effects would combine two declared effect variables.
+Inferred signatures follow the same rule: `fn compose(f, g) { |x| g(f(x)) }` is inferred with one effect variable shared by `f`, `g` and the returned function.
+
+## Effects in traits
+
+Traits can expose effect outputs, such as `NextEffect` in `Iterator`, and an implementation may bind them explicitly.
+Such a binding is a bound that callers rely on, and its direction depends on how the trait's methods use the effect.
+For an effect that the methods perform, an implementation may declare fewer effects than a caller expects: a pure `next` can be used where a fallible one is allowed.
+For an effect that the methods receive in callbacks, an implementation may declare more effects: an implementation declaring `CallbackEffect = ()` for a method taking `f: (int) -> int ! CallbackEffect` only accepts pure callbacks.
+
+Likewise, an implementation method must accept every callback the trait method allows: if the trait method takes `f: (int) -> int ! fallible`, the implementation cannot take `f: (int) -> int`.
+A `&mut` parameter is also written back, so its type must match the trait's exactly: an implementation cannot take `x: &mut (() -> int ! fallible)` for a trait method taking `x: &mut (() -> int)`.
 
 ## Examples
 

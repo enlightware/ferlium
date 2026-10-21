@@ -408,7 +408,7 @@ impl TypeInference {
                             match_span,
                         )?;
                         node_id = self.materialize_owned_value(env, node_id, match_span);
-                        self.add_same_type_constraint(
+                        self.add_same_type_with_sub_effects_constraint(
                             env.ir_arena[node_id].ty,
                             sp(*expr),
                             return_ty,
@@ -529,7 +529,7 @@ impl TypeInference {
                 let default_id =
                     self.check_expr(env, *default, return_ty, MutType::constant(), match_span)?;
                 let default_id = self.materialize_owned_value(env, default_id, match_span);
-                self.add_same_type_constraint(
+                self.add_same_type_with_sub_effects_constraint(
                     env.ir_arena[default_id].ty,
                     sp(*default),
                     return_ty,
@@ -598,7 +598,7 @@ impl TypeInference {
                 let default_id =
                     self.check_expr(env, *default, return_ty, MutType::constant(), match_span)?;
                 let default_id = self.materialize_owned_value(env, default_id, match_span);
-                self.add_same_type_constraint(
+                self.add_same_type_with_sub_effects_constraint(
                     env.ir_arena[default_id].ty,
                     sp(*default),
                     return_ty,
@@ -713,7 +713,7 @@ impl TypeInference {
                         expected_return_span,
                     )?;
                     let node_id = self.materialize_owned_value(env, node_id, expected_return_span);
-                    self.add_same_type_constraint(
+                    self.add_same_type_with_sub_effects_constraint(
                         env.ir_arena[node_id].ty,
                         env.ast_arena[*expr].span,
                         expected_return_type,

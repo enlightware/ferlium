@@ -151,6 +151,9 @@ If you omit them, Ferlium infers them from the method signatures.
 If you write them explicitly, they must agree with the inferred ones.
 Effect outputs, such as `NextEffect`, work the same way for traits that expose them.
 
+An explicit effect output is a bound that callers rely on, and an implementation method must accept every argument the trait method allows.
+The chapter on [effects](./effects.md#effects-in-traits) explains how these bounds apply to effects.
+
 ## Associated constants
 
 Traits may also declare associated constants.

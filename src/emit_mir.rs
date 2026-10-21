@@ -3,6 +3,7 @@
 
 use std::{fmt::Write, mem};
 
+use itertools::Itertools;
 use ustr::Ustr;
 
 use crate::{
@@ -45,7 +46,7 @@ use crate::{
         },
     },
     types::{
-        effects::{Effect, PrimitiveEffect, no_effects},
+        effects::{EffType, Effect, PrimitiveEffect, no_effects},
         mutability::MutType,
         r#trait::{TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex},
         r#type::{
@@ -2577,7 +2578,7 @@ impl<'a> Emitter<'a> {
         &mut self,
         node: &ENode,
         n: &hir::CallDictionaryFunction<Elaborated>,
-    ) -> (mir::Value, Vec<mir::Value>) {
+    ) -> (mir::Value, Vec<mir::Value>, Option<Instantiation>) {
         if let Some(evidence) = self.static_evidence_node(&self.hir_arena[n.dictionary])
             && let Some((function, hidden_evidence)) =
                 self.static_dictionary_entry(&evidence, n.entry_index)
@@ -2587,7 +2588,15 @@ impl<'a> Emitter<'a> {
                 .map(|evidence| mir::Value::Evidence(Box::new(evidence)))
                 .collect();
             arguments.extend(self.lower_arguments(&n.arguments, &n.ty));
-            return (mir::Value::Function(function), arguments);
+            let mir::value::StaticEvidence::Dictionary { definition, .. } = &evidence else {
+                unreachable!("a dictionary entry comes from dictionary evidence");
+            };
+            let instantiation = self.dictionary_entry_instantiation(
+                *definition,
+                function,
+                n.output_effs.as_deref(),
+            );
+            return (mir::Value::Function(function), arguments, instantiation);
         }
         let dictionary = self.lower_dictionary_operand(&self.hir_arena[n.dictionary]);
         let function_ty = Type::function_type(n.ty.fn_ty.clone());
@@ -2603,7 +2612,57 @@ impl<'a> Emitter<'a> {
             ))
             .unwrap();
         let arguments = self.lower_arguments(&n.arguments, &n.ty);
-        (function_place, arguments)
+        (function_place, arguments, None)
+    }
+
+    /// The instantiation of a dictionary entry called directly, when it is generic over effects
+    /// only.
+    ///
+    /// A dictionary serves every instantiation of its trait's output effects, so an entry such
+    /// as a blanket implementation's method thunk quantifies the implementation's open output
+    /// effects. Each such quantifier is the output effect at its position, which the call's trait
+    /// application instantiates.
+    fn dictionary_entry_instantiation(
+        &self,
+        definition: TraitDictionaryId,
+        function: FunctionId,
+        output_effs: Option<&[EffType]>,
+    ) -> Option<Instantiation> {
+        let scheme = &self
+            .env
+            .module_by_id(function.module)?
+            .get_function_by_id(function.function)?
+            .definition
+            .ty_scheme;
+        if !scheme.ty_quantifiers.is_empty() || scheme.eff_quantifiers.is_empty() {
+            return None;
+        }
+        let impl_output_effs = &self
+            .env
+            .module_by_id(definition.module_id)?
+            .get_impl_data(definition.impl_id)?
+            .output_effs;
+        let output_effs = output_effs?;
+        assert_eq!(
+            impl_output_effs.len(),
+            output_effs.len(),
+            "a trait application has one output effect per output of its implementation"
+        );
+        let eff_args = scheme
+            .eff_quantifiers
+            .iter()
+            .sorted()
+            .map(|quantifier| {
+                let position = impl_output_effs
+                    .iter()
+                    .position(|effect| *effect == EffType::single_variable(*quantifier))?;
+                Some(output_effs[position].clone())
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(Instantiation {
+            ty_args: Vec::new(),
+            eff_args,
+        })
     }
 
     /// Inserts an allocation of the result storage for a call to a function of type `f` and returns
@@ -2682,8 +2741,9 @@ impl<'a> Emitter<'a> {
             }
             K::CallDictionaryFunction(n) => {
                 // Project the function out of the dictionary, then call it.
-                let (function, arguments) = self.lower_dictionary_function_target(node, n);
-                (function, arguments, n.ty.clone(), None)
+                let (function, arguments, instantiation) =
+                    self.lower_dictionary_function_target(node, n);
+                (function, arguments, n.ty.clone(), instantiation)
             }
             _ => return None,
         })
