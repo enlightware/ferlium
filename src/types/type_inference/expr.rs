@@ -3179,7 +3179,9 @@ impl TypeInference {
         let previous = env.place_aliases.insert(binding, accessor.node);
         // If the accessor's slide may fail, elaboration holds the values leaving the body, as its
         // result or through a transfer, in locals until the slide has run, which drop them if it
-        // fails. Effects are not final here, so this is a superset of the projections it holds.
+        // fails. Effects are not final here, so this is a superset of the projections it holds:
+        // deciding exactly would need a "slide may fail" fact settled after effect minimization.
+        // The extra `Value` requirements are sound and, in std, never reach a published scheme.
         let slide_may_fail = !accessor.effects.cannot_fail();
         env.failing_projections += usize::from(slide_may_fail);
         let result = build_body(self, env, place, accessor.ty, true);

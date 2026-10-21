@@ -1455,10 +1455,18 @@ struct HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
     warnings: &'w mut Vec<CompilationWarning>,
     /// The open projections whose slide may fail, innermost last.
     failing_projections: Vec<FailingProjection>,
-    /// The number of failing projections open when each loop was entered.
-    loop_projection_depths: FxHashMap<LoopId, usize>,
-    /// The next loop label unused in the source function, computed when first needed.
-    next_loop_id: Option<LoopId>,
+    /// The elaborated loop of each source loop label.
+    loops: FxHashMap<LoopId, ElaboratedLoop>,
+    /// The next label of an elaborated loop, source loops and generated ones alike.
+    next_loop_id: LoopId,
+}
+
+/// An elaborated source loop.
+#[derive(Clone, Copy)]
+struct ElaboratedLoop {
+    label: LoopId,
+    /// The number of failing projections open when it was entered.
+    failing_projections: usize,
 }
 
 /// The values transferred out of the body of an open projection whose slide may fail.
@@ -1528,8 +1536,8 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             in_progress: FxHashSet::default(),
             warnings,
             failing_projections: Vec::new(),
-            loop_projection_depths: FxHashMap::default(),
-            next_loop_id: None,
+            loops: FxHashMap::default(),
+            next_loop_id: LoopId::from_index(0),
         }
     }
 
@@ -1592,32 +1600,22 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
         LocalDecl::push_with_next_slot(&mut self.locals, local)
     }
 
-    /// A loop label unused in the source function.
-    fn fresh_loop_id(&mut self, src: &UNodeArena) -> LoopId {
-        let next = *self.next_loop_id.get_or_insert_with(|| {
-            let used = src.iter().filter_map(|(_, node)| match &node.kind {
-                NodeKind::Loop(node) => Some(node.label.as_index() + 1),
-                _ => None,
-            });
-            LoopId::from_index(used.max().unwrap_or(0))
-        });
-        self.next_loop_id = Some(LoopId::from_index(next.as_index() + 1));
-        next
+    fn fresh_loop_id(&mut self) -> LoopId {
+        let label = self.next_loop_id;
+        self.next_loop_id = LoopId::from_index(label.as_index() + 1);
+        label
     }
 
-    /// Build a transfer of `value` to `target`. If it leaves failing projections and its value
-    /// needs a drop, hold the value until their slides have run (see `FailingProjection`).
+    /// Build a transfer of `value` to `target`, crossing the failing projections from `crossed`
+    /// inwards. If it crosses any and its value needs a drop, hold the value until their slides
+    /// have run (see `FailingProjection`).
     fn transfer_value(
         &mut self,
-        src: &UNodeArena,
         value: ENodeId,
         target: TransferTarget,
+        crossed: usize,
         span: Location,
     ) -> Result<NodeKind<Elaborated>, InternalCompilationError> {
-        let crossed = match target {
-            TransferTarget::Return => 0,
-            TransferTarget::Break(label) => self.loop_projection_depths[&label],
-        };
         let value_ty = self.dst[value].ty;
         if crossed >= self.failing_projections.len() || value_ty == Type::never() {
             return Ok(target.transfer(value));
@@ -1628,7 +1626,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             return Ok(target.transfer(value));
         }
         let local = self.push_owned_temp(value_ty, drop, span, ustr("$transferred"));
-        let exit = self.fresh_loop_id(src);
+        let exit = self.fresh_loop_id();
         // Leave through the outermost crossed projection: its exits are outside all the others.
         self.failing_projections[crossed]
             .transfers
@@ -1671,7 +1669,6 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
     /// `loop 'done { loop 'exit_1 { … projection; break 'done result … }; transfer_1 }`.
     fn elaborate_failing_projection(
         &mut self,
-        src: &UNodeArena,
         mut projection: hir::WithYielded<Elaborated>,
         exits: FailingProjection,
         ty: Type,
@@ -1745,8 +1742,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 span,
             ),
         };
-        let mut held_locals = Vec::with_capacity(exits.transfers.len());
-        let done = (ty != Type::never()).then(|| self.fresh_loop_id(src));
+        let done = (ty != Type::never()).then(|| self.fresh_loop_id());
         if let Some(done) = done {
             node = self.alloc_elaborated_node(
                 NodeKind::Break(hir::Break {
@@ -1793,7 +1789,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 effects.clone(),
                 span,
             );
-            held_locals.push(held.local);
+            cleanup.push(held.local);
         }
         if let Some(done) = done {
             node = self.alloc_elaborated_node(
@@ -1806,26 +1802,8 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 span,
             );
         }
-        // The held values are stored inside nested blocks but owned by this one: give them their
-        // storage here, before entering those blocks.
-        let mut nodes = Vec::with_capacity(held_locals.len() + 1);
-        for &local in &held_locals {
-            let local_ty = self.locals[local.as_index()].ty;
-            let uninit = self.alloc_elaborated_node(NodeKind::Uninit, local_ty, no_effects(), span);
-            nodes.push(self.alloc_elaborated_node(
-                NodeKind::StoreLocal(hir::StoreLocal {
-                    value: uninit,
-                    id: local,
-                }),
-                Type::unit(),
-                no_effects(),
-                span,
-            ));
-        }
-        nodes.push(node);
-        cleanup.extend(held_locals);
         Ok(NodeKind::Block(b(hir::Block {
-            body: b(SVec2::from_vec(nodes)),
+            body: b(SVec2::from_vec(vec![node])),
             cleanup,
         })))
     }
@@ -2978,7 +2956,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             }
             Return(node) => {
                 let value = self.elaborate_node(src, *node)?;
-                self.transfer_value(src, value, TransferTarget::Return, node_span)?
+                self.transfer_value(value, TransferTarget::Return, 0, node_span)?
             }
             Block(block) => {
                 let cleanup = block.cleanup.clone();
@@ -3223,18 +3201,33 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 }))
             }
             Loop(node) => {
-                self.loop_projection_depths
-                    .insert(node.label, self.failing_projections.len());
+                let label = self.fresh_loop_id();
+                let failing_projections = self.failing_projections.len();
+                self.loops.insert(
+                    node.label,
+                    ElaboratedLoop {
+                        label,
+                        failing_projections,
+                    },
+                );
                 Loop(hir::Loop {
-                    label: node.label,
+                    label,
                     body: self.elaborate_node(src, node.body)?,
                 })
             }
             Break(node) => {
                 let value = self.elaborate_node(src, node.value)?;
-                self.transfer_value(src, value, TransferTarget::Break(node.label), node_span)?
+                let target = self.loops[&node.label];
+                self.transfer_value(
+                    value,
+                    TransferTarget::Break(target.label),
+                    target.failing_projections,
+                    node_span,
+                )?
             }
-            Continue(node) => Continue(hir::Continue { label: node.label }),
+            Continue(node) => Continue(hir::Continue {
+                label: self.loops[&node.label].label,
+            }),
             Yield(node) => Yield(self.elaborate_node(src, *node)?),
             WithYielded(node) => {
                 let accessor = self.elaborate_node(src, node.accessor)?;
@@ -3289,7 +3282,6 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     };
                     match exits {
                         Some(exits) => self.elaborate_failing_projection(
-                            src,
                             projection,
                             exits,
                             node_ty,

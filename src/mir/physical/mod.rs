@@ -670,7 +670,7 @@ fn expand_physical_mir(
             let body = drop_elaboration::elaborate(body, semantic, env, |variant, payload| {
                 lowerer.intern_variant_payload_release(variant, payload)
             });
-            let body = drop_elaboration::clear_failed_results(body, env);
+            let clear_failed_result = drop_elaboration::failure_may_leave_result(&body, env);
             let body = scalar_arguments::call_scalar_clones(&body, env).unwrap_or(body);
             // Physical MIR keeps a scalar value only where the callee's entry takes or returns it
             // directly.
@@ -691,7 +691,10 @@ fn expand_physical_mir(
             let body =
                 scalar_arguments::place_no_value_results(&body, |call| transports.result(call))
                     .unwrap_or(body);
-            let body = lowerer.lower_body(function, original, body)?;
+            let mut body = lowerer.lower_body(function, original, body)?;
+            if clear_failed_result {
+                body = clear_result_on_failure(body);
+            }
             *entry = Some(
                 if lowerer.known.resolve(original, |_| None) == Some(KnownCallee::BlackBox) {
                     lowerer.add_black_box_barrier(function, body)?
@@ -710,6 +713,36 @@ fn expand_physical_mir(
     }
     entries.extend(lowerer.helpers.into_iter().map(Some));
     Ok(entries)
+}
+
+/// Forget the result on every failing exit, after all of the exit's cleanup: releasing a variant
+/// payload reads its shell's tag. Forgetting an absent result is harmless and costs no code.
+fn clear_result_on_failure(body: Function) -> Function {
+    let Some(index) = body
+        .parameters()
+        .iter()
+        .position(|parameter| parameter.kind == ParameterKind::Return)
+    else {
+        return body;
+    };
+    let result = Value::Parameter(ParameterId::from_index(index));
+    let mut edit = FunctionEdit::new(body);
+    let exits = edit
+        .blocks()
+        .filter(|&block| {
+            matches!(
+                edit.block(block).terminator.kind,
+                TerminatorKind::PropagateError
+            )
+        })
+        .collect::<Vec<_>>();
+    for exit in exits {
+        let span = edit.block(exit).terminator.span;
+        edit.block_mut(exit)
+            .operations
+            .push(Operation::clear(span, result.clone()));
+    }
+    edit.finish_unverified()
 }
 
 /// Rebuild process-local bindings and derived catalogs, then verify lowered or restored bodies.
@@ -1773,15 +1806,6 @@ impl<'a> PhysicalLowerer<'a> {
         for exit in exits {
             let span = edit.block(exit).terminator.span;
             let mut next = edit.add_block(Terminator::propagate_error(span));
-            // Forgetting a failed result comes last: releasing a payload reads its shell's tag.
-            if let Some(last) = edit.block(exit).operations.last()
-                && matches!(last.kind, OperationKind::Clear)
-                && matches!(&last.operands[0], Value::Parameter(parameter)
-                    if edit.parameters()[parameter.as_index()].kind == ParameterKind::Return)
-            {
-                let clear = edit.block_mut(exit).operations.pop().unwrap();
-                edit.block_mut(next).operations.push(clear);
-            }
             // `cleanups` is deepest-first. Building the chain backwards preserves that execution
             // order, so no containing allocation is freed before an address stored inside it.
             for cleanup in cleanups.iter().rev() {

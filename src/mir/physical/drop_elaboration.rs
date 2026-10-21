@@ -153,22 +153,22 @@ pub(super) fn elaborate(
     }
 }
 
-/// A failing callee leaves no live result. Construction in place may already have written parts
-/// of the result before a later part fails. Lowering builds owned parts in temporaries, dropped on
-/// the error path, and moves them into the result only once all succeeded; a value returned from
+/// Whether a failing path may leave part of the result written, which must then be forgotten: a
+/// failing callee leaves no live result. Construction in place may already have written parts of
+/// the result before a later part fails. Lowering builds owned parts in temporaries, dropped on the
+/// error path, and moves them into the result only once all succeeded; a value returned from
 /// inside a projection whose slide may fail is likewise held until the slide has run. What may
 /// remain is a variant's shell, written first so that its payload can be built inside it. A shell
 /// owns nothing itself (an indirect payload has its own release), so forgetting it is the whole
 /// cleanup.
-pub(super) fn clear_failed_results(body: Function, env: ModuleEnv<'_>) -> Function {
+pub(super) fn failure_may_leave_result(body: &Function, env: ModuleEnv<'_>) -> bool {
     let Some(index) = body
         .parameters()
         .iter()
         .position(|parameter| parameter.kind == ParameterKind::Return)
     else {
-        return body;
+        return false;
     };
-    let result = Value::Parameter(ParameterId::from_index(index));
     let failing = body
         .blocks()
         .filter(|&block| {
@@ -179,44 +179,30 @@ pub(super) fn clear_failed_results(body: Function, env: ModuleEnv<'_>) -> Functi
         })
         .collect::<Vec<_>>();
     if failing.is_empty() {
-        return body;
+        return false;
     }
-    let places = Places::of(&body, env);
-    let root = places.values[&result];
-    let entries = places.analyze_with(&body, |state, op, success| {
+    let places = Places::of(body, env);
+    let root = places.values[&Value::Parameter(ParameterId::from_index(index))];
+    let entries = places.analyze_with(body, |state, op, success| {
         transfer_owned_parts(&places, state, op, success)
     });
-    let cleared = failing
-        .into_iter()
-        .filter(|&block| {
-            let Some(mut state) = entries[block.as_index()].clone() else {
-                return false;
-            };
-            for op in body.block(block).operations() {
-                transfer_owned_parts(&places, &mut state, op, true);
-            }
-            if places.status(&state, root) == Absent {
-                return false;
-            }
-            let owned = may_own_live_resources(&places, &state, root, env);
+    let mut written = false;
+    for block in failing {
+        let Some(mut state) = entries[block.as_index()].clone() else {
+            continue;
+        };
+        for op in body.block(block).operations() {
+            transfer_owned_parts(&places, &mut state, op, true);
+        }
+        if places.status(&state, root) != Absent {
             debug_assert!(
-                !owned,
+                !may_own_live_resources(&places, &state, root, env),
                 "a failing path leaves an owned part of the result live"
             );
-            !owned
-        })
-        .collect::<Vec<_>>();
-    if cleared.is_empty() {
-        return body;
+            written = true;
+        }
     }
-    let mut edit = FunctionEdit::new(body);
-    for block in cleared {
-        let span = edit.block(block).terminator.span;
-        edit.block_mut(block)
-            .operations
-            .push(Operation::clear(span, result.clone()));
-    }
-    edit.finish_unverified()
+    written
 }
 
 /// Whether a part of `id` owning resources may be live in `state`, as computed by

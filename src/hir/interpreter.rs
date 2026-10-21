@@ -2717,6 +2717,16 @@ fn eval_block_with_cleanup(
     cleanup_drops: &[LocalDeclId],
 ) -> EvalControlFlowResult {
     let env_size = ctx.runtime.environment.len();
+    // The block owns the storage of its cleanup locals for its whole extent, also when they are
+    // first stored in a nested block.
+    if let Some(last) = cleanup_drops
+        .iter()
+        .map(|id| local_environment_index(ctx, locals, *id))
+        .max()
+    {
+        ctx.runtime.check_environment_cell_limit(last, None)?;
+        ctx.runtime.ensure_environment_slot(last);
+    }
     let mut last_value: Option<Value> = None;
     for node in nodes.iter() {
         match eval_node_with_ctx(arena, *node, ctx, locals) {
