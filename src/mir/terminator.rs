@@ -243,6 +243,15 @@ pub enum TerminatorKind {
 }
 
 impl TerminatorKind {
+    /// Whether this terminator ends execution rather than returning to a caller: no later
+    /// operation of this frame runs, so values it still holds are never read or dropped by it.
+    pub(crate) fn abandons_frame(&self) -> bool {
+        matches!(
+            self,
+            Self::EffectViolation | Self::FailureDuringCleanup | Self::InvariantFailure { .. }
+        )
+    }
+
     /// Basic blocks this terminator form may transfer control to.
     pub(crate) fn successors(&self) -> impl Iterator<Item = BlockId> {
         let (cases, targets): (&[(Ustr, BlockId)], [_; 2]) = match self {

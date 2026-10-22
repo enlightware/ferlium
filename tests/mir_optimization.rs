@@ -674,3 +674,44 @@ fn closures_of_dictionaries_alone_are_called_directly() {
         );
     }
 }
+
+/// Traversing a hash collection steps through its buckets with the generic `Value` impl of the
+/// optional entry, closed over the key and value dictionaries at run time. Once those are
+/// constants, the closed dictionary is static evidence: dropping and cloning a bucket are direct
+/// calls. The bucket array, each bucket and each value are then read in place, although the
+/// inlined `next` poisons execution rather than dropping them on its unchecked index's failure.
+#[test]
+fn hash_collection_traversals_read_entries_in_place() {
+    for (name, body) in [
+        (
+            "for",
+            "fn view(t: map<int, [int]>) -> int { let mut n = 0; for (k, v) in t { n += k + len(v) }; n }",
+        ),
+        (
+            "fold",
+            "fn view(t: map<int, [int]>) -> int { fold(t, 0, |n, e| n + e.0 + len(e.1)) }",
+        ),
+        (
+            "string keys",
+            "fn view(t: map<string, [int]>) -> int { let mut n = 0; for (k, v) in t { n += len(k) + len(v) }; n }",
+        ),
+        (
+            "set",
+            "fn view(s: set<[int]>) -> int { let mut n = 0; for v in s { n += len(v) }; n }",
+        ),
+    ] {
+        let optimized = emit("hash_traversal", body, MirOptimization::Enabled);
+        let view = rendered_function(&optimized, "view");
+        assert!(
+            !view.lines().any(|line| {
+                let line = line.trim_start();
+                line.starts_with("clone ") || line.contains("call %") || line.contains("dict_entry")
+            }),
+            "{name}: entries must be read in place, without dynamic dispatch:\n{view}"
+        );
+        assert!(
+            !view.contains("build_dictionary"),
+            "{name}: a dictionary closed over constants must be static:\n{view}"
+        );
+    }
+}

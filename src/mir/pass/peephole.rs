@@ -3,14 +3,19 @@
 
 //! Small local MIR rewrites.
 
+use rustc_hash::FxHashMap;
+
 use crate::{
     containers::b,
     hir::value::LiteralValue,
     mir::{
         self, BlockId, Function, Operation, OperationKind,
         edit::FunctionEdit,
+        pass::dataflow::static_evidence_operand,
         terminator::{Terminator, TerminatorKind},
+        value::{StaticEvidence, ValueId},
     },
+    module::ModuleEnv,
 };
 
 struct BoolStore {
@@ -153,6 +158,84 @@ fn single_bool_store(func: &Function, block: BlockId) -> Option<BoolStore> {
         destination: destination.clone(),
         join: target,
     })
+}
+
+/// Replaces each dictionary closed over static evidence only by that static evidence.
+///
+/// Inlining binds a callee's dictionary parameters to the caller's evidence, so a
+/// `build_dictionary` that closed a blanket impl over run-time evidence can end up closing it over
+/// constants, such as `Value<Option<HashMapEntry<K, V>>>` once `K` and `V` are known. As a
+/// register, its entries are opaque to devirtualization; as static evidence, they resolve to
+/// direct calls carrying their captures, which specialization and inlining then reach. Nested
+/// closures resolve to a fixpoint, since a capture may itself be such a register.
+pub(crate) fn close_static_dictionaries(func: &Function, env: ModuleEnv<'_>) -> Option<Function> {
+    let mut closed: FxHashMap<ValueId, StaticEvidence> = FxHashMap::default();
+    let static_operand =
+        |closed: &FxHashMap<ValueId, StaticEvidence>, operand: &mir::Value| match operand {
+            mir::Value::Register(id) => closed.get(id).cloned(),
+            _ => static_evidence_operand(operand),
+        };
+    loop {
+        let found = closed.len();
+        for operation in func.blocks().flat_map(|block| {
+            let block = func.block(block);
+            block
+                .operations()
+                .iter()
+                .chain(match &block.terminator().kind {
+                    TerminatorKind::Invoke { operation, .. } => Some(operation),
+                    _ => None,
+                })
+        }) {
+            let OperationKind::BuildDictionary { definition, .. } = operation.kind else {
+                continue;
+            };
+            let Some(result) = operation.result_id() else {
+                continue;
+            };
+            if closed.contains_key(&result) {
+                continue;
+            }
+            let Some(captures) = operation
+                .operands
+                .iter()
+                .map(|operand| static_operand(&closed, operand))
+                .collect::<Option<Box<[_]>>>()
+            else {
+                continue;
+            };
+            closed.insert(
+                result,
+                StaticEvidence::Dictionary {
+                    definition,
+                    captures,
+                },
+            );
+        }
+        if closed.len() == found {
+            break;
+        }
+    }
+    if closed.is_empty() {
+        return None;
+    }
+
+    let mut edit = FunctionEdit::new(func.clone());
+    for block in edit.blocks().collect::<Vec<_>>() {
+        edit.block_mut(block).operations.retain(|operation| {
+            operation
+                .result_id()
+                .is_none_or(|result| !closed.contains_key(&result))
+        });
+    }
+    edit.visit_operands_mut(|operand| {
+        if let mir::Value::Register(id) = operand
+            && let Some(evidence) = closed.get(id)
+        {
+            *operand = mir::Value::Evidence(b(evidence.clone()));
+        }
+    });
+    Some(edit.finish(env))
 }
 
 pub(super) fn bool_value(func: &Function, value: &mir::Value) -> Option<bool> {

@@ -1686,6 +1686,45 @@ fn mapped_managed_payload_lifetimes() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_map_traversal_entry_lifetimes() {
+    let mut session = TestSession::new();
+    let table = "fn table() -> map<int, [int]> { let mut t: map<int, [int]> = empty(); map_insert(t, 1, [1, 2]); map_insert(t, 2, []); map_insert(t, 3, [3]); t }";
+    for (body, expected) in [
+        (
+            "fn f(t: map<int, [int]>) -> int { let mut n = 0; for (k, v) in t { n += k + len(v) }; n } f(table())",
+            9,
+        ),
+        (
+            "fn f(t: map<int, [int]>) -> int { fold(t, 0, |n, e| n + e.0 + len(e.1)) } f(table())",
+            9,
+        ),
+        (
+            "fn f(t: map<int, [int]>) -> int { let mut n = 0; for (k, v) in t { n += k + len(v) }; n } f(empty())",
+            0,
+        ),
+        // A value can escape the traversal and mutate independently of the map.
+        (
+            "fn first(t: map<int, [int]>) -> [int] { for (k, v) in t { if len(v) > 1 { return v } }; [] } let mut t = table(); let mut v = first(t); v[0] = 7; let w = match map_get(t, 1) { Some(w) => w, None => [] }; v[0] + w[0]",
+            8,
+        ),
+        // The traversal keeps its snapshot while the loop body changes the map.
+        (
+            "let mut t = table(); let mut n = 0; for (k, v) in t { map_insert(t, k + 10, [k]); n += 1 }; n + len(t)",
+            9,
+        ),
+    ] {
+        assert_val_eq!(session.run(&format!("{table} {body}")), int(expected));
+    }
+    assert_eq!(
+        session.fail_run(&format!(
+            "{table} fn f(t: map<int, [int]>, d: int) -> int {{ let mut n = 0; for (k, v) in t {{ n += idiv(len(v), d) }}; n }} f(table(), 0)"
+        )),
+        SourceFailureKind::DivisionByZero,
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn filter_predicate_failure_propagates() {
     let mut session = TestSession::new();
     // The failure occurs in the predicate, not in the consuming loop body.

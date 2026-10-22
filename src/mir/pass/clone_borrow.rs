@@ -621,8 +621,9 @@ fn lifetime(
         if state != 0 && matches!(basic.terminator().kind, TerminatorKind::Yield { .. }) {
             return None;
         }
+        // Abandoning the frame skips the copy's cleanup; the borrowed source is just as unread.
         let mut successors = basic.terminator().successors().peekable();
-        if state != 0 && successors.peek().is_none() {
+        if state != 0 && successors.peek().is_none() && !basic.terminator().kind.abandons_frame() {
             return None;
         }
         work.extend(successors.map(|target| (target, state)));
@@ -798,6 +799,30 @@ mod tests {
         check(
             "fn view(x: string, d: int) -> int { let mut copy = x; idiv(len(copy), d) }",
             true,
+        );
+    }
+
+    /// An inlined callee whose `effects_unsafe` failure poisons execution leaves the caller's copy
+    /// undropped on that path: abandoning the frame reads neither the copy nor its source.
+    #[test]
+    fn borrows_across_a_poisoning_exit() {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        session.set_allow_unsafe(true);
+        let body = session.emit_mir(
+            "poisoning_borrow",
+            "fn at(x: [string], i: int) -> int { effects_unsafe { len(x[i]) } }
+            fn view(x: [string], i: int) -> int { let mut copy = x; at(copy, i) + len(copy) }",
+        );
+        let view = &body[body.find("fn view(").unwrap()..];
+        let view = &view[..view[1..].find("\nfn ").map_or(view.len(), |end| end + 1)];
+        assert!(
+            view.contains("effect_violation"),
+            "fixture needs a poisoning exit: {view}"
+        );
+        assert!(
+            !view.contains("clone [string]"),
+            "the copy must borrow its parameter: {view}"
         );
     }
 

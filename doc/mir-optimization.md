@@ -31,6 +31,7 @@ Per function (`mir::pass::optimize_function`):
 ```text
 for round in 0..MAX_ROUNDS:
     load CSE      // read a place nothing wrote since an earlier load as that load's value
+    close dicts   // a dictionary closed over static evidence alone becomes static evidence
     fold          // constant/semantic folding, devirtualization; block merging in its own edit
     specialize    // point generic calls at concrete copies
     call CSE      // merge repeated addressor and trivial value calls before copying their bodies
@@ -169,8 +170,10 @@ Caller-rooted provenance does not imply write permission: readers with mutable s
 structural storage, retaining a copy when the source is an addressor referent with unproved permissions.
 For example, a local string copy used only by `len` can read the original instead, including across
 read-only loops. A two-state CFG walk checks both absent and active lifetimes at joins, rejecting
-reconstruction while active and requiring cleanup before every finite exit. It does not require
-loops to terminate. A `clear` of the clone's destination also ends its lifetime: by contract, that
+reconstruction while active and requiring cleanup before every finite exit. An exit that abandons
+the frame (`effect_violation`, a failure during cleanup or an invariant failure) needs none: no
+later operation drops the copy or reads its source, as when an inlined callee's `effects_unsafe`
+index fails. It does not require loops to terminate. A `clear` of the clone's destination also ends its lifetime: by contract, that
 place has no pending drop. Those clears disappear with the clone's drops, so they cannot invalidate
 the borrowed source. Stack restores preserve parameter storage; local sources use a lazy, cached
 must-analysis of markers that protect the current allocation incarnation. Reallocation invalidates
@@ -308,6 +311,12 @@ evidence is inserted immediately after that operand and interpreted as the direc
 argument prefix. The
 `Value` methods are the larger population: generic code drops through a dictionary entry far more
 often than it calls through one.
+
+Generic code closes a blanket impl's dictionary over its own evidence at run time with
+`build_dictionary`, as hash-collection traversal does for the `Value` impl of its optional entries.
+Once inlining has bound that evidence to constants, each round first replaces such a dictionary by
+the equivalent static evidence (nested closures to a fixpoint), so its entries devirtualize like
+any constant dictionary's.
 
 Inlining can expose one last `dict_entry`/dispatch pair after the final fold round. A final
 devirtualization sweep catches only those known dictionary-entry callees before DCE, so the now

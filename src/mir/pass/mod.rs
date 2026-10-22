@@ -325,6 +325,12 @@ pub(crate) fn optimize_function(
         {
             current = Some(merged);
         }
+        // Inlining binds dictionary parameters to constants, which can leave a dictionary closed
+        // over static evidence only; as static evidence, folding devirtualizes its entries.
+        let source = current.as_ref().unwrap_or(function);
+        if let Some(closed) = peephole::close_static_dictionaries(source, env) {
+            current = Some(closed);
+        }
         let source = current.as_ref().unwrap_or(function);
         if let Some(folded) = fold::fold_function(
             source,
