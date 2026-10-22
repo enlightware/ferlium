@@ -1637,6 +1637,55 @@ fn filtered_managed_payload_lifetimes() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn mapped_managed_payload_lifetimes() {
+    let mut session = TestSession::new();
+    for (source, expected) in [
+        (
+            "fn f(rows: [[int]]) -> int { iter(rows) |> map(|row| len(row)) |> sum() } f([[1, 2], [], [3]])",
+            3,
+        ),
+        (
+            "fn f(rows: [[int]]) -> int { iter(rows) |> filter(|row| len(row) > 0) |> map(|row| len(row)) |> sum() } f([[1, 2], [], [3]])",
+            3,
+        ),
+        (
+            "fn f(rows: [[int]]) -> int { let mut n = 0; for l in iter(rows) |> map(|row| len(row)) { n += l }; n } f([[1, 2], [], [3]])",
+            3,
+        ),
+        (
+            "fn f(rows: [[int]]) -> int { let lengths = rows |> map(|row| len(row)); len(lengths) + lengths[0] } f([[1, 2], [], [3]])",
+            5,
+        ),
+        (
+            "fn f(rows: [[int]]) -> int { iter(rows) |> filter(|row| len(row) > 0) |> map(|row| len(row)) |> sum() } f([])",
+            0,
+        ),
+        // A mapped element can escape the pipeline and mutate independently of its source.
+        (
+            "fn first(rows: [[int]]) -> [int] { for row in iter(rows) |> filter(|row| len(row) > 0) |> map(|row| row) { return row }; [] } let mut rows = [[], [1, 2]]; let mut row = first(rows); row[0] = 7; rows[1][1] = 9; row[0] + row[1] + rows[1][0] + rows[1][1]",
+            19,
+        ),
+        // The pipeline keeps its snapshot while the loop body replaces the source.
+        (
+            "let mut rows = [[1], [2, 3]]; let mut n = 0; for l in iter(rows) |> filter(|row| len(row) > 0) |> map(|row| len(row)) { rows[1] = [4]; n += l }; n + len(rows[1])",
+            4,
+        ),
+        (
+            "fn f(rows: [[int]], d: int) -> int { iter(rows) |> filter(|row| len(row) > 0) |> map(|row| idiv(len(row), d)) |> sum() } f([[1, 2], [], [3, 4]], 2)",
+            2,
+        ),
+    ] {
+        assert_val_eq!(session.run(source), int(expected));
+    }
+    // An accepted element is still owned by the pipeline when the mapping callback fails.
+    assert_eq!(
+        session.fail_run("fn f(rows: [[int]], d: int) -> int { iter(rows) |> filter(|row| len(row) > 0) |> map(|row| idiv(len(row), d)) |> sum() } f([[], [1, 2]], 0)"),
+        SourceFailureKind::DivisionByZero,
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn filter_predicate_failure_propagates() {
     let mut session = TestSession::new();
     // The failure occurs in the predicate, not in the consuming loop body.

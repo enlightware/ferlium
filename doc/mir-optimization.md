@@ -178,6 +178,10 @@ older marker facts, and joins intersect them. Unresolved aliases, consuming uses
 preservation and suspension inside the borrowed lifetime retain the copy.
 A copy into a field of a local product, such as an inlined array iterator holding the array it
 reads, is borrowed once the managed split below has made the field a local of its own.
+Whole moves between private locals carry the copy on: the walk tracks which local holds it, so an
+element a `filter` accepts and moves into its consumer's payload still reads the collection.
+Borrowing repeats until no clone is borrowed, because a borrowed copy of a collection makes the
+elements cloned out of it rooted in its source too.
 This runs after the semantic rounds settle, before DCE removes the unused destination storage.
 
 ## Discarded `TrivialCopy` results
@@ -791,7 +795,7 @@ producing the boolean defines a register, which its arm stores, so it follows th
 The proof is a linear use and predecessor census and deliberately narrower than general jump
 threading. The slot must be a local boolean `alloca`; its only uses must be a boolean store per
 incoming predecessor and the final read; every predecessor must jump unconditionally
-to the join; and the join may contain only `stack_restore`s besides that read. Other operations,
+to the join, or reach it along an `invoke`'s normal edge; and the join may contain only `stack_restore`s besides that read. Other operations,
 additional uses, unknown stores and self-edges all refuse the rewrite.
 
 The same pass forwards a local variant, including one owning managed payloads, whose whole-place
@@ -799,7 +803,9 @@ definitions store statically tagged shells. Multiple tag reads may feed `switch_
 directly from the place or through an immediately preceding load. A forward analysis tracks known
 tags through joins; drops, clears and re-executed allocations reset that knowledge. Constructor
 paths with known tags jump directly to the selected case, retaining payload storage and replaying
-intervening stack restores. A switch whose tag is already known within its own block becomes a
+intervening stack restores. A path may leave its constructor along an `invoke`'s normal edge, as
+an inlined iterator's `next` does when a fallible callback computes the payload after `Some` is
+stored: only that edge is redirected, and the call and its error edge stay. A switch whose tag is already known within its own block becomes a
 direct jump even when other work precedes the tag read; that work remains in place. The variant
 place must not escape, and other whole-place uses still block forwarding. Payload ownership
 operations remain intact; aggregate scalar replacement is a separate rule.
@@ -1238,8 +1244,11 @@ lifetime becomes a local of its own: an iterator over two arrays then borrows ea
 each cursor in a local. Such a product is dropped whole only through its structural destructor,
 which is spliced first, as physical drop elaboration does for a partially initialized product; its
 field drops remain initialization-aware. Inline variants split into a tag place and independent
-payload places, including when nested in products. The pass expands structural cleanup, forwards
-known-tag branches and retries splitting until the independent fields can be proved safe. If a
+payload places, including when nested in products. The pass expands structural cleanup, removes
+the dead storage and stack brackets the spliced destructor leaves, forwards known-tag branches and
+retries splitting until the independent fields can be proved safe. Without that cleanup, a
+destructor taken from a run-time dictionary, as for an `Option` built by a generic adaptor, leaves
+work in front of the tag test that branch forwarding cannot bypass. If a
 root becomes ineligible after expansion, it restarts from the original body excluding that root,
 so rejected roots do not retain speculative cleanup expansion.
 

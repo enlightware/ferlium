@@ -608,6 +608,11 @@ fn inlined_adaptors_borrow_their_collection_and_call_their_callback_directly() {
             !view.contains("clone [[int]]") && !view.contains("function_value_clone"),
             "{pipeline}: the collection must be borrowed and the callback not cloned:\n{view}"
         );
+        // A `filter_map` callback that is not inlined returns its own copy of the element.
+        assert!(
+            pipeline.starts_with("filter_map") || !view.contains("clone [int]"),
+            "{pipeline}: each element must be read in place:\n{view}"
+        );
         assert!(
             !view.lines().any(|line| line.contains("call %")),
             "{pipeline}: the callback must be called directly:\n{view}"
@@ -616,7 +621,8 @@ fn inlined_adaptors_borrow_their_collection_and_call_their_callback_directly() {
 }
 
 /// A consumer such as `sum` copies the iterator it receives, which the caller then only drops at
-/// exit: the copy becomes a move, and the moved collection is borrowed from the parameter.
+/// exit: the copy becomes a move, and the moved collection is borrowed from the parameter. Each
+/// element is then read in place, including one an accepting `filter` moves on to `map`.
 #[test]
 fn consumed_adaptors_move_their_iterator_and_borrow_their_collection() {
     for body in [
@@ -637,14 +643,9 @@ fn consumed_adaptors_move_their_iterator_and_borrow_their_collection() {
             }),
             "{body}: neither the iterator nor its collection may be cloned:\n{view}"
         );
-        // The element read from the collection is copied once; an accepted one then moves on.
-        let element_clones = view
-            .lines()
-            .filter(|line| line.trim_start().starts_with("clone [int]"))
-            .count();
         assert!(
-            element_clones <= 1,
-            "{body}: an accepted element must move:\n{view}"
+            !view.contains("clone [int]"),
+            "{body}: each element must be read in place:\n{view}"
         );
     }
 }

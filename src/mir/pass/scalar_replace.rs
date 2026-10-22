@@ -349,6 +349,12 @@ pub(crate) fn split_managed_local_products(
             Split::Expand(drops, roots) => {
                 expanded_roots.extend(roots);
                 let expanded = expand_drops(source, &drops, env, stage)?;
+                // A spliced destructor leaves its unit result cell, frame bracket and unread
+                // dictionary entries in front of its tag test; branch forwarding needs them gone.
+                let expanded = dce::remove_dead_storage(&expanded).unwrap_or(expanded);
+                let expanded =
+                    stack_region::remove_redundant_stack_markers(&expanded).unwrap_or(expanded);
+                let expanded = dce::remove_dead_trivial_results(&expanded).unwrap_or(expanded);
                 current =
                     Some(branch_forward::forward_variant_branches(&expanded).unwrap_or(expanded));
             }

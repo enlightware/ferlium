@@ -14,13 +14,15 @@
 //! The proof requires a fresh destination with one static clone constructor, and a source
 //! rooted in an immutable parameter or a private local allocated before the destination in the
 //! same block. A field of a local product is a destination once the product is split into one
-//! local per field. A finite-state walk proves read-only lifetimes even across CFG cycles. Stack
+//! local per field. Whole moves may carry the copy into further private locals, each initialized
+//! only by such a move. A finite-state walk proves read-only lifetimes even across CFG cycles. Stack
 //! restores must preserve the source allocation; suspension remains a proof boundary. Uses are
 //! indexed once, and unchanged bodies are never opened for editing.
-//! Each candidate walks the reachable CFG in at most two states per block, including paths
-//! before its clone, so proof cost is O(candidates × reachable blocks and operations).
+//! Each candidate walks the reachable CFG in at most one state per block and holding local, plus
+//! the absent state, including paths before its clone, so proof cost is O(candidates × holders ×
+//! reachable blocks and operations). Borrowing repeats while it removes clones.
 
-use std::{cell::OnceCell, iter::once};
+use std::{cell::OnceCell, collections::hash_map::Entry, iter::once};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -52,6 +54,33 @@ pub(super) enum Access {
     Escape,
 }
 
+/// The private locals that may hold one clone's copy, in discovery order: the clone's destination
+/// first, then the locals whole moves carry it into. Indexed for constant-time membership.
+struct Holders {
+    ids: Vec<ValueId>,
+    index: FxHashMap<ValueId, usize>,
+}
+
+impl Holders {
+    fn new(destination: ValueId) -> Self {
+        Self {
+            ids: vec![destination],
+            index: FxHashMap::from_iter([(destination, 0)]),
+        }
+    }
+
+    fn insert(&mut self, id: ValueId) {
+        if let Entry::Vacant(entry) = self.index.entry(id) {
+            entry.insert(self.ids.len());
+            self.ids.push(id);
+        }
+    }
+
+    fn index_of(&self, id: ValueId) -> Option<usize> {
+        self.index.get(&id).copied()
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Use {
     site: OperationSite,
@@ -59,12 +88,28 @@ struct Use {
 }
 
 /// Returns a rewritten semantic body only after proving an entire borrowed lifetime.
+///
+/// Borrowing a clone can make it the source of another: once a local copy of a collection reads
+/// its parameter, an element cloned out of that copy is rooted in the parameter too. Repeat until
+/// no clone is borrowed; every round removes at least one clone.
 pub(crate) fn borrow_read_only_clones(
+    func: &Function,
+    summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
+) -> Option<Function> {
+    let mut current = borrow_once(func, summary_of)?;
+    while let Some(next) = borrow_once(&current, summary_of) {
+        current = next;
+    }
+    Some(current)
+}
+
+fn borrow_once(
     func: &Function,
     summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
 ) -> Option<Function> {
     let mut candidates = Vec::new();
     let mut allocas = FxHashMap::default();
+    let mut moves: FxHashMap<ValueId, Vec<(OperationSite, ValueId)>> = FxHashMap::default();
     for block in func.blocks() {
         for (index, operation) in func.block(block).operations().iter().enumerate() {
             let site = OperationSite {
@@ -77,6 +122,10 @@ pub(crate) fn borrow_read_only_clones(
                 && let mir::Value::Register(destination) = &operation.operands[1]
             {
                 candidates.push((site, *destination));
+            } else if operation.kind == OperationKind::Move
+                && let [mir::Value::Register(from), mir::Value::Register(to)] = &*operation.operands
+            {
+                moves.entry(*from).or_default().push((site, *to));
             }
         }
     }
@@ -110,9 +159,28 @@ pub(crate) fn borrow_read_only_clones(
         if !eligible_source {
             return false;
         }
-        tracked.extend([source, Root::Alloca(*destination)]);
+        tracked.insert(source);
         true
     });
+    // Whole moves between private locals may carry the copy onward. The lifetime proof decides
+    // whether each such move really transfers it; collecting every reachable local is enough here.
+    let candidates = candidates
+        .into_iter()
+        .map(|(site, destination)| {
+            let mut holders = Holders::new(destination);
+            let mut index = 0;
+            while let Some(&holder) = holders.ids.get(index) {
+                index += 1;
+                for &(_, to) in moves.get(&holder).into_iter().flatten() {
+                    if allocas.contains_key(&to) {
+                        holders.insert(to);
+                    }
+                }
+            }
+            tracked.extend(holders.ids.iter().map(|&holder| Root::Alloca(holder)));
+            (site, holders)
+        })
+        .collect::<Vec<_>>();
     if candidates.is_empty() {
         return None;
     }
@@ -166,43 +234,59 @@ pub(crate) fn borrow_read_only_clones(
     let mut replacements = FxHashMap::default();
     let mut cleanups = Vec::new();
     let mut preserving_restores = FxHashMap::default();
-    for (site, destination) in candidates {
+    for (site, holders) in candidates {
         let operation = &func.block(site.block).operations()[site.index.as_index()];
         let source = origins
             .origin_of(&operation.operands[0])
             .map(|origin| origin.root)
             .unwrap();
-        let destination_uses = &uses[&Root::Alloca(destination)];
+        let transfers: FxHashMap<_, _> = holders
+            .ids
+            .iter()
+            .enumerate()
+            .flat_map(|(from, holder)| {
+                let holders = &holders;
+                moves
+                    .get(holder)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(move |(site, to)| Some((*site, (from, holders.index_of(*to)?))))
+            })
+            .collect();
+        let holder_uses = || {
+            holders
+                .ids
+                .iter()
+                .flat_map(|holder| &uses[&Root::Alloca(*holder)])
+        };
         // All source aliases must remain known: even an earlier escape could permit mutation
         // through an unrelated operand during the lifetime being borrowed.
         if uses[&source]
             .iter()
             .any(|usage| usage.access == Access::Escape)
-            || destination_uses
-                .iter()
-                .any(|usage| usage.access == Access::Escape)
+            || holder_uses()
+                .any(|usage| usage.access == Access::Escape && !transfers.contains_key(&usage.site))
         {
             continue;
         }
-        let Some(drops) =
-            lifetime(
-                func,
-                site,
-                destination,
-                source,
-                &uses,
-                &mut |restore| match source {
-                    // Let parameters borrow caller storage in both interpreters and Wasm;
-                    // restoring this callee's stack region cannot free that storage.
-                    Root::Parameter(_) => true,
-                    Root::Alloca(id) => preserving_restores
-                        .entry(id)
-                        .or_insert_with(|| stack_region::restores_preserving_alloca(func, id))
-                        .contains(&restore),
-                    _ => false,
-                },
-            )
-        else {
+        let Some(drops) = lifetime(
+            func,
+            site,
+            &holders,
+            &transfers,
+            source,
+            &uses,
+            &mut |restore| match source {
+                // Let parameters borrow caller storage in both interpreters and Wasm;
+                // restoring this callee's stack region cannot free that storage.
+                Root::Parameter(_) => true,
+                Root::Alloca(id) => preserving_restores
+                    .entry(id)
+                    .or_insert_with(|| stack_region::restores_preserving_alloca(func, id))
+                    .contains(&restore),
+                _ => false,
+            },
+        ) else {
             continue;
         };
         // A structural source register may have been defined only on the constructor's path.
@@ -225,7 +309,7 @@ pub(crate) fn borrow_read_only_clones(
                 Dominance::of(&successors, func.entry().as_index())
             });
             let cleanup: FxHashSet<_> = drops.iter().copied().collect();
-            if destination_uses.iter().any(|usage| {
+            if holder_uses().any(|usage| {
                 usage.site != site
                     && !cleanup.contains(&usage.site)
                     && !dominance.dominates(site.block.as_index(), usage.site.block.as_index())
@@ -233,32 +317,37 @@ pub(crate) fn borrow_read_only_clones(
                 continue;
             }
         }
-        replacements.insert(destination, operation.operands[0].clone());
-        cleanups.push((destination, site, drops));
+        for &holder in &holders.ids {
+            replacements.insert(holder, operation.operands[0].clone());
+        }
+        cleanups.push((holders.ids, site, drops));
     }
     // A rooted, repeatable addressor proves non-mutation, not write permission. Addressor
     // referents may be shared native members. Require structural storage for mutable readers,
     // following proposed substitutions too so chained clone elimination cannot bypass this rule.
     // Rejecting all such referents is conservative until summaries carry access permissions.
-    let rejected = replacements
+    let rejected = cleanups
         .iter()
-        .filter_map(|(&destination, source)| {
-            let needs_mutable = uses[&Root::Alloca(destination)]
-                .iter()
-                .any(|usage| usage.access == Access::ReadMutable);
-            (needs_mutable && !supports_mutable_reader(source, &origins, &replacements))
-                .then_some(destination)
+        .filter(|(holders, _, _)| {
+            let needs_mutable = holders.iter().any(|holder| {
+                uses[&Root::Alloca(*holder)]
+                    .iter()
+                    .any(|usage| usage.access == Access::ReadMutable)
+            });
+            needs_mutable
+                && !supports_mutable_reader(&replacements[&holders[0]], &origins, &replacements)
         })
+        .flat_map(|(holders, _, _)| holders.clone())
         .collect::<Vec<_>>();
-    for destination in rejected {
-        replacements.remove(&destination);
+    for holder in rejected {
+        replacements.remove(&holder);
     }
     if replacements.is_empty() {
         return None;
     }
     let removed: FxHashSet<_> = cleanups
         .into_iter()
-        .filter(|(destination, _, _)| replacements.contains_key(destination))
+        .filter(|(holders, _, _)| replacements.contains_key(&holders[0]))
         .flat_map(|(_, site, drops)| once(site).chain(drops))
         .collect();
     // Resolve nested borrowed clones before substitution. Every edge refers to storage already
@@ -414,44 +503,65 @@ fn is_rooted_repeatable_addressor(
             .is_some_and(|result| origins.returned_origin(result).is_some())
 }
 
-/// Checks every reachable absent/active state of this clone's lifetime. A read-only cycle needs
-/// no termination proof: every finite exit must end the lifetime, and every active operation
-/// must preserve the source. Visiting a block in both states prevents a join from hiding uses
-/// after cleanup or a backedge from reconstructing an already active destination.
+/// Checks every reachable state of this clone's lifetime: absent, or held by one of `holders`.
+/// The clone initializes the first holder; each of `transfers` moves the copy from one holder to
+/// another. A read-only cycle needs no termination proof: every finite exit must end the
+/// lifetime, and every active operation must preserve the source. Visiting a block in each state
+/// prevents a join from hiding uses after cleanup or a backedge from reconstructing an already
+/// active destination. Returns the cleanups and transfers to remove.
 fn lifetime(
     func: &Function,
     clone: OperationSite,
-    destination: ValueId,
+    holders: &Holders,
+    transfers: &FxHashMap<OperationSite, (usize, usize)>,
     source: Root,
     uses: &FxHashMap<Root, Vec<Use>>,
     preserves_storage: &mut impl FnMut(OperationSite) -> bool,
 ) -> Option<Vec<OperationSite>> {
-    let destination_uses = &uses[&Root::Alloca(destination)];
+    let holder_uses = || {
+        holders.ids.iter().enumerate().flat_map(|(holder, id)| {
+            uses[&Root::Alloca(*id)]
+                .iter()
+                .map(move |usage| (holder, usage))
+        })
+    };
     let writes: FxHashSet<_> = uses[&source]
         .iter()
-        .chain(destination_uses)
+        .chain(holder_uses().map(|(_, usage)| usage))
         .filter(|usage| !matches!(usage.access, Access::Read | Access::ReadMutable))
         .map(|usage| usage.site)
         .collect();
-    let destination_sites: FxHashSet<_> = destination_uses.iter().map(|usage| usage.site).collect();
-    let mut visited = vec![[false; 2]; func.blocks().count()];
+    let mut holder_sites = FxHashMap::<_, Vec<usize>>::default();
+    for (holder, usage) in holder_uses() {
+        holder_sites.entry(usage.site).or_default().push(holder);
+    }
+    // State 0 is absent; state `h + 1` means `holders[h]` holds the copy.
+    let mut visited = vec![vec![false; holders.ids.len() + 1]; func.blocks().count()];
     let OperationKind::Clone { ty: cloned } =
         func.block(clone.block).operations()[clone.index.as_index()].kind
     else {
         unreachable!("candidate is a clone")
     };
-    let is_cleanup = |operation: &Operation| {
-        (matches!(operation.kind, OperationKind::Drop { ty } if ty == cloned)
+    // Every holder is initialized only by this lifetime, so it is absent whenever it does not hold
+    // the copy, and its cleanup is then a no-op.
+    let cleanup_of = |operation: &Operation| {
+        if !(matches!(operation.kind, OperationKind::Drop { ty } if ty == cloned)
             || operation.kind == OperationKind::Clear)
-            && operation.operands[0] == mir::Value::Register(destination)
+        {
+            return None;
+        }
+        let mir::Value::Register(id) = operation.operands[0] else {
+            return None;
+        };
+        holders.index_of(id)
     };
     let mut drops = FxHashSet::default();
-    let mut work = vec![(func.entry(), false)];
-    while let Some((block, mut active)) = work.pop() {
-        if visited[block.as_index()][usize::from(active)] {
+    let mut work = vec![(func.entry(), 0)];
+    while let Some((block, mut state)) = work.pop() {
+        if visited[block.as_index()][state] {
             continue;
         }
-        visited[block.as_index()][usize::from(active)] = true;
+        visited[block.as_index()][state] = true;
         let basic = func.block(block);
         for (index, operation) in basic
             .operations()
@@ -467,26 +577,39 @@ fn lifetime(
                 index: OperationIndex::from_index(index),
             };
             if site == clone {
-                if active {
+                if state != 0 {
                     return None;
                 }
-                active = true;
+                state = 1;
                 continue;
             }
-            if is_cleanup(operation) {
+            if let Some(&(from, to)) = transfers.get(&site) {
+                if state != from + 1 {
+                    return None;
+                }
                 drops.insert(site);
-                active = false;
+                state = to + 1;
                 continue;
             }
-            if !active && destination_sites.contains(&site) {
+            if let Some(holder) = cleanup_of(operation) {
+                drops.insert(site);
+                if state == holder + 1 {
+                    state = 0;
+                }
+                continue;
+            }
+            if holder_sites
+                .get(&site)
+                .is_some_and(|used| used.iter().any(|holder| state != holder + 1))
+            {
                 return None;
             }
-            if active
+            if state != 0
                 && (writes.contains(&site)
                     || matches!(operation.kind, OperationKind::Alloca { .. })
-                        && operation
-                            .result_id()
-                            .is_some_and(|id| id == destination || source == Root::Alloca(id))
+                        && operation.result_id().is_some_and(|id| {
+                            holders.index_of(id).is_some() || source == Root::Alloca(id)
+                        })
                     || matches!(operation.kind, OperationKind::StackRestore)
                         && !preserves_storage(site))
             {
@@ -495,14 +618,14 @@ fn lifetime(
         }
         // A suspended frame can permit mutation outside this function. No local read-only
         // proof covers that interval, even when the source is caller-rooted.
-        if active && matches!(basic.terminator().kind, TerminatorKind::Yield { .. }) {
+        if state != 0 && matches!(basic.terminator().kind, TerminatorKind::Yield { .. }) {
             return None;
         }
         let mut successors = basic.terminator().successors().peekable();
-        if active && successors.peek().is_none() {
+        if state != 0 && successors.peek().is_none() {
             return None;
         }
-        work.extend(successors.map(|target| (target, active)));
+        work.extend(successors.map(|target| (target, state)));
     }
     // Substitution rewrites unreachable blocks too. Keep the original whole-place rule there:
     // empty cleanup is harmless, but other uses could turn a destination initializer into a
@@ -512,7 +635,7 @@ fn lifetime(
             continue;
         }
         for (index, operation) in func.block(block).operations().iter().enumerate() {
-            if is_cleanup(operation) {
+            if cleanup_of(operation).is_some() {
                 drops.insert(OperationSite {
                     block,
                     index: OperationIndex::from_index(index),
@@ -520,7 +643,7 @@ fn lifetime(
             }
         }
     }
-    for usage in destination_uses {
+    for (_, usage) in holder_uses() {
         if visited[usage.site.block.as_index()]
             .iter()
             .any(|&state| state)
@@ -531,9 +654,7 @@ fn lifetime(
             .block(usage.site.block)
             .operations()
             .get(usage.site.index.as_index())?;
-        if !is_cleanup(operation) {
-            return None;
-        }
+        cleanup_of(operation)?;
     }
     Some(drops.into_iter().collect())
 }

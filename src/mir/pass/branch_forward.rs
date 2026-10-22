@@ -52,7 +52,8 @@
 //!
 //! The proof is intentionally local and linear. The flag must be a local boolean `alloca`; every
 //! use must be a boolean store or the one final read; every block on a walked path must end in an
-//! unconditional jump; a store-free block on a path may contain only `stack_restore`s; the join may
+//! unconditional jump, except that a storing block may leave along an `invoke`'s normal edge, which
+//! is redirected alone; a store-free block on a path may contain only `stack_restore`s; the join may
 //! contain only `stack_restore`s besides the read; and the stores found must be exactly those the
 //! use census saw, which is what proves no other definition reaches the join. Two paths may not meet at one block, since rewriting it would mean duplicating
 //! it. For a variant, the forward analysis takes the place of the store census: a block where
@@ -175,11 +176,7 @@ pub(crate) fn forward_boolean_branches(func: &Function) -> Option<Function> {
     let mut edit = FunctionEdit::new(func.clone());
     for forward in forwards {
         for arm in forward.arms {
-            let span = edit.block(arm.source).terminator.span;
-            let terminator = arm.exit.terminator(span);
-            let block = edit.block_mut(arm.source);
-            block.operations.extend(arm.replay);
-            block.terminator = terminator;
+            arm.redirect(&mut edit);
         }
     }
     edit.remove_unreachable_blocks();
@@ -469,11 +466,7 @@ pub(crate) fn forward_variant_branches(func: &Function) -> Option<Function> {
     }
     for forward in forwards {
         for arm in forward.arms {
-            let span = edit.block(arm.source).terminator.span;
-            let terminator = arm.exit.terminator(span);
-            let block = edit.block_mut(arm.source);
-            block.operations.extend(arm.replay);
-            block.terminator = terminator;
+            arm.redirect(&mut edit);
         }
     }
     edit.remove_unreachable_blocks();
@@ -756,6 +749,36 @@ pub(crate) fn shadow_variant_tag_tests(func: &Function, env: ModuleEnv<'_>) -> O
     Some(edit.finish_unverified())
 }
 
+impl Arm {
+    /// Sends the arm's source to its exit after the replayed cleanup. A source ending in an
+    /// `invoke` keeps its call and error edge; only its normal edge, the one the walk came along,
+    /// is redirected, through a new block when cleanup must run first.
+    fn redirect(self, edit: &mut FunctionEdit) {
+        let span = edit.block(self.source).terminator.span;
+        let terminator = self.exit.terminator(span);
+        let block = edit.block_mut(self.source);
+        if !matches!(block.terminator.kind, TerminatorKind::Invoke { .. }) {
+            block.operations.extend(self.replay);
+            block.terminator = terminator;
+            return;
+        }
+        let target = match terminator.kind {
+            TerminatorKind::Goto { target } if self.replay.is_empty() => target,
+            _ => {
+                let target = edit.add_block(terminator);
+                edit.block_mut(target).operations = self.replay;
+                target
+            }
+        };
+        let TerminatorKind::Invoke { normal, .. } =
+            &mut edit.block_mut(self.source).terminator.kind
+        else {
+            unreachable!("checked above")
+        };
+        *normal = target;
+    }
+}
+
 impl Exit {
     fn terminator(self, span: DebugLocation) -> Terminator {
         match self {
@@ -969,24 +992,29 @@ fn reaching_sources<T>(
 ) -> Option<Vec<Reaching<T>>> {
     let mut found: Vec<Reaching<T>> = Vec::new();
     let mut visited: FxHashSet<BlockId> = FxHashSet::default();
-    let mut pending: Vec<(BlockId, Vec<Operation>)> = incoming[join.as_index()]
+    let mut pending: Vec<(BlockId, BlockId, Vec<Operation>)> = incoming[join.as_index()]
         .iter()
-        .map(|predecessor| (*predecessor, Vec::new()))
+        .map(|predecessor| (*predecessor, join, Vec::new()))
         .collect();
 
-    while let Some((block, replay)) = pending.pop() {
+    while let Some((block, successor, replay)) = pending.pop() {
         // A repeat is either a cycle or two paths meeting, and both would need this block to be
         // duplicated rather than redirected. A `condbr` with both arms on the join arrives here as
         // the same predecessor twice.
         if block == join || !visited.insert(block) || visited.len() > FORWARD_BOOLEAN_BLOCKS {
             return None;
         }
-        if !matches!(
-            func.block(block).terminator().kind,
-            TerminatorKind::Goto { .. }
-        ) {
-            return None;
-        }
+        // A deciding block may also leave along an `invoke`'s normal edge, which a rewrite can
+        // redirect without touching the call or its error edge.
+        let invoke = match func.block(block).terminator().kind {
+            TerminatorKind::Goto { .. } => false,
+            TerminatorKind::Invoke { normal, error, .. }
+                if normal == successor && error != successor =>
+            {
+                true
+            }
+            _ => return None,
+        };
 
         match step(block) {
             Step::Source(value) => {
@@ -997,8 +1025,8 @@ fn reaching_sources<T>(
                 });
                 continue;
             }
-            Step::Cross => {}
-            Step::Refuse => return None,
+            Step::Cross if !invoke => {}
+            Step::Cross | Step::Refuse => return None,
         }
 
         // A block on the path that does not decide the value is only passed through if it does
@@ -1021,7 +1049,7 @@ fn reaching_sources<T>(
             return None;
         }
         for predecessor in predecessors {
-            pending.push((*predecessor, carried.clone()));
+            pending.push((*predecessor, block, carried.clone()));
         }
     }
 
@@ -1149,8 +1177,8 @@ mod tests {
         },
         std::math::int_type,
         types::{
-            effects::EffType,
-            r#type::{CallImplType, FnType, Type},
+            effects::{EffType, PrimitiveEffect},
+            r#type::{CallImplType, CallResultConvention, FnType, Type},
         },
     };
 
@@ -1434,10 +1462,7 @@ mod tests {
                 span,
                 Value::Parameter(mutator),
                 [element],
-                CallImplType::new(
-                    mutator_ty,
-                    crate::types::r#type::CallResultConvention::NoValue,
-                ),
+                CallImplType::new(mutator_ty, CallResultConvention::NoValue),
             ),
         );
         builder.set_terminator(some_source, Terminator::goto(span, join));
@@ -1474,6 +1499,116 @@ mod tests {
 
         let function = builder.finish(env);
         assert!(forward_variant_branches(&function).is_none());
+    }
+
+    /// A constructor path may reach the join along an `invoke`'s normal edge, as an inlined
+    /// iterator's `next` does when a fallible callback computes the payload after `Some` is stored.
+    /// Only that edge is redirected: the call and its error edge stay as they were.
+    #[test]
+    fn a_variant_stored_before_an_invoke_is_forwarded_along_its_normal_edge() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let some = ustr("Some");
+        let none = ustr("None");
+        let payload_ty = Type::tuple([int_type()]);
+        let variant_ty = Type::variant([(none, Type::unit()), (some, payload_ty)]);
+        let callee_ty = FnType::new_mut_resolved(
+            [],
+            Type::unit(),
+            EffType::single_primitive(PrimitiveEffect::Fallible),
+        );
+        let mut builder = FunctionBuilder::new("invoked_variant".into(), Default::default());
+        let flag = builder.add_parameter(Type::primitive::<bool>(), ParameterKind::Value);
+        let callee = builder.add_parameter(
+            Type::function_type(callee_ty.clone()),
+            ParameterKind::Place(ArgConvention::Let),
+        );
+        let entry = builder.add_block();
+        let some_source = builder.add_block();
+        let none_source = builder.add_block();
+        let failure = builder.add_block();
+        let join = builder.add_block();
+        let some_target = builder.add_block();
+        let none_target = builder.add_block();
+
+        let storage = builder
+            .append_operation(entry, Operation::alloca(span, variant_ty))
+            .unwrap();
+        builder.set_terminator(
+            entry,
+            Terminator::cond_br(span, Value::Parameter(flag), some_source, none_source),
+        );
+        for (block, tag, payload) in [
+            (some_source, some, payload_ty),
+            (none_source, none, Type::unit()),
+        ] {
+            let shell = builder
+                .append_operation(
+                    block,
+                    Operation::variant(
+                        span,
+                        tag,
+                        variant_ty,
+                        payload,
+                        Some(VariantPayloadStorage::Inline),
+                        None,
+                        None,
+                    ),
+                )
+                .unwrap();
+            builder.append_operation(block, Operation::store(span, shell, storage.clone()));
+        }
+        builder.set_terminator(
+            some_source,
+            Terminator::invoke(
+                span,
+                Operation::call(
+                    span,
+                    Value::Parameter(callee),
+                    [],
+                    CallImplType::new(callee_ty, CallResultConvention::NoValue),
+                ),
+                join,
+                failure,
+            ),
+        );
+        builder.set_terminator(none_source, Terminator::goto(span, join));
+        builder.set_terminator(failure, Terminator::propagate_error(span));
+        let tag = builder
+            .append_operation(join, Operation::extract_tag(span, storage))
+            .unwrap();
+        builder.set_terminator(
+            join,
+            Terminator::switch_variant(span, tag, vec![(some, some_target)], none_target),
+        );
+        builder.set_terminator(some_target, Terminator::ret(span));
+        builder.set_terminator(none_target, Terminator::ret(span));
+
+        let function = builder.finish(env);
+        let forwarded = forward_variant_branches(&function).expect("the join is forwarded");
+        let terminators = || {
+            forwarded
+                .blocks()
+                .map(|block| &forwarded.block(block).terminator().kind)
+        };
+        assert!(
+            !terminators().any(|kind| matches!(kind, TerminatorKind::SwitchVariant { .. })),
+            "both constructor paths must select their consumers directly"
+        );
+        let Some(TerminatorKind::Invoke { normal, error, .. }) =
+            terminators().find(|kind| matches!(kind, TerminatorKind::Invoke { .. }))
+        else {
+            panic!("the invoke must remain");
+        };
+        assert!(matches!(
+            forwarded.block(*normal).terminator().kind,
+            TerminatorKind::Return { .. }
+        ));
+        assert!(matches!(
+            forwarded.block(*error).terminator().kind,
+            TerminatorKind::PropagateError
+        ));
     }
 
     /// A boolean alternative head lowers to `load`, so nothing in the emitter produces the

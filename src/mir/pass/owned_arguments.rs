@@ -1716,16 +1716,15 @@ mod tests {
     }
 
     #[test]
-    fn filtered_iteration_moves_accepted_payloads() {
+    fn filtered_iteration_borrows_accepted_payloads() {
         for ty in ["[int]", "string"] {
             let module = optimized(&format!(
                 "fn view(rows: [{ty}]) -> int {{ let mut total = 0; for row in iter(rows) |> filter(|row| len(row) > 0) {{ total += len(row) }}; total }}"
             ));
             let body = body_of(&module, "view(");
-            assert_eq!(
-                body.matches(&format!("clone {ty} ")).count(),
-                1,
-                "only the original element copy should remain:\n{body}"
+            assert!(
+                !body.contains(&format!("clone {ty} ")),
+                "accepted elements should read the collection in place:\n{body}"
             );
         }
     }
