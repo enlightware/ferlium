@@ -729,6 +729,15 @@ impl UnifiedTypeInference {
                 Ok(())
             }
             (Record(cur), Record(exp)) => {
+                if cur.len() != exp.len() {
+                    return Err(internal_compilation_error!(TypeMismatch {
+                        current_ty,
+                        current_span,
+                        expected_ty,
+                        expected_span,
+                        sub_or_same,
+                    }));
+                }
                 for (cur_field, exp_field) in cur.into_iter().zip(exp) {
                     if cur_field.0 != exp_field.0 {
                         return Err(internal_compilation_error!(TypeMismatch {

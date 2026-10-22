@@ -1785,6 +1785,34 @@ fn first_class_functions() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn record_argument_missing_field() {
+    let mut session = TestSession::new();
+    session
+        .try_compile(
+            r#"fn read_b(x: {a: int, b: int}) -> int { x.b }
+            fn bad(x: {a: int}) -> int { read_b(x) }
+            bad({a: 1})"#,
+        )
+        .expect_err("a missing record field must be rejected before execution")
+        .expect_type_mismatch("{ a: int }", "{ a: int, b: int }");
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn record_argument_extra_field() {
+    let mut session = TestSession::new();
+    session
+        .try_compile(
+            r#"fn read_a(x: {a: int}) -> int { x.a }
+            fn bad(x: {a: int, b: int}) -> int { read_a(x) }
+            bad({a: 1, b: 2})"#,
+        )
+        .expect_err("an explicitly typed record parameter requires the same fields")
+        .expect_type_mismatch("{ a: int, b: int }", "{ a: int }");
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn records() {
     let mut session = TestSession::new();
     assert_val_eq!(session.run("{a:1}.a"), int(1));
