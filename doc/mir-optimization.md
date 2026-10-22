@@ -141,22 +141,23 @@ read, projection, call argument or other alias-producing use of the local root.
 
 A private local's last ownership can also move into its clone destination, including another local
 or a field of a returned aggregate. Read-only borrowing runs first because it can eliminate the
-destination storage entirely. The terminal ownership-forwarding rule requires the clone and exactly
-one subsequent source drop in the same block, with no other source or derived-place use after the
-clone, in that block or, unless it returns, in any block reachable from it. Shared place provenance
-and access classification reject escaping aliases and scoped accessors. The source must be a whole
-local allocation with a static layout; borrowed parameters and managed source fields remain outside
-this rule. Values needing a run-time layout witness retain their clone, as in owned-ABI forwarding.
-Restores between the clone and its matched source drop are conservative proof boundaries; restores
-after that drop are allowed. Rewriting the clone to `move` removes only that block's source drop,
-retaining cleanup on earlier failure paths. The destination retains its original ownership
-obligations; ordinary DCE collects the unused clone/drop dispatch evidence. A syntactic scan admits
-only whole alloca sources with a later matching drop in the same block, before deriving provenance
-and value roles. Escape classification is limited to those candidate roots. In a loop, a new
-allocation of the source starts a fresh lifetime, so later uses of that allocation do not prevent
-moving the previous value. This stopping rule requires whole-place-only uses: derived aliases might
-still refer to an older allocation and retain the conservative all-successors check. Uses in the
-clone block's terminator are checked too. Reinitialization by a store alone is not a fresh
+destination storage entirely. The terminal ownership-forwarding rule walks every path from the
+clone: the source and its derived places may only be dropped there, and each such drop must be
+dominated by the clone, so that no path reaches it without moving the source. A consumer copying the
+iterator it receives, such as `sum`, ends this way: the caller drops its own iterator at the exit,
+blocks later. Each block is walked with the source still live or already dropped: a restore that
+may release the source's storage, because its marker was not saved after the source's allocation,
+must follow the drop. Shared place provenance and access classification reject escaping aliases and
+scoped accessors. The source must be a whole local allocation with a static layout; borrowed
+parameters and managed source fields remain outside this rule. Values needing a run-time layout
+witness retain their clone, as in owned-ABI forwarding. Rewriting the clone to `move` removes the
+drops the walk found, retaining cleanup on paths that do not run the clone. The destination retains
+its original ownership obligations; ordinary DCE collects the unused clone/drop dispatch evidence. A
+syntactic scan admits only whole alloca sources also dropped whole, before deriving provenance and
+value roles. Escape classification is limited to those candidate roots. In a loop, a new allocation
+of the source starts a fresh lifetime, so later uses of that allocation do not prevent moving the
+previous value. This stopping rule requires whole-place-only uses: derived aliases might still refer
+to an older allocation and keep the walk going. Reinitialization by a store alone is not a fresh
 allocation.
 
 Read-only clones have a separate lifetime proof: readers borrow the source while its value and
@@ -725,7 +726,10 @@ the producer initializes the final destination directly. Producers are `store`, 
 are in one block, those between them may neither define nor observe the destination, the temporary
 must be a local `alloca`, and its complete operand-use count must consist of exactly the producer
 destination and transfer source. Contiguous transfer chains are
-collapsed in one traversal rather than requiring another optimization round.
+collapsed in one traversal rather than requiring another optimization round. When the destination is allocated after the producer, the producer cannot target it; if the
+transfer is the destination's first use and only whole write, the destination becomes the temporary
+itself, allocated earlier and so released no earlier. After a split, a moved iterator's collection
+field is such a temporary, which clone borrowing can then redirect to its source.
 
 Retargeting must not make a producer overwrite storage it also reads. A small place-identity model
 tracks allocation/parameter roots and constant `subfield` paths, proving different roots and sibling

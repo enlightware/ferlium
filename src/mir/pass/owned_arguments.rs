@@ -16,10 +16,9 @@
 //! aggregate field. It shares the terminal-cleanup proof and rewrite with forwarding into owned
 //! calls, and the alias/access proof with read-only clone borrowing. Earlier failure cleanup is
 //! retained. Plain moves require statically sized source values, as for owned-ABI variants.
-//! Uses and escapes are indexed once; each candidate scans its block's suffix, and outside a
-//! return block, the blocks reachable from it.
+//! Uses and escapes are indexed once; each candidate walks the blocks reachable from it.
 
-use std::iter::once;
+use std::{cell::OnceCell, iter::once};
 
 use itertools::Itertools;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -30,7 +29,7 @@ use super::{
     dataflow::Root,
     dce,
     provenance::{AddressorSummary, PlaceOrigins},
-    site::OperationIndex,
+    site::{OperationIndex, OperationSite},
     stack_region,
 };
 use crate::{
@@ -39,7 +38,8 @@ use crate::{
     hir::function::ArgConvention,
     mir::{
         self, BlockId, CallMetadata, Function, Operation, OperationKind, ParameterId,
-        ParameterKind, ValueId, edit::FunctionEdit, role::ValueRoles, terminator::TerminatorKind,
+        ParameterKind, ValueId, dominance::Dominance, edit::FunctionEdit, role::ValueRoles,
+        terminator::TerminatorKind,
     },
     module::{FunctionId, LocalFunctionId, ModuleEnv, ModuleId, id::Id, unique_generated_name},
     std::value::type_has_static_layout,
@@ -213,12 +213,11 @@ pub(crate) fn forward_owned_arguments(
 /// returned aggregate field. The existing clone establishes destination initialization; only
 /// the source lifetime changes. Earlier failure paths keep their cleanup unchanged.
 ///
-/// This form requires a clone and its sole subsequent source drop in one block. Consequently the
-/// removed drop cannot be reached without executing the clone, even when earlier error exits
-/// bypass that block. No exit-dominance requirement is needed. Outside a return block, no block
-/// reachable from it may use the old source lifetime. Whole-place-only temporaries may be
-/// allocated afresh on a later loop iteration; derived aliases retain the conservative rule.
-/// Stack restores after the matched source drop do not extend that lifetime.
+/// On every path from the clone, the source may only be dropped, and the clone must dominate each
+/// such drop, so that a removed drop cannot be reached without executing the clone, even when
+/// earlier error exits bypass it. No exit-dominance requirement is needed. Whole-place-only
+/// temporaries may be allocated afresh on a later loop iteration; derived aliases retain the
+/// conservative rule. A stack restore that may release the source must follow its drop.
 pub(crate) fn forward_terminal_clones(
     source: &Function,
     env: ModuleEnv<'_>,
@@ -281,6 +280,8 @@ pub(crate) fn forward_terminal_clones(
             }
         }
     }
+    let sites = allocation_and_mark_sites(source);
+    let dominance = OnceCell::new();
     let mut rewrites = Vec::new();
     let mut removed = FxHashSet::default();
     for (site, root) in candidates {
@@ -311,82 +312,228 @@ pub(crate) fn forward_terminal_clones(
         if escaped.contains(&root) {
             continue;
         }
-        let Some(drop_index) = sole_drop_in_operations(
-            basic.operations(),
-            index.as_index() + 1,
-            operand,
-            root,
-            &origins,
-        ) else {
-            continue;
-        };
-        // A restore before the drop can invalidate the source; after its last drop the
-        // source no longer owns a value, so restoring storage is harmless.
-        if basic.operations()[index.as_index() + 1..drop_index.as_index()]
-            .iter()
-            .any(|operation| matches!(operation.kind, OperationKind::StackRestore))
-        {
-            continue;
-        }
         // A loop may allocate this temporary again. Only whole-place users can treat that
         // allocation as a new lifetime: a derived address might still name the old incarnation.
         let fresh_lifetimes = !aliased.contains(&root);
-        if basic
-            .terminator()
-            .operands()
-            .iter()
-            .any(|operand| operand_root(operand, &origins) == Some(root))
-            || (!matches!(basic.terminator().kind, TerminatorKind::Return { .. })
-                && used_after(source, block, root, &origins, fresh_lifetimes))
+        let dominance = dominance.get_or_init(|| {
+            let successors: Vec<Vec<usize>> = source
+                .blocks()
+                .map(|block| {
+                    source
+                        .block(block)
+                        .terminator()
+                        .successors()
+                        .map(|target| target.as_index())
+                        .collect()
+                })
+                .collect();
+            Dominance::of(&successors, source.entry().as_index())
+        });
+        let precedes = |first: OperationSite, second: OperationSite| {
+            if first.block == second.block {
+                first.index.as_index() < second.index.as_index()
+            } else {
+                dominance.dominates(first.block.as_index(), second.block.as_index())
+            }
+        };
+        // Stack discipline: a restore releases the source unless the source was allocated before
+        // its marker was saved.
+        let releases = |marker: &mir::Value| {
+            let mir::Value::Register(marker) = marker else {
+                return true;
+            };
+            match (sites.get(&root), sites.get(marker)) {
+                (Some(&allocation), Some(&save)) => !precedes(allocation, save),
+                _ => true,
+            }
+        };
+        let Some(drops) = lifetime_ending_drops(
+            source,
+            block,
+            index,
+            operand,
+            root,
+            &origins,
+            fresh_lifetimes,
+            &releases,
+        ) else {
+            continue;
+        };
+        // A drop reached without running the clone still ends a value the source owns.
+        if drops.iter().any(|drop| {
+            let Site::Operation {
+                block: drop_block, ..
+            } = *drop
+            else {
+                unreachable!("a drop is an operation")
+            };
+            drop_block != block && !dominance.dominates(block.as_index(), drop_block.as_index())
+        }) || drops.iter().any(|drop| removed.contains(drop))
         {
             continue;
         }
-        let drop = Site::Operation {
-            block,
-            index: drop_index,
-        };
-        if !removed.insert(drop) {
-            continue;
-        }
-        rewrites.push((
-            site,
-            operand.clone(),
-            operation.operands[1].clone(),
-            vec![drop],
-        ));
+        removed.extend(drops.iter().copied());
+        rewrites.push((site, operand.clone(), operation.operands[1].clone(), drops));
     }
     rewrite_clones_as_moves(source, rewrites)
 }
 
-/// Syntactic admission only: a whole alloca source must have a later matching drop in the
-/// same block. Reverse scanning indexes later drops without walking a suffix per clone.
-/// Bodies without such a candidate never pay for provenance, roles or escape classification.
+/// The drops ending the lifetime that the clone at `index` of `block` reads, if they are the
+/// source's only uses on every path from the clone: the source is dropped and never otherwise
+/// used, until a fresh allocation of it when `fresh_lifetimes`. The caller checks that the clone
+/// dominates them. A restore that `releases` the source's storage must follow a drop of it on its
+/// path: each block is scanned with the source still live or already dropped on entry.
+#[allow(clippy::too_many_arguments)]
+fn lifetime_ending_drops(
+    function: &Function,
+    block: BlockId,
+    index: OperationIndex,
+    operand: &mir::Value,
+    root: ValueId,
+    origins: &FxHashMap<ValueId, ValueId>,
+    fresh_lifetimes: bool,
+    releases: &dyn Fn(&mir::Value) -> bool,
+) -> Option<Vec<Site>> {
+    let mut drops = Vec::new();
+    // A block reached in both states is scanned twice; each drop is removed once.
+    let mut found = FxHashSet::default();
+    let mut visited = FxHashSet::default();
+    let mut pending = Vec::new();
+    // The clone's block is scanned after the clone; reached again, it is scanned whole, and its
+    // clone is then a use.
+    let mut next = Some((block, index.as_index() + 1, false));
+    loop {
+        let (block, start, mut dropped) = match next.take() {
+            Some(start) => start,
+            None => match pending.pop() {
+                Some((block, dropped)) if visited.insert((block, dropped)) => (block, 0, dropped),
+                Some(_) => continue,
+                None => break,
+            },
+        };
+        let basic = function.block(block);
+        let terminator = basic.terminator();
+        let invoked = match &terminator.kind {
+            TerminatorKind::Invoke { operation, .. } => Some(operation),
+            _ => None,
+        };
+        let mut reallocated = false;
+        for (index, operation) in basic
+            .operations()
+            .iter()
+            .enumerate()
+            .skip(start)
+            .map(|(index, operation)| (Some(index), operation))
+            .chain(invoked.map(|operation| (None, operation)))
+        {
+            if fresh_lifetimes
+                && matches!(operation.kind, OperationKind::Alloca { .. })
+                && operation.result_id() == Some(root)
+            {
+                reallocated = true;
+                break;
+            }
+            if matches!(operation.kind, OperationKind::StackRestore)
+                && !dropped
+                && releases(&operation.operands[0])
+            {
+                return None;
+            }
+            if !operation
+                .operands
+                .iter()
+                .any(|value| operand_root(value, origins) == Some(root))
+            {
+                continue;
+            }
+            match index {
+                Some(index)
+                    if matches!(operation.kind, OperationKind::Drop { .. })
+                        && operation.operands[0] == *operand =>
+                {
+                    dropped = true;
+                    let drop = Site::Operation {
+                        block,
+                        index: OperationIndex::from_index(index),
+                    };
+                    if found.insert(drop) {
+                        drops.push(drop);
+                    }
+                }
+                _ => return None,
+            }
+        }
+        if reallocated {
+            continue;
+        }
+        if invoked.is_none()
+            && terminator
+                .operands()
+                .iter()
+                .any(|value| operand_root(value, origins) == Some(root))
+        {
+            return None;
+        }
+        pending.extend(
+            terminator
+                .successors()
+                .map(|successor| (successor, dropped)),
+        );
+    }
+    (!drops.is_empty()).then_some(drops)
+}
+
+/// Where each local allocation and stack mark is made.
+fn allocation_and_mark_sites(function: &Function) -> FxHashMap<ValueId, OperationSite> {
+    let mut sites = FxHashMap::default();
+    for block in function.blocks() {
+        for (index, operation) in function.block(block).operations().iter().enumerate() {
+            if matches!(
+                operation.kind,
+                OperationKind::Alloca { .. } | OperationKind::StackSave
+            ) && let Some(result) = operation.result_id()
+            {
+                sites.insert(
+                    result,
+                    OperationSite {
+                        block,
+                        index: OperationIndex::from_index(index),
+                    },
+                );
+            }
+        }
+    }
+    sites
+}
+
+/// Syntactic admission only: a whole alloca source must also be dropped whole. Bodies without
+/// such a candidate never pay for provenance, roles or escape classification.
 fn terminal_clone_candidates(source: &Function) -> Vec<(Site, ValueId)> {
+    let dropped: FxHashSet<_> = all_operations(source)
+        .filter_map(
+            |(_, operation)| match (&operation.kind, &operation.operands[..]) {
+                (OperationKind::Drop { .. }, [mir::Value::Register(root), ..]) => Some(*root),
+                _ => None,
+            },
+        )
+        .collect();
+    if dropped.is_empty() {
+        return Vec::new();
+    }
     let mut candidates = Vec::new();
     for block in source.blocks() {
-        let basic = source.block(block);
-        let mut dropped = FxHashSet::default();
-        for (index, operation) in basic.operations().iter().enumerate().rev() {
-            match operation.kind {
-                OperationKind::Drop { .. } => {
-                    if let mir::Value::Register(root) = operation.operands[0] {
-                        dropped.insert(root);
-                    }
-                }
-                OperationKind::Clone { .. } => {
-                    if let mir::Value::Register(root) = operation.operands[0]
-                        && dropped.contains(&root)
-                    {
-                        candidates.push((
-                            Site::Operation {
-                                block,
-                                index: OperationIndex::from_index(index),
-                            },
-                            root,
-                        ));
-                    }
-                }
-                _ => {}
+        for (index, operation) in source.block(block).operations().iter().enumerate() {
+            if let (OperationKind::Clone { .. }, [mir::Value::Register(root), ..]) =
+                (&operation.kind, &operation.operands[..])
+                && dropped.contains(root)
+            {
+                candidates.push((
+                    Site::Operation {
+                        block,
+                        index: OperationIndex::from_index(index),
+                    },
+                    *root,
+                ));
             }
         }
     }
@@ -1278,17 +1425,69 @@ mod tests {
         assert_eq!(rewritten.is_some(), expected, "{}", body.format_with(&env));
         if let Some(rewritten) = rewritten {
             verify_function(&rewritten, env);
-            let drops = |function: &Function| {
+            let (_, root) = super::terminal_clone_candidates(body)[0];
+            let drops = |function: &Function, of_root: bool| {
                 all_operations(function)
-                    .filter(|(_, operation)| matches!(operation.kind, OperationKind::Drop { .. }))
+                    .filter(|(_, operation)| {
+                        matches!(operation.kind, OperationKind::Drop { .. })
+                            && (operation.operands[0] == Value::Register(root)) == of_root
+                    })
                     .count()
             };
+            let removed = drops(body, true) - drops(&rewritten, true);
+            assert!(removed > 0, "the terminal source cleanup is removed");
             assert_eq!(
-                drops(&rewritten) + 1,
-                drops(body),
-                "only the terminal source cleanup is removed"
+                rewritten.operation_count() + removed,
+                body.operation_count(),
+                "only source drops are removed"
             );
         }
+    }
+
+    /// One arm drops the source and the join drops it again, which does nothing on that path: the
+    /// join is reached with the source live and dropped, and its drop is removed once.
+    #[test]
+    fn terminal_clones_remove_a_drop_reached_in_both_states_once() {
+        use crate::mir::{OperationKind, ParameterId, edit::FunctionEdit, terminator::Terminator};
+
+        check_terminal_clone_with(
+            "fn view(c: bool, n: int) -> ([int], int) { let mut a = [n]; (a, n) }",
+            true,
+            |body, _| {
+                let candidates = super::terminal_clone_candidates(body);
+                assert_eq!(candidates.len(), 1);
+                let (Site::Operation { block, .. }, root) = candidates[0] else {
+                    unreachable!()
+                };
+                let mut edit = FunctionEdit::new(body.clone());
+                let span = Location::new_synthesized();
+                let drop_index = edit
+                    .block(block)
+                    .operations
+                    .iter()
+                    .position(|op| {
+                        matches!(op.kind, OperationKind::Drop { .. })
+                            && op.operands[0] == Value::Register(root)
+                    })
+                    .unwrap();
+                let drop = edit.block(block).operations[drop_index].clone();
+                // The join starts at the drop, after everything its operands need.
+                let tail = edit.block_mut(block).operations.split_off(drop_index);
+                let terminator = edit.block(block).terminator.clone();
+                let join = edit.add_block(terminator);
+                edit.block_mut(join).operations = tail;
+                let dropping = edit.add_block(Terminator::goto(span, join));
+                edit.block_mut(dropping).operations.push(drop);
+                let keeping = edit.add_block(Terminator::goto(span, join));
+                edit.block_mut(block).terminator = Terminator::cond_br(
+                    span,
+                    Value::Parameter(ParameterId::from_index(0)),
+                    dropping,
+                    keeping,
+                );
+                edit.finish_unverified()
+            },
+        );
     }
 
     #[test]
@@ -1532,13 +1731,14 @@ mod tests {
     }
 
     #[test]
-    fn terminal_clones_retain_sources_across_intervening_restores() {
+    fn terminal_clones_forward_sources_no_intervening_restore_releases() {
         use crate::mir::{OperationKind, edit::FunctionEdit};
 
+        // Allocated before the marker, the source outlives the restore either way.
         for restore_before_drop in [false, true] {
             check_terminal_clone_with(
                 "fn view(n: int) -> ([int], int) { let mut a = [n]; (a, n) }",
-                !restore_before_drop,
+                true,
                 |body, _| {
                     let candidates = super::terminal_clone_candidates(body);
                     assert_eq!(candidates.len(), 1);

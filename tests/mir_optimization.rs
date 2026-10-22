@@ -614,3 +614,37 @@ fn inlined_adaptors_borrow_their_collection_and_call_their_callback_directly() {
         );
     }
 }
+
+/// A consumer such as `sum` copies the iterator it receives, which the caller then only drops at
+/// exit: the copy becomes a move, and the moved collection is borrowed from the parameter.
+#[test]
+fn consumed_adaptors_move_their_iterator_and_borrow_their_collection() {
+    for body in [
+        "iter(rows) |> map(|row| len(row)) |> sum()",
+        "iter(rows) |> filter(|row| len(row) > 0) |> map(|row| len(row)) |> sum()",
+        "let lengths = rows |> map(|row| len(row)); len(lengths)",
+    ] {
+        let optimized = emit(
+            "consumer",
+            &format!("fn view(rows: [[int]]) -> int {{ {body} }}"),
+            MirOptimization::Enabled,
+        );
+        let view = rendered_function(&optimized, "view");
+        assert!(
+            !view.lines().any(|line| {
+                let line = line.trim_start();
+                line.starts_with("clone [[int]]") || line.starts_with("clone MapIterator")
+            }),
+            "{body}: neither the iterator nor its collection may be cloned:\n{view}"
+        );
+        // The element read from the collection is copied once; an accepted one then moves on.
+        let element_clones = view
+            .lines()
+            .filter(|line| line.trim_start().starts_with("clone [int]"))
+            .count();
+        assert!(
+            element_clones <= 1,
+            "{body}: an accepted element must move:\n{view}"
+        );
+    }
+}

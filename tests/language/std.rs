@@ -808,6 +808,8 @@ fn buffer_slot_is_registered_as_native_addressor_subscript() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn temporary_array_index_shared_ref_call_does_not_clone() {
     let mut session = TestSession::new();
+    // Exact lifecycle counts are instrumentation, not observable Value semantics.
+    session.without_optimized_mode();
     assert_val_eq!(
         session.run(
             r#"
@@ -825,6 +827,8 @@ fn temporary_array_index_shared_ref_call_does_not_clone() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn temporary_array_index_let_uses_value_clone() {
     let mut session = TestSession::new();
+    // Exact lifecycle counts are instrumentation, not observable Value semantics.
+    session.without_optimized_mode();
     assert_val_eq!(
         session.run(
             r#"

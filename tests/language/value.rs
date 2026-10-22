@@ -286,6 +286,38 @@ fn tracked_probe_value_impl() -> &'static str {
     "#
 }
 
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_drop_reachable_without_the_clone_keeps_its_source() {
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    // The clone runs only on one branch; the source's drop after the join must stay, as the other
+    // branch reaches it without moving the source.
+    let source = format!(
+        r#"
+        {}
+        fn f(c: bool, n: int) -> int {{
+            let x = [Probe(n)];
+            let r = if c {{
+                let mut y = x;
+                y[0] = Probe(2);
+                2
+            }} else {{
+                0
+            }};
+            r + 1
+        }}
+        testing::reset_tracked_drops();
+        // Run-time arguments, so that the call is not evaluated while compiling.
+        let n = testing::tracked_drop_log() + 5;
+        let r = f(n == 0, n);
+        testing::tracked_drop_log() * 10 + r
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(51));
+}
+
 fn incrementing_clone_probe_value_impl() -> &'static str {
     // Deliberately violates the `Value` ownership laws: `clone` changes the observable payload and
     // `drop` records an observable event. This makes required ownership operations visible to
@@ -1888,6 +1920,9 @@ fn auto_derived_struct_value_clone_uses_field_clone() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn named_generic_enum_auto_derives_value() {
     let mut session = TestSession::new();
+    // `Probe`'s clone breaks the Value laws to observe that the derived clone calls it; the
+    // optimizer may remove a clone followed by its source's drop.
+    session.without_optimized_mode();
     session.allow_unsafe();
     assert_val_eq!(
         session.run(

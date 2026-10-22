@@ -23,7 +23,7 @@
 //! so there is no alias through which either place can change. Allocating the source first also
 //! proves it outlives the destination across every `stack_restore`.
 
-use std::cell::OnceCell;
+use std::{cell::OnceCell, iter::once};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -255,11 +255,15 @@ pub(crate) fn forward_redundant_storage(
     let participants: FxHashSet<ValueId> = copies
         .iter()
         .flat_map(|copy| [copy.source, copy.destination])
-        .chain(
-            forwarded_initializations
-                .iter()
-                .map(|forwarded| forwarded.temporary),
-        )
+        .chain(forwarded_initializations.iter().flat_map(|forwarded| {
+            let destination = match forwarded.destination {
+                mir::Value::Register(destination) if definitions.contains_key(&destination) => {
+                    Some(destination)
+                }
+                _ => None,
+            };
+            once(forwarded.temporary).chain(destination)
+        }))
         .collect();
     let cells = LocalCells::of_matching(func, |id, _| participants.contains(&id));
     let uses: FxHashMap<ValueId, Uses> = participants
@@ -390,6 +394,53 @@ pub(crate) fn forward_redundant_storage(
             }
             current = producer_to_forwarding[&forwarded.transfer_site];
         }
+    }
+    // A destination allocated after the producer cannot be what the producer initializes. When
+    // the transfer is its first use and its only whole write, the destination can instead be the
+    // temporary, allocated before it and so released no earlier.
+    for (index, forwarded) in forwarded_initializations.iter().enumerate() {
+        let mir::Value::Register(destination) = forwarded.destination else {
+            continue;
+        };
+        let transfer = forwarded.transfer_site;
+        if consumed.contains(&index)
+            || forwarded_temporaries.contains(&destination)
+            || replacements.contains_key(&destination)
+            // Its producer, a transfer coalesced above, is gone.
+            || replacements.contains_key(&forwarded.temporary)
+            || !definitions.get(&destination).is_some_and(|definition| {
+                definition.site.block == transfer.block
+                    && definition.site.index.as_index() > forwarded.producer_site.index.as_index()
+            })
+        {
+            continue;
+        }
+        let cell = cells
+            .get(destination)
+            .expect("a transfer destination is a participant");
+        let transferred_first = cells.uses(cell).iter().all(|cell_use| {
+            if cell_use.site == transfer {
+                return true;
+            }
+            let later = cell_use.site.block != transfer.block
+                || cell_use.site.index.as_index() > transfer.index.as_index();
+            later && !matches!(cell_use.access, Access::Write(_) | Access::MoveIn(_))
+        });
+        if !transferred_first {
+            continue;
+        }
+        consumed.insert(index);
+        forwarded_temporaries.insert(forwarded.temporary);
+        replacements.insert(destination, forwarded.temporary);
+        removed
+            .entry(transfer.block)
+            .or_default()
+            .insert(transfer.index);
+        let definition = definitions[&destination];
+        removed
+            .entry(definition.site.block)
+            .or_default()
+            .insert(definition.site.index);
     }
     for copy in copies {
         // Initialization forwarding may already have consumed this transfer and retargeted its
