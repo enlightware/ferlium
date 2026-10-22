@@ -1177,6 +1177,9 @@ impl Operation {
     ///
     /// Operand layout is `[hidden_dicts…, captures…, env_dict?]`. The result is a register holding
     /// the closure value (a runtime `FunctionValue`).
+    ///
+    /// `instantiation` is how the closure instantiates a generic target, recorded as a call
+    /// records it, so that a call through the closure made direct can be specialized.
     pub fn build_closure(
         span: impl Into<DebugLocation>,
         function: FunctionId,
@@ -1184,6 +1187,7 @@ impl Operation {
         env_dict: Option<mir::Value>,
         ty: Type,
         captures: Vec<mir::Value>,
+        instantiation: Option<Instantiation>,
     ) -> Self {
         let num_hidden_dicts = u32::try_from(hidden_dicts.len())
             .expect("a closure cannot capture more than u32::MAX hidden dictionaries");
@@ -1199,7 +1203,7 @@ impl Operation {
                 function,
                 num_hidden_dicts,
                 has_env_dict,
-                ty,
+                signature: Box::new(ClosureSignature { ty, instantiation }),
             },
         }
     }
@@ -1337,6 +1341,16 @@ pub struct VariantMetadata {
 /// `layout_witness_tys` is positional against the evidence operands following the aggregate and
 /// logical field index. It contains every direct member whose inline layout is not static in the
 /// containing function.
+/// A closure's type, and how it instantiates its target function.
+///
+/// Boxed out of the operation, as a call's signature is, since few operations build closures.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct ClosureSignature {
+    pub ty: Type,
+    /// How the closure instantiates its target, as a call's [`CallMetadata`] records it.
+    pub instantiation: Option<Instantiation>,
+}
+
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct ProductProjectionMetadata {
     pub(crate) aggregate_ty: Type,
@@ -1344,6 +1358,26 @@ pub struct ProductProjectionMetadata {
 }
 
 impl Instantiation {
+    /// The instantiation taking every quantifier of `scheme` to itself, `None` if it has none.
+    pub fn identity<Ty: TypeLike>(scheme: &TypeScheme<Ty>) -> Option<Self> {
+        if scheme.ty_quantifiers.is_empty() && scheme.eff_quantifiers.is_empty() {
+            return None;
+        }
+        Some(Self {
+            ty_args: scheme
+                .ty_quantifiers
+                .iter()
+                .map(|quantifier| Type::variable(*quantifier))
+                .collect(),
+            eff_args: scheme
+                .eff_quantifiers
+                .iter()
+                .sorted()
+                .map(|quantifier| EffType::single_variable(*quantifier))
+                .collect(),
+        })
+    }
+
     /// Builds the substitution taking the callee's quantifiers to what this call site instantiated
     /// them at, in the callee's own variable numbering.
     ///
@@ -1523,7 +1557,7 @@ pub enum OperationKind {
         function: FunctionId,
         num_hidden_dicts: u32,
         has_env_dict: bool,
-        ty: Type,
+        signature: Box<ClosureSignature>,
     },
     /// Deep-clone a closure's captured environment.
     CloneClosureEnv { ty: Type },
@@ -1739,10 +1773,10 @@ impl OperationKind {
             BuildDictionary { ty, .. } | BuildSubscriptEvidence { ty } => {
                 OperationResult::Lowered(*ty)
             }
-            BuildSubscript { ty }
-            | CloneSubscriptEnv { ty }
-            | BuildClosure { ty, .. }
-            | CloneClosureEnv { ty } => OperationResult::Lowered(*ty),
+            BuildSubscript { ty } | CloneSubscriptEnv { ty } | CloneClosureEnv { ty } => {
+                OperationResult::Lowered(*ty)
+            }
+            BuildClosure { signature, .. } => OperationResult::Lowered(signature.ty),
             Variant { metadata, .. } => OperationResult::Lowered(metadata.ty),
             ExtractTag => OperationResult::VariantTag,
             ExtractPayloadIndirection => OperationResult::Lowered(cached_primitive_ty!(bool)),

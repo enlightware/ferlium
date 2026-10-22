@@ -383,6 +383,7 @@ enum SnapshotOperationKind {
         num_hidden_dicts: u32,
         has_env_dict: bool,
         ty: SnapshotTypeId,
+        instantiation: Option<SnapshotInstantiation>,
     },
     CloneClosureEnv {
         ty: SnapshotTypeId,
@@ -1003,12 +1004,17 @@ impl SnapshotOperationKind {
                 function,
                 num_hidden_dicts,
                 has_env_dict,
-                ty,
+                signature,
             } => Stored::BuildClosure {
                 function: *function,
                 num_hidden_dicts: *num_hidden_dicts,
                 has_env_dict: *has_env_dict,
-                ty: graph.capture(*ty)?,
+                ty: graph.capture(signature.ty)?,
+                instantiation: signature
+                    .instantiation
+                    .as_ref()
+                    .map(|instantiation| SnapshotInstantiation::capture(instantiation, graph))
+                    .transpose()?,
             },
             Source::CloneClosureEnv { ty } => Stored::CloneClosureEnv {
                 ty: graph.capture(*ty)?,
@@ -1165,11 +1171,18 @@ impl SnapshotOperationKind {
                 num_hidden_dicts,
                 has_env_dict,
                 ty,
+                instantiation,
             } => Runtime::BuildClosure {
                 function: *function,
                 num_hidden_dicts: *num_hidden_dicts,
                 has_env_dict: *has_env_dict,
-                ty: resolve_type(types, *ty)?,
+                signature: Box::new(mir::ClosureSignature {
+                    ty: resolve_type(types, *ty)?,
+                    instantiation: instantiation
+                        .as_ref()
+                        .map(|instantiation| instantiation.materialize(types))
+                        .transpose()?,
+                }),
             },
             Stored::CloneClosureEnv { ty } => Runtime::CloneClosureEnv {
                 ty: resolve_type(types, *ty)?,
@@ -1198,6 +1211,41 @@ impl SnapshotCallImplType {
     }
 }
 
+impl SnapshotInstantiation {
+    fn capture(
+        instantiation: &mir::Instantiation,
+        graph: &mut SnapshotTypeGraphBuilder<'_>,
+    ) -> Result<Self, SnapshotError> {
+        Ok(Self {
+            ty_args: instantiation
+                .ty_args
+                .iter()
+                .map(|ty| graph.capture(*ty))
+                .collect::<Result<_, _>>()?,
+            eff_args: instantiation
+                .eff_args
+                .iter()
+                .map(|effects| effects.iter().collect())
+                .collect(),
+        })
+    }
+
+    fn materialize(&self, types: &[Type]) -> Result<mir::Instantiation, SnapshotError> {
+        Ok(mir::Instantiation {
+            ty_args: self
+                .ty_args
+                .iter()
+                .map(|id| resolve_type(types, *id))
+                .collect::<Result<_, _>>()?,
+            eff_args: self
+                .eff_args
+                .iter()
+                .map(|effects| effects.iter().copied().collect::<EffType>())
+                .collect(),
+        })
+    }
+}
+
 impl SnapshotCallMetadata {
     fn capture(
         metadata: &mir::CallMetadata,
@@ -1207,20 +1255,7 @@ impl SnapshotCallMetadata {
             instantiation: metadata
                 .instantiation
                 .as_ref()
-                .map(|instantiation| {
-                    Ok(SnapshotInstantiation {
-                        ty_args: instantiation
-                            .ty_args
-                            .iter()
-                            .map(|ty| graph.capture(*ty))
-                            .collect::<Result<_, _>>()?,
-                        eff_args: instantiation
-                            .eff_args
-                            .iter()
-                            .map(|effects| effects.iter().collect())
-                            .collect(),
-                    })
-                })
+                .map(|instantiation| SnapshotInstantiation::capture(instantiation, graph))
                 .transpose()?,
             owned_arguments: metadata
                 .owned_arguments
@@ -1239,20 +1274,7 @@ impl SnapshotCallMetadata {
             instantiation: self
                 .instantiation
                 .as_ref()
-                .map(|instantiation| {
-                    Ok(mir::Instantiation {
-                        ty_args: instantiation
-                            .ty_args
-                            .iter()
-                            .map(|id| resolve_type(types, *id))
-                            .collect::<Result<_, _>>()?,
-                        eff_args: instantiation
-                            .eff_args
-                            .iter()
-                            .map(|effects| effects.iter().copied().collect::<EffType>())
-                            .collect(),
-                    })
-                })
+                .map(|instantiation| instantiation.materialize(types))
                 .transpose()?,
             owned_arguments,
         })

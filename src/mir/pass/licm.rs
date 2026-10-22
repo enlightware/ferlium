@@ -955,7 +955,8 @@ fn invariant_cell<'f>(
         Definition::Value(_) => {
             inputs.push(&value_cells::operation_at(func, cell.site).operands[0])
         }
-        Definition::Copy(_) => return false,
+        // A closure's evidence is released by its drop, which stays in the loop.
+        Definition::Copy(_) | Definition::Closure { .. } => return false,
     }
     if values
         .uses(cell)

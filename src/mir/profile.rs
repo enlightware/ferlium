@@ -258,8 +258,8 @@ impl MirExecutionProfile {
             | OperationKind::Clone { ty }
             | OperationKind::Drop { ty }
             | OperationKind::DropInitialized { ty }
-            | OperationKind::BuildClosure { ty, .. }
             | OperationKind::CloneClosureEnv { ty } => Some(*ty),
+            OperationKind::BuildClosure { signature, .. } => Some(signature.ty),
             OperationKind::Variant { metadata, .. } => Some(metadata.ty),
             OperationKind::AllocaPlace { pointing_to }
             | OperationKind::AddressOffsetPlace { pointing_to } => Some(*pointing_to),

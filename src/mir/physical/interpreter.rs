@@ -520,12 +520,14 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     | OperationKind::BlackBox { ty }
                     | OperationKind::MoveBytes { ty }
                     | OperationKind::MoveRange { ty }
-                    | OperationKind::BuildClosure { ty, .. }
                     | OperationKind::BuildSubscript { ty }
                     | OperationKind::CloneSubscriptEnv { ty }
                     | OperationKind::CloneClosureEnv { ty } => {
                         self.memory.prepare_type(types.resolve(*ty), &env)?
                     }
+                    OperationKind::BuildClosure { signature, .. } => self
+                        .memory
+                        .prepare_type(types.resolve(signature.ty), &env)?,
                     OperationKind::AllocaPlace { pointing_to }
                     | OperationKind::AddressOffsetPlace { pointing_to } => self
                         .memory
@@ -1928,7 +1930,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 function,
                 num_hidden_dicts,
                 has_env_dict,
-                ty,
+                signature,
             } => {
                 let hidden = (0..*num_hidden_dicts as usize)
                     .map(|i| operand(i)?.evidence(&self.memory))
@@ -1947,7 +1949,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     hidden,
                     dictionary,
                     &captures,
-                    self.types.resolve(*ty),
+                    self.types.resolve(signature.ty),
                     operation.span.location,
                 )?;
                 Some(Binding::Aggregate(Rc::new(value)))

@@ -414,7 +414,7 @@ same reason cross-module inlining is: a dependency's revision is immutable.
 Every parameter's type; the type fields of `Alloca`, `AllocaPlace`, `Call`, `Project`, `Subfield`,
 `DictEntry`, `SubscriptMember`, `BuildSubscript`, `Variant`, `BuildArray`, `BuildClosure`,
 `CloneClosureEnv`, `Clone` and `Drop`; the constant pool's types; effects wherever they appear; and **the instantiation
-recorded on the body's own calls**, which is what makes the cascade work.
+recorded on the body's own calls and closures**, which is what makes the cascade work.
 
 Substitution interns types, and the type universe's lock is not reentrant: nothing may hold
 `Type::data()` or `Type::summary()` across it.
@@ -757,8 +757,12 @@ forwarded read sees what the definition stored: a materialized register or value
 constant, or, for a copy from another such cell, what that cell holds. A copy from a `let` parameter
 passed as a place reads the parameter in place. A cell holding a non-capturing closure's function is
 one too: calls through it become direct, its clone, which duplicates no environment, stores the
-function, and its drop, which releases nothing, goes. A cell whose
-every read was forwarded is removed with its write. A read-only `let` argument keeps the cell but
+function, and its drop, which releases nothing, goes. So is a cell holding a closure that captures
+only hidden evidence, such as a lambda using its generic function's dictionaries: calls through it
+call the lambda directly, with that evidence ahead of the arguments and the closure's recorded
+instantiation, so specialization and inlining reach it. Its evidence lives in an environment that
+its drop releases, so the drop goes only together with the cell and the closure's construction.
+A cell whose every read was forwarded is removed with its write. A read-only `let` argument keeps the cell but
 does not block forwarding its other reads.
 
 It is a canonicalizer: every later pass may assume a value is tested where it is computed, not

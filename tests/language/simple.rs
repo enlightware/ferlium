@@ -1301,6 +1301,31 @@ fn value_function_arity_for_static_std_function_value() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_lambdas_capturing_only_dictionaries() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            "fn total(xs) { let add = |a, b| a + b; let mut t = 0; for x in xs { t = add(t, x) }; t } total([1, 2, 3])"
+        ),
+        int(6)
+    );
+    // A copy keeps the closure alive past the calls through it.
+    assert_val_eq!(
+        session.run(
+            "fn twice(x) { let add = |a, b| a + b; let other = add; add(x, x) + other(x, 1) } twice(2)"
+        ),
+        int(7)
+    );
+    assert_val_eq!(
+        session.run(
+            "fn pair(x) { let add = |a, b| a + b; (add(x, 1), add) } let p = pair(2); p.0 + p.1(3, 4)"
+        ),
+        int(10)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn lambda() {
     let mut session = TestSession::new();
     assert_val_eq!(session.run("let f = || 1; f()"), int(1));

@@ -1713,8 +1713,13 @@ fn substitute_in_operation(operation: &mut Operation, mapper: &mut impl TypeMapp
         | OperationKind::BuildSubscript { ty }
         | OperationKind::CloneSubscriptEnv { ty }
         | OperationKind::BorrowSubscriptMember { ty, .. }
-        | OperationKind::BuildClosure { ty, .. }
         | OperationKind::CloneClosureEnv { ty } => *ty = ty.map(mapper),
+        OperationKind::BuildClosure { signature, .. } => {
+            signature.ty = signature.ty.map(mapper);
+            if let Some(instantiation) = &mut signature.instantiation {
+                substitute_in_instantiation(instantiation, mapper);
+            }
+        }
         OperationKind::Subfield { ty, product, .. } => {
             *ty = ty.map(mapper);
             if let Some(product) = product {

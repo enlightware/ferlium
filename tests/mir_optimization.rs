@@ -649,3 +649,28 @@ fn consumed_adaptors_move_their_iterator_and_borrow_their_collection() {
         );
     }
 }
+
+/// A lambda in a generic function captures only that function's dictionaries, as `sum`'s folding
+/// lambda does. Once those are constants, the closure is the lambda at its recorded instantiation:
+/// it is called directly, specialized and inlined, and never built.
+#[test]
+fn closures_of_dictionaries_alone_are_called_directly() {
+    for (name, source) in [
+        (
+            "sum",
+            "fn view(rows: [[int]]) -> int { iter(rows) |> map(|row| len(row)) |> sum() }",
+        ),
+        (
+            "local",
+            "fn total(xs) { let add = |a, b| a + b; let mut t = 0; for x in xs { t = add(t, x) }; t }
+            fn view(xs: [int]) -> int { total(xs) }",
+        ),
+    ] {
+        let optimized = emit("evidence_closure", source, MirOptimization::Enabled);
+        let view = rendered_function(&optimized, "view");
+        assert!(
+            !view.contains("build_closure") && !view.lines().any(|line| line.contains("call %")),
+            "{name}: the closure must be neither built nor called indirectly:\n{view}"
+        );
+    }
+}

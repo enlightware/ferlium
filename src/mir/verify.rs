@@ -31,7 +31,7 @@ use crate::{
     module::{ModuleEnv, id::Id},
     std::{array::array_type, math::readable_as},
     types::{
-        r#type::{CallImplType, CallResultConvention, Type, TypeKind},
+        r#type::{CallImplType, CallResultConvention, FnType, Type, TypeKind},
         type_like::TypeLike,
         type_mapper::EffectErasingMapper,
         type_properties::concrete_type_is_trivial_copy,
@@ -1089,7 +1089,7 @@ impl<'a> Verifier<'a> {
                 self.verify_instantiation(
                     node,
                     &operands[0],
-                    ty,
+                    &ty.fn_ty,
                     metadata
                         .as_deref()
                         .and_then(|metadata| metadata.instantiation.as_ref()),
@@ -1196,6 +1196,21 @@ impl<'a> Verifier<'a> {
                 self.verify_place_representation(node, 0, &operands[0], MirType::Lowered(*ty));
                 self.verify_place_representation(node, 1, &operands[1], MirType::Lowered(*ty));
             }
+            // A closure records its target's instantiation as a call does.
+            OperationKind::BuildClosure {
+                function,
+                signature,
+                ..
+            } => {
+                if let TypeKind::Function(fn_ty) = cloned_type_kind(signature.ty) {
+                    self.verify_instantiation(
+                        node,
+                        &mir::Value::Function(*function),
+                        &fn_ty,
+                        signature.instantiation.as_ref(),
+                    );
+                }
+            }
             OperationKind::BlackBox { ty } => {
                 self.verify_place_representation(node, 0, &operands[0], MirType::Lowered(*ty));
             }
@@ -1261,7 +1276,7 @@ impl<'a> Verifier<'a> {
         self.role(value).place_pointee_type()
     }
 
-    /// Checks that a call's recorded instantiation actually explains its call-site type.
+    /// Checks that a call's or a closure's recorded instantiation actually explains its type.
     ///
     /// Substituting the callee's declared signature by the recorded arguments must reproduce the
     /// concrete signature the call site carries. This is the invariant that makes the instantiation
@@ -1276,7 +1291,7 @@ impl<'a> Verifier<'a> {
         &self,
         node: usize,
         callee: &mir::Value,
-        ty: &CallImplType,
+        fn_ty: &FnType,
         instantiation: Option<&Instantiation>,
     ) {
         let (Some(instantiation), mir::Value::Function(callee)) = (instantiation, callee) else {
@@ -1316,18 +1331,18 @@ impl<'a> Verifier<'a> {
         let substituted = scheme.ty.instantiate_simple(&subst);
         assert_eq!(
             substituted.args.len(),
-            ty.fn_ty.args.len(),
+            fn_ty.args.len(),
             "MIR function `{}` node {}: instantiating the callee's signature gives {} arguments \
              but the call site's type has {}",
             self.func.name,
             node,
             substituted.args.len(),
-            ty.fn_ty.args.len()
+            fn_ty.args.len()
         );
         // Rendered rather than compared by handle: a mismatch here is a lowering bug, and the two
         // types are what identifies it.
         assert!(
-            substituted.ret == ty.fn_ty.ret,
+            substituted.ret == fn_ty.ret,
             "MIR function `{}` node {}: instantiating {}'s signature by the recorded arguments \
              [{}] gives return type {}, but the call site's type says {}",
             self.func.name,
@@ -1340,7 +1355,7 @@ impl<'a> Verifier<'a> {
                 .collect::<Vec<_>>()
                 .join(", "),
             substituted.ret.format_with(&self.env),
-            ty.fn_ty.ret.format_with(&self.env),
+            fn_ty.ret.format_with(&self.env),
         );
     }
 

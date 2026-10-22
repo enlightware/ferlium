@@ -15,7 +15,10 @@
 //! statically sized contents, and visible `Let` call arguments, which the callee may neither mutate
 //! nor retain: since scalar arguments are values, such an argument is of another type, such as
 //! unit. A cell defined by storing a bare function may also be called through, cloned and dropped:
-//! it holds no environment, so its clone is a copy and its drop releases nothing. Any other value must be `TrivialCopy`, so a read never transfers ownership and
+//! it holds no environment, so its clone is a copy and its drop releases nothing. So may a cell
+//! storing a closure capturing no value, which holds a function and its hidden evidence; its drop
+//! releases what represents the evidence, so it goes only with the closure's construction.
+//! Any other value must be `TrivialCopy`, so a read never transfers ownership and
 //! the cell carries no drop obligation. A `move` out still leaves the cell uninitialized, making it
 //! the cell's last use until the definition runs again.
 //!
@@ -24,13 +27,17 @@
 //! is a value within each iteration; moving its definition across iterations is the consumer's
 //! proof, which must also respect the stack region releasing it and exclude moves out.
 
+use std::cell::OnceCell;
+
+use rustc_hash::FxHashMap;
+
 use super::{
     local_cells::{self, Access, Allocation, Cell, CellId, CellUse, LocalCells, Transfer},
-    site::OperationSite,
+    site::{OperationIndex, OperationSite},
 };
 use crate::{
     mir::{
-        self, Function, Operation, OperationKind,
+        self, Function, Instantiation, Operation, OperationKind,
         dominance::Dominance,
         terminator::TerminatorKind,
         value::{ConstantId, ValueId},
@@ -46,11 +53,28 @@ pub(crate) enum Definition {
     Value(mir::Value),
     /// `store <function> to %cell`: a bare function without an environment.
     Function(FunctionId),
+    /// `store %closure to %cell`, from the `build_closure` at `build` capturing no value: a
+    /// function with its hidden evidence, constant dictionaries or evidence parameters. The store
+    /// is the only read of the closure, so the cell owns what represents that evidence.
+    Closure {
+        closure: EvidenceClosure,
+        build: OperationSite,
+    },
     /// `store @constant to %cell`.
     Constant(ConstantId),
     /// `memcpy`/`move %source to %cell`, from a register or a parameter. The source may change
     /// after the copy; the cell keeps what it received.
     Copy(mir::Value),
+}
+
+/// A function applied to its hidden evidence alone, as a `build_closure` capturing no value holds
+/// it.
+#[derive(Clone, Debug)]
+pub(crate) struct EvidenceClosure {
+    pub(crate) function: FunctionId,
+    pub(crate) evidence: Box<[mir::Value]>,
+    /// How the closure instantiates `function`, if it recorded it.
+    pub(crate) instantiation: Option<Instantiation>,
 }
 
 /// A local cell holding one value for its whole lifetime.
@@ -82,12 +106,28 @@ impl<'a> ValueCells<'a> {
         admit: impl Fn(Access) -> bool,
         dominance: impl FnOnce() -> &'d Dominance,
     ) -> Self {
+        let closures = OnceCell::new();
         let mut candidates: Vec<_> = local
             .iter()
             .enumerate()
             .filter_map(|(position, cell)| {
                 let uses = local.uses(cell);
                 shape(func, cell, CellId::from_index(position), uses, &admit)
+            })
+            .map(|mut shape| {
+                // A function value used as one may be a closure of evidence alone.
+                if shape.function_uses
+                    && let Definition::Value(mir::Value::Register(stored)) = shape.value.definition
+                    && let Some((closure, build)) = closures
+                        .get_or_init(|| evidence_closures(func))
+                        .get(&stored)
+                {
+                    shape.value.definition = Definition::Closure {
+                        closure: closure.clone(),
+                        build: *build,
+                    };
+                }
+                shape
             })
             .filter(|shape| shape.copyable(env))
             .map(|shape| (shape.value, shape.index))
@@ -179,17 +219,17 @@ struct Shape {
     index: usize,
     /// The allocated type, `None` for a pointer slot.
     ty: Option<Type>,
-    /// Whether the cell is called through, cloned or dropped, which needs it to hold a bare
-    /// function.
+    /// Whether the cell is called through, cloned or dropped, which needs it to hold a function.
     function_uses: bool,
 }
 
 impl Shape {
-    /// Whether reading the cell copies its value: a bare function carries no environment; any
-    /// other value must be `TrivialCopy`, and neither called through, cloned nor dropped.
+    /// Whether the cell's reads leave its value in place: a bare function holds no environment, and
+    /// a closure of evidence alone keeps its environment for its drop; any other value must be
+    /// `TrivialCopy`, and neither called through, cloned nor dropped.
     fn copyable(&self, env: ModuleEnv<'_>) -> bool {
         match self.value.definition {
-            Definition::Function(_) => true,
+            Definition::Function(_) | Definition::Closure { .. } => true,
             _ => {
                 !self.function_uses
                     && self
@@ -272,6 +312,50 @@ fn shape(
         ty,
         function_uses,
     })
+}
+
+/// The closures of evidence alone read once, by the register `build_closure` defines, with the
+/// site defining it.
+fn evidence_closures(func: &Function) -> FxHashMap<ValueId, (EvidenceClosure, OperationSite)> {
+    let mut closures = FxHashMap::default();
+    let mut reads: FxHashMap<ValueId, usize> = FxHashMap::default();
+    for block in func.blocks() {
+        let basic_block = func.block(block);
+        for (index, operation) in basic_block.operations().iter().enumerate() {
+            count_reads(&mut reads, &operation.operands);
+            if let OperationKind::BuildClosure {
+                function,
+                num_hidden_dicts,
+                signature,
+                ..
+            } = &operation.kind
+                && !operation.result_requires_consuming_use()
+                && let Some(result) = operation.result_id()
+            {
+                let closure = EvidenceClosure {
+                    function: *function,
+                    evidence: operation.operands[..*num_hidden_dicts as usize].into(),
+                    instantiation: signature.instantiation.clone(),
+                };
+                let site = OperationSite {
+                    block,
+                    index: OperationIndex::from_index(index),
+                };
+                closures.insert(result, (closure, site));
+            }
+        }
+        count_reads(&mut reads, basic_block.terminator().operands());
+    }
+    closures.retain(|result, _| reads.get(result) == Some(&1));
+    closures
+}
+
+fn count_reads(reads: &mut FxHashMap<ValueId, usize>, operands: &[mir::Value]) {
+    for operand in operands {
+        if let mir::Value::Register(id) = operand {
+            *reads.entry(*id).or_default() += 1;
+        }
+    }
 }
 
 #[cfg(test)]

@@ -58,6 +58,13 @@ that the two scopes cannot alias.
 This is the mainstream choice: rustc carries `GenericArgs` in the type of the callee operand, and
 Swift's SIL carries a `SubstitutionMap` on `apply`.
 
+A closure records the instantiation of the function it builds as a call does, so that a call through
+the closure made direct can be specialized. A generic function used as a value carries its
+reference's instantiation. A lambda is generalized together with its enclosing function and takes
+that function's quantifiers as its own, so the body building it names them in its own type
+environment: its instantiation is the identity, which substituting the enclosing function makes
+concrete.
+
 ## The arguments live in the caller's type environment
 
 `ty_args` are written in terms of whatever type variables are in scope *at the call site*, so a

@@ -1225,6 +1225,28 @@ impl<'a> Emitter<'a> {
         })
     }
 
+    /// How a closure instantiates its generated lambda: the identity.
+    ///
+    /// A lambda is generalized together with its enclosing function and takes that function's
+    /// quantifiers as its own, so the body building it, the enclosing function or another of its
+    /// lambdas, names them in its own type environment. Its reference therefore records no type
+    /// arguments, as a recursive call records none. `None` for any other function.
+    fn lambda_instantiation(&self, function: FunctionId) -> Option<Instantiation> {
+        if function.module != self.env.current.module_id() {
+            return None;
+        }
+        let module = self.env.current;
+        if !Module::is_generated_lambda_name(module.get_function_name_by_id(function.function)?) {
+            return None;
+        }
+        Instantiation::identity(
+            &module
+                .get_function_by_id(function.function)?
+                .definition
+                .ty_scheme,
+        )
+    }
+
     /// Emits a pinned sandbox guard. A violated guard leaves the MIR CFG through executor abort
     /// management, so it has neither a source-error successor nor a guest-cleanup edge.
     fn emit_runtime_check(&mut self, span: Location, call_depth: bool) {
@@ -3493,6 +3515,8 @@ impl<'a> Emitter<'a> {
                 };
                 let (fi, mi) = self.resolve_function(g.function);
                 let fref = self.demand_function(fi, mi);
+                let instantiation = Self::instantiation_of(&g.inst_data)
+                    .or_else(|| self.lambda_instantiation(g.function));
 
                 // The symbolic `Value` dictionary used to clone/drop the captured value environment
                 // (`None` when there are no value captures).
@@ -3527,6 +3551,7 @@ impl<'a> Emitter<'a> {
                         env_dict,
                         node.ty,
                         captures,
+                        instantiation,
                     ))
                     .unwrap();
                 self.store_into_if_needed(node.span, closure, destination);

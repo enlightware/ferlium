@@ -24,6 +24,8 @@ pub(crate) mod verify;
 
 pub use debug_location::{DebugLocation, InlineSite, InlineSiteId, InlineSites};
 pub use function::{BasicBlock, BlockId, Function, Parameter, ParameterKind};
-pub use operation::{CallMetadata, Instantiation, Operation, OperationKind, OperationResult};
+pub use operation::{
+    CallMetadata, ClosureSignature, Instantiation, Operation, OperationKind, OperationResult,
+};
 pub use results::ResultTransport;
 pub use value::{ParameterId, Value, ValueId};

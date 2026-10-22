@@ -25,10 +25,15 @@
 //! non-capturing closure bound to a local lowers: it holds that function and no environment. A call
 //! through it calls the function directly, which inlining and call-graph proofs can then see, its
 //! clone stores the function, and its drop has nothing to release. A closure with captures is built by `build_closure` instead, so
-//! a store of a bare function never drops an environment.
+//! a store of a bare function never drops an environment. A `build_closure` capturing no value,
+//! such as a generic lambda capturing only its dictionaries, holds the function and that evidence:
+//! a call through it calls the function directly with the evidence ahead of the arguments, as any
+//! direct call to a generic function passes it. Its environment holds the evidence and its drop
+//! releases it, so that drop goes only with the whole cell and the closure's construction.
 //!
 //! A cell whose every read was forwarded is removed with its write and loads; being `TrivialCopy`,
-//! or holding a bare function, it holds no drop obligation.
+//! or holding a bare function, it holds no drop obligation, and a closure's goes with its
+//! construction.
 //!
 //! Registers are defined once, so a store dominating a read also proves `%v` still holds the value
 //! stored: `%v`'s definition dominates the store, and no path from it to the read avoids the store.
@@ -44,7 +49,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::{
     local_cells::{self, Access, LocalCells, Transfer},
     site::{OperationIndex, OperationSite},
-    value_cells::{Definition, ValueCell, ValueCells, operation_at},
+    value_cells::{Definition, EvidenceClosure, ValueCell, ValueCells, operation_at},
 };
 use crate::{
     hir::function::ArgConvention,
@@ -56,7 +61,7 @@ use crate::{
         terminator::TerminatorKind,
         value::{ConstantId, ValueId},
     },
-    module::{FunctionId, ModuleEnv, id::Id},
+    module::{ModuleEnv, id::Id},
 };
 
 /// Rewrites reads of single-assignment cells to what they hold, returning `None` when there is
@@ -106,19 +111,23 @@ pub(crate) fn forward_stored_values(func: &Function, env: ModuleEnv<'_>) -> Opti
     let mut forwarded_reads: FxHashMap<ValueId, usize> = FxHashMap::default();
     let mut loads: FxHashMap<ValueId, mir::Value> = FxHashMap::default();
     let mut rewrites: Vec<(OperationSite, &Target)> = Vec::new();
-    // Drops of cells holding a bare function, which release nothing.
-    let mut empty_drops: FxHashSet<OperationSite> = FxHashSet::default();
+    // Drops of cells holding a function without an environment, by cell.
+    let mut empty_drops: Vec<(ValueId, OperationSite)> = Vec::new();
     for (&cell, target) in &targets {
         let local_cell = local.get(cell).expect("a census cell is a local cell");
         for cell_use in local.uses(local_cell) {
             let at = cell_use.site;
             let forwardable = match (read_kind(cell_use.access), target) {
-                // A bare function is not the ordinary materialized value a load produces.
-                (Some(Read::Value), Target::Function(_)) => matches!(
-                    cell_use.access,
-                    Access::Read(local_cells::Read::Copy | local_cells::Read::Clone)
-                        | Access::MoveOut(Transfer::Sized)
-                ),
+                // A bare function is not the ordinary materialized value a load produces, and a
+                // copy of a function with evidence would need that evidence too.
+                (Some(Read::Value), Target::Function(callable)) => {
+                    callable.evidence.is_empty()
+                        && matches!(
+                            cell_use.access,
+                            Access::Read(local_cells::Read::Copy | local_cells::Read::Clone)
+                                | Access::MoveOut(Transfer::Sized)
+                        )
+                }
                 // Only a bare function is cloned by copying it.
                 (Some(Read::Value), _)
                     if cell_use.access == Access::Read(local_cells::Read::Clone) =>
@@ -128,9 +137,9 @@ pub(crate) fn forward_stored_values(func: &Function, env: ModuleEnv<'_>) -> Opti
                 // Loads, comparisons, tag extractions and copies accept either a register or a
                 // pool constant.
                 (Some(Read::Value), _) => true,
-                (Some(Read::Callee), Target::Function(_)) => true,
+                (Some(Read::Callee), Target::Function(..)) => true,
                 // Only an operation in the block can be removed; an invoked drop stays.
-                (Some(Read::Drop), Target::Function(_)) => !cell_use.in_terminator(func),
+                (Some(Read::Drop), Target::Function(..)) => !cell_use.in_terminator(func),
                 _ => false,
             };
             if !forwardable {
@@ -148,9 +157,7 @@ pub(crate) fn forward_stored_values(func: &Function, env: ModuleEnv<'_>) -> Opti
                         loads.insert(result, stored);
                     }
                 }
-                (Access::Drop, _) => {
-                    empty_drops.insert(at);
-                }
+                (Access::Drop, _) => empty_drops.push((cell, at)),
                 _ => rewrites.push((at, target)),
             }
         }
@@ -188,11 +195,33 @@ pub(crate) fn forward_stored_values(func: &Function, env: ModuleEnv<'_>) -> Opti
         .filter(|(cell, forwarded)| values.reads(census.cell(*cell)) == *forwarded)
         .map(|(cell, _)| cell)
         .collect();
+    // A closure's construction goes with the cell its only read stores it to.
     let mut removed: FxHashSet<OperationSite> = removed_cells
         .iter()
-        .map(|cell| census.cell(*cell).site)
+        .flat_map(|cell| {
+            let cell = census.cell(*cell);
+            let build = match &cell.definition {
+                Definition::Closure { build, .. } => Some(*build),
+                _ => None,
+            };
+            std::iter::once(cell.site).chain(build)
+        })
         .collect();
-    removed.extend(empty_drops);
+    // A bare function releases nothing. A closure's evidence lives in an environment its drop
+    // releases, so that drop goes only with the cell, whose `build_closure` is then unread.
+    removed.extend(
+        empty_drops
+            .into_iter()
+            .filter(|(cell, _)| {
+                removed_cells.contains(cell)
+                    || matches!(&targets[cell], Target::Function(function) if function.evidence.is_empty())
+            })
+            .map(|(_, at)| at),
+    );
+    // Only retained closure drops: nothing changes.
+    if loads.is_empty() && rewrites.is_empty() && removed.is_empty() {
+        return None;
+    }
 
     let mut edit = FunctionEdit::new(func.clone());
     for (at, target) in rewrites {
@@ -208,10 +237,14 @@ pub(crate) fn forward_stored_values(func: &Function, env: ModuleEnv<'_>) -> Opti
                 _ => unreachable!("a site past the operations is the invoked one"),
             },
         };
+        let mut callable = None;
         let stored = match target {
             Target::Value(mir::Value::Register(stored)) => resolve(*stored),
             Target::Value(stored) => stored.clone(),
-            Target::Function(function) => mir::Value::Function(*function),
+            Target::Function(function) => {
+                callable = Some(function);
+                mir::Value::Function(function.function)
+            }
             Target::Constant(constant) => mir::Value::Constant(*constant),
             Target::Place(place) => {
                 operation.operands[0] = place.clone();
@@ -224,11 +257,24 @@ pub(crate) fn forward_stored_values(func: &Function, env: ModuleEnv<'_>) -> Opti
             }
         };
         match operation.kind {
-            // The callee read through the cell is called directly.
-            OperationKind::CompareEqual
-            | OperationKind::ExtractTag
-            | OperationKind::Call { .. } => {
+            OperationKind::CompareEqual | OperationKind::ExtractTag => {
                 operation.operands[0] = stored;
+            }
+            // The callee read through the cell is called directly, its evidence ahead of the
+            // visible arguments as a direct call to a generic function passes it.
+            // It records the closure's instantiation, as a direct call to a generic function does.
+            OperationKind::Call {
+                ref mut metadata, ..
+            } => {
+                let callable = callable.expect("only a function is called through a cell");
+                if let Some(instantiation) = &callable.instantiation {
+                    metadata.get_or_insert_with(Default::default).instantiation =
+                        Some(instantiation.clone());
+                }
+                let mut operands = std::mem::take(&mut operation.operands).into_vec();
+                operands[0] = stored;
+                operands.splice(1..1, callable.evidence.iter().cloned());
+                operation.operands = operands.into_boxed_slice();
             }
             // A copy out of a cell holding a value stores that value, as does the clone of a bare
             // function.
@@ -278,8 +324,8 @@ enum Target {
     /// A place holding the same value for as long as the cell lives: another cell, or a `let`
     /// parameter, which the callee cannot mutate.
     Place(mir::Value),
-    /// The function the cell holds, without an environment.
-    Function(FunctionId),
+    /// The function the cell holds, without an environment: a bare function has no evidence.
+    Function(EvidenceClosure),
     /// The pool constant the cell holds.
     Constant(ConstantId),
 }
@@ -390,7 +436,12 @@ fn targets(func: &Function, census: &Census<'_>) -> FxHashMap<ValueId, Target> {
                 Definition::Value(stored) => {
                     (self.materialized)(stored).then(|| Target::Value(stored.clone()))
                 }
-                Definition::Function(function) => Some(Target::Function(*function)),
+                Definition::Function(function) => Some(Target::Function(EvidenceClosure {
+                    function: *function,
+                    evidence: Box::new([]),
+                    instantiation: None,
+                })),
+                Definition::Closure { closure, .. } => Some(Target::Function(closure.clone())),
                 Definition::Constant(constant) => Some(Target::Constant(*constant)),
                 Definition::Copy(source) => self.copied(cell, source),
             };
@@ -410,7 +461,7 @@ fn targets(func: &Function, census: &Census<'_>) -> FxHashMap<ValueId, Target> {
                 Some(Target::Value(stored)) => Some(Target::Value(stored)),
                 Some(Target::Constant(constant)) => Some(Target::Constant(constant)),
                 // Copies are of representation-copyable values, never of a function value.
-                Some(Target::Function(_)) => None,
+                Some(Target::Function(..)) => None,
                 Some(Target::Place(place)) if self.census.outlives(self.func, &place, cell) => {
                     Some(Target::Place(place))
                 }
@@ -440,9 +491,11 @@ fn targets(func: &Function, census: &Census<'_>) -> FxHashMap<ValueId, Target> {
 
 #[cfg(test)]
 mod tests {
+    use ustr::ustr;
+
     use super::forward_stored_values;
     use crate::{
-        CompilerSession, Location,
+        CompilerSession, ExecutionTarget, Location, MirOptimization, Path,
         containers::b,
         hir::{function::ArgConvention, value::LiteralValue},
         mir::{
@@ -451,6 +504,7 @@ mod tests {
             terminator::{Terminator, TerminatorKind},
             verify::verify_function,
         },
+        module::Module,
         std::{
             logic::bool_type,
             math::{Float, float_type, int_type},
@@ -1040,6 +1094,126 @@ mod tests {
                 .iter()
                 .any(|operation| operation.kind == OperationKind::Memcpy),
             "the copy must stay"
+        );
+    }
+
+    /// The unoptimized body of `name` in `src`.
+    fn raw_body(session: &mut CompilerSession, src: &str, name: &str) -> Function {
+        let module_id = session
+            .compile_for(
+                ExecutionTarget::Mir,
+                src,
+                "store_forward",
+                Path::single_str("store_forward"),
+            )
+            .expect("test source must compile")
+            .module_id;
+        let function = session
+            .expect_fresh_module(module_id)
+            .get_local_function_id(ustr(name))
+            .unwrap_or_else(|| panic!("module has no `{name}`"));
+        session
+            .mir_artifacts_for(module_id, MirOptimization::Disabled)
+            .expect("MIR must be prepared")
+            .get(function)
+            .expect("function must have a MIR body")
+            .clone()
+    }
+
+    fn operations(function: &Function) -> impl Iterator<Item = &Operation> {
+        function
+            .blocks()
+            .flat_map(|block| function.block(block).operations())
+    }
+
+    fn calls_through_a_place(function: &Function) -> usize {
+        operations(function)
+            .filter(|operation| {
+                matches!(operation.kind, OperationKind::Call { .. })
+                    && matches!(operation.operands[0], Value::Register(_))
+            })
+            .count()
+    }
+
+    /// A lambda capturing only its generic function's dictionaries is that function's evidence
+    /// applied to it. The call through its cell calls the lambda directly at the closure's
+    /// instantiation, and the cell, its drops and the closure's construction go.
+    #[test]
+    fn a_closure_of_evidence_alone_is_called_directly() {
+        let mut session = CompilerSession::new();
+        let source = raw_body(
+            &mut session,
+            "fn twice(x) { let add = |a, b| a + b; add(x, x) }",
+            "twice",
+        );
+        assert_eq!(
+            calls_through_a_place(&source),
+            1,
+            "the call through the closure"
+        );
+        let forwarded = forward_stored_values(&source, session.module_env())
+            .expect("the call must be forwarded");
+        verify_function(&forwarded, session.module_env());
+        assert_eq!(calls_through_a_place(&forwarded), 0);
+        let direct = operations(&forwarded)
+            .find(|operation| match operation.operands.first() {
+                Some(Value::Function(function)) => session
+                    .expect_fresh_module(function.module)
+                    .get_function_name_by_id(function.function)
+                    .is_some_and(Module::is_generated_lambda_name),
+                _ => false,
+            })
+            .expect("the lambda must be called directly");
+        let OperationKind::Call { metadata, .. } = &direct.kind else {
+            panic!("a direct call");
+        };
+        assert!(
+            metadata
+                .as_deref()
+                .is_some_and(|metadata| metadata.instantiation.is_some()),
+            "the call must record the closure's instantiation"
+        );
+        assert!(
+            matches!(direct.operands[1], Value::Parameter(_)),
+            "the evidence must precede the arguments"
+        );
+        assert!(
+            operations(&forwarded).all(|operation| match operation.kind {
+                OperationKind::BuildClosure { .. } => false,
+                OperationKind::Drop { ty } => !ty.is_function(),
+                _ => true,
+            }),
+            "the closure must be neither built nor dropped"
+        );
+    }
+
+    /// A closure also passed on keeps its cell, which still owns its evidence: the call through it
+    /// is direct, but its construction and drop stay, and forwarding again changes nothing.
+    #[test]
+    fn a_closure_of_evidence_alone_passed_on_keeps_its_drop() {
+        let mut session = CompilerSession::new();
+        let source = raw_body(
+            &mut session,
+            "fn apply(f, x) { f(x, x) } fn twice(x) { let add = |a, b| a + b; add(x, x) + apply(add, x) }",
+            "twice",
+        );
+        let forwarded = forward_stored_values(&source, session.module_env())
+            .expect("the call must be forwarded");
+        verify_function(&forwarded, session.module_env());
+        assert!(
+            operations(&forwarded)
+                .any(|operation| matches!(operation.kind, OperationKind::BuildClosure { .. })),
+            "the closure must still be built"
+        );
+        assert!(
+            operations(&forwarded).any(
+                |operation| matches!(operation.kind, OperationKind::Drop { ty } if ty.is_function())
+            ),
+            "the closure must still be dropped"
+        );
+        assert!(
+            forward_stored_values(&forwarded, session.module_env()).is_none(),
+            "a retained drop alone is no progress"
         );
     }
 }
