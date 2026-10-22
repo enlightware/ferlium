@@ -24,7 +24,7 @@ needs no runtime adapter (see [abi.md](abi.md)).
 - **Joins** (branches of a match or `if`, array elements, loop exits, writes to a mutable local):
   a type variable receiving a callable gives it a fresh effect variable that each contributor's row
   is included in. Joins never equate the contributors' effects with each other.
-- **Invariant positions** (effect arguments of named types, duplicate trait applications in one
+- **Invariant positions** (type and effect arguments of named types, duplicate trait applications in one
   scope, the types behind `&mut` parameters, which are also written back): equality. Where it is
   exact, it unifies the two rows so that equal types stay syntactically equal: two lone
   variables merge, and a lone variable becomes the other row. Other equalities, such as
@@ -89,7 +89,11 @@ scheme language, a simplifier and a display), restricting only by polarity (a po
 can still be pinned invariantly elsewhere), and an ambiguity diagnostic for disjunctions (it would
 reject ordinary joins). The accepted cost is that merged variables and replaced ceilings make some
 signatures coarser, and sometimes give a may-fail convention where a finer type would not.
-Effect arguments of named types are invariant; a variance analysis of named types could relax
-this. Order independence of solving is tested, not proved, and whether validation can reject a
+Type and effect arguments of named types are invariant; this includes effects nested inside a
+type argument. For example, `Consumer<(() -> int)>` cannot become
+`Consumer<(() -> int ! fallible)>` when `Consumer<T>` stores a function accepting `T`:
+the stored function may require a pure callback. Invariance also rejects some safe conversions,
+such as widening a callback already stored in `Box<T>`; a variance analysis of named types could
+relax this. Order independence of solving is tested, not proved, and whether validation can reject a
 function without declared effect variables is open: a counterexample is to be investigated, not
 answered by weakening validation.

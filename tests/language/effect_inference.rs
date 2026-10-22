@@ -534,3 +534,54 @@ fn mutable_argument_types_are_invariant_in_nested_function_types() {
         f()
     "# });
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn named_type_parameters_preserve_callback_effect_requirements() {
+    let mut session = TestSession::new();
+    let error = session
+        .try_compile(indoc! { r#"
+        type Pure = () -> int;
+        type Fallible = () -> int ! fallible;
+        struct Consumer<T> { consume: (T) -> int }
+        fn coerce(c: Consumer<Pure>) -> Consumer<Fallible> { c }
+        fn pure_call(f: Pure) -> int { f() }
+        fn bad() -> int {
+            let d = coerce(Consumer { consume: pure_call });
+            (d.consume)(|| idiv(1, 0))
+        }
+    "# })
+        .expect_err("a consumer of pure callbacks cannot accept fallible callbacks");
+    error.expect_invalid_effect_dependency(effect(PrimitiveEffect::Fallible), no_effects());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn named_type_parameters_preserve_nested_callback_effect_requirements() {
+    let mut session = TestSession::new();
+    let error = session
+        .try_compile(indoc! { r#"
+        type Pure = () -> int;
+        type Fallible = () -> int ! fallible;
+        struct Consumer<T> { consume: (T) -> int }
+        fn coerce(c: Consumer<(Fallible) -> int>) -> Consumer<(Pure) -> int> { c }
+    "# })
+        .expect_err("nested callback effects must remain invariant in named types");
+    error.expect_invalid_effect_dependency(effect(PrimitiveEffect::Fallible), no_effects());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn named_type_parameters_preserve_effect_polymorphism() {
+    let mut session = TestSession::new();
+    let src = indoc! { r#"
+        struct Box<T>(T)
+        fn identity<T>(x: Box<T>) -> Box<T> { x }
+        fn apply<! E>(x: Box<(() -> int ! E)>) -> int { (identity(x).0)() }
+    "# };
+    assert_val_eq!(session.run(&format!("{src}\napply(Box(|| 7))")), int(7));
+    assert_eq!(
+        session.fail_run(&format!("{src}\napply(Box(|| idiv(1, 0)))")),
+        SourceFailureKind::DivisionByZero,
+    );
+}

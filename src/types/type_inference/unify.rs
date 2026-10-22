@@ -53,6 +53,8 @@ use crate::{
 pub enum SubOrSameType {
     SubType,
     SameTypeWithSubEffects,
+    /// Equality throughout the type, including callable effects and mutability.
+    SameType,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -638,12 +640,22 @@ impl UnifiedTypeInference {
                         sub_or_same: SameTypeWithSubEffects,
                     })
                 }),
-            (Variable(var), _) => {
-                self.unify_type_variable(var, current_span, expected_ty, expected_span, false)
-            }
-            (_, Variable(var)) => {
-                self.unify_type_variable(var, expected_span, current_ty, current_span, true)
-            }
+            (Variable(var), _) => self.unify_type_variable(
+                var,
+                current_span,
+                expected_ty,
+                expected_span,
+                false,
+                sub_or_same,
+            ),
+            (_, Variable(var)) => self.unify_type_variable(
+                var,
+                expected_span,
+                current_ty,
+                current_span,
+                true,
+                sub_or_same,
+            ),
             (Native(cur), Native(exp)) => {
                 if cur.bare_ty != exp.bare_ty {
                     return Err(internal_compilation_error!(TypeMismatch {
@@ -766,8 +778,9 @@ impl UnifiedTypeInference {
                         sub_or_same,
                     )?;
                     // A mutable argument is also written back, so its type is invariant.
-                    if self.is_resolved_mutable(cur_arg.mut_ty)
-                        || self.is_resolved_mutable(exp_arg.mut_ty)
+                    if sub_or_same != SameType
+                        && (self.is_resolved_mutable(cur_arg.mut_ty)
+                            || self.is_resolved_mutable(exp_arg.mut_ty))
                     {
                         self.unify_sub_or_same_type(
                             cur_arg.ty,
@@ -778,8 +791,12 @@ impl UnifiedTypeInference {
                         )?;
                     }
                 }
-                // Covariant effects.
-                self.add_effect_dep(&cur.effects, current_span, &exp.effects, expected_span)?;
+                if sub_or_same == SameType {
+                    self.unify_same_effect(cur.effects, current_span, exp.effects, expected_span)?;
+                } else {
+                    // Covariant effects.
+                    self.add_effect_dep(&cur.effects, current_span, &exp.effects, expected_span)?;
+                }
                 // Covariance of return type.
                 self.unify_sub_or_same_type(
                     cur.ret,
@@ -790,7 +807,10 @@ impl UnifiedTypeInference {
                 )
             }
             (Subscript(cur), Subscript(exp)) => {
-                if cur.args.len() != exp.args.len() || !cur.can_satisfy_members(&exp) {
+                if cur.args.len() != exp.args.len()
+                    || !cur.can_satisfy_members(&exp)
+                    || (sub_or_same == SameType && !exp.can_satisfy_members(&cur))
+                {
                     return Err(internal_compilation_error!(TypeMismatch {
                         current_ty,
                         current_span,
@@ -818,8 +838,9 @@ impl UnifiedTypeInference {
                         sub_or_same,
                     )?;
                     // A mutable argument is also written back, so its type is invariant.
-                    if self.is_resolved_mutable(cur_arg.mut_ty)
-                        || self.is_resolved_mutable(exp_arg.mut_ty)
+                    if sub_or_same != SameType
+                        && (self.is_resolved_mutable(cur_arg.mut_ty)
+                            || self.is_resolved_mutable(exp_arg.mut_ty))
                     {
                         self.unify_sub_or_same_type(
                             cur_arg.ty,
@@ -830,17 +851,19 @@ impl UnifiedTypeInference {
                         )?;
                     }
                 }
-                self.add_subscript_member_effect_dep(
+                self.unify_subscript_member_effects(
                     cur.ref_member.as_ref(),
                     current_span,
                     exp.ref_member.as_ref(),
                     expected_span,
+                    sub_or_same,
                 )?;
-                self.add_subscript_member_effect_dep(
+                self.unify_subscript_member_effects(
                     cur.mut_member.as_ref(),
                     current_span,
                     exp.mut_member.as_ref(),
                     expected_span,
+                    sub_or_same,
                 )?;
                 // Covariance of return type.
                 self.unify_sub_or_same_type(
@@ -866,12 +889,14 @@ impl UnifiedTypeInference {
                     "A Named type must have the same number of arguments for all its instances"
                 );
                 for (cur_el_ty, exp_el_ty) in cur.params.into_iter().zip(exp.params) {
+                    // A parameter may occur in negative or mutable positions in the
+                    // definition. Without variance analysis, named type arguments are invariant.
                     self.unify_sub_or_same_type(
                         cur_el_ty,
                         current_span,
                         exp_el_ty,
                         expected_span,
-                        sub_or_same,
+                        SameType,
                     )?;
                 }
                 assert_eq!(
@@ -902,6 +927,7 @@ impl UnifiedTypeInference {
         ty: Type,
         ty_span: Location,
         var_is_supertype: bool,
+        sub_or_same: SubOrSameType,
     ) -> Result<(), InternalCompilationError> {
         let ty = if ty.contains_any_type_var(var) {
             // A recursive type equation: intern it as a recursive type when it
@@ -924,6 +950,8 @@ impl UnifiedTypeInference {
                     span: ty_span
                 })
             })?
+        } else if sub_or_same == SubOrSameType::SameType {
+            ty
         } else {
             // A variable bound to a callable gets its own effect variable, related to the
             // callable's by inclusion in the direction of the subtyping, so that the other values
@@ -1877,7 +1905,7 @@ impl UnifiedTypeInference {
         // -----------|---------|---------
         // target cst |   ok    |   ok
         // target mut |   err   |   ok
-        // When it is SameTypeWithSubEffects, the table is a perfect diagonal.
+        // For either same-type relation, the table is a perfect diagonal.
         use MutType::*;
         use MutabilityMustBeWhat::*;
         match (current_mut, target_mut) {
@@ -1917,14 +1945,14 @@ impl UnifiedTypeInference {
                     // Check mutability value coercion.
                     SubType => current < target,
                     // Must be exactly the same.
-                    SameTypeWithSubEffects => current != target,
+                    SameTypeWithSubEffects | SameType => current != target,
                 } {
                     Err(internal_compilation_error!(MutabilityMustBe {
                         source_span: current_span,
                         reason_span: target_span,
                         what: match sub_or_same {
                             SubType => Mutable,
-                            SameTypeWithSubEffects => Equal,
+                            SameTypeWithSubEffects | SameType => Equal,
                         },
                         ctx,
                     }))
@@ -1965,7 +1993,7 @@ impl UnifiedTypeInference {
                         })
                 }
             }
-            SameTypeWithSubEffects => self
+            SameTypeWithSubEffects | SameType => self
                 .mut_unification_table
                 .unify_var_value(current, Some(target))
                 .map_err(|_| {
@@ -2009,7 +2037,7 @@ impl UnifiedTypeInference {
                         })
                 }
             }
-            SameTypeWithSubEffects => self
+            SameTypeWithSubEffects | SameType => self
                 .mut_unification_table
                 .unify_var_value(target, Some(current))
                 .map_err(|_| {
@@ -2144,12 +2172,13 @@ impl UnifiedTypeInference {
             .add_effect_dep(current, current_span, target, target_span)
     }
 
-    fn add_subscript_member_effect_dep(
+    fn unify_subscript_member_effects(
         &mut self,
         current: Option<&SubscriptMemberType>,
         current_span: Location,
         target: Option<&SubscriptMemberType>,
         target_span: Location,
+        sub_or_same: SubOrSameType,
     ) -> Result<(), InternalCompilationError> {
         let Some(target) = target else {
             return Ok(());
@@ -2157,7 +2186,16 @@ impl UnifiedTypeInference {
         let Some(current) = current else {
             return Ok(());
         };
-        self.add_effect_dep(&current.effects, current_span, &target.effects, target_span)
+        if sub_or_same == SubOrSameType::SameType {
+            self.unify_same_effect(
+                current.effects.clone(),
+                current_span,
+                target.effects.clone(),
+                target_span,
+            )
+        } else {
+            self.add_effect_dep(&current.effects, current_span, &target.effects, target_span)
+        }
     }
 
     pub fn finalize_effect_dependencies(&mut self) -> Result<(), InternalCompilationError> {

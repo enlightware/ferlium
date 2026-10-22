@@ -226,7 +226,7 @@ fn pretty_print_checking_error(error: &CompilationError, src: &str, source_table
             use SubOrSameType::*;
             let extra_reason = match sub_or_same {
                 SubType => "not a subtype",
-                SameTypeWithSubEffects => "not the same type",
+                SameTypeWithSubEffects | SameType => "not the same type",
             };
             Report::build(ReportKind::Error, span)
                 .with_message(format!(
