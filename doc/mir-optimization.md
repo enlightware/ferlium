@@ -48,6 +48,7 @@ peephole          // collapse small local CFG/value patterns
 boolean flow      // repeat while the body shrinks: store forward, negation, branch forward
 string rewrites   // fuse static construction into appends; forward self-prefixed builders
 devirtualize      // final dictionary-entry callees exposed too late for a fold round
+narrow invokes    // call a direct callee that cannot fail without an error edge
 bounds checks     // prove array indices in range and remove checked access/failure edges;
                   // check a range loop's remaining indices once, before the loop
 discarded results // remove unread TrivialCopy result places exposed by inlining
@@ -305,6 +306,11 @@ often than it calls through one.
 Inlining can expose one last `dict_entry`/dispatch pair after the final fold round. A final
 devirtualization sweep catches only those known dictionary-entry callees before DCE, so the now
 unread entries are removed without reopening the fold/specialize/inline loop.
+
+A call keeps the type of the site that wrote it, so naming its callee, by devirtualization or by
+inlining a function argument, can leave a fallible call type on a callee that cannot fail. A direct
+call reaches the callee's own entry, whose conventions follow the callee's type, so after the rounds
+such an `invoke` becomes a `call` typed with the callee's effects.
 
 ## Finite-domain analysis and branch simplification
 

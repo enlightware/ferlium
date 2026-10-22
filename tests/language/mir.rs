@@ -3763,3 +3763,40 @@ fn failure_after_partial_result_construction_propagates() {
         assert_eq!(session.fail_run(src), SourceFailureKind::DivisionByZero);
     }
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn failure_into_a_reused_result_slot_propagates() {
+    // The callback's result slot still holds the previous call's result when a later call fails.
+    let mut session = TestSession::new();
+    assert_eq!(
+        session
+            .fail_run("fn g(v, a: [int]) { a |> filter(|y| idiv(v, y) > 3) }\nlen(g(1, [3, 0]))"),
+        SourceFailureKind::DivisionByZero
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn inlined_pure_callback_of_a_fallible_parameter_is_called_directly() {
+    // Inlining the wrappers binds the callback parameter, typed `! fallible`, to a pure function.
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc::indoc! { r#"
+            trait Apply<Self |-> ! E> { fn apply(s: Self, x: int, f: (int) -> int ! E) -> int ! E; }
+            struct S { v: int }
+            struct W<T>(T)
+            impl Apply for <Self = S |-> ! E = fallible> {
+                fn apply(s, x, f) { f(idiv(x, s.v)) }
+            }
+            impl<T ! E> Apply for <Self = W<T> |-> ! E = E>
+            where
+                T: Apply<! E = E>
+            {
+                fn apply(s, x, f) { apply(s.0, x, f) }
+            }
+            apply(W(W(W(S { v: 2 }))), 6, |z| z * 5)
+        "# }),
+        int(15)
+    );
+}

@@ -405,9 +405,19 @@ fn constraints_may_be_satisfiable(
 
     let constraint = pending.pop().unwrap();
     let constraint = ty_inf.substitute_in_constraint(&constraint);
-    let (_, trait_id, input_tys, output_tys, output_effs, _span) = constraint
-        .into_have_trait()
-        .expect("Non trait constraint in blanket impl overlap check");
+    // Structural requirements that impl methods infer, such as a field of `Self`, are not
+    // decided here: taking them as satisfiable can report an overlap, never hide one.
+    let Ok((_, trait_id, input_tys, output_tys, output_effs, _span)) = constraint.into_have_trait()
+    else {
+        return constraints_may_be_satisfiable(
+            current,
+            others,
+            ty_inf,
+            pending,
+            next_ty_var_index,
+            stack,
+        );
+    };
     if input_tys.iter().all(Type::is_constant) && output_tys.iter().all(Type::is_constant) {
         let mut trait_solver = TraitSolverProbe::from_module(current, others);
         let mut arena = NodeArena::default();

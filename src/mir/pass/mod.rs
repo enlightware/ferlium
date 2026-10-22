@@ -550,6 +550,14 @@ pub(crate) fn optimize_function(
             current = Some(devirtualized);
         }
     }
+    // Inlining and devirtualization name callees through call sites typed for any callee; a
+    // direct call must follow its callee's failure convention.
+    let source = current.as_ref().unwrap_or(function);
+    if let Some(narrowed) =
+        fold::narrow_infallible_direct_invokes(source, env, |callee| callees.original(callee))
+    {
+        current = Some(narrowed);
+    }
     // After devirtualization, which is what makes a subscript's checks direct calls the analysis can
     // resolve at all, and before DCE, which removes the cleanup blocks a removed check strands.
     let source = current.as_ref().unwrap_or(function);

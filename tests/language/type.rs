@@ -824,6 +824,26 @@ fn overlapping_blanket_trait_impls_are_rejected() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn blanket_impls_with_inferred_field_requirements_overlap() {
+    let mut session = TestSession::new();
+    let err = session.fail_compilation(indoc! { r#"
+        trait Get<Self> { fn get(s: Self) -> int; }
+        struct W<T>(T)
+        impl<T> Get for <Self = T> {
+            fn get(s) { s.v }
+        }
+        impl<T> Get for <Self = W<T>> where T: Get {
+            fn get(s) { get(s.0) }
+        }
+    "# });
+    match err.into_inner() {
+        CompilationErrorImpl::OverlappingTraitImpls { .. } => {}
+        other => panic!("expected OverlappingTraitImpls, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn impl_overlap_accounts_for_trait_output_bindings() {
     let mut session = TestSession::new();
     session.compile(indoc! { r#"

@@ -430,29 +430,8 @@ pub(crate) fn fold_function(
         block.terminator = Terminator::goto(span, invoke.normal);
     }
     for (block_id, callee, ty) in plan.nonzero_invokes {
-        let block = edit.block_mut(block_id);
-        let TerminatorKind::Invoke {
-            operation, normal, ..
-        } = &block.terminator.kind
-        else {
-            unreachable!("planned against an Invoke");
-        };
-        let normal = *normal;
-        let mut operation = operation.clone();
-        operation.operands[0] = mir::Value::Function(callee);
-        let OperationKind::Call { ty: call_ty, .. } = &mut operation.kind else {
-            unreachable!("only calls have nonzero counterparts");
-        };
         // Retargetable declarations have identical instantiation and ownership conventions.
-        // Preserve the original metadata while replacing the callee's effect type.
-        *call_ty = b(ty);
-        let span = block.terminator.span;
-        block.terminator = Terminator::goto(span, normal);
-        // An infallible call carries a scalar result as a value.
-        let store = scalar_arguments::normalize_call_result(&mut edit, &mut operation, env);
-        let block = edit.block_mut(block_id);
-        block.operations.push(operation);
-        block.operations.extend(store);
+        demote_invoke(&mut edit, block_id, callee, ty, env);
     }
     for (block, target) in plan.branches {
         let span = edit.block(block).terminator.span;
@@ -861,6 +840,91 @@ fn dispatch_callee(operation: &Operation) -> Option<&mir::Value> {
 
 fn is_indirect_callee(callee: &mir::Value) -> bool {
     !matches!(callee, mir::Value::Function(_))
+}
+
+/// Replaces `block`'s invoke by a call to `callee` typed `ty`, which cannot fail, followed by a
+/// jump to the invoke's normal successor. The call keeps its metadata.
+fn demote_invoke(
+    edit: &mut FunctionEdit,
+    block_id: BlockId,
+    callee: FunctionId,
+    ty: CallImplType,
+    env: ModuleEnv<'_>,
+) {
+    let block = edit.block_mut(block_id);
+    let TerminatorKind::Invoke {
+        operation, normal, ..
+    } = &block.terminator.kind
+    else {
+        unreachable!("planned against an Invoke");
+    };
+    let normal = *normal;
+    let mut operation = operation.clone();
+    operation.operands[0] = mir::Value::Function(callee);
+    let OperationKind::Call { ty: call_ty, .. } = &mut operation.kind else {
+        unreachable!("only calls are demoted");
+    };
+    *call_ty = b(ty);
+    let span = block.terminator.span;
+    block.terminator = Terminator::goto(span, normal);
+    // An infallible call carries a scalar result as a value.
+    let store = scalar_arguments::normalize_call_result(edit, &mut operation, env);
+    let block = edit.block_mut(block_id);
+    block.operations.push(operation);
+    block.operations.extend(store);
+}
+
+/// Demotes each invoke whose direct callee cannot fail to a call typed with the callee's effects.
+///
+/// A call keeps the type of the site that wrote it. Once inlining or devirtualization names its
+/// callee, that type may be wider than the callee's own, as for a callback parameter typed
+/// `! fallible` bound to a pure function. A direct call reaches the callee's own entry, whose
+/// conventions follow the callee's type; effects that cannot fail have no variables, so they need
+/// no instantiation.
+pub(crate) fn narrow_infallible_direct_invokes(
+    func: &Function,
+    env: ModuleEnv<'_>,
+    original_of: impl Fn(FunctionId) -> FunctionId,
+) -> Option<Function> {
+    let narrowed: Vec<_> = func
+        .blocks()
+        .filter_map(|block| {
+            let TerminatorKind::Invoke { operation, .. } = &func.block(block).terminator().kind
+            else {
+                return None;
+            };
+            let (mir::Value::Function(callee), OperationKind::Call { ty, .. }) =
+                (&operation.operands[0], &operation.kind)
+            else {
+                return None;
+            };
+            let original = original_of(*callee);
+            let effects = &env
+                .module_by_id(original.module)?
+                .get_function_by_id(original.function)?
+                .definition
+                .ty_scheme
+                .ty
+                .effects;
+            if !effects.cannot_fail() {
+                return None;
+            }
+            let mut ty = (**ty).clone();
+            ty.fn_ty.effects = effects.clone();
+            Some((block, *callee, ty))
+        })
+        .collect();
+    if narrowed.is_empty() {
+        return None;
+    }
+    let mut edit = FunctionEdit::new(func.clone());
+    for (block, callee, ty) in narrowed {
+        demote_invoke(&mut edit, block, callee, ty, env);
+    }
+    // The error edges died with their invokes.
+    edit.remove_unreachable_blocks();
+    edit.merge_blocks_into_predecessors();
+    Some(edit.finish_unverified())
 }
 
 // Naming a resolved callee directly. A closed dictionary entry's captured evidence is inserted

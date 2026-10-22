@@ -1306,6 +1306,11 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             if self.memory.is_pointer_slot(argument.place()?)? != pointer_result {
                 return Err(invalid("call argument storage role mismatch"));
             }
+            // Result storage is `MaybeUninit` for the callee (`doc/abi.md`): a value the caller
+            // left there, such as a previous call's trivially copyable result, is not its result.
+            if parameter.kind == ParameterKind::Return && !pointer_result {
+                self.memory.prepare_output(argument.place()?)?;
+            }
             if parameter.kind == ParameterKind::Owned {
                 assert!(
                     self.memory.fully_initialized(argument.place()?)?,
