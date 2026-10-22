@@ -5,12 +5,12 @@ use super::*;
 use crate::compiler::error::{
     AttributeTarget, InvalidAttributeKind, InvalidRecursiveTypeKind, UnsafeFeature,
 };
-use crate::std::{array::array_type, value::NO_DERIVE_VALUE_ATTRIBUTE};
+use crate::std::{array::array_type_def, value::NO_DERIVE_VALUE_ATTRIBUTE};
 use crate::types::r#type::{
-    BareNativeTypeB, PRIVATE_REPR_ATTRIBUTE, TypeAliasEntry, TypeDef as HirTypeDef, TypeKind,
-    store_types,
+    BareNativeTypeB, NamedType, PRIVATE_REPR_ATTRIBUTE, TypeAliasEntry, TypeDef as HirTypeDef,
+    TypeKind, store_types,
 };
-use crate::types::type_substitution::instantiate_type;
+use crate::types::type_substitution::{instantiate_type, instantiate_type_in_graph};
 
 /// Placeholder metadata for an alias root while a recursive type SCC is lowered.
 #[derive(Clone)]
@@ -29,6 +29,7 @@ pub(crate) struct RecursiveTypeBuilder<'a, 'm> {
     modules_used: &'a mut FxHashSet<ModuleId>,
     aliases: &'a FxHashMap<Ustr, RecursiveAliasRef>,
     type_defs: &'a FxHashMap<Ustr, TypeDefId>,
+    root_count: usize,
     kinds: Vec<TypeKind>,
 }
 
@@ -46,6 +47,7 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
             modules_used,
             aliases,
             type_defs,
+            root_count,
             kinds: vec![TypeKind::Never; root_count],
         }
     }
@@ -63,13 +65,48 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
         self.desugar_type(ty, span, false, Some(root_index))
     }
 
-    pub(crate) fn finish(self, roots: &[Type]) -> Vec<Type> {
+    /// `roots` lists each desugared root in its reserved local-index order.
+    pub(crate) fn finish(mut self, roots: &[Type]) -> Vec<Type> {
+        debug_assert_eq!(
+            roots.len(),
+            self.root_count,
+            "recursive alias root count mismatch"
+        );
+        // A root that is an alias application can point to a different local node
+        // (or directly to another root). Redirect its references before interning.
+        // Validation has already ruled out cycles consisting only of aliases.
+        let resolve_root = |mut ty: Type| {
+            let mut steps = 0;
+            while ty.is_local() {
+                let Some(&target) = roots.get(ty.index() as usize) else {
+                    break;
+                };
+                if target == ty {
+                    break;
+                }
+                assert!(
+                    steps < roots.len(),
+                    "cycle in recursive alias root forwarding"
+                );
+                steps += 1;
+                ty = target;
+            }
+            ty
+        };
+        for kind in &mut self.kinds {
+            kind.for_each_inner_type_mut(|ty| *ty = resolve_root(*ty));
+        }
+        // Forwarded root slots can still contain unused Never placeholders.
+        // Interning these harmless constants keeps every original local index
+        // valid without another compaction/remapping pass.
         let stored = store_types(&self.kinds);
         roots
             .iter()
+            .copied()
+            .map(resolve_root)
             .map(|ty| {
                 ty.world()
-                    .map_or_else(|| stored[ty.index() as usize], |_| *ty)
+                    .map_or_else(|| stored[ty.index() as usize], |_| ty)
             })
             .collect()
     }
@@ -180,7 +217,14 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
                     .iter()
                     .map(|(arg, arg_span)| self.desugar_type(arg, *arg_span, false, None))
                     .collect::<Result<Vec<_>, _>>()?;
-                return Ok(Type::named(*type_def, desugared_args));
+                return Ok(self.store_kind(
+                    TypeKind::Named(NamedType {
+                        def: *type_def,
+                        params: desugared_args,
+                        effect_params: vec![],
+                    }),
+                    None,
+                ));
             }
         }
         if let Some(resolved) = resolve_type_path(path, self.env, self.modules_used)? {
@@ -188,7 +232,15 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
                 .iter()
                 .map(|(arg, arg_span)| self.desugar_type(arg, *arg_span, false, None))
                 .collect::<Result<Vec<_>, _>>()?;
-            desugar_resolved_type_with_args(resolved, path, desugared_args, vec![], span, self.env)
+            desugar_resolved_type_with_args(
+                resolved,
+                path,
+                desugared_args,
+                vec![],
+                span,
+                self.env,
+                Some(&mut self.kinds),
+            )
         } else {
             Err(internal_compilation_error!(TypeNotFound(span)))
         }
@@ -327,7 +379,12 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
             }
             Array(array) => {
                 let element = self.desugar_type(&array.0, array.1, false, None)?;
-                desugar_array_syntax_type(element, self.env.current.module_id(), self.modules_used)
+                desugar_array_syntax_type(
+                    element,
+                    self.env.current.module_id(),
+                    self.modules_used,
+                    Some(&mut self.kinds),
+                )
             }
             Function(fn_type) => {
                 let fn_type = self.desugar_fn_type(fn_type)?;
@@ -808,6 +865,7 @@ impl ast::PType {
                         desugared_effect_args,
                         span,
                         env,
+                        None,
                     )?
                 } else if let [(name, name_span)] = &path.segments[..] {
                     if generic_ty_params.contains_key(name) {
@@ -934,6 +992,7 @@ impl ast::PType {
                 )?,
                 env.current.module_id(),
                 modules_used,
+                None,
             ),
             Function(fn_type) => Type::function_type(fn_type.desugar_with_ty_and_eff_params(
                 env,
@@ -1499,11 +1558,31 @@ fn desugar_array_syntax_type(
     element: Type,
     current_module_id: ModuleId,
     modules_used: &mut FxHashSet<ModuleId>,
+    graph: Option<&mut Vec<TypeKind>>,
 ) -> Type {
     if current_module_id != STD_MODULE_ID {
         modules_used.insert(STD_MODULE_ID);
     }
-    array_type(element)
+    store_type_kind(
+        TypeKind::Named(NamedType {
+            def: array_type_def(),
+            params: vec![element],
+            effect_params: vec![],
+        }),
+        graph,
+    )
+}
+
+/// References in `graph` are local to that entire graph. In particular, a named
+/// type must not intern its arguments separately and retie a recursive edge to itself.
+fn store_type_kind(kind: TypeKind, graph: Option<&mut Vec<TypeKind>>) -> Type {
+    if let Some(graph) = graph {
+        let ty = Type::new_local(graph.len() as u32);
+        graph.push(kind);
+        ty
+    } else {
+        kind.store()
+    }
 }
 
 fn desugar_type_arguments(
@@ -1590,6 +1669,7 @@ fn desugar_resolved_type_with_args(
     effect_args: Vec<EffType>,
     span: Location,
     env: &ModuleEnv<'_>,
+    graph: Option<&mut Vec<TypeKind>>,
 ) -> Result<Type, InternalCompilationError> {
     match resolved {
         ResolvedTypePath::Alias(entry) => {
@@ -1604,10 +1684,12 @@ fn desugar_resolved_type_with_args(
                 .map(TypeVar::new)
                 .zip(args)
                 .collect();
-            Ok(instantiate_type(
-                entry.ty,
-                &(ty_subst, EffectsInstSubst::default()),
-            ))
+            let subst = (ty_subst, EffectsInstSubst::default());
+            Ok(if let Some(graph) = graph {
+                instantiate_type_in_graph(entry.ty, &subst, graph)
+            } else {
+                instantiate_type(entry.ty, &subst)
+            })
         }
         ResolvedTypePath::TypeDef(type_def) => {
             expect_type_argument_count(
@@ -1623,11 +1705,21 @@ fn desugar_resolved_type_with_args(
                 effect_args.len(),
                 span,
             )?;
-            Ok(Type::named_with_effects(type_def, args, effect_args))
+            Ok(store_type_kind(
+                TypeKind::Named(NamedType {
+                    def: type_def,
+                    params: args,
+                    effect_params: effect_args,
+                }),
+                graph,
+            ))
         }
         ResolvedTypePath::BareNative(bare) => {
             expect_type_argument_count(0, path.span().unwrap_or(span), effect_args.len(), span)?;
-            Ok(Type::native_type(NativeType::new(bare, args)))
+            Ok(store_type_kind(
+                TypeKind::Native(b(NativeType::new(bare, args))),
+                graph,
+            ))
         }
     }
 }
@@ -1749,6 +1841,255 @@ fn local_function_sccs(fn_dep_graph: &[DepGraphNode], sccs: Vec<Vec<usize>>) -> 
 fn record_module_use(module_id: Option<ModuleId>, modules_used: &mut FxHashSet<ModuleId>) {
     if let Some(module_id) = module_id {
         modules_used.insert(module_id);
+    }
+}
+
+#[cfg(test)]
+mod recursive_alias_tests {
+    use super::*;
+    use crate::{
+        CompilerSession, module::Path, std::buffer::buffer_bare_native_type,
+        types::type_inference::unify::UnifiedTypeInference,
+    };
+
+    fn finish_roots(root_count: usize, roots: &[Type]) {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let mut modules_used = FxHashSet::default();
+        let aliases = FxHashMap::default();
+        let type_defs = FxHashMap::default();
+        RecursiveTypeBuilder::new(root_count, &env, &mut modules_used, &aliases, &type_defs)
+            .finish(roots);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "recursive alias root count mismatch")]
+    fn recursive_alias_finish_rejects_missing_root() {
+        finish_roots(2, &[Type::new_local(0)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "cycle in recursive alias root forwarding")]
+    fn recursive_alias_finish_rejects_forwarding_cycle() {
+        finish_roots(2, &[Type::new_local(1), Type::new_local(0)]);
+    }
+
+    fn compile_aliases(source: &str, names: &[&str]) -> Vec<Type> {
+        let mut session = CompilerSession::new();
+        let output = session
+            .compile(
+                source,
+                "recursive_alias",
+                Path::single_str("recursive_alias"),
+            )
+            .unwrap();
+        let module = session.expect_fresh_module(output.module_id);
+        names
+            .iter()
+            .map(|name| module.get_type_alias(ustr(name)).unwrap().ty)
+            .collect()
+    }
+
+    fn variant_payload(ty: Type, name: &str) -> Type {
+        ty.data()
+            .as_variant()
+            .unwrap()
+            .iter()
+            .find(|(tag, _)| *tag == ustr(name))
+            .unwrap()
+            .1
+    }
+
+    fn next_fields(ty: Type) -> Vec<Type> {
+        variant_payload(ty, "Next")
+            .data()
+            .as_tuple()
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn recursive_alias_named_argument_points_to_variant() {
+        let root = compile_aliases(
+            "struct Box<T>(T)
+             type Recursive<T> = Done | Next(Box<Recursive<T>>, T);",
+            &["Recursive"],
+        )[0];
+        let fields = next_fields(root);
+        let boxed = fields[0].data().as_named().unwrap().clone();
+        assert_eq!(boxed.params, vec![root]);
+        assert_eq!(fields[1], Type::variable_id(0));
+    }
+
+    #[test]
+    fn recursive_alias_array_element_points_to_variant() {
+        let root = compile_aliases("type Tree<T> = Done | Next([Tree<T>], T);", &["Tree"])[0];
+        let fields = next_fields(root);
+        assert_eq!(fields[0].data().as_named().unwrap().params, vec![root]);
+    }
+
+    #[test]
+    fn recursive_alias_native_argument_points_to_variant() {
+        let session = CompilerSession::new();
+        let span = Location::new_synthesized();
+        let mut graph = vec![TypeKind::Never];
+        // Native generic types are supplied by the host. Exercise the resolved
+        // constructor with a recursive argument without relying on std visibility.
+        let native = desugar_resolved_type_with_args(
+            ResolvedTypePath::BareNative(buffer_bare_native_type()),
+            &ast::Path::single_str("Buffer", span),
+            vec![Type::new_local(0)],
+            vec![],
+            span,
+            &session.module_env(),
+            Some(&mut graph),
+        )
+        .unwrap();
+        graph[0] = TypeKind::Variant(vec![(ustr("Done"), Type::unit()), (ustr("Next"), native)]);
+        let root = store_types(&graph)[0];
+        assert_eq!(
+            variant_payload(root, "Next")
+                .data()
+                .as_native()
+                .unwrap()
+                .arguments,
+            vec![root]
+        );
+    }
+
+    #[test]
+    fn recursive_alias_instantiates_structural_alias_in_its_graph() {
+        let root = compile_aliases(
+            "type Pair<T> = { first: T, second: T };
+             type Tree<T> = Done | Next(Pair<Tree<T>>, T);",
+            &["Tree"],
+        )[0];
+        let fields = next_fields(root);
+        assert_eq!(
+            *fields[0].data().as_record().unwrap(),
+            vec![(ustr("first"), root), (ustr("second"), root)]
+        );
+    }
+
+    #[test]
+    fn recursive_alias_instantiates_recursive_alias_in_its_graph() {
+        let root = compile_aliases(
+            "type List<T> = Nil | Cons(T, List<T>);
+             type Tree<T> = Done | Next(List<Tree<T>>, T);",
+            &["Tree"],
+        )[0];
+        let list = next_fields(root)[0];
+        assert_eq!(
+            *variant_payload(list, "Cons").data().as_tuple().unwrap(),
+            vec![root, list]
+        );
+    }
+
+    #[test]
+    fn recursive_alias_application_at_root_keeps_mutual_links() {
+        let types = compile_aliases(
+            "struct Box<T>(T)
+             type A<T> = Box<B<T>>;
+             type B<T> = Done | Next(A<T>, T);",
+            &["A", "B"],
+        );
+        let [a, b] = types[..] else { unreachable!() };
+        assert_eq!(a.data().as_named().unwrap().params, vec![b]);
+        assert_eq!(next_fields(b), vec![a, Type::variable_id(0)]);
+    }
+
+    #[test]
+    fn recursive_alias_forwarding_roots_keep_mutual_links() {
+        let types = compile_aliases(
+            "type Identity<T> = T;
+             type A<T> = Identity<B<T>>;
+             type B<T> = C<T>;
+             type C<T> = Done | Next(A<T>, T);",
+            &["A", "B", "C"],
+        );
+        assert_eq!(types, vec![types[0]; 3]);
+        assert_eq!(next_fields(types[0]), vec![types[0], Type::variable_id(0)]);
+    }
+
+    #[test]
+    fn recursive_alias_duplicate_array_identity() {
+        let duplicated = compile_aliases("type Tree = Done | Next([Tree], [Tree]);", &["Tree"])[0];
+        let shared = store_types(&[
+            TypeKind::Variant(vec![
+                (ustr("Done"), Type::unit()),
+                (ustr("Next"), Type::new_local(1)),
+            ]),
+            TypeKind::Tuple(vec![Type::new_local(2), Type::new_local(2)]),
+            TypeKind::Named(NamedType {
+                def: array_type_def(),
+                params: vec![Type::new_local(0)],
+                effect_params: vec![],
+            }),
+        ])[0];
+        let span = Location::new_synthesized();
+        let mut inference = UnifiedTypeInference::default();
+        inference
+            .unify_sub_type(duplicated, span, shared, span)
+            .unwrap();
+        inference
+            .unify_sub_type(shared, span, duplicated, span)
+            .unwrap();
+        assert_eq!(duplicated, shared);
+    }
+
+    #[test]
+    fn recursive_alias_duplicate_list_identity() {
+        let duplicated = compile_aliases(
+            "type List<T> = Nil | Cons(T, List<T>);
+             type Tree = Done | Next(List<Tree>, List<Tree>);",
+            &["Tree"],
+        )[0];
+        let shared = store_types(&[
+            TypeKind::Variant(vec![
+                (ustr("Done"), Type::unit()),
+                (ustr("Next"), Type::new_local(1)),
+            ]),
+            TypeKind::Tuple(vec![Type::new_local(2), Type::new_local(2)]),
+            TypeKind::Variant(vec![
+                (ustr("Nil"), Type::unit()),
+                (ustr("Cons"), Type::new_local(3)),
+            ]),
+            TypeKind::Tuple(vec![Type::new_local(0), Type::new_local(2)]),
+        ])[0];
+        let span = Location::new_synthesized();
+        let mut inference = UnifiedTypeInference::default();
+        inference
+            .unify_sub_type(duplicated, span, shared, span)
+            .unwrap();
+        inference
+            .unify_sub_type(shared, span, duplicated, span)
+            .unwrap();
+        assert_eq!(duplicated, shared);
+    }
+
+    #[test]
+    fn recursive_alias_duplicate_tuple_identity() {
+        let aliases = compile_aliases(
+            "type List<T> = Nil | Cons(T, List<T>);
+             type Pair<T> = (T, T);
+             type Repeated = Done | Next((List<Repeated>, List<Repeated>));
+             type Shared = Done | Next(Pair<List<Shared>>);",
+            &["Repeated", "Shared"],
+        );
+        assert_eq!(aliases[0], aliases[1]);
+    }
+
+    #[test]
+    fn recursive_alias_distinguishes_tuple_payload_nesting() {
+        let aliases = compile_aliases(
+            "type List<T> = Nil | Cons(T, List<T>);
+             type Pair<T> = (T, T);
+             type Repeated = Done | Next(List<Repeated>, List<Repeated>);
+             type Shared = Done | Next(Pair<List<Shared>>);",
+            &["Repeated", "Shared"],
+        );
+        assert_ne!(aliases[0], aliases[1]);
     }
 }
 

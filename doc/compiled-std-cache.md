@@ -70,6 +70,9 @@ structural addressors store their field index.
 
 The type snapshot is a graph of structural nodes. All nodes are re-interned in one operation, so
 forward references and mutually recursive strongly connected components are restored correctly.
+Recursive types have the same identity when their infinite unfoldings agree, regardless of graph
+sharing or node order. Re-interning merges equivalent nodes and preserves every input reference;
+constructor identities, effects, mutability, and inference-variable identities remain distinct.
 Strings are stored as owned UTF-8 data and re-interned on load. Native literals have explicit
 portable codecs.
 

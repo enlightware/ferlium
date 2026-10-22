@@ -56,6 +56,21 @@ pub(crate) fn instantiate_type(ty: Type, subst: &InstSubst) -> Type {
     map_type_recursive(ty, &mut SimpleInstantiationMapper::new(subst))
 }
 
+/// Instantiate into an existing, unfinished graph without interning it. Replacements
+/// may refer to local nodes in `output`; they stay opaque to the instantiation traversal.
+pub(crate) fn instantiate_type_in_graph(
+    ty: Type,
+    subst: &InstSubst,
+    output: &mut Vec<TypeKind>,
+) -> Type {
+    map_type_rec(
+        ty,
+        &mut SimpleInstantiationMapper::new(subst),
+        output,
+        &mut FxHashMap::default(),
+    )
+}
+
 /// Recursively map a type while preserving recursive type graphs.
 ///
 /// Variable replacements are treated as opaque, matching `TypeMapper`'s

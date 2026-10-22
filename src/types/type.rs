@@ -2443,7 +2443,7 @@ impl TypeKind {
     }
 
     #[inline]
-    fn for_each_inner_type_mut(&mut self, mut f: impl FnMut(&mut Type)) {
+    pub(crate) fn for_each_inner_type_mut(&mut self, mut f: impl FnMut(&mut Type)) {
         use TypeKind::*;
         match self {
             Native(g) => {
@@ -2941,270 +2941,157 @@ impl Borrow<TypeKind> for InternedType {
     }
 }
 
-/// Attempts to find an isomorphism (bijection) between local_world and existing_world.
-/// Returns a vector where `result[local_idx] = global_idx` in `existing_world`, if an isomorphism
-/// exists.
+/// Candidate key preserving constructor attributes and world-0 children. A local
+/// cyclic node cannot equal a canonical world-0 node, so those IDs safely narrow
+/// the search. Erase BOTH local and stored recursive children: an incoming SCC
+/// may refer to an existing recursive node where the stored graph has a cycle edge.
+fn recursive_candidate_signature(kind: &TypeKind) -> TypeKind {
+    let mut signature = kind.clone();
+    signature.for_each_inner_type_mut(|ty| {
+        if ty.is_local() || ty.is_global_recursive() {
+            *ty = Type::new_local(0);
+        }
+    });
+    signature
+}
+
+/// Minimize a recursive component by bisimulation, treating already-canonical
+/// global children as distinct constants. The caller first checks whether this
+/// component maps into stored types: if any node of an SCC equals a stored type,
+/// following its local edges supplies stored representatives for the entire SCC.
+/// Consequently, when that check fails, no local node can equal a global child.
 ///
-/// Two worlds are isomorphic if there exists a bijection f: local → existing such that
-/// when we remap all local type references in `local_world[i]` using `f`, we get
-/// `existing_world[f(i)]`.
-fn find_world_isomorphism(
-    local_world: &[TypeKind],
-    existing_world: &TypeWorld,
-    world_idx: usize,
-) -> Option<Vec<u32>> {
-    let n = local_world.len();
-    assert_eq!(n, existing_world.len());
-
-    let mut mapping: Vec<Option<usize>> = vec![None; n];
-
-    // For each local type, find all possible matches in existing_world
-    let mut candidates: Vec<(usize, DenseBitSet)> = (0..n)
-        .map(|local_idx| {
-            let local_kind = &local_world[local_idx];
-            let mut possible = DenseBitSet::with_capacity(n);
-            for existing_idx in 0..n {
-                // Quick structural check: compare ignoring type references.
-                if types_could_match(local_kind, &existing_world[existing_idx].kind) {
-                    possible.insert(existing_idx);
-                }
+/// Initial blocks agree on every constructor attribute and global child. Refine
+/// them by ordered local-child edges, using predecessor lists and the smaller-half
+/// splitter rule. Each edge participates in O(log n) splitters; no unfolding or
+/// permutation search is needed. Return the quotient and an original-to-quotient
+/// map, including an entry for every duplicate input node.
+fn minimize_recursive_component(kinds: &[TypeKind]) -> (Vec<TypeKind>, Vec<u32>) {
+    let mut signatures = FxHashMap::default();
+    let mut blocks: Vec<Vec<usize>> = Vec::new();
+    let mut classes = vec![0; kinds.len()];
+    let mut positions = vec![0; kinds.len()];
+    let mut predecessors = vec![Vec::new(); kinds.len()];
+    for (node, kind) in kinds.iter().enumerate() {
+        let mut signature = kind.clone();
+        let mut edge = 0;
+        signature.for_each_inner_type_mut(|ty| {
+            if ty.is_local() {
+                predecessors[ty.index() as usize].push((node, edge));
+                *ty = Type::new_local(0);
             }
-            (local_idx, possible)
+            edge += 1;
+        });
+        let next_class = blocks.len();
+        let class = *signatures.entry(signature).or_insert(next_class);
+        if class == blocks.len() {
+            blocks.push(Vec::new());
+        }
+        classes[node] = class;
+        positions[node] = blocks[class].len();
+        blocks[class].push(node);
+    }
+
+    let mut pending: Vec<_> = (0..blocks.len()).collect();
+    let mut queued = DenseBitSet::with_capacity(blocks.len());
+    for class in 0..blocks.len() {
+        queued.insert(class);
+    }
+    while let Some(splitter) = pending.pop() {
+        queued.remove(splitter);
+        // Snapshot all predecessor sets before splitting: the splitter itself
+        // may be split while processing one of these edge positions.
+        let mut by_edge: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
+        for &target in &blocks[splitter] {
+            for &(source, edge) in &predecessors[target] {
+                by_edge.entry(edge).or_default().push(source);
+            }
+        }
+        for sources in by_edge.into_values() {
+            let mut affected: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
+            for source in sources {
+                affected.entry(classes[source]).or_default().push(source);
+            }
+            for (class, members) in affected {
+                if members.len() == blocks[class].len() {
+                    continue;
+                }
+                let new_class = blocks.len();
+                for (position, &node) in members.iter().enumerate() {
+                    let old_position = positions[node];
+                    blocks[class].swap_remove(old_position);
+                    if let Some(&moved) = blocks[class].get(old_position) {
+                        positions[moved] = old_position;
+                    }
+                    classes[node] = new_class;
+                    positions[node] = position;
+                }
+                blocks.push(members);
+                // If the old block is pending, both halves must be processed.
+                // Otherwise its previous processing lets us use the smaller half.
+                let enqueue =
+                    if queued.contains(class) || blocks[new_class].len() < blocks[class].len() {
+                        new_class
+                    } else {
+                        class
+                    };
+                queued.insert(enqueue);
+                pending.push(enqueue);
+            }
+        }
+    }
+
+    // Refinement may visit hash buckets in any order. Number the final classes
+    // by first input occurrence so neither their IDs nor representative selection
+    // depend on hashing (including differences between 32- and 64-bit targets).
+    let mut class_to_quotient = vec![None; blocks.len()];
+    let mut representatives = Vec::with_capacity(blocks.len());
+    let mapping: Vec<_> = classes
+        .into_iter()
+        .enumerate()
+        .map(|(node, class)| {
+            *class_to_quotient[class].get_or_insert_with(|| {
+                let index = representatives.len() as u32;
+                representatives.push(node);
+                index
+            })
         })
         .collect();
-    if candidates.iter().any(|(_, possible)| possible.is_empty()) {
-        return None;
-    }
-
-    // Sort by number of candidates (fewest first for constraint propagation)
-    candidates.sort_by_key(|(_, possible)| possible.len());
-    let mut used_existing = DenseBitSet::with_capacity(n);
-
-    // Recursive backtracking search
-    fn search(
-        local_world: &[TypeKind],
-        existing_world: &TypeWorld,
-        world_idx: usize,
-        candidates: &[(usize, DenseBitSet)],
-        mapping: &mut Vec<Option<usize>>,
-        used_existing: &mut DenseBitSet,
-        depth: usize,
-    ) -> bool {
-        if depth == candidates.len() {
-            // Check if complete mapping is valid
-            return verify_mapping(local_world, existing_world, world_idx, mapping);
-        }
-
-        let (local_idx, possible) = &candidates[depth];
-        for existing_idx in possible.iter_ones() {
-            if used_existing.contains(existing_idx) {
-                continue; // Already mapped
-            }
-
-            // Try this mapping
-            mapping[*local_idx] = Some(existing_idx);
-            used_existing.insert(existing_idx);
-
-            if search(
-                local_world,
-                existing_world,
-                world_idx,
-                candidates,
-                mapping,
-                used_existing,
-                depth + 1,
-            ) {
-                return true;
-            }
-
-            // Backtrack
-            mapping[*local_idx] = None;
-            used_existing.remove(existing_idx);
-        }
-
-        false
-    }
-
-    if search(
-        local_world,
-        existing_world,
-        world_idx,
-        &candidates,
-        &mut mapping,
-        &mut used_existing,
-        0,
-    ) {
-        Some(mapping.into_iter().map(|opt| opt.unwrap() as u32).collect())
-    } else {
-        None
-    }
-}
-
-/// Quick structural check to see if two TypeKinds could potentially match
-/// (ignoring the actual type indices they reference)
-fn types_could_match(a: &TypeKind, b: &TypeKind) -> bool {
-    match (a, b) {
-        (TypeKind::Never, TypeKind::Never) => true,
-        (TypeKind::Variable(_), TypeKind::Variable(_)) => true,
-        (TypeKind::Tuple(a), TypeKind::Tuple(b)) => a.len() == b.len(),
-        (TypeKind::Record(a), TypeKind::Record(b)) => {
-            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.0 == y.0)
-        }
-        (TypeKind::Variant(a), TypeKind::Variant(b)) => {
-            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.0 == y.0)
-        }
-        (TypeKind::Function(_), TypeKind::Function(_)) => true, // Could compare arity, but skip for now
-        (TypeKind::Subscript(a), TypeKind::Subscript(b)) => {
-            a.args.len() == b.args.len()
-                && a.ref_member.is_some() == b.ref_member.is_some()
-                && a.mut_member.is_some() == b.mut_member.is_some()
-        }
-        (TypeKind::Native(a), TypeKind::Native(b)) => {
-            a.bare_ty == b.bare_ty && a.arguments.len() == b.arguments.len()
-        }
-        (TypeKind::Named(a), TypeKind::Named(b)) => a.def == b.def,
-        _ => false,
-    }
-}
-
-/// Verify that a complete mapping is valid by checking that when we remap
-/// local_world using the mapping, it exactly matches existing_world
-fn verify_mapping(
-    local_world: &[TypeKind],
-    existing_world: &TypeWorld,
-    world_idx: usize,
-    mapping: &[Option<usize>],
-) -> bool {
-    // Check that the mapping is complete (bijective)
-    if mapping.len() != local_world.len() {
-        return false;
-    }
-
-    for (local_idx, existing_idx) in mapping.iter().copied().enumerate() {
-        let Some(existing_idx) = existing_idx else {
-            return false;
-        };
-        let local_kind = &local_world[local_idx];
-        let existing_kind = &existing_world[existing_idx].kind;
-        // Compare local references through `mapping` without cloning the local kind.
-        if !type_kinds_match_with_mapping(local_kind, existing_kind, world_idx, mapping) {
-            return false;
-        }
-    }
-
-    true
-}
-
-fn type_kinds_match_with_mapping(
-    local: &TypeKind,
-    existing: &TypeKind,
-    world_idx: usize,
-    mapping: &[Option<usize>],
-) -> bool {
-    match (local, existing) {
-        (TypeKind::Never, TypeKind::Never) => true,
-        (TypeKind::Variable(a), TypeKind::Variable(b)) => a == b,
-        (TypeKind::Tuple(a), TypeKind::Tuple(b)) => {
-            type_slices_match_with_mapping(a, b, world_idx, mapping)
-        }
-        (TypeKind::Record(a), TypeKind::Record(b)) => {
-            tagged_type_slices_match_with_mapping(a, b, world_idx, mapping)
-        }
-        (TypeKind::Variant(a), TypeKind::Variant(b)) => {
-            tagged_type_slices_match_with_mapping(a, b, world_idx, mapping)
-        }
-        (TypeKind::Function(a), TypeKind::Function(b)) => {
-            a.effects == b.effects
-                && a.args.len() == b.args.len()
-                && a.args.iter().zip(&b.args).all(|(a, b)| {
-                    a.mut_ty == b.mut_ty
-                        && type_matches_with_mapping(a.ty, b.ty, world_idx, mapping)
-                })
-                && type_matches_with_mapping(a.ret, b.ret, world_idx, mapping)
-        }
-        (TypeKind::Subscript(a), TypeKind::Subscript(b)) => {
-            a.ref_member == b.ref_member
-                && a.mut_member == b.mut_member
-                && a.args.len() == b.args.len()
-                && a.args.iter().zip(&b.args).all(|(a, b)| {
-                    a.mut_ty == b.mut_ty
-                        && type_matches_with_mapping(a.ty, b.ty, world_idx, mapping)
-                })
-                && type_matches_with_mapping(a.ret, b.ret, world_idx, mapping)
-        }
-        (TypeKind::Native(a), TypeKind::Native(b)) => {
-            a.bare_ty == b.bare_ty
-                && type_slices_match_with_mapping(&a.arguments, &b.arguments, world_idx, mapping)
-        }
-        (TypeKind::Named(a), TypeKind::Named(b)) => {
-            a.def == b.def
-                && type_slices_match_with_mapping(&a.params, &b.params, world_idx, mapping)
-        }
-        _ => false,
-    }
-}
-
-fn type_slices_match_with_mapping(
-    local: &[Type],
-    existing: &[Type],
-    world_idx: usize,
-    mapping: &[Option<usize>],
-) -> bool {
-    local.len() == existing.len()
-        && local.iter().zip(existing).all(|(&local, &existing)| {
-            type_matches_with_mapping(local, existing, world_idx, mapping)
+    let quotient = representatives
+        .into_iter()
+        .map(|node| {
+            let mut kind = kinds[node].clone();
+            kind.substitute_locals(&mapping);
+            kind
         })
-}
-
-fn tagged_type_slices_match_with_mapping(
-    local: &[(Ustr, Type)],
-    existing: &[(Ustr, Type)],
-    world_idx: usize,
-    mapping: &[Option<usize>],
-) -> bool {
-    local.len() == existing.len()
-        && local.iter().zip(existing).all(
-            |(&(local_name, local_ty), &(existing_name, existing_ty))| {
-                local_name == existing_name
-                    && type_matches_with_mapping(local_ty, existing_ty, world_idx, mapping)
-            },
-        )
-}
-
-fn type_matches_with_mapping(
-    local: Type,
-    existing: Type,
-    world_idx: usize,
-    mapping: &[Option<usize>],
-) -> bool {
-    if !local.is_local() {
-        return local == existing;
-    }
-    let Some(mapped_idx) = mapping.get(local.index as usize).copied().flatten() else {
-        return false;
-    };
-    Type::new_global(world_idx as u32, mapped_idx as u32) == existing
-}
-
-/// A mapping from a local world to a global world
-#[derive(Debug, Clone)]
-struct WorldMapping {
-    /// The index of the global world
-    world_idx: usize,
-    /// The mapping from local indices to global indices in the global world
-    local_to_global_map: Vec<u32>,
+        .collect();
+    (quotient, mapping)
 }
 
 /// The type universe, containing all known types organized in worlds.
+///
+/// Invariant: distinct published IDs denote inequivalent infinite unfoldings
+/// (ordered-child bisimulation), across ALL worlds. Published IDs never change.
+/// World 0 contains non-recursive nodes: none participates in a cycle, although
+/// a node may contain a recursive type and thus have an infinite unfolding.
+/// Each other world is a minimal strongly connected component of recursive nodes.
+///
+/// Canonical child IDs make exact hash-consing sufficient for world 0, including
+/// reuse of recursive nodes through their immediate children's worlds. The same
+/// invariant makes forced recursive matching complete: conflicting stored targets
+/// cannot be equivalent, and an SCC's partner must lie on a stored cycle. Only
+/// after matching fails may minimization treat all global children as constants.
 #[derive(Debug)]
 struct TypeUniverse {
     /// The list of worlds, each being a set of types.
     /// The first world (index 0) is the global non-recursive world.
     /// Subsequent worlds contain SCC of recursive types.
     worlds: Vec<TypeWorld>,
-    /// A cache mapping local worlds to their corresponding global world and index mapping.
-    /// This is used to intern types efficiently.
-    local_to_world: FxHashMap<Vec<TypeKind>, WorldMapping>,
+    /// Exact-input cache, including the representative of every duplicate node.
+    /// Entries contain stable global IDs and need no inference-dependent invalidation.
+    local_to_world: FxHashMap<Vec<TypeKind>, Vec<Type>>,
+    /// Stored recursive nodes indexed by constructor attributes and world-0 children.
+    recursive_candidates: FxHashMap<TypeKind, Vec<Type>>,
 }
 
 impl TypeUniverse {
@@ -3212,6 +3099,7 @@ impl TypeUniverse {
         Self {
             worlds: vec![TypeWorld::default()],
             local_to_world: FxHashMap::default(),
+            recursive_candidates: FxHashMap::default(),
         }
     }
 
@@ -3259,6 +3147,122 @@ impl TypeUniverse {
         resolved_ty
     }
 
+    /// Find a bisimulation from a local SCC into the canonical stored graph.
+    /// Ordered child edges force the entire mapping once a root is chosen. Many
+    /// local nodes may map to one stored node; repeated visits to a local node
+    /// must agree because distinct stored IDs denote inequivalent types.
+    fn match_recursive_component(&self, kinds: &[TypeKind]) -> Option<Vec<Type>> {
+        let (root, candidates) = kinds
+            .iter()
+            .enumerate()
+            .map(|(index, kind)| {
+                Some((
+                    index,
+                    self.recursive_candidates
+                        .get(&recursive_candidate_signature(kind))?,
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?
+            .into_iter()
+            .min_by_key(|(_, candidates)| candidates.len())?;
+        for &candidate in candidates {
+            if let Some(mapping) = self.match_recursive_root(kinds, root, candidate) {
+                return Some(mapping);
+            }
+        }
+        None
+    }
+
+    fn match_recursive_root(
+        &self,
+        kinds: &[TypeKind],
+        root: usize,
+        candidate: Type,
+    ) -> Option<Vec<Type>> {
+        let mut mapping = vec![None; kinds.len()];
+        let mut pending = vec![(root, candidate)];
+        while let Some((local, global)) = pending.pop() {
+            if let Some(previous) = mapping[local] {
+                if previous != global {
+                    return None;
+                }
+                continue;
+            }
+            mapping[local] = Some(global);
+            let existing = self.get_type_data(global);
+            let mut children = Vec::new();
+            existing.for_each_inner_type(|ty| children.push(ty));
+            let mut children = children.into_iter();
+            let mut remapped = kinds[local].clone();
+            let mut compatible = true;
+            remapped.for_each_inner_type_mut(|ty| {
+                let Some(child) = children.next() else {
+                    compatible = false;
+                    return;
+                };
+                if ty.is_local() {
+                    pending.push((ty.index() as usize, child));
+                } else if *ty != child {
+                    compatible = false;
+                }
+                *ty = child;
+            });
+            if !compatible || children.next().is_some() || remapped != *existing {
+                return None;
+            }
+        }
+        // Every local node is reachable from the root because this is an SCC.
+        Some(mapping.into_iter().map(Option::unwrap).collect())
+    }
+
+    /// Intern a strongly connected local graph after its dependencies have been
+    /// interned. Matching first makes global references safe constants during
+    /// minimization; a quotient of an SCC is again strongly connected.
+    fn intern_recursive_component(&mut self, local_world: Vec<TypeKind>) -> Vec<Type> {
+        if let Some(mapping) = self.local_to_world.get(&local_world) {
+            return mapping.clone();
+        }
+        if let Some(mapping) = self.match_recursive_component(&local_world) {
+            self.local_to_world.insert(local_world, mapping.clone());
+            return mapping;
+        }
+
+        let (mut quotient, local_to_quotient) = minimize_recursive_component(&local_world);
+        let world_index = self.worlds.len() as u32;
+        let mapping: Vec<_> = local_to_quotient
+            .into_iter()
+            .map(|index| Type::new_global(world_index, index))
+            .collect();
+        for kind in &mut quotient {
+            kind.for_each_inner_type_mut(|ty| {
+                if ty.is_local() {
+                    *ty = Type::new_global(world_index, ty.index());
+                }
+            });
+        }
+        let summaries = self.compute_scc_summaries(&quotient, world_index);
+        let node_count = quotient.len();
+        let world: TypeWorld = quotient
+            .into_iter()
+            .zip(summaries)
+            .map(|(kind, summary)| InternedType { kind, summary })
+            .collect();
+        assert_eq!(
+            world.len(),
+            node_count,
+            "minimized recursive nodes must be distinct"
+        );
+        for (index, entry) in world.iter().enumerate() {
+            self.recursive_candidates
+                .entry(recursive_candidate_signature(&entry.kind))
+                .or_default()
+                .push(Type::new_global(world_index, index as u32));
+        }
+        self.worlds.push(world);
+        self.local_to_world.insert(local_world, mapping.clone());
+        mapping
+    }
+
     fn insert_types(&mut self, kinds: impl Into<Vec<TypeKind>>) -> Vec<Type> {
         let mut kinds: Vec<_> = kinds.into();
         kinds.iter_mut().for_each(TypeKind::normalize);
@@ -3278,191 +3282,69 @@ impl TypeUniverse {
             return types;
         }
 
-        // Partition tks into sub-graphs of strongly connected recursive types.
         let sorted_sccs = if kinds.len() == 1 {
             vec![vec![0]]
         } else {
             let sccs = find_strongly_connected_components(&kinds);
-            let mut sorted_sccs = topological_sort_sccs(&kinds, &sccs);
-            sorted_sccs.reverse();
-            sorted_sccs
+            let mut sorted = topological_sort_sccs(&kinds, &sccs);
+            sorted.reverse();
+            sorted
         };
-
-        // TODO: somewhere, renormalize generics to be in the same order.
-
-        // For each strongly connected component, starting from the leaves...
-        // Note: Using local types as placeholders to build the array without having to
-        // get a recursive lock on the universe.
-        let mut types = vec![Type::new_local(0); kinds.len()];
-        // Resolved global types per input index. Indexed by `input_index`
-        // (0..kinds.len()); `None` means not yet resolved.
-        let mut resolved: Vec<Option<Type>> = vec![None; kinds.len()];
-        sorted_sccs
-            .into_iter()
-            .flat_map(|mut input_indices| {
-                // Replace the already-processed local types with their true values in the type kind.
-                input_indices.iter().for_each(|input_index| {
-                    kinds[*input_index].for_each_inner_type_mut(|ty| {
-                        if ty.is_local() {
-                            if let Some(resolved_ty) = resolved[ty.index as usize] {
-                                *ty = resolved_ty;
-                            }
-                        }
-                    })
-                });
-
-                // Detect singletons and put them in the main world if they have no cycle.
-                if input_indices.len() == 1 {
-                    let input_index = input_indices[0];
-                    let kind = &kinds[input_index];
-                    if let Some(worlds_to_check) = kind.recursive_worlds_if_no_local_refs() {
-                        let resolved_ty = self.insert_non_recursive_kind(kind, worlds_to_check);
-                        resolved[input_index] = Some(resolved_ty);
-                        return vec![(input_index, resolved_ty)];
-                    }
-                }
-
-                // Sort each sub-graph, for early existing world matching.
-                input_indices.sort_by(|&a, &b| {
-                    // Note: ignore local types while sorting.
-                    kinds[a].local_cmp(&kinds[b])
-                });
-
-                // Renormalize local indices and store into local world.
-                // `subst_to_local[input_index] = local_index` for the SCC's
-                // members; `u32::MAX` for unrelated input indices (which
-                // `substitute_locals` will panic on if encountered).
-                let mut subst_to_local: Vec<u32> = vec![u32::MAX; kinds.len()];
-                for (local_index, &input_index) in input_indices.iter().enumerate() {
-                    subst_to_local[input_index] = local_index as u32;
-                }
-                let local_world: Vec<_> = input_indices
-                    .iter()
-                    .map(|&index| {
-                        let mut kind = kinds[index].clone();
-                        kind.substitute_locals(&subst_to_local);
-                        kind
-                    })
-                    .collect();
-                assert!(local_world.iter().all(|kind| {
-                    let mut valid = true;
-                    kind.for_each_inner_type(|ty| {
-                        if ty.is_local() && (ty.index as usize) >= local_world.len() {
-                            valid = false;
-                        }
-                    });
-                    valid
-                }));
-
-                // Some helper functions to get the global indices from the local input indices.
-                let global_world_indices = |mapping: &WorldMapping| -> Vec<(usize, Type)> {
-                    let world_index = mapping.world_idx;
-                    input_indices
-                        .iter()
-                        .enumerate()
-                        .map(|(local_idx, &input_index)| {
-                            let global_idx = mapping.local_to_global_map[local_idx];
-                            (
-                                input_index,
-                                Type::new_global(world_index as u32, global_idx),
-                            )
-                        })
-                        .collect()
-                };
-                let mut mark_indices_as_resolved = |indices_and_tys: &[(usize, Type)]| {
-                    indices_and_tys
-                        .iter()
-                        .for_each(|(input_index, resolved_ty)| {
-                            assert!(!resolved_ty.is_local());
-                            assert!(resolved[*input_index].is_none());
-                            resolved[*input_index] = Some(*resolved_ty);
-                        });
-                };
-
-                // Local world is now a key, is it a known global world?
-                if let Some(mapping) = self.local_to_world.get(&local_world) {
-                    // If so, store processed and return.
-                    let indices_and_tys = global_world_indices(mapping);
-                    mark_indices_as_resolved(&indices_and_tys);
-                    return indices_and_tys;
-                }
-
-                // Before creating a new world, check if any existing recursive world
-                // (world index > 0) is structurally equivalent to local_world.
-                // This catches cases where type inference creates a new SCC that's
-                // equivalent to an existing canonical recursive type.
-                // We need permutation-invariant matching because the internal ordering
-                // within worlds may differ due to sorting.
-                for (world_idx, existing_world) in self.worlds.iter().enumerate().skip(1) {
-                    if existing_world.len() == local_world.len() {
-                        // Try to find a bijection (permutation) from local indices to existing world indices
-                        // such that when we remap local_world using this bijection, it matches existing_world
-                        if let Some(local_to_global_map) =
-                            find_world_isomorphism(&local_world, existing_world, world_idx)
-                        {
-                            // Found an equivalent world! Return types from that world using the mapping
-                            // Build the result by mapping each local index (0..n) to its corresponding global type,
-                            // local_to_global_map[local_idx] gives the corresponding index in existing_world.
-                            let indices_and_tys: Vec<_> = input_indices
-                                .iter()
-                                .enumerate()
-                                .map(|(local_idx, &input_idx)| {
-                                    let global_idx = local_to_global_map[local_idx];
-                                    let ty = Type {
-                                        world: Some(NonMaxU32::new(world_idx as u32).unwrap()),
-                                        index: global_idx,
-                                    };
-                                    (input_idx, ty)
-                                })
-                                .collect();
-                            mark_indices_as_resolved(&indices_and_tys);
-                            // Cache this for future lookups.
-                            let mapping = WorldMapping {
-                                world_idx,
-                                local_to_global_map,
-                            };
-                            self.local_to_world.insert(local_world.clone(), mapping);
-                            return indices_and_tys;
+        let mut resolved = vec![None; kinds.len()];
+        // Reuse the allocation across components. Previously assigned entries
+        // cannot be read: references to those dependencies become global below.
+        let mut subst_to_local = vec![u32::MAX; kinds.len()];
+        for mut input_indices in sorted_sccs {
+            for &input in &input_indices {
+                kinds[input].for_each_inner_type_mut(|ty| {
+                    if ty.is_local() {
+                        if let Some(global) = resolved[ty.index() as usize] {
+                            *ty = global;
                         }
                     }
+                });
+            }
+            if input_indices.len() == 1 {
+                let input = input_indices[0];
+                if let Some(worlds) = kinds[input].recursive_worlds_if_no_local_refs() {
+                    resolved[input] = Some(self.insert_non_recursive_kind(&kinds[input], worlds));
+                    continue;
                 }
+            }
 
-                // If not, create a new one.
-                let global_world_index = self.worlds.len() as u32;
-                let mapping = WorldMapping {
-                    world_idx: global_world_index as usize,
-                    local_to_global_map: (0..local_world.len() as u32).collect(),
-                };
-                self.local_to_world
-                    .insert(local_world.clone(), mapping.clone());
-
-                // Renormalize local indices to global indices.
-                let kinds_renormalized: Vec<TypeKind> = local_world
-                    .into_iter()
-                    .map(|mut td| {
-                        td.for_each_inner_type_mut(|ty| {
-                            if ty.is_local() {
-                                ty.world = Some(NonMaxU32::new(global_world_index).unwrap());
-                            }
-                        });
-                        td
-                    })
-                    .collect();
-                let summaries = self.compute_scc_summaries(&kinds_renormalized, global_world_index);
-                let global_world: TypeWorld = kinds_renormalized
-                    .into_iter()
-                    .zip(summaries)
-                    .map(|(kind, summary)| InternedType { kind, summary })
-                    .collect();
-                self.worlds.push(global_world);
-
-                // Collect indices, store processed and return.
-                let indices_and_tys = global_world_indices(&mapping);
-                mark_indices_as_resolved(&indices_and_tys);
-                indices_and_tys
-            })
-            .for_each(|(ty_index, ty)| types[ty_index] = ty);
-        types
+            // A stable constructor ordering improves exact-input cache reuse;
+            // correctness does not depend on it being a canonical graph ordering.
+            input_indices.sort_by(|&a, &b| kinds[a].local_cmp(&kinds[b]));
+            for (local, &input) in input_indices.iter().enumerate() {
+                subst_to_local[input] = local as u32;
+            }
+            let local_world = input_indices
+                .iter()
+                .map(|&input| {
+                    let mut kind = kinds[input].clone();
+                    kind.substitute_locals(&subst_to_local);
+                    kind
+                })
+                .collect();
+            let mapping = self.intern_recursive_component(local_world);
+            // Check every input edge, including cached and many-to-one mappings.
+            // The independent test oracle checks the stronger uniqueness invariant.
+            debug_assert_eq!(mapping.len(), input_indices.len());
+            #[cfg(debug_assertions)]
+            for (&input, &ty) in input_indices.iter().zip(&mapping) {
+                let mut expected = kinds[input].clone();
+                expected.for_each_inner_type_mut(|child| {
+                    if child.is_local() {
+                        *child = mapping[subst_to_local[child.index() as usize] as usize];
+                    }
+                });
+                debug_assert_eq!(&expected, self.get_type_data(ty));
+            }
+            for (input, ty) in input_indices.into_iter().zip(mapping) {
+                resolved[input] = Some(ty);
+            }
+        }
+        resolved.into_iter().map(Option::unwrap).collect()
     }
 
     fn get_type_data(&self, r: Type) -> &TypeKind {
@@ -4096,16 +3978,6 @@ mod tests {
         );
     }
 
-    /// Wrap a `TypeKind` in an `InternedType` with an empty summary, for tests
-    /// that only exercise the structural-isomorphism logic which never reads
-    /// the summary.
-    fn test_interned(kind: TypeKind) -> InternedType {
-        InternedType {
-            kind,
-            summary: TypeSummary::default(),
-        }
-    }
-
     #[test]
     fn parse_and_format() {
         let mut session = CompilerSession::new();
@@ -4197,42 +4069,6 @@ mod tests {
             stored1, stored2,
             "Same recursive structure should intern to same type"
         );
-    }
-
-    #[test]
-    fn recursive_variant_with_peeling() {
-        // Test that different "peelings" of the same recursive type intern correctly
-        // This simulates what happens during unification
-
-        let int = int_type();
-        let string = string_type();
-
-        // Original: Variant = Array([Variant]) | Int(int) | String(string)
-        let variant_original = TypeKind::Variant(vec![
-            (ustr("Array"), Type::tuple([array_type(Type::new_local(0))])),
-            (ustr("Int"), Type::tuple([int])),
-            (ustr("String"), Type::tuple([string])),
-        ]);
-        let stored_original = store_type(variant_original);
-
-        // Peeled once: the Array payload now contains the full variant definition
-        // Array([Array([Variant]) | Int(int) | String(string)]) | Int(int) | String(string)
-        let variant_peeled = TypeKind::Variant(vec![
-            (ustr("Array"), Type::tuple([array_type(stored_original)])),
-            (ustr("Int"), Type::tuple([int])),
-            (ustr("String"), Type::tuple([string])),
-        ]);
-        let stored_peeled = store_type(variant_peeled);
-
-        // These should be recognized as the same equirecursive type
-        // However, they currently won't be because stored_original is already resolved
-        // This test documents the current limitation
-        println!("Original: {:?}", stored_original);
-        println!("Peeled: {:?}", stored_peeled);
-
-        // For now, just verify they're both valid types
-        assert!(stored_original.world().is_some());
-        assert!(stored_peeled.world().is_some());
     }
 
     #[test]
@@ -4460,161 +4296,483 @@ mod tests {
 
     #[test]
     fn recursive_variant_unfolding_equivalence() {
-        // This test demonstrates the key issue: when a recursive variant is "unfolded"
-        // during unification, does it create an equivalent type?
-
         let int = int_type();
-        let string = string_type();
-
-        // Original recursive Variant type:
-        // V = Array([V]) | Int(int) | String(string)
-        let v_def = TypeKind::Variant(vec![
-            (ustr("Array"), Type::tuple([array_type(Type::new_local(0))])),
-            (ustr("Int"), Type::tuple([int])),
-            (ustr("String"), Type::tuple([string])),
-        ]);
-        let v = store_type(v_def);
-
-        // Now create the "unfolded" version where Array's payload explicitly contains V:
-        // V_unfolded = Array([Array([V]) | Int(int) | String(string)]) | Int(int) | String(string)
-        let v_unfolded_def = TypeKind::Variant(vec![
-            (ustr("Array"), Type::tuple([array_type(v)])),
-            (ustr("Int"), Type::tuple([int])),
-            (ustr("String"), Type::tuple([string])),
-        ]);
-        let v_unfolded = store_type(v_unfolded_def);
-
-        // These are equirecursive - they represent the same infinite tree
-        // With proper recursive type handling, they should be recognized as equal
-        println!("Original:  {:?}", v);
-        println!("Unfolded:  {:?}", v_unfolded);
-        println!("Are equal: {}", v == v_unfolded);
-
-        // Currently this will likely fail because the interning doesn't recognize
-        // that unfolding a recursive type creates the same structure
-        // This documents the limitation that needs to be fixed
-
-        // For now, just ensure both are valid
-        assert!(v.world().is_some());
-        assert!(v_unfolded.world().is_some());
-
-        // The REAL fix would make this assertion pass:
-        // assert_eq!(v, v_unfolded, "Equirecursive types should be recognized as equal");
+        let original = store_types(&[
+            TypeKind::Variant(vec![
+                (ustr("Next"), Type::new_local(1)),
+                (ustr("Leaf"), int),
+            ]),
+            TypeKind::Tuple(vec![Type::new_local(2)]),
+            TypeKind::Named(NamedType {
+                def: array_type_def(),
+                params: vec![Type::new_local(0)],
+                effect_params: vec![],
+            }),
+        ])[0];
+        for _ in 0..3 {
+            let unfolded = store_type(TypeKind::Variant(vec![
+                (ustr("Next"), Type::tuple([array_type(original)])),
+                (ustr("Leaf"), int),
+            ]));
+            assert_eq!(original, unfolded);
+        }
     }
 
     #[test]
-    fn test_find_world_isomorphism_recursive() {
-        // Test recursive references
-        // Local: [Array([local[0]]), Tuple([int, local[0]])]
-        // Existing: [Array([global[1, 0]]), Tuple([int, global[1, 0]])]
-        let int = int_type();
+    fn recursive_interning_refines_long_periodic_cycles() {
+        // A single marked node distinguishes every position of a long cycle.
+        // Doubling the period introduces equivalent nodes with different indices.
+        // This requires propagation around the entire cycle without full rescans.
+        for period in [256, 4096] {
+            let count = 2 * period;
+            let graph: Vec<_> = (0..count)
+                .map(|i| {
+                    let next = Type::new_local(((i + 1) % count) as u32);
+                    if i % period == 0 {
+                        TypeKind::Record(vec![(ustr("mark"), next)])
+                    } else {
+                        TypeKind::Tuple(vec![next])
+                    }
+                })
+                .collect();
+            let (quotient, mapping) = minimize_recursive_component(&graph);
+            assert_eq!(quotient.len(), period);
+            assert_eq!(mapping[..period], mapping[period..]);
+            // Quotient indices follow first input occurrence, regardless of the
+            // order in which the refinement splitters happened to run.
+            assert_eq!(mapping[..period], (0..period as u32).collect::<Vec<_>>());
+            for (index, mut kind) in graph.into_iter().enumerate() {
+                kind.substitute_locals(&mapping);
+                assert_eq!(kind, quotient[mapping[index] as usize]);
+            }
+        }
+    }
 
-        let local_world = vec![
+    /// Check every original edge, including edges from duplicate input nodes.
+    fn assert_interned_graph(universe: &TypeUniverse, kinds: &[TypeKind], stored: &[Type]) {
+        assert_eq!(kinds.len(), stored.len());
+        for (kind, &ty) in kinds.iter().zip(stored) {
+            let mut expected = kind.clone();
+            expected.normalize();
+            expected.for_each_inner_type_mut(|child| {
+                if child.is_local() {
+                    *child = stored[child.index() as usize];
+                }
+            });
+            assert_eq!(&expected, universe.get_type_data(ty));
+        }
+    }
+
+    #[test]
+    fn recursive_interning_minimizes_duplicate_nodes_in_both_orders() {
+        let local = Type::new_local;
+        let shared = vec![
+            TypeKind::Tuple(vec![local(1), local(1)]),
+            container_kind(local(2)),
+            TypeKind::Record(vec![(ustr("tail"), local(0))]),
+        ];
+        let exact_duplicates = vec![
+            TypeKind::Tuple(vec![local(1), local(3)]),
+            container_kind(local(2)),
+            TypeKind::Record(vec![(ustr("tail"), local(0))]),
+            container_kind(local(2)),
+        ];
+        let equivalent_cycles = vec![
+            TypeKind::Tuple(vec![local(1), local(3)]),
+            container_kind(local(2)),
+            TypeKind::Record(vec![(ustr("tail"), local(0))]),
+            container_kind(local(4)),
+            TypeKind::Record(vec![(ustr("tail"), local(0))]),
+        ];
+        for duplicated in [exact_duplicates, equivalent_cycles] {
+            for duplicate_first in [false, true] {
+                let mut universe = TypeUniverse::new_empty();
+                let (first, second) = if duplicate_first {
+                    (&duplicated, &shared)
+                } else {
+                    (&shared, &duplicated)
+                };
+                let a = universe.insert_types(first.clone());
+                let b = universe.insert_types(second.clone());
+                assert_interned_graph(&universe, first, &a);
+                assert_interned_graph(&universe, second, &b);
+                assert_eq!(a[0], b[0]);
+                assert_eq!(universe.worlds.len(), 2);
+                assert_eq!(universe.worlds[1].len(), 3);
+                // Exercise both cached original-to-quotient mappings.
+                assert_eq!(a, universe.insert_types(first.clone()));
+                assert_eq!(b, universe.insert_types(second.clone()));
+            }
+        }
+    }
+
+    #[test]
+    fn recursive_interning_minimizes_cycle_lengths_and_separate_components() {
+        for long_first in [false, true] {
+            let mut universe = TypeUniverse::new_empty();
+            let single = vec![container_kind(Type::new_local(0))];
+            let cycle = vec![
+                container_kind(Type::new_local(1)),
+                container_kind(Type::new_local(0)),
+            ];
+            let (first, second) = if long_first {
+                (&cycle, &single)
+            } else {
+                (&single, &cycle)
+            };
+            let a = universe.insert_types(first.clone());
+            let b = universe.insert_types(second.clone());
+            assert_interned_graph(&universe, first, &a);
+            assert_interned_graph(&universe, second, &b);
+            assert!(a.iter().chain(&b).all(|ty| *ty == a[0]));
+            let separate = universe.insert_types(vec![
+                container_kind(Type::new_local(0)),
+                container_kind(Type::new_local(1)),
+                TypeKind::Tuple(vec![Type::new_local(0), Type::new_local(1)]),
+            ]);
+            assert_eq!(separate[0], a[0]);
+            assert_eq!(separate[1], a[0]);
+            assert_eq!(universe.worlds[1].len(), 1);
+        }
+    }
+
+    #[test]
+    fn recursive_interning_reuses_part_of_existing_component() {
+        let mut universe = TypeUniverse::new_empty();
+        // A = (A, B), B = Native<A>; X = (X, B) is A, although X's
+        // local SCC has one node and the stored SCC has two.
+        let graph = vec![
+            TypeKind::Tuple(vec![Type::new_local(0), Type::new_local(1)]),
             container_kind(Type::new_local(0)),
-            TypeKind::Tuple(vec![int, Type::new_local(0)]),
         ];
-
-        let mut existing_world = TypeWorld::default();
-        existing_world.insert(test_interned(container_kind(Type::new_global(1, 0))));
-        existing_world.insert(test_interned(TypeKind::Tuple(vec![
-            int,
-            Type::new_global(1, 0),
-        ])));
-
-        let mapping = find_world_isomorphism(&local_world, &existing_world, 1);
-
-        assert!(
-            mapping.is_some(),
-            "Should find isomorphism for recursive worlds"
-        );
-        let mapping = mapping.unwrap();
-
-        assert_eq!(mapping.len(), 2);
-        assert_eq!(mapping[0], 0);
-        assert_eq!(mapping[1], 1);
-    }
-
-    #[test]
-    fn test_find_world_isomorphism_variant_case() {
-        // THIS IS THE KEY TEST - simulates the real Variant case
-        // Simplified: two mutually recursive types where order matters
-
-        // Local: [Array([local[1]]), Variant{V(local[0]), Tuple(local[0], )}]
-        let local_world = vec![
-            // local[0] = Array([local[1]])
-            container_kind(Type::new_local(1)),
-            // local[1] = Variant with field referencing local[0]
-            TypeKind::Variant(vec![(ustr("V"), Type::new_local(2))]),
-            TypeKind::Tuple(vec![Type::new_local(0)]), // local[2] = Tuple([local[0]])
-        ];
-
-        // Existing: [Variant{V(global[1,1])}, Array([global[1,0]])]
-        // Same types but REVERSED order
-        let mut existing_world = TypeWorld::default();
-        existing_world.insert(test_interned(TypeKind::Variant(vec![(
-            ustr("V"),
-            Type::new_global(1, 2),
-        )])));
-        existing_world.insert(test_interned(container_kind(Type::new_global(1, 0))));
-        existing_world.insert(test_interned(TypeKind::Tuple(vec![Type::new_global(1, 1)])));
-
-        let mapping = find_world_isomorphism(&local_world, &existing_world, 1);
-
-        assert!(mapping.is_some(), "Should find isomorphism");
-        let mapping = mapping.unwrap();
-
-        assert_eq!(mapping.len(), 3);
-
-        // After remapping:
-        // local[0] = Array([local[1]]) -> Array([global[1,?]])
-        //   where local[1] maps to some global index
-        // local[1] = Variant{V(local[0])} -> Variant{V(global[1,?])}
-        //   where local[0] maps to some global index
-
-        // For this to be valid:
-        // - local[0] must map to existing[1] (the Array)
-        // - local[1] must map to existing[0] (the Variant)
-
-        assert_eq!(mapping[0], 1, "local[0] (Array) should map to existing[1]");
+        let stored = universe.insert_types(graph.clone());
+        let partial = vec![TypeKind::Tuple(vec![Type::new_local(0), stored[1]])];
+        let reused = universe.insert_types(partial.clone());
+        assert_eq!(reused, vec![stored[0]]);
+        assert_interned_graph(&universe, &partial, &reused);
+        assert_eq!(universe.insert_types(partial), reused);
+        // A finite unfolding must use the same identity, too.
         assert_eq!(
-            mapping[1], 0,
-            "local[1] (Variant) should map to existing[0]"
+            universe.insert_type(TypeKind::Tuple(stored.clone())),
+            stored[0]
         );
-        assert_eq!(mapping[2], 2, "local[2] (Tuple) should map to existing[2]");
+        assert_eq!(universe.worlds.len(), 2);
+        assert_interned_graph(&universe, &graph, &stored);
     }
 
     #[test]
-    fn test_find_world_isomorphism_ambiguous() {
-        // Test case with ambiguous matching - two structurally similar types
-        // This is the REAL bug case: when there are multiple valid isomorphisms
-
-        // Both types are self-referential in structurally similar ways
-        // Local: [Array([local[0]]), Array([local[1]])]
-        let local_world = vec![
-            container_kind(Type::new_local(0)),
-            container_kind(Type::new_local(1)),
+    fn recursive_interning_matches_mixed_local_and_global_tree_edges() {
+        let mut universe = TypeUniverse::new_empty();
+        let leaf = universe.insert_type(TypeKind::Tuple(vec![]));
+        // T = Leaf | Node(N), N = (T, T).
+        let tree = vec![
+            TypeKind::Variant(vec![
+                (ustr("Leaf"), leaf),
+                (ustr("Node"), Type::new_local(1)),
+            ]),
+            TypeKind::Tuple(vec![Type::new_local(0), Type::new_local(0)]),
         ];
+        let stored = universe.insert_types(tree.clone());
+        // a = Leaf | Node(b), b = (a, T_global). Candidate signatures must
+        // erase both kinds of recursive edge or this creates a duplicate world.
+        let mut mixed = tree;
+        mixed[1] = TypeKind::Tuple(vec![Type::new_local(0), stored[0]]);
+        let reused = universe.insert_types(mixed.clone());
+        assert_eq!(reused, stored);
+        assert_interned_graph(&universe, &mixed, &reused);
+        assert_eq!(universe.worlds.len(), 2);
+    }
 
-        // Existing: [Array([global[1,0]]), Array([global[1,1]])]
-        let mut existing_world = TypeWorld::default();
-        existing_world.insert(test_interned(container_kind(Type::new_global(1, 0))));
-        existing_world.insert(test_interned(container_kind(Type::new_global(1, 1))));
+    #[test]
+    fn recursive_interning_indexes_world_zero_children() {
+        let mut universe = TypeUniverse::new_empty();
+        for variable in 0..16 {
+            let payload = universe.insert_type(TypeKind::Variable(TypeVar::new(variable)));
+            let list = vec![
+                TypeKind::Record(vec![(ustr("cons"), Type::new_local(1))]),
+                TypeKind::Tuple(vec![payload, Type::new_local(0)]),
+            ];
+            let stored = universe.insert_types(list);
+            let key = recursive_candidate_signature(universe.get_type_data(stored[1]));
+            // Different nonrecursive payloads must not accumulate in one bucket.
+            assert_eq!(universe.recursive_candidates[&key], vec![stored[1]]);
+        }
+    }
 
-        let mapping = find_world_isomorphism(&local_world, &existing_world, 1);
+    #[test]
+    fn recursive_interning_preserves_constructor_attributes() {
+        let root = Type::new_local(0);
+        let pure = EffType::empty();
+        let fallible = EffType::single_primitive(PrimitiveEffect::Fallible);
+        let def = TypeDefId::new(ModuleId::new(0), LocalTypeDefId::new(0));
+        let other_def = TypeDefId::new(ModuleId::new(0), LocalTypeDefId::new(1));
+        let named = |def, effects| {
+            TypeKind::Named(NamedType {
+                def,
+                params: vec![root],
+                effect_params: vec![effects],
+            })
+        };
+        let function = |mut_ty, effects| {
+            TypeKind::Function(b(FnType::new(
+                vec![FnArgType::new(root, mut_ty)],
+                root,
+                effects,
+            )))
+        };
+        let subscript = |effects, convention| {
+            TypeKind::Subscript(b(SubscriptType::new(
+                vec![FnArgType::new_by_val(root)],
+                root,
+                Some(SubscriptMemberType::new(effects, convention)),
+                None,
+            )))
+        };
+        let variants = vec![
+            named(def, pure.clone()),
+            named(def, fallible.clone()),
+            named(other_def, pure.clone()),
+            function(MutType::constant(), pure.clone()),
+            function(MutType::mutable(), pure.clone()),
+            function(MutType::constant(), fallible.clone()),
+            subscript(pure.clone(), SubscriptResultConvention::AddressorPlace),
+            subscript(fallible, SubscriptResultConvention::AddressorPlace),
+            subscript(pure, SubscriptResultConvention::YieldedOnce),
+            TypeKind::Record(vec![(ustr("a"), root)]),
+            TypeKind::Record(vec![(ustr("b"), root)]),
+            TypeKind::Variant(vec![(ustr("a"), root)]),
+            TypeKind::Variant(vec![(ustr("b"), root)]),
+            container_kind(root),
+            TypeKind::Native(b(NativeType::new(bare_native_type::<bool>(), vec![root]))),
+        ];
+        // All nodes belong to one SCC, exercising minimization as well as lookup.
+        let mut graph = vec![TypeKind::Tuple(
+            (1..=variants.len())
+                .map(|i| Type::new_local(i as u32))
+                .collect(),
+        )];
+        graph.extend(variants);
+        let mut universe = TypeUniverse::new_empty();
+        let stored = universe.insert_types(graph.clone());
+        assert_eq!(stored.iter().collect::<FxHashSet<_>>().len(), graph.len());
+        assert_interned_graph(&universe, &graph, &stored);
+        // Renumber every node so this cannot take the exact-input cache path.
+        let reverse: Vec<_> = (0..graph.len() as u32).rev().collect();
+        let mut reordered = graph.clone();
+        reordered.reverse();
+        for kind in &mut reordered {
+            kind.substitute_locals(&reverse);
+        }
+        universe.local_to_world.clear();
+        let reused = universe.insert_types(reordered.clone());
+        assert_eq!(reused, stored.iter().rev().copied().collect::<Vec<_>>());
+        assert_interned_graph(&universe, &reordered, &reused);
 
-        // There are two valid isomorphisms:
-        // 1. [0->0, 1->1] (identity)
-        // 2. [0->1, 1->0] (swap)
-        // Both are structurally valid!
+        // Distinct named effects alone must also prevent reuse of a stored SCC.
+        let a = universe.insert_type(named(def, EffType::empty()));
+        let b = universe.insert_type(named(
+            def,
+            EffType::single_primitive(PrimitiveEffect::Fallible),
+        ));
+        assert_ne!(a, b);
+    }
 
-        assert!(mapping.is_some(), "Should find an isomorphism");
-        let mapping = mapping.unwrap();
+    #[test]
+    fn recursive_interning_preserves_variables_and_summaries() {
+        let mut universe = TypeUniverse::new_empty();
+        let vars: Vec<_> = (0..2)
+            .map(|i| universe.insert_type(TypeKind::Variable(TypeVar::new(i))))
+            .collect();
+        let eff = EffectVar::new(7);
+        let mut_var = MutVar::new(9);
+        let graph = vec![
+            TypeKind::Tuple(vec![Type::new_local(1), Type::new_local(2), vars[0]]),
+            TypeKind::Function(b(FnType::new(
+                vec![FnArgType::new(
+                    Type::new_local(0),
+                    MutType::Variable(mut_var),
+                )],
+                Type::new_local(0),
+                EffType::single_variable(eff),
+            ))),
+            TypeKind::Function(b(FnType::new(
+                vec![FnArgType::new(
+                    Type::new_local(0),
+                    MutType::Variable(mut_var),
+                )],
+                Type::new_local(0),
+                EffType::single_variable(eff),
+            ))),
+        ];
+        let stored = universe.insert_types(graph.clone());
+        assert_eq!(stored[1], stored[2]);
+        assert_interned_graph(&universe, &graph, &stored);
+        for ty in &stored {
+            let summary = universe.get_type_summary(*ty);
+            assert!(summary.free_ty_vars.contains(TypeVar::new(0)));
+            assert!(summary.free_mut_vars.contains(mut_var));
+            assert!(summary.free_eff_vars.contains(eff));
+        }
+        let mut other = graph;
+        other[0].for_each_inner_type_mut(|ty| {
+            if *ty == vars[0] {
+                *ty = vars[1];
+            }
+        });
+        let distinct = universe.insert_types(other.clone());
+        assert_ne!(stored[0], distinct[0]);
+        assert_interned_graph(&universe, &other, &distinct);
+    }
 
-        // The algorithm should pick one consistently, but which one?
-        // The identity mapping [0->0, 1->1] is semantically correct
-        assert_eq!(mapping.len(), 2);
-
-        // Ideally we want identity mapping, but the algorithm might find either
-        // This test documents the ambiguity problem
+    #[test]
+    fn recursive_interning_agrees_with_pairwise_bisimulation() {
+        // Independent oracle: unfold local and global references alike and close
+        // already-seen pairs. In particular, never assume global IDs distinguish
+        // types: that is the interner invariant this test is checking.
+        fn equivalent(
+            universe: &TypeUniverse,
+            a: &[TypeKind],
+            ai: Type,
+            b: &[TypeKind],
+            bi: Type,
+        ) -> bool {
+            let mut seen = FxHashSet::default();
+            let mut pending = vec![(ai, bi)];
+            while let Some((ai, bi)) = pending.pop() {
+                if !seen.insert((ai, bi)) {
+                    continue;
+                }
+                let ak = if ai.is_local() {
+                    &a[ai.index() as usize]
+                } else {
+                    universe.get_type_data(ai)
+                };
+                let bk = if bi.is_local() {
+                    &b[bi.index() as usize]
+                } else {
+                    universe.get_type_data(bi)
+                };
+                match (ak, bk) {
+                    (TypeKind::Variable(a), TypeKind::Variable(b)) if a == b => {}
+                    (TypeKind::Tuple(a), TypeKind::Tuple(b)) if a.len() == b.len() => {
+                        pending.extend(a.iter().copied().zip(b.iter().copied()));
+                    }
+                    (TypeKind::Record(a), TypeKind::Record(b)) if a.len() == b.len() => {
+                        for ((an, at), (bn, bt)) in a.iter().zip(b) {
+                            if an != bn {
+                                return false;
+                            }
+                            pending.push((*at, *bt));
+                        }
+                    }
+                    _ => return false,
+                }
+            }
+            true
+        }
+        for reverse in [false, true] {
+            let mut universe = TypeUniverse::new_empty();
+            let var0 = universe.insert_type(TypeKind::Variable(TypeVar::new(0)));
+            let var1 = universe.insert_type(TypeKind::Variable(TypeVar::new(1)));
+            let recursive = universe.insert_type(TypeKind::Tuple(vec![Type::new_local(0), var0]));
+            let wrapper = universe.insert_type(TypeKind::Tuple(vec![recursive]));
+            assert_eq!(wrapper.world().unwrap().get(), 0);
+            let record =
+                universe.insert_type(TypeKind::Record(vec![(ustr("next"), Type::new_local(0))]));
+            let globals = [var0, var1, recursive, wrapper, record];
+            let mut seed = 0x12345678u32;
+            let mut random = || {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                seed as usize
+            };
+            // Explicitly include local/global encodings of the same type. The
+            // random cases then exercise leaves, constants and arbitrary sharing.
+            let mut graphs = vec![
+                vec![TypeKind::Tuple(vec![Type::new_local(0), var0])],
+                vec![
+                    TypeKind::Tuple(vec![Type::new_local(0), Type::new_local(1)]),
+                    TypeKind::Variable(TypeVar::new(0)),
+                ],
+                vec![TypeKind::Tuple(vec![recursive, var0])],
+                vec![TypeKind::Record(vec![(ustr("next"), Type::new_local(0))])],
+            ];
+            graphs.extend((0..80).map(|case| {
+                let count = 1 + case % 7;
+                (0..count)
+                    .map(|_| {
+                        if random() % 4 == 0 {
+                            return TypeKind::Variable(TypeVar::new((random() % 2) as u32));
+                        }
+                        let edges: Vec<_> = (0..1 + random() % 2)
+                            .map(|_| {
+                                if random() % 3 == 0 {
+                                    globals[random() % globals.len()]
+                                } else {
+                                    Type::new_local((random() % count) as u32)
+                                }
+                            })
+                            .collect();
+                        if random() % 3 == 0 {
+                            TypeKind::Record(vec![(ustr("next"), edges[0])])
+                        } else {
+                            TypeKind::Tuple(edges)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            }));
+            let mut previous: Vec<(usize, Vec<Type>)> = Vec::new();
+            let order: Vec<_> = if reverse {
+                (0..graphs.len()).rev().collect()
+            } else {
+                (0..graphs.len()).collect()
+            };
+            for index in order {
+                let graph = &graphs[index];
+                let stored = universe.insert_types(graph.clone());
+                assert_interned_graph(&universe, graph, &stored);
+                for (node, &ty) in stored.iter().enumerate() {
+                    assert!(equivalent(
+                        &universe,
+                        graph,
+                        Type::new_local(node as u32),
+                        &[],
+                        ty
+                    ));
+                }
+                // Replace random local edges by their already-interned partners,
+                // changing SCC boundaries without changing the unfolded types.
+                let mut mixed = graph.clone();
+                for kind in &mut mixed {
+                    kind.for_each_inner_type_mut(|child| {
+                        if child.is_local() && random() % 2 == 0 {
+                            *child = stored[child.index() as usize];
+                        }
+                    });
+                }
+                let reused = universe.insert_types(mixed.clone());
+                assert_eq!(reused, stored);
+                assert_interned_graph(&universe, &mixed, &reused);
+                previous.push((index, stored.clone()));
+                for (other_index, other_stored) in &previous {
+                    for (ai, a) in stored.iter().enumerate() {
+                        for (bi, b) in other_stored.iter().enumerate() {
+                            assert_eq!(
+                                *a == *b,
+                                equivalent(
+                                    &universe,
+                                    graph,
+                                    Type::new_local(ai as u32),
+                                    &graphs[*other_index],
+                                    Type::new_local(bi as u32)
+                                ),
+                                "graphs {index}:{ai} and {other_index}:{bi}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }

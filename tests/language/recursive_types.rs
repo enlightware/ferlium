@@ -92,6 +92,62 @@ fn recursive_comparison_preserves_named_invariance() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_alias_preserves_named_argument_invariance() {
+    let mut session = TestSession::new();
+    session
+        .try_compile(indoc! { r#"
+            type Pure = () -> int;
+            type Fallible = () -> int ! fallible;
+            struct Box<T>(T)
+            type Recursive<T> = Done | Next(Box<Recursive<T>>, T);
+            fn bad(x: Recursive<Pure>) -> Recursive<Fallible> { x }
+        "# })
+        .expect_err("the Box argument must retain the recursive variant and its callback effects")
+        .expect_invalid_effect_dependency(effect(PrimitiveEffect::Fallible), no_effects());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_alias_values_through_named_type() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            struct Box<T>(T)
+            type Recursive<T> = Done | Next(Box<Recursive<T>>, T);
+            fn sum(xs: Recursive<int>) -> int {
+                match xs { Done => 0, Next(tail, n) => n + sum(tail.0) }
+            }
+            sum(Next(Box(Next(Box(Done), 20)), 22))
+        "# }),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_alias_values_through_array() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            type Tree = Leaf(int) | Branch([Tree]);
+            fn sum(tree: Tree) -> int {
+                match tree {
+                    Leaf(n) => n,
+                    Branch(children) => {
+                        let mut total = 0;
+                        for child in children { total += sum(child) };
+                        total
+                    },
+                }
+            }
+            sum(Branch([Leaf(20), Branch([Leaf(22)])]))
+        "# }),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn match_infers_recursive_variant() {
     let mut session = TestSession::new();
 
@@ -515,4 +571,24 @@ fn recursive_equations_without_terminating_variant_are_rejected() {
             build_a(2)
         "# })
         .expect_infinite_type_ty_var_sum_cycle_without_terminating_variant();
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_alias_equivalent_sharing_finds_trait_impl() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            type List<T> = Nil | Cons(T, List<T>);
+            type Pair<T> = (T, T);
+            type Repeated = Done | Next((List<Repeated>, List<Repeated>));
+            type Shared = Done | Next(Pair<List<Shared>>);
+            struct Wrapped<T>(T)
+            trait Marker<Self> { fn tag(x: Self) -> int; }
+            impl Marker for Wrapped<Repeated> { fn tag(x: Wrapped<Repeated>) -> int { 42 } }
+            fn read(x: Wrapped<Shared>) -> int { Marker::tag(x) }
+            read(Wrapped(Next((Cons(Done, Nil), Nil))))
+        "# }),
+        int(42)
+    );
 }
