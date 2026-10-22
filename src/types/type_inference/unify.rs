@@ -49,7 +49,7 @@ use crate::{
 };
 
 /// Whether the unification should target a subtype or the same type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SubOrSameType {
     SubType,
     SameTypeWithSubEffects,
@@ -586,6 +586,7 @@ impl UnifiedTypeInference {
             expected,
             expected_span,
             SubOrSameType::SubType,
+            &mut FxHashSet::default(),
         )
     }
 
@@ -602,6 +603,7 @@ impl UnifiedTypeInference {
             expected,
             expected_span,
             SubOrSameType::SameTypeWithSubEffects,
+            &mut FxHashSet::default(),
         )
     }
 
@@ -612,6 +614,7 @@ impl UnifiedTypeInference {
         expected: Type,
         expected_span: Location,
         sub_or_same: SubOrSameType,
+        active: &mut FxHashSet<(Type, Type, SubOrSameType)>,
     ) -> Result<(), InternalCompilationError> {
         if current == expected {
             return Ok(());
@@ -621,6 +624,39 @@ impl UnifiedTypeInference {
         if current_ty == expected_ty {
             return Ok(());
         }
+        // Only recursive worlds can close a cycle. Keep the ordered, normalized pair
+        // and its relation: contravariance reverses the pair, and named arguments
+        // strengthen subtyping to equality. Neither may reuse the weaker assumption.
+        let recursive = current_ty.is_global_recursive() && expected_ty.is_global_recursive();
+        let key = (current_ty, expected_ty, sub_or_same);
+        if recursive && !active.insert(key) {
+            return Ok(());
+        }
+        let result = self.unify_type_structure(
+            current_ty,
+            current_span,
+            expected_ty,
+            expected_span,
+            sub_or_same,
+            active,
+        );
+        // These are assumptions on the current path, not cached results. Remove them
+        // on success and failure; later comparisons may observe new variable bindings.
+        if recursive {
+            active.remove(&key);
+        }
+        result
+    }
+
+    fn unify_type_structure(
+        &mut self,
+        current_ty: Type,
+        current_span: Location,
+        expected_ty: Type,
+        expected_span: Location,
+        sub_or_same: SubOrSameType,
+        active: &mut FxHashSet<(Type, Type, SubOrSameType)>,
+    ) -> Result<(), InternalCompilationError> {
         let cur_data = { current_ty.data().clone() };
         let exp_data = { expected_ty.data().clone() };
         use SubOrSameType::*;
@@ -673,6 +709,7 @@ impl UnifiedTypeInference {
                         exp_arg_ty,
                         expected_span,
                         sub_or_same,
+                        active,
                     )?;
                 }
                 Ok(())
@@ -703,6 +740,7 @@ impl UnifiedTypeInference {
                         exp_variant.1,
                         expected_span,
                         sub_or_same,
+                        active,
                     )?;
                 }
                 Ok(())
@@ -724,6 +762,7 @@ impl UnifiedTypeInference {
                         exp_el_ty,
                         expected_span,
                         sub_or_same,
+                        active,
                     )?;
                 }
                 Ok(())
@@ -754,6 +793,7 @@ impl UnifiedTypeInference {
                         exp_field.1,
                         expected_span,
                         sub_or_same,
+                        active,
                     )?;
                 }
                 Ok(())
@@ -785,6 +825,7 @@ impl UnifiedTypeInference {
                         cur_arg.ty,
                         expected_span,
                         sub_or_same,
+                        active,
                     )?;
                     // A mutable argument is also written back, so its type is invariant.
                     if sub_or_same != SameType
@@ -797,6 +838,7 @@ impl UnifiedTypeInference {
                             exp_arg.ty,
                             expected_span,
                             sub_or_same,
+                            active,
                         )?;
                     }
                 }
@@ -813,6 +855,7 @@ impl UnifiedTypeInference {
                     exp.ret,
                     expected_span,
                     sub_or_same,
+                    active,
                 )
             }
             (Subscript(cur), Subscript(exp)) => {
@@ -845,6 +888,7 @@ impl UnifiedTypeInference {
                         cur_arg.ty,
                         expected_span,
                         sub_or_same,
+                        active,
                     )?;
                     // A mutable argument is also written back, so its type is invariant.
                     if sub_or_same != SameType
@@ -857,6 +901,7 @@ impl UnifiedTypeInference {
                             exp_arg.ty,
                             expected_span,
                             sub_or_same,
+                            active,
                         )?;
                     }
                 }
@@ -881,6 +926,7 @@ impl UnifiedTypeInference {
                     exp.ret,
                     expected_span,
                     sub_or_same,
+                    active,
                 )
             }
             (Named(cur), Named(exp)) => {
@@ -906,6 +952,7 @@ impl UnifiedTypeInference {
                         exp_el_ty,
                         expected_span,
                         SameType,
+                        active,
                     )?;
                 }
                 assert_eq!(
@@ -2346,6 +2393,90 @@ fn constraint_solve_specificity(constraint: &PubTypeConstraint) -> u8 {
             0
         }
         _ => 1,
+    }
+}
+
+#[cfg(test)]
+mod recursive_tests {
+    use super::*;
+    use crate::{
+        module::{LocalTypeDefId, ModuleId, TypeDefId},
+        std::{logic::bool_type, math::int_type},
+        types::{
+            effects::{PrimitiveEffect, effect},
+            r#type::{NamedType, store_types},
+        },
+    };
+    use ustr::ustr;
+
+    fn tail_first_list(payload: Type) -> Type {
+        store_types(&[
+            TypeKind::Variant(vec![
+                (ustr("Nil"), Type::unit()),
+                (ustr("Cons"), Type::new_local(1)),
+            ]),
+            TypeKind::Tuple(vec![Type::new_local(0), payload]),
+        ])[0]
+    }
+
+    #[test]
+    fn recursive_comparison_observes_inferred_payloads() {
+        let mut inference = UnifiedTypeInference::new_with_ty_vars(1);
+        let span = Location::new_synthesized();
+        let unknown = Type::variable_id(0);
+        let generic = tail_first_list(unknown);
+        let integers = tail_first_list(int_type());
+        let booleans = tail_first_list(bool_type());
+
+        inference
+            .unify_same_type_with_sub_effects(generic, span, integers, span)
+            .unwrap();
+        assert_eq!(inference.substitute_in_type(unknown), int_type());
+        assert_eq!(inference.substitute_in_type(generic), integers);
+        // A later comparison sees the binding, and a failed comparison must not
+        // leave a cycle assumption that would make a retry succeed.
+        for _ in 0..2 {
+            assert!(
+                inference
+                    .unify_sub_type(generic, span, booleans, span)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn recursive_comparison_distinguishes_subtyping_from_equality() {
+        // A<T> = Done | Next(Box<A<T>>, T). The named type's definition is not
+        // consulted when comparing its arguments, so a synthetic id suffices.
+        let recursive = |payload| {
+            store_types(&[
+                TypeKind::Variant(vec![
+                    (ustr("Done"), Type::unit()),
+                    (ustr("Next"), Type::new_local(1)),
+                ]),
+                TypeKind::Tuple(vec![Type::new_local(2), payload]),
+                TypeKind::Named(NamedType {
+                    def: TypeDefId::new(ModuleId::new(0), LocalTypeDefId::new(0)),
+                    params: vec![Type::new_local(0)],
+                    effect_params: vec![],
+                }),
+            ])[0]
+        };
+        let pure = Type::nullary_function_by_val(int_type());
+        let fallible =
+            Type::function_by_val_with_effects([], int_type(), effect(PrimitiveEffect::Fallible));
+        let span = Location::new_synthesized();
+        let mut inference = UnifiedTypeInference::default();
+        inference
+            .unify_sub_type(pure, span, fallible, span)
+            .unwrap();
+        // Traversing Box strengthens the active pair's relation. Skipping that
+        // comparison would incorrectly allow the covariant callback widening.
+        assert!(
+            inference
+                .unify_sub_type(recursive(pure), span, recursive(fallible), span)
+                .is_err()
+        );
     }
 }
 

@@ -1,7 +1,9 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-//! Inference of recursive structural types without annotations.
+//! Inference and comparison of recursive structural types.
+
+use ferlium::types::effects::{PrimitiveEffect, effect, no_effects};
 
 use indoc::indoc;
 
@@ -9,6 +11,84 @@ use crate::harness::{TestSession, bool, int, variant_0, variant_t1};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_comparison_widens_callback_effects() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            type Pure = () -> int;
+            type Fallible = () -> int ! fallible;
+            type List<T> = Nil | Cons(T, List<T>);
+            fn coerce(xs: List<Pure>) -> List<Fallible> { xs }
+            fn first(xs: List<Fallible>) -> int {
+                match xs { Nil => 0, Cons(f, tail) => f() }
+            }
+            first(coerce(Cons(|| 42, Nil)))
+        "# }),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_comparison_checks_payload_after_cycle() {
+    let mut session = TestSession::new();
+    session
+        .try_compile(indoc! { r#"
+            type List<T> = Nil | Cons(List<T>, T);
+            fn bad(xs: List<int>) -> List<bool> { xs }
+        "# })
+        .expect_err("closing the recursive edge must still check the following payload")
+        .expect_type_mismatch("int", "bool");
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_comparison_checks_effects_after_cycle() {
+    let mut session = TestSession::new();
+    session
+        .try_compile(indoc! { r#"
+            type Pure = () -> int;
+            type Fallible = () -> int ! fallible;
+            type List<T> = Nil | Cons(List<T>, T);
+            fn bad(xs: List<Fallible>) -> List<Pure> { xs }
+        "# })
+        .expect_err("closing the recursive edge must not hide callback effects")
+        .expect_invalid_effect_dependency(effect(PrimitiveEffect::Fallible), no_effects());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_comparison_preserves_direction() {
+    let mut session = TestSession::new();
+    session
+        .try_compile(indoc! { r#"
+            type Pure = () -> int;
+            type Fallible = () -> int ! fallible;
+            type Recursive<T> = Done | Next((Recursive<T>) -> T);
+            fn bad(x: Recursive<Pure>) -> Recursive<Fallible> { x }
+        "# })
+        .expect_err("a contravariant recursive edge must check the reverse relation")
+        .expect_invalid_effect_dependency(effect(PrimitiveEffect::Fallible), no_effects());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_comparison_preserves_named_invariance() {
+    let mut session = TestSession::new();
+    session
+        .try_compile(indoc! { r#"
+            type Pure = () -> int;
+            type Fallible = () -> int ! fallible;
+            struct Box<T>(T)
+            type Recursive<T> = Done | Next(Recursive<T>, T);
+            fn bad(x: Box<Recursive<Pure>>) -> Box<Recursive<Fallible>> { x }
+        "# })
+        .expect_err("recursive comparisons inside named arguments must preserve exact effects")
+        .expect_invalid_effect_dependency(effect(PrimitiveEffect::Fallible), no_effects());
+}
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
