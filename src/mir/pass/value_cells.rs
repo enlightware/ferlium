@@ -14,8 +14,8 @@
 //! no register to name. Admitted reads are loads, `comp_eq` scrutinees, copies out, `move`s out of
 //! statically sized contents, and visible `Let` call arguments, which the callee may neither mutate
 //! nor retain: since scalar arguments are values, such an argument is of another type, such as
-//! unit. A cell defined by storing a bare function may also be called through and dropped: it holds
-//! no environment. Any other value must be `TrivialCopy`, so a read never transfers ownership and
+//! unit. A cell defined by storing a bare function may also be called through, cloned and dropped:
+//! it holds no environment, so its clone is a copy and its drop releases nothing. Any other value must be `TrivialCopy`, so a read never transfers ownership and
 //! the cell carries no drop obligation. A `move` out still leaves the cell uninitialized, making it
 //! the cell's last use until the definition runs again.
 //!
@@ -179,13 +179,14 @@ struct Shape {
     index: usize,
     /// The allocated type, `None` for a pointer slot.
     ty: Option<Type>,
-    /// Whether the cell is called through or dropped, which needs it to hold a bare function.
+    /// Whether the cell is called through, cloned or dropped, which needs it to hold a bare
+    /// function.
     function_uses: bool,
 }
 
 impl Shape {
     /// Whether reading the cell copies its value: a bare function carries no environment; any
-    /// other value must be `TrivialCopy`, and neither called through nor dropped.
+    /// other value must be `TrivialCopy`, and neither called through, cloned nor dropped.
     fn copyable(&self, env: ModuleEnv<'_>) -> bool {
         match self.value.definition {
             Definition::Function(_) => true,
@@ -240,7 +241,9 @@ fn shape(
             )
             // Without a layout witness, a `move` transfers a statically sized representation.
             | Access::MoveOut(Transfer::Sized) => {}
-            Access::Callee | Access::Drop => function_uses = true,
+            Access::Callee | Access::Drop | Access::Read(local_cells::Read::Clone) => {
+                function_uses = true
+            }
             _ => return None,
         }
     }

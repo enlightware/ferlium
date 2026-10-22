@@ -929,7 +929,8 @@ fn payload_effects(
                 {
                     Effect::Write
                 }
-                (OperationKind::Call { .. }, index) if index > 0 => Effect::Read,
+                // The callee, a function value, is read in place like the arguments.
+                (OperationKind::Call { .. }, _) => Effect::Read,
                 _ => continue,
             };
             let node = &candidates[&place.root].shape.nodes[place.node];
@@ -1270,7 +1271,8 @@ fn check_operation(
                 OperationKind::IsInitialized => !managed && index == 0 && !node.in_payload,
                 OperationKind::Store => index == 1,
                 OperationKind::Memcpy | OperationKind::Move => copy,
-                OperationKind::Call { .. } => index > 0,
+                // A call reads its callee, a function value, in place like its arguments.
+                OperationKind::Call { .. } => true,
                 // A managed field keeps its ownership operations and its own representation.
                 OperationKind::Clone { .. } => managed && index <= 1,
                 OperationKind::Drop { .. } => managed && index == 0,

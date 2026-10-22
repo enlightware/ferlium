@@ -66,6 +66,7 @@ repeat while the body shrinks:
     tail merge        // hash-cons equivalent tails, collapse equal edges, and fold empty blocks
     finite domains    // collapse exhaustive tests; materialize Boolean results
     dead proven + dce // after each rewrite, collect its newly dead predicate
+narrow invokes    // again: forwarding after the split names callees too
 finish            // restores canonical form without exposing the intermediate body
 ```
 
@@ -747,7 +748,8 @@ store or a copy and otherwise only observed, including as read-only `let` call a
 forwarded read sees what the definition stored: a materialized register or value parameter, a
 constant, or, for a copy from another such cell, what that cell holds. A copy from a `let` parameter
 passed as a place reads the parameter in place. A cell holding a non-capturing closure's function is
-one too: calls through it become direct, and its drop, which releases nothing, goes. A cell whose
+one too: calls through it become direct, its clone, which duplicates no environment, stores the
+function, and its drop, which releases nothing, goes. A cell whose
 every read was forwarded is removed with its write. A read-only `let` argument keeps the cell but
 does not block forwarding its other reads.
 
@@ -1241,7 +1243,10 @@ Payload reads must be definitely initialized without relying on a remaining tag 
 payloads must also have no live ownership at a shell store, a stack restore that releases their
 storage, or a function exit. Shell stores clear the separate payload places in managed mode.
 Initialization queries that would observe aggregate or payload state retain the original storage;
-whole-value uses and escaping addresses likewise prevent splitting. Initialization through an
+whole-value uses and escaping addresses likewise prevent splitting. A field holding a function may
+be called through: the call reads it in place. An inlined adaptor consumed by a loop therefore splits
+into its collection, cursor and callback, so the collection borrows its source and the callback,
+once forwarded, is called directly. Initialization through an
 `invoke` result remains conservative because it occurs only on the normal edge. Storage forwarding,
 clone borrowing and terminal moves then run again on what the split exposed. LLVM similarly runs
 SROA before the passes that remove copies and move code.

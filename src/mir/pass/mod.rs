@@ -757,6 +757,15 @@ pub(crate) fn optimize_function(
         }
         repeated = true;
     }
+    // Forwarding a cell that holds a bare function, in the cleanups after the split above, names
+    // callees too, after the narrowing placed with devirtualization. A direct call must follow
+    // its callee's failure convention in the final body.
+    let source = current.as_ref().unwrap_or(function);
+    if let Some(narrowed) =
+        fold::narrow_infallible_direct_invokes(source, env, |callee| callees.original(callee))
+    {
+        current = Some(narrowed);
+    }
     let source = current.as_ref().unwrap_or(function);
     if let Some(simplified) = call_depth::simplify_checks(source, env, callees) {
         current = Some(simplified);

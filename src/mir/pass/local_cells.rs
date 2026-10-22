@@ -82,8 +82,10 @@ pub(crate) enum Read {
     Copy,
     /// A visible call argument passed under the `Let` convention.
     Argument,
-    /// Any other non-mutating reader: a tag or payload-indirection extraction, a `clone` source,
-    /// an array element, a `comp_eq` pattern, an allocation or byte-move size.
+    /// The source of a `clone`.
+    Clone,
+    /// Any other non-mutating reader: a tag or payload-indirection extraction, an array element,
+    /// a `comp_eq` pattern, an allocation or byte-move size.
     Other,
 }
 
@@ -134,7 +136,7 @@ pub(crate) fn access(operation: &Operation, position: usize) -> Access {
             | OperationKind::RuntimeAlloc { .. },
             _,
         ) => Access::Read(Read::Other),
-        (OperationKind::Clone { .. }, 0) => Access::Read(Read::Other),
+        (OperationKind::Clone { .. }, 0) => Access::Read(Read::Clone),
         (OperationKind::Clone { .. }, 1) => Access::Write(Write::Clone),
         (OperationKind::BuildArray { .. }, _) => {
             if position + 1 == operation.operands.len() {

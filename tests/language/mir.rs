@@ -3744,6 +3744,25 @@ fn failing_projection_slide_after_a_generic_result_propagates() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn callables_in_local_variant_payloads_are_called_in_place() {
+    let mut session = TestSession::new();
+    // A split variant's payload holding a function is read by the call through it.
+    for (source, expected) in [
+        (
+            "fn f(c: bool, k: int) -> int { let v = if c { Some(|x| x + k) } else { None }; match v { Some(g) => g(1), None => 0 } } f(true, 2) + f(false, 2)",
+            3,
+        ),
+        (
+            "fn f(c: bool, a: [int]) -> int { let v = if c { Both(a, |x| x * 2) } else { Neither }; match v { Both(b, g) => g(len(b)), _ => 0 } } f(true, [1, 2]) + f(false, [1])",
+            4,
+        ),
+    ] {
+        assert_val_eq!(session.run(source), int(expected));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn failure_after_partial_result_construction_propagates() {
     let mut session = TestSession::new();
     for src in [

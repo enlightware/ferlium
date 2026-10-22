@@ -10,8 +10,8 @@
 //!
 //! The cells are the [value cells](super::value_cells) defined by a store or a copy whose every
 //! read only observes the value. Read-only call arguments keep their storage; other reads can
-//! still be forwarded: a load, a comparison, a copy out or, for a bare function, a call through it
-//! or its drop. Each forwarded read sees:
+//! still be forwarded: a load, a comparison, a copy out or, for a bare function, a call through it,
+//! its clone or its drop. Each forwarded read sees:
 //! - the stored value, when the write stores a materialized register or a value parameter: a
 //!   `load`'s uses are rewritten to it, a `comp_eq` scrutinee reads it, and a copy from the cell
 //!   stores it;
@@ -23,8 +23,8 @@
 //!
 //! A cell of function type is also one when its single write stores a function constant, as a
 //! non-capturing closure bound to a local lowers: it holds that function and no environment. A call
-//! through it calls the function directly, which inlining and call-graph proofs can then see, and
-//! its drop has nothing to release. A closure with captures is built by `build_closure` instead, so
+//! through it calls the function directly, which inlining and call-graph proofs can then see, its
+//! clone stores the function, and its drop has nothing to release. A closure with captures is built by `build_closure` instead, so
 //! a store of a bare function never drops an environment.
 //!
 //! A cell whose every read was forwarded is removed with its write and loads; being `TrivialCopy`,
@@ -116,8 +116,15 @@ pub(crate) fn forward_stored_values(func: &Function, env: ModuleEnv<'_>) -> Opti
                 // A bare function is not the ordinary materialized value a load produces.
                 (Some(Read::Value), Target::Function(_)) => matches!(
                     cell_use.access,
-                    Access::Read(local_cells::Read::Copy) | Access::MoveOut(Transfer::Sized)
+                    Access::Read(local_cells::Read::Copy | local_cells::Read::Clone)
+                        | Access::MoveOut(Transfer::Sized)
                 ),
+                // Only a bare function is cloned by copying it.
+                (Some(Read::Value), _)
+                    if cell_use.access == Access::Read(local_cells::Read::Clone) =>
+                {
+                    false
+                }
                 // Loads, comparisons, tag extractions and copies accept either a register or a
                 // pool constant.
                 (Some(Read::Value), _) => true,
@@ -223,8 +230,9 @@ pub(crate) fn forward_stored_values(func: &Function, env: ModuleEnv<'_>) -> Opti
             | OperationKind::Call { .. } => {
                 operation.operands[0] = stored;
             }
-            // A copy out of a cell holding a value stores that value.
-            OperationKind::Memcpy | OperationKind::Move => {
+            // A copy out of a cell holding a value stores that value, as does the clone of a bare
+            // function.
+            OperationKind::Memcpy | OperationKind::Move | OperationKind::Clone { .. } => {
                 let destination = operation.operands[1].clone();
                 operation.kind = OperationKind::Store;
                 operation.operands = Box::new([stored, destination]);
@@ -278,7 +286,7 @@ enum Target {
 
 /// How a forwardable access reads a cell named by its first operand.
 enum Read {
-    /// A load, a comparison, a tag extraction or a copy out of it.
+    /// A load, a comparison, a tag extraction, a copy out of it or, for a bare function, its clone.
     Value,
     /// A call through the function the cell holds.
     Callee,
@@ -332,7 +340,8 @@ fn read_kind(access: Access) -> Option<Read> {
             local_cells::Read::Load
                 | local_cells::Read::Compare
                 | local_cells::Read::Tag
-                | local_cells::Read::Copy,
+                | local_cells::Read::Copy
+                | local_cells::Read::Clone,
         )
         // Without a layout witness, a `move` transfers a statically sized representation.
         | Access::MoveOut(Transfer::Sized) => Some(Read::Value),

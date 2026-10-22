@@ -585,3 +585,32 @@ fn generic_callback_recursion_retains_specialization_at_every_level() {
         }
     }
 }
+
+/// An adaptor consumed by a loop is built in the loop's frame: its fields split into locals, the
+/// collection it would copy is borrowed from the parameter, and the non-capturing callback it
+/// stores is a bare function, so the loop calls it directly.
+#[test]
+fn inlined_adaptors_borrow_their_collection_and_call_their_callback_directly() {
+    for pipeline in [
+        "filter(|row| len(row) > 0)",
+        "map(|row| row)",
+        "filter_map(|row| if len(row) > 0 { Some(row) } else { None })",
+    ] {
+        let optimized = emit(
+            "adaptor",
+            &format!(
+                "fn view(rows: [[int]]) -> int {{ let mut n = 0; for row in iter(rows) |> {pipeline} {{ n += len(row) }}; n }}"
+            ),
+            MirOptimization::Enabled,
+        );
+        let view = rendered_function(&optimized, "view");
+        assert!(
+            !view.contains("clone [[int]]") && !view.contains("function_value_clone"),
+            "{pipeline}: the collection must be borrowed and the callback not cloned:\n{view}"
+        );
+        assert!(
+            !view.lines().any(|line| line.contains("call %")),
+            "{pipeline}: the callback must be called directly:\n{view}"
+        );
+    }
+}
