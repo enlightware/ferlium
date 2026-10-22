@@ -3725,6 +3725,7 @@ mod tests {
     use super::*;
     use crate::{
         CompilerSession,
+        module::{LocalTypeDefId, ModuleId},
         parser::location::{Location, SourceTable},
         std::{
             array::array_type,
@@ -3799,6 +3800,129 @@ mod tests {
                 SubscriptResultConvention::AddressorPlace,
             )),
         )
+    }
+
+    fn named_subscript_type(subscript: SubscriptType) -> Type {
+        // Comparing arguments of the same named type does not consult its definition.
+        let def = TypeDefId::new(ModuleId::new(0), LocalTypeDefId::new(0));
+        Type::named(def, vec![Type::subscript_type(subscript)])
+    }
+
+    #[test]
+    fn named_subscript_arguments_preserve_members() {
+        let actual = test_ref_mut_subscript_type(int_type(), bool_type());
+        let span = Location::new_synthesized();
+        for remove_ref in [false, true] {
+            let mut expected = actual.clone();
+            if remove_ref {
+                expected.ref_member = None;
+            } else {
+                expected.mut_member = None;
+            }
+            UnifiedTypeInference::default()
+                .unify_sub_type(
+                    Type::subscript_type(actual.clone()),
+                    span,
+                    Type::subscript_type(expected.clone()),
+                    span,
+                )
+                .expect("a subscript can supply a subset of its members");
+            assert!(
+                UnifiedTypeInference::default()
+                    .unify_sub_type(
+                        named_subscript_type(actual.clone()),
+                        span,
+                        named_subscript_type(expected),
+                        span
+                    )
+                    .is_err(),
+                "a named type argument must preserve both members"
+            );
+        }
+    }
+
+    #[test]
+    fn named_subscript_arguments_preserve_result_conventions() {
+        let actual = test_ref_mut_subscript_type(int_type(), bool_type());
+        let span = Location::new_synthesized();
+        for change_ref in [false, true] {
+            let mut expected = actual.clone();
+            let member = if change_ref {
+                &mut expected.ref_member
+            } else {
+                &mut expected.mut_member
+            };
+            member.as_mut().unwrap().result_convention = SubscriptResultConvention::YieldedOnce;
+            UnifiedTypeInference::default()
+                .unify_sub_type(
+                    Type::subscript_type(actual.clone()),
+                    span,
+                    Type::subscript_type(expected.clone()),
+                    span,
+                )
+                .expect("an addressor can satisfy a yielded-place capability");
+            assert!(
+                UnifiedTypeInference::default()
+                    .unify_sub_type(
+                        named_subscript_type(actual.clone()),
+                        span,
+                        named_subscript_type(expected),
+                        span
+                    )
+                    .is_err(),
+                "a named type argument must preserve each result convention"
+            );
+        }
+    }
+
+    #[test]
+    fn named_subscript_arguments_preserve_member_effects() {
+        let actual = test_ref_mut_subscript_type(int_type(), bool_type());
+        let span = Location::new_synthesized();
+        for change_ref in [false, true] {
+            let mut expected = actual.clone();
+            let member = if change_ref {
+                &mut expected.ref_member
+            } else {
+                &mut expected.mut_member
+            };
+            member.as_mut().unwrap().effects = EffType::single_primitive(PrimitiveEffect::Fallible);
+            UnifiedTypeInference::default()
+                .unify_sub_type(
+                    Type::subscript_type(actual.clone()),
+                    span,
+                    Type::subscript_type(expected.clone()),
+                    span,
+                )
+                .expect("a pure subscript member can satisfy a fallible capability");
+            assert!(
+                UnifiedTypeInference::default()
+                    .unify_sub_type(
+                        named_subscript_type(actual.clone()),
+                        span,
+                        named_subscript_type(expected.clone()),
+                        span
+                    )
+                    .is_err(),
+                "a named type argument must preserve each member's effects"
+            );
+
+            // Invariance must still infer a member's unknown effects from the other argument.
+            let member = if change_ref {
+                &mut expected.ref_member
+            } else {
+                &mut expected.mut_member
+            };
+            member.as_mut().unwrap().effects = EffType::single_variable(EffectVar::new(0));
+            let actual = named_subscript_type(actual.clone());
+            let expected = named_subscript_type(expected);
+            let mut inference = UnifiedTypeInference::default();
+            inference
+                .unify_sub_type(actual, span, expected, span)
+                .unwrap();
+            inference.finalize_effect_dependencies().unwrap();
+            assert_eq!(inference.substitute_in_type(expected), actual);
+        }
     }
 
     #[test]

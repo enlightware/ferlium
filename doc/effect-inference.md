@@ -22,11 +22,13 @@ needs no runtime adapter (see [abi.md](abi.md)).
 - **Function values** (arguments, returns, bindings, annotations, fields): the value's row is
   included in the expected one, recursively through parameter and result types.
 - **Joins** (branches of a match or `if`, array elements, loop exits, writes to a mutable local):
-  a type variable receiving a callable gives it a fresh effect variable that each contributor's row
-  is included in. Joins never equate the contributors' effects with each other.
-- **Invariant positions** (type and effect arguments of named types, duplicate trait applications in one
-  scope, the types behind `&mut` parameters, which are also written back): equality. Where it is
-  exact, it unifies the two rows so that equal types stay syntactically equal: two lone
+  a type variable receiving a top-level callable gives it a fresh effect variable that each
+  contributor's row is included in. This widening does not descend into named type arguments:
+  joining already-typed `Box<Pure>` and `Box<Fallible>` requires equal callback effects and is
+  rejected when those effects differ (see [Design choices](#design-choices)).
+- **Invariant positions** (type and effect arguments of named types, duplicate trait applications
+  in one scope, the types behind `&mut` parameters, which are also written back): equality. Where
+  it is exact, it unifies the two rows so that equal types stay syntactically equal: two lone
   variables merge, and a lone variable becomes the other row. Other equalities, such as
   `(read, a) = (read, b)`, which does not imply `a = b`, are kept as two inclusions.
 - **Trait outputs**: the implementation's output effect relates to the requested one by the
