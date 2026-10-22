@@ -75,5 +75,21 @@ three documented approximations:
 
 Variables occurring only in effects that the published type performs, never in effects it
 receives, take their least solution, as do the variables of a body that its type cannot observe.
+What is observable depends on what is published: a function's signature and the constraints over
+its type variables; an implementation method's head, as the method is quantified over it alone; a
+top-level expression's type, as it is not generalized. Derived implementations take the effects of
+the callables in their input types at their least solution, as no derived method calls them.
 Every retained constraint is then checked against the published rows; this validation makes each
 published signature sound.
+
+## Design choices
+
+Rejected alternatives: residual effect constraints in published schemes (principal, but needs a
+scheme language, a simplifier and a display), restricting only by polarity (a positive trait slot
+can still be pinned invariantly elsewhere), and an ambiguity diagnostic for disjunctions (it would
+reject ordinary joins). The accepted cost is that merged variables and replaced ceilings make some
+signatures coarser, and sometimes give a may-fail convention where a finer type would not.
+Effect arguments of named types are invariant; a variance analysis of named types could relax
+this. Order independence of solving is tested, not proved, and whether validation can reject a
+function without declared effect variables is open: a counterexample is to be investigated, not
+answered by weakening validation.

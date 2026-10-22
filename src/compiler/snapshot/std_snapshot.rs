@@ -362,8 +362,8 @@ mod tests {
             expected.impls.generated_value_key_to_id
         );
         assert_eq!(
-            restored.impls.unconstrained_application_key_to_id,
-            expected.impls.unconstrained_application_key_to_id
+            restored.impls.application_key_to_id,
+            expected.impls.application_key_to_id
         );
     }
 

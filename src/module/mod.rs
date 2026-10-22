@@ -58,6 +58,7 @@ use crate::{
         effects::EffType,
         mutability::MutType,
         r#trait::Trait,
+        trait_solver::application_key,
         r#type::{
             BareNativeType, CallResultConvention, FnArgType, LocalTypeAliasId, SubscriptMemberType,
             SubscriptResultConvention, SubscriptType, Type, TypeAliasEntry, TypeAliases, TypeDef,
@@ -1957,6 +1958,23 @@ impl Module {
     /// Return a concrete implementation id by its key, if it exists in this module.
     pub fn get_concrete_impl_by_key(&self, key: &ConcreteTraitImplKey) -> Option<&LocalImplId> {
         self.impls.concrete().get(key)
+    }
+
+    /// Return the dictionary generated in this module from a blanket implementation for the given
+    /// application, if one exists.
+    pub fn get_generated_impl(
+        &self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        output_tys: &[Type],
+        output_effs: &[EffType],
+    ) -> Option<&LocalImplId> {
+        self.impls.application_key_to_id.get(&application_key(
+            trait_id,
+            input_tys,
+            Some(output_tys),
+            Some(output_effs),
+        ))
     }
 
     /// Return a set of blanket implementations by their trait id, if any exist in this module.

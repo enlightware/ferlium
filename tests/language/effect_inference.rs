@@ -10,7 +10,11 @@ use indoc::indoc;
 use ustr::ustr;
 
 use crate::harness::{TestSession, int};
-use ferlium::{compiler::error::SourceFailureKind, format::FormatWith, types::effects::*};
+use ferlium::{
+    compiler::error::{CompilationErrorImpl, SourceFailureKind},
+    format::FormatWith,
+    types::effects::*,
+};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -127,7 +131,7 @@ fn eager_map_callback_failure_propagates() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn impl_declaring_pure_callback_effect_rejects_fallible_callback() {
     let mut session = TestSession::new();
-    session.fail_compilation(indoc! { r#"
+    let error = session.fail_compilation(indoc! { r#"
         trait Apply<Self |-> ! CallbackEffect> {
             fn apply(value: Self, f: (int) -> int ! CallbackEffect) -> int;
         }
@@ -139,6 +143,17 @@ fn impl_declaring_pure_callback_effect_rejects_fallible_callback() {
         }
         Apply::apply(Box { v: 1 }, |x| idiv(x, 0))
     "# });
+    let CompilationErrorImpl::TraitImplOutputEffectsMismatch { mismatches, .. } =
+        error.into_inner()
+    else {
+        panic!("expected an output effects mismatch");
+    };
+    let [(name, declared, requested)] = mismatches.as_slice() else {
+        panic!("expected one mismatch, got {mismatches:?}");
+    };
+    assert_eq!(name.as_str(), "CallbackEffect");
+    assert_eq!(*declared, no_effects());
+    assert!(requested.contains(Effect::Primitive(PrimitiveEffect::Fallible)));
 }
 
 #[test]

@@ -2159,7 +2159,7 @@ pub(super) fn check_unbounds(
 
 /// Reject functions whose published types combine two declared effect variables in one effect.
 /// The effect variables that neither the generalized `signatures`, the given `observable` variables
-/// nor a pending constraint can observe take their least solution, so values inside a body keep
+/// nor a published constraint can observe take their least solution, so values inside a body keep
 /// the effects they were built with.
 fn minimize_body_effects(
     output: &Module,
@@ -2170,10 +2170,6 @@ fn minimize_body_effects(
     for id in signatures {
         let fn_ty = &output.functions[id.as_index()].definition.ty_scheme.ty;
         observable.extend(ty_inf.substitute_in_fn_type(fn_ty).inner_effect_vars());
-    }
-    ty_inf.normalize_remaining_constraints();
-    for constraint in ty_inf.remaining_constraints() {
-        constraint.fill_with_inner_effect_vars(&mut observable);
     }
     ty_inf.minimize_unobservable_effects(observable)
 }

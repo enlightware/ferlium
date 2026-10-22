@@ -50,7 +50,7 @@ fn main() {
         match report {
             Report::Ran { outcome, may_fail } => {
                 ran += 1;
-                failed += usize::from(matches!(outcome, Outcome::Failure(_)));
+                failed += usize::from(matches!(outcome, Outcome::Failure { .. }));
                 typed_fallible += usize::from(may_fail);
             }
             Report::Rejected { category, message } => {

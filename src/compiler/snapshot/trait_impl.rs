@@ -56,7 +56,7 @@ pub(crate) struct SnapshotTraitImpls {
     concrete: Vec<(SnapshotConcreteKey, LocalImplId)>,
     blanket: Vec<(TraitId, SnapshotBlanketSubKey, LocalImplId)>,
     generated_value: Vec<(Vec<SnapshotTypeId>, LocalImplId)>,
-    unconstrained_applications: Vec<(SnapshotConcreteKey, LocalImplId)>,
+    applications: Vec<(SnapshotConcreteKey, LocalImplId)>,
     data: Vec<SnapshotTraitImpl>,
 }
 
@@ -234,19 +234,19 @@ impl SnapshotTraitImpls {
             .collect::<Result<Vec<_>, SnapshotError>>()?;
         generated_value.sort_by_key(|(_, id)| id.as_u32());
 
-        let mut unconstrained_applications = value
-            .unconstrained_application_key_to_id
+        let mut applications = value
+            .application_key_to_id
             .iter()
             .map(|(key, id)| Ok((SnapshotConcreteKey::capture(key, graph)?, *id)))
             .collect::<Result<Vec<_>, SnapshotError>>()?;
-        unconstrained_applications.sort_by_key(|(_, id)| id.as_u32());
+        applications.sort_by_key(|(_, id)| id.as_u32());
 
         Ok(Self {
             module_id: value.module_id,
             concrete,
             blanket,
             generated_value,
-            unconstrained_applications,
+            applications,
             data: value
                 .data
                 .iter()
@@ -274,8 +274,8 @@ impl SnapshotTraitImpls {
             .iter()
             .map(|(key, id)| Ok((live_types(key, types)?, *id)))
             .collect::<Result<_, SnapshotError>>()?;
-        value.unconstrained_application_key_to_id = self
-            .unconstrained_applications
+        value.application_key_to_id = self
+            .applications
             .iter()
             .map(|(key, id)| Ok((key.materialize(types)?, *id)))
             .collect::<Result<_, SnapshotError>>()?;

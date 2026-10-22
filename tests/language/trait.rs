@@ -1954,8 +1954,10 @@ fn trait_default_leaf_methods_keep_their_dictionary_abi() {
         let output = session.compile(&code);
         let module = session.session().expect_fresh_module(output.module_id);
         let trait_id = module.get_trait_id_str("Measure").unwrap();
+        // A declared implementation is found by its inputs, a generated one by its application.
         let impl_id = module
             .get_concrete_impl_by_key(&ConcreteTraitImplKey::new(trait_id, vec![ty]))
+            .or_else(|| module.get_generated_impl(trait_id, &[ty], &[], &[]))
             .unwrap();
         let implementation = module.get_impl_data(*impl_id).unwrap();
         let leaf = TraitDictionaryEntryIndex::from_index(0);
@@ -1982,7 +1984,7 @@ fn trait_default_leaf_methods_keep_their_dictionary_abi() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn trait_default_given_owners_survive_constraint_deduplication() {
-    use ferlium::module::{ConcreteTraitImplKey, id::Id};
+    use ferlium::module::id::Id;
     let mut session = TestSession::new();
     let source = indoc! {r#"
         trait Size<Self> {
@@ -2002,7 +2004,7 @@ fn trait_default_given_owners_survive_constraint_deduplication() {
     let module = session.session().expect_fresh_module(output.module_id);
     let trait_id = module.get_trait_id_str("Size").unwrap();
     let impl_id = module
-        .get_concrete_impl_by_key(&ConcreteTraitImplKey::new(trait_id, vec![ty]))
+        .get_generated_impl(trait_id, &[ty], &[], &[])
         .unwrap();
     let dictionary = &module.get_impl_data(*impl_id).unwrap().dictionary_value;
     assert!(!dictionary.entry_uses_self_dictionary(TraitDictionaryEntryIndex::from_index(0)));

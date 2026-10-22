@@ -306,6 +306,10 @@ pub(crate) fn diagnostics_from_error(
             fn_span: instantiation_span,
             ..
         }
+        | TraitImplOutputEffectsMismatch {
+            fn_span: instantiation_span,
+            ..
+        }
         | TraitSolverRecursionLimitExceeded {
             fn_span: instantiation_span,
             ..

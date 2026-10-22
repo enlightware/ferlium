@@ -9,16 +9,23 @@
 //!
 //! - traits whose output effect `E` sits in different positions: the method's own row (positive),
 //!   a callback parameter's row (negative), both (invariant), or a returned function's row;
-//! - concrete impls fixing `E` to `()` or `fallible`, blanket impls over a wrapper forwarding,
+//! - concrete impls fixing `E` to `()`, `fallible` or all effects, blanket impls over a wrapper forwarding,
 //!   extending or constraining the evidence's `E` (possibly of another trait), and impls for a
 //!   callback carrier whose `E` comes from the stored callable;
 //! - generic callers reaching the methods directly, through declared signatures, method
-//!   references, eager and lazy std adaptors, and other callers;
-//! - an entry expression summing calls on concrete values, with pure and fallible callbacks.
+//!   references, eager and lazy std adaptors, joins of callables, closures built in loops, and
+//!   other callers;
+//! - an entry expression summing calls on concrete values, with callbacks that are pure, fail,
+//!   read or write.
 //!
-//! Every program computes an `int`, so outcomes compare as plain values or failure kinds.
+//! `effects::write()` counts and `effects::read()` returns the count, so the result of a program
+//! depends on which effects ran and in which order. Every program computes an `int`, so outcomes
+//! compare as plain values or failure kinds.
 
 use arbitrary::{Result, Unstructured};
+use ferlium::types::effects::{
+    EffType, Effect, EffectRow, PrimitiveEffect, effect, effect_read, effect_write, no_effects,
+};
 use std::fmt::Write;
 
 /// Where a trait's output effect `E` appears in its method.
@@ -59,11 +66,8 @@ impl TraitKind {
     }
 }
 
-/// A concrete effect, as fixed by an impl or carried by a callback.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Eff {
-    Pure,
-    Fallible,
+fn fallible() -> EffType {
+    effect(PrimitiveEffect::Fallible)
 }
 
 /// How the wrapper `W<T>` implements a trait.
@@ -83,7 +87,7 @@ pub enum WrapImpl {
 pub struct TraitImpls {
     pub kind: TraitKind,
     /// Concrete impls for `S0` and `S1`, with their fixed `E` and body variant.
-    pub concrete: [Option<(Eff, u8)>; 2],
+    pub concrete: [Option<(EffType, u8)>; 2],
     pub wrap: Option<WrapImpl>,
     /// Whether the callback carrier `C<! E>` implements the trait (positive traits only).
     pub carrier: bool,
@@ -104,13 +108,16 @@ pub struct Callback {
     pub constant: i8,
 }
 
-const CALLBACK_SHAPES: u8 = 5;
+const CALLBACK_SHAPES: u8 = 8;
 
 impl Callback {
-    fn eff(self) -> Eff {
+    fn eff(self) -> EffType {
         match self.shape {
-            0..=2 => Eff::Pure,
-            _ => Eff::Fallible,
+            0..=2 => no_effects(),
+            3 | 4 => fallible(),
+            5 => effect_read(),
+            6 => effect_write(),
+            _ => effect_write().union(&fallible()),
         }
     }
 
@@ -121,7 +128,10 @@ impl Callback {
             1 => format!("|{var}| {var} * {c}"),
             2 => format!("|{var}| {c}"),
             3 => format!("|{var}| idiv({c}, {var})"),
-            _ => format!("|{var}| idiv({var}, {c})"),
+            4 => format!("|{var}| idiv({var}, {c})"),
+            5 => format!("|{var}| {var} + effects::read()"),
+            6 => format!("|{var}| {{ effects::write(); {var} + {c} }}"),
+            _ => format!("|{var}| {{ effects::write(); idiv({c}, {var}) }}"),
         }
     }
 }
@@ -138,6 +148,10 @@ pub enum Flavor {
     EagerFilter,
     LazyMap,
     LazyFold,
+    /// Calls a callable chosen between two by a condition.
+    Join,
+    /// Calls a closure built in each iteration of a loop.
+    LoopClosure,
     /// Calls an earlier caller on `W(s)`.
     Delegate(usize),
 }
@@ -178,7 +192,7 @@ pub struct EffectProgram {
 pub struct Variant {
     /// Effect variables named `Q` instead of `E`.
     pub rename: bool,
-    /// Impls and entry terms in reverse order.
+    /// Impls, and the compilation of entry terms, in reverse order.
     pub reverse: bool,
 }
 
@@ -192,10 +206,10 @@ impl EffectProgram {
             let mut concrete = [None, None];
             for slot in &mut concrete {
                 if u.ratio(2, 3)? {
-                    let eff = if u.arbitrary()? {
-                        Eff::Fallible
-                    } else {
-                        Eff::Pure
+                    let eff = match u.int_in_range(0..=2)? {
+                        0 => no_effects(),
+                        1 => fallible(),
+                        _ => EffType::all_primitives(),
                     };
                     *slot = Some((eff, u.int_in_range(0..=1)?));
                 }
@@ -210,7 +224,7 @@ impl EffectProgram {
         if traits.is_empty() {
             traits.push(TraitImpls {
                 kind: TraitKind::Own,
-                concrete: [Some((Eff::Fallible, 0)), Some((Eff::Pure, 0))],
+                concrete: [Some((fallible(), 0)), Some((no_effects(), 0))],
                 wrap: None,
                 carrier: true,
             });
@@ -254,7 +268,7 @@ impl EffectProgram {
 
         let caller_count = u.int_in_range(0..=4)?;
         for _ in 0..caller_count {
-            let flavor = match u.int_in_range(0..=7)? {
+            let flavor = match u.int_in_range(0..=9)? {
                 0 => Flavor::Direct,
                 1 => Flavor::Declared,
                 2 => Flavor::Reference,
@@ -262,6 +276,8 @@ impl EffectProgram {
                 4 => Flavor::EagerFilter,
                 5 => Flavor::LazyMap,
                 6 => Flavor::LazyFold,
+                7 => Flavor::Join,
+                8 => Flavor::LoopClosure,
                 _ if !program.callers.is_empty() => {
                     Flavor::Delegate(u.int_in_range(0..=program.callers.len() - 1)?)
                 }
@@ -296,6 +312,7 @@ impl EffectProgram {
                                 | Flavor::EagerFilter
                                 | Flavor::LazyMap
                                 | Flavor::LazyFold
+                                | Flavor::LoopClosure
                         ),
                     }
                 }
@@ -334,8 +351,8 @@ impl EffectProgram {
             };
             let callback = if kind.takes_callback() {
                 let callback = arbitrary_callback(u)?;
-                // A callback reaching an impl fixing `E = ()` must be pure.
-                if eff == Eff::Pure && callback.eff() == Eff::Fallible {
+                // A callback must perform no more than the `E` of the impl it reaches.
+                if !callback.eff().is_subset_of(&eff) {
                     continue;
                 }
                 Some(callback)
@@ -376,17 +393,19 @@ impl EffectProgram {
     }
 
     /// The effect `E` that `value` gives the trait `kind`, or `None` if it does not implement it.
-    fn eff(&self, kind: TraitKind, value: &SelfValue) -> Option<Eff> {
+    fn eff(&self, kind: TraitKind, value: &SelfValue) -> Option<EffType> {
         let implementation = self.implementation(kind)?;
         match value {
-            SelfValue::S(index, _) => implementation.concrete[*index].map(|(eff, _)| eff),
+            SelfValue::S(index, _) => implementation.concrete[*index]
+                .as_ref()
+                .map(|(eff, _)| eff.clone()),
             SelfValue::C(callback) => implementation.carrier.then(|| callback.eff()),
             SelfValue::W(inner) => match implementation.wrap? {
                 WrapImpl::Forward {
                     inner: inner_kind, ..
                 } => self.eff(inner_kind, inner),
-                WrapImpl::Extend => self.eff(kind, inner).map(|_| Eff::Fallible),
-                WrapImpl::Pure => (self.eff(kind, inner)? == Eff::Pure).then_some(Eff::Pure),
+                WrapImpl::Extend => self.eff(kind, inner).map(|eff| eff.union(&fallible())),
+                WrapImpl::Pure => self.eff(kind, inner)?.is_empty().then(no_effects),
             },
         }
     }
@@ -434,16 +453,24 @@ impl EffectProgram {
             out.push_str(&self.render_caller(index, caller, e));
         }
 
-        let mut terms: Vec<_> = self
+        let terms: Vec<_> = self
             .terms
             .iter()
             .map(|term| self.render_term(term))
             .collect();
-        if variant.reverse {
-            terms.reverse();
-        }
         if terms.is_empty() {
             out.push_str("0\n");
+        } else if variant.reverse {
+            // The terms are compiled in reverse order but still evaluated in order, as their
+            // effects are observable.
+            out.push_str("{\n");
+            for (index, term) in terms.iter().enumerate().rev() {
+                writeln!(out, "\tlet k{index} = || {term};").unwrap();
+            }
+            let calls: Vec<_> = (0..terms.len())
+                .map(|index| format!("k{index}()"))
+                .collect();
+            writeln!(out, "\t{}\n}}", calls.join(" + ")).unwrap();
         } else {
             out.push_str(&terms.join(" + "));
             out.push('\n');
@@ -494,6 +521,23 @@ impl EffectProgram {
             Flavor::LazyFold => format!(
                 "fn g{index}(s, x{f_param}{a_param}) {{ fold(iter(a) |> map(|y| {}), x, |acc, v| acc + v) }}\n",
                 call("s", "y")
+            ),
+            Flavor::Join => {
+                if kind.takes_callback() {
+                    format!(
+                        "fn g{index}(s, x, f) {{\n\tlet h = if x > 0 {{ f }} else {{ |y| y + 1 }};\n\t{}\n}}\n",
+                        method_call(kind, "s", "x", "h")
+                    )
+                } else {
+                    format!(
+                        "fn g{index}(s, x) {{\n\tlet h = if x > 0 {{ |y| {} }} else {{ |y| y }};\n\th(x)\n}}\n",
+                        call("s", "y")
+                    )
+                }
+            }
+            Flavor::LoopClosure => format!(
+                "fn g{index}(s, x{f_param}{a_param}) {{\n\tlet mut t = x;\n\tfor y in a {{\n\t\tlet h = |z| {};\n\t\tt = t + h(y)\n\t}};\n\tt\n}}\n",
+                call("s", "z")
             ),
             Flavor::Delegate(callee) => {
                 let f_arg = if kind.takes_callback() { ", f" } else { "" };
@@ -565,14 +609,11 @@ fn render_impls(implementation: &TraitImpls, e: &str, out: &mut Vec<String>) {
         TraitKind::Returned => "s",
     };
     for (index, concrete) in implementation.concrete.iter().enumerate() {
-        let Some((eff, variant)) = *concrete else {
+        let Some((eff, variant)) = concrete else {
             continue;
         };
-        let row = match eff {
-            Eff::Pure => "()",
-            Eff::Fallible => "fallible",
-        };
-        let body = concrete_body(kind, eff, variant);
+        let row = EffectRow(eff);
+        let body = concrete_body(kind, eff, *variant);
         out.push(format!(
             "impl Tr{i} for <Self = S{index} |-> ! {e} = {row}> {{\n\tfn {m}({params}) {{ {body} }}\n}}\n"
         ));
@@ -637,24 +678,45 @@ fn render_impls(implementation: &TraitImpls, e: &str, out: &mut Vec<String>) {
     }
 }
 
-fn concrete_body(kind: TraitKind, eff: Eff, variant: u8) -> String {
-    match (kind, eff, variant) {
-        (TraitKind::Both, Eff::Pure, 0) => "f(x) + s.v".into(),
-        (TraitKind::Both, Eff::Pure, _) => "f(f(x) + s.v)".into(),
-        (TraitKind::Both, Eff::Fallible, 0) => "idiv(f(x), s.v)".into(),
-        (TraitKind::Both, Eff::Fallible, _) => "f(idiv(x, s.v))".into(),
-        (TraitKind::Own, Eff::Pure, 0) => "x + s.v".into(),
-        (TraitKind::Own, Eff::Pure, _) => "x * s.v".into(),
-        (TraitKind::Own, Eff::Fallible, 0) => "idiv(x, s.v)".into(),
-        (TraitKind::Own, Eff::Fallible, _) => "idiv(s.v, x)".into(),
-        (TraitKind::Callback, Eff::Pure, 0) => "f(x) + s.v".into(),
-        (TraitKind::Callback, Eff::Pure, _) => "f(f(x))".into(),
+fn concrete_body(kind: TraitKind, eff: &EffType, variant: u8) -> String {
+    let body = fallibility_body(
+        kind,
+        eff.contains(Effect::Primitive(PrimitiveEffect::Fallible)),
+        variant,
+    );
+    if *eff != EffType::all_primitives() {
+        return body;
+    }
+    // All effects: also write and read where the method's own row or its result performs `E`.
+    match kind {
+        TraitKind::Both | TraitKind::Own | TraitKind::OwnFallible => {
+            format!("effects::write(); ({body}) + effects::read()")
+        }
+        TraitKind::Returned => {
+            "{ let v = s.v; |y| { effects::write(); idiv(y, v) + effects::read() } }".into()
+        }
+        TraitKind::Callback => body,
+    }
+}
+
+fn fallibility_body(kind: TraitKind, fallible: bool, variant: u8) -> String {
+    match (kind, fallible, variant) {
+        (TraitKind::Both, false, 0) => "f(x) + s.v".into(),
+        (TraitKind::Both, false, _) => "f(f(x) + s.v)".into(),
+        (TraitKind::Both, true, 0) => "idiv(f(x), s.v)".into(),
+        (TraitKind::Both, true, _) => "f(idiv(x, s.v))".into(),
+        (TraitKind::Own, false, 0) => "x + s.v".into(),
+        (TraitKind::Own, false, _) => "x * s.v".into(),
+        (TraitKind::Own, true, 0) => "idiv(x, s.v)".into(),
+        (TraitKind::Own, true, _) => "idiv(s.v, x)".into(),
+        (TraitKind::Callback, false, 0) => "f(x) + s.v".into(),
+        (TraitKind::Callback, false, _) => "f(f(x))".into(),
         // The method's own row is pure: an impl accepting fallible callbacks cannot call them.
-        (TraitKind::Callback, Eff::Fallible, _) => "x + s.v".into(),
-        (TraitKind::Returned, Eff::Pure, 0) => "|y| y + s.v".into(),
-        (TraitKind::Returned, Eff::Pure, _) => "{ let v = s.v; |y| y * v }".into(),
-        (TraitKind::Returned, Eff::Fallible, 0) => "|y| idiv(y, s.v)".into(),
-        (TraitKind::Returned, Eff::Fallible, _) => "{ let v = s.v; |y| idiv(v, y) }".into(),
+        (TraitKind::Callback, true, _) => "x + s.v".into(),
+        (TraitKind::Returned, false, 0) => "|y| y + s.v".into(),
+        (TraitKind::Returned, false, _) => "{ let v = s.v; |y| y * v }".into(),
+        (TraitKind::Returned, true, 0) => "|y| idiv(y, s.v)".into(),
+        (TraitKind::Returned, true, _) => "{ let v = s.v; |y| idiv(v, y) }".into(),
         (TraitKind::OwnFallible, _, 0) => "idiv(x, s.v)".into(),
         (TraitKind::OwnFallible, _, _) => "x + s.v".into(),
     }

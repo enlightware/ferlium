@@ -364,11 +364,11 @@ pub(crate) fn alpha_canonicalize_types(types: &[Type]) -> Vec<Type> {
     types.iter().map(|ty| ty.map(&mut mapper)).collect()
 }
 
-/// The identity of a dictionary generated for an application whose output effects stay open in
-/// the caller's variables: its inputs and requested outputs, renamed together by first occurrence.
-/// Each requested output effect is encoded as the effect of a nullary function type, so the key
-/// shares the representation of input-keyed applications without colliding with them.
-fn open_application_key(
+/// The identity of a generated dictionary: its trait application, inputs and outputs, renamed
+/// together by first occurrence, as outputs may stay open in the caller's variables. Each output
+/// effect is encoded as the effect of a nullary function type, so the key shares the representation
+/// of input-keyed applications without colliding with them.
+pub(crate) fn application_key(
     trait_id: TraitId,
     input_tys: &[Type],
     output_tys: Option<&[Type]>,
@@ -947,7 +947,7 @@ pub(crate) struct DerivedImplSnapshot {
     concrete_key_to_id: FxHashMap<ConcreteTraitImplKey, LocalImplId>,
     blanket_key_to_id: BlanketImpls,
     generated_value_key_to_id: FxHashMap<Vec<Type>, LocalImplId>,
-    unconstrained_application_key_to_id: FxHashMap<ConcreteTraitImplKey, LocalImplId>,
+    application_key_to_id: FxHashMap<ConcreteTraitImplKey, LocalImplId>,
     impl_data_len: usize,
     new_function_len: usize,
 }
@@ -2523,10 +2523,7 @@ impl<'a> TraitSolver<'a> {
             concrete_key_to_id: self.impls.concrete_key_to_id.clone(),
             blanket_key_to_id: self.impls.blanket_key_to_id.clone(),
             generated_value_key_to_id: self.impls.generated_value_key_to_id.clone(),
-            unconstrained_application_key_to_id: self
-                .impls
-                .unconstrained_application_key_to_id
-                .clone(),
+            application_key_to_id: self.impls.application_key_to_id.clone(),
             impl_data_len: self.impls.data.len(),
             new_function_len: self.fn_collector.new_elements.len(),
         }
@@ -2536,8 +2533,7 @@ impl<'a> TraitSolver<'a> {
         self.impls.concrete_key_to_id = snapshot.concrete_key_to_id;
         self.impls.blanket_key_to_id = snapshot.blanket_key_to_id;
         self.impls.generated_value_key_to_id = snapshot.generated_value_key_to_id;
-        self.impls.unconstrained_application_key_to_id =
-            snapshot.unconstrained_application_key_to_id;
+        self.impls.application_key_to_id = snapshot.application_key_to_id;
         self.impls.data.truncate(snapshot.impl_data_len);
         self.fn_collector
             .new_elements
@@ -3438,7 +3434,7 @@ impl<'a> TraitSolver<'a> {
             }
         }
         {
-            let canonical_key = open_application_key(
+            let canonical_key = application_key(
                 trait_id,
                 input_tys,
                 requested_output_tys,
@@ -3446,7 +3442,7 @@ impl<'a> TraitSolver<'a> {
             );
             if let Some(local_impl_id) = self
                 .impls
-                .unconstrained_application_key_to_id
+                .application_key_to_id
                 .get(&canonical_key)
                 .copied()
             {
@@ -3667,11 +3663,6 @@ impl<'a> TraitSolver<'a> {
                 else {
                     continue_impl_loop!();
                 };
-                // The match fixed the implementation's own effect variables at their least
-                // solution, so the variables left in the outputs are the application's: the
-                // dictionary is open in them.
-                let output_effs_depend_on_application =
-                    output_effs.iter().any(EffType::has_variables);
                 let defaulted_output_effect_vars = FxHashSet::default();
 
                 // Non-Value blanket impls can materialize all constraint dictionaries up front.
@@ -3817,18 +3808,10 @@ impl<'a> TraitSolver<'a> {
                         &associated_const_getters,
                         &method_requirements,
                     );
-                    let resulting_key = output_effs_depend_on_application.then(|| {
-                        open_application_key(
-                            trait_id,
-                            input_tys,
-                            Some(&output_tys),
-                            Some(&output_effs),
-                        )
-                    });
                     let imp = TraitImpl::new(
                         trait_id,
-                        output_tys,
-                        output_effs,
+                        output_tys.clone(),
+                        output_effs.clone(),
                         methods,
                         dictionary_value,
                         dictionary_ty,
@@ -3837,31 +3820,21 @@ impl<'a> TraitSolver<'a> {
                     )
                     .with_associated_const_values(associated_const_values)
                     .with_associated_const_getters(associated_const_getters);
-                    let local_impl_id = if output_effs_depend_on_application {
-                        // Concrete impl lookup is keyed only by input types. If
-                        // output effects still had variables before the
-                        // materialized dictionary defaulted them, caching this
-                        // impl would make that default leak into later
-                        // applications with different output-effect bindings.
-                        let local_impl_id = self.impls.add_anonymous_dictionary_struct(imp);
-                        // Index the record by its request and by the outputs it has, so that a later
-                        // request naming those outputs finds it.
-                        let requested_key = open_application_key(
-                            trait_id,
-                            input_tys,
-                            requested_output_tys,
-                            requested_output_effs,
-                        );
-                        for key in [Some(requested_key), resulting_key].into_iter().flatten() {
-                            self.impls
-                                .unconstrained_application_key_to_id
-                                .insert(key, local_impl_id);
-                        }
-                        local_impl_id
-                    } else {
-                        let key = ConcreteTraitImplKey::new(trait_id, input_tys.to_vec());
-                        self.impls.add_concrete_struct(key, imp)
-                    };
+                    // A generated dictionary denotes its full application, outputs included: it is
+                    // indexed by its request and by the outputs it has, so that a later request
+                    // naming either finds it, and never serves another application.
+                    let local_impl_id = self.impls.add_anonymous_dictionary_struct(imp);
+                    let requested_key = application_key(
+                        trait_id,
+                        input_tys,
+                        requested_output_tys,
+                        requested_output_effs,
+                    );
+                    let resulting_key =
+                        application_key(trait_id, input_tys, Some(&output_tys), Some(&output_effs));
+                    for key in [requested_key, resulting_key] {
+                        self.impls.application_key_to_id.insert(key, local_impl_id);
+                    }
 
                     if imp_module_id.is_some() {
                         self.private_impl_scope.pop();
@@ -3990,6 +3963,8 @@ impl<'a> TraitSolver<'a> {
         };
         // Derived implementations do not depend on the effects of the callables in their input
         // types: derive them for these effects at their least solution, which any row includes.
+        // This holds because no derived method calls a callable of its input: they print, hash,
+        // compare, clone or drop it, and serialization and defaults have no callable instance.
         let effect_vars = input_tys
             .iter()
             .flat_map(TypeLike::inner_effect_vars)
@@ -4034,11 +4009,64 @@ impl<'a> TraitSolver<'a> {
             trait_name
         );
         self.log_debug_impls(trait_id);
+        if let Some(requested_output_effs) = requested_output_effs
+            && let Some(imp) = self.get_concrete_impl(&key)
+        {
+            let mismatches = self.output_effect_mismatches(
+                self.get_impl_data_by_id(imp),
+                requested_output_effs,
+                quantified_effect_vars,
+                fn_span,
+            );
+            if !mismatches.is_empty() {
+                return Err(internal_compilation_error!(
+                    TraitImplOutputEffectsMismatch {
+                        trait_ref: trait_id,
+                        input_tys: input_tys.to_vec(),
+                        mismatches,
+                        fn_span,
+                    }
+                ));
+            }
+        }
         Err(internal_compilation_error!(TraitImplNotFound {
             trait_ref: trait_id,
             input_tys: input_tys.to_vec(),
             fn_span,
         }))
+    }
+
+    /// The output effects of `imp` that do not relate to the requested ones by polarity, each with
+    /// its name, its declared row and the requested one.
+    fn output_effect_mismatches(
+        &self,
+        imp: &TraitImpl,
+        requested_output_effs: &[EffType],
+        quantified_effect_vars: &FxHashSet<EffectVar>,
+        fn_span: Location,
+    ) -> Vec<(Ustr, EffType, EffType)> {
+        let names = &self.trait_def(imp.trait_id).output_effect_names;
+        (0..imp.output_effs.len().min(requested_output_effs.len()))
+            .filter_map(|index| {
+                // Request this output alone; the others take the implementation's own rows.
+                let mut requested = imp.output_effs.clone();
+                requested[index] = requested_output_effs[index].clone();
+                (!self.impl_matches_requested_outputs(
+                    imp,
+                    None,
+                    Some(&requested),
+                    quantified_effect_vars,
+                    fn_span,
+                ))
+                .then(|| {
+                    (
+                        names[index],
+                        imp.output_effs[index].clone(),
+                        requested_output_effs[index].clone(),
+                    )
+                })
+            })
+            .collect()
     }
 
     /// Get a specific method implementation for the given trait id and input types.

@@ -19,7 +19,7 @@ use crate::{
     module::{ModuleEnv, ModuleId, SubscriptMemberKind, TraitId, TypeDefId, path::Path},
     parser::location::{Location, SourceTable},
     types::{
-        effects::{EffType, EffectVar},
+        effects::{EffType, EffectRow, EffectVar},
         r#type::{Type, TypeVar},
         type_inference::unify::SubOrSameType,
         type_scheme::PubTypeConstraint,
@@ -1084,6 +1084,14 @@ pub enum CompilationErrorImpl<S: Scope> {
         input_tys: Vec<S::Type>,
         fn_span: Location,
     },
+    /// An implementation exists for the inputs, but its output effects do not relate to the
+    /// requested ones: `mismatches` names each output effect, as declared and as requested.
+    TraitImplOutputEffectsMismatch {
+        trait_ref: S::TraitName,
+        input_tys: Vec<S::Type>,
+        mismatches: Vec<(Ustr, EffType, EffType)>,
+        fn_span: Location,
+    },
     TraitSolverRecursionLimitExceeded {
         trait_ref: S::TraitName,
         input_tys: Vec<S::Type>,
@@ -1864,6 +1872,21 @@ impl FormatWith<SourceTable> for CompilationError {
                     fmt_span(fn_span)
                 )
             }
+            TraitImplOutputEffectsMismatch {
+                trait_ref,
+                input_tys,
+                mismatches,
+                fn_span,
+            } => {
+                write!(
+                    f,
+                    "Implementation of trait `{}` over types `{}` declares {} (when calling {})",
+                    trait_ref,
+                    input_tys.join(", "),
+                    format_output_effect_mismatches(mismatches),
+                    fmt_span(fn_span)
+                )
+            }
             TraitSolverRecursionLimitExceeded {
                 trait_ref,
                 input_tys,
@@ -1999,16 +2022,8 @@ impl FormatWith<SourceTable> for CompilationError {
                     "Method `{}` of trait `{}` has effects `{}`, but implementation has effects `{}` in {}",
                     method_name,
                     trait_ref,
-                    if expected.is_empty() {
-                        "none".to_string()
-                    } else {
-                        expected.to_string()
-                    },
-                    if got.is_empty() {
-                        "none".to_string()
-                    } else {
-                        got.to_string()
-                    },
+                    EffectRow(expected),
+                    EffectRow(got),
                     fmt_span(span)
                 )
             }
@@ -2129,9 +2144,9 @@ impl FormatWith<SourceTable> for CompilationError {
                 write!(
                     f,
                     "Invalid effect dependency: `{}` due to {} is incompatible with `{}` due to {}",
-                    source,
+                    EffectRow(source),
                     fmt_span(source_span),
-                    target,
+                    EffectRow(target),
                     fmt_span(target_span),
                 )
             }
@@ -2601,6 +2616,21 @@ impl CompilationError {
                     .collect(),
                 fn_span,
             }),
+            TraitImplOutputEffectsMismatch {
+                trait_ref,
+                input_tys,
+                mismatches,
+                fn_span,
+            } => compilation_error!(TraitImplOutputEffectsMismatch {
+                trait_ref: env.trait_name(trait_ref).to_string(),
+                input_tys: input_tys
+                    .iter()
+                    .zip(env.trait_def(trait_ref).input_type_names.iter())
+                    .map(|(ty, name)| format!("{name} = {}", ty.format_with(env)))
+                    .collect(),
+                mismatches,
+                fn_span,
+            }),
             TraitSolverRecursionLimitExceeded {
                 trait_ref,
                 input_tys,
@@ -2875,4 +2905,20 @@ impl CompilationError {
             Internal { span, error } => compilation_error!(Internal { span, error }),
         }
     }
+}
+
+/// Renders declared and requested output effects, for example "`E = ()`, which does not accept
+/// the requested `fallible`".
+pub(crate) fn format_output_effect_mismatches(mismatches: &[(Ustr, EffType, EffType)]) -> String {
+    mismatches
+        .iter()
+        .map(|(name, declared, requested)| {
+            format!(
+                "`{name} = {}`, which does not accept the requested `{}`",
+                EffectRow(declared),
+                EffectRow(requested)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", and ")
 }

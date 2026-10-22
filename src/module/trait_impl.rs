@@ -602,11 +602,11 @@ pub struct TraitImpls {
     /// alpha-canonicalization cannot change ordinary semantic trait lookup.
     #[new(default)]
     pub(crate) generated_value_key_to_id: FxHashMap<Vec<Type>, LocalImplId>,
-    /// Materialized blanket applications whose outputs were not constrained by the caller, keyed
-    /// separately from selectable concrete impls because their output variables were defaulted
-    /// only for this generated dictionary.
+    /// Dictionaries materialized from blanket impls, keyed by their full application, outputs
+    /// included, separately from selectable concrete impls: a generated dictionary serves only the
+    /// application it denotes.
     #[new(default)]
-    pub(crate) unconstrained_application_key_to_id: FxHashMap<ConcreteTraitImplKey, LocalImplId>,
+    pub(crate) application_key_to_id: FxHashMap<ConcreteTraitImplKey, LocalImplId>,
     #[new(default)]
     pub(crate) data: Vec<TraitImpl>,
 }

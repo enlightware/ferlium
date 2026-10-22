@@ -219,6 +219,11 @@ impl EffType {
         effects.iter().copied().collect()
     }
 
+    /// The row of every primitive effect, the largest row without variables.
+    pub fn all_primitives() -> Self {
+        Self::multiple_primitive(&PRIMITIVE_EFFECTS)
+    }
+
     pub fn multiple_primitive(effects: &[PrimitiveEffect]) -> Self {
         let mut primitives = PrimitiveEffects::default();
         for effect in effects {
@@ -751,6 +756,16 @@ pub(crate) fn format_effect_binding_value(
         Some(effect) => effect.fmt(f),
         None if eff.is_empty() => write!(f, "()"),
         None => write!(f, "({eff})"),
+    }
+}
+
+/// Displays an effect row as written in source: `()` when pure, parenthesized when it has several
+/// effects. `EffType`'s own display lists the effects bare, for function types that omit `()`.
+pub struct EffectRow<'a>(pub &'a EffType);
+
+impl Display for EffectRow<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        format_effect_binding_value(self.0, f)
     }
 }
 

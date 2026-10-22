@@ -59,7 +59,7 @@ fn apply<T ! E>(value: T, f: (T) -> T ! E) -> T {
 }
 ```
 
-Explicit effect parameters are checked like type parameters: the body must work for any effects `E` stands for, so it can neither require `E` to be a specific effect set nor add effects to it.
+Unlike type parameters, explicit effect parameters are checked: the body must work for any effects `E` stands for, so it can neither require `E` to be a specific effect set nor add effects to it.
 
 ### Function-level `where` clauses
 

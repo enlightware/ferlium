@@ -11,8 +11,10 @@ use crate::{
     compiler::error::{
         CompilationErrorImpl, ImportKind, InfiniteTypeKind, InvalidRecordFieldContext,
         MutabilityMustBeWhat, WhatIsNotAProductType, WhichProductTypeIsNot,
+        format_output_effect_mismatches,
     },
     parser::location::SourceTable,
+    types::effects::EffectRow,
 };
 use itertools::Itertools;
 #[cfg(target_arch = "wasm32")]
@@ -568,6 +570,21 @@ pub(super) fn compilation_error_to_data(
                 ),
             )]
         }
+        TraitImplOutputEffectsMismatch {
+            trait_ref,
+            input_tys,
+            mismatches,
+            fn_span,
+        } => {
+            vec![error_data_from_location(
+                fn_span,
+                format!(
+                    "Implementation of trait `{trait_ref}` over types `{}` declares {}",
+                    input_tys.join(", "),
+                    format_output_effect_mismatches(mismatches)
+                ),
+            )]
+        }
         CompilerLimitExceeded(error) => {
             vec![error_data_from_location(&error.span, error.to_string())]
         }
@@ -722,16 +739,8 @@ pub(super) fn compilation_error_to_data(
                     "Method `{}` of trait `{}` has effects `{}`, but implementation has effects `{}`",
                     method_name,
                     trait_ref,
-                    if expected.is_empty() {
-                        "none".to_string()
-                    } else {
-                        expected.to_string()
-                    },
-                    if got.is_empty() {
-                        "none".to_string()
-                    } else {
-                        got.to_string()
-                    },
+                    EffectRow(expected),
+                    EffectRow(got),
                 ),
             )]
         }
@@ -873,7 +882,11 @@ pub(super) fn compilation_error_to_data(
         } => {
             vec![error_data_from_location(
                 source_span,
-                format!("Effect `{source}` cannot depend on `{target}`"),
+                format!(
+                    "Effect `{}` cannot depend on `{}`",
+                    EffectRow(source),
+                    EffectRow(target)
+                ),
             )]
         }
         UnknownProperty {

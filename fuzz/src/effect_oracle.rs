@@ -6,7 +6,11 @@
 //! A source failure escaping code compiled as unable to fail panics inside the MIR interpreters
 //! (`a plain MIR operation raised a source failure`) or surfaces as an `EffectViolation`; both are
 //! findings. Beyond that, every backend must agree, every rendering variant must agree, and a
-//! program whose entry is typed as unable to fail must not fail.
+//! program whose entry is typed as unable to fail must not fail. Programs perform `read` and
+//! `write` through a native `effects` module whose writes count and whose reads return the count,
+//! so an effect a backend drops, repeats or reorders changes the outcome.
+
+use std::cell::Cell;
 
 use crate::effects::{EffectProgram, Variant};
 use ferlium::{
@@ -14,14 +18,53 @@ use ferlium::{
     compiler::error::RuntimeErrorKind,
     eval::RuntimeError,
     execution::{ExecutionLimits, ReferenceInterpreterLimits},
-    module::Path,
+    hir::native_functions::NativeFn0,
+    module::{Module, Path},
+    types::effects::{PrimitiveEffect, effect},
 };
 
-/// The observable outcome of a run.
+thread_local! {
+    static WRITES: Cell<isize> = const { Cell::new(0) };
+}
+
+extern "C" fn read() -> isize {
+    WRITES.with(Cell::get)
+}
+
+extern "C" fn write() {
+    WRITES.with(|writes| writes.set(writes.get() + 1));
+}
+
+/// Registers the `effects` module the generated programs read and write through.
+fn register_effects(session: &mut CompilerSession) {
+    let mut module = Module::new(session.modules().next_id(), Path::single_str("effects"));
+    module.add_function(
+        "read".into(),
+        NativeFn0::new(read).description(
+            [],
+            "Returns the number of writes.",
+            effect(PrimitiveEffect::Read),
+        ),
+    );
+    module.add_function(
+        "write".into(),
+        NativeFn0::new(write).description([], "Counts a write.", effect(PrimitiveEffect::Write)),
+    );
+    session.register_module(Path::single_str("effects"), module);
+}
+
+/// The observable outcome of a run: its value or failure, and the number of writes it performed,
+/// which a later read may not observe.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Outcome {
-    Value(isize),
-    Failure(RuntimeErrorKind),
+    Value {
+        value: isize,
+        writes: isize,
+    },
+    Failure {
+        kind: RuntimeErrorKind,
+        writes: isize,
+    },
     /// A sandbox limit was hit: not comparable across backends.
     Limit,
 }
@@ -76,7 +119,8 @@ fn limits() -> ReferenceInterpreterLimits {
 /// Compiles and runs `source` on every backend; panics on a finding.
 pub fn check_source(source: &str) -> Report {
     let mut session = CompilerSession::new();
-    let output = match session.compile(source, "effects.fer", Path::single_str("effects")) {
+    register_effects(&mut session);
+    let output = match session.compile(source, "program.fer", Path::single_str("program")) {
         Ok(output) => output,
         Err(error) => {
             let message = format!("{:?}", error.into_inner());
@@ -105,11 +149,12 @@ pub fn check_source(source: &str) -> Report {
     for (target, optimization, physical_optimization, label) in MODES {
         session.set_mir_optimization(optimization);
         session.set_physical_mir_optimization(physical_optimization);
+        WRITES.with(|writes| writes.set(0));
         let result =
             session.run_entry_with_limits(target, output.module_id, entry, vec![], limits());
         let error = result.as_ref().err().map(|error| format!("{error:?}"));
         let outcome = outcome(result);
-        if let Outcome::Failure(kind) = &outcome {
+        if let Outcome::Failure { kind, .. } = &outcome {
             assert!(
                 !matches!(kind, RuntimeErrorKind::EffectViolation),
                 "{label}: a source failure escaped code typed as unable to fail:\n{source}"
@@ -127,7 +172,11 @@ pub fn check_source(source: &str) -> Report {
         }
     }
     let outcome = reference.map_or(Outcome::Limit, |(outcome, _)| outcome);
-    if let Outcome::Failure(RuntimeErrorKind::SourceFailure(_)) = outcome {
+    if let Outcome::Failure {
+        kind: RuntimeErrorKind::SourceFailure(_),
+        ..
+    } = outcome
+    {
         assert!(
             may_fail,
             "the entry is typed as unable to fail, but fails with {outcome:?}:\n{source}"
@@ -143,11 +192,17 @@ fn outcome(result: Result<ferlium::hir::value::Value, RuntimeError>) -> Outcome 
                 .as_primitive_ty::<isize>()
                 .expect("generated programs compute an int");
             value.discard_storage();
-            Outcome::Value(n)
+            Outcome::Value {
+                value: n,
+                writes: WRITES.with(Cell::get),
+            }
         }
         Err(error) => match error.kind() {
             RuntimeErrorKind::SandboxViolation(_) => Outcome::Limit,
-            kind => Outcome::Failure(kind),
+            kind => Outcome::Failure {
+                kind,
+                writes: WRITES.with(Cell::get),
+            },
         },
     }
 }

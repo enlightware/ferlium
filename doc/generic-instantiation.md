@@ -137,14 +137,13 @@ the implementation's own effect variables their least solution, so its methods h
 that application needs and no more. Effects that depend on the caller's variables stay open rather
 than being closed at the implementation's least effects.
 
-Reuse follows the same full application. Materialized blanket applications whose output effects
-depend on the application use a separate cache from concrete trait implementations, whose cache is
-keyed by input types only. A dictionary found there is reused only if its output effects relate to
-the requested ones by polarity: one generated for a pure callback does not serve a fallible one,
-and a caller's own effect variables are not specialized to fit it. Open applications share through
-the unconstrained-application cache, keyed by the alpha-canonicalized full application and indexed
-both under the request and under the outputs the generated dictionary has. Inference-only output
-queries populate neither cache.
+Reuse follows the same full application. A dictionary generated from a blanket implementation
+serves only the application it denotes: it is cached under its alpha-canonicalized full application,
+indexed both under the request and under the outputs it has. Declared concrete implementations are
+found by their input types; one is selected only if its output effects relate to the requested ones
+by polarity, so an implementation for pure callbacks does not serve a fallible one, and a caller's
+own effect variables are not specialized to fit it. Inference-only output queries populate neither
+cache.
 
 ## Trait defaults and enclosing-impl evidence
 
