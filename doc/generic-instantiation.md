@@ -133,7 +133,7 @@ selects a blanket implementation, it instantiates the implementation's head in t
 inference rather than copying materialized outputs. The output types and effects then keep the
 caller's variables, and the implementation's constraints that determine outputs become obligations
 of the caller. Output effects relate to the requested ones by polarity (see
-[effect-inference.md](effect-inference.md#where-constraints-come-from)). Only the final HIR
+[inference.md](inference.md#where-constraints-come-from)). Only the final HIR
 elaboration of a dictionary or method reference performs the materializing query. Consequently,
 effect rows considered and later rejected or defaulted during inference cannot leave orphaned
 module functions that the MIR optimizer would treat as roots.

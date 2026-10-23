@@ -119,8 +119,8 @@ pub struct TypingEnv<'m> {
     pub(crate) module_env: ModuleEnv<'m>,
     /// The expected return type of the enclosing function (for type-checking `return` statements).
     pub(crate) expected_return_ty: Option<(Type, Location)>,
-    /// The return convention of the enclosing function.
-    pub(crate) expected_return_convention: CallResultConvention,
+    /// The enclosing function's result convention; typing uses `return_requires_place`.
+    expected_return_convention: CallResultConvention,
     /// Source or synthetic name of the function currently being inferred.
     #[new(default)]
     pub(crate) function_name: Option<Ustr>,
@@ -156,6 +156,14 @@ pub struct TypingEnv<'m> {
 }
 
 impl<'m> TypingEnv<'m> {
+    /// Whether a non-diverging `return` must expose an existing caller-rooted
+    /// place rather than produce a value. Its referent type must be preserved,
+    /// since the caller may write through the returned place. This is a semantic
+    /// requirement, independent of how ordinary values are transported by the ABI.
+    pub(crate) fn return_requires_place(&self) -> bool {
+        self.expected_return_convention.returns_place()
+    }
+
     pub fn current_module_id(&self) -> ModuleId {
         self.module_env.current.module_id()
     }

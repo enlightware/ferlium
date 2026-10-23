@@ -1,9 +1,21 @@
-# Effect inference
+# Inference
 
-How the compiler infers effects: the shape of effect rows, how values relate their effects, how
-constraints are solved, and how a solution is published in a type scheme.
+How the compiler relates types, mutability, and effects: the constraints produced by expressions,
+how the solvers interpret them, and how effect solutions are published in type schemes.
+See [generic-instantiation.md](generic-instantiation.md) for how callers instantiate those schemes.
 
-## Effect rows
+## Foundation
+
+Ferlium's theoretical foundation is HM(X), as developed by Odersky, Sulzmann, and Wehr in
+[Type Inference with Constrained Types](https://infoscience.epfl.ch/bitstreams/599e87e9-0212-49ea-ae4d-6a497b5b5259/download).
+HM(X) parameterizes Hindley–Milner inference by a constraint domain and its solver. Ferlium's
+type, trait, mutability, and effect constraints belong to that language-specific domain.
+The framework's principal-type guarantees depend on conditions on the domain and solver;
+citing HM(X) does not establish those guarantees for every implementation choice below.
+
+## Effect inference
+
+### Effect rows
 
 An effect row is a set of primitive effects (`read`, `write`, `fallible`) and at most one effect
 variable; `()` is the pure row. A row with two variables is not a type: a declaration naming two
@@ -17,7 +29,7 @@ where one with more is expected: function types are covariant in their own row a
 in their parameters' rows. Widening the row of a first-class callable is a typing step only; it
 needs no runtime adapter (see [abi.md](abi.md)).
 
-## Where constraints come from
+### Where constraints come from
 
 - **Function values** (arguments, returns, bindings, annotations, fields): the value's row is
   included in the expected one, recursively through parameter and result types.
@@ -40,7 +52,7 @@ needs no runtime adapter (see [abi.md](abi.md)).
 Declared effect variables (function, implementation and trait default effect parameters) are rigid
 atoms: the body is checked against them and can neither specialize nor widen them.
 
-## Solving
+### Solving
 
 Each inclusion is split per solvable variable into three kinds of constraints over atoms (primitive
 effects and rigid variables): lower bounds, ceilings (several ceilings on a variable all apply), and
@@ -62,7 +74,7 @@ before.
 While inference runs, a variable reads as its least solution plus itself, or as its row once its
 bounds determine it; only facts are baked into rewritten constraints.
 
-## Publication
+### Publication
 
 Published schemes carry no effect constraints, so the solution is encoded by substitution, using
 three documented approximations:
@@ -84,7 +96,7 @@ the callables in their input types at their least solution, as no derived method
 Every retained constraint is then checked against the published rows; this validation makes each
 published signature sound.
 
-## Design choices
+### Design choices
 
 Rejected alternatives: residual effect constraints in published schemes (principal, but needs a
 scheme language, a simplifier and a display), restricting only by polarity (a positive trait slot

@@ -1261,7 +1261,7 @@ impl TypeInference {
                         }));
                     }
                 };
-                let node_id = if env.expected_return_convention.returns_place() {
+                let node_id = if env.return_requires_place() {
                     self.infer_expr_as_place_return(env, *expr)?
                 } else {
                     self.infer_expr_drop_mut(env, *expr)?
@@ -1269,7 +1269,7 @@ impl TypeInference {
                 let ty = env.ir_arena[node_id].ty;
                 self.add_same_type_with_sub_effects_constraint(ty, sp(*expr), outer_ty, outer_span);
                 let effects = env.ir_arena[node_id].effects.clone();
-                let return_value = if env.expected_return_convention.returns_place() {
+                let return_value = if env.return_requires_place() {
                     if ty != Type::never() && !node_is_place_reference(env.ir_arena, node_id) {
                         return Err(internal_compilation_error!(InvalidSubscriptDefinition {
                             subject: env.subscript_member.map_or(

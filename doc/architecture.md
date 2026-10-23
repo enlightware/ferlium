@@ -66,7 +66,7 @@ The main phases are:
 2. Validate parsed AST features that are not accepted in user code.
 3. Desugar parsed AST syntax and module declarations.
 4. Resolve symbols and emit typed HIR while collecting type, effect, mutability, and trait constraints. Definite unreachable suffixes are reported as warnings and omitted without constraining inference. Source lints, such as needless returns in function-tail position, are collected alongside those warnings. Some HIR decisions, such as local storage ownership and value argument passing, may remain explicitly unresolved.
-5. Unify type and mutability constraints, and solve effect constraints as inclusions (see [effect-inference.md](effect-inference.md)).
+5. Unify type and mutability constraints, and solve effect constraints as inclusions (see [inference.md](inference.md)).
 6. Resolve deferred local storage decisions from the unified mutability facts, then activate the `Value` constraints required by finalized ownership and take-local semantics.
 7. Simplify and default remaining trait constraints, then build final type schemes and hidden dictionary/evidence parameter lists.
 8. Elaborate dictionaries, ownership and value dispatch, record field access, and call lifetime plans into final HIR.
