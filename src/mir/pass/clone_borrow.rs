@@ -1039,6 +1039,30 @@ mod tests {
     }
 
     #[test]
+    fn borrows_product_iteration_payloads() {
+        // The element is cloned into `Some` as a whole product, which must stay one local.
+        for (ty, read) in [
+            (
+                "{ name: string, scores: [int] }",
+                "len(p.name) + len(p.scores)",
+            ),
+            ("([int], int)", "len(p.0) + p.1"),
+        ] {
+            for expression in [
+                format!("let mut n = 0; for p in x {{ n += {read} }}; n"),
+                format!("fold(x, 0, |n, p| n + {read})"),
+                format!("iter(x) |> filter(|p| {read} > 0) |> map(|p| {read}) |> sum()"),
+            ] {
+                let body = optimized_body(&format!("fn view(x: [{ty}]) -> int {{ {expression} }}"));
+                assert!(
+                    !body.contains("clone "),
+                    "read-only traversal must borrow product payloads:\n{body}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn borrows_managed_payloads_of_general_local_variants() {
         for source in [
             "fn view(flag: bool, text: string, rows: [int]) -> int { let v = if flag { Text(text) } else { Rows(rows) }; match v { Text(s) => len(s), Rows(r) => len(r) } }",

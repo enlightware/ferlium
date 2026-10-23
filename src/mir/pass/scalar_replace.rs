@@ -10,8 +10,9 @@
 //!
 //! A separate mode splits local aggregates owning managed fields, including inline variants.
 //! Their fields keep their clones, drops and projections. Structural drops are spliced first;
-//! known-tag forwarding then exposes conditional payload lifetimes. Rejected splits roll back
-//! their cleanup expansion; see [`split_managed_local_products`].
+//! known-tag forwarding then exposes conditional payload lifetimes. A nested product cloned as a
+//! whole stays whole. Rejected splits roll back their cleanup expansion; see
+//! [`split_managed_local_products`].
 //!
 //! A variant splits into a tag place, of the unit-only variant with the same cases, and one place
 //! per distinct inline payload type. Storage is a function of the payload type rather than the
@@ -144,8 +145,9 @@ fn variant_parts(ty: Type, env: ModuleEnv<'_>) -> Option<Parts> {
 }
 
 impl Shape {
-    /// A `TrivialCopy` shape, or with `managed`, a shape owning managed fields.
-    fn of(ty: Type, env: ModuleEnv<'_>, managed: bool) -> Option<Self> {
+    /// A `TrivialCopy` shape, or with `managed`, a shape owning managed fields. Nested nodes of
+    /// a type in `whole` are leaves.
+    fn of(ty: Type, env: ModuleEnv<'_>, managed: bool, whole: &FxHashSet<Type>) -> Option<Self> {
         let mut root_parts = Some(parts(ty, env)?);
         let mut shape = Self {
             nodes: Vec::new(),
@@ -179,6 +181,8 @@ impl Shape {
             pending.push((index, true));
             let parts = if index == 0 {
                 root_parts.take()
+            } else if whole.contains(&shape.nodes[index].ty) {
+                None
             } else {
                 parts(shape.nodes[index].ty, env)
             };
@@ -313,9 +317,10 @@ pub(crate) fn split_local_products(func: &Function, env: ModuleEnv<'_>) -> Optio
         None,
         &FxHashSet::default(),
         &FxHashSet::default(),
+        &FxHashSet::default(),
     ) {
         Split::Done(split) => Some(split),
-        Split::Unchanged | Split::Expand(_, _) | Split::Rejected(_) => None,
+        Split::Unchanged | Split::Expand(_, _) | Split::Rejected(_) | Split::Reshape(_) => None,
     }
 }
 
@@ -326,6 +331,11 @@ pub(crate) fn split_local_products(func: &Function, env: ModuleEnv<'_>) -> Optio
 /// the drop becomes one initialization-aware drop per field, which the split then gives to each
 /// field's local, as physical drop elaboration does for a partially initialized product. Each
 /// splice removes one level of nesting, so the number of splices is bounded by the shape depth.
+///
+/// A nested product cloned as a whole, such as an element copied into `Some`, stays one local:
+/// clone borrowing needs its whole lifetime in one place, while splitting it would need a clone
+/// per field. Which products stay whole is a function-wide choice by type, made on the original
+/// body and grown only, so it is bounded by the types in the function.
 pub(crate) fn split_managed_local_products(
     func: &Function,
     env: ModuleEnv<'_>,
@@ -334,15 +344,21 @@ pub(crate) fn split_managed_local_products(
     let mut current: Option<Function> = None;
     let mut expanded_roots = FxHashSet::default();
     let mut excluded = FxHashSet::default();
+    let mut whole = FxHashSet::default();
     for _ in 0..MAX_NODES {
         let source = current.as_ref().unwrap_or(func);
-        match split(source, env, Some(stage), &excluded, &expanded_roots) {
+        match split(source, env, Some(stage), &excluded, &expanded_roots, &whole) {
             Split::Done(split) => return Some(split),
             // Splices are made only for products otherwise accepted; discard them if the split
             // still fails, as they only grow the body.
             Split::Unchanged => return None,
             Split::Rejected(roots) => {
                 excluded.extend(roots);
+                expanded_roots.clear();
+                current = None;
+            }
+            Split::Reshape(types) => {
+                whole.extend(types);
                 expanded_roots.clear();
                 current = None;
             }
@@ -369,6 +385,8 @@ enum Split {
     Rejected(Vec<ValueId>),
     /// Whole-product drops to splice, and their roots, before those products can split.
     Expand(Vec<OperationSite>, Vec<ValueId>),
+    /// Retry with nested products of these types kept whole.
+    Reshape(FxHashSet<Type>),
     Done(Function),
 }
 
@@ -452,6 +470,7 @@ fn split(
     managed: Option<OptimizationStage<'_>>,
     excluded: &FxHashSet<ValueId>,
     expanded_roots: &FxHashSet<ValueId>,
+    whole: &FxHashSet<Type>,
 ) -> Split {
     let mut shapes = FxHashMap::<Type, Option<Rc<Shape>>>::default();
     let mut candidates = FxHashMap::<ValueId, Candidate>::default();
@@ -466,9 +485,9 @@ fn split(
             };
             match operation.kind {
                 OperationKind::Alloca { ty } => {
-                    let shape = shapes
-                        .entry(ty)
-                        .or_insert_with(|| Shape::of(ty, env, managed.is_some()).map(Rc::new));
+                    let shape = shapes.entry(ty).or_insert_with(|| {
+                        Shape::of(ty, env, managed.is_some(), whole).map(Rc::new)
+                    });
                     if let Some(shape) = shape
                         && !excluded.contains(&result)
                     {
@@ -582,6 +601,7 @@ fn split(
             .is_some_and(|(callee, _)| stage.body(callee).is_some())
     };
     let mut expanded = Vec::new();
+    let mut kept_whole = FxHashSet::default();
     for block in func.blocks() {
         let basic = func.block(block);
         for (index, operation) in basic.operations().iter().enumerate() {
@@ -591,6 +611,7 @@ fn split(
                 &bindings,
                 &mut candidates,
                 &mut shells,
+                &mut kept_whole,
                 managed.is_some(),
                 &expandable,
             ) {
@@ -607,6 +628,7 @@ fn split(
                 &bindings,
                 &mut candidates,
                 &mut shells,
+                &mut kept_whole,
                 managed.is_some(),
                 &expandable,
             );
@@ -632,6 +654,9 @@ fn split(
                 }
             }
         }
+    }
+    if !kept_whole.is_empty() {
+        return Split::Reshape(kept_whole);
     }
     // A shell stored into split variants becomes a tag-only shell, so every other place it is
     // stored into must split too. A shell used otherwise keeps its variant type, and the variants
@@ -1210,12 +1235,14 @@ fn meet(predecessors: &[BlockId], outputs: &[Vec<u64>], words: usize) -> Vec<u64
 
 /// Rejects the candidates `operation` observes other than as admitted, and returns whether it is
 /// a whole-product drop of a `managed` candidate, admitted on condition of being `expandable`.
+#[allow(clippy::too_many_arguments)]
 fn check_operation(
     operation: &Operation,
     func: &Function,
     bindings: &Bindings,
     candidates: &mut FxHashMap<ValueId, Candidate>,
     shells: &mut FxHashMap<ValueId, Shell>,
+    kept_whole: &mut FxHashSet<Type>,
     managed: bool,
     expandable: &dyn Fn(&Operation) -> bool,
 ) -> bool {
@@ -1227,11 +1254,13 @@ fn check_operation(
     let destination = operation.operands.get(1).and_then(|v| binding(v, bindings));
     let copy = matches!(operation.kind, OperationKind::Memcpy | OperationKind::Move)
         && operation.operands.len() == 2;
+    // Both sides must be split: a root keeps the fields of a type kept whole when nested, so equal
+    // types alone do not give equal shapes. A product copied into such a leaf stays whole.
     let product_copy = copy
         && source.zip(destination).is_some_and(|(a, b)| {
             let a = &candidates[&a.root].shape.nodes[a.node];
             let b = &candidates[&b.root].shape.nodes[b.node];
-            !a.is_leaf() && a.ty == b.ty
+            !a.is_leaf() && !b.is_leaf() && a.ty == b.ty
         });
     if product_copy {
         let (a, b) = source.zip(destination).unwrap();
@@ -1312,6 +1341,11 @@ fn check_operation(
                     expands = true;
                     true
                 }
+                // A nested product cloned as a whole keeps its own clone, as a leaf.
+                OperationKind::Clone { .. } if managed && index <= 1 && place.node != 0 => {
+                    kept_whole.insert(node.ty);
+                    false
+                }
                 _ => false,
             }
         };
@@ -1326,16 +1360,21 @@ fn check_operation(
 mod tests {
     use rustc_hash::FxHashSet;
 
-    use super::{MAX_LEAVES, MAX_NODES, Shape, split_local_products};
+    use ustr::ustr;
+
+    use super::{MAX_LEAVES, MAX_NODES, Shape, split_local_products, split_managed_local_products};
     use crate::{
-        CompilerSession, Location, MirOptimization,
+        CompilerSession, ExecutionTarget, Location, MirOptimization,
         hir::{
             function::ArgConvention,
             value::{LiteralValue, Value as RuntimeValue, VariantPayloadStorage},
         },
         mir::{
             BlockId, Function, Operation, OperationKind, ParameterKind, Value,
-            builder::FunctionBuilder, edit::FunctionEdit, terminator::Terminator,
+            builder::FunctionBuilder,
+            edit::FunctionEdit,
+            pass::{OptimizationStage, SemanticCallees},
+            terminator::Terminator,
             verify::verify_function,
         },
         module::Path,
@@ -1872,19 +1911,113 @@ mod tests {
         builder.set_terminator(entry, Terminator::ret(span));
         let original = builder.finish(env);
         assert!(split_local_products(&original, env).is_none());
-        assert!(Shape::of(Type::tuple(vec![int_type(); MAX_LEAVES]), env, false).is_some());
-        assert!(Shape::of(Type::tuple(vec![int_type(); MAX_LEAVES + 1]), env, false).is_none());
+        let shape = |ty| Shape::of(ty, env, false, &FxHashSet::default());
+        assert!(shape(Type::tuple(vec![int_type(); MAX_LEAVES])).is_some());
+        assert!(shape(Type::tuple(vec![int_type(); MAX_LEAVES + 1])).is_none());
         // Interned types can describe exponentially many fields without an equally large source.
         let mut exponentially_nested = int_type();
         for _ in 0..20 {
             exponentially_nested = Type::tuple(vec![exponentially_nested; 2]);
         }
-        assert!(Shape::of(exponentially_nested, env, false).is_none());
+        assert!(shape(exponentially_nested).is_none());
         let mut deeply_nested = int_type();
         for _ in 0..MAX_NODES {
             deeply_nested = Type::tuple(vec![deeply_nested]);
         }
-        assert!(Shape::of(deeply_nested, env, false).is_none());
+        assert!(shape(deeply_nested).is_none());
+    }
+
+    #[test]
+    fn a_split_root_is_not_copied_into_a_product_kept_whole() {
+        // Cloning `x` into `outer.0` keeps `(string, string)` whole when nested, while the root
+        // `local` of that type would still split; moving it whole into `moved.0` then needs one
+        // representation on both sides.
+        let mut session = CompilerSession::new();
+        let module_id = session
+            .compile_for(
+                ExecutionTarget::Mir,
+                "fn pair(x: (string, string)) -> (string, string) { x }
+                 fn text(x: string) -> string { x }",
+                "kept_whole",
+                Path::single_str("kept_whole"),
+            )
+            .unwrap()
+            .module_id;
+        let module = session.expect_fresh_module(module_id);
+        let artifacts = session
+            .mir_artifacts_for(module_id, MirOptimization::Disabled)
+            .unwrap();
+        let clone_callee = |name: &str| {
+            let body = artifacts
+                .get(module.get_local_function_id(ustr(name)).unwrap())
+                .unwrap();
+            body.blocks()
+                .flat_map(|block| body.block(block).operations())
+                .find(|operation| matches!(operation.kind, OperationKind::Clone { .. }))
+                .unwrap()
+                .operands[2]
+                .clone()
+        };
+        let (pair_clone, text_clone) = (clone_callee("pair"), clone_callee("text"));
+        let env = session.modules().env_for(&module);
+        let span = Location::new_synthesized();
+        let pair = Type::tuple(vec![string_type(), string_type()]);
+        let outer = Type::tuple(vec![pair, int_type()]);
+        let mut builder = FunctionBuilder::new("kept_whole".into(), Default::default());
+        let x =
+            Value::Parameter(builder.add_parameter(pair, ParameterKind::Place(ArgConvention::Let)));
+        let entry = builder.add_block();
+        let [cloned, moved] = [outer; 2].map(|ty| {
+            builder
+                .append_operation(entry, Operation::alloca(span, ty))
+                .unwrap()
+        });
+        let local = builder
+            .append_operation(entry, Operation::alloca(span, pair))
+            .unwrap();
+        let target = field(&mut builder, entry, cloned, 0, pair, outer, &session);
+        builder.append_operation(
+            entry,
+            Operation::clone_value(span, x.clone(), target, pair_clone, pair),
+        );
+        for index in 0..2 {
+            let source = field(
+                &mut builder,
+                entry,
+                x.clone(),
+                index,
+                string_type(),
+                pair,
+                &session,
+            );
+            let target = field(
+                &mut builder,
+                entry,
+                local.clone(),
+                index,
+                string_type(),
+                pair,
+                &session,
+            );
+            builder.append_operation(
+                entry,
+                Operation::clone_value(span, source, target, text_clone.clone(), string_type()),
+            );
+        }
+        let target = field(&mut builder, entry, moved, 0, pair, outer, &session);
+        builder.append_operation(entry, Operation::move_value(span, local, target));
+        builder.set_terminator(entry, Terminator::ret(span));
+        let original = builder.finish(env);
+        let stage = OptimizationStage::Semantic(SemanticCallees::new(&session, None));
+        if let Some(split) = split_managed_local_products(&original, env, stage) {
+            verify_function(&split, env);
+            let moves = split
+                .blocks()
+                .flat_map(|block| split.block(block).operations())
+                .filter(|operation| operation.kind == OperationKind::Move)
+                .count();
+            assert_eq!(moves, 1, "the whole move must stay one move");
+        }
     }
 
     #[test]

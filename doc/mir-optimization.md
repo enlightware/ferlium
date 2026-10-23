@@ -1274,9 +1274,11 @@ lifetime becomes a local of its own: an iterator over two arrays then borrows ea
 each cursor in a local. Such a product is dropped whole only through its structural destructor,
 which is spliced first, as physical drop elaboration does for a partially initialized product; its
 field drops remain initialization-aware. Inline variants split into a tag place and independent
-payload places, including when nested in products. The pass expands structural cleanup, removes
-the dead storage and stack brackets the spliced destructor leaves, forwards known-tag branches and
-retries splitting until the independent fields can be proved safe. Without that cleanup, a
+payload places, including when nested in products. A nested product cloned as a whole, such as a
+record element copied into `Some`, stays one place, so that clone borrowing sees its whole
+lifetime; which products stay whole is decided by type, from such clones. The pass expands
+structural cleanup, removes the dead storage and stack brackets the spliced destructor leaves,
+forwards known-tag branches and retries splitting until the independent fields can be proved safe. Without that cleanup, a
 destructor taken from a run-time dictionary, as for an `Option` built by a generic adaptor, leaves
 work in front of the tag test that branch forwarding cannot bypass. If a
 root becomes ineligible after expansion, it restarts from the original body excluding that root,
