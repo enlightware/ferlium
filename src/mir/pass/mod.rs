@@ -6,12 +6,12 @@
 //! A function is opened with [`FunctionEdit`](crate::mir::edit::FunctionEdit), rewritten in place,
 //! and closed again to restore canonical form. Internal pass transitions deliberately skip global
 //! verification; [`MirArtifacts`](crate::compiler::artifacts::MirArtifacts) verifies every final
-//! body once after the whole-module cleanup. The driver alternates folding and inlining for a
-//! bounded number of rounds, because the two feed each other: inlining
-//! binds a callee's dictionary parameters to constants, folding then resolves the callee's
-//! `dict_entry`s into known function places, and the calls that become direct are new candidates
-//! for both. Fold first within a round — it is cheap, it is what makes arguments known, and it
-//! shrinks a function before the inliner measures it against its growth budget.
+//! body once after the whole-module cleanup. The driver alternates normalization (folding and the
+//! other shrinking rewrites, run to a fixpoint; see `normalize`) with expansion (specialization
+//! and inlining) for a bounded number of rounds, because the two feed each other: inlining binds a
+//! callee's dictionary parameters to constants, folding then resolves the callee's `dict_entry`s
+//! into known function places, and the calls that become direct are new candidates for both.
+//! Normalizing first means the inliner measures a settled body against its growth budget.
 //!
 //! Both passes **merge** jump-joined blocks before closing their own edit, because both leave them:
 //! inlining splits every call site's block whether or not the callee needed it, and folding turns a
@@ -19,9 +19,10 @@
 //! round of its own — keeping canonical cleanup with the rewrite that creates it avoids another
 //! body decomposition and reconstruction.
 //!
-//! Optimization terminates on three independent bounds: the dataflow lattice is monotone within a
-//! run, inlining is bounded by its growth budget and the non-recursive restriction, and
-//! [`MAX_ROUNDS`](budget::MAX_ROUNDS) bounds the outer loop.
+//! Optimization terminates on independent bounds: the dataflow lattice is monotone within a run,
+//! inlining is bounded by its growth budget and the non-recursive restriction,
+//! [`MAX_ROUNDS`](budget::MAX_ROUNDS) bounds the expansion rounds, and normalization caps its pass
+//! runs.
 //!
 //! Each stage reads immutable pre-pass callee bodies, so a result never depends on the order
 //! functions are optimized in. Semantic inlining may cross module boundaries — that is
@@ -54,6 +55,7 @@ pub(crate) mod loop_checks;
 pub(crate) mod loops;
 pub(crate) mod monomorphize;
 pub(crate) mod negation;
+mod normalize;
 pub(crate) mod outcome_branch;
 pub(crate) mod owned_arguments;
 pub(crate) mod peephole;
@@ -288,12 +290,142 @@ pub(crate) fn optimize_specialization_ahead(
     specializations.end_ahead(id, optimized, frame, stats);
 }
 
+/// The shrinking rewrites run between expansions, to a fixpoint; see [`normalize`].
+///
+/// Order matters: each pass's comment says what it consumes from the ones before it. The back
+/// edges are the measured cases where a pass enables an earlier one or itself.
+fn normalize_semantic(
+    function: &Function,
+    growth_base: cost::GrowthBase,
+    env: ModuleEnv<'_>,
+    session: &CompilerSession,
+    specializations: &Specializations,
+    context: &OptimizationContext,
+) -> Option<Function> {
+    let callees = SemanticCallees::new(session, Some(specializations));
+    let summary_of = |callee| callees.addressor_summary(callee);
+    let is_optimization_barrier = |callee| {
+        context
+            .known_callees
+            .resolve(callee, callees.original_of())
+            .is_some_and(known_callee::KnownCallee::is_optimization_barrier)
+    };
+    // Scalar arguments are values read at their calls. Merging the loads of a place nothing wrote
+    // in between, those of the body arriving and those the last inlining exposed, makes a place
+    // read twice one value, which folding's identities and call CSE compare.
+    let common_loads =
+        |f: &Function| cse::eliminate_common_loads(f, env, &summary_of).map(Rewrite::settled);
+    // Inlining binds dictionary parameters to constants, which can leave a dictionary closed over
+    // static evidence only; as static evidence, folding devirtualizes its entries.
+    let static_dictionaries =
+        |f: &Function| peephole::close_static_dictionaries(f, env).map(Rewrite::settled);
+    // Fold early: it is what makes arguments known. Most folds shrink before the inliner measures
+    // the body; constructive folds reserve their setup against the whole-function growth budget. A
+    // chain of folds that crosses block boundaries needs the analysis to run again to propagate,
+    // which only a rewrite producing something known warrants (see `Folded`).
+    let fold = |f: &Function| {
+        fold::fold_function(
+            f,
+            growth_base,
+            env,
+            OptimizationStage::Semantic(callees),
+            fold::KnownCallSemantics::new(context.known_callees, &callees.original_of()),
+            &context.string_materializer,
+        )
+        .map(|folded| Rewrite {
+            body: folded.body,
+            enables_itself: folded.warrants_another_round,
+        })
+    };
+    // Calls are merged before inlining so one body is copied per distinct computation, rather
+    // than copying duplicates and trying to rediscover the whole computation afterwards.
+    // Addressors additionally use provenance. A specialization inherits its original's
+    // conservative addressor summary: substitution cannot change provenance, and a repeatability
+    // proof remains true when types are substituted or operations removed. An unresolved original
+    // remains conservatively non-repeatable even when its concrete copy could prove more.
+    let common_calls = |f: &Function| {
+        cse::eliminate_common_calls(f, env, &summary_of, &is_optimization_barrier)
+            .map(Rewrite::settled)
+    };
+    // Lowering and value-call CSE both leave results in fresh slots before transferring them to
+    // their real destinations. Storage forwarding is a separate proof from expression equivalence,
+    // run before inlining so the body being priced has already lost provably redundant result
+    // slots, transfers and allocations.
+    // One forwarding can expose another (std's parser `bump` helpers).
+    let redundant_storage = |f: &Function| {
+        copy_forward::forward_redundant_storage(f, env, OptimizationStage::Semantic(callees)).map(
+            |body| Rewrite {
+                body,
+                enables_itself: true,
+            },
+        )
+    };
+    // Its register counterpart: a value parked in a single-store cell, such as an inlined callee's
+    // `@ret`, is read where it is computed. That can name a callee or an argument folding and call
+    // CSE consume (a function stored in a local, then called), and expose another such cell.
+    let stored_values = |f: &Function| {
+        store_forward::forward_stored_values(f, env).map(|body| Rewrite {
+            body,
+            enables_itself: true,
+        })
+    };
+    // The place-producing operations are merged before inlining too, because their redundancy is
+    // already present: a generic body reads the same `dict_entry` once per use of the trait
+    // method. Merging them shrinks the body before the inliner prices it, and two calls whose only
+    // difference was which copy of an entry they named become one expression for call CSE.
+    let common_subexpressions =
+        |f: &Function| cse::eliminate_common_subexpressions(f).map(Rewrite::settled);
+    use normalize::Rewrite;
+    normalize::normalize(
+        function,
+        &[
+            normalize::Pass {
+                name: "common_loads",
+                run: &common_loads,
+                enables: &[],
+            },
+            normalize::Pass {
+                name: "static_dictionaries",
+                run: &static_dictionaries,
+                enables: &[],
+            },
+            normalize::Pass {
+                name: "fold",
+                run: &fold,
+                enables: &[],
+            },
+            normalize::Pass {
+                name: "common_calls",
+                run: &common_calls,
+                enables: &[],
+            },
+            normalize::Pass {
+                name: "redundant_storage",
+                run: &redundant_storage,
+                enables: &[],
+            },
+            normalize::Pass {
+                name: "stored_values",
+                run: &stored_values,
+                enables: &["common_loads", "fold", "common_calls"],
+            },
+            normalize::Pass {
+                name: "common_subexpressions",
+                run: &common_subexpressions,
+                enables: &["common_loads", "common_calls"],
+            },
+        ],
+    )
+}
+
 /// Optimizes one function, returning the body to install.
 ///
-/// Each round rewrites an immutable function into a new one, so a pass never reads an analysis that
-/// its own edits have invalidated. A round that changes nothing ends the loop; the rounds exist
-/// because folding and inlining feed each other, and because a chain of folds that crosses block
-/// boundaries needs the analysis to be re-run to propagate.
+/// The driver alternates normalization, run to a fixpoint, with one expansion step: specializing
+/// generic calls, then inlining. Expansion grows code under budgets; normalization shrinks it, so
+/// the inliner always prices a settled body. Each pass rewrites an immutable function into a new
+/// one, so it never reads an analysis that its own edits have invalidated. The loop ends when an
+/// expansion step changes nothing, or after [`MAX_ROUNDS`](budget::MAX_ROUNDS) of them, followed by
+/// a last normalization of what the final one exposed.
 pub(crate) fn optimize_function(
     function: &Function,
     env: ModuleEnv<'_>,
@@ -308,52 +440,22 @@ pub(crate) fn optimize_function(
     let mut rounds_exhausted = true;
     let mut inlined_any = false;
     for _round in 0..budget::MAX_ROUNDS {
-        // Fold first: it is cheap and it is what makes arguments known. Most folds shrink before
-        // the inliner measures the body; constructive folds reserve their setup against the same
-        // whole-function growth budget. Inlining then hands the next round a body whose parameters
-        // have become the caller's places.
-        let mut changed = false;
-        let mut reified_places = FxHashSet::default();
-        // Scalar arguments are values read at their calls. Merging the loads of a place nothing
-        // wrote in between, those of the body arriving and those the last round's inlining
-        // exposed, makes a place read twice one value, which folding's identities and call CSE
-        // compare.
         let source = current.as_ref().unwrap_or(function);
-        let callees = SemanticCallees::new(session, Some(specializations));
-        if let Some(merged) =
-            cse::eliminate_common_loads(source, env, &|callee| callees.addressor_summary(callee))
+        if let Some(normalized) =
+            normalize_semantic(source, growth_base, env, session, specializations, context)
         {
-            current = Some(merged);
+            current = Some(normalized);
         }
-        // Inlining binds dictionary parameters to constants, which can leave a dictionary closed
-        // over static evidence only; as static evidence, folding devirtualizes its entries.
-        let source = current.as_ref().unwrap_or(function);
-        if let Some(closed) = peephole::close_static_dictionaries(source, env) {
-            current = Some(closed);
-        }
-        let source = current.as_ref().unwrap_or(function);
-        if let Some(folded) = fold::fold_function(
-            source,
-            growth_base,
-            env,
-            OptimizationStage::Semantic(callees),
-            fold::KnownCallSemantics::new(context.known_callees, &callees.original_of()),
-            &context.string_materializer,
-        ) {
-            current = Some(folded.body);
-            // A rewrite that cannot enable another one must not buy a round; see `Folded`.
-            changed |= folded.warrants_another_round;
-            reified_places = folded.reified_places;
-        }
+        let mut expanded = false;
         // Specialization before inlining: it rewrites a generic call into a call on a concrete
-        // copy, whose dictionaries are constants the *next* round's folding resolves. That is what
-        // reaches this language's generic code at all — see `monomorphize`.
+        // copy, whose dictionaries are constants the next normalization's folding resolves. That
+        // is what reaches this language's generic code at all — see `monomorphize`.
         let source = current.as_ref().unwrap_or(function);
         if let Some(specialized) =
             monomorphize::specialize_call_sites(source, env, session, module_id, specializations)
         {
             current = Some(specialized);
-            changed = true;
+            expanded = true;
         }
         // A specialization is a callee found while optimizing. Like a declared callee, it is
         // optimized before the inliner reads it, whenever its inputs are final.
@@ -375,75 +477,35 @@ pub(crate) fn optimize_function(
         if specializations.abandons_ahead() {
             return function.clone();
         }
-        // Calls are merged before inlining so one body is copied per distinct computation, rather
-        // than copying duplicates and trying to rediscover the whole computation afterwards.
-        // Addressors additionally use provenance. A specialization inherits its original's
-        // conservative addressor summary:
-        // substitution cannot change provenance, and a repeatability proof remains true when types
-        // are substituted or operations removed. An unresolved original remains conservatively
-        // non-repeatable even when its concrete copy could prove more.
-        let source = current.as_ref().unwrap_or(function);
-        // Read-only until the next round specializes.
+        // Normalization has already folded every call it could, so no call is left for folding to
+        // subsume and none needs deferring.
         let callees = SemanticCallees::new(session, Some(specializations));
-        let summary_of = |callee| callees.addressor_summary(callee);
-        if let Some(merged) = cse::eliminate_common_calls(source, env, &summary_of, &|callee| {
-            context
-                .known_callees
-                .resolve(callee, callees.original_of())
-                .is_some_and(known_callee::KnownCallee::is_optimization_barrier)
-        }) {
-            current = Some(merged);
-            changed = true;
-        }
-        // Lowering and value-call CSE both leave results in fresh slots before transferring them to
-        // their real destinations. Storage forwarding is a separate proof from expression
-        // equivalence. Run its cheap structural scan every round before inlining so the body being
-        // priced has already lost provably redundant result slots, transfers and allocations.
-        let source = current.as_ref().unwrap_or(function);
-        if let Some(forwarded) = copy_forward::forward_redundant_storage(
-            source,
-            env,
-            OptimizationStage::Semantic(callees),
-        ) {
-            current = Some(forwarded);
-            changed = true;
-        }
-        // Its register counterpart: a value parked in a single-store cell, such as an inlined
-        // callee's `@ret`, is read where it is computed.
-        let source = current.as_ref().unwrap_or(function);
-        if let Some(forwarded) = store_forward::forward_stored_values(source, env) {
-            current = Some(forwarded);
-            changed = true;
-        }
-        // The place-producing operations are merged here too, before inlining rather than only
-        // after it, because their redundancy is already present: a generic body reads the same
-        // `dict_entry` once per use of the trait method. Merging them shrinks the body before the
-        // inliner prices it against its growth budget, and two calls whose only difference was
-        // which copy of an entry they named become one expression for the pass above.
-        let source = current.as_ref().unwrap_or(function);
-        if let Some(merged) = cse::eliminate_common_subexpressions(source) {
-            current = Some(merged);
-            changed = true;
-        }
-        // Now inlining.
         let source = current.as_ref().unwrap_or(function);
         if let Some(inlined) = inline::inline_function(
             source,
             growth_base,
             env,
             OptimizationStage::Semantic(callees),
-            &reified_places,
+            &FxHashSet::default(),
         ) {
             current = Some(inlined);
-            changed = true;
+            expanded = true;
             inlined_any = true;
         }
         if specializations.abandons_ahead() {
             return function.clone();
         }
-        if !changed {
+        if !expanded {
             rounds_exhausted = false;
             break;
+        }
+    }
+    if rounds_exhausted {
+        let source = current.as_ref().unwrap_or(function);
+        if let Some(normalized) =
+            normalize_semantic(source, growth_base, env, session, specializations, context)
+        {
+            current = Some(normalized);
         }
     }
     // The specialization table is final from here.

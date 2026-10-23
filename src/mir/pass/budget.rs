@@ -27,13 +27,13 @@ pub const CALL_DEPTH_PROOF_WORK: usize = 4096;
 /// Maximum host recursion while proving a call graph acyclic.
 pub const CALL_DEPTH_PROOF_DEPTH: usize = 64;
 
-/// How many fold/inline rounds a single function may go through.
+/// How many expansion rounds (specialization and inlining, each after normalizing) a single
+/// function may go through.
 ///
 /// Folding and inlining feed each other — inlining a generic callee lets folding resolve its
 /// `dict_entry`s, which turns indirect calls direct, which offers new inlining candidates — so one
 /// pass of each is not enough. In practice the chain is short; this bounds the outer loop of the
-/// driver, and is the last of the three bounds that make optimization terminate (the other two
-/// being the monotone lattice and the inlining growth budget).
+/// driver. Normalization runs to a fixpoint within a round, so a round is spent only on expansion.
 pub const MAX_ROUNDS: usize = 4;
 
 /// The largest [hot cost](super::cost::hot_cost) of a callee inlining will copy into a caller.

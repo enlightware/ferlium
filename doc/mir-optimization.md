@@ -30,16 +30,18 @@ Per function (`mir::pass::optimize_function`):
 
 ```text
 for round in 0..MAX_ROUNDS:
-    load CSE      // read a place nothing wrote since an earlier load as that load's value
-    close dicts   // a dictionary closed over static evidence alone becomes static evidence
-    fold          // constant/semantic folding, devirtualization; block merging in its own edit
+    normalize, to a fixpoint:
+        load CSE      // read a place nothing wrote since an earlier load as that load's value
+        close dicts   // a dictionary closed over static evidence alone becomes static evidence
+        fold          // constant/semantic folding, devirtualization; block merging in its own edit
+        call CSE      // merge repeated addressor and trivial value calls before copying bodies
+        copy forward  // coalesce redundant trivial-copy storage
+        store forward // read single-store cells as their stored values
+        place CSE     // merge repeated subfield and dictionary-entry places
     specialize    // point generic calls at concrete copies
-    call CSE      // merge repeated addressor and trivial value calls before copying their bodies
-    copy forward  // coalesce redundant trivial-copy storage exposed during the round
-    store forward // read single-store cells as their stored values
-    place CSE     // merge repeated subfield and dictionary-entry places
     inline        // budget-limited; block merging inside its own edit
-    stop if nothing warranted another round
+    stop if neither expanded anything
+normalize          // once more if the last round still expanded
 place CSE          // merge places which inlining exposes
 copy forward      // catch trivial-copy storage exposed after the last round
 store forward     // likewise for single-store cells
@@ -80,8 +82,18 @@ declared and generated body exactly once before installing the optimized artifac
 **Why the rounds.** Specialization makes a generic callee concrete, inlining copies it and binds its
 dictionary parameters to constants, folding resolves the callee's `dict_entry`s into known functions,
 and the calls that become direct are new candidates for all three. One pass cannot express that
-cycle. Fold first within a round: it is cheap, it is what makes arguments known, and it shrinks a
-function before the inliner measures it against the growth budget.
+cycle.
+
+**Normalize, then expand.** The rounds separate two kinds of rewrite. Specialization and inlining
+*expand* code and are bounded by budgets; the passes before them *normalize* a body, shrinking or
+canonicalizing it, and run until none applies (`mir::pass::normalize`). The inliner therefore
+always prices and copies a settled body, and a round is spent only on expansion. Normalization is a
+worklist over pure passes in a fixed order: a change makes every later pass pending, plus the
+earlier passes it is known to enable (store forwarding and place CSE expose load CSE, place CSE
+exposes call CSE), and a pass that may enable itself says so with its rewrite (folding, when it
+produced something known; copy forwarding, whose forwardings chain). Fold comes first among the
+heavy passes: it is what makes arguments known, and it shrinks a function before the inliner
+measures it against the growth budget.
 
 **Callees are optimized before their callers.** `MirArtifacts::optimize` walks the module's call
 graph (`mir::pass::call_graph`) in strongly connected components, callees first, and publishes a
@@ -107,9 +119,11 @@ its specialization table; a dependency, including specializations its own optimi
 through its optimized artifact, which is complete and immutable because dependencies are optimized
 first.
 
-**Termination** rests on three independent bounds: the dataflow lattice is monotone within a run,
-inlining is bounded by its growth budget and the non-recursive restriction, and `MAX_ROUNDS` bounds
-the outer loop. Work per function is a product of named constants.
+**Termination** rests on independent bounds: the dataflow lattice is monotone within a run,
+inlining is bounded by its growth budget and the non-recursive restriction, `MAX_ROUNDS` bounds the
+expansion rounds, and normalization stops after a fixed number of runs per pass, a cap that a body
+never reaches unless two rewrites undo each other. Work per function is a product of named
+constants.
 
 ## Overwritten `TrivialCopy` stores
 
@@ -208,22 +222,25 @@ Five rules, which apply to any new pass.
    cleanup. Raw lowering, generated specialization/substitution inputs consumed by another pass,
    and final optimized artifacts remain checked boundaries. Keep related canonical cleanup in the
    pass that creates it to avoid another body decomposition and reconstruction.
-2. **A rewrite that cannot enable another rewrite must not grant a round.** `Folded` carries
-   `warrants_another_round` for this. Devirtualization sets it false: the callees a dictionary entry
-   resolves to are overwhelmingly natives, which cannot be inlined and only fold with known
-   arguments, so granting a round buys a full cycle that finds nothing.
+2. **A rewrite that cannot enable another rewrite must not buy another run.** `Folded` carries
+   `warrants_another_round` for this, which in normalization decides whether folding runs again.
+   Devirtualization sets it false: the callees a dictionary entry resolves to are overwhelmingly
+   natives, which cannot be inlined and only fold with known arguments, so another run finds
+   nothing.
 3. **Reuse an analysis rather than building a second one.** The dataflow analysis is the cost of most
    rewrites. Devirtualization rides along with folding for this reason. A final devirtualization
    sweep exists only for dictionary-entry callees exposed after the last fold round; it first runs a
    cheap syntactic filter and then lets DCE remove the entries it strands.
 4. **Cleanup runs on every body**, not only on one a pass changed. A specialization arrives already
    carrying dead code, so "nothing changed it, so nothing is dead" does not hold.
-5. **A pass belongs in the rounds only if its output feeds folding, specialization or inlining.**
-   Passes inside a round expose known arguments and callees, or shrink a body before the inliner
-   prices it. Passes after the rounds consume the settled body and feed nothing back: ownership
-   proofs, bounds checks, the managed split (products are local only once inlined, and callees are
-   split before their callers price them), LICM and cleanup. A pass in the rounds pays its cost
-   every round, so moving one there needs an opportunity the later passes miss.
+5. **A pass belongs in normalization only if its output feeds folding, specialization or
+   inlining.** Normalizing passes expose known arguments and callees, or shrink a body before the
+   inliner prices it. Passes after the rounds consume the settled body and feed nothing back:
+   ownership proofs, bounds checks, the managed split (products are local only once inlined, and
+   callees are split before their callers price them), LICM and cleanup. A normalizing pass runs at
+   least once per round and again whenever an earlier pass changes the body, so moving one there
+   needs an opportunity the later passes miss. A normalizing pass that enables an earlier one must
+   be listed as such, or the fixpoint misses it.
 
 ## Folding
 
