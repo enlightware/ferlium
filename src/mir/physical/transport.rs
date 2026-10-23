@@ -32,12 +32,91 @@ use crate::{
         native_functions::{NativeParameter, NativeResult},
     },
     mir::{
-        Function, Operation, OperationKind, Parameter, ResultTransport, Value, ValueId, operation,
+        Function, Operation, OperationKind, Parameter, ResultTransport, Value, ValueId,
+        edit::FunctionEdit,
+        operation,
         results::definition_result_transport,
+        terminator::{Terminator, TerminatorKind},
     },
     module::{CallableOrigin, FunctionId, ModuleEnv, TraitId, id::Id},
-    types::r#trait::TraitDictionaryEntryIndex,
+    types::{
+        r#trait::TraitDictionaryEntryIndex,
+        r#type::{CallResultConvention, Type},
+    },
+    ustr,
 };
+
+/// A devirtualized callback can have a wider source result than its native entry.
+/// Call a diverging entry with its actual contract and private bottom storage;
+/// it cannot initialize the caller's widened result. Preserve the failure edge,
+/// including its cleanup, and trap if the native violates its Never contract.
+pub(super) fn lower_diverging_native_calls(body: Function, env: ModuleEnv<'_>) -> Function {
+    let candidates = body
+        .blocks()
+        .filter_map(|block| {
+            let terminator = body.block(block).terminator();
+            let TerminatorKind::Invoke { operation, .. } = &terminator.kind else {
+                return None;
+            };
+            let OperationKind::Call { ty, .. } = &operation.kind else {
+                return None;
+            };
+            let Value::Function(target) = operation.operands.first()? else {
+                return None;
+            };
+            let entry = env
+                .module_by_id(target.module)?
+                .get_function_by_id(target.function)?
+                .code
+                .native_entry()?;
+            (entry.signature().result == NativeResult::Never && ty.fn_ty.ret != Type::never())
+                .then(|| (block, terminator.clone()))
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return body;
+    }
+    let mut edit = FunctionEdit::new(body);
+    for (block, mut terminator) in candidates {
+        let TerminatorKind::Invoke {
+            operation, normal, ..
+        } = &mut terminator.kind
+        else {
+            unreachable!();
+        };
+        let mut storage = Operation::alloca(operation.span, Type::never());
+        let slot = edit.assign_new_result(&mut storage).unwrap();
+        let entry = edit.entry();
+        edit.block_mut(entry).operations.insert(0, storage);
+        let result_index = operation.call_result_place_index();
+        let mut operands = operation.operands.to_vec();
+        if let Some(index) = result_index {
+            operands[index] = slot;
+        } else {
+            operands.push(slot);
+        }
+        operation.operands = operands.into_boxed_slice();
+        operation.assign_result_id(None);
+        let OperationKind::Call {
+            ty,
+            result_transport,
+            ..
+        } = &mut operation.kind
+        else {
+            unreachable!();
+        };
+        ty.fn_ty.ret = Type::never();
+        ty.result_convention = CallResultConvention::Value;
+        *result_transport = ResultTransport::Place;
+        *normal = edit.add_block(Terminator::invariant_failure(
+            operation.span,
+            ustr("never native returned success"),
+        ));
+        edit.block_mut(block).terminator = terminator;
+    }
+    edit.remove_unreachable_blocks();
+    edit.finish_unverified()
+}
 
 /// The entries the calls of one body reach.
 pub(crate) struct Transports<'a> {

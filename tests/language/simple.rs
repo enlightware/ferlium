@@ -3946,3 +3946,20 @@ fn early_returns() {
         .fail_compilation("if true { return 1 }")
         .expect_return_outside_function();
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn native_never_callback_preserves_its_call_contract() {
+    for source in [
+        "fn invoke(f: () -> int) -> int { f() } invoke(abort)",
+        "fn invoke(f: () -> int) -> int { f() } invoke(black_box(abort))",
+        "fn invoke(f: () -> (int, int)) -> (int, int) { f() } invoke(abort)",
+        "let f: () -> int = abort; f()",
+        "fn stop() { abort() } fn invoke(f: () -> int) -> int { f() } invoke(stop)",
+    ] {
+        assert_eq!(
+            TestSession::new().fail_run(source),
+            SourceFailureKind::Aborted(None)
+        );
+    }
+}

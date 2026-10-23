@@ -691,6 +691,7 @@ fn expand_physical_mir(
             let body =
                 scalar_arguments::place_no_value_results(&body, |call| transports.result(call))
                     .unwrap_or(body);
+            let body = transport::lower_diverging_native_calls(body, env);
             let mut body = lowerer.lower_body(function, original, body)?;
             if clear_failed_result {
                 body = clear_result_on_failure(body);

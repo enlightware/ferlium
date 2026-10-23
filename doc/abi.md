@@ -616,6 +616,13 @@ all nested types in visible parameters, hidden parameters, and results. Generic 
 be specialized to closed entries or eliminated before reaching the boundary; this ABI does not
 define polymorphic native entries. Every retained native callable must supply a compatible C entry.
 
+A native returning `Never` may be used as a callable with a wider source result type, but its
+native entry keeps its original result contract. When such a call becomes direct, physical
+lowering uses private `Never` result storage and preserves the existing source-failure cleanup
+edge; successful return traps as a native contract violation. It does not pretend that the native
+initializes the widened result. Indirect calls continue through the uniform callable adapter,
+whose pointer-based result interface also supports non-returning targets.
+
 ## Value transport and safety
 
 Entries follow the [calling conventions](#calling-conventions) above:
