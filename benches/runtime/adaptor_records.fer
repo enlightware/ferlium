@@ -1,0 +1,3 @@
+fn benchmark_entry() {
+	adaptor_total(black_box(48))
+}

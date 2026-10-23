@@ -1,0 +1,84 @@
+// Iterator adapter pipelines over managed elements.
+//
+// `iter_pipeline` runs its adapters over integers, which cost nothing to pass around. Here every
+// element is a record holding a string and an array, and every callback is a non-capturing lambda.
+// A callback that reads its element can borrow it; one that returns part of it, such as a
+// projection, hands back a managed value, which costs a clone unless the callback is inlined and
+// the pipeline's ownership resolved. So this workload measures whether adapter callbacks over
+// managed elements inline, and what their elements cost once they do.
+//
+// Both adapter forms are covered: lazy chains consumed by a `for` loop or by `sum`, and the eager
+// `[A]` impls, which build an iterator and collect it back into an array.
+
+fn people(n, width) -> [{ name: string, scores: [int] }] {
+	let mut out = [];
+	for i in 0..n {
+		let mut scores = [];
+		for j in 0..rem(i, width) {
+			array_append(scores, i + j)
+		};
+		array_append(out, { name: "person", scores: scores })
+	};
+	out
+}
+
+fn filter_for(people: [{ name: string, scores: [int] }]) -> int {
+	let mut n = 0;
+	for p in iter(people) |> filter(|p| len(p.scores) > 1) {
+		n += len(p.scores)
+	};
+	n
+}
+
+fn map_for(people: [{ name: string, scores: [int] }]) -> int {
+	let mut n = 0;
+	for l in iter(people) |> map(|p| len(p.scores)) {
+		n += l
+	};
+	n
+}
+
+fn filter_map_for(people: [{ name: string, scores: [int] }]) -> int {
+	let mut n = 0;
+	let firsts = iter(people) |> filter_map(|p| if len(p.scores) > 0 {
+		Some(p.scores[0])
+	} else {
+		None
+	});
+	for first in firsts {
+		n += first
+	};
+	n
+}
+
+fn projected_for(people: [{ name: string, scores: [int] }]) -> int {
+	let mut n = 0;
+	for scores in iter(people) |> map(|p| p.scores) {
+		n += len(scores)
+	};
+	n
+}
+
+fn map_sum(people: [{ name: string, scores: [int] }]) -> int {
+	iter(people) |> map(|p| len(p.scores)) |> sum()
+}
+
+fn filter_map_sum(people: [{ name: string, scores: [int] }]) -> int {
+	iter(people) |> filter(|p| len(p.scores) > 2) |> map(|p| len(p.name)) |> sum()
+}
+
+fn projected_sum(people: [{ name: string, scores: [int] }]) -> int {
+	iter(people) |> map(|p| p.scores) |> map(|scores| len(scores)) |> sum()
+}
+
+fn eager_map(people: [{ name: string, scores: [int] }]) -> int {
+	sum(people |> map(|p| len(p.scores)))
+}
+
+// Entry point. Builds the records from `n` and runs every pipeline over them, so one integer
+// controls the work.
+fn adaptor_total(n) {
+	let values = people(n, 6);
+	filter_for(values) + map_for(values) + filter_map_for(values) + projected_for(values)
+		+ map_sum(values) + filter_map_sum(values) + projected_sum(values) + eager_map(values)
+}

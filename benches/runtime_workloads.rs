@@ -175,6 +175,13 @@ impl RuntimeWorkload {
         RuntimeResult::Int,
         4_195.0,
     );
+    pub const ADAPTOR_RECORDS: Self = Self::single(
+        "adaptor_records",
+        include_str!("../tests/modules/adaptor_records.fer"),
+        include_str!("runtime/adaptor_records.fer"),
+        RuntimeResult::Int,
+        1_816.0,
+    );
     pub const DATA_TEXT_ROUNDTRIP: Self = Self::single(
         "data_text_roundtrip",
         include_str!("../tests/modules/data_text.fer"),
@@ -251,7 +258,7 @@ impl RuntimeWorkload {
         6_538_894.0,
     );
 
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 22] = [
         Self::QUICKSORT,
         Self::FIBONACCI,
         Self::SIEVE,
@@ -263,6 +270,7 @@ impl RuntimeWorkload {
         Self::LINALG_TRANSFORM,
         Self::LINALG_GRID,
         Self::ITER_PIPELINE,
+        Self::ADAPTOR_RECORDS,
         Self::DATA_TEXT_ROUNDTRIP,
         Self::FLOAT_KERNEL,
         Self::IMAGE_ADJUST,
