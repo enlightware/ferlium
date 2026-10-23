@@ -1222,6 +1222,10 @@ impl TypeInference {
             }
             PatternConstraint(data) => {
                 let (node_id, mut_type) = self.infer_expr(env, data.expr)?;
+                // Destructuring never starts if evaluating its operand diverges.
+                if env.ir_arena[node_id].ty == Type::never() {
+                    return Ok((node_id, mut_type));
+                }
                 match &data.constraint {
                     PatternConstraintKind::ExactTuple(element_count) => {
                         let expected_ty = if *element_count == 0 {
@@ -1267,7 +1271,18 @@ impl TypeInference {
                     self.infer_expr_drop_mut(env, *expr)?
                 };
                 let ty = env.ir_arena[node_id].ty;
-                self.add_same_type_with_sub_effects_constraint(ty, sp(*expr), outer_ty, outer_span);
+                if env.return_requires_place() {
+                    if ty != Type::never() {
+                        self.add_same_type_with_sub_effects_constraint(
+                            ty,
+                            sp(*expr),
+                            outer_ty,
+                            outer_span,
+                        );
+                    }
+                } else {
+                    self.add_sub_type_constraint(ty, sp(*expr), outer_ty, outer_span);
+                }
                 let effects = env.ir_arena[node_id].effects.clone();
                 let return_value = if env.return_requires_place() {
                     if ty != Type::never() && !node_is_place_reference(env.ir_arena, node_id) {
@@ -1322,12 +1337,14 @@ impl TypeInference {
                         span: operand_span,
                     }));
                 }
-                self.add_same_type_with_sub_effects_constraint(
-                    ty,
-                    operand_span,
-                    expected_ty,
-                    expected_span,
-                );
+                if ty != Type::never() {
+                    self.add_same_type_with_sub_effects_constraint(
+                        ty,
+                        operand_span,
+                        expected_ty,
+                        expected_span,
+                    );
+                }
                 if requires_mutable_place {
                     self.add_mut_be_at_least_constraint(
                         mut_ty,
@@ -1416,13 +1433,23 @@ impl TypeInference {
                         let effects = self.make_dependent_effect([&func_effects, &args_effects]);
                         self.diverging_prefix_result(env, nodes, effects)
                     } else {
-                        // Allocate a fresh variable for the return type and effects of the function
-                        let ret_ty = self.fresh_type_var_ty();
-                        let call_effects = self.fresh_effect_var_ty();
-                        let abi_args = match &*env.ir_arena[func_node_id].ty.data() {
-                            TypeKind::Function(fn_ty) => Some(fn_ty.args.clone()),
-                            _ => None,
+                        // Preserve known divergence. A fresh supertype of Never
+                        // would leave an unconstrained result for a call that cannot
+                        // return. Other results keep their own inference variable,
+                        // including independent effects for returned callables.
+                        let (returns_never, abi_args) = match &*env.ir_arena[func_node_id].ty.data()
+                        {
+                            TypeKind::Function(fn_ty) => {
+                                (fn_ty.ret == Type::never(), Some(fn_ty.args.clone()))
+                            }
+                            _ => (false, None),
                         };
+                        let ret_ty = if returns_never {
+                            Type::never()
+                        } else {
+                            self.fresh_type_var_ty()
+                        };
+                        let call_effects = self.fresh_effect_var_ty();
                         // Build the function type
                         let app_ty = FnType::new(args_tys.clone(), ret_ty, call_effects.clone());
                         let func_ty = Type::function_type(app_ty.clone());
@@ -2006,7 +2033,7 @@ impl TypeInference {
                 let ty = data
                     .ty
                     .map(&mut AnnotationTypeMapper::new(self, env.annotation_subst));
-                self.add_same_type_with_sub_effects_constraint(
+                self.add_sub_type_constraint(
                     env.ir_arena[node_id].ty,
                     sp(data.expr),
                     ty,
@@ -2138,10 +2165,10 @@ impl TypeInference {
         let expr_span = env.ast_arena[expr].span;
         let node_id = self.infer_expr_as_place_return(env, expr)?;
         let ty = env.ir_arena[node_id].ty;
-        self.add_same_type_with_sub_effects_constraint(ty, expr_span, expected_ty, expected_span);
         if ty == Type::never() {
             return Ok(node_id);
         }
+        self.add_same_type_with_sub_effects_constraint(ty, expr_span, expected_ty, expected_span);
         if !node_is_place_reference(env.ir_arena, node_id) {
             return Err(internal_compilation_error!(InvalidSubscriptDefinition {
                 subject: env.subscript_member.map_or(
@@ -3846,7 +3873,9 @@ impl TypeInference {
                 self.prepare_assignment_operator(env, place_ty, path, sign_span, value, span)
             })
             .transpose()?;
-        if operator.is_none() {
+        // A diverging destination never produces a place to write. Still check
+        // the RHS itself, but do not require its value to inhabit Never.
+        if operator.is_none() && place_ty != Type::never() {
             self.add_sub_type_constraint(value_ty, env.ir_arena[value].span, place_ty, sign_span);
         }
         let diverges = place_ty == Type::never() || value_ty == Type::never();
@@ -6279,7 +6308,7 @@ impl TypeInference {
         expected_span: Location,
     ) {
         for (current_arg, expected_arg) in current.args.iter().zip(expected.args.iter()) {
-            self.add_same_type_with_sub_effects_constraint(
+            self.add_sub_type_constraint(
                 expected_arg.ty,
                 expected_span,
                 current_arg.ty,
@@ -6293,7 +6322,7 @@ impl TypeInference {
                 "neither signature declares the mutability of an argument"
             );
             if expected_arg.mut_ty.is_mutable() || current_arg.mut_ty.is_mutable() {
-                self.add_same_type_with_sub_effects_constraint(
+                self.add_sub_type_constraint(
                     current_arg.ty,
                     current_span,
                     expected_arg.ty,
@@ -6307,12 +6336,7 @@ impl TypeInference {
                 expected_span,
             );
         }
-        self.add_same_type_with_sub_effects_constraint(
-            current.ret,
-            current_span,
-            expected.ret,
-            expected_span,
-        );
+        self.add_sub_type_constraint(current.ret, current_span, expected.ret, expected_span);
     }
 
     /// Make a new effect depending on the given effects

@@ -13,6 +13,66 @@ type, trait, mutability, and effect constraints belong to that language-specific
 The framework's principal-type guarantees depend on conditions on the domain and solver;
 citing HM(X) does not establish those guarantees for every implementation choice below.
 
+## Type relations
+
+The structural solver in `src/types/type_inference/unify.rs` uses three relations:
+
+| Relation | Contract |
+| --- | --- |
+| `SubType` | The current value is usable where the expected type is required. |
+| `SameTypeWithSubEffects` | Equal type structure and mutability, with directional callable effects. |
+| `SameType` | Exact equality, including nested callable effects and mutability. |
+
+Function subtyping is contravariant in arguments and covariant in results and effects. Mutable
+arguments must also support writing back, so their types are checked in both directions. Named
+type arguments use exact equality: without variance analysis, a parameter might occur in an
+argument or mutable position in its definition.
+
+Type variables are normalized through the unification table before comparing structure. Recursive
+types are compared with an active set of ordered type pairs and their relation; a comparison under
+subtyping cannot discharge one that requires equality. The active set tracks the current recursion
+path rather than caching successes across later variable bindings.
+
+## Never
+
+`Never` is bottom only in the subtype relation: `Never <: T` holds for every type, but a concrete
+type other than `Never` cannot satisfy `T <: Never`. Both equality relations require `Never` to match `Never`.
+This is structural identity, not an analysis equating all uninhabited types.
+
+For an unresolved inference variable `a`, `Never <: a` imposes no restriction; another branch
+can determine its type. Conversely, `a <: Never` and equality with `Never` bind `a` to `Never`.
+Defaulting unconstrained diverging returns and unused variant payloads remains a separate step
+with its own eligibility checks. Bottom is neither an inference wildcard nor a universal default.
+
+Value returns, annotations, and match arms use directional compatibility. Structural projections,
+trait identities, and invariant type positions retain structural equality. A place-returning or
+yielding expression that diverges before producing a place needs no equality check for that place;
+its effects are still retained.
+
+A callable returning `Never` is itself an ordinary function value. Return covariance permits
+`() -> Never` to satisfy `() -> int`, subject to effect inclusion, but not the reverse. In
+particular, a mutable local storing `() -> Never` cannot receive a boolean-returning replacement.
+Containing `Never` does not bypass named-parameter invariance or mutable-argument checks, and a
+fallible diverging callable cannot satisfy a pure callable requirement.
+
+These rules follow the standard [bottom subtype rule](https://www.seas.upenn.edu/~cis5000/cis500-f02/lectures/1106-4up.pdf).
+The distinction between bottom-to-any compatibility and equality with an inference variable is
+also described in the [Rust compiler's coercion documentation](https://rustc-dev-guide.rust-lang.org/hir-typeck/coercions.html).
+
+## Mutability and places
+
+Mutability constraints distinguish having at least the required access from having exactly the
+same mutability. A mutable place can satisfy a read-only requirement; a read-only place cannot
+satisfy a mutable requirement. Both same-type relations require equal mutability. The solver
+resolves mutability constraints before structural type relations, so callable comparisons know
+which arguments require invariance.
+
+Returning a value and exposing a place have different typing requirements. A value may be widened
+by subtyping, while an exposed place preserves its referent type so writes remain valid.
+`TypingEnv::return_requires_place()` exposes this semantic requirement to expression inference;
+callers do not inspect the result transport convention. A diverging expression supplies neither
+a value nor a place, but its effects and control-flow behavior must still be preserved.
+
 ## Effect inference
 
 ### Effect rows

@@ -15,6 +15,52 @@ use crate::harness::{TestSession, float, int};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
 
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn never_returning_callable_cannot_be_replaced_with_a_returning_callable() {
+    let mut session = TestSession::new();
+    session
+        .fail_compilation(indoc! { "
+        fn diverge() { loop {} }
+        let mut f = diverge;
+        f = || true;
+        f() + 1
+    " })
+        .expect_type_mismatch("bool", "never");
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn never_returning_callable_remains_checked_inside_containers() {
+    for (source, expected) in [
+        (
+            indoc! { "
+            fn diverge() { loop {} }
+            let mut fs = [diverge];
+            fs[0] = || true;
+            let g: () -> int = fs[0];
+            g() + 1
+        " },
+            "never",
+        ),
+        (
+            indoc! { "
+            struct Box<T>(T)
+            fn diverge() { loop {} }
+            let mut b = Box(diverge);
+            b = Box(|| true);
+            let c: Box<() -> int> = b;
+            c.0() + 1
+        " },
+            "never",
+        ),
+    ] {
+        TestSession::new()
+            .fail_compilation(source)
+            .expect_type_mismatch("bool", expected);
+    }
+}
+
 /// A compound assignment whose index operands contain assignments must report a diagnostic rather
 /// than panicking in the borrow checker.
 ///

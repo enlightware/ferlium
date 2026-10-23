@@ -408,12 +408,6 @@ impl TypeInference {
                             match_span,
                         )?;
                         node_id = self.materialize_owned_value(env, node_id, match_span);
-                        self.add_same_type_with_sub_effects_constraint(
-                            env.ir_arena[node_id].ty,
-                            sp(*expr),
-                            return_ty,
-                            match_span,
-                        );
 
                         // Generate the variable binding code
                         if !bind_var_names.is_empty() {
@@ -528,14 +522,7 @@ impl TypeInference {
                 // Generate the default code node
                 let default_id =
                     self.check_expr(env, *default, return_ty, MutType::constant(), match_span)?;
-                let default_id = self.materialize_owned_value(env, default_id, match_span);
-                self.add_same_type_with_sub_effects_constraint(
-                    env.ir_arena[default_id].ty,
-                    sp(*default),
-                    return_ty,
-                    match_span,
-                );
-                default_id
+                self.materialize_owned_value(env, default_id, match_span)
             } else {
                 // No default, compute a full variant type.
                 let variant_inner_tys: Vec<_> =
@@ -598,12 +585,6 @@ impl TypeInference {
                 let default_id =
                     self.check_expr(env, *default, return_ty, MutType::constant(), match_span)?;
                 let default_id = self.materialize_owned_value(env, default_id, match_span);
-                self.add_same_type_with_sub_effects_constraint(
-                    env.ir_arena[default_id].ty,
-                    sp(*default),
-                    return_ty,
-                    match_span,
-                );
                 let (alternatives, alt_eff) = self.check_literal_patterns(
                     env,
                     alternatives,
@@ -713,12 +694,6 @@ impl TypeInference {
                         expected_return_span,
                     )?;
                     let node_id = self.materialize_owned_value(env, node_id, expected_return_span);
-                    self.add_same_type_with_sub_effects_constraint(
-                        env.ir_arena[node_id].ty,
-                        env.ast_arena[*expr].span,
-                        expected_return_type,
-                        expected_return_span,
-                    );
                     let effects = env.ir_arena[node_id].effects.clone();
                     Ok(((literal.clone(), node_id), effects))
                 } else {

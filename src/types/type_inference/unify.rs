@@ -51,7 +51,9 @@ use crate::{
 /// Whether the unification should target a subtype or the same type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SubOrSameType {
+    /// Directional value compatibility, including bottom-to-any subtyping.
     SubType,
+    /// Equal type structure and mutability, with directional callable effects.
     SameTypeWithSubEffects,
     /// Equality throughout the type, including callable effects and mutability.
     SameType,
@@ -662,8 +664,11 @@ impl UnifiedTypeInference {
         use SubOrSameType::*;
         use TypeKind::*;
         match (cur_data, exp_data) {
-            (Never, _) => Ok(()),
-            (_, Never) => Ok(()),
+            // Bottom supplies no value and imposes no restriction on a supertype,
+            // even when that supertype is still unknown. Equality is different:
+            // the variable cases below must bind it to Never. Likewise, a variable
+            // constrained to be a subtype of Never must itself become Never.
+            (Never, _) if sub_or_same == SubType => Ok(()),
             (Variable(cur), Variable(exp)) => self
                 .ty_unification_table
                 .unify_var_var(cur, exp)
@@ -970,7 +975,7 @@ impl UnifiedTypeInference {
                 current_span,
                 expected_ty,
                 expected_span,
-                sub_or_same: SameTypeWithSubEffects,
+                sub_or_same,
             })),
         }
     }
@@ -2393,6 +2398,161 @@ fn constraint_solve_specificity(constraint: &PubTypeConstraint) -> u8 {
             0
         }
         _ => 1,
+    }
+}
+
+#[cfg(test)]
+mod never_tests {
+    use super::*;
+    use crate::{
+        std::{logic::bool_type, math::int_type},
+        types::effects::{PrimitiveEffect, effect},
+    };
+
+    fn relate(
+        inference: &mut UnifiedTypeInference,
+        current: Type,
+        expected: Type,
+        relation: SubOrSameType,
+    ) -> Result<(), InternalCompilationError> {
+        let span = Location::new_synthesized();
+        inference.unify_sub_or_same_type(
+            current,
+            span,
+            expected,
+            span,
+            relation,
+            &mut FxHashSet::default(),
+        )
+    }
+
+    #[test]
+    fn never_is_bottom_only_for_subtyping() {
+        use SubOrSameType::*;
+        for relation in [SubType, SameTypeWithSubEffects, SameType] {
+            for other in [int_type(), Type::tuple(vec![Type::never()])] {
+                let mut inference = UnifiedTypeInference::default();
+                assert_eq!(
+                    relate(&mut inference, Type::never(), other, relation).is_ok(),
+                    relation == SubType,
+                );
+                assert!(relate(&mut inference, other, Type::never(), relation).is_err());
+            }
+            assert!(
+                relate(
+                    &mut UnifiedTypeInference::default(),
+                    Type::never(),
+                    Type::never(),
+                    relation,
+                )
+                .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn never_inference_respects_direction_and_constraint_order() {
+        use SubOrSameType::*;
+        let unknown = Type::variable_id(0);
+        for relation in [SubType, SameTypeWithSubEffects, SameType] {
+            for never_first in [false, true] {
+                // A bottom lower bound leaves the variable free; equality or an
+                // upper bound of bottom fixes it, whichever constraint is first.
+                for bottom_on_left in [false, true] {
+                    let mut inference = UnifiedTypeInference::new_with_ty_vars(1);
+                    let bottom_relation = if bottom_on_left {
+                        (Type::never(), unknown, relation)
+                    } else {
+                        (unknown, Type::never(), relation)
+                    };
+                    let integer_relation = (unknown, int_type(), SameType);
+                    let constraints = if never_first {
+                        [bottom_relation, integer_relation]
+                    } else {
+                        [integer_relation, bottom_relation]
+                    };
+                    let result = constraints
+                        .into_iter()
+                        .try_for_each(|(a, b, r)| relate(&mut inference, a, b, r));
+                    let unconstrained = relation == SubType && bottom_on_left;
+                    assert_eq!(result.is_ok(), unconstrained);
+                    if unconstrained {
+                        assert_eq!(inference.substitute_in_type(unknown), int_type());
+                    }
+                }
+            }
+            for (a, b) in [(unknown, Type::never()), (Type::never(), unknown)] {
+                let mut inference = UnifiedTypeInference::new_with_ty_vars(1);
+                relate(&mut inference, a, b, relation).unwrap();
+                let expected = if relation == SubType && a == Type::never() {
+                    unknown
+                } else {
+                    Type::never()
+                };
+                assert_eq!(inference.substitute_in_type(unknown), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn never_callable_variance_preserves_effects_and_mutable_arguments() {
+        use SubOrSameType::*;
+        let bottom_result = Type::nullary_function_by_val(Type::never());
+        let bool_result = Type::nullary_function_by_val(bool_type());
+        let mut inference = UnifiedTypeInference::default();
+        relate(&mut inference, bottom_result, bool_result, SubType).unwrap();
+        assert!(relate(&mut inference, bool_result, bottom_result, SubType).is_err());
+        for relation in [SameTypeWithSubEffects, SameType] {
+            assert!(relate(&mut inference, bottom_result, bool_result, relation).is_err());
+        }
+        let fallible_bottom = Type::function_by_val_with_effects(
+            [],
+            Type::never(),
+            effect(PrimitiveEffect::Fallible),
+        );
+        assert!(relate(&mut inference, fallible_bottom, bool_result, SubType).is_err());
+
+        let accepting = |ty, mutable| {
+            Type::function_type(FnType::new(
+                vec![FnArgType::new(
+                    ty,
+                    MutType::resolved(if mutable {
+                        MutVal::mutable()
+                    } else {
+                        MutVal::constant()
+                    }),
+                )],
+                Type::unit(),
+                no_effects(),
+            ))
+        };
+        relate(
+            &mut inference,
+            accepting(int_type(), false),
+            accepting(Type::never(), false),
+            SubType,
+        )
+        .unwrap();
+        assert!(
+            relate(
+                &mut inference,
+                accepting(Type::never(), false),
+                accepting(int_type(), false),
+                SubType
+            )
+            .is_err()
+        );
+        for (a, b) in [(int_type(), Type::never()), (Type::never(), int_type())] {
+            assert!(
+                relate(
+                    &mut inference,
+                    accepting(a, true),
+                    accepting(b, true),
+                    SubType
+                )
+                .is_err()
+            );
+        }
     }
 }
 

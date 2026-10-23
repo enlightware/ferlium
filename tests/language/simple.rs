@@ -3079,6 +3079,34 @@ fn never_type() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn never_flows_into_value_contexts_without_losing_effects() {
+    for source in [
+        "fn f() -> int { return abort() } f()",
+        "let x: int = abort(); x",
+        "let (x, y) = abort(); x + y",
+        "struct Pair(int, int) let Pair(x, y) = abort(); x + y",
+        "fn stop() { abort() } let f: () -> int = stop; f()",
+        "fn stop() { abort() } fn invoke(f: () -> int) -> int { f() } invoke(stop)",
+        "fn f() -> int { loop { break abort() } } f()",
+    ] {
+        assert_eq!(
+            TestSession::new().fail_run(source),
+            SourceFailureKind::Aborted(None)
+        );
+    }
+    // Both branch orders must let the returning branch determine the result.
+    for source in [
+        "fn f(b: bool) -> int { if b { return 42 } else { abort() } } f(true)",
+        "fn f(b: bool) -> int { if b { abort() } else { return 42 } } f(false)",
+        "match Some(42) { Some(x) => x, None => abort() }",
+        "match Some(42) { None => abort(), Some(x) => x }",
+    ] {
+        assert_val_eq!(TestSession::new().run(source), int(42));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn loop_types() {
     let mut session = TestSession::new();
 
