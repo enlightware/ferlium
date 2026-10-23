@@ -244,13 +244,18 @@ impl UnifiedTypeInference {
 
     /// Whether `mut_ty` is mutable. Mutability is solved before types are related, so it is
     /// known whenever a relation depends on it.
-    fn is_resolved_mutable(&mut self, mut_ty: MutType) -> bool {
-        let mut_ty = self.normalize_mut_type(mut_ty);
-        debug_assert!(
-            !mut_ty.is_variable(),
-            "unresolved mutability when relating types"
-        );
-        mut_ty.is_mutable()
+    fn is_resolved_mutable(
+        &mut self,
+        mut_ty: MutType,
+        span: Location,
+    ) -> Result<bool, InternalCompilationError> {
+        match self.normalize_mut_type(mut_ty) {
+            MutType::Resolved(value) => Ok(value.is_mutable()),
+            MutType::Variable(_) => Err(internal_compilation_error!(Internal {
+                span,
+                error: "unresolved mutability when relating types".into(),
+            })),
+        }
     }
 
     /// A fresh effect variable that solving may not constrain, standing for one fixed elsewhere.
@@ -832,10 +837,11 @@ impl UnifiedTypeInference {
                         sub_or_same,
                         active,
                     )?;
-                    // A mutable argument is also written back, so its type is invariant.
+                    // Only a callee that can write needs the reverse check. A read-only
+                    // implementation stays contravariant even when the expected contract
+                    // permits writes; making that case invariant would break transitivity.
                     if sub_or_same != SameType
-                        && (self.is_resolved_mutable(cur_arg.mut_ty)
-                            || self.is_resolved_mutable(exp_arg.mut_ty))
+                        && self.is_resolved_mutable(cur_arg.mut_ty, current_span)?
                     {
                         self.unify_sub_or_same_type(
                             cur_arg.ty,
@@ -895,10 +901,10 @@ impl UnifiedTypeInference {
                         sub_or_same,
                         active,
                     )?;
-                    // A mutable argument is also written back, so its type is invariant.
+                    // As for functions, write-back depends on the actual callee's access,
+                    // not on the expected contract permitting mutable access.
                     if sub_or_same != SameType
-                        && (self.is_resolved_mutable(cur_arg.mut_ty)
-                            || self.is_resolved_mutable(exp_arg.mut_ty))
+                        && self.is_resolved_mutable(cur_arg.mut_ty, current_span)?
                     {
                         self.unify_sub_or_same_type(
                             cur_arg.ty,
@@ -2552,6 +2558,165 @@ mod never_tests {
                 )
                 .is_err()
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod callable_subtyping_tests {
+    use super::*;
+    use crate::{
+        compiler::error::CompilationErrorImpl,
+        std::{logic::bool_type, math::int_type},
+        types::effects::{PrimitiveEffect::Fallible, effect},
+    };
+
+    fn accepting(
+        arg: Type,
+        mutable: impl Into<MutType>,
+        effects: EffType,
+        subscript: bool,
+    ) -> Type {
+        let args = vec![FnArgType::new(arg, mutable.into())];
+        if subscript {
+            Type::subscript_type(SubscriptType::new(
+                args,
+                Type::unit(),
+                Some(SubscriptMemberType::new(
+                    effects,
+                    SubscriptResultConvention::AddressorPlace,
+                )),
+                None,
+            ))
+        } else {
+            Type::function_type(FnType::new(args, Type::unit(), effects))
+        }
+    }
+
+    fn relates(current: Type, expected: Type, relation: SubOrSameType) -> bool {
+        let span = Location::new_synthesized();
+        UnifiedTypeInference::default()
+            .unify_sub_or_same_type(
+                current,
+                span,
+                expected,
+                span,
+                relation,
+                &mut FxHashSet::default(),
+            )
+            .is_ok()
+    }
+
+    #[test]
+    fn callable_subtyping_matches_read_write_model_and_is_transitive() {
+        // A finite interpretation independent of structural comparison: bits stand
+        // for observable values/behaviors. The callback sets contain a divergent
+        // behavior, then an integer-returning one, then a failing one.
+        let arguments = [
+            (Type::never(), 0_u8),
+            (int_type(), 0b00001),
+            (bool_type(), 0b00010),
+            (Type::nullary_function_by_val(Type::never()), 0b00100),
+            (Type::nullary_function_by_val(int_type()), 0b01100),
+            (
+                Type::function_by_val_with_effects([], int_type(), effect(Fallible)),
+                0b11100,
+            ),
+        ];
+        for subscript in [false, true] {
+            let mut cases = Vec::new();
+            for (argument, values) in arguments {
+                for mutable in [false, true] {
+                    for fallible in [false, true] {
+                        let effects = if fallible {
+                            effect(Fallible)
+                        } else {
+                            no_effects()
+                        };
+                        cases.push((
+                            accepting(argument, mutable, effects, subscript),
+                            values,
+                            mutable.then_some(values),
+                            fallible,
+                        ));
+                    }
+                }
+            }
+            let mut relation = vec![vec![false; cases.len()]; cases.len()];
+            for (i, &(actual, reads, writes, fails)) in cases.iter().enumerate() {
+                for (j, &(expected, inputs, outputs, may_fail)) in cases.iter().enumerate() {
+                    let can_read = inputs & !reads == 0;
+                    let can_write = writes
+                        .is_none_or(|writes| outputs.is_some_and(|outputs| writes & !outputs == 0));
+                    let modeled = can_read && can_write && (!fails || may_fail);
+                    relation[i][j] = relates(actual, expected, SubOrSameType::SubType);
+                    assert_eq!(
+                        relation[i][j], modeled,
+                        "read/write model disagrees for {actual:?} <: {expected:?}"
+                    );
+                }
+            }
+            for (i, row) in relation.iter().enumerate() {
+                assert!(row[i]);
+                for (j, &ij) in row.iter().enumerate() {
+                    for (k, &jk) in relation[j].iter().enumerate() {
+                        assert!(
+                            !ij || !jk || row[k],
+                            "non-transitive callable relation: {:?} <: {:?} <: {:?}",
+                            cases[i].0,
+                            cases[j].0,
+                            cases[k].0
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unresolved_callable_mutability_is_an_internal_error() {
+        for subscript in [false, true] {
+            let mut inference = UnifiedTypeInference::default();
+            let actual_mut = inference.mut_unification_table.new_key(None);
+            let expected_mut = inference.mut_unification_table.new_key(None);
+            let actual = accepting(
+                int_type(),
+                MutType::variable(actual_mut),
+                no_effects(),
+                subscript,
+            );
+            let expected = accepting(
+                Type::never(),
+                MutType::variable(expected_mut),
+                no_effects(),
+                subscript,
+            );
+            let span = Location::new_synthesized();
+            let error = inference
+                .unify_sub_type(actual, span, expected, span)
+                .unwrap_err();
+            assert!(matches!(
+                &*error,
+                CompilationErrorImpl::Internal { error, .. }
+                    if error == "unresolved mutability when relating types"
+            ));
+        }
+    }
+
+    #[test]
+    fn callable_mutability_coercion_does_not_weaken_equality() {
+        for subscript in [false, true] {
+            let read = accepting(int_type(), false, no_effects(), subscript);
+            let write = accepting(int_type(), true, no_effects(), subscript);
+            assert!(relates(read, write, SubOrSameType::SubType));
+            assert!(!relates(write, read, SubOrSameType::SubType));
+            for relation in [
+                SubOrSameType::SameType,
+                SubOrSameType::SameTypeWithSubEffects,
+            ] {
+                assert!(!relates(read, write, relation));
+                assert!(!relates(write, read, relation));
+            }
         }
     }
 }

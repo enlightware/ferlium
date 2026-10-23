@@ -6,7 +6,7 @@ use test_log::test;
 use indoc::indoc;
 use ustr::ustr;
 
-use crate::harness::{TestSession, int};
+use crate::harness::{TestSession, expected_array_infer, expected_tuple, int};
 use ferlium::{
     compiler::error::{CompilationErrorImpl, RuntimeErrorKind, SourceFailureKind, UnsafeFeature},
     module::{LocalImplId, id::Id},
@@ -236,6 +236,76 @@ fn effects_in_fn_type_ascription() {
         "g",
         effects(&[Fallible, Read, Write]),
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn read_only_callable_coercions_preserve_argument_variance() {
+    for reader in [
+        "read",
+        "black_box(read)",
+        "|f| read(f) + captured",
+        "readers[0]",
+    ] {
+        let source = format!(
+            "fn read(f: () -> int ! fallible) -> int {{ f() }}
+             fn widened_read() -> (&mut (() -> int ! ())) -> int {{ read }}
+             fn invoke(f: (&mut (() -> int ! ())) -> int,
+                       callback: &mut (() -> int ! ())) -> int {{ f(callback) }}
+             let captured = black_box(0);
+             let readers = [black_box(widened_read())];
+             let mut callback = || 42;
+             invoke({reader}, callback)"
+        );
+        assert_val_eq!(TestSession::new().run(&source), int(42));
+    }
+    for reader in ["effects::take_read", "black_box(effects::take_read)"] {
+        let source = format!(
+            "fn invoke(f: (&mut (() -> () ! ())) -> (),
+                       callback: &mut (() -> () ! ())) {{ f(callback) }}
+             let mut callback = || ();
+             invoke({reader}, callback);
+             42"
+        );
+        assert_val_eq!(TestSession::new().run(&source), int(42));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn read_only_callable_coercions_preserve_heap_arguments() {
+    for reader in ["first", "black_box(first)"] {
+        let source = format!(
+            "fn first(values: [int]) -> int {{ values[0] }}
+             fn invoke(reader: (&mut [int]) -> int, values: &mut [int]) -> int {{ reader(values) }}
+             let mut values = [7, 8];
+             let snapshot = values;
+             let observed = invoke({reader}, values);
+             values[0] = 9;
+             (observed, values, snapshot)"
+        );
+        assert_val_eq!(
+            TestSession::new().run(&source),
+            expected_tuple([
+                int(7),
+                expected_array_infer([int(9), int(8)]),
+                expected_array_infer([int(7), int(8)]),
+            ])
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn writing_callable_coercions_preserve_argument_invariance() {
+    let source = "fn replace(f: &mut (() -> int ! fallible)) { f = || [1][1]; }
+                  fn invoke(f: (&mut (() -> int ! ())) -> (),
+                            callback: &mut (() -> int ! ())) { f(callback) }
+                  let mut callback = || 42;
+                  invoke(replace, callback)";
+    TestSession::new()
+        .fail_compilation(source)
+        .expect_invalid_effect_dependency(effect(PrimitiveEffect::Fallible), no_effects());
 }
 
 #[test]

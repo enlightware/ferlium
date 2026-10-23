@@ -198,28 +198,17 @@ impl RuntimeTypes {
                         .zip(b.arguments.iter().copied())
                         .collect()
                 }
-                // Effects are erased, but argument access modes remain part of the contract.
-                (Function(a), Function(b))
-                    if a.args.len() == b.args.len()
-                        && a.args
-                            .iter()
-                            .zip(&b.args)
-                            .all(|(a, b)| a.mut_ty == b.mut_ty) =>
-                {
-                    a.args
-                        .iter()
-                        .zip(&b.args)
-                        .map(|(a, b)| (a.ty, b.ty))
-                        .chain([(a.ret, b.ret)])
-                        .collect()
-                }
-                (Subscript(a), Subscript(b))
-                    if a.args.len() == b.args.len()
-                        && a.args
-                            .iter()
-                            .zip(&b.args)
-                            .all(|(a, b)| a.mut_ty == b.mut_ty) =>
-                {
+                // Stored callable views may differ in effects and argument access modes.
+                // Static typing checks their compatibility; dispatch uses the actual entry's
+                // conventions. These annotations do not change the uniform callable storage.
+                (Function(a), Function(b)) if a.args.len() == b.args.len() => a
+                    .args
+                    .iter()
+                    .zip(&b.args)
+                    .map(|(a, b)| (a.ty, b.ty))
+                    .chain([(a.ret, b.ret)])
+                    .collect(),
+                (Subscript(a), Subscript(b)) if a.args.len() == b.args.len() => {
                     // A subscript can expose fewer members or a widened result convention.
                     // Dispatch checks the selected entry's actual protocol.
                     a.args
@@ -1302,7 +1291,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             if parameter.kind == ParameterKind::Dictionary || parameter.is_value() {
                 continue;
             }
-            // for_call checks runtime type identities; callable effect annotations are erased.
+            // for_call checks storage type identities, erasing callable effects/access modes.
             let pointer_result = parameter.kind == ParameterKind::Return
                 && body.result_convention() == CallResultConvention::ADDRESSOR_PLACE;
             if self.memory.is_pointer_slot(argument.place()?)? != pointer_result {
@@ -2714,14 +2703,23 @@ mod tests {
         assert!(types.bind(variable, seconds, env).is_err());
         assert_eq!(types.resolve(variable), meters);
 
-        let callable = |mutable| {
+        let callable = |argument, mutable| {
             Type::function_type(FnType::new_mut_resolved(
-                [(ScalarKind::Int.ty(), mutable)],
+                [(argument, mutable)],
                 Type::unit(),
                 Default::default(),
             ))
         };
-        assert!(types.bind(callable(false), callable(true), env).is_err());
+        let read = callable(ScalarKind::Int.ty(), false);
+        let write = callable(ScalarKind::Int.ty(), true);
+        // This is a storage check, not permission to coerce a writing callable
+        // to a read-only contract. Static subtyping still rejects that direction.
+        types.bind(read, write, env).unwrap();
+        types.bind(write, read, env).unwrap();
+        assert!(same_storage_type(read, write));
+        let different = callable(ScalarKind::Bool.ty(), false);
+        assert!(types.bind(read, different, env).is_err());
+        assert!(!same_storage_type(read, different));
     }
 
     #[test]

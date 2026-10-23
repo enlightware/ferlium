@@ -4599,6 +4599,30 @@ fn first_class_subscript_value_captures_hidden_evidence() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn read_only_subscript_coercions_preserve_argument_variance() {
+    for accessor in ["first", "black_box(first)"] {
+        let source = format!(
+            "subscript first(slot: (int, () -> int ! fallible)) -> int {{
+                 ref {{ let result = slot.0; yield result }}
+             }}
+             fn answer() -> int {{ 42 }}
+             fn read_with(accessor) -> (int, int) {{
+                 let mut slot = (7, answer);
+                 let observed = slot->[accessor];
+                 (observed, slot.1())
+             }}
+             let accessor = {accessor};
+             read_with(accessor)"
+        );
+        assert_val_eq!(
+            run_experimental_subscript_source(&source),
+            expected_tuple([int(7), int(42)])
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn first_class_subscript_value_passes_captured_hidden_evidence() {
     let value = run_experimental_subscript_source(indoc! { r#"
             subscript cell<T>(slot: &mut T) -> T

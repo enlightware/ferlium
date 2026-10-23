@@ -13,6 +13,33 @@ type, trait, mutability, and effect constraints belong to that language-specific
 The framework's principal-type guarantees depend on conditions on the domain and solver;
 citing HM(X) does not establish those guarantees for every implementation choice below.
 
+## Publication policy
+
+Type subtyping and effect inclusion follow the same design choice: retain directional constraints
+while inferring a body, then publish a scheme in the existing language, without residual subtype
+or effect-inclusion bounds. Existing trait constraints remain part of schemes. Preserving principal
+types across publication boundaries is not a goal; readable signatures and a simpler scheme
+representation take precedence over retaining every valid typing.
+
+Publication may conservatively strengthen constraints through eligible polarity-based substitutions
+and by merging related inference variables. Every original obligation must then hold for **every
+instantiation allowed by the published scheme**, under its environment and declared constraints.
+Finding one satisfying assignment is insufficient. Reject publication if its choices cannot be
+validated; never silently discard a bound. Rigid parameters, captured variables, invariance, and
+trait obligations restrict the choices. This strengthening belongs at publication, not in eager
+constraint propagation, where it could reintroduce order dependence.
+
+For types, `fn choose(c, f, g) { if c { f } else { g } }` can publish `(bool, a, a) -> a`
+instead of retaining subtype bounds between three separate variables. Call-site subtyping can
+still join `() -> Never` and `() -> int` at a fresh `a`. Some generality is lost, however:
+invariant containers can prevent call-site widening from recovering distinctions merged at
+publication. The policy accepts that limitation; validation preserves soundness, not completeness
+or principal types. Order independence of publication still needs its own validation.
+
+This policy is already implemented for [effects](#publication). Applying it to retained type bounds
+is planned work: the Never soundness fix does not implement the bounds solver or its publication
+procedure. The two solvers need different reduction rules, but share this publication contract.
+
 ## Type relations
 
 The structural solver in `src/types/type_inference/unify.rs` uses three relations:
@@ -23,10 +50,11 @@ The structural solver in `src/types/type_inference/unify.rs` uses three relation
 | `SameTypeWithSubEffects` | Equal type structure and mutability, with directional callable effects. |
 | `SameType` | Exact equality, including nested callable effects and mutability. |
 
-Function subtyping is contravariant in arguments and covariant in results and effects. Mutable
-arguments must also support writing back, so their types are checked in both directions. Named
-type arguments use exact equality: without variance analysis, a parameter might occur in an
-argument or mutable position in its definition.
+Function subtyping is contravariant in arguments and covariant in results and effects. An argument
+the actual callee may mutate requires a mutable contract and an invariant type. Read-only arguments
+remain contravariant even when the expected contract permits mutation. The same rules apply to
+subscript arguments. Named type arguments use exact equality: without variance analysis, a parameter
+might occur in an argument or mutable position in its definition.
 
 Type variables are normalized through the unification table before comparing structure. Recursive
 types are compared with an active set of ordered type pairs and their relation; a comparison under
@@ -43,6 +71,10 @@ For an unresolved inference variable `a`, `Never <: a` imposes no restriction; a
 can determine its type. Conversely, `a <: Never` and equality with `Never` bind `a` to `Never`.
 Defaulting unconstrained diverging returns and unused variant payloads remains a separate step
 with its own eligibility checks. Bottom is neither an inference wildcard nor a universal default.
+
+This does not yet make joins of callable values order independent: with `diverge: () -> Never`
+and `one: () -> int`, a local initialized by `if c { one } else { diverge }` is rejected, while
+the reverse branch order compiles; the planned bounds solver addresses this limitation.
 
 Value returns, annotations, and match arms use directional compatibility. Structural projections,
 trait identities, and invariant type positions retain structural equality. A place-returning or
@@ -136,8 +168,8 @@ bounds determine it; only facts are baked into rewritten constraints.
 
 ### Publication
 
-Published schemes carry no effect constraints, so the solution is encoded by substitution, using
-three documented approximations:
+Following the shared [publication policy](#publication-policy), published schemes carry no effect
+constraints. The solution is encoded by substitution, using three documented approximations:
 
 - **Ceilings**: a variable bounded above, directly or through the variables it flows into, takes
   the largest row its ceilings allow (their intersection).

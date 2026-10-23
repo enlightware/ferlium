@@ -93,7 +93,9 @@ use subscript::PhysicalSubscriptCatalog;
 pub(crate) use subscript::{PhysicalSubscriptDefinition, PhysicalSubscriptMember};
 use transport::Transports;
 
-/// Effect annotations do not distinguish stored values, including nested callable signatures.
+/// Callable effects and argument access modes do not distinguish stored values,
+/// including nested signatures. Static typing checks access permissions; callable
+/// entries use a uniform pointer ABI and retain their actual parameter conventions.
 pub(super) fn same_storage_type(left: Type, right: Type) -> bool {
     if left == right {
         return true;
@@ -124,22 +126,12 @@ pub(super) fn same_storage_type(left: Type, right: Type) -> bool {
             {
                 pending.extend(a.arguments.iter().copied().zip(b.arguments.iter().copied()))
             }
-            (Function(a), Function(b))
-                if a.args.len() == b.args.len()
-                    && a.args
-                        .iter()
-                        .zip(&b.args)
-                        .all(|(a, b)| a.mut_ty == b.mut_ty) =>
-            {
+            (Function(a), Function(b)) if a.args.len() == b.args.len() => {
                 pending.extend(a.args.iter().zip(&b.args).map(|(a, b)| (a.ty, b.ty)));
                 pending.push((a.ret, b.ret));
             }
             (Subscript(a), Subscript(b))
                 if a.args.len() == b.args.len()
-                    && a.args
-                        .iter()
-                        .zip(&b.args)
-                        .all(|(a, b)| a.mut_ty == b.mut_ty)
                     && a.ref_member.as_ref().map(|m| m.result_convention)
                         == b.ref_member.as_ref().map(|m| m.result_convention)
                     && a.mut_member.as_ref().map(|m| m.result_convention)

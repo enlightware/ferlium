@@ -544,6 +544,7 @@ secures the lifetime of all its transitive prerequisites without copying their e
 Every first-class callable uses the same outer `{ descriptor_index: u32, env_ptr: target_pointer }`
 layout as [dictionary evidence](#dictionary-evidence). Its environment ownership follows the
 function or subscript contract below.
+Effects and argument access modes do not change this stored representation.
 
 ## Functions and closures
 

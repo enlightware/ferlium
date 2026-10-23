@@ -3077,6 +3077,63 @@ fn never_type() {
     );
 }
 
+// Pending subtype-bounds solver target; currently expected to fail.
+// See doc/plans/subtype-bounds.md. Keep out of independent backend commits.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn never_callable_joins_are_independent_of_contributor_order() {
+    for body in [
+        "let f = if false { diverge } else { one }; f()",
+        "let f = if true { one } else { diverge }; f()",
+        "let fs = [diverge, one]; fs[1]()",
+        "let fs = [one, diverge]; fs[0]()",
+        "choose(false)()",
+        "choose_reversed(true)()",
+    ] {
+        let source = format!(
+            "fn diverge() {{ loop {{}} }}
+            fn one() -> int {{ 1 }}
+            fn choose(c) {{ if c {{ return diverge }}; return one }}
+            fn choose_reversed(c) {{ if c {{ return one }}; return diverge }}
+            {body}"
+        );
+        assert_val_eq!(TestSession::new().run(&source), int(1));
+    }
+    assert_val_eq!(
+        TestSession::new().run(
+            "fn diverge() { loop {} }
+         fn choose(c, f) { if c { diverge } else { f } }
+         (choose(false, || 1)(), choose(false, || true)())"
+        ),
+        tuple!(int(1), bool(true))
+    );
+}
+
+// Pending subtype-bounds solver target; currently expected to fail.
+// See doc/plans/subtype-bounds.md. Keep out of independent backend commits.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn never_callable_ascriptions_expose_the_expected_value_type() {
+    assert_val_eq!(
+        TestSession::new().run(
+            "fn read(x: int) -> int { x } let f = (read: (&mut int) -> int); let mut x = 7; f(x)"
+        ),
+        int(7)
+    );
+    assert_val_eq!(
+        TestSession::new().run("fn set(x: &mut _) { (x: int) = 9; } let mut x = 7; set(x); x"),
+        int(9)
+    );
+    for body in [
+        "let mut f = (diverge: () -> int); f = one; f()",
+        "let mut f: () -> int = diverge; f = one; f()",
+        "let f = if true { one } else { (diverge: () -> int) }; f()",
+    ] {
+        let source = format!("fn diverge() {{ loop {{}} }} fn one() -> int {{ 1 }} {body}");
+        assert_val_eq!(TestSession::new().run(&source), int(1));
+    }
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn never_flows_into_value_contexts_without_losing_effects() {
@@ -3088,6 +3145,10 @@ fn never_flows_into_value_contexts_without_losing_effects() {
         "fn stop() { abort() } let f: () -> int = stop; f()",
         "fn stop() { abort() } fn invoke(f: () -> int) -> int { f() } invoke(stop)",
         "fn f() -> int { loop { break abort() } } f()",
+        // Pending subtype-bounds solver targets; currently expected to fail.
+        "let fs = [abort]; fs[0]()",
+        "let fs = (abort,); fs.0()",
+        "let f = if true { abort } else { abort }; f()",
     ] {
         assert_eq!(
             TestSession::new().fail_run(source),
