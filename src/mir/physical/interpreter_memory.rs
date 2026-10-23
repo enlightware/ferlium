@@ -1727,7 +1727,7 @@ impl Memory {
             return Err(invalid("expected buffer allocation base"));
         }
         let address = self.member(base, index)?;
-        if address.offset != offset || address.ty != ty {
+        if address.offset != offset || !same_storage_type(address.ty, ty) {
             return Err(invalid("buffer element offset mismatch"));
         }
         Ok(address)
@@ -3561,6 +3561,42 @@ mod tests {
         memory.clear(owner).unwrap();
         memory.restore(0);
         memory.check_runtime_ownership().unwrap();
+    }
+
+    #[test]
+    fn physical_buffer_elements_erase_callable_effects() {
+        use crate::types::{
+            effects::{PrimitiveEffect::Fallible, effect, no_effects},
+            r#type::FnType,
+        };
+
+        let module = Module::new(ModuleId::from_index(0), Path::single_str("memory_test"));
+        let modules = Default::default();
+        let env = ModuleEnv::new(&module, &modules);
+        let stored = Type::function_type(FnType::new_by_val([], Type::unit(), effect(Fallible)));
+        let erased = Type::function_type(FnType::new_by_val([], Type::unit(), no_effects()));
+        let different =
+            Type::function_type(FnType::new_by_val([], ScalarKind::Int.ty(), no_effects()));
+        for (stored, erased, different) in [
+            (stored, erased, different),
+            (
+                Type::tuple(vec![stored]),
+                Type::tuple(vec![erased]),
+                Type::tuple(vec![different]),
+            ),
+        ] {
+            let mut memory = Memory::default();
+            memory.prepare_type(stored, &env).unwrap();
+            let layout = memory.shape(stored).unwrap().layout;
+            let base = memory
+                .allocate_sequence(stored, layout.size(), layout.align(), 1, None)
+                .unwrap();
+            let slot = memory.sequence_element(base, 0, 0, erased).unwrap();
+            assert_eq!(slot, memory.member(base, 0).unwrap());
+            // Equal callable layouts do not erase differences in their value types.
+            assert!(memory.sequence_element(base, 0, 0, different).is_err());
+            memory.deallocate(base).unwrap();
+        }
     }
 
     #[test]
