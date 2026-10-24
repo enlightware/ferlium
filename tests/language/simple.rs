@@ -4110,6 +4110,25 @@ fn callable_bounds_wait_for_numeric_trait_output_defaulting() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn numeric_default_waits_for_pending_upper_bound() {
+    let prefix = r#"
+        trait Make<Self |-> Output> { fn make(value: Self) -> Output; }
+        impl Make for <Self = int |-> Output = float> {
+            fn make(value: int) -> float { 2.0 }
+        }
+    "#;
+    // Defaulting the producer's separate input unlocks the float upper bound.
+    // Defaulting the other literal to int first would reject this valid join.
+    for branches in ["if c { 1 } else { make(1) }", "if c { make(1) } else { 1 }"] {
+        let source = format!(
+            "{prefix} fn run(c: bool) {{ let value = {branches}; () }} run(true); run(false)"
+        );
+        assert_val_eq!(TestSession::new().run(&source), unit());
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn shared_trait_input_defaults_in_function_bodies() {
     let prefix = r#"
         trait Make<Self |-> Output> { fn make(value: Self) -> Output; }

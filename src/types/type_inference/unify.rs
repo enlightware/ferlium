@@ -15,6 +15,7 @@ use super::{
     effect_solver::{EffectSolver, EffectSolverSnapshot},
     evidence_uses::{EvidenceUses, GivenId},
     expr::TypeInference,
+    ground_bounds::is_maximal,
     selection::SelectionStats,
     type_bounds::{TypeBound, TypeBounds},
 };
@@ -653,6 +654,18 @@ impl UnifiedTypeInference {
                     .entry(expected_ty)
                     .or_insert(current_span);
                 Ok(())
+            }
+            (_, Variable(var)) if sub_or_same == SubType && is_maximal(current_ty) => {
+                // This is incorporation, not selection: no other supertype is
+                // possible, even after instantiating invariant named arguments.
+                self.unify_type_variable(
+                    var,
+                    expected_span,
+                    current_ty,
+                    current_span,
+                    true,
+                    SameType,
+                )
             }
             (Variable(_), _) | (_, Variable(_))
                 if sub_or_same == SubType && expected_ty != Type::never() =>

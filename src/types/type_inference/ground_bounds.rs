@@ -13,7 +13,7 @@
 use std::mem;
 
 use crate::{
-    FxHashMap,
+    FxHashMap, FxHashSet,
     parser::location::Location,
     types::{
         effects::EffType,
@@ -26,6 +26,49 @@ use crate::{
 };
 
 use super::unify::UnifiedTypeInference;
+
+/// A sufficient, substitution-stable condition for `ty <: a` to force `a = ty`.
+/// Named parameters (including effects) are invariant. Other products preserve
+/// their constructor and are maximal when every covariant child is maximal.
+/// Callables and bottom can widen; unknown leaves must remain undecided.
+pub(super) fn is_maximal(ty: Type) -> bool {
+    let kind = ty.data();
+    match &*kind {
+        TypeKind::Named(_) => return true,
+        TypeKind::Native(native) if native.arguments.is_empty() => return true,
+        TypeKind::Variable(_)
+        | TypeKind::Never
+        | TypeKind::Function(_)
+        | TypeKind::Subscript(_) => {
+            return false;
+        }
+        _ => {}
+    }
+    let mut pending = Vec::new();
+    kind.for_each_inner_type(|child| pending.push(child));
+    drop(kind);
+    if pending.is_empty() {
+        return true;
+    }
+    let mut visited = FxHashSet::from_iter([ty]);
+    while let Some(child) = pending.pop() {
+        if !visited.insert(child) {
+            continue;
+        }
+        let kind = child.data();
+        match &*kind {
+            TypeKind::Named(_) => {}
+            TypeKind::Variable(_)
+            | TypeKind::Never
+            | TypeKind::Function(_)
+            | TypeKind::Subscript(_) => {
+                return false;
+            }
+            _ => kind.for_each_inner_type(|child| pending.push(child)),
+        }
+    }
+    true
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum BoundOperation {
@@ -460,6 +503,48 @@ mod tests {
 
     fn bound(left: Type, right: Type, operation: BoundOperation) -> Option<Type> {
         ground_bound(left, right, operation).unwrap()
+    }
+
+    #[test]
+    fn maximal_bounds_preserve_invariant_unknowns_and_recursive_shapes() {
+        use crate::std::array::array_type;
+        let unknown = Type::variable_id(0);
+        for ty in [
+            int_type(),
+            Type::unit(),
+            array_type(unknown),
+            array_type(Type::nullary_function_by_val(Type::never())),
+            Type::tuple([int_type(), bool_type()]),
+            recursive(&[int_type(), bool_type()]),
+        ] {
+            assert!(is_maximal(ty), "{ty:?}");
+        }
+        for ty in [
+            unknown,
+            Type::never(),
+            Type::nullary_function_by_val(int_type()),
+            Type::tuple([unknown]),
+            Type::tuple([Type::never()]),
+            recursive(&[int_type(), Type::never()]),
+        ] {
+            assert!(!is_maximal(ty), "{ty:?}");
+        }
+        let span = Location::new_synthesized();
+        let mut inference = UnifiedTypeInference::new_with_ty_vars(2);
+        let snapshot = inference.snapshot();
+        inference
+            .unify_sub_type(array_type(unknown), span, Type::variable_id(1), span)
+            .unwrap();
+        assert_eq!(
+            inference.substitute_in_type(Type::variable_id(1)),
+            array_type(unknown)
+        );
+        assert_eq!(inference.substitute_in_type(unknown), unknown);
+        inference.rollback_to(snapshot);
+        assert_eq!(
+            inference.substitute_in_type(Type::variable_id(1)),
+            Type::variable_id(1)
+        );
     }
 
     #[test]

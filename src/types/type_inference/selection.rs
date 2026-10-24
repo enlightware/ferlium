@@ -48,6 +48,27 @@ mod tests {
     use crate::std::{logic::bool_type, math::int_type};
 
     #[test]
+    fn discharged_bounds_are_restored_by_speculative_rollback() {
+        let span = Location::new_synthesized();
+        let var = Type::variable_id(0);
+        let mut inference = UnifiedTypeInference::new_with_ty_vars(1);
+        inference
+            .unify_sub_type(var, span, int_type(), span)
+            .unwrap();
+        let snapshot = inference.snapshot();
+        inference
+            .unify_same_type(var, span, Type::never(), span)
+            .unwrap();
+        inference.propagate_type_bounds().unwrap();
+        assert_eq!(inference.bounds.relations().count(), 0);
+        inference.rollback_to(snapshot);
+        inference
+            .unify_same_type(var, span, bool_type(), span)
+            .unwrap();
+        assert!(inference.propagate_type_bounds().is_err());
+    }
+
+    #[test]
     fn selected_bounds_hold_for_every_remaining_model_instantiation() {
         let domain = [
             (Type::never(), 0_u8),
@@ -208,7 +229,8 @@ mod tests {
                         int_type()
                     );
                 }
-                assert_eq!(inference.selection_stats.selections, count as usize);
+                // The first root is forced immediately by its maximal lower bound.
+                assert_eq!(inference.selection_stats.selections, count as usize - 1);
                 assert!(inference.selection_stats.normalizations <= 2);
                 assert!(
                     !inference
@@ -227,7 +249,10 @@ mod tests {
         for (a, b) in [
             (Type::variable_id(0), Type::variable_id(1)),
             (Type::variable_id(1), Type::variable_id(2)),
-            (int_type(), Type::variable_id(1)),
+            (
+                Type::nullary_function_by_val(Type::never()),
+                Type::variable_id(1),
+            ),
         ] {
             inference.unify_sub_type(a, span, b, span).unwrap();
         }
@@ -414,9 +439,10 @@ impl UnifiedTypeInference {
             }
             progress = true;
             self.selection_stats.structural_comparisons += work.len();
-            for bound in work {
+            for bound in &work {
                 self.unify_sub_type(bound.lower, bound.lower_span, bound.upper, bound.upper_span)?;
             }
+            self.bounds.discharge_checked(&work);
         }
     }
 

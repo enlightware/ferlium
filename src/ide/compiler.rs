@@ -1127,7 +1127,9 @@ mod tests {
             .iter()
             .find(|diagnostic| diagnostic.file == SRC_NAME)
             .expect("the invalid addition should have a source diagnostic");
-        assert_eq!((diagnostic.from, diagnostic.to), (7, 8));
+        // The known string input makes addition fail at `+`. Its UTF-16
+        // position differs from its byte position because of the emoji.
+        assert_eq!((diagnostic.from, diagnostic.to), (5, 6));
 
         let annotation_source = "let a = \"😀\"; let b = 1; b";
         assert!(compiler.compile(annotation_source).is_none());

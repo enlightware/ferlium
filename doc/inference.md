@@ -38,7 +38,7 @@ or principal types. Order independence of publication still needs its own valida
 
 The type and [effect](#publication) solvers implement this contract with different reduction rules.
 Type publication selects representable joins and meets, and may strengthen remaining relationships
-to equal type structure. It rechecks the original bounds after these choices. Explicit type
+to equal type structure. Every original bound must remain satisfied after these choices. Explicit type
 parameters must remain distinct and polymorphic. Ferlium has no top type or general union/intersection
 constructors, so joins such as `int` with `bool` can fail.
 

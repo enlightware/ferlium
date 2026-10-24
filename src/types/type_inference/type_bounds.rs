@@ -14,7 +14,10 @@ use crate::{
     FxHashMap, FxHashSet,
     graph::{Node, find_strongly_connected_components},
     parser::location::Location,
-    types::r#type::{Type, TypeVar},
+    types::{
+        r#type::{Type, TypeVar},
+        type_like::TypeLike,
+    },
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,6 +45,9 @@ impl TypeBounds {
     /// carry the endpoint contributors, rather than the intermediate variable's
     /// span, so a conflict still identifies its two source requirements.
     pub fn insert(&mut self, bound: TypeBound) -> bool {
+        if bound.lower == bound.upper {
+            return false;
+        }
         let key = (bound.lower, bound.upper);
         if !self.seed_keys.insert(key) {
             return false;
@@ -103,8 +109,8 @@ impl TypeBounds {
         }
     }
 
-    /// Equality changes both representatives and nested terms. Rebuild from all
-    /// original seeds, never from a cache of previously successful comparisons.
+    /// Equality changes both representatives and nested terms. Rebuild from the
+    /// remaining seeds, never from a cache of successful symbolic comparisons.
     /// The caller drains and checks structural work after every rebuild.
     pub fn normalize(&mut self, mut normalize: impl FnMut(Type) -> Type) -> bool {
         let seeds: Vec<_> = self
@@ -128,6 +134,38 @@ impl TypeBounds {
 
     pub fn take_structural(&mut self) -> Vec<TypeBound> {
         mem::take(&mut self.structural)
+    }
+
+    /// Forget successfully checked immutable pairs. They cannot change under
+    /// later substitutions, and concrete endpoints never connect propagation
+    /// paths. Symbolic pairs must stay, including those with only effect vars.
+    pub fn discharge_checked(&mut self, checked: &[TypeBound]) {
+        let ground: FxHashSet<_> = checked
+            .iter()
+            .filter(|bound| bound.lower.is_constant() && bound.upper.is_constant())
+            .map(|bound| (bound.lower, bound.upper))
+            .collect();
+        if ground.is_empty() {
+            return;
+        }
+        self.seeds
+            .retain(|bound| !ground.contains(&(bound.lower, bound.upper)));
+        for (lower, upper) in ground {
+            self.seed_keys.remove(&(lower, upper));
+            self.relations.remove(&(lower, upper));
+            if let Some(incoming) = self.incoming.get_mut(&upper) {
+                incoming.retain(|ty| *ty != lower);
+                if incoming.is_empty() {
+                    self.incoming.remove(&upper);
+                }
+            }
+            if let Some(outgoing) = self.outgoing.get_mut(&lower) {
+                outgoing.retain(|ty| *ty != upper);
+                if outgoing.is_empty() {
+                    self.outgoing.remove(&lower);
+                }
+            }
+        }
     }
 
     pub fn relations(&self) -> impl Iterator<Item = &TypeBound> {
@@ -203,8 +241,45 @@ mod tests {
     }
 
     #[test]
+    fn type_bounds_discharge_only_immutable_checked_pairs() {
+        use crate::types::{
+            effects::{EffType, EffectVar},
+            r#type::FnType,
+        };
+        let lower = Type::nullary_function_by_val(Type::never());
+        let upper = Type::nullary_function_by_val(int_type());
+        let effectful = Type::function_type(FnType::new(
+            vec![],
+            int_type(),
+            EffType::single_variable(EffectVar::new(0)),
+        ));
+        let symbolic = Type::nullary_function_by_val(variable(1));
+        let mut bounds = TypeBounds::default();
+        bounds.insert(edge(lower, variable(0)));
+        bounds.insert(edge(variable(0), upper));
+        bounds.insert(edge(upper, effectful));
+        bounds.insert(edge(symbolic, upper));
+        let work = bounds.take_structural();
+        bounds.discharge_checked(&work);
+        let pairs: FxHashSet<_> = bounds.relations().map(|b| (b.lower, b.upper)).collect();
+        assert!(!pairs.contains(&(lower, upper)));
+        assert!(pairs.contains(&(lower, variable(0))));
+        assert!(pairs.contains(&(variable(0), upper)));
+        assert!(pairs.contains(&(upper, effectful)));
+        assert!(pairs.contains(&(symbolic, upper)));
+        // A future equality must still schedule the symbolic obligations again.
+        bounds.normalize(|ty| if ty == symbolic { upper } else { ty });
+        assert!(
+            bounds
+                .take_structural()
+                .iter()
+                .any(|b| b.upper == effectful)
+        );
+    }
+
+    #[test]
     fn type_bounds_derived_relations_are_sound_in_finite_model() {
-        // Retaining all seeds means solution equivalence alone cannot detect a
+        // Retaining input obligations means solution equivalence alone cannot detect a
         // missing consequence. Reachability completeness is tested separately.
         // Three variable assignments over an independent finite subtype model:
         // Never, int, bool, () -> Never, () -> int. Model points denote sets of
