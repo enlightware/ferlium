@@ -3,7 +3,7 @@
 
 use std::mem;
 
-use super::unify::UnifiedTypeInference;
+use super::{tables::Revision, unify::UnifiedTypeInference};
 use crate::{
     FxHashMap,
     format::FormatWith,
@@ -26,13 +26,29 @@ use crate::{
 pub type InstSubst = (TypeInstSubst, EffectsInstSubst);
 
 impl UnifiedTypeInference {
-    /// Substitute the remaining constraints using the current unification tables,
-    /// storing the normalized constraints back into self.
+    fn constraint_normalization_revision(&self) -> (Revision, Revision, Revision, Revision) {
+        (
+            self.ty_unification_table.revision(),
+            self.mut_unification_table.revision(),
+            self.effects.substitution_revision(),
+            self.remaining_ty_constraints.revision(),
+        )
+    }
+
+    /// Substitute and deduplicate only when equalities, effect substitution or
+    /// the constraint vector changed. Revisions are invalidation tokens, not
+    /// evidence of semantic progress for defaulting.
     pub fn normalize_remaining_constraints(&mut self) {
-        let mut constraints = mem::take(&mut self.remaining_ty_constraints);
+        if self.constraints_normalized_at == Some(self.constraint_normalization_revision()) {
+            self.selection_stats.skipped_constraint_normalizations += 1;
+            return;
+        }
+        self.selection_stats.performed_constraint_normalizations += 1;
+        let mut constraints = mem::take(&mut *self.remaining_ty_constraints);
         self.substitute_in_constraints_in_place(&mut constraints);
         self.deduplicate_constraints_in_place(&mut constraints);
-        self.remaining_ty_constraints = constraints;
+        *self.remaining_ty_constraints = constraints;
+        self.constraints_normalized_at = Some(self.constraint_normalization_revision());
     }
 
     /// Borrow the remaining constraints. Call `normalize_remaining_constraints`
@@ -43,7 +59,7 @@ impl UnifiedTypeInference {
 
     /// Extract the remaining constraints from self.
     pub fn take_constraints(&mut self) -> Vec<PubTypeConstraint> {
-        let mut constraints = mem::take(&mut self.remaining_ty_constraints);
+        let mut constraints = mem::take(&mut *self.remaining_ty_constraints);
         for constraint in &mut constraints {
             constraint.set_origin(Default::default());
         }
@@ -380,7 +396,7 @@ impl UnifiedTypeInference {
         } else {
             log::trace!("Type constraints after unification:");
             if !self.remaining_ty_constraints.is_empty() {
-                for constraint in &self.remaining_ty_constraints {
+                for constraint in self.remaining_ty_constraints.iter() {
                     log::trace!("  {}", constraint.format_with(&module_env));
                 }
             }
@@ -495,6 +511,128 @@ mod tests {
         parser::location::Location,
         types::effects::{EffType, Effect, PrimitiveEffect},
     };
+
+    #[test]
+    fn constraint_normalization_observes_effect_publication() {
+        use crate::{
+            module::{LocalTraitId, ModuleId, TraitId},
+            types::type_scheme::PubTypeConstraint,
+        };
+        let mut inference = UnifiedTypeInference::default();
+        let span = Location::new_synthesized();
+        let effect = EffType::single_variable(inference.fresh_effect_var());
+        let ceiling = EffType::single_primitive(PrimitiveEffect::Read);
+        inference
+            .add_effect_dep(&effect, span, &ceiling, span)
+            .unwrap();
+        let constraint = |output| {
+            PubTypeConstraint::new_have_trait(
+                TraitId::new(ModuleId::new(0), LocalTraitId::new(0)),
+                vec![],
+                vec![],
+                vec![output],
+                span,
+            )
+        };
+        inference
+            .remaining_ty_constraints
+            .push(constraint(effect.clone()));
+        inference.normalize_remaining_constraints();
+        assert_eq!(inference.remaining_constraints(), &[constraint(effect)]);
+        inference.effects.finalize().unwrap();
+        inference.normalize_remaining_constraints();
+        assert_eq!(inference.remaining_constraints(), &[constraint(ceiling)]);
+    }
+
+    #[test]
+    fn constraint_normalization_revisions_cover_inputs_and_substitutions() {
+        use crate::{
+            module::{LocalTraitId, ModuleId, TraitId},
+            std::{logic::bool_type, math::int_type},
+            types::{
+                mutability::{MutType, MutVal},
+                r#type::{FnArgType, FnType, Type},
+                type_scheme::PubTypeConstraint,
+            },
+        };
+        let mut inference = UnifiedTypeInference::new_with_ty_vars(2);
+        let span = Location::new_synthesized();
+        let effect = EffType::single_variable(inference.fresh_effect_var());
+        let mut_var = inference.mut_unification_table.new_key(None);
+        let callable = Type::function_type(FnType::new(
+            vec![FnArgType {
+                ty: Type::variable_id(0),
+                mut_ty: MutType::variable(mut_var),
+            }],
+            Type::variable_id(1),
+            effect.clone(),
+        ));
+        // Public constraints are normalized only after mutability is resolved.
+        inference
+            .mut_unification_table
+            .unify_var_value(mut_var, Some(MutVal::constant()))
+            .unwrap();
+        let constraint = |ty| {
+            PubTypeConstraint::new_have_trait(
+                TraitId::new(ModuleId::new(0), LocalTraitId::new(0)),
+                vec![ty],
+                vec![],
+                vec![],
+                span,
+            )
+        };
+        inference
+            .remaining_ty_constraints
+            .push(constraint(callable));
+        inference.normalize_remaining_constraints();
+        let first = inference.constraints_normalized_at;
+        inference.fresh_type_var(); // allocation cannot affect an existing term
+        inference.lookup_type_var(crate::types::r#type::TypeVar::new(0));
+        inference.normalize_remaining_constraints();
+        assert_eq!(inference.constraints_normalized_at, first);
+
+        inference
+            .unify_same_type(Type::variable_id(0), span, int_type(), span)
+            .unwrap();
+        inference.normalize_remaining_constraints();
+        assert_ne!(inference.constraints_normalized_at, first);
+        let expected = inference.substitute_in_type(callable);
+        assert_eq!(inference.remaining_constraints(), &[constraint(expected)]);
+
+        let before_effect = inference.constraints_normalized_at;
+        inference
+            .unify_same_effect(effect, span, EffType::empty(), span)
+            .unwrap();
+        inference.normalize_remaining_constraints();
+        assert_ne!(inference.constraints_normalized_at, before_effect);
+        let expected = inference.substitute_in_type(callable);
+        assert_eq!(inference.remaining_constraints(), &[constraint(expected)]);
+
+        // Replacing with the same length must invalidate, even without a binding.
+        inference.remaining_ty_constraints[0] = constraint(Type::variable_id(0));
+        inference.normalize_remaining_constraints();
+        assert_eq!(inference.remaining_constraints(), &[constraint(int_type())]);
+        inference
+            .remaining_ty_constraints
+            .push(constraint(int_type()));
+        inference.normalize_remaining_constraints();
+        assert_eq!(inference.remaining_constraints().len(), 1);
+
+        // A failed speculative branch must not reuse its normalization stamp.
+        let snapshot = inference.snapshot();
+        inference
+            .unify_same_type(Type::variable_id(1), span, bool_type(), span)
+            .unwrap();
+        inference.normalize_remaining_constraints();
+        let speculative = inference.constraints_normalized_at;
+        inference.rollback_to(snapshot);
+        inference.normalize_remaining_constraints();
+        assert_ne!(inference.constraints_normalized_at, speculative);
+        assert_eq!(
+            inference.normalize_type(Type::variable_id(1)),
+            Type::variable_id(1)
+        );
+    }
 
     #[test]
     fn recursive_effect_substitution_reaches_a_fixed_point() {

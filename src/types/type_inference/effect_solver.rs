@@ -6,7 +6,7 @@ use std::{borrow::Borrow, mem};
 use ena::unify::{InPlace, InPlaceUnificationTable, NoError, Snapshot, UnifyValue};
 use ustr::Ustr;
 
-use super::constraints::EffectConstraint;
+use super::{constraints::EffectConstraint, tables::Revision};
 use crate::{
     FxHashMap, FxHashSet,
     compiler::error::InternalCompilationError,
@@ -176,6 +176,7 @@ pub(crate) struct EffectSolver {
     deferred_inclusions: Vec<EffectInclusion>,
     publishing: bool,
     publication: Option<PublicationView>,
+    substitution_revision: Revision,
     /// The declared names of rigid variables, for diagnostics.
     rigid_names: FxHashMap<EffectVar, Ustr>,
 }
@@ -188,8 +189,19 @@ struct PublicationView {
 }
 
 impl EffectSolver {
-    pub(crate) fn fresh_var(&mut self) -> EffectVar {
+    // Every change to classes or the substitution view invalidates both caches.
+    // The revision is monotonic across rollback; it is not solver progress.
+    fn invalidate_publication(&mut self) {
+        self.substitution_revision.advance();
         self.publication = None;
+    }
+
+    pub(super) fn substitution_revision(&self) -> Revision {
+        self.substitution_revision
+    }
+
+    pub(crate) fn fresh_var(&mut self) -> EffectVar {
+        self.invalidate_publication();
         let var = self.table.new_key(EffectClass::default());
         self.table.union_value(
             var,
@@ -203,7 +215,7 @@ impl EffectSolver {
 
     /// A declared effect variable: an atom, which stands for any row and is never solved.
     pub(crate) fn fresh_rigid_var(&mut self, name: Option<Ustr>) -> EffectVar {
-        self.publication = None;
+        self.invalidate_publication();
         let var = self.table.new_key(EffectClass {
             rigid: true,
             ..EffectClass::default()
@@ -236,7 +248,7 @@ impl EffectSolver {
         self.table.rollback_to(snapshot.table);
         self.deferred_inclusions = snapshot.deferred_inclusions;
         self.publishing = snapshot.publishing;
-        self.publication = None;
+        self.invalidate_publication();
     }
 
     pub(super) fn add_same_constraint(
@@ -478,7 +490,7 @@ impl EffectSolver {
     pub(super) fn finalize(&mut self) -> Result<(), InternalCompilationError> {
         self.expand_pending_dependencies()?;
         self.publishing = true;
-        self.publication = None;
+        self.invalidate_publication();
         self.validate_publication()
     }
 
@@ -634,7 +646,7 @@ impl EffectSolver {
     pub(super) fn set_finalized(&mut self, finalized: bool) {
         if self.publishing != finalized {
             self.publishing = finalized;
-            self.publication = None;
+            self.invalidate_publication();
         }
     }
 
@@ -669,7 +681,7 @@ impl EffectSolver {
     }
 
     fn update_class(&mut self, root: EffectVar, delta: EffectClass) {
-        self.publication = None;
+        self.invalidate_publication();
         self.table.union_value(root, delta);
     }
 
@@ -1005,7 +1017,7 @@ impl EffectSolver {
             self.add_effect_inclusion(a_row.clone(), span, b_row.clone(), span, origin.clone())?;
             return self.add_effect_inclusion(b_row, span, a_row, span, origin);
         }
-        self.publication = None;
+        self.invalidate_publication();
         self.table.union(a_root, b_root);
         let root = self.table.find(a_root);
         let origin = EffectConstraintOrigin::Inference;

@@ -10,6 +10,8 @@
 
 use std::{collections::VecDeque, mem};
 
+use super::tables::Revision;
+
 use crate::{
     FxHashMap, FxHashSet,
     graph::{Node, find_strongly_connected_components},
@@ -33,6 +35,7 @@ pub(super) struct TypeBound {
 #[derive(Clone, Debug, Default)]
 pub(super) struct TypeBounds {
     seeds: Vec<TypeBound>,
+    normalized_at: Option<(Revision, Revision)>,
     seed_keys: FxHashSet<(Type, Type)>,
     relations: FxHashMap<(Type, Type), TypeBound>,
     incoming: FxHashMap<Type, Vec<Type>>,
@@ -52,6 +55,7 @@ impl TypeBounds {
         if !self.seed_keys.insert(key) {
             return false;
         }
+        self.normalized_at = None;
         self.seeds.push(bound);
         self.propagate(bound);
         true
@@ -107,6 +111,20 @@ impl TypeBounds {
                 self.structural.push(bound);
             }
         }
+    }
+
+    /// Skip unchanged inputs; `None` means skipped, `Some` reports graph changes.
+    pub fn normalize_if_changed(
+        &mut self,
+        revision: (Revision, Revision),
+        normalize: impl FnMut(Type) -> Type,
+    ) -> Option<bool> {
+        if self.normalized_at == Some(revision) {
+            return None;
+        }
+        let changed = self.normalize(normalize);
+        self.normalized_at = Some(revision);
+        Some(changed)
     }
 
     /// Equality changes both representatives and nested terms. Rebuild from the
@@ -238,6 +256,39 @@ mod tests {
 
     fn variable(index: u32) -> Type {
         Type::variable(TypeVar::new(index))
+    }
+
+    #[test]
+    fn type_bounds_normalization_skips_only_unchanged_inputs() {
+        let mut bounds = TypeBounds::default();
+        bounds.insert(edge(variable(0), variable(1)));
+        let first = Revision::default();
+        let mut next = first;
+        next.advance();
+        assert_eq!(
+            bounds.normalize_if_changed((first, first), |ty| ty),
+            Some(false)
+        );
+        assert_eq!(
+            bounds.normalize_if_changed((first, first), |_| panic!("unchanged")),
+            None
+        );
+        bounds.insert(edge(variable(1), int_type()));
+        let mut visits = 0;
+        bounds.normalize_if_changed((first, first), |ty| {
+            visits += 1;
+            ty
+        });
+        assert!(visits > 0);
+        // Mutability alone must invalidate, as must ordinary type equalities.
+        for revision in [(first, next), (next, next)] {
+            visits = 0;
+            bounds.normalize_if_changed(revision, |ty| {
+                visits += 1;
+                ty
+            });
+            assert!(visits > 0);
+        }
     }
 
     #[test]

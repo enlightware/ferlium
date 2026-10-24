@@ -36,6 +36,10 @@ pub(super) enum SelectionPhase {
 #[derive(Debug, Default)]
 pub(super) struct SelectionStats {
     normalizations: usize,
+    performed_bounds_normalizations: usize,
+    skipped_bounds_normalizations: usize,
+    pub(super) performed_constraint_normalizations: usize,
+    pub(super) skipped_constraint_normalizations: usize,
     scc_passes: usize,
     structural_comparisons: usize,
     products: usize,
@@ -46,6 +50,69 @@ pub(super) struct SelectionStats {
 mod tests {
     use super::*;
     use crate::std::{logic::bool_type, math::int_type};
+
+    #[test]
+    fn immutable_bound_comparisons_survive_rebuilds_and_rollback() {
+        let mut inference = UnifiedTypeInference::new_with_ty_vars(2);
+        let span = Location::new_synthesized();
+        let lower = Type::nullary_function_by_val(Type::never());
+        let upper = Type::nullary_function_by_val(int_type());
+        let a = Type::variable_id(0);
+        let b = Type::variable_id(1);
+        for (lower, upper) in [(lower, a), (a, upper), (b, a)] {
+            inference.unify_sub_type(lower, span, upper, span).unwrap();
+        }
+        let snapshot = inference.snapshot();
+        inference.propagate_type_bounds().unwrap();
+        assert!(inference.checked_bounds.contains(&(lower, upper)));
+        let comparisons = inference.selection_stats.structural_comparisons;
+        inference.unify_same_type(b, span, lower, span).unwrap();
+        inference.propagate_type_bounds().unwrap();
+        assert_eq!(
+            inference.selection_stats.structural_comparisons,
+            comparisons
+        );
+        inference.rollback_to(snapshot);
+        inference.propagate_type_bounds().unwrap();
+        assert_eq!(
+            inference.selection_stats.structural_comparisons,
+            comparisons
+        );
+        inference
+            .unify_same_type(b, span, Type::nullary_function_by_val(bool_type()), span)
+            .unwrap();
+        assert!(inference.propagate_type_bounds().is_err());
+        assert_eq!(inference.checked_bounds.len(), 1);
+    }
+
+    #[test]
+    fn symbolic_effect_comparisons_are_not_cached() {
+        use crate::types::{effects::PrimitiveEffect, r#type::FnType};
+        let mut inference = UnifiedTypeInference::default();
+        let span = Location::new_synthesized();
+        let effect = EffType::single_variable(inference.fresh_effect_var());
+        let lower = Type::function_type(FnType::new(vec![], int_type(), effect.clone()));
+        let upper = Type::nullary_function_by_val(int_type());
+        inference.bounds.insert(TypeBound {
+            lower,
+            lower_span: span,
+            upper,
+            upper_span: span,
+        });
+        let snapshot = inference.snapshot();
+        inference.propagate_type_bounds().unwrap();
+        assert!(inference.checked_bounds.is_empty());
+        inference.rollback_to(snapshot);
+        inference
+            .unify_same_effect(
+                effect,
+                span,
+                EffType::single_primitive(PrimitiveEffect::Write),
+                span,
+            )
+            .unwrap();
+        assert!(inference.propagate_type_bounds().is_err());
+    }
 
     #[test]
     fn discharged_bounds_are_restored_by_speculative_rollback() {
@@ -418,9 +485,18 @@ impl UnifiedTypeInference {
                 }
             }
             let mut bounds = mem::take(&mut self.bounds);
-            let normalized = bounds.normalize(|ty| self.normalize_type(ty));
-            self.selection_stats.normalizations += usize::from(normalized);
-            progress |= normalized;
+            let revision = (
+                self.ty_unification_table.revision(),
+                self.mut_unification_table.revision(),
+            );
+            match bounds.normalize_if_changed(revision, |ty| self.normalize_type(ty)) {
+                Some(changed) => {
+                    self.selection_stats.performed_bounds_normalizations += 1;
+                    self.selection_stats.normalizations += usize::from(changed);
+                    progress |= changed;
+                }
+                None => self.selection_stats.skipped_bounds_normalizations += 1,
+            }
             self.bounds = bounds;
             self.selection_stats.scc_passes += 1;
             let equalities = self.bounds.equalities();
@@ -438,9 +514,16 @@ impl UnifiedTypeInference {
                 return Ok(progress);
             }
             progress = true;
-            self.selection_stats.structural_comparisons += work.len();
             for bound in &work {
+                let pair = (bound.lower, bound.upper);
+                if self.checked_bounds.contains(&pair) {
+                    continue;
+                }
+                self.selection_stats.structural_comparisons += 1;
                 self.unify_sub_type(bound.lower, bound.lower_span, bound.upper, bound.upper_span)?;
+                if bound.lower.is_constant() && bound.upper.is_constant() {
+                    self.checked_bounds.insert(pair);
+                }
             }
             self.bounds.discharge_checked(&work);
         }
@@ -450,7 +533,7 @@ impl UnifiedTypeInference {
         use crate::types::type_scheme::PubTypeConstraint::*;
         self.normalize_remaining_constraints();
         let mut outputs = FxHashSet::default();
-        for constraint in &self.remaining_ty_constraints {
+        for constraint in self.remaining_ty_constraints.iter() {
             match constraint {
                 HaveTrait {
                     input_tys,
@@ -524,7 +607,7 @@ impl UnifiedTypeInference {
         // existing shape may preserve unknown members, but defaulting its shape
         // would close a constructor before those members are known.
         use crate::types::type_scheme::PubTypeConstraint::*;
-        for constraint in &self.remaining_ty_constraints {
+        for constraint in self.remaining_ty_constraints.iter() {
             let (subject, output) = match constraint {
                 TupleAtIndexIs {
                     tuple_ty,

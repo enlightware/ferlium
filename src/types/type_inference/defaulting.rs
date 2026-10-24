@@ -494,7 +494,7 @@ impl UnifiedTypeInference {
     ) -> Result<(), InternalCompilationError> {
         loop {
             self.normalize_remaining_constraints();
-            let constraints = mem::take(&mut self.remaining_ty_constraints);
+            let constraints = mem::take(&mut *self.remaining_ty_constraints);
             let old_remaining_constraints = constraints.iter().collect::<FxHashSet<_>>();
             // Defaulting reuses the main constraint aggregation path so late
             // projection and ADT constraints are canonicalized consistently.
@@ -511,7 +511,7 @@ impl UnifiedTypeInference {
                 arena,
             )?;
             self.substitute_in_constraints_in_place(&mut remaining);
-            self.remaining_ty_constraints = remaining;
+            *self.remaining_ty_constraints = remaining;
             self.normalize_remaining_constraints();
             let bounds_progress = self.propagate_type_bounds()?
                 | self.select_lower_bounds(false, SelectionPhase::Inference)?;

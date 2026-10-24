@@ -7,7 +7,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use ena::unify::{InPlace, InPlaceUnificationTable, Snapshot};
+use ena::unify::{InPlace, Snapshot};
 use ustr::Ustr;
 
 use super::{
@@ -17,6 +17,7 @@ use super::{
     expr::TypeInference,
     ground_bounds::is_maximal,
     selection::SelectionStats,
+    tables::{Revision, RevisionedConstraints, RevisionedTable},
     type_bounds::{TypeBound, TypeBounds},
 };
 use crate::{
@@ -84,16 +85,19 @@ pub(crate) struct UnifiedTypeInferenceSnapshot {
 #[derive(Default, Debug)]
 pub struct UnifiedTypeInference {
     pub(super) selection_stats: SelectionStats,
+    pub(super) constraints_normalized_at: Option<(Revision, Revision, Revision, Revision)>,
+    /// Only immutable successful pairs; deliberately survives speculative rollback.
+    pub(super) checked_bounds: FxHashSet<(Type, Type)>,
     pub(super) bounds: TypeBounds,
     pub(super) bottom_sources: FxHashMap<Type, Location>,
     pub(super) publication_inputs: Vec<Type>,
     ty_coverage_constraints: Vec<(Location, Type, Vec<LiteralValue>)>,
     pub(super) given_constraints: Vec<PubTypeConstraint>,
     pub(super) evidence_uses: EvidenceUses,
-    pub(super) ty_unification_table: InPlaceUnificationTable<TyVarKey>,
+    pub(super) ty_unification_table: RevisionedTable<TyVarKey>,
     /// Remaining constraints that cannot be solved, will be part of the resulting type scheme
-    pub(super) remaining_ty_constraints: Vec<PubTypeConstraint>,
-    pub(super) mut_unification_table: InPlaceUnificationTable<MutVarKey>,
+    pub(super) remaining_ty_constraints: RevisionedConstraints,
+    pub(super) mut_unification_table: RevisionedTable<MutVarKey>,
     pub(super) effects: EffectSolver,
     /// Constraints of the implementations that resolved trait applications, still to solve.
     obligations: Vec<PubTypeConstraint>,
@@ -329,15 +333,17 @@ impl UnifiedTypeInference {
         let effect_constraints = effects.drain_constraints();
         let mut unified_ty_inf = UnifiedTypeInference {
             selection_stats: SelectionStats::default(),
+            constraints_normalized_at: None,
+            checked_bounds: FxHashSet::default(),
             bounds: TypeBounds::default(),
             bottom_sources: FxHashMap::default(),
             publication_inputs: Vec::new(),
             ty_coverage_constraints,
             given_constraints,
             evidence_uses,
-            ty_unification_table,
-            remaining_ty_constraints: vec![],
-            mut_unification_table,
+            ty_unification_table: ty_unification_table.into(),
+            remaining_ty_constraints: RevisionedConstraints::default(),
+            mut_unification_table: mut_unification_table.into(),
             effects,
             obligations: vec![],
         };
@@ -440,9 +446,9 @@ impl UnifiedTypeInference {
 
         // Bounds and public constraints share one fixed point. Trait outputs
         // remain blockers until that pass has either resolved or deferred them.
-        unified_ty_inf.remaining_ty_constraints = remaining_constraints;
+        *unified_ty_inf.remaining_ty_constraints = remaining_constraints;
         unified_ty_inf.resolve_remaining_constraints_to_fixed_point(trait_solver, arena)?;
-        let mut remaining_constraints = mem::take(&mut unified_ty_inf.remaining_ty_constraints);
+        let mut remaining_constraints = mem::take(&mut *unified_ty_inf.remaining_ty_constraints);
 
         if !variant_layout_constraints.is_empty() {
             unified_ty_inf.substitute_in_constraints_in_place(&mut variant_layout_constraints);
@@ -469,7 +475,7 @@ impl UnifiedTypeInference {
         unified_ty_inf.effects.expand_pending_dependencies()?;
 
         // FIXME: think whether we should have an intermediate struct without the remaining_constraints in it.
-        unified_ty_inf.remaining_ty_constraints = remaining_constraints;
+        *unified_ty_inf.remaining_ty_constraints = remaining_constraints;
         Ok(unified_ty_inf)
     }
 
@@ -2305,7 +2311,7 @@ impl UnifiedTypeInference {
         mut observable: FxHashSet<EffectVar>,
     ) -> Result<(), InternalCompilationError> {
         self.normalize_remaining_constraints();
-        for constraint in &self.remaining_ty_constraints {
+        for constraint in self.remaining_ty_constraints.iter() {
             if !constraint.inner_ty_vars().is_empty() {
                 constraint.fill_with_inner_effect_vars(&mut observable);
             }

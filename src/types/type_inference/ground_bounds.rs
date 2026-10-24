@@ -28,7 +28,8 @@ use crate::{
 use super::unify::UnifiedTypeInference;
 
 /// A sufficient, substitution-stable condition for `ty <: a` to force `a = ty`.
-/// Named parameters (including effects) are invariant. Other products preserve
+/// Named parameters (including effects) are invariant in `unify_type_structure`.
+/// Revisit this predicate if named variance is introduced. Other products preserve
 /// their constructor and are maximal when every covariant child is maximal.
 /// Callables and bottom can widen; unknown leaves must remain undecided.
 pub(super) fn is_maximal(ty: Type) -> bool {
