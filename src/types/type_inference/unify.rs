@@ -15,6 +15,8 @@ use super::{
     effect_solver::{EffectSolver, EffectSolverSnapshot},
     evidence_uses::{EvidenceUses, GivenId},
     expr::TypeInference,
+    selection::SelectionStats,
+    type_bounds::{TypeBound, TypeBounds},
 };
 use crate::{
     FxHashMap, FxHashSet,
@@ -22,7 +24,7 @@ use crate::{
         ADTAccessType, InfiniteTypeKind, InternalCompilationError, InvalidRecordFieldContext,
         MutabilityMustBeContext, MutabilityMustBeWhat,
     },
-    hir::NodeArena,
+    hir::{NodeArena, value::LiteralValue},
     internal_compilation_error,
     module::{LocalFunctionId, TraitId},
     parser::location::Location,
@@ -67,6 +69,8 @@ enum GivenMatch {
 }
 
 pub(crate) struct UnifiedTypeInferenceSnapshot {
+    bounds: TypeBounds,
+    bottom_sources: FxHashMap<Type, Location>,
     evidence_uses: EvidenceUses,
     ty_unification_table: Snapshot<InPlace<TyVarKey>>,
     mut_unification_table: Snapshot<InPlace<MutVarKey>>,
@@ -75,9 +79,14 @@ pub(crate) struct UnifiedTypeInferenceSnapshot {
     obligations_len: usize,
 }
 
-/// The type inference after unification, with only public constraints remaining
+/// Equality state, retained bounds and public obligations during inference.
 #[derive(Default, Debug)]
 pub struct UnifiedTypeInference {
+    pub(super) selection_stats: SelectionStats,
+    pub(super) bounds: TypeBounds,
+    pub(super) bottom_sources: FxHashMap<Type, Location>,
+    pub(super) publication_inputs: Vec<Type>,
+    ty_coverage_constraints: Vec<(Location, Type, Vec<LiteralValue>)>,
     pub(super) given_constraints: Vec<PubTypeConstraint>,
     pub(super) evidence_uses: EvidenceUses,
     pub(super) ty_unification_table: InPlaceUnificationTable<TyVarKey>,
@@ -142,10 +151,6 @@ impl ConstraintPassAggregation<'_> {
     }
 }
 
-fn constraints_equal_as_sets(left: &[PubTypeConstraint], right: &[PubTypeConstraint]) -> bool {
-    left.iter().collect::<FxHashSet<_>>() == right.iter().collect::<FxHashSet<_>>()
-}
-
 impl UnifiedTypeInference {
     pub(crate) fn given_used_by(&self, owner: LocalFunctionId, given: GivenId) -> bool {
         self.evidence_uses.used_by(owner, given)
@@ -162,7 +167,10 @@ impl UnifiedTypeInference {
         }
     }
 
-    fn deduplicate_constraints_in_place(&mut self, constraints: &mut Vec<PubTypeConstraint>) {
+    pub(super) fn deduplicate_constraints_in_place(
+        &mut self,
+        constraints: &mut Vec<PubTypeConstraint>,
+    ) {
         let mut seen = FxHashMap::<PubTypeConstraint, ConstraintOrigin>::default();
         constraints.retain(|constraint| {
             if let Some(origin) = seen.get(constraint) {
@@ -276,6 +284,8 @@ impl UnifiedTypeInference {
 
     pub(crate) fn snapshot(&mut self) -> UnifiedTypeInferenceSnapshot {
         UnifiedTypeInferenceSnapshot {
+            bounds: self.bounds.clone(),
+            bottom_sources: self.bottom_sources.clone(),
             evidence_uses: self.evidence_uses.clone(),
             ty_unification_table: self.ty_unification_table.snapshot(),
             mut_unification_table: self.mut_unification_table.snapshot(),
@@ -286,6 +296,8 @@ impl UnifiedTypeInference {
     }
 
     pub(crate) fn rollback_to(&mut self, snapshot: UnifiedTypeInferenceSnapshot) {
+        self.bounds = snapshot.bounds;
+        self.bottom_sources = snapshot.bottom_sources;
         self.evidence_uses = snapshot.evidence_uses;
         self.ty_unification_table
             .rollback_to(snapshot.ty_unification_table);
@@ -315,6 +327,11 @@ impl UnifiedTypeInference {
         } = ty_inf;
         let effect_constraints = effects.drain_constraints();
         let mut unified_ty_inf = UnifiedTypeInference {
+            selection_stats: SelectionStats::default(),
+            bounds: TypeBounds::default(),
+            bottom_sources: FxHashMap::default(),
+            publication_inputs: Vec::new(),
+            ty_coverage_constraints,
             given_constraints,
             evidence_uses,
             ty_unification_table,
@@ -384,44 +401,21 @@ impl UnifiedTypeInference {
             }
         }
 
-        // Then, solve all type equalities. Subtyping between two unknown types is deferred until
-        // one of them is known: binding it then relates their effects by inclusion, whereas
-        // binding the variables to each other would equate them.
-        let mut deferred_subtypes = Vec::new();
+        // Equality and directional constraints share generation, but unknown
+        // subtype endpoints remain in the bounds graph until selection.
         for constraint in ty_constraints {
-            use TypeConstraint::*;
             match constraint {
-                Pub(cst) => {
-                    let destination =
-                        if matches!(cst, PubTypeConstraint::VariantPayloadLayout { .. }) {
-                            &mut variant_layout_constraints
-                        } else {
-                            &mut remaining_constraints
-                        };
-                    destination.push(cst);
-                }
-                constraint if unified_ty_inf.relates_unknown_types(&constraint) => {
-                    deferred_subtypes.push(constraint);
+                TypeConstraint::Pub(cst) => {
+                    if matches!(cst, PubTypeConstraint::VariantPayloadLayout { .. }) {
+                        variant_layout_constraints.push(cst);
+                    } else {
+                        remaining_constraints.push(cst);
+                    }
                 }
                 constraint => unified_ty_inf.unify_type_relation(constraint)?,
             }
         }
-        loop {
-            let count = deferred_subtypes.len();
-            for constraint in mem::take(&mut deferred_subtypes) {
-                if unified_ty_inf.relates_unknown_types(&constraint) {
-                    deferred_subtypes.push(constraint);
-                } else {
-                    unified_ty_inf.unify_type_relation(constraint)?;
-                }
-            }
-            if deferred_subtypes.len() == count {
-                break;
-            }
-        }
-        for constraint in deferred_subtypes {
-            unified_ty_inf.unify_type_relation(constraint)?;
-        }
+        unified_ty_inf.propagate_type_bounds()?;
 
         // Then, solve all effect equalities.
         for constraint in effect_constraints {
@@ -443,64 +437,11 @@ impl UnifiedTypeInference {
 
         unified_ty_inf.normalize_given_outputs()?;
 
-        // Then, solve type coverage constraints
-        for (span, ty, values) in ty_coverage_constraints {
-            let ty = unified_ty_inf.normalize_type(ty);
-            let all_values = ty.data().all_values().ok_or_else(|| {
-                internal_compilation_error!(TypeValuesCannotBeEnumerated { span, ty })
-            })?;
-            let mut complete = true;
-            for ty_value in all_values {
-                if !values.contains(&ty_value) {
-                    complete = false;
-                    break;
-                }
-            }
-            if complete {
-                continue;
-            }
-            return Err(internal_compilation_error!(NonExhaustivePattern {
-                span,
-                ty
-            }));
-        }
-
-        // Then, solve other constraints.
-        if !remaining_constraints.is_empty() {
-            unified_ty_inf.substitute_in_constraints_in_place(&mut remaining_constraints);
-            unified_ty_inf.deduplicate_constraints_in_place(&mut remaining_constraints);
-
-            loop {
-                // Loop as long as we make progress.
-                let old_remaining_constraints = remaining_constraints;
-
-                // Aggregate same-family constraints and check incompatible ADT views.
-                let aggregation = unified_ty_inf
-                    .aggregate_constraints_for_pass(old_remaining_constraints.iter())?;
-
-                // Perform unification.
-                let constraints = aggregation
-                    .constraints
-                    .iter()
-                    .map(|constraint| constraint.as_ref())
-                    .collect::<Vec<_>>();
-                let is_ty_adt = |ty| aggregation.is_ty_adt(ty);
-                let mut new_constraints = unified_ty_inf.unify_constraint_pass(
-                    &constraints,
-                    is_ty_adt,
-                    trait_solver,
-                    arena,
-                )?;
-                unified_ty_inf.substitute_in_constraints_in_place(&mut new_constraints);
-                unified_ty_inf.deduplicate_constraints_in_place(&mut new_constraints);
-                remaining_constraints = new_constraints;
-
-                // Break if no progress was made
-                if constraints_equal_as_sets(&remaining_constraints, &old_remaining_constraints) {
-                    break;
-                }
-            }
-        }
+        // Bounds and public constraints share one fixed point. Trait outputs
+        // remain blockers until that pass has either resolved or deferred them.
+        unified_ty_inf.remaining_ty_constraints = remaining_constraints;
+        unified_ty_inf.resolve_remaining_constraints_to_fixed_point(trait_solver, arena)?;
+        let mut remaining_constraints = mem::take(&mut unified_ty_inf.remaining_ty_constraints);
 
         if !variant_layout_constraints.is_empty() {
             unified_ty_inf.substitute_in_constraints_in_place(&mut variant_layout_constraints);
@@ -531,21 +472,23 @@ impl UnifiedTypeInference {
         Ok(unified_ty_inf)
     }
 
-    /// Whether `constraint` relates two types that are both still unknown.
-    fn relates_unknown_types(&mut self, constraint: &TypeConstraint) -> bool {
-        use TypeConstraint::*;
-        let (SameTypeWithSubEffects {
-            current, expected, ..
+    /// Coverage needs the selected scrutinee type, including upper-only bounds
+    /// such as a generic input matched against boolean literals. Keep these
+    /// immutable checks until publication has resolved those bounds.
+    pub(super) fn validate_type_coverage(&mut self) -> Result<(), InternalCompilationError> {
+        for (span, ty, values) in self.ty_coverage_constraints.clone() {
+            let ty = self.normalize_type(ty);
+            let all_values = ty.data().all_values().ok_or_else(|| {
+                internal_compilation_error!(TypeValuesCannotBeEnumerated { span, ty })
+            })?;
+            if all_values.iter().any(|value| !values.contains(value)) {
+                return Err(internal_compilation_error!(NonExhaustivePattern {
+                    span,
+                    ty
+                }));
+            }
         }
-        | SubType {
-            current, expected, ..
-        }) = constraint
-        else {
-            return false;
-        };
-        let current = self.normalize_type(*current);
-        let expected = self.normalize_type(*expected);
-        current != expected && current.data().is_variable() && expected.data().is_variable()
+        Ok(())
     }
 
     /// Solve a type relation, a constraint other than a public one.
@@ -555,6 +498,19 @@ impl UnifiedTypeInference {
     ) -> Result<(), InternalCompilationError> {
         use TypeConstraint::*;
         match constraint {
+            SameType {
+                current,
+                current_span,
+                expected,
+                expected_span,
+            } => self.unify_sub_or_same_type(
+                current,
+                current_span,
+                expected,
+                expected_span,
+                SubOrSameType::SameType,
+                &mut FxHashSet::default(),
+            ),
             SameTypeWithSubEffects {
                 current,
                 current_span,
@@ -593,6 +549,23 @@ impl UnifiedTypeInference {
             expected,
             expected_span,
             SubOrSameType::SubType,
+            &mut FxHashSet::default(),
+        )
+    }
+
+    pub(crate) fn unify_same_type(
+        &mut self,
+        current: Type,
+        current_span: Location,
+        expected: Type,
+        expected_span: Location,
+    ) -> Result<(), InternalCompilationError> {
+        self.unify_sub_or_same_type(
+            current,
+            current_span,
+            expected,
+            expected_span,
+            SubOrSameType::SameType,
             &mut FxHashSet::default(),
         )
     }
@@ -673,6 +646,25 @@ impl UnifiedTypeInference {
             // even when that supertype is still unknown. Equality is different:
             // the variable cases below must bind it to Never. Likewise, a variable
             // constrained to be a subtype of Never must itself become Never.
+            (Never, Variable(_)) if sub_or_same == SubType => {
+                // Bottom imposes no restriction. Preserve only the provenance
+                // needed by eligible fallback; do not propagate trivial edges.
+                self.bottom_sources
+                    .entry(expected_ty)
+                    .or_insert(current_span);
+                Ok(())
+            }
+            (Variable(_), _) | (_, Variable(_))
+                if sub_or_same == SubType && expected_ty != Type::never() =>
+            {
+                self.bounds.insert(TypeBound {
+                    lower: current_ty,
+                    lower_span: current_span,
+                    upper: expected_ty,
+                    upper_span: expected_span,
+                });
+                Ok(())
+            }
             (Never, _) if sub_or_same == SubType => Ok(()),
             (Variable(cur), Variable(exp)) => self
                 .ty_unification_table
@@ -930,13 +922,22 @@ impl UnifiedTypeInference {
                     expected_span,
                     sub_or_same,
                 )?;
-                // Covariance of return type.
+                // An exposed mutable result permits replacement of the stored
+                // value, so its complete type (including nested effects) must
+                // agree. Forgetting mutable access still permits covariance.
+                // Unlike argument write-back, this depends on the EXPECTED
+                // capability: it controls the writes the consumer may perform.
+                let result_relation = if exp.mut_member.is_some() {
+                    SameType
+                } else {
+                    sub_or_same
+                };
                 self.unify_sub_or_same_type(
                     cur.ret,
                     current_span,
                     exp.ret,
                     expected_span,
-                    sub_or_same,
+                    result_relation,
                     active,
                 )
             }
@@ -2716,6 +2717,49 @@ mod callable_subtyping_tests {
             ] {
                 assert!(!relates(read, write, relation));
                 assert!(!relates(write, read, relation));
+            }
+        }
+    }
+
+    #[test]
+    fn subscript_mutable_results_preserve_storage_type() {
+        let narrow = Type::nullary_function_by_val(Type::never());
+        let wide = Type::nullary_function_by_val(int_type());
+        let fallible = Type::function_by_val_with_effects([], int_type(), effect(Fallible));
+        for convention in [
+            SubscriptResultConvention::AddressorPlace,
+            SubscriptResultConvention::YieldedOnce,
+        ] {
+            let member = SubscriptMemberType::new(no_effects(), convention);
+            let accessor = |ret, writable: bool| {
+                Type::subscript_type(SubscriptType::new(
+                    vec![FnArgType::new_by_val(Type::unit())],
+                    ret,
+                    Some(member.clone()),
+                    writable.then(|| member.clone()),
+                ))
+            };
+            for (narrow, wide) in [(narrow, wide), (wide, fallible)] {
+                assert!(!relates(
+                    accessor(narrow, true),
+                    accessor(wide, true),
+                    SubOrSameType::SubType
+                ));
+                assert!(!relates(
+                    accessor(narrow, true),
+                    accessor(wide, true),
+                    SubOrSameType::SameTypeWithSubEffects
+                ));
+                assert!(relates(
+                    accessor(narrow, true),
+                    accessor(wide, false),
+                    SubOrSameType::SubType
+                ));
+                assert!(relates(
+                    accessor(narrow, true),
+                    accessor(narrow, true),
+                    SubOrSameType::SubType
+                ));
             }
         }
     }

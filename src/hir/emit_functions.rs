@@ -14,9 +14,9 @@ use crate::{
         CompilationCapabilities,
         diagnostics::CompilationWarning,
         error::{
-            AttributeTarget, InternalCompilationError, InvalidAttributeKind,
-            InvalidSubscriptDefinitionKind, InvalidTraitDefinitionKind, SubscriptDefinitionSubject,
-            UnsafeFeature, UnsupportedSubscriptFeatureKind,
+            AttributeTarget, GenericParamsOwner, InternalCompilationError, InvalidAttributeKind,
+            InvalidGenericParamsKind, InvalidSubscriptDefinitionKind, InvalidTraitDefinitionKind,
+            SubscriptDefinitionSubject, UnsafeFeature, UnsupportedSubscriptFeatureKind,
         },
         lints::report_needless_returns_in_tail,
     },
@@ -1308,6 +1308,21 @@ where
     // Third pass, perform the unification.
     let mut solver = trait_solver_from_module!(output, others);
     let mut ty_inf = ty_inf.unify(&mut solver, solver_arena)?;
+    ty_inf.set_publication_inputs(
+        local_fns
+            .iter()
+            .flat_map(|id| {
+                output.functions[id.as_index()]
+                    .definition
+                    .ty_scheme
+                    .ty
+                    .args
+                    .iter()
+                    .map(|arg| arg.ty)
+            })
+            .chain(function_explicit_root_tys.iter().flatten().copied()),
+    );
+    ty_inf.prepare_type_bounds()?;
     let generated = solver.commit(
         &mut output.functions,
         &mut output.def_table,
@@ -1346,13 +1361,41 @@ where
             head_tys.extend(output_tys.iter().copied());
             let head_quantifiers = collect_ty_vars(&head_tys);
             ty_inf.normalize_remaining_constraints();
-            let head_boundary =
-                ConstraintBoundary::from_seed_ty_vars(head_quantifiers.iter().copied());
+            let head_boundary = ty_inf.constraint_boundary(head_quantifiers.iter().copied());
             let orphan_constraints =
                 head_boundary.owned_inaccessible_constraints(ty_inf.remaining_constraints());
             let scope = DefaultingScope::from_constraints(&orphan_constraints);
             let mut solver = trait_solver_from_module!(output, others);
             ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, solver_arena)?;
+            ty_inf.finalize_type_bounds(&mut solver, solver_arena)?;
+            let generated = solver.commit(
+                &mut output.functions,
+                &mut output.def_table,
+                &mut pending_functions,
+            );
+            elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
+            // Publication can reveal product layouts that were unknown during
+            // the pre-defaulting ownership pass. Activate their evidence now.
+            let module_env = ModuleEnv::new(output, others);
+            for id in &local_fns {
+                let mut ty_inf = ty_inf.constraint_owner_scope(*id);
+                for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
+                    let descr = pending_functions
+                        .get_mut(&function_id)
+                        .expect("pending function body");
+                    ty_inf.resolve_local_storage_and_activate_value_constraints(
+                        &descr.code.arena,
+                        descr.code.entry_node_id,
+                        &mut descr.locals,
+                        value_trait_id,
+                        module_env,
+                    );
+                }
+            }
+            let mut solver = trait_solver_from_module!(output, others);
+            ty_inf.finalize_type_bounds(&mut solver, solver_arena)?;
+            ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, solver_arena)?;
+            ty_inf.finalize_type_bounds(&mut solver, solver_arena)?;
             let generated = solver.commit(
                 &mut output.functions,
                 &mut output.def_table,
@@ -1725,41 +1768,67 @@ where
 
         // Default orphan constraints for each function into the unification tables.
         for (id, explicit_root_tys) in local_fns.iter().zip(function_explicit_root_tys.iter()) {
-            let descr = &output.functions[id.as_index()];
-            let fn_ty = ty_inf.substitute_in_fn_type(&descr.definition.ty_scheme.ty);
-            let mut sig_ty_vars = fn_ty.inner_ty_vars();
-            sig_ty_vars.extend(
-                explicit_root_tys
-                    .iter()
-                    .flat_map(|ty| ty_inf.substitute_in_type(*ty).inner_ty_vars().into_iter())
-                    .collect::<Vec<_>>(),
+            let scope = function_defaulting_scope(
+                &mut ty_inf,
+                &output.functions[id.as_index()].definition.ty_scheme.ty,
+                pending_functions.get(id),
+                explicit_root_tys,
             );
-            sig_ty_vars = sig_ty_vars.into_iter().unique().collect();
-            ty_inf.normalize_remaining_constraints();
-            let sig_boundary = ConstraintBoundary::from_seed_ty_vars(sig_ty_vars.iter().copied());
-            let orphan_constraints =
-                sig_boundary.owned_inaccessible_constraints(ty_inf.remaining_constraints());
             let mut solver = trait_solver_from_module!(output, others);
-            // If the signature still exposes type variables, it defines the boundary for
-            // defaulting and body-local `None`/unit evidence must not bias it.
-            // Only functions with no remaining signature boundary can use their body root
-            // to seed the narrow unit-constructor fallback.
-            let unit_variant_seed_tys = if sig_ty_vars.is_empty() {
-                pending_functions
-                    .get(id)
-                    .map(|function| {
-                        UnifiedTypeInference::collect_unit_variant_seed_types(
-                            &function.code.arena,
-                            function.code.entry_node_id,
-                        )
-                    })
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-            let scope = DefaultingScope::from_constraints(&orphan_constraints)
-                .with_unit_variant_seed_tys(unit_variant_seed_tys);
             ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, solver_arena)?;
+            let generated = solver.commit(
+                &mut output.functions,
+                &mut output.def_table,
+                &mut pending_functions,
+            );
+            elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
+        }
+        // All function scopes have had their eligible defaults applied before
+        // any pending output component is conservatively published.
+        {
+            let mut solver = trait_solver_from_module!(output, others);
+            ty_inf.finalize_type_bounds(&mut solver, solver_arena)?;
+            let generated = solver.commit(
+                &mut output.functions,
+                &mut output.def_table,
+                &mut pending_functions,
+            );
+            elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
+            // Publication can reveal product layouts that were unknown during
+            // the pre-defaulting ownership pass. Activate their evidence now.
+            let module_env = ModuleEnv::new(output, others);
+            for id in &local_fns {
+                let mut ty_inf = ty_inf.constraint_owner_scope(*id);
+                for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
+                    let descr = pending_functions
+                        .get_mut(&function_id)
+                        .expect("pending function body");
+                    ty_inf.resolve_local_storage_and_activate_value_constraints(
+                        &descr.code.arena,
+                        descr.code.entry_node_id,
+                        &mut descr.locals,
+                        value_trait_id,
+                        module_env,
+                    );
+                }
+            }
+            let mut solver = trait_solver_from_module!(output, others);
+            ty_inf.finalize_type_bounds(&mut solver, solver_arena)?;
+            // Publication can identify a pending output with its own input,
+            // making an already-local numeric or unit default eligible. Retry
+            // using current signature boundaries, then validate the choices.
+            for (id, explicit_root_tys) in local_fns.iter().zip(&function_explicit_root_tys) {
+                let scope = function_defaulting_scope(
+                    &mut ty_inf,
+                    &output.functions[id.as_index()].definition.ty_scheme.ty,
+                    pending_functions.get(id),
+                    explicit_root_tys,
+                );
+                if !scope.is_empty() {
+                    ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, solver_arena)?;
+                }
+            }
+            ty_inf.finalize_type_bounds(&mut solver, solver_arena)?;
             let generated = solver.commit(
                 &mut output.functions,
                 &mut output.def_table,
@@ -1846,6 +1915,26 @@ where
         {
             let function = input.function;
             let descr = &output.functions[id.as_index()];
+            let mut declared_roots = FxHashSet::default();
+            for ((name, span), root) in function
+                .generic_params
+                .type_params()
+                .iter()
+                .zip(explicit_root_tys)
+            {
+                let resolved = ty_inf.substitute_in_type(*root);
+                if declared.is_none()
+                    && (resolved.data().as_variable().is_none() || !declared_roots.insert(resolved))
+                {
+                    return Err(internal_compilation_error!(InvalidGenericParams {
+                        owner: GenericParamsOwner::Function {
+                            name: function.name.0
+                        },
+                        kind: InvalidGenericParamsKind::RestrictedTypeParameter { name: *name },
+                        span: *span,
+                    }));
+                }
+            }
             let pending = pending_functions
                 .get(id)
                 .expect("expected pending function body");
@@ -2155,6 +2244,47 @@ pub(super) fn check_unbounds(
         }
     }
     Ok(uninstantiated_unbound)
+}
+
+/// Recompute locality after inference/publication: an explicit parameter or a
+/// signature-connected variable must never become eligible for orphan defaults.
+fn function_defaulting_scope(
+    ty_inf: &mut UnifiedTypeInference,
+    fn_ty: &FnType,
+    pending_function: Option<&PendingModuleFunction>,
+    explicit_root_tys: &[Type],
+) -> DefaultingScope {
+    let fn_ty = ty_inf.substitute_in_fn_type(fn_ty);
+    let mut sig_ty_vars = fn_ty.inner_ty_vars();
+    sig_ty_vars.extend(
+        explicit_root_tys
+            .iter()
+            .flat_map(|ty| ty_inf.substitute_in_type(*ty).inner_ty_vars().into_iter())
+            .collect::<Vec<_>>(),
+    );
+    sig_ty_vars = sig_ty_vars.into_iter().unique().collect();
+    ty_inf.normalize_remaining_constraints();
+    let sig_boundary = ty_inf.constraint_boundary(sig_ty_vars.iter().copied());
+    let orphan_constraints =
+        sig_boundary.owned_inaccessible_constraints(ty_inf.remaining_constraints());
+    // If the signature still exposes type variables, it defines the boundary for
+    // defaulting and body-local `None`/unit evidence must not bias it.
+    // Only functions with no remaining signature boundary can use their body root
+    // to seed the narrow unit-constructor fallback.
+    let unit_variant_seed_tys = if sig_ty_vars.is_empty() {
+        pending_function
+            .map(|function| {
+                UnifiedTypeInference::collect_unit_variant_seed_types(
+                    &function.code.arena,
+                    function.code.entry_node_id,
+                )
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    DefaultingScope::from_constraints(&orphan_constraints)
+        .with_unit_variant_seed_tys(unit_variant_seed_tys)
 }
 
 /// Reject functions whose published types combine two declared effect variables in one effect.

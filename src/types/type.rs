@@ -2398,7 +2398,7 @@ impl TypeKind {
     }
 
     #[inline]
-    fn for_each_inner_type(&self, mut f: impl FnMut(Type)) {
+    pub(crate) fn for_each_inner_type(&self, mut f: impl FnMut(Type)) {
         use TypeKind::*;
         match self {
             Native(g) => {

@@ -168,11 +168,16 @@ impl GenericParamsOwner {
 pub enum InvalidGenericParamsKind {
     DuplicateParam { name: Ustr },
     DuplicateEffectParam { name: Ustr },
+    RestrictedTypeParameter { name: Ustr },
 }
 
 impl InvalidGenericParamsKind {
     pub fn message(&self, owner: GenericParamsOwner) -> String {
         match self {
+            Self::RestrictedTypeParameter { name } => format!(
+                "Generic type parameter `{name}` in {} must remain independent and polymorphic",
+                owner.description()
+            ),
             Self::DuplicateParam { name } => {
                 format!(
                     "Duplicate generic type parameter `{name}` in {}",

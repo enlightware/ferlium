@@ -31,6 +31,7 @@ impl UnifiedTypeInference {
     pub fn normalize_remaining_constraints(&mut self) {
         let mut constraints = mem::take(&mut self.remaining_ty_constraints);
         self.substitute_in_constraints_in_place(&mut constraints);
+        self.deduplicate_constraints_in_place(&mut constraints);
         self.remaining_ty_constraints = constraints;
     }
 

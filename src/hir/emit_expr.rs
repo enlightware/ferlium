@@ -211,6 +211,7 @@ fn emit_expr_unsafe_inner(
         solver.allow_private_impls_from(module_id);
     }
     let mut ty_inf = ty_inf.unify(&mut solver, expr_arena)?;
+    ty_inf.prepare_type_bounds()?;
     let generated = solver.commit(
         &mut module.functions,
         &mut module.def_table,
@@ -258,6 +259,40 @@ fn emit_expr_unsafe_inner(
             .with_expr_root_ty(node_ty)
             .with_unit_variant_seed_tys(unit_variant_seed_tys);
         ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, expr_arena)?;
+        ty_inf.finalize_type_bounds(&mut solver, expr_arena)?;
+        let generated = solver.commit(
+            &mut module.functions,
+            &mut module.def_table,
+            &mut pending_functions,
+        );
+        elaborate_generated_functions(module, others, &mut pending_functions, generated)?;
+        let module_env = ModuleEnv::new(module, others);
+        for lambda_id in &lambda_functions {
+            let descr = pending_functions
+                .get_mut(lambda_id)
+                .expect("pending lambda body");
+            ty_inf.resolve_local_storage_and_activate_value_constraints(
+                &descr.code.arena,
+                descr.code.entry_node_id,
+                &mut descr.locals,
+                value_trait_id,
+                module_env,
+            );
+        }
+        ty_inf.resolve_local_storage_and_activate_value_constraints(
+            expr_arena,
+            node_id,
+            &mut locals,
+            value_trait_id,
+            module_env,
+        );
+        let mut solver = trait_solver_from_module!(module, others);
+        if let Some(module_id) = private_impl_module {
+            solver.allow_private_impls_from(module_id);
+        }
+        ty_inf.finalize_type_bounds(&mut solver, expr_arena)?;
+        ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, expr_arena)?;
+        ty_inf.finalize_type_bounds(&mut solver, expr_arena)?;
         let generated = solver.commit(
             &mut module.functions,
             &mut module.def_table,

@@ -325,12 +325,12 @@ where
 	}
 }
 
-fn hash_map_contains_entry<K, V>(collection: HashMap<K, V>, entry: HashMapEntry<K, V>) -> bool
+fn hash_map_contains_entry<K, V>(collection: HashMap<K, V>, entry: (K, V)) -> bool
 where
 	K: Value,
 	V: Value
 {
-	map_contains_key_value(collection, entry.key, entry.value)
+	map_contains_key_value(collection, entry.0, entry.1)
 }
 
 impl<K, V> Iterator for <Self = HashMapIterator<K, V> |-> Item = (K, V)>

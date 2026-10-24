@@ -13,6 +13,13 @@ use crate::{
 /// A constraint on types.
 #[derive(Debug, Clone)]
 pub enum TypeConstraint {
+    /// Storage identity, including callable effects and mutability.
+    SameType {
+        current: Type,
+        current_span: Location,
+        expected: Type,
+        expected_span: Location,
+    },
     /// Same structural type, with function effects checked directionally.
     ///
     /// This preserves independently polymorphic implicit effect variables in
@@ -38,7 +45,10 @@ impl FormatWith<ModuleEnv<'_>> for TypeConstraint {
     fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
         use TypeConstraint::*;
         match self {
-            SameTypeWithSubEffects {
+            SameType {
+                current, expected, ..
+            }
+            | SameTypeWithSubEffects {
                 current, expected, ..
             } => {
                 write!(

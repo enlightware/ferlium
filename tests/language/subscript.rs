@@ -4623,6 +4623,122 @@ fn read_only_subscript_coercions_preserve_argument_variance() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn mutable_subscript_result_cannot_widen_stored_callback() {
+    let source = indoc! { r#"
+        fn diverge() { loop {} }
+        fn answer() -> int { 42 }
+        subscript cell(slot: &mut int) {
+            mut {
+                let mut callback = diverge;
+                yield callback;
+                slot = 1;
+            }
+        }
+        fn replace_with(accessor, slot: &mut int) {
+            slot->[accessor] = answer;
+        }
+        let mut slot = 0;
+        replace_with(cell, slot);
+        slot
+    "# };
+    let error = experimental_session().fail_compilation(source);
+    assert!(matches!(
+        error.into_inner(),
+        CompilationErrorImpl::TypeMismatch { .. }
+    ));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn mutable_subscript_result_preserves_callback_effects() {
+    let source = indoc! { r#"
+        type Pure = () -> int;
+        struct Slot(Pure)
+        fn answer() -> int { 42 }
+        fn fail() -> int { abort() }
+        subscript cell(slot: &mut Slot) -> Pure {
+            ref mut { slot.0 }
+        }
+        fn replace_with(accessor, slot: &mut Slot) {
+            slot->[accessor] = fail;
+        }
+        let mut slot = Slot(answer);
+        replace_with(cell, slot);
+        ()
+    "# };
+    // This is a typing rejection, not a failure while invoking the callback.
+    experimental_session()
+        .try_compile(source)
+        .expect_err("a mutable result cannot widen stored callback effects")
+        .expect_invalid_effect_dependency(effect(PrimitiveEffect::Fallible), no_effects());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn subscript_result_widening_can_discard_mutable_access() {
+    let source = indoc! { r#"
+        type Pure = () -> int;
+        type Fallible = () -> int ! fallible;
+        struct Slot(Pure)
+        fn answer() -> int { 42 }
+        subscript cell(slot: &mut Slot) -> Pure {
+            ref mut { slot.0 }
+        }
+        fn read_with(accessor, slot: &mut Slot) -> Fallible {
+            slot->[accessor]
+        }
+        let mut slot = Slot(answer);
+        let callback = read_with(cell, slot);
+        callback()
+    "# };
+    assert_val_eq!(run_experimental_subscript_source(source), int(42));
+    let source = indoc! { r#"
+        fn diverge() { loop {} }
+        subscript cell(slot: &mut int) {
+            ref mut {
+                let mut callback = diverge;
+                yield callback;
+                slot = 1;
+            }
+        }
+        fn read_with(accessor, slot: &mut int) -> () -> int {
+            slot->[accessor]
+        }
+        let mut slot = 0;
+        let callback = read_with(cell, slot);
+        slot
+    "# };
+    assert_val_eq!(run_experimental_subscript_source(source), int(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn mutable_subscript_result_replaces_matching_callback_types() {
+    for body in [
+        "ref mut { slot.0 }",
+        "mut { let mut callback = slot.0; yield callback; slot.0 = callback; }",
+    ] {
+        for accessor in ["cell", "black_box(cell)"] {
+            let source = format!(
+                "type Pure = () -> int;
+                 struct Slot(Pure)
+                 fn answer() -> int {{ 42 }}
+                 fn replacement() -> int {{ 43 }}
+                 subscript cell(slot: &mut Slot) -> Pure {{ {body} }}
+                 fn replace_with(accessor, slot: &mut Slot) {{
+                     slot->[accessor] = replacement;
+                 }}
+                 let mut slot = Slot(answer);
+                 replace_with({accessor}, slot);
+                 (slot.0)()"
+            );
+            assert_val_eq!(run_experimental_subscript_source(&source), int(43));
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn first_class_subscript_value_passes_captured_hidden_evidence() {
     let value = run_experimental_subscript_source(indoc! { r#"
             subscript cell<T>(slot: &mut T) -> T

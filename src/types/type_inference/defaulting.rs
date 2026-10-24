@@ -5,7 +5,7 @@ use std::{mem, slice::from_ref};
 
 use itertools::Itertools;
 
-use super::{substitution::InstSubst, unify::UnifiedTypeInference};
+use super::{selection::SelectionPhase, substitution::InstSubst, unify::UnifiedTypeInference};
 use crate::{
     FxHashMap, FxHashSet,
     compiler::error::InternalCompilationError,
@@ -138,6 +138,12 @@ pub struct DefaultingScope {
 }
 
 impl DefaultingScope {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.boundary.seed_ty_vars.is_empty()
+            && self.expr_root_ty.is_none()
+            && self.unit_variant_seed_tys.is_empty()
+    }
+
     pub fn from_constraints(constraints: &[PubTypeConstraint]) -> Self {
         Self {
             boundary: ConstraintBoundary::from_constraints(constraints),
@@ -159,8 +165,16 @@ impl DefaultingScope {
         self
     }
 
-    fn boundary_constraints(&self, constraints: &[PubTypeConstraint]) -> Vec<PubTypeConstraint> {
-        self.boundary.owned_accessible_constraints(constraints)
+    fn boundary_constraints(&self, inference: &mut UnifiedTypeInference) -> Vec<PubTypeConstraint> {
+        let seeds = self
+            .boundary
+            .seed_ty_vars
+            .iter()
+            .flat_map(|var| inference.lookup_type_var(*var).inner_ty_vars())
+            .collect::<Vec<_>>();
+        inference
+            .constraint_boundary(seeds)
+            .owned_accessible_constraints(inference.remaining_constraints())
     }
 
     fn unit_default_constraints(
@@ -179,7 +193,7 @@ impl DefaultingScope {
             return Vec::new();
         }
 
-        let unit_boundary = ConstraintBoundary::from_seed_ty_vars(unit_variant_seed_ty_vars);
+        let unit_boundary = ty_inf.constraint_boundary(unit_variant_seed_ty_vars);
         let source = if boundary_constraints.is_empty() {
             remaining_constraints
         } else {
@@ -189,13 +203,58 @@ impl DefaultingScope {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct DefaultingProgressKey {
     unresolved_expr_var_count: usize,
     boundary_constraint_var_count: usize,
+    variable_solutions: Vec<Type>,
+    retained_bound_count: usize,
 }
 
 impl UnifiedTypeInference {
+    /// Signature reachability includes retained subtype relations as well as
+    /// public obligations. Otherwise delaying publication makes a generic
+    /// variable appear orphaned and eligible for numeric defaulting.
+    pub(crate) fn constraint_boundary(
+        &mut self,
+        seeds: impl IntoIterator<Item = TypeVar>,
+    ) -> ConstraintBoundary {
+        let mut neighbors = FxHashMap::<TypeVar, Vec<TypeVar>>::default();
+        let groups = self
+            .remaining_ty_constraints
+            .iter()
+            .map(|c| c.inner_ty_vars())
+            .chain(self.bounds.relations().map(|bound| {
+                bound
+                    .lower
+                    .inner_ty_vars()
+                    .into_iter()
+                    .chain(bound.upper.inner_ty_vars())
+                    .collect()
+            }));
+        for vars in groups {
+            if let Some(first) = vars.first() {
+                for var in &vars[1..] {
+                    neighbors.entry(*first).or_default().push(*var);
+                    neighbors.entry(*var).or_default().push(*first);
+                }
+            }
+        }
+        let mut reachable: FxHashSet<_> = seeds
+            .into_iter()
+            .flat_map(|var| self.normalize_type(Type::variable(var)).inner_ty_vars())
+            .collect();
+        let mut queue: Vec<_> = reachable.iter().copied().collect();
+        while let Some(var) = queue.pop() {
+            for next in neighbors.get(&var).into_iter().flatten() {
+                if reachable.insert(*next) {
+                    queue.push(*next);
+                }
+            }
+        }
+        ConstraintBoundary::from_seed_ty_vars(reachable)
+    }
+
     /// Resolve local ownership decisions and activate the `Value` constraints that are still needed.
     pub fn resolve_local_storage_and_activate_value_constraints(
         &mut self,
@@ -428,7 +487,7 @@ impl UnifiedTypeInference {
 
     /// Re-solve remaining constraints after defaulting has added new information
     /// to the unification tables. Constraints that are now solvable are removed.
-    fn resolve_remaining_constraints_to_fixed_point(
+    pub(super) fn resolve_remaining_constraints_to_fixed_point(
         &mut self,
         trait_solver: &mut TraitSolver<'_>,
         arena: &mut NodeArena,
@@ -454,11 +513,13 @@ impl UnifiedTypeInference {
             self.substitute_in_constraints_in_place(&mut remaining);
             self.remaining_ty_constraints = remaining;
             self.normalize_remaining_constraints();
+            let bounds_progress = self.propagate_type_bounds()?
+                | self.select_lower_bounds(false, SelectionPhase::Inference)?;
             let new_remaining_constraints = self
                 .remaining_ty_constraints
                 .iter()
                 .collect::<FxHashSet<_>>();
-            if new_remaining_constraints == old_remaining_constraints {
+            if !bounds_progress && new_remaining_constraints == old_remaining_constraints {
                 break;
             }
         }
@@ -509,7 +570,7 @@ impl UnifiedTypeInference {
         }
 
         // Then, collect the type variables that are invalid for variant simplification.
-        let mut invalid_ty_vars = FxHashSet::<TypeVar>::default();
+        let mut invalid_ty_vars = self.pending_default_variables();
         for constraint in constraints {
             match constraint {
                 PubTypeConstraint::TypeHasVariant { payload_ty, .. } => {
@@ -588,7 +649,7 @@ impl UnifiedTypeInference {
         let subst_constraints = self.substitute_in_constraints(constraints);
 
         // First, collect invalid type variables and Num type variables.
-        let mut invalid_ty_vars = FxHashSet::<TypeVar>::default();
+        let mut invalid_ty_vars = self.pending_default_variables();
         let mut num_ty_vars = FxHashSet::<TypeVar>::default();
         for constraint in &subst_constraints {
             if let PubTypeConstraint::HaveTrait {
@@ -706,8 +767,12 @@ impl UnifiedTypeInference {
             }
         }
 
+        let blocked = self.pending_default_variables();
         let mut progress = false;
         for ty_var in candidate_ty_vars {
+            if blocked.contains(&ty_var) {
+                continue;
+            }
             if self.lookup_type_var(ty_var).data().as_variable().is_none() {
                 continue;
             }
@@ -827,7 +892,11 @@ impl UnifiedTypeInference {
         self.normalize_remaining_constraints();
         let subst_constraints = self.remaining_constraints().to_vec();
 
+        let blocked = self.pending_default_variables();
         for ty_var in remaining_vars {
+            if blocked.contains(&ty_var) {
+                continue;
+            }
             // Only default if this variable appears in at least one remaining constraint.
             let has_constraint = subst_constraints
                 .iter()
@@ -896,9 +965,11 @@ impl UnifiedTypeInference {
         &mut self,
         scope: &DefaultingScope,
         boundary_constraints: &[PubTypeConstraint],
+        observed_variable_count: usize,
     ) -> DefaultingProgressKey {
-        // This intentionally tracks only coarse counts, not full semantic state.
-        // This currently work because any progress will remove at least one type variable.
+        // Observe solutions of variables that existed at this boundary. Trait
+        // probing can allocate fresh scratch variables on every pass without
+        // changing any live type; allocation counts are not semantic progress.
         let unresolved_expr_var_count = scope
             .expr_root_ty
             .map(|expr_root_ty| {
@@ -916,6 +987,29 @@ impl UnifiedTypeInference {
         DefaultingProgressKey {
             unresolved_expr_var_count,
             boundary_constraint_var_count,
+            variable_solutions: (0..observed_variable_count)
+                .map(|index| self.normalize_type(Type::variable(TypeVar::new(index as u32))))
+                .collect(),
+            retained_bound_count: self.bounds.relations().count() + self.bottom_sources.len(),
+        }
+    }
+
+    /// Publication can make deferred public obligations concrete. Resolve and
+    /// revalidate those consequences before exposing a scheme.
+    pub(crate) fn finalize_type_bounds(
+        &mut self,
+        trait_solver: &mut TraitSolver<'_>,
+        arena: &mut NodeArena,
+    ) -> Result<(), InternalCompilationError> {
+        loop {
+            self.publish_type_bounds()?;
+            let before: FxHashSet<_> = self.remaining_ty_constraints.iter().cloned().collect();
+            self.resolve_remaining_constraints_to_fixed_point(trait_solver, arena)?;
+            self.publish_type_bounds()?;
+            let after: FxHashSet<_> = self.remaining_ty_constraints.iter().cloned().collect();
+            if before == after {
+                return Ok(());
+            }
         }
     }
 
@@ -927,13 +1021,18 @@ impl UnifiedTypeInference {
         trait_solver: &mut TraitSolver<'_>,
         arena: &mut NodeArena,
     ) -> Result<(), InternalCompilationError> {
+        let observed_variable_count = self.ty_unification_table.len();
         loop {
+            self.prepare_type_bounds()?;
+            self.resolve_remaining_constraints_to_fixed_point(trait_solver, arena)?;
             self.normalize_remaining_constraints();
-            let boundary_constraints = scope.boundary_constraints(self.remaining_constraints());
-            let old_progress_key = self.defaulting_progress_key(scope, &boundary_constraints);
+            let boundary_constraints = scope.boundary_constraints(self);
+            let old_progress_key =
+                self.defaulting_progress_key(scope, &boundary_constraints, observed_variable_count);
 
             self.default_orphan_variants_in_constraints(&boundary_constraints)?;
             self.default_num_types_once(&boundary_constraints, trait_solver, arena)?;
+            self.propagate_type_bounds()?;
 
             let remaining_constraints = self.remaining_constraints().to_vec();
             let unit_default_constraints =
@@ -947,6 +1046,10 @@ impl UnifiedTypeInference {
             }
 
             self.resolve_remaining_constraints_to_fixed_point(trait_solver, arena)?;
+            self.prepare_type_bounds()?;
+            if scope.expr_root_ty.is_some() {
+                while self.select_lower_bounds(true, SelectionPhase::Inference)? {}
+            }
             let unconstrained_progress = scope
                 .expr_root_ty
                 .map(|expr_root_ty| {
@@ -955,8 +1058,9 @@ impl UnifiedTypeInference {
                 .unwrap_or(false);
 
             self.normalize_remaining_constraints();
-            let boundary_constraints = scope.boundary_constraints(self.remaining_constraints());
-            let new_progress_key = self.defaulting_progress_key(scope, &boundary_constraints);
+            let boundary_constraints = scope.boundary_constraints(self);
+            let new_progress_key =
+                self.defaulting_progress_key(scope, &boundary_constraints, observed_variable_count);
 
             if !unconstrained_progress && new_progress_key == old_progress_key {
                 break;
@@ -965,6 +1069,7 @@ impl UnifiedTypeInference {
 
         self.normalize_remaining_constraints();
 
+        self.log_bounds_stats();
         Ok(())
     }
 }

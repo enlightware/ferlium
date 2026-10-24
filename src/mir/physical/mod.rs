@@ -96,39 +96,59 @@ use transport::Transports;
 /// Callable effects and argument access modes do not distinguish stored values,
 /// including nested signatures. Static typing checks access permissions; callable
 /// entries use a uniform pointer ABI and retain their actual parameter conventions.
+/// A Never leaf within a callable signature can also have a wider usable view;
+/// it describes a call contract, not a value stored in the callable descriptor.
+/// Never outside a signature remains distinct from every inhabited storage type.
 pub(super) fn same_storage_type(left: Type, right: Type) -> bool {
     if left == right {
         return true;
     }
-    let mut pending = vec![(left, right)];
+    let mut pending = vec![(left, right, false)];
     let mut seen = FxHashSet::default();
-    while let Some((left, right)) = pending.pop() {
-        if left == right || !seen.insert((left, right)) {
+    while let Some((left, right, callable)) = pending.pop() {
+        if left == right || !seen.insert((left, right, callable)) {
+            continue;
+        }
+        if callable && (left == Type::never() || right == Type::never()) {
             continue;
         }
         let left = left.data();
         let right = right.data();
         use TypeKind::*;
         match (&*left, &*right) {
-            (Tuple(a), Tuple(b)) if a.len() == b.len() => {
-                pending.extend(a.iter().copied().zip(b.iter().copied()))
-            }
+            (Tuple(a), Tuple(b)) if a.len() == b.len() => pending.extend(
+                a.iter()
+                    .copied()
+                    .zip(b.iter().copied())
+                    .map(|(a, b)| (a, b, callable)),
+            ),
             (Record(a), Record(b)) | (Variant(a), Variant(b))
                 if a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.0 == b.0) =>
             {
-                pending.extend(a.iter().zip(b).map(|(a, b)| (a.1, b.1)))
+                pending.extend(a.iter().zip(b).map(|(a, b)| (a.1, b.1, callable)))
             }
-            (Named(a), Named(b)) if a.def == b.def && a.params.len() == b.params.len() => {
-                pending.extend(a.params.iter().copied().zip(b.params.iter().copied()))
-            }
+            (Named(a), Named(b)) if a.def == b.def && a.params.len() == b.params.len() => pending
+                .extend(
+                    a.params
+                        .iter()
+                        .copied()
+                        .zip(b.params.iter().copied())
+                        .map(|(a, b)| (a, b, callable)),
+                ),
             (Native(a), Native(b))
                 if a.bare_ty == b.bare_ty && a.arguments.len() == b.arguments.len() =>
             {
-                pending.extend(a.arguments.iter().copied().zip(b.arguments.iter().copied()))
+                pending.extend(
+                    a.arguments
+                        .iter()
+                        .copied()
+                        .zip(b.arguments.iter().copied())
+                        .map(|(a, b)| (a, b, callable)),
+                )
             }
             (Function(a), Function(b)) if a.args.len() == b.args.len() => {
-                pending.extend(a.args.iter().zip(&b.args).map(|(a, b)| (a.ty, b.ty)));
-                pending.push((a.ret, b.ret));
+                pending.extend(a.args.iter().zip(&b.args).map(|(a, b)| (a.ty, b.ty, true)));
+                pending.push((a.ret, b.ret, true));
             }
             (Subscript(a), Subscript(b))
                 if a.args.len() == b.args.len()
@@ -137,8 +157,8 @@ pub(super) fn same_storage_type(left: Type, right: Type) -> bool {
                     && a.mut_member.as_ref().map(|m| m.result_convention)
                         == b.mut_member.as_ref().map(|m| m.result_convention) =>
             {
-                pending.extend(a.args.iter().zip(&b.args).map(|(a, b)| (a.ty, b.ty)));
-                pending.push((a.ret, b.ret));
+                pending.extend(a.args.iter().zip(&b.args).map(|(a, b)| (a.ty, b.ty, true)));
+                pending.push((a.ret, b.ret, true));
             }
             _ => return false,
         }

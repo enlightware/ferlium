@@ -989,7 +989,7 @@ fn match_omits_uninhabited_named_enum_variants() {
                 }
             }
         "# })
-        .expect_type_mismatch("A (int) | B (bool)", "A (int)");
+        .expect_type_mismatch("A (int) | B (bool)", "A (B)");
 }
 
 #[test]
@@ -1270,23 +1270,23 @@ fn value_function_arity() {
     assert_val_eq!(session.run(&format!("{text} (a,).0()")), int(0));
     session
         .fail_compilation(&format!("{text} (b,).0()"))
-        .expect_type_mismatch("(B) -> B", "() -> A ! e₀");
+        .expect_type_mismatch("(B) -> B ! e₁", "() -> A ! e₀");
     session
         .fail_compilation(&format!("{text} (c,).0()"))
-        .expect_type_mismatch("(B, B) -> B", "() -> A ! e₀");
+        .expect_type_mismatch("(B, B) -> B ! e₁", "() -> A ! e₀");
     session
         .fail_compilation(&format!("{text} (a,).0(1)"))
-        .expect_type_mismatch("() -> C", "(A) -> B ! e₀");
+        .expect_type_mismatch("() -> C ! e₁", "(A) -> B ! e₀");
     assert_val_eq!(session.run(&format!("{text} (b,).0(1)")), int(2));
     session
         .fail_compilation(&format!("{text} (c,).0(1)"))
-        .expect_type_mismatch("(C, C) -> C", "(A) -> B ! e₀");
+        .expect_type_mismatch("(C, C) -> C ! e₁", "(A) -> B ! e₀");
     session
         .fail_compilation(&format!("{text} (a,).0(1, 2)"))
-        .expect_type_mismatch("() -> D", "(A, B) -> C ! e₀");
+        .expect_type_mismatch("() -> D ! e₁", "(A, B) -> C ! e₀");
     session
         .fail_compilation(&format!("{text} (b,).0(1, 2)"))
-        .expect_type_mismatch("(D) -> D", "(A, B) -> C ! e₀");
+        .expect_type_mismatch("(D) -> D ! e₁", "(A, B) -> C ! e₀");
     assert_val_eq!(session.run(&format!("{text} (c,).0(1, 2)")), int(3));
 }
 
@@ -2146,6 +2146,13 @@ fn generic_record_projection_rejects_incompatible_return_requirements() {
         .into_inner()
     {
         CompilationErrorImpl::TypeMismatch { .. } => {}
+        // The greatest common upper restriction is Never. Materializing that
+        // field additionally requires Value, which has no implementation for it.
+        CompilationErrorImpl::TraitImplNotFound {
+            trait_ref,
+            input_tys,
+            ..
+        } if trait_ref == "Value" && input_tys == ["Self = never"] => {}
         other => panic!("expected TypeMismatch, got {other:?}"),
     }
 }
@@ -3077,8 +3084,6 @@ fn never_type() {
     );
 }
 
-// Pending subtype-bounds solver target; currently expected to fail.
-// See doc/plans/subtype-bounds.md. Keep out of independent backend commits.
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn never_callable_joins_are_independent_of_contributor_order() {
@@ -3109,8 +3114,6 @@ fn never_callable_joins_are_independent_of_contributor_order() {
     );
 }
 
-// Pending subtype-bounds solver target; currently expected to fail.
-// See doc/plans/subtype-bounds.md. Keep out of independent backend commits.
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn never_callable_ascriptions_expose_the_expected_value_type() {
@@ -3136,6 +3139,63 @@ fn never_callable_ascriptions_expose_the_expected_value_type() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn callable_joins_can_infer_uninhabited_arguments() {
+    for branches in ["from_int } else { from_bool", "from_bool } else { from_int"] {
+        let prefix = format!(
+            "fn from_int(x: int) -> int {{ x }}
+             fn from_bool(x: bool) -> int {{ if x {{ 1 }} else {{ 0 }} }}
+             fn select(b: bool) {{ if b {{ {branches} }} }}"
+        );
+        assert_val_eq!(
+            TestSession::new().run(&format!("{prefix} let f = select(true); 7")),
+            int(7)
+        );
+        for argument in ["42", "true"] {
+            assert!(matches!(
+                TestSession::new()
+                    .fail_compilation(&format!("{prefix} select(true)({argument})"))
+                    .into_inner(),
+                CompilationErrorImpl::TypeMismatch { .. }
+            ));
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn numeric_default_precedes_bottom_for_delayed_divergence() {
+    assert_eq!(
+        TestSession::new().fail_run(
+            "fn require_num<T>(x: &mut T) where T: Num { () }
+         fn stop() { abort() }
+         let f = if true { stop } else { stop };
+         let mut x = f();
+         require_num(x)"
+        ),
+        SourceFailureKind::Aborted(None)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn publication_preserves_declared_type_parameters() {
+    for source in [
+        "fn specialize<T>(x: T) -> int { x }",
+        "fn identify<A, B>(x: A, y: B) -> A { y }",
+    ] {
+        assert!(matches!(
+            TestSession::new().fail_compilation(source).into_inner(),
+            CompilationErrorImpl::InvalidGenericParams { .. }
+        ));
+    }
+    assert_val_eq!(
+        TestSession::new().run("fn keep<T>(x: T) -> T { x } (keep(1), keep(true))"),
+        tuple!(int(1), bool(true))
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn never_flows_into_value_contexts_without_losing_effects() {
     for source in [
         "fn f() -> int { return abort() } f()",
@@ -3145,7 +3205,6 @@ fn never_flows_into_value_contexts_without_losing_effects() {
         "fn stop() { abort() } let f: () -> int = stop; f()",
         "fn stop() { abort() } fn invoke(f: () -> int) -> int { f() } invoke(stop)",
         "fn f() -> int { loop { break abort() } } f()",
-        // Pending subtype-bounds solver targets; currently expected to fail.
         "let fs = [abort]; fs[0]()",
         "let fs = (abort,); fs.0()",
         "let f = if true { abort } else { abort }; f()",
@@ -4023,4 +4082,137 @@ fn native_never_callback_preserves_its_call_contract() {
             SourceFailureKind::Aborted(None)
         );
     }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn callable_bounds_wait_for_numeric_trait_output_defaulting() {
+    let prefix = r#"
+        fn one() -> int { 1 }
+        fn stop() { loop {} }
+        trait Make<Self |-> Output> { fn make(value: Self) -> Output; }
+        impl Make for <Self = int |-> Output = () -> int> {
+            fn make(value: int) -> () -> int { one }
+        }
+    "#;
+    for branches in [
+        "if false { stop } else { make(1) }",
+        "if true { make(1) } else { stop }",
+    ] {
+        for body in [
+            format!("let g = {branches}; g()"),
+            format!("fn run() -> int {{ let g = {branches}; g() }} run()"),
+        ] {
+            assert_val_eq!(TestSession::new().run(&format!("{prefix} {body}")), int(1));
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn shared_trait_input_defaults_in_function_bodies() {
+    let prefix = r#"
+        trait Make<Self |-> Output> { fn make(value: Self) -> Output; }
+        impl Make for <Self = int |-> Output = int> {
+            fn make(value: int) -> int { value }
+        }
+    "#;
+    for branches in ["if c { a } else { make(a) }", "if c { make(a) } else { a }"] {
+        for body in [
+            format!("let c = false; let a = 1; let b = {branches}; ()"),
+            format!(
+                "fn run(c: bool) {{ let a = 1; let b = {branches}; () }} run(true); run(false)"
+            ),
+            format!(
+                "fn run(c: bool) {{ let a = 1; let b = {branches}; if c {{ again(false) }}; () }}
+                 fn again(c: bool) {{ if c {{ run(false) }}; () }} run(true); again(true)"
+            ),
+        ] {
+            assert_val_eq!(TestSession::new().run(&format!("{prefix} {body}")), unit());
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn shared_trait_input_defaulting_checks_the_output_contract() {
+    let prefix = r#"
+        trait Make<Self |-> Output> { fn make(value: Self) -> Output; }
+        impl Make for <Self = int |-> Output = bool> {
+            fn make(value: int) -> bool { false }
+        }
+    "#;
+    for branches in ["if c { a } else { make(a) }", "if c { make(a) } else { a }"] {
+        let source =
+            format!("{prefix} fn run(c: bool) {{ let a = 1; let b = {branches}; () }} run(false)");
+        TestSession::new().fail_compilation(&source);
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn callable_bounds_wait_for_unit_trait_input_defaulting() {
+    let source = r#"
+        fn one() -> int { 1 }
+        fn stop() { loop {} }
+        struct Marker<T>(Option<T>)
+        trait Make<Self |-> Output> { fn make(value: Self) -> Output; }
+        impl Make for <Self = Marker<()> |-> Output = () -> int> {
+            fn make(value: Marker<()>) -> () -> int { one }
+        }
+        let g = if false { stop } else { make(Marker(None)) };
+        g()
+    "#;
+    assert_val_eq!(TestSession::new().run(source), int(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn callable_bounds_wait_for_nested_trait_output_contributors() {
+    let prefix = r#"
+        fn one() -> int { 1 }
+        fn stop() { loop {} }
+        trait Pending<Self |-> Output> { fn pending(value: Self) -> Output; }
+        impl Pending for <Self = int |-> Output = (() -> int,)> {
+            fn pending(value: int) -> (() -> int,) { (one,) }
+        }
+    "#;
+    for body in [
+        "fn same<T>(a: T, b: (T,)) -> T { b.0 } same(stop, pending(1))()",
+        "fn same<T>(b: (T,), a: T) -> T { b.0 } same(pending(1), stop)()",
+        "let pair = pending(1); let g = if false { stop } else { pair.0 }; g()",
+        "let pair = pending(1); let g = if true { pair.0 } else { stop }; g()",
+    ] {
+        assert_val_eq!(TestSession::new().run(&format!("{prefix} {body}")), int(1));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn aggregate_ascriptions_with_unreachable_bottom_elements() {
+    for source in [
+        "let values = if false { [abort()] } else { [] }; len((values: [int]))",
+        "fn values() { if false { [abort()] } else { [] } } len((values(): [int]))",
+        "let values = (if false { [abort()] } else { [] },); len((values: ([int],)).0)",
+    ] {
+        assert_val_eq!(TestSession::new().run(source), int(0));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_iteration_rejects_nominal_entry_callback_for_tuple_items() {
+    let source = r#"
+        struct Entry<K, V> { key: K, value: V }
+        fn contains<K, V>(collection: [(K, V)], entry: Entry<K, V>) -> bool { true }
+        fn compare(left, right, contains) -> bool {
+            for value in left { if not contains(right, value) { return false } };
+            true
+        }
+        compare([(1, 2)], [(1, 2)], contains)
+    "#;
+    assert!(matches!(
+        TestSession::new().fail_compilation(source).into_inner(),
+        CompilationErrorImpl::TypeMismatch { .. }
+    ));
 }

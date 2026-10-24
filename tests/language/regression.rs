@@ -31,6 +31,24 @@ fn never_returning_callable_cannot_be_replaced_with_a_returning_callable() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn mutable_callback_arguments_preserve_storage_type() {
+    for call in ["replace(callback)", "let f = replace; f(callback)"] {
+        let source = format!(
+            "fn diverge() {{ loop {{}} }}
+             fn answer() -> int {{ 42 }}
+             fn replace(callback: &mut (() -> int)) {{ callback = answer; }}
+             let mut callback = diverge;
+             {call}; callback()"
+        );
+        assert!(matches!(
+            TestSession::new().fail_compilation(&source).into_inner(),
+            CompilationErrorImpl::TypeMismatch { .. }
+        ));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn never_returning_callable_remains_checked_inside_containers() {
     for (source, expected) in [
         (
@@ -41,7 +59,9 @@ fn never_returning_callable_remains_checked_inside_containers() {
             let g: () -> int = fs[0];
             g() + 1
         " },
-            "never",
+            // Array elements are inferred from all contributors. The write can
+            // select bool, but the later int view must still be rejected.
+            "int",
         ),
         (
             indoc! { "
@@ -52,7 +72,7 @@ fn never_returning_callable_remains_checked_inside_containers() {
             let c: Box<() -> int> = b;
             c.0() + 1
         " },
-            "never",
+            "int",
         ),
     ] {
         TestSession::new()

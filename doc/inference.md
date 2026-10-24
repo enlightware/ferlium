@@ -36,9 +36,11 @@ invariant containers can prevent call-site widening from recovering distinctions
 publication. The policy accepts that limitation; validation preserves soundness, not completeness
 or principal types. Order independence of publication still needs its own validation.
 
-This policy is already implemented for [effects](#publication). Applying it to retained type bounds
-is planned work: the Never soundness fix does not implement the bounds solver or its publication
-procedure. The two solvers need different reduction rules, but share this publication contract.
+The type and [effect](#publication) solvers implement this contract with different reduction rules.
+Type publication selects representable joins and meets, and may strengthen remaining relationships
+to equal type structure. It rechecks the original bounds after these choices. Explicit type
+parameters must remain distinct and polymorphic. Ferlium has no top type or general union/intersection
+constructors, so joins such as `int` with `bool` can fail.
 
 ## Type relations
 
@@ -56,10 +58,36 @@ remain contravariant even when the expected contract permits mutation. The same 
 subscript arguments. Named type arguments use exact equality: without variance analysis, a parameter
 might occur in an argument or mutable position in its definition.
 
+Subscript results are covariant only when the expected capability does not expose a mutable
+member. A mutable result permits replacing the stored value, so its complete type, including nested
+callable effects, must match exactly. A coercion may discard mutable access and widen the readable
+result. This depends on the expected result capability, whereas argument write-back depends on the
+actual callee's access.
+
+Value ascriptions check subtyping and expose the annotated value type; place ascriptions require
+exact equality so writes preserve storage identity. Mutable call arguments require the reverse
+compatibility check whenever the actual callee can write.
+
 Type variables are normalized through the unification table before comparing structure. Recursive
 types are compared with an active set of ordered type pairs and their relation; a comparison under
 subtyping cannot discharge one that requires equality. The active set tracks the current recursion
 path rather than caching successes across later variable bindings.
+
+## Bounds and selection
+
+Unknown subtype endpoints remain directional bounds. Concrete lower and upper bounds propagate
+through variables; variable cycles become equalities. Structural comparison decomposes concrete
+pairs into further obligations.
+
+Selection coordinates with trait and projection solving. It defers choices that still depend on
+pending outputs, including dependencies through nested types and projected members. A symbolic
+join or meet is usable only when its constructor decisions hold for every remaining instantiation;
+otherwise the bounds stay unresolved until conservative publication.
+
+Eligible numeric and unit defaults run before publication. Defaults made eligible by publication
+are retried in both expressions and function bodies, and the resulting obligations are rechecked.
+Defaulting respects the current signature, explicit parameters and their connected constraints;
+delaying a subtype relation must not make a generic variable appear local.
 
 ## Never
 
@@ -72,9 +100,11 @@ can determine its type. Conversely, `a <: Never` and equality with `Never` bind 
 Defaulting unconstrained diverging returns and unused variant payloads remains a separate step
 with its own eligibility checks. Bottom is neither an inference wildcard nor a universal default.
 
-This does not yet make joins of callable values order independent: with `diverge: () -> Never`
-and `one: () -> int`, a local initialized by `if c { one } else { diverge }` is rejected, while
-the reverse branch order compiles; the planned bounds solver addresses this limitation.
+With `diverge: () -> Never` and `one: () -> int`, either contributor order in
+`if c { one } else { diverge }` infers a callable returning `int`. Callable joins may also infer
+`Never` arguments when that is the representable common contract. Such a callable value can be
+stored, but an ordinary inhabited argument cannot be passed to it. Eligible numeric defaulting
+runs before the fallback for an otherwise unconstrained diverging expression.
 
 Value returns, annotations, and match arms use directional compatibility. Structural projections,
 trait identities, and invariant type positions retain structural equality. A place-returning or
@@ -97,7 +127,7 @@ Mutability constraints distinguish having at least the required access from havi
 same mutability. A mutable place can satisfy a read-only requirement; a read-only place cannot
 satisfy a mutable requirement. Both same-type relations require equal mutability. The solver
 resolves mutability constraints before structural type relations, so callable comparisons know
-which arguments require invariance.
+which arguments require invariance. Mutability is not abstracted over in type schemes.
 
 Returning a value and exposing a place have different typing requirements. A value may be widened
 by subtyping, while an exposed place preserves its referent type so writes remain valid.

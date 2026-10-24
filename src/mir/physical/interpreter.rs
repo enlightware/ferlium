@@ -155,20 +155,31 @@ impl RuntimeTypes {
         actual: Type,
         env: ModuleEnv<'_>,
     ) -> Result<(), RuntimeError> {
-        let mut pending = vec![(pattern, actual)];
+        let mut pending = vec![(pattern, actual, false)];
         let mut seen = FxHashSet::default();
-        while let Some((pattern, actual)) = pending.pop() {
-            if pattern == actual || !seen.insert((pattern, actual)) {
+        while let Some((pattern, actual, callable)) = pending.pop() {
+            if pattern == actual || !seen.insert((pattern, actual, callable)) {
+                continue;
+            }
+            // A signature's bottom leaf does not describe storage in this
+            // frame. In particular it cannot determine a generic result from
+            // the actual diverging entry when the caller uses a wider view;
+            // ordinary arguments/results and layout evidence determine it.
+            if callable && (pattern == Type::never() || actual == Type::never()) {
                 continue;
             }
             let lhs = pattern.data();
             let rhs = actual.data();
             use TypeKind::*;
+            let signature = matches!(
+                (&*lhs, &*rhs),
+                (Function(_), Function(_)) | (Subscript(_), Subscript(_))
+            );
             let pairs: Vec<_> = match (&*lhs, &*rhs) {
                 (Variable(var), _) => {
                     if let Some(&previous) = self.0.0.get(var) {
                         if !same_storage_type(previous, actual) {
-                            pending.push((previous, actual));
+                            pending.push((previous, actual, callable));
                         }
                     } else {
                         self.0.0.insert(*var, actual);
@@ -242,7 +253,11 @@ impl RuntimeTypes {
                     )));
                 }
             };
-            pending.extend(pairs);
+            pending.extend(
+                pairs
+                    .into_iter()
+                    .map(|(pattern, actual)| (pattern, actual, callable || signature)),
+            );
         }
         Ok(())
     }
@@ -2720,6 +2735,26 @@ mod tests {
         let different = callable(ScalarKind::Bool.ty(), false);
         assert!(types.bind(read, different, env).is_err());
         assert!(!same_storage_type(read, different));
+
+        let diverging = Type::nullary_function_by_val(Type::never());
+        let returning = Type::nullary_function_by_val(ScalarKind::Int.ty());
+        types.bind(diverging, returning, env).unwrap();
+        types.bind(returning, diverging, env).unwrap();
+        assert!(same_storage_type(diverging, returning));
+        assert!(!same_storage_type(Type::never(), ScalarKind::Int.ty()));
+        assert!(
+            types
+                .bind(Type::never(), ScalarKind::Int.ty(), env)
+                .is_err()
+        );
+
+        let result = Type::variable_id(1);
+        types
+            .bind(Type::nullary_function_by_val(result), diverging, env)
+            .unwrap();
+        assert_eq!(types.resolve(result), result);
+        types.bind(result, ScalarKind::Int.ty(), env).unwrap();
+        assert_eq!(types.resolve(result), ScalarKind::Int.ty());
     }
 
     #[test]

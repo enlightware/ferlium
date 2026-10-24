@@ -2033,12 +2033,20 @@ impl TypeInference {
                 let ty = data
                     .ty
                     .map(&mut AnnotationTypeMapper::new(self, env.annotation_subst));
-                self.add_sub_type_constraint(
-                    env.ir_arena[node_id].ty,
-                    sp(data.expr),
-                    ty,
-                    data.span,
-                );
+                let actual = env.ir_arena[node_id].ty;
+                if node_is_place_reference(env.ir_arena, node_id) {
+                    self.ty_constraints.push(TypeConstraint::SameType {
+                        current: actual,
+                        current_span: sp(data.expr),
+                        expected: ty,
+                        expected_span: data.span,
+                    });
+                } else {
+                    self.add_sub_type_constraint(actual, sp(data.expr), ty, data.span);
+                    if actual != Type::never() {
+                        env.ir_arena[node_id].ty = ty;
+                    }
+                }
                 return Ok((node_id, mut_type));
             }
             Error => {
@@ -2939,10 +2947,11 @@ impl TypeInference {
         let member_ty = Self::select_subscript_member_type(&subscript_ty, mode, field)?;
 
         let arg_ty = subscript_ty.args[0];
-        self.add_sub_type_constraint(
+        self.add_argument_type_constraint(
             receiver.ty,
             env.ir_arena[receiver.node].span,
             arg_ty.ty,
+            arg_ty.mut_ty,
             field.1,
         );
         self.add_mut_be_at_least_constraint(
@@ -3027,10 +3036,11 @@ impl TypeInference {
         let mut diverges = false;
         for (index, (arg, arg_ty)) in args.iter().zip(arg_tys).enumerate() {
             let node_id = if index == 0 {
-                self.add_sub_type_constraint(
+                self.add_argument_type_constraint(
                     receiver.ty,
                     env.ir_arena[receiver.node].span,
                     arg_ty.ty,
+                    arg_ty.mut_ty,
                     expected_span,
                 );
                 self.add_mut_be_at_least_constraint(
@@ -4593,7 +4603,13 @@ impl TypeInference {
                 .iter()
                 .find(|prepared| prepared.index == index)
             {
-                self.add_sub_type_constraint(prepared.ty, expr_span, arg_ty.ty, path_span);
+                self.add_argument_type_constraint(
+                    prepared.ty,
+                    expr_span,
+                    arg_ty.ty,
+                    arg_ty.mut_ty,
+                    path_span,
+                );
                 if prepared.mode == SubscriptMemberKind::Mut {
                     self.add_mut_be_at_least_constraint(
                         MutType::mutable(),
@@ -4677,7 +4693,7 @@ impl TypeInference {
             rhs_arg.mut_ty,
             path_span,
         );
-        self.add_sub_type_constraint(lhs_ty, expr_span, lhs_arg.ty, path_span);
+        self.add_argument_type_constraint(lhs_ty, expr_span, lhs_arg.ty, lhs_arg.mut_ty, path_span);
         self.add_mut_be_at_least_constraint(
             MutType::mutable(),
             expr_span,
@@ -6127,7 +6143,13 @@ impl TypeInference {
                 drop(ty_data);
                 let (node_id, node_ty, actual_mut, _) =
                     self.infer_abstract(env, &data.args, data.body, Some(*fn_ty), expr_span)?;
-                self.add_sub_type_constraint(node_ty, expr_span, expected_ty, expected_span);
+                self.add_argument_type_constraint(
+                    node_ty,
+                    expr_span,
+                    expected_ty,
+                    expected_mut,
+                    expected_span,
+                );
                 self.add_mut_be_at_least_constraint(
                     actual_mut,
                     expr_span,
@@ -6153,7 +6175,13 @@ impl TypeInference {
                 |_, _, place, place_ty, _inside_yielded| Ok((place, place_ty)),
             )?;
             let node_ty = env.ir_arena[node_id].ty;
-            self.add_sub_type_constraint(node_ty, expr_span, expected_ty, expected_span);
+            self.add_argument_type_constraint(
+                node_ty,
+                expr_span,
+                expected_ty,
+                expected_mut,
+                expected_span,
+            );
             self.add_mut_be_at_least_constraint(actual_mut, expr_span, expected_mut, expected_span);
             return Ok(node_id);
         }
@@ -6161,7 +6189,13 @@ impl TypeInference {
         // Other cases, infer and add constraints
         let (node_id, actual_mut) = self.infer_expr(env, expr_id)?;
         let node_ty = env.ir_arena[node_id].ty;
-        self.add_sub_type_constraint(node_ty, expr_span, expected_ty, expected_span);
+        self.add_argument_type_constraint(
+            node_ty,
+            expr_span,
+            expected_ty,
+            expected_mut,
+            expected_span,
+        );
         self.add_mut_be_at_least_constraint(actual_mut, expr_span, expected_mut, expected_span);
         Ok(node_id)
     }
@@ -6210,6 +6244,37 @@ impl TypeInference {
                 expected,
                 expected_span,
             });
+    }
+
+    /// An argument may be read by the callee, and may be replaced when its
+    /// parameter is mutable. Express that read/write contract using the existing
+    /// function relation so unresolved mutability is decided by its own solver.
+    fn add_argument_type_constraint(
+        &mut self,
+        current: Type,
+        current_span: Location,
+        expected: Type,
+        expected_mut: MutType,
+        expected_span: Location,
+    ) {
+        if current == Type::never() {
+            return;
+        }
+        if expected_mut == MutType::constant() {
+            self.add_sub_type_constraint(current, current_span, expected, expected_span);
+        } else {
+            let consumer = Type::function_type(FnType::new(
+                vec![FnArgType::new(expected, expected_mut)],
+                Type::unit(),
+                no_effects(),
+            ));
+            let place = Type::function_type(FnType::new(
+                vec![FnArgType::new(current, MutType::mutable())],
+                Type::unit(),
+                no_effects(),
+            ));
+            self.add_sub_type_constraint(consumer, expected_span, place, current_span);
+        }
     }
 
     pub(crate) fn add_sub_type_constraint(
