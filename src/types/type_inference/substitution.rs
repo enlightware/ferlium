@@ -587,6 +587,8 @@ mod tests {
         inference.normalize_remaining_constraints();
         let first = inference.constraints_normalized_at;
         inference.fresh_type_var(); // allocation cannot affect an existing term
+        inference.fresh_effect_var();
+        inference.fresh_rigid_effect_var();
         inference.lookup_type_var(crate::types::r#type::TypeVar::new(0));
         inference.normalize_remaining_constraints();
         assert_eq!(inference.constraints_normalized_at, first);

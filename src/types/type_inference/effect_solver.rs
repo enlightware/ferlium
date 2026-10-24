@@ -189,7 +189,8 @@ struct PublicationView {
 }
 
 impl EffectSolver {
-    // Every change to classes or the substitution view invalidates both caches.
+    // Changes to existing classes or the substitution view invalidate both caches.
+    // Fresh independent roots only require rebuilding the publication view.
     // The revision is monotonic across rollback; it is not solver progress.
     fn invalidate_publication(&mut self) {
         self.substitution_revision.advance();
@@ -201,7 +202,9 @@ impl EffectSolver {
     }
 
     pub(crate) fn fresh_var(&mut self) -> EffectVar {
-        self.invalidate_publication();
+        // The publication view needs an entry for the new root, but allocating
+        // an independent variable cannot change substitution of existing terms.
+        self.publication = None;
         let var = self.table.new_key(EffectClass::default());
         self.table.union_value(
             var,
@@ -215,7 +218,7 @@ impl EffectSolver {
 
     /// A declared effect variable: an atom, which stands for any row and is never solved.
     pub(crate) fn fresh_rigid_var(&mut self, name: Option<Ustr>) -> EffectVar {
-        self.invalidate_publication();
+        self.publication = None;
         let var = self.table.new_key(EffectClass {
             rigid: true,
             ..EffectClass::default()
@@ -1430,6 +1433,46 @@ mod tests {
                 row.extend(&self.substitute_var(var));
             }
             row
+        }
+    }
+
+    #[test]
+    fn allocation_preserves_existing_substitution_in_both_effect_views() {
+        let span = Location::new_synthesized();
+        for finalized in [false, true] {
+            let mut solver = EffectSolver::default();
+            let existing = solver.fresh_var();
+            solver
+                .add_effect_dep(&EffType::single_variable(existing), span, &read(), span)
+                .unwrap();
+            if finalized {
+                solver.finalize().unwrap();
+            }
+            let before = solver.substitute_var(existing);
+            let revision = solver.substitution_revision();
+            let fresh = solver.fresh_var();
+            let rigid = solver.fresh_rigid_var(None);
+            assert_eq!(solver.substitution_revision(), revision);
+            assert_eq!(solver.substitute_var(existing), before);
+            // Publication must include the new roots even though its semantic
+            // revision did not advance for their allocation.
+            assert_eq!(
+                solver.substitute_var(fresh),
+                EffType::single_variable(fresh)
+            );
+            assert_eq!(
+                solver.substitute_var(rigid),
+                EffType::single_variable(rigid)
+            );
+            solver
+                .unify_same_effect(
+                    EffType::single_variable(fresh),
+                    span,
+                    EffType::empty(),
+                    span,
+                )
+                .unwrap();
+            assert_ne!(solver.substitution_revision(), revision);
         }
     }
 

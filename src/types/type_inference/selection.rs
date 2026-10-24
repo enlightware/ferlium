@@ -3,7 +3,7 @@
 
 //! Saturation and checked selection of ordinary subtype bounds.
 
-use std::mem;
+use std::{collections::hash_map::Entry, mem};
 
 use super::{
     ground_bounds::{BoundOperation, ground_bound, symbolic_bound},
@@ -50,6 +50,107 @@ pub(super) struct SelectionStats {
 mod tests {
     use super::*;
     use crate::std::{logic::bool_type, math::int_type};
+
+    #[test]
+    fn component_publication_keeps_disjoint_shapes_and_effect_rows_independent() {
+        const COMPONENTS: u32 = 32;
+        let mut inference = UnifiedTypeInference::new_with_ty_vars(2 * COMPONENTS + 5);
+        let span = Location::new_synthesized();
+        let edge = |lower, upper| TypeBound {
+            lower,
+            lower_span: span,
+            upper,
+            upper_span: span,
+        };
+        let variable = Type::variable_id;
+        let bottom = Type::nullary_function_by_val(Type::never());
+        let result = |index| {
+            if index % 2 == 0 {
+                int_type()
+            } else {
+                bool_type()
+            }
+        };
+        let mut relations = Vec::new();
+        for index in (0..COMPONENTS).rev() {
+            relations.push(edge(variable(2 * index), variable(2 * index + 1)));
+            relations.push(edge(bottom, variable(2 * index)));
+        }
+        for index in 0..COMPONENTS {
+            relations.push(edge(
+                Type::nullary_function_by_val(result(index)),
+                variable(2 * index + 1),
+            ));
+            relations.push(edge(Type::never(), variable(2 * index)));
+        }
+        let empty = 2 * COMPONENTS;
+        let recursive = empty + 2;
+        let singleton = empty + 4;
+        relations.extend([
+            edge(variable(empty), variable(empty + 1)),
+            edge(variable(recursive), variable(recursive + 1)),
+            edge(
+                Type::nullary_function_by_val(variable(recursive)),
+                variable(recursive + 1),
+            ),
+            edge(bottom, variable(singleton)),
+            edge(bottom, Type::nullary_function_by_val(int_type())),
+        ]);
+        assert!(inference.publish_component_shapes(&relations).unwrap());
+        let mut effects = FxHashSet::default();
+        for index in 0..COMPONENTS {
+            for var in [2 * index, 2 * index + 1] {
+                let ty = inference.normalize_type(variable(var));
+                let data = ty.data();
+                let function = data.as_function().unwrap();
+                assert_eq!(function.ret, result(index));
+                assert!(effects.insert(function.effects.to_single_variable().unwrap()));
+            }
+        }
+        for var in empty..=singleton {
+            assert_eq!(inference.normalize_type(variable(var)), variable(var));
+        }
+    }
+
+    #[test]
+    fn component_publication_preserves_component_and_contributor_diagnostic_order() {
+        use crate::compiler::error::CompilationErrorImpl;
+        let mut inference = UnifiedTypeInference::new_with_ty_vars(4);
+        let location =
+            |offset| Location::new(offset, offset + 1, Location::new_synthesized().source_id);
+        let edge = |lower, upper, offset| TypeBound {
+            lower,
+            lower_span: location(offset),
+            upper,
+            upper_span: location(offset),
+        };
+        let int = Type::nullary_function_by_val(int_type());
+        let boolean = Type::nullary_function_by_val(bool_type());
+        let variable = Type::variable_id;
+        // Component 2 appears first, but component 0 must still publish first.
+        // Its contributors retain input order, even with spans in reverse order.
+        let relations = [
+            edge(variable(2), variable(3), 0),
+            edge(variable(0), variable(1), 1),
+            edge(boolean, variable(2), 2),
+            edge(int, variable(1), 50),
+            edge(int, variable(3), 40),
+            edge(boolean, variable(0), 5),
+        ];
+        let error = inference.publish_component_shapes(&relations).unwrap_err();
+        let CompilationErrorImpl::TypeMismatch {
+            current_ty,
+            current_span,
+            expected_ty,
+            expected_span,
+            ..
+        } = error.into_inner()
+        else {
+            panic!("expected callable mismatch");
+        };
+        assert_eq!((current_ty, current_span), (boolean, location(5)));
+        assert_eq!((expected_ty, expected_span), (int, location(50)));
+    }
 
     #[test]
     fn immutable_bound_comparisons_survive_rebuilds_and_rollback() {
@@ -842,34 +943,47 @@ impl UnifiedTypeInference {
         let mut roots: Vec<_> = neighbors.keys().copied().collect();
         roots.sort_by_key(|var| var.name());
         let inputs = self.input_variables();
-        let mut visited = FxHashSet::default();
-        let mut progress = false;
+        let mut component_indices = FxHashMap::default();
+        let mut components = Vec::new();
         for root in roots {
-            if !visited.insert(root) {
+            if component_indices.contains_key(&root) {
                 continue;
             }
+            let index = components.len();
+            component_indices.insert(root, index);
             let mut component = vec![root];
             let mut cursor = 0;
             while cursor < component.len() {
                 for next in &neighbors[&component[cursor]] {
-                    if visited.insert(*next) {
+                    if let Entry::Vacant(entry) = component_indices.entry(*next) {
+                        entry.insert(index);
                         component.push(*next);
                     }
                 }
                 cursor += 1;
             }
-            let lower: Vec<_> = relations
-                .iter()
-                .filter(|b| {
-                    b.lower != Type::never()
-                        && !b.lower.data().is_variable()
-                        && b.upper
-                            .data()
-                            .as_variable()
-                            .is_some_and(|var| component.contains(var))
-                })
-                .copied()
-                .collect();
+            components.push(component);
+        }
+        if components.is_empty() {
+            return Ok(false);
+        }
+        // Partition once instead of rescanning all relations for each component.
+        // Preserve relation order within each group: products and diagnostics
+        // use the first contributor. Component/BFS order is unchanged as well.
+        let mut lowers = vec![Vec::new(); components.len()];
+        let never = Type::never();
+        for bound in relations {
+            if bound.lower == never || bound.lower.data().as_variable().is_some() {
+                continue;
+            }
+            if let Some(upper) = bound.upper.data().as_variable()
+                && let Some(&index) = component_indices.get(upper)
+            {
+                lowers[index].push(*bound);
+            }
+        }
+        let mut progress = false;
+        for (component, lower) in components.into_iter().zip(lowers) {
             if lower
                 .iter()
                 .any(|b| b.lower.contains_any_ty_vars(&component))

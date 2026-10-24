@@ -504,14 +504,14 @@ impl UnifiedTypeInference {
                 .iter()
                 .map(|constraint| constraint.as_ref())
                 .collect::<Vec<_>>();
-            let mut remaining = self.unify_constraint_pass(
+            let remaining = self.unify_constraint_pass(
                 &constraint_refs,
                 |ty| aggregation.is_ty_adt(ty),
                 trait_solver,
                 arena,
             )?;
-            self.substitute_in_constraints_in_place(&mut remaining);
             *self.remaining_ty_constraints = remaining;
+            // Normalize and deduplicate once against the pass's final bindings.
             self.normalize_remaining_constraints();
             let bounds_progress = self.propagate_type_bounds()?
                 | self.select_lower_bounds(false, SelectionPhase::Inference)?;
