@@ -5,6 +5,8 @@
 //! are diagnostic data only. Deduplication joins origins before discarding an
 //! obligation, and solver snapshots include this provenance.
 
+use std::rc::Rc;
+
 use crate::{FxHashSet, module::LocalFunctionId, types::type_scheme::ConstraintOrigin};
 
 /// Stable index in the inference context's supplied-evidence list.
@@ -14,9 +16,16 @@ pub(crate) struct GivenId(pub usize);
 #[derive(Clone, Debug, Default)]
 pub(super) struct EvidenceUses {
     enabled: bool,
+    // Probes usually only read provenance. Share it with snapshots until a
+    // real update; lexical ownership and enablement remain local to each copy.
+    data: Rc<EvidenceData>,
+    active_owner: Option<LocalFunctionId>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct EvidenceData {
     groups: Vec<OriginGroup>,
     used: Vec<(usize, GivenId)>,
-    active_owner: Option<LocalFunctionId>,
 }
 
 #[derive(Clone, Debug)]
@@ -47,8 +56,9 @@ impl EvidenceUses {
         if !self.enabled {
             return ConstraintOrigin::default();
         }
-        let index = self.groups.len();
-        self.groups.push(OriginGroup {
+        let data = Rc::make_mut(&mut self.data);
+        let index = data.groups.len();
+        data.groups.push(OriginGroup {
             parent: index,
             owners: FxHashSet::from_iter([None]),
         });
@@ -62,8 +72,8 @@ impl EvidenceUses {
     }
 
     fn root(&self, mut index: usize) -> usize {
-        while self.groups[index].parent != index {
-            index = self.groups[index].parent;
+        while self.data.groups[index].parent != index {
+            index = self.data.groups[index].parent;
         }
         index
     }
@@ -75,10 +85,11 @@ impl EvidenceUses {
         let index = self.ensure_origin(origin);
         // Ownership is assigned once, before this obligation is solved or merged.
         debug_assert_eq!(self.root(index), index);
-        debug_assert_eq!(self.groups[index].owners.len(), 1);
-        let was_unowned = self.groups[index].owners.remove(&None);
+        debug_assert_eq!(self.data.groups[index].owners.len(), 1);
+        let group = &mut Rc::make_mut(&mut self.data).groups[index];
+        let was_unowned = group.owners.remove(&None);
         debug_assert!(was_unowned);
-        self.groups[index].owners.insert(Some(owner));
+        group.owners.insert(Some(owner));
     }
 
     pub fn merge(&mut self, kept: ConstraintOrigin, removed: ConstraintOrigin) {
@@ -92,12 +103,13 @@ impl EvidenceUses {
         if left == right {
             return;
         }
-        if self.groups[left].owners.len() < self.groups[right].owners.len() {
+        if self.data.groups[left].owners.len() < self.data.groups[right].owners.len() {
             std::mem::swap(&mut left, &mut right);
         }
-        self.groups[right].parent = left;
-        let owners = std::mem::take(&mut self.groups[right].owners);
-        self.groups[left].owners.extend(owners);
+        let data = Rc::make_mut(&mut self.data);
+        data.groups[right].parent = left;
+        let owners = std::mem::take(&mut data.groups[right].owners);
+        data.groups[left].owners.extend(owners);
     }
 
     pub fn record(&mut self, origin: ConstraintOrigin, given: GivenId) {
@@ -105,15 +117,15 @@ impl EvidenceUses {
             return;
         }
         let index = self.ensure_origin(origin);
-        self.used.push((index, given));
+        Rc::make_mut(&mut self.data).used.push((index, given));
     }
 
     pub fn used_by(&self, owner: LocalFunctionId, given: GivenId) -> bool {
-        self.used.iter().any(|(index, used_given)| {
+        self.data.used.iter().any(|(index, used_given)| {
             if *used_given != given {
                 return false;
             }
-            let group = &self.groups[self.root(*index)];
+            let group = &self.data.groups[self.root(*index)];
             let owners = &group.owners;
             // An obligation introduced outside a registered function scope must
             // never make a supplied dictionary disappear from the ABI.
@@ -126,6 +138,81 @@ impl EvidenceUses {
 mod tests {
     use super::*;
     use crate::{module::id::Id, types::type_inference::unify::UnifiedTypeInference};
+
+    #[test]
+    fn evidence_snapshots_share_data_across_no_ops_and_owner_changes() {
+        let mut uses = EvidenceUses::default();
+        let disabled = uses.clone();
+        let owner = LocalFunctionId::from_index(0);
+        let missing = ConstraintOrigin::default();
+        assert_eq!(uses.fresh_origin(), missing);
+        uses.register(missing, owner);
+        uses.merge(missing, missing);
+        uses.record(missing, GivenId(0));
+        uses.enable();
+        uses.replace_active_owner(Some(owner));
+        assert!(Rc::ptr_eq(&uses.data, &disabled.data));
+        assert!(!disabled.enabled);
+        assert_eq!(disabled.active_owner(), None);
+
+        let origin = uses.fresh_origin();
+        let unowned = uses.clone();
+        uses.register(origin, owner);
+        uses.record(origin, GivenId(0));
+        assert!(!Rc::ptr_eq(&uses.data, &unowned.data));
+        assert!(unowned.data.groups[0].owners.contains(&None));
+        let snapshot = uses.clone();
+        uses.merge(origin, origin);
+        uses.enable();
+        uses.replace_active_owner(None);
+        assert!(uses.used_by(owner, GivenId(0)));
+        assert!(Rc::ptr_eq(&uses.data, &snapshot.data));
+        assert_eq!(snapshot.active_owner(), Some(owner));
+    }
+
+    #[test]
+    fn nested_solver_snapshots_restore_evidence_merges_and_unowned_uses() {
+        let mut inference = UnifiedTypeInference::default();
+        let owner = LocalFunctionId::from_index;
+        inference.evidence_uses.enable();
+        let a = inference.evidence_uses.fresh_origin();
+        let b = inference.evidence_uses.fresh_origin();
+        inference.evidence_uses.register(a, owner(0));
+        inference.evidence_uses.register(b, owner(1));
+        inference.evidence_uses.record(a, GivenId(0));
+        inference.evidence_uses.replace_active_owner(Some(owner(0)));
+        let outer = inference.snapshot();
+
+        inference.evidence_uses.merge(a, b);
+        assert!(inference.given_used_by(owner(1), GivenId(0)));
+        let c = inference.evidence_uses.fresh_origin();
+        inference.evidence_uses.register(c, owner(2));
+        inference.evidence_uses.record(c, GivenId(1));
+        inference.evidence_uses.replace_active_owner(Some(owner(1)));
+        let inner = inference.snapshot();
+
+        inference.evidence_uses.merge(a, c);
+        assert!(inference.given_used_by(owner(0), GivenId(1)));
+        let unowned = inference.evidence_uses.fresh_origin();
+        inference.evidence_uses.merge(a, unowned);
+        assert!(inference.given_used_by(owner(3), GivenId(0)));
+        assert!(inference.given_used_by(owner(3), GivenId(1)));
+        inference.evidence_uses.replace_active_owner(None);
+        inference.rollback_to(inner);
+
+        assert_eq!(inference.evidence_uses.active_owner(), Some(owner(1)));
+        assert!(inference.given_used_by(owner(1), GivenId(0)));
+        assert!(inference.given_used_by(owner(2), GivenId(1)));
+        assert!(!inference.given_used_by(owner(0), GivenId(1)));
+        assert!(!inference.given_used_by(owner(3), GivenId(0)));
+        inference.rollback_to(outer);
+
+        assert_eq!(inference.evidence_uses.active_owner(), Some(owner(0)));
+        assert!(inference.given_used_by(owner(0), GivenId(0)));
+        assert!(!inference.given_used_by(owner(1), GivenId(0)));
+        assert!(!inference.given_used_by(owner(2), GivenId(1)));
+        assert_eq!(inference.evidence_uses.fresh_origin(), c);
+    }
 
     #[test]
     fn deduplicated_evidence_retains_transitive_owners() {
