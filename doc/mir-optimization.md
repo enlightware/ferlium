@@ -65,7 +65,7 @@ dead snapshots    // collect stack saves whose last restore disappeared
 repeat while the body shrinks:
     stack markers     // on a repeated sweep: rewrites below concatenate arms' restores
     boolean flow      // cleanup and outcome simplification expose new boolean flow
-    tail merge        // hash-cons equivalent tails, collapse equal edges, and fold empty blocks
+    tail merge        // merge equivalent regions, collapse equal edges, and fold empty blocks
     finite domains    // collapse exhaustive tests; materialize Boolean results
     dead proven + dce // after each rewrite, collect its newly dead predicate
 narrow invokes    // again: forwarding after the split names callees too
@@ -1145,24 +1145,31 @@ Constants left unreferenced are pruned from the pool, explicitly, since that ren
 ## Tail merging
 
 `mir::pass::tail_merge` simplifies shared control-flow tails after ordinary DCE has removed dead
-lowering scaffolding. Its main rule hash-conses complete alpha-equivalent basic blocks. Operation
-kinds, operands from outside the block and exact successors must agree. Results defined within the
-block are compared by definition order rather than by their function-wide `ValueId`, and source
-spans do not participate. The representative's span remains, as when any other optimization keeps
-one of two redundant computations.
+lowering scaffolding. Its main rule merges alpha-equivalent *regions*: a block together with the
+blocks it dominates. Two regions are compared by pairing their blocks along their edges; operation
+kinds and operands defined outside the regions must agree, an edge leaving the regions must reach
+the same block on both sides, and results defined inside are compared by definition order across
+the whole region rather than by their function-wide `ValueId`. Source spans do not participate. The
+representative's span remains, as when any other optimization keeps one of two redundant
+computations.
 
-The table owns only a 64-bit canonical fingerprint and a block id. A matching fingerprint is
-collision-checked by a borrowed alpha comparison before any edge is redirected; operation metadata
-and operand lists are never cloned into keys. One local-result scratch map is reused while
-fingerprinting blocks, and the editable body is opened only after a duplicate, equal-target branch,
-or foldable empty exit was found.
+Regions rather than blocks make the rule independent of what earlier passes did across blocks: CSE
+leaves a place computed in one block and used in the next, and an `invoke` defines a result its
+normal edge reads, so either copy is equivalent only as a whole. Dominance is what makes the whole
+well defined: every use of a result is dominated by its definition, so no result of a discarded
+region is read outside it, and redirecting the edges entering one root to the other only adds paths
+through the representative.
+
+The table owns only a 64-bit fingerprint of each block and its id; a region's successors are
+fingerprinted by presence only, and a matching fingerprint is checked by the region comparison
+before any edge is redirected. Operation metadata and operand lists are never cloned into keys,
+and the editable body is opened only after a duplicate, equal-target branch, or foldable empty
+exit was found.
 
 Blocks are visited backwards so already-equivalent forward successors share a representative in
-their predecessors' keys; this merges multi-block acyclic tails without graph isomorphism or code
-motion. Backedges remain conservative. Source-fallible `invoke` blocks are excluded because an
-invoked result begins its valid scope only on the normal edge and would require subgraph-level
-renaming. Unreachable blocks are excluded too: they have no useful dominance relationship with a
-reachable candidate and therefore cannot safely serve as its representative.
+their predecessors' keys, and what the two regions share is compared by identity. Unreachable
+blocks are excluded: they have no useful dominance relationship with a reachable candidate and
+therefore cannot safely serve as its representative.
 
 Every edge to a duplicate is redirected to the representative. A `condbr` or `switch_variant`
 whose targets thereby all become equal becomes a `goto`, after which unreachable-block and

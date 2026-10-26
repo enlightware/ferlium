@@ -5,17 +5,17 @@
 //!
 //! Lowering keeps the source's control-flow shape. Consequently two arms which compute the same
 //! thing still become two blocks, and ordinary CSE cannot see across their mutually exclusive
-//! paths. This pass hash-conses complete blocks while treating results defined inside each block by
-//! their definition order rather than their function-wide [`ValueId`](mir::ValueId). It redirects
-//! edges to one representative; it never moves or duplicates an operation.
+//! paths. This pass merges equivalent *regions*: a block with the blocks it dominates, compared
+//! along their edges, with the results defined inside each region compared by definition order
+//! rather than by their function-wide [`ValueId`](mir::ValueId). A result defined in one block of a
+//! region and used in another, as CSE leaves it, is thus no obstacle, and neither is an invoke,
+//! whose result reaches only its normal edge. A block hash-conses alone, the successors it
+//! dominates counted by presence only, which preselects the candidates. The pass redirects edges
+//! to one representative; it never moves or duplicates an operation.
 //!
 //! Source spans are intentionally absent from the key. They describe where either equivalent copy
 //! came from, not what it does, and retaining the representative's span is the same diagnostic
 //! compromise made whenever optimization removes one of two redundant computations.
-//!
-//! Source-fallible `invoke` tails are excluded for now. An invoked operation may define a value
-//! whose valid scope begins only on its normal edge, so merging it needs a subgraph-level renaming
-//! proof rather than this block-local one.
 //!
 //! An empty block is the limiting case in the other direction: it holds nothing to execute, so its
 //! terminator can be folded into its predecessors without duplicating an operation. How far that
@@ -27,11 +27,16 @@
 
 use std::hash::{Hash, Hasher};
 
-use rustc_hash::{FxHashMap, FxHasher};
+use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 
 use crate::{
-    containers::{DenseBitSet, SVec2},
-    mir::{self, BlockId, Function, ValueId, edit::FunctionEdit, terminator::TerminatorKind},
+    containers::SVec2,
+    mir::{
+        self, BlockId, Function, Operation, ValueId,
+        dominance::Dominance,
+        edit::FunctionEdit,
+        terminator::{TerminatorKind, TerminatorKindDiscriminant},
+    },
     module::id::Id,
 };
 
@@ -74,78 +79,86 @@ fn canonical_target(target: BlockId, replacement: &FxHashMap<BlockId, BlockId>) 
     replacement.get(&target).copied().unwrap_or(target)
 }
 
+fn hash_target(
+    block: BlockId,
+    target: BlockId,
+    replacement: &FxHashMap<BlockId, BlockId>,
+    dominance: &Dominance,
+    state: &mut impl Hasher,
+) {
+    // A successor in the block's region is compared as part of it, not by identity.
+    if !replacement.contains_key(&target)
+        && dominance.dominates(block.as_index(), target.as_index())
+    {
+        u32::MAX.hash(state);
+    } else {
+        canonical_target(target, replacement).hash(state);
+    }
+}
+
+fn hash_operation(
+    operation: &Operation,
+    local_results: &mut FxHashMap<ValueId, usize>,
+    state: &mut impl Hasher,
+) {
+    let (kind, operands) = operation.kind_and_operands();
+    kind.hash(state);
+    operands.len().hash(state);
+    for operand in operands {
+        hash_value(operand, local_results, state);
+    }
+    if let Some(result) = operation.result_id() {
+        local_results.insert(result, local_results.len());
+    }
+}
+
+/// A hash of `block` alone that equivalent regions share: results it defines by definition order,
+/// successors in its region by their presence.
 fn block_fingerprint(
     function: &Function,
-    block: BlockId,
+    id: BlockId,
     replacement: &FxHashMap<BlockId, BlockId>,
+    dominance: &Dominance,
     local_results: &mut FxHashMap<ValueId, usize>,
-) -> Option<u64> {
-    let block = function.block(block);
+) -> u64 {
+    let block = function.block(id);
     let mut state = FxHasher::default();
     block.operations().len().hash(&mut state);
     local_results.clear();
     for operation in block.operations() {
-        let (kind, operands) = operation.kind_and_operands();
-        kind.hash(&mut state);
-        operands.len().hash(&mut state);
-        for operand in operands {
-            hash_value(operand, local_results, &mut state);
-        }
-        if let Some(result) = operation.result_id() {
-            local_results.insert(result, local_results.len());
-        }
+        hash_operation(operation, local_results, &mut state);
     }
-
-    match &block.terminator().kind {
-        TerminatorKind::Goto { target } => {
-            0u8.hash(&mut state);
-            canonical_target(*target, replacement).hash(&mut state);
+    let kind = &block.terminator().kind;
+    TerminatorKindDiscriminant::from(kind).hash(&mut state);
+    match kind {
+        TerminatorKind::CondBr { condition, .. } => {
+            hash_value(condition, local_results, &mut state)
         }
-        TerminatorKind::CondBr {
-            condition,
-            then_target,
-            else_target,
-        } => {
-            1u8.hash(&mut state);
-            hash_value(condition, local_results, &mut state);
-            canonical_target(*then_target, replacement).hash(&mut state);
-            canonical_target(*else_target, replacement).hash(&mut state);
-        }
-        TerminatorKind::SwitchVariant {
-            tag,
-            cases,
-            default,
-        } => {
-            2u8.hash(&mut state);
+        TerminatorKind::SwitchVariant { tag, cases, .. } => {
             hash_value(tag, local_results, &mut state);
-            cases.len().hash(&mut state);
-            for (case, target) in cases {
+            for (case, _) in cases {
                 case.hash(&mut state);
-                canonical_target(*target, replacement).hash(&mut state);
             }
-            canonical_target(*default, replacement).hash(&mut state);
         }
-        TerminatorKind::Invoke { .. } => return None,
-        TerminatorKind::Yield { place, resume } => {
-            3u8.hash(&mut state);
-            hash_value(place, local_results, &mut state);
-            canonical_target(*resume, replacement).hash(&mut state);
+        TerminatorKind::Invoke { operation, .. } => {
+            hash_operation(operation, local_results, &mut state)
         }
+        TerminatorKind::Yield { place, .. } => hash_value(place, local_results, &mut state),
         TerminatorKind::Return { value } => {
-            4u8.hash(&mut state);
             if let Some(value) = value {
                 hash_value(value, local_results, &mut state);
             }
         }
-        TerminatorKind::PropagateError => 5u8.hash(&mut state),
-        TerminatorKind::FailureDuringCleanup => 6u8.hash(&mut state),
-        TerminatorKind::EffectViolation => 8u8.hash(&mut state),
-        TerminatorKind::InvariantFailure { message } => {
-            7u8.hash(&mut state);
-            message.hash(&mut state);
-        }
+        TerminatorKind::InvariantFailure { message } => message.hash(&mut state),
+        TerminatorKind::Goto { .. }
+        | TerminatorKind::PropagateError
+        | TerminatorKind::FailureDuringCleanup
+        | TerminatorKind::EffectViolation => {}
     }
-    Some(state.finish())
+    for target in kind.successors() {
+        hash_target(id, target, replacement, dominance, &mut state);
+    }
+    state.finish()
 }
 
 enum Representatives {
@@ -154,10 +167,15 @@ enum Representatives {
 }
 
 impl Representatives {
-    fn find(&self, mut equivalent: impl FnMut(BlockId) -> bool) -> Option<BlockId> {
+    fn find(
+        &self,
+        mut equivalent: impl FnMut(BlockId) -> Option<Vec<BlockId>>,
+    ) -> Option<(BlockId, Vec<BlockId>)> {
         match self {
-            Self::One(block) => equivalent(*block).then_some(*block),
-            Self::Many(blocks) => blocks.iter().copied().find(|block| equivalent(*block)),
+            Self::One(block) => equivalent(*block).map(|region| (*block, region)),
+            Self::Many(blocks) => blocks
+                .iter()
+                .find_map(|block| equivalent(*block).map(|region| (*block, region))),
         }
     }
 
@@ -169,145 +187,181 @@ impl Representatives {
     }
 }
 
-fn blocks_alpha_equivalent(
-    function: &Function,
-    left: BlockId,
-    right: BlockId,
-    replacement: &FxHashMap<BlockId, BlockId>,
+/// Whether two operations compute the same thing, pairing their results by position.
+fn operations_alpha_equivalent(
+    left: &Operation,
+    right: &Operation,
+    left_results: &mut FxHashMap<ValueId, usize>,
+    right_results: &mut FxHashMap<ValueId, usize>,
 ) -> bool {
-    let left = function.block(left);
-    let right = function.block(right);
-    if left.operations().len() != right.operations().len() {
+    let (left_kind, left_operands) = left.kind_and_operands();
+    let (right_kind, right_operands) = right.kind_and_operands();
+    if left_kind != right_kind
+        || left_operands.len() != right_operands.len()
+        || !left_operands
+            .iter()
+            .zip(right_operands)
+            .all(|(left, right)| values_alpha_equivalent(left, right, left_results, right_results))
+    {
         return false;
     }
-    let mut left_results = FxHashMap::default();
-    let mut right_results = FxHashMap::default();
-    for (left, right) in left.operations().iter().zip(right.operations()) {
-        let (left_kind, left_operands) = left.kind_and_operands();
-        let (right_kind, right_operands) = right.kind_and_operands();
-        if left_kind != right_kind
-            || left_operands.len() != right_operands.len()
-            || !left_operands
-                .iter()
-                .zip(right_operands.iter())
-                .all(|(left, right)| {
-                    values_alpha_equivalent(left, right, &left_results, &right_results)
-                })
-        {
-            return false;
+    match (left.result_id(), right.result_id()) {
+        (Some(left), Some(right)) => {
+            let ordinal = left_results.len();
+            left_results.insert(left, ordinal);
+            right_results.insert(right, ordinal);
+            true
         }
-        match (left.result_id(), right.result_id()) {
-            (Some(left), Some(right)) => {
-                let ordinal = left_results.len();
-                left_results.insert(left, ordinal);
-                right_results.insert(right, ordinal);
-            }
-            (None, None) => {}
-            _ => return false,
-        }
+        (None, None) => true,
+        _ => false,
     }
+}
 
-    match (&left.terminator().kind, &right.terminator().kind) {
-        (TerminatorKind::Goto { target: left }, TerminatorKind::Goto { target: right }) => {
-            canonical_target(*left, replacement) == canonical_target(*right, replacement)
-        }
+/// Pairs the targets of two terminators that agree in everything else, recording the result of
+/// an invoked operation; `None` if they differ.
+fn paired_targets(
+    left: &TerminatorKind,
+    right: &TerminatorKind,
+    left_results: &mut FxHashMap<ValueId, usize>,
+    right_results: &mut FxHashMap<ValueId, usize>,
+) -> Option<SVec2<(BlockId, BlockId)>> {
+    let agree = match (left, right) {
+        (TerminatorKind::Goto { .. }, TerminatorKind::Goto { .. })
+        | (TerminatorKind::PropagateError, TerminatorKind::PropagateError)
+        | (TerminatorKind::EffectViolation, TerminatorKind::EffectViolation)
+        | (TerminatorKind::FailureDuringCleanup, TerminatorKind::FailureDuringCleanup) => true,
         (
             TerminatorKind::CondBr {
-                condition: left_condition,
-                then_target: left_then,
-                else_target: left_else,
+                condition: left, ..
             },
             TerminatorKind::CondBr {
-                condition: right_condition,
-                then_target: right_then,
-                else_target: right_else,
+                condition: right, ..
             },
-        ) => {
-            values_alpha_equivalent(
-                left_condition,
-                right_condition,
-                &left_results,
-                &right_results,
-            ) && canonical_target(*left_then, replacement)
-                == canonical_target(*right_then, replacement)
-                && canonical_target(*left_else, replacement)
-                    == canonical_target(*right_else, replacement)
+        )
+        | (TerminatorKind::Yield { place: left, .. }, TerminatorKind::Yield { place: right, .. }) => {
+            values_alpha_equivalent(left, right, left_results, right_results)
         }
         (
             TerminatorKind::SwitchVariant {
                 tag: left_tag,
                 cases: left_cases,
-                default: left_default,
+                ..
             },
             TerminatorKind::SwitchVariant {
                 tag: right_tag,
                 cases: right_cases,
-                default: right_default,
+                ..
             },
         ) => {
-            values_alpha_equivalent(left_tag, right_tag, &left_results, &right_results)
+            values_alpha_equivalent(left_tag, right_tag, left_results, right_results)
                 && left_cases.len() == right_cases.len()
-                && left_cases.iter().zip(right_cases).all(
-                    |((left_case, left_target), (right_case, right_target))| {
-                        left_case == right_case
-                            && canonical_target(*left_target, replacement)
-                                == canonical_target(*right_target, replacement)
-                    },
-                )
-                && canonical_target(*left_default, replacement)
-                    == canonical_target(*right_default, replacement)
+                && left_cases
+                    .iter()
+                    .zip(right_cases)
+                    .all(|((left, _), (right, _))| left == right)
         }
-        (TerminatorKind::Invoke { .. }, _) | (_, TerminatorKind::Invoke { .. }) => false,
+        // The invoked result is defined on the normal edge, which the region pairs like any other.
         (
-            TerminatorKind::Yield {
-                place: left_place,
-                resume: left_resume,
+            TerminatorKind::Invoke {
+                operation: left, ..
             },
-            TerminatorKind::Yield {
-                place: right_place,
-                resume: right_resume,
+            TerminatorKind::Invoke {
+                operation: right, ..
             },
-        ) => {
-            values_alpha_equivalent(left_place, right_place, &left_results, &right_results)
-                && canonical_target(*left_resume, replacement)
-                    == canonical_target(*right_resume, replacement)
-        }
+        ) => operations_alpha_equivalent(left, right, left_results, right_results),
         (TerminatorKind::Return { value: left }, TerminatorKind::Return { value: right }) => {
             match (left, right) {
                 (None, None) => true,
                 (Some(left), Some(right)) => {
-                    values_alpha_equivalent(left, right, &left_results, &right_results)
+                    values_alpha_equivalent(left, right, left_results, right_results)
                 }
                 _ => false,
             }
         }
-        (TerminatorKind::PropagateError, TerminatorKind::PropagateError)
-        | (TerminatorKind::EffectViolation, TerminatorKind::EffectViolation)
-        | (TerminatorKind::FailureDuringCleanup, TerminatorKind::FailureDuringCleanup) => true,
         (
             TerminatorKind::InvariantFailure { message: left },
             TerminatorKind::InvariantFailure { message: right },
         ) => left == right,
         _ => false,
-    }
+    };
+    agree.then(|| left.successors().zip(right.successors()).collect())
 }
 
-fn reachable_blocks(function: &Function) -> DenseBitSet {
-    let mut reachable = DenseBitSet::with_capacity(function.blocks().count());
-    let mut pending = vec![
-        function
-            .blocks()
-            .next()
-            .expect("a canonical MIR function has an entry block"),
-    ];
-    while let Some(block) = pending.pop() {
-        if reachable.contains(block.as_index()) {
-            continue;
-        }
-        reachable.insert(block.as_index());
-        pending.extend(function.block(block).terminator().successors());
+/// Whether the region of `right` is alpha-equivalent to the region of `left`, answering the blocks
+/// of `right`'s region, which redirecting `right`'s edges to `left` leaves unreachable.
+///
+/// A block's region is the blocks it dominates. Every use of a result defined in a region is
+/// dominated by its definition, hence in the region too, so two regions compare by pairing their
+/// blocks along their edges and their results by definition order across all those blocks; a
+/// depth-first walk from the roots reaches every block's dominators first. An edge leaving the
+/// regions must reach the same block on both sides. A result may thus cross blocks, as CSE leaves
+/// it, and an invoke's result reaches its normal edge. Redirecting the edges entering `right` to
+/// `left` only adds paths through `left`, which leaves every use in `left`'s region dominated.
+fn equivalent_region(
+    function: &Function,
+    left: BlockId,
+    right: BlockId,
+    replacement: &FxHashMap<BlockId, BlockId>,
+    representatives: &FxHashSet<BlockId>,
+    dominance: &Dominance,
+) -> Option<Vec<BlockId>> {
+    let (left_root, right_root) = (left.as_index(), right.as_index());
+    if dominance.dominates(left_root, right_root) || dominance.dominates(right_root, left_root) {
+        return None;
     }
-    reachable
+    // Dominance is that of the body before this simplification: a block already merged, or
+    // standing for others, has other edges now.
+    let in_region = |root: usize, block: BlockId| {
+        dominance.dominates(root, block.as_index())
+            && !replacement.contains_key(&block)
+            && !representatives.contains(&block)
+    };
+    let mut left_results = FxHashMap::default();
+    let mut right_results = FxHashMap::default();
+    let mut pairs = FxHashMap::from_iter([(right, left)]);
+    let mut paired_lefts = FxHashSet::from_iter([left]);
+    let mut pending = vec![(left, right)];
+    while let Some((left, right)) = pending.pop() {
+        let left = function.block(left);
+        let right = function.block(right);
+        if left.operations().len() != right.operations().len()
+            || !left
+                .operations()
+                .iter()
+                .zip(right.operations())
+                .all(|(left, right)| {
+                    operations_alpha_equivalent(left, right, &mut left_results, &mut right_results)
+                })
+        {
+            return None;
+        }
+        for (left, right) in paired_targets(
+            &left.terminator().kind,
+            &right.terminator().kind,
+            &mut left_results,
+            &mut right_results,
+        )? {
+            let shared = canonical_target(left, replacement);
+            if shared == canonical_target(right, replacement)
+                && !dominance.dominates(right_root, shared.as_index())
+            {
+                continue;
+            }
+            if !in_region(left_root, left) || !in_region(right_root, right) {
+                return None;
+            }
+            match pairs.get(&right) {
+                Some(paired) if *paired == left => {}
+                Some(_) => return None,
+                None if paired_lefts.insert(left) => {
+                    pairs.insert(right, left);
+                    pending.push((left, right));
+                }
+                None => return None,
+            }
+        }
+    }
+    Some(pairs.into_keys().collect())
 }
 
 /// The result of simplifying tails, including whether the rewrite can have made values dead.
@@ -464,18 +518,32 @@ pub(crate) fn simplify_tails(function: &Function) -> Option<SimplifiedTails> {
 
     let mut representatives = FxHashMap::<u64, Representatives>::default();
     let mut replacement = FxHashMap::<BlockId, BlockId>::default();
+    // The blocks others were redirected to, and those a merged region left unreachable.
+    let mut standing_for_others = FxHashSet::default();
+    let mut discarded = FxHashSet::default();
     let mut local_results = FxHashMap::default();
     // An unreachable block cannot safely represent a reachable one: a shared successor may use a
     // result defined by the reachable candidate, which only dominates that successor while the
     // other predecessor remains unreachable.
-    let reachable = reachable_blocks(function);
+    let successors: Vec<Vec<usize>> = function
+        .blocks()
+        .map(|block| {
+            function
+                .block(block)
+                .terminator()
+                .successors()
+                .map(|target| target.as_index())
+                .collect()
+        })
+        .collect();
+    let dominance = Dominance::of(&successors, function.entry().as_index());
     // Ordinary forward branch tails occur later in canonical block order. Walking backwards means
-    // their representatives are already known, so two multi-block acyclic tails compare equal as
-    // soon as their final blocks do. Backedges stay conservative: this is not graph isomorphism.
+    // their representatives are already known, so the tails two blocks share are found first and
+    // compared by identity; what is left of the two regions is paired.
     let mut blocks: Vec<_> = function
         .blocks()
         .skip(1)
-        .filter(|block| reachable.contains(block.as_index()))
+        .filter(|block| dominance.is_reachable(block.as_index()))
         .collect();
     blocks.reverse();
     let mut has_empty_terminal_successor = match function.block(function.entry()).terminator().kind
@@ -487,17 +555,35 @@ pub(crate) fn simplify_tails(function: &Function) -> Option<SimplifiedTails> {
         if let TerminatorKind::Goto { target } = function.block(block).terminator().kind {
             has_empty_terminal_successor |= is_empty_terminal_block(function, target);
         }
-        let Some(fingerprint) =
-            block_fingerprint(function, block, &replacement, &mut local_results)
-        else {
+        if discarded.contains(&block) {
             continue;
-        };
+        }
+        let fingerprint = block_fingerprint(
+            function,
+            block,
+            &replacement,
+            &dominance,
+            &mut local_results,
+        );
         let representative = representatives.get(&fingerprint).and_then(|candidates| {
-            candidates
-                .find(|candidate| blocks_alpha_equivalent(function, block, candidate, &replacement))
+            candidates.find(|candidate| {
+                if discarded.contains(&candidate) {
+                    return None;
+                }
+                equivalent_region(
+                    function,
+                    candidate,
+                    block,
+                    &replacement,
+                    &standing_for_others,
+                    &dominance,
+                )
+            })
         });
-        if let Some(representative) = representative {
+        if let Some((representative, region)) = representative {
             replacement.insert(block, representative);
+            standing_for_others.insert(representative);
+            discarded.extend(region);
         } else if let Some(candidates) = representatives.get_mut(&fingerprint) {
             candidates.push(block);
         } else {
@@ -507,7 +593,7 @@ pub(crate) fn simplify_tails(function: &Function) -> Option<SimplifiedTails> {
 
     let has_equal_target_branch = function
         .blocks()
-        .filter(|block| reachable.contains(block.as_index()))
+        .filter(|block| dominance.is_reachable(block.as_index()))
         .any(|block| match &function.block(block).terminator().kind {
             TerminatorKind::CondBr {
                 then_target,
@@ -522,7 +608,7 @@ pub(crate) fn simplify_tails(function: &Function) -> Option<SimplifiedTails> {
     let has_empty_forwarding_block = function
         .blocks()
         .skip(1)
-        .filter(|block| reachable.contains(block.as_index()))
+        .filter(|block| dominance.is_reachable(block.as_index()))
         .any(|block| is_empty_forwarding_block(function, block));
     let mut exposed_dead_code = !replacement.is_empty() || has_equal_target_branch;
     if !exposed_dead_code && !has_empty_terminal_successor && !has_empty_forwarding_block {
@@ -610,7 +696,7 @@ mod tests {
         CompilerSession, Location, MirOptimization,
         hir::value::LiteralValue,
         mir::{
-            Operation, ParameterKind, Value,
+            Operation, OperationKind, ParameterKind, Value,
             builder::FunctionBuilder,
             terminator::{Terminator, TerminatorKind},
             verify::verify_function,
@@ -641,6 +727,88 @@ mod tests {
                 && !body.contains("gt_int")
                 && !body.contains("Ord<std::int>::gt"),
             "proven-call DCE must collect the dead predicate:\n{body}"
+        );
+    }
+
+    /// CSE leaves a result defined in one block and used in a later one. Each copy is then
+    /// equivalent only as a whole region, never block by block: alone, the later block would lose
+    /// the definition its own copy provides.
+    #[test]
+    fn regions_whose_results_cross_blocks_are_merged_whole() {
+        let span = Location::new_synthesized();
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        for same in [true, false] {
+            let mut builder = FunctionBuilder::new("region_tails".into(), Default::default());
+            let x = builder.add_parameter(int_type(), ParameterKind::Value);
+            let c = builder.add_parameter(bool_type(), ParameterKind::Value);
+            let ret = builder.add_parameter(int_type(), ParameterKind::Return);
+            let entry = builder.add_block();
+            let copies = [
+                (builder.add_block(), builder.add_block()),
+                (builder.add_block(), builder.add_block()),
+            ];
+            let exit = builder.add_block();
+            let join = builder.add_block();
+            let slot = builder
+                .append_operation(entry, Operation::alloca(span, int_type()))
+                .unwrap();
+            builder.append_operation(
+                entry,
+                Operation::store(span, Value::Parameter(x), slot.clone()),
+            );
+            builder.set_terminator(
+                entry,
+                Terminator::cond_br(span, Value::Parameter(c), copies[0].0, copies[1].0),
+            );
+            for (index, (test, update)) in copies.into_iter().enumerate() {
+                let loaded = builder
+                    .append_operation(test, Operation::load(span, slot.clone()))
+                    .unwrap();
+                builder.set_terminator(
+                    test,
+                    Terminator::cond_br(span, Value::Parameter(c), update, exit),
+                );
+                let stored = if same || index == 0 {
+                    loaded
+                } else {
+                    Value::Parameter(x)
+                };
+                builder.append_operation(
+                    update,
+                    Operation::store(span, stored, Value::Parameter(ret)),
+                );
+                builder.set_terminator(update, Terminator::goto(span, join));
+            }
+            builder.append_operation(
+                exit,
+                Operation::store(span, Value::Parameter(x), Value::Parameter(ret)),
+            );
+            builder.set_terminator(exit, Terminator::ret(span));
+            builder.set_terminator(join, Terminator::ret(span));
+            let body = builder.finish(env);
+            let body = simplify_tails(&body).map_or(body, |result| result.body);
+            verify_function(&body, env);
+            let loads = body
+                .blocks()
+                .flat_map(|block| body.block(block).operations())
+                .filter(|operation| matches!(operation.kind, OperationKind::Load))
+                .count();
+            assert_eq!(loads, if same { 1 } else { 2 }, "same: {same}");
+        }
+    }
+
+    /// An indexed read lowers to a bounds-check diamond and an invoke whose result its normal edge
+    /// reads: equivalent arms are a region with a join and an invoke, merged as a whole.
+    #[test]
+    fn arms_reading_through_a_checked_index_are_merged() {
+        let body = optimized_body(
+            "fn f(a: [int], i: int, c: bool) -> int { if c { a[i] * 3 + i } else { a[i] * 3 + i } }",
+        );
+        assert_eq!(
+            body.matches("array_offset_in_bounds").count(),
+            1,
+            "the two arms must become one:\n{body}"
         );
     }
 
