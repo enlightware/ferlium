@@ -8,7 +8,7 @@
 //! returned to the structural solver; equality normalization must rebuild the
 //! graph from its seeds before those pairs are reused.
 
-use std::{collections::VecDeque, mem};
+use std::{collections::VecDeque, mem, rc::Rc};
 
 use super::tables::Revision;
 
@@ -30,12 +30,18 @@ pub(super) struct TypeBound {
     pub upper_span: Location,
 }
 
-/// Cloning provides a complete speculative snapshot, including diagnostics and
-/// pending structural work. Optimize this only after measuring real snapshots.
+/// Snapshots share the graph until a mutation, including its provenance and
+/// pending structural work. A normalization stamp is local to each snapshot:
+/// checking unchanged seeds need not copy the graph just to update the stamp.
 #[derive(Clone, Debug, Default)]
 pub(super) struct TypeBounds {
-    seeds: Vec<TypeBound>,
+    graph: Rc<BoundGraph>,
     normalized_at: Option<(Revision, Revision)>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct BoundGraph {
+    seeds: Vec<TypeBound>,
     seed_keys: FxHashSet<(Type, Type)>,
     relations: FxHashMap<(Type, Type), TypeBound>,
     incoming: FxHashMap<Type, Vec<Type>>,
@@ -52,15 +58,136 @@ impl TypeBounds {
             return false;
         }
         let key = (bound.lower, bound.upper);
-        if !self.seed_keys.insert(key) {
+        if self.graph.seed_keys.contains(&key) {
             return false;
         }
         self.normalized_at = None;
-        self.seeds.push(bound);
-        self.propagate(bound);
+        let graph = Rc::make_mut(&mut self.graph);
+        graph.seed_keys.insert(key);
+        graph.seeds.push(bound);
+        graph.propagate(bound);
         true
     }
 
+    /// Skip unchanged inputs; `None` means skipped, `Some` reports graph changes.
+    pub fn normalize_if_changed(
+        &mut self,
+        revision: (Revision, Revision),
+        normalize: impl FnMut(Type) -> Type,
+    ) -> Option<bool> {
+        if self.normalized_at == Some(revision) {
+            return None;
+        }
+        let changed = self.normalize(normalize);
+        self.normalized_at = Some(revision);
+        Some(changed)
+    }
+
+    /// Equality changes both representatives and nested terms. Rebuild from the
+    /// remaining seeds, never from a cache of successful symbolic comparisons.
+    /// The caller drains and checks structural work after every rebuild.
+    pub fn normalize(&mut self, mut normalize: impl FnMut(Type) -> Type) -> bool {
+        let seeds: Vec<_> = self
+            .graph
+            .seeds
+            .iter()
+            .map(|bound| TypeBound {
+                lower: normalize(bound.lower),
+                upper: normalize(bound.upper),
+                ..*bound
+            })
+            .collect();
+        if seeds == self.graph.seeds {
+            return false;
+        }
+        *self = Self::default();
+        for bound in seeds {
+            self.insert(bound);
+        }
+        true
+    }
+
+    pub fn take_structural(&mut self) -> Vec<TypeBound> {
+        if self.graph.structural.is_empty() {
+            return Vec::new();
+        }
+        mem::take(&mut Rc::make_mut(&mut self.graph).structural)
+    }
+
+    /// Forget successfully checked immutable pairs. They cannot change under
+    /// later substitutions, and concrete endpoints never connect propagation
+    /// paths. Symbolic pairs must stay, including those with only effect vars.
+    pub fn discharge_checked(&mut self, checked: &[TypeBound]) {
+        let ground: FxHashSet<_> = checked
+            .iter()
+            .filter(|bound| bound.lower.is_constant() && bound.upper.is_constant())
+            .map(|bound| (bound.lower, bound.upper))
+            .collect();
+        if ground.is_empty() {
+            return;
+        }
+        let graph = Rc::make_mut(&mut self.graph);
+        graph
+            .seeds
+            .retain(|bound| !ground.contains(&(bound.lower, bound.upper)));
+        for (lower, upper) in ground {
+            graph.seed_keys.remove(&(lower, upper));
+            graph.relations.remove(&(lower, upper));
+            if let Some(incoming) = graph.incoming.get_mut(&upper) {
+                incoming.retain(|ty| *ty != lower);
+                if incoming.is_empty() {
+                    graph.incoming.remove(&upper);
+                }
+            }
+            if let Some(outgoing) = graph.outgoing.get_mut(&lower) {
+                outgoing.retain(|ty| *ty != upper);
+                if outgoing.is_empty() {
+                    graph.outgoing.remove(&lower);
+                }
+            }
+        }
+    }
+
+    pub fn relations(&self) -> impl Iterator<Item = &TypeBound> {
+        self.graph.relations.values()
+    }
+
+    /// Return a spanning set of equalities for each variable SCC, using the
+    /// smallest variable as its root. The caller applies these in its equality
+    /// table and normalizes the bounds before continuing structural work.
+    pub fn equalities(&self) -> Vec<(TypeVar, TypeVar)> {
+        let mut edges = Vec::new();
+        let mut variables = FxHashSet::default();
+        for &(lower, upper) in self.graph.relations.keys() {
+            if let (Some(lower), Some(upper)) = (
+                lower.data().as_variable().copied(),
+                upper.data().as_variable().copied(),
+            ) {
+                variables.extend([lower, upper]);
+                edges.push((lower, upper));
+            }
+        }
+        let mut variables: Vec<_> = variables.into_iter().collect();
+        variables.sort_by_key(|var| var.name());
+        let indices: FxHashMap<_, _> = variables.iter().enumerate().map(|(i, v)| (*v, i)).collect();
+        let mut graph: Vec<_> = variables.iter().map(|_| VariableNode::default()).collect();
+        for (lower, upper) in edges {
+            graph[indices[&lower]].0.push(indices[&upper]);
+        }
+        let mut equalities = Vec::new();
+        for mut component in find_strongly_connected_components(&graph) {
+            component.sort_unstable();
+            let root = variables[component[0]];
+            for &index in &component[1..] {
+                equalities.push((root, variables[index]));
+            }
+        }
+        equalities.sort_by_key(|(lower, upper)| (lower.name(), upper.name()));
+        equalities
+    }
+}
+
+impl BoundGraph {
     fn propagate(&mut self, bound: TypeBound) {
         let mut queue = VecDeque::from([bound]);
         while let Some(bound) = queue.pop_front() {
@@ -112,117 +239,6 @@ impl TypeBounds {
             }
         }
     }
-
-    /// Skip unchanged inputs; `None` means skipped, `Some` reports graph changes.
-    pub fn normalize_if_changed(
-        &mut self,
-        revision: (Revision, Revision),
-        normalize: impl FnMut(Type) -> Type,
-    ) -> Option<bool> {
-        if self.normalized_at == Some(revision) {
-            return None;
-        }
-        let changed = self.normalize(normalize);
-        self.normalized_at = Some(revision);
-        Some(changed)
-    }
-
-    /// Equality changes both representatives and nested terms. Rebuild from the
-    /// remaining seeds, never from a cache of successful symbolic comparisons.
-    /// The caller drains and checks structural work after every rebuild.
-    pub fn normalize(&mut self, mut normalize: impl FnMut(Type) -> Type) -> bool {
-        let seeds: Vec<_> = self
-            .seeds
-            .iter()
-            .map(|bound| TypeBound {
-                lower: normalize(bound.lower),
-                upper: normalize(bound.upper),
-                ..*bound
-            })
-            .collect();
-        if seeds == self.seeds {
-            return false;
-        }
-        *self = Self::default();
-        for bound in seeds {
-            self.insert(bound);
-        }
-        true
-    }
-
-    pub fn take_structural(&mut self) -> Vec<TypeBound> {
-        mem::take(&mut self.structural)
-    }
-
-    /// Forget successfully checked immutable pairs. They cannot change under
-    /// later substitutions, and concrete endpoints never connect propagation
-    /// paths. Symbolic pairs must stay, including those with only effect vars.
-    pub fn discharge_checked(&mut self, checked: &[TypeBound]) {
-        let ground: FxHashSet<_> = checked
-            .iter()
-            .filter(|bound| bound.lower.is_constant() && bound.upper.is_constant())
-            .map(|bound| (bound.lower, bound.upper))
-            .collect();
-        if ground.is_empty() {
-            return;
-        }
-        self.seeds
-            .retain(|bound| !ground.contains(&(bound.lower, bound.upper)));
-        for (lower, upper) in ground {
-            self.seed_keys.remove(&(lower, upper));
-            self.relations.remove(&(lower, upper));
-            if let Some(incoming) = self.incoming.get_mut(&upper) {
-                incoming.retain(|ty| *ty != lower);
-                if incoming.is_empty() {
-                    self.incoming.remove(&upper);
-                }
-            }
-            if let Some(outgoing) = self.outgoing.get_mut(&lower) {
-                outgoing.retain(|ty| *ty != upper);
-                if outgoing.is_empty() {
-                    self.outgoing.remove(&lower);
-                }
-            }
-        }
-    }
-
-    pub fn relations(&self) -> impl Iterator<Item = &TypeBound> {
-        self.relations.values()
-    }
-
-    /// Return a spanning set of equalities for each variable SCC, using the
-    /// smallest variable as its root. The caller applies these in its equality
-    /// table and normalizes the bounds before continuing structural work.
-    pub fn equalities(&self) -> Vec<(TypeVar, TypeVar)> {
-        let mut edges = Vec::new();
-        let mut variables = FxHashSet::default();
-        for &(lower, upper) in self.relations.keys() {
-            if let (Some(lower), Some(upper)) = (
-                lower.data().as_variable().copied(),
-                upper.data().as_variable().copied(),
-            ) {
-                variables.extend([lower, upper]);
-                edges.push((lower, upper));
-            }
-        }
-        let mut variables: Vec<_> = variables.into_iter().collect();
-        variables.sort_by_key(|var| var.name());
-        let indices: FxHashMap<_, _> = variables.iter().enumerate().map(|(i, v)| (*v, i)).collect();
-        let mut graph: Vec<_> = variables.iter().map(|_| VariableNode::default()).collect();
-        for (lower, upper) in edges {
-            graph[indices[&lower]].0.push(indices[&upper]);
-        }
-        let mut equalities = Vec::new();
-        for mut component in find_strongly_connected_components(&graph) {
-            component.sort_unstable();
-            let root = variables[component[0]];
-            for &index in &component[1..] {
-                equalities.push((root, variables[index]));
-            }
-        }
-        equalities.sort_by_key(|(lower, upper)| (lower.name(), upper.name()));
-        equalities
-    }
 }
 
 // Test the root constructor, not TypeLike::is_variable's recursive free-variable query.
@@ -256,6 +272,94 @@ mod tests {
 
     fn variable(index: u32) -> Type {
         Type::variable(TypeVar::new(index))
+    }
+
+    #[test]
+    fn type_bounds_no_op_updates_preserve_snapshot_sharing() {
+        let mut bounds = TypeBounds::default();
+        let relation = edge(variable(0), variable(1));
+        bounds.insert(relation);
+        let first = Revision::default();
+        bounds.normalize_if_changed((first, first), |ty| ty);
+        let mut snapshot = bounds.clone();
+        assert!(Rc::ptr_eq(&bounds.graph, &snapshot.graph));
+
+        assert!(!bounds.insert(relation));
+        assert!(!bounds.insert(edge(variable(0), variable(0))));
+        assert!(bounds.take_structural().is_empty());
+        bounds.discharge_checked(&[]);
+        // An unrelated equality may require checking the seeds again without
+        // changing the graph. Updating that stamp must neither clone the graph
+        // nor change the stamp retained by the snapshot.
+        let mut next = first;
+        next.advance();
+        assert_eq!(
+            bounds.normalize_if_changed((next, first), |ty| ty),
+            Some(false)
+        );
+        assert!(Rc::ptr_eq(&bounds.graph, &snapshot.graph));
+        assert_eq!(
+            bounds.normalize_if_changed((next, first), |_| panic!("current stamp")),
+            None
+        );
+        assert_eq!(
+            snapshot.normalize_if_changed((first, first), |_| panic!("snapshot stamp")),
+            None
+        );
+        assert_eq!(
+            snapshot.normalize_if_changed((next, first), |ty| ty),
+            Some(false)
+        );
+        assert!(Rc::ptr_eq(&bounds.graph, &snapshot.graph));
+    }
+
+    #[test]
+    fn type_bounds_snapshots_preserve_pending_work_and_provenance() {
+        let lower = Type::nullary_function_by_val(Type::never());
+        let upper = Type::nullary_function_by_val(int_type());
+        let mut relation = edge(lower, upper);
+        let source = Location::new_synthesized().source_id;
+        relation.lower_span = Location::new(10, 11, source);
+        relation.upper_span = Location::new(20, 21, source);
+        let mut bounds = TypeBounds::default();
+        bounds.insert(relation);
+        bounds.insert(edge(variable(0), variable(1)));
+        let snapshot = bounds.clone();
+
+        let work = bounds.take_structural();
+        assert_eq!(work, vec![relation]);
+        bounds.discharge_checked(&work);
+        assert!(!bounds.relations().any(|bound| *bound == relation));
+        // A second branch rebuilds its graph under a new equality. Neither
+        // draining work, retiring a checked pair nor rebuilding may change the
+        // still-live outer snapshot or its source locations.
+        let mut other_branch = snapshot.clone();
+        assert!(other_branch.normalize(|ty| if ty == variable(1) { int_type() } else { ty }));
+        other_branch.insert(edge(variable(0), bool_type()));
+        assert!(
+            other_branch
+                .relations()
+                .any(|b| b.lower == variable(0) && b.upper == int_type())
+        );
+
+        bounds = snapshot;
+        assert_eq!(bounds.relations().count(), 2);
+        assert!(
+            bounds
+                .relations()
+                .any(|bound| *bound == edge(variable(0), variable(1)))
+        );
+        assert_eq!(bounds.take_structural(), vec![relation]);
+        assert!(bounds.take_structural().is_empty());
+        // A mutation after rollback must propagate using the restored indexes.
+        bounds.insert(edge(int_type(), variable(0)));
+        bounds.insert(edge(variable(1), bool_type()));
+        assert!(
+            bounds
+                .take_structural()
+                .iter()
+                .any(|b| b.lower == int_type() && b.upper == bool_type())
+        );
     }
 
     #[test]
