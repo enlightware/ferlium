@@ -45,15 +45,11 @@ for round in 0..MAX_ROUNDS:
     inline        // budget-limited; block merging inside its own edit
     stop if neither expanded anything
 normalize          // once more if the last round still expanded
-place CSE          // merge places which inlining exposes
-copy forward      // catch trivial-copy storage exposed after the last round
-store forward     // likewise for single-store cells
 shadow tag tests  // test a local variant's tag through a boolean its stores keep in step
 branch forward    // bypass booleans stored in branch arms only to control a second branch
 peephole          // collapse small local CFG/value patterns
 boolean flow      // repeat while the body shrinks: store forward, negation, branch forward
 string rewrites   // fuse static construction into appends; forward self-prefixed builders
-devirtualize      // final dictionary-entry callees exposed too late for a fold round
 narrow invokes    // call a direct callee that cannot fail without an error edge
 bounds checks     // prove array indices in range and remove checked access/failure edges;
                   // check a range loop's remaining indices once, before the loop
@@ -231,9 +227,8 @@ Five rules, which apply to any new pass.
    natives, which cannot be inlined and only fold with known arguments, so another run finds
    nothing.
 3. **Reuse an analysis rather than building a second one.** The dataflow analysis is the cost of most
-   rewrites. Devirtualization rides along with folding for this reason. A final devirtualization
-   sweep exists only for dictionary-entry callees exposed after the last fold round; it first runs a
-   cheap syntactic filter and then lets DCE remove the entries it strands.
+   rewrites. Devirtualization rides along with folding for this reason; it needs no sweep of its
+   own, since the rounds always end with a normalization.
 4. **Cleanup runs on every body**, not only on one a pass changed. A specialization arrives already
    carrying dead code, so "nothing changed it, so nothing is dead" does not hold.
 5. **A pass belongs in normalization only if its output feeds folding, specialization or
@@ -340,9 +335,9 @@ Once inlining has bound that evidence to constants, each round first replaces su
 the equivalent static evidence (nested closures to a fixpoint), so its entries devirtualize like
 any constant dictionary's.
 
-Inlining can expose one last `dict_entry`/dispatch pair after the final fold round. A final
-devirtualization sweep catches only those known dictionary-entry callees before DCE, so the now
-unread entries are removed without reopening the fold/specialize/inline loop.
+Inlining can expose one last `dict_entry`/dispatch pair in the last permitted round. The
+normalization that always follows the rounds devirtualizes it, so the entry is removed without
+reopening the fold/specialize/inline loop.
 
 A call keeps the type of the site that wrote it, so naming its callee, by devirtualization or by
 inlining a function argument, can leave a fallible call type on a callee that cannot fail. A direct
@@ -704,10 +699,9 @@ comparing two arbitrarily deep expressions is one key comparison and no subtree 
 Partial redundancy — a value available on some paths only — is out of reach; that needs available
 expressions and lazy code motion.
 
-It runs before inlining to merge the repeated dictionary entries generic bodies start with, then
-again after the rounds because inlining copies a callee's `subfield` chains into the caller. These
-placements target different redundancies: the first shrinks the body the inliner prices, while the
-second cleans up what splicing created.
+It runs in normalization, so before every inlining, where it merges both the repeated dictionary
+entries generic bodies start with and the `subfield` chains an earlier inlining copied into the
+caller: the body the inliner prices has lost both.
 
 The boundary is narrower than "pure". A `subfield` *derives* a place: the base's root and path with
 an index appended, holding no storage of its own, so it is valid exactly where its base is. A
@@ -993,8 +987,9 @@ SSA facts kept outside the flow state.
 Only functions containing a relevant known call, a call returning `never` or a range iterator are
 admitted. Induction recognition locally interprets a loop's construction block, then one reverse-postorder-prioritized fixed point computes
 the proof; replay performs the rewrite. Refusing a proof retains the original check. The pass runs
-after the final devirtualization because inlining may expose `array_resolve_index` and may leave a
-whole `array_index`, and immediately before DCE because removing either error edge strands cleanup.
+after the rounds' final normalization because inlining may expose `array_resolve_index` and may
+leave a whole `array_index`, and immediately before DCE because removing either error edge strands
+cleanup.
 
 ### Range-check hoisting
 

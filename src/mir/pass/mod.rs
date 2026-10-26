@@ -552,27 +552,6 @@ pub(crate) fn optimize_function(
     }
     // The specialization table is final from here.
     let callees = SemanticCallees::new(session, Some(specializations));
-    if rounds_exhausted {
-        // The last changing round may have exposed place computations and storage transfers after
-        // their pre-inline placements. When a no-change round ended the loop, those placements have
-        // already seen the settled body, so repeating them would deliver no additional work.
-        let source = current.as_ref().unwrap_or(function);
-        if let Some(merged) = cse::eliminate_common_subexpressions(source) {
-            current = Some(merged);
-        }
-        let source = current.as_ref().unwrap_or(function);
-        if let Some(forwarded) = copy_forward::forward_redundant_storage(
-            source,
-            env,
-            OptimizationStage::Semantic(callees),
-        ) {
-            current = Some(forwarded);
-        }
-        let source = current.as_ref().unwrap_or(function);
-        if let Some(forwarded) = store_forward::forward_stored_values(source, env) {
-            current = Some(forwarded);
-        }
-    }
     // Whether a callee is proved to return, which the cleanups below and loop-invariant motion
     // all ask.
     let will_return = |callee| callees.will_return(callee);
@@ -650,15 +629,6 @@ pub(crate) fn optimize_function(
         string_accumulate::forward_string_accumulation(source, context.string_functions)
     {
         current = Some(forwarded);
-    }
-    if rounds_exhausted {
-        // Inlining in the last permitted round can expose a dictionary-entry dispatch after the
-        // last fold placement. A converged round has already devirtualized the settled body; the
-        // post-round branch, peephole and string rewrites above cannot expose a dictionary callee.
-        let source = current.as_ref().unwrap_or(function);
-        if let Some(devirtualized) = fold::devirtualize_known_callees(source, env) {
-            current = Some(devirtualized);
-        }
     }
     // Inlining and devirtualization name callees through call sites typed for any callee; a
     // direct call must follow its callee's failure convention.

@@ -709,27 +709,6 @@ fn call_rewrite_operation_count(rewrite: &CallRewrite) -> usize {
     }
 }
 
-/// Names callees resolved through constant dictionary entries after the optimization round budget
-/// was exhausted.
-///
-/// Folding normally performs this rewrite while it already owns the dataflow analysis. Inlining can
-/// expose one last `dict_entry`/dispatch pair in the last permitted round, however, and DCE can
-/// remove the entry only after this has made the dispatch direct. The driver does not call this
-/// after genuine convergence: the final no-change fold already saw the settled body.
-pub(crate) fn devirtualize_known_callees(func: &Function, env: ModuleEnv<'_>) -> Option<Function> {
-    if !may_have_devirtualization(func) {
-        return None;
-    }
-    let devirtualizations = plan_devirtualizations(func, env);
-    if devirtualizations.is_empty() {
-        return None;
-    }
-
-    let mut edit = FunctionEdit::new(func.clone());
-    apply_devirtualizations(&mut edit, devirtualizations);
-    Some(edit.finish_unverified())
-}
-
 /// Decides what to rewrite, without touching the function.
 ///
 /// `refusals`, when present, collects why each call site was left alone — the optimization report
@@ -755,11 +734,7 @@ pub(crate) fn plan_folds(
 ///
 /// **Devirtualization rides along with folding rather than running as a pass of its own**, and the
 /// reason is entirely the dataflow analysis: resolving a callee needs exactly the analysis folding
-/// has already built, and that analysis *is* the cost. Riding along is therefore the main path. The
-/// final devirtualization sweep below exists only for dictionary-entry callees exposed in an
-/// exhausted last round, behind a cheap syntactic pre-filter and before DCE removes the stranded
-/// entry.
-///
+/// has already built, and that analysis *is* the cost.
 fn plan_folds_and_devirtualizations(
     func: &Function,
     resources: FoldResources<'_, '_>,
@@ -776,62 +751,6 @@ fn plan_folds_and_devirtualizations(
         &mut session.map(|_| &mut devirtualizations),
     );
     (plan, devirtualizations)
-}
-
-fn plan_devirtualizations(func: &Function, env: ModuleEnv<'_>) -> Vec<Devirtualization> {
-    let analysis = dataflow::analyze(func, env);
-    let mut devirtualizations = Vec::new();
-    for block in func.blocks() {
-        let mut state = analysis.entry_state(block);
-        let basic_block = func.block(block);
-        for (index, operation) in basic_block.operations().iter().enumerate() {
-            if let Some(resolved) = resolved_callee(operation, &state, &analysis) {
-                devirtualizations.push(Devirtualization {
-                    site: Site::Operation {
-                        block,
-                        index: OperationIndex::from_index(index),
-                    },
-                    operand: resolved.operand,
-                    callee: resolved.callee,
-                    hidden_evidence: resolved.hidden_evidence,
-                });
-            }
-            analysis.step(func, env, operation, &mut state);
-        }
-        if let TerminatorKind::Invoke { operation, .. } = &basic_block.terminator().kind
-            && let Some(resolved) = resolved_callee(operation, &state, &analysis)
-        {
-            devirtualizations.push(Devirtualization {
-                site: Site::Terminator { block },
-                operand: resolved.operand,
-                callee: resolved.callee,
-                hidden_evidence: resolved.hidden_evidence,
-            });
-        }
-    }
-    devirtualizations
-}
-
-fn may_have_devirtualization(func: &Function) -> bool {
-    let mut has_dict_entry = false;
-    let mut has_indirect_dispatch = false;
-    for block in func.blocks() {
-        let basic_block = func.block(block);
-        for operation in basic_block.operations() {
-            has_dict_entry |= matches!(operation.kind, OperationKind::DictEntry { .. });
-            has_indirect_dispatch |= dispatch_callee(operation).is_some_and(is_indirect_callee);
-            if has_dict_entry && has_indirect_dispatch {
-                return true;
-            }
-        }
-        if let TerminatorKind::Invoke { operation, .. } = &basic_block.terminator().kind {
-            has_indirect_dispatch |= dispatch_callee(operation).is_some_and(is_indirect_callee);
-            if has_dict_entry && has_indirect_dispatch {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 fn dispatch_callee(operation: &Operation) -> Option<&mir::Value> {
