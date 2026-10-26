@@ -77,9 +77,11 @@ test('warnings are nonfatal and positions use UTF-16', () => {
     assert.equal(result.status, 0, result.stderr);
     assert.ok(result.events.some(e => e.kind === 'diagnostic' && e.severity === 'warning'));
     assert.equal(result.events.at(-1).text, '1: int');
-    const failure = events('"😀" + 1\n');
+    // An explicit mismatch keeps the location independent of trait-solving order.
+    // The emoji occupies two UTF-16 code units, but four UTF-8 bytes.
+    const failure = events('"😀"; let x: int = false;\n');
     assert.equal(failure.status, 1);
-    assert.ok(failure.events.some(e => e.kind === 'diagnostic' && e.from === 7 && e.to === 8));
+    assert.ok(failure.events.some(e => e.kind === 'diagnostic' && e.from === 19 && e.to === 24));
 });
 
 test('reset, rerun and invalid options', () => {

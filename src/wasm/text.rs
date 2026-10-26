@@ -689,8 +689,11 @@ mod tests {
             "{text}"
         );
         assert!(text[strings..evidence].contains(r#") "é""#), "{text}");
+        // `pairs` requires tuple evidence; its generic helpers may carry
+        // anonymous dictionaries rather than a direct string dictionary.
         assert!(
-            text[evidence..].contains(r#"(dictionary "std::impl Value for string")"#),
+            text[evidence..]
+                .contains(r#"(dictionary "wasm_host::impl Value for (string, string)")"#),
             "{text}"
         );
         assert!(text[evidence..].ends_with("\")\n)\n"), "{text}");
