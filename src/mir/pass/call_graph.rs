@@ -63,9 +63,11 @@ impl CallGraph {
     /// dictionaries it captures. Without them, a function passing a dictionary to a generic callee
     /// could be optimized before the methods that callee's specialization calls.
     ///
-    /// `build_closure` stores its target in the operation kind rather than an operand and therefore
-    /// contributes no edge here. Constructing a closure does not invoke that target; a consumer
-    /// concerned with a later indirect call must reject that call independently.
+    /// `build_closure` names its target in the operation kind rather than an operand, and it is
+    /// an edge too. Building a closure does not invoke it, so this is one more over-approximation,
+    /// but optimization walks this order and a builder must see its closure finished: once
+    /// folding makes the closure's call direct, the builder reads the closure's body. A consumer
+    /// concerned with a later indirect call must still reject that call independently.
     ///
     /// A call with no statically known callee contributes no edge, which is why this graph alone
     /// cannot answer reachability. A consumer needing that has to add its own conservatism.
@@ -161,6 +163,11 @@ fn callees_within(function: &Function, module: &Module) -> Vec<LocalFunctionId> 
                     _ => {}
                 }
             }
+            if let Some(callee) = operation.kind.function_id()
+                && callee.module == module.module_id()
+            {
+                record(&mut callees, callee.function);
+            }
         }
     }
     callees
@@ -233,6 +240,27 @@ mod tests {
         assert!(
             callees.contains(&id("leaf")),
             "root must have an edge to leaf, got {callees:?}"
+        );
+    }
+
+    #[test]
+    fn building_a_closure_becomes_an_edge() {
+        let (graph, id) = graph_of("fn root(x: int) -> int { let f = |y| y + x; f(1) }");
+        let lambda = id("$lambda$1");
+        assert!(
+            graph.callees(id("root")).any(|callee| callee == lambda),
+            "root must have an edge to the closure it builds"
+        );
+        let order = graph.components_callees_first();
+        let position = |wanted: LocalFunctionId| {
+            order
+                .iter()
+                .position(|component| component.contains(&wanted))
+                .expect("every function is in a component")
+        };
+        assert!(
+            position(lambda) < position(id("root")),
+            "the closure must be optimized before its builder"
         );
     }
 
