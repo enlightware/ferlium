@@ -436,6 +436,38 @@ mod tests {
     }
 
     #[test]
+    fn selection_without_contributors_still_saturates_bounds() {
+        let span = Location::new_synthesized();
+        for phase in [
+            SelectionPhase::Inference,
+            SelectionPhase::Preparation,
+            SelectionPhase::Publication,
+        ] {
+            let mut inference = UnifiedTypeInference::new_with_ty_vars(2);
+            let a = Type::variable_id(0);
+            let b = Type::variable_id(1);
+            for (lower, upper) in [(a, b), (b, a)] {
+                inference.unify_sub_type(lower, span, upper, span).unwrap();
+            }
+            // Neither variable has a concrete contributor, but the cycle must
+            // still collapse before selection reports that it made no choice.
+            assert!(!inference.select_lower_bounds(false, phase).unwrap());
+            assert_eq!(inference.normalize_type(a), inference.normalize_type(b));
+            assert_eq!(inference.selection_stats.selections, 0);
+
+            // A structural pair also has no variable to select. Its queued
+            // check must not disappear behind the empty-contributor return.
+            inference.bounds.insert(TypeBound {
+                lower: Type::nullary_function_by_val(int_type()),
+                lower_span: span,
+                upper: Type::nullary_function_by_val(bool_type()),
+                upper_span: span,
+            });
+            assert!(inference.select_lower_bounds(false, phase).is_err());
+        }
+    }
+
+    #[test]
     fn bottom_generalization_requires_known_read_only_access() {
         use crate::types::r#type::{FnArgType, FnType};
         let inner = Type::function_type(FnType::new_mut_resolved(
@@ -640,7 +672,7 @@ impl UnifiedTypeInference {
                     input_tys,
                     output_tys,
                     ..
-                } => {
+                } if !output_tys.is_empty() => {
                     let inputs: FxHashSet<_> =
                         input_tys.iter().flat_map(|ty| ty.inner_ty_vars()).collect();
                     outputs.extend(
@@ -770,6 +802,12 @@ impl UnifiedTypeInference {
                     contributors.entry(root).or_default().push(bound);
                 }
             }
+        }
+        // Saturation above is still required even when no root can be selected:
+        // it checks structural pairs and collapses variable cycles. Once it has
+        // finished, an empty contributor map needs no dependency or input scan.
+        if contributors.is_empty() {
+            return Ok(false);
         }
         let mut roots: Vec<_> = contributors.keys().copied().collect();
         roots.sort_by_key(|var| var.name());
@@ -942,7 +980,6 @@ impl UnifiedTypeInference {
         }
         let mut roots: Vec<_> = neighbors.keys().copied().collect();
         roots.sort_by_key(|var| var.name());
-        let inputs = self.input_variables();
         let mut component_indices = FxHashMap::default();
         let mut components = Vec::new();
         for root in roots {
@@ -967,6 +1004,7 @@ impl UnifiedTypeInference {
         if components.is_empty() {
             return Ok(false);
         }
+        let inputs = self.input_variables();
         // Partition once instead of rescanning all relations for each component.
         // Preserve relation order within each group: products and diagnostics
         // use the first contributor. Component/BFS order is unchanged as well.
