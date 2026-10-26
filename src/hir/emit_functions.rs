@@ -1323,7 +1323,7 @@ where
             .chain(function_explicit_root_tys.iter().flatten().copied()),
     );
     ty_inf.prepare_type_bounds()?;
-    let generated = solver.commit(
+    let generated = solver.finish().commit(
         &mut output.functions,
         &mut output.def_table,
         &mut pending_functions,
@@ -1368,7 +1368,7 @@ where
             let mut solver = trait_solver_from_module!(output, others);
             ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, solver_arena)?;
             ty_inf.finalize_type_bounds(&mut solver, solver_arena)?;
-            let generated = solver.commit(
+            let generated = solver.finish().commit(
                 &mut output.functions,
                 &mut output.def_table,
                 &mut pending_functions,
@@ -1396,7 +1396,7 @@ where
             ty_inf.finalize_type_bounds(&mut solver, solver_arena)?;
             ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, solver_arena)?;
             ty_inf.finalize_type_bounds(&mut solver, solver_arena)?;
-            let generated = solver.commit(
+            let generated = solver.finish().commit(
                 &mut output.functions,
                 &mut output.def_table,
                 &mut pending_functions,
@@ -1595,7 +1595,7 @@ where
                     .transpose()
             })
             .collect::<Result<_, _>>()?;
-        let generated = solver.commit(
+        let generated = solver.finish().commit(
             &mut output.functions,
             &mut output.def_table,
             &mut pending_functions,
@@ -1776,7 +1776,7 @@ where
             );
             let mut solver = trait_solver_from_module!(output, others);
             ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, solver_arena)?;
-            let generated = solver.commit(
+            let generated = solver.finish().commit(
                 &mut output.functions,
                 &mut output.def_table,
                 &mut pending_functions,
@@ -1788,7 +1788,7 @@ where
         {
             let mut solver = trait_solver_from_module!(output, others);
             ty_inf.finalize_type_bounds(&mut solver, solver_arena)?;
-            let generated = solver.commit(
+            let generated = solver.finish().commit(
                 &mut output.functions,
                 &mut output.def_table,
                 &mut pending_functions,
@@ -1829,7 +1829,7 @@ where
                 }
             }
             ty_inf.finalize_type_bounds(&mut solver, solver_arena)?;
-            let generated = solver.commit(
+            let generated = solver.finish().commit(
                 &mut output.functions,
                 &mut output.def_table,
                 &mut pending_functions,
@@ -2001,7 +2001,7 @@ where
                         .transpose()
                 })
                 .collect::<Result<_, _>>()?;
-            let generated = solver.commit(
+            let generated = solver.finish().commit(
                 &mut output.functions,
                 &mut output.def_table,
                 &mut pending_functions,

@@ -634,7 +634,7 @@ pub(super) fn borrow_check_and_elaborate_dict(
         )?;
     }
     let generated_projection_subscripts = ctx.take_generated_projection_subscripts();
-    let generated = solver.commit(
+    let generated = solver.finish().commit(
         &mut output.functions,
         &mut output.def_table,
         pending_functions,

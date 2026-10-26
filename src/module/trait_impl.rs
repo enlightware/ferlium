@@ -22,9 +22,9 @@ use crate::{
         value::LiteralValue,
     },
     module::{
-        LocalDecl, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, PendingModuleFunction,
-        QualifiedNameEnv, TraitId, Visibility, fmt_ordered_quantifiers, id::Id,
-        unique_generated_name,
+        Def, DefKind, DefTable, LocalDecl, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId,
+        PendingModuleFunction, QualifiedNameEnv, TraitId, Visibility, fmt_ordered_quantifiers,
+        id::Id, unique_generated_name,
     },
     parser::location::Location,
     std::value::{
@@ -521,6 +521,26 @@ impl FunctionCollector {
 }
 
 impl PendingFunctionCollector {
+    /// Commit newly created pending functions as module placeholders.
+    pub fn commit(
+        mut self,
+        functions: &mut Vec<ModuleFunction>,
+        def_table: &mut DefTable,
+        pending_functions: &mut FxHashMap<LocalFunctionId, PendingModuleFunction>,
+    ) -> Vec<LocalFunctionId> {
+        let mut ids = Vec::with_capacity(self.new_elements.len());
+        for (name, function, visibility) in self.new_elements.drain(..) {
+            let id = LocalFunctionId::from_index(functions.len());
+            let name = unique_generated_name(name, |name| def_table.get_by_name(&name).is_some());
+            def_table.insert(name, Def::new(DefKind::Function(id), visibility));
+            let function = function.expect("committing a reserved generated function without code");
+            functions.push(function.placeholder());
+            pending_functions.insert(id, function);
+            ids.push(id);
+        }
+        ids
+    }
+
     fn existing_index_for_name(&self, name: Ustr) -> Option<usize> {
         self.new_elements
             .iter()

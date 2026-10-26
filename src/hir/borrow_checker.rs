@@ -1639,10 +1639,11 @@ mod tests {
         let module_env = session.module_env();
         let mut impls = module.impls.clone();
         let mut deps = FxHashSet::default();
+        let current_def_table = Default::default();
         let solver = TraitSolver::new(
             CurrentTypeItems::new_from_module(module),
             &mut impls,
-            FxHashMap::default(),
+            &current_def_table,
             &mut deps,
             CurrentProjectionSubscriptTypes::empty(),
             PendingFunctionCollector::new(0),

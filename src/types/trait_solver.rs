@@ -22,13 +22,13 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        self, BlanketImpls, BlanketTraitImpls, ConcreteTraitImplKey, CurrentTypeItems, Def,
-        DefKind, DefTable, DictionaryEntryRequirements, FunctionId, LocalDecl, LocalDeclId,
-        LocalFunctionId, LocalImplId, LocalTraitId, Module, ModuleEnv, ModuleFunction, ModuleId,
-        PendingFunctionBody, PendingFunctionCollector, PendingModuleFunction, ProjectionKey,
-        QualifiedNameEnv, ResolvedValueLayout, TraitDictionary, TraitId, TraitImpl, TraitImplId,
-        TraitImpls, TypeDefId, Visibility, build_capturing_dictionary_value,
-        build_dictionary_value, dictionary_capture_plan, id::Id, unique_generated_name,
+        self, BlanketImpls, BlanketTraitImpls, ConcreteTraitImplKey, CurrentTypeItems, DefTable,
+        DictionaryEntryRequirements, FunctionId, LocalDecl, LocalDeclId, LocalFunctionId,
+        LocalImplId, LocalTraitId, Module, ModuleEnv, ModuleId, PendingFunctionBody,
+        PendingFunctionCollector, PendingModuleFunction, ProjectionKey, QualifiedNameEnv,
+        ResolvedValueLayout, TraitDictionary, TraitId, TraitImpl, TraitImplId, TraitImpls,
+        TypeDefId, Visibility, build_capturing_dictionary_value, build_dictionary_value,
+        dictionary_capture_plan, id::Id,
     },
     std::{
         STD_MODULE_ID,
@@ -90,14 +90,15 @@ fn blanket_dictionary(
 /// Trait solving is performed by this structure, mutating it by caching intermediate results.
 #[allow(clippy::too_many_arguments)]
 #[derive(Debug)]
-#[must_use = "call .commit() to store the created functions"]
+#[must_use = "call .finish().commit() to store the created functions"]
 pub struct TraitSolver<'a> {
     /// Current module type-level items. Kept separately from `others` because the current module can be mid-compilation and not yet committed.
     pub(crate) current_type_items: CurrentTypeItems<'a>,
     /// Current module implementations.
     pub impls: &'a mut TraitImpls,
-    /// Current module functions available by name.
-    pub current_functions: FxHashMap<Ustr, LocalFunctionId>,
+    /// Borrowed definitions for looking up existing named functions. Generated
+    /// functions remain in `fn_collector` until commit.
+    current_def_table: &'a DefTable,
     /// Current module dependencies discovered while solving.
     pub deps: &'a mut FxHashSet<ModuleId>,
     /// Current-module projection subscript capability types, materialized eagerly for real solvers and lazily for probes.
@@ -143,7 +144,7 @@ impl<'a> TraitSolver<'a> {
     pub(crate) fn new(
         current_type_items: CurrentTypeItems<'a>,
         impls: &'a mut TraitImpls,
-        current_functions: FxHashMap<Ustr, LocalFunctionId>,
+        current_def_table: &'a DefTable,
         deps: &'a mut FxHashSet<ModuleId>,
         current_projection_subscript_types: CurrentProjectionSubscriptTypes<'a>,
         fn_collector: PendingFunctionCollector,
@@ -153,7 +154,7 @@ impl<'a> TraitSolver<'a> {
         Self {
             current_type_items,
             impls,
-            current_functions,
+            current_def_table,
             deps,
             current_projection_subscript_types,
             fn_collector,
@@ -219,8 +220,6 @@ fn materialized_associated_const_values(
 /// mutably borrow parts of the module's data while not touching the function field.
 macro_rules! trait_solver_from_module {
     ($module:expr, $program:expr) => {{
-        let current_functions =
-            crate::types::trait_solver::current_function_map(&$module.def_table);
         let current_projection_subscript_types =
             crate::types::trait_solver::CurrentProjectionSubscriptTypes::from_map(
                 crate::types::trait_solver::current_projection_subscript_type_map(&$module),
@@ -238,7 +237,7 @@ macro_rules! trait_solver_from_module {
                 &$module.projection_subscripts,
             ),
             &mut $module.impls,
-            current_functions,
+            &$module.def_table,
             &mut $module.deps,
             current_projection_subscript_types,
             crate::module::PendingFunctionCollector::new(function_count),
@@ -252,7 +251,7 @@ pub(crate) use trait_solver_from_module;
 pub(crate) struct TraitSolverProbe<'a> {
     current_type_items: CurrentTypeItems<'a>,
     impls: Cow<'a, TraitImpls>,
-    current_functions: FxHashMap<Ustr, LocalFunctionId>,
+    current_def_table: &'a DefTable,
     current_projection_subscript_types: CurrentProjectionSubscriptTypes<'a>,
     deps: FxHashSet<ModuleId>,
     fn_collector: PendingFunctionCollector,
@@ -420,17 +419,6 @@ pub(crate) fn alpha_canonicalize_dictionary_requirements(
     requirements
         .iter()
         .map(|requirement| requirement.instantiate(&mut mapper))
-        .collect()
-}
-
-pub(crate) fn current_function_map(def_table: &DefTable) -> FxHashMap<Ustr, LocalFunctionId> {
-    def_table
-        .iter()
-        .filter_map(|(def, name)| {
-            let name = name.as_ref()?;
-            let local_id = def.kind.as_function().copied()?;
-            Some((*name, local_id))
-        })
         .collect()
 }
 
@@ -742,7 +730,7 @@ impl<'a> TraitSolverProbe<'a> {
         Self {
             current_type_items: CurrentTypeItems::new_from_module(module),
             impls: Cow::Borrowed(&module.impls),
-            current_functions: current_function_map(&module.def_table),
+            current_def_table: &module.def_table,
             current_projection_subscript_types: CurrentProjectionSubscriptTypes::from_module(
                 module,
             ),
@@ -770,7 +758,7 @@ impl<'a> TraitSolverProbe<'a> {
         Self {
             current_type_items: solver.current_type_items,
             impls: Cow::Owned(impls),
-            current_functions: solver.current_functions.clone(),
+            current_def_table: solver.current_def_table,
             current_projection_subscript_types: solver.current_projection_subscript_types.clone(),
             deps: solver.deps.clone(),
             fn_collector: solver.fn_collector.clone(),
@@ -790,7 +778,7 @@ impl<'a> TraitSolverProbe<'a> {
         let mut solver = TraitSolver::new(
             self.current_type_items,
             self.impls.to_mut(),
-            mem::take(&mut self.current_functions),
+            self.current_def_table,
             &mut self.deps,
             self.current_projection_subscript_types.clone(),
             fn_collector,
@@ -803,7 +791,6 @@ impl<'a> TraitSolverProbe<'a> {
         self.active_improvements = mem::take(&mut solver.active_improvements);
         self.private_impl_scope = mem::take(&mut solver.private_impl_scope);
         self.privileged_impl_module = solver.privileged_impl_module;
-        self.current_functions = mem::take(&mut solver.current_functions);
         self.current_projection_subscript_types
             .cache_materialized_types_from(&solver.current_projection_subscript_types);
         self.fn_collector = mem::replace(
@@ -2504,26 +2491,15 @@ impl<'a> TraitSolver<'a> {
         })
     }
 
-    /// Commit newly created pending functions as module placeholders.
-    /// This must be called after trait solving is done,
-    /// otherwise the created functions will be lost.
-    pub fn commit(
-        mut self,
-        functions: &mut Vec<ModuleFunction>,
-        def_table: &mut DefTable,
-        pending_functions: &mut FxHashMap<LocalFunctionId, PendingModuleFunction>,
-    ) -> Vec<LocalFunctionId> {
-        let mut ids = Vec::with_capacity(self.fn_collector.new_elements.len());
-        for (name, function, visibility) in self.fn_collector.new_elements.drain(..) {
-            let id = LocalFunctionId::from_index(functions.len());
-            let name = unique_generated_name(name, |name| def_table.get_by_name(&name).is_some());
-            def_table.insert(name, Def::new(DefKind::Function(id), visibility));
-            let function = function.expect("committing a reserved generated function without code");
-            functions.push(function.placeholder());
-            pending_functions.insert(id, function);
-            ids.push(id);
-        }
-        ids
+    /// Finish solving and release borrowed module definitions before committing
+    /// generated functions back to the module.
+    #[must_use = "commit the generated functions to the module"]
+    pub fn finish(mut self) -> PendingFunctionCollector {
+        let initial_count = self.fn_collector.initial_count;
+        mem::replace(
+            &mut self.fn_collector,
+            PendingFunctionCollector::new(initial_count),
+        )
     }
 
     /// Add a concrete trait implementation from the given code body, for single-function traits.
@@ -4570,6 +4546,25 @@ impl<'a> TraitSolver<'a> {
         Ok(self.function_id(module_id, function_id))
     }
 
+    /// Look up an existing named function without rebuilding a function-only index.
+    pub(crate) fn current_function(&self, name: Ustr) -> Option<LocalFunctionId> {
+        let (_, def) = self.current_def_table.get_by_name(&name)?;
+        if let Some(id) = def.kind.as_function() {
+            return Some(*id);
+        }
+        // Helper lookup historically selected the last named function even if
+        // a later non-function shadowed it. Preserve that behavior only for an
+        // indexed name; ordinary misses must not scan the definition table.
+        self.current_def_table
+            .iter()
+            .filter_map(|(def, entry_name)| {
+                (*entry_name == Some(name))
+                    .then(|| def.kind.as_function().copied())
+                    .flatten()
+            })
+            .last()
+    }
+
     /// Get a function from the current module if it is defined locally, otherwise import it.
     pub fn get_local_or_import_function(
         &mut self,
@@ -4581,7 +4576,7 @@ impl<'a> TraitSolver<'a> {
         // if let Some(local_id) = self.fn_collector.get_function(function_name) {
         //     return Ok(self.function_id(self.current_type_items.module.id, local_id));
         // }
-        if let Some(local_id) = self.current_functions.get(&function_name).copied() {
+        if let Some(local_id) = self.current_function(function_name) {
             return Ok(self.function_id(self.current_type_items.module.id, local_id));
         }
         self.get_function(use_site, module_path, function_name)
@@ -4724,7 +4719,7 @@ impl<'a> Drop for TraitSolver<'a> {
     fn drop(&mut self) {
         if !self.fn_collector.new_elements.is_empty() {
             log::warn!(
-                "TraitSolver dropped without committing the created functions. Call .commit() to store them in the module."
+                "TraitSolver dropped without committing the created functions. Call .finish().commit() to store them in the module."
             );
         }
     }
@@ -4757,6 +4752,63 @@ mod tests {
             r#type::FnType,
         },
     };
+
+    #[test]
+    fn borrowed_function_lookup_preserves_named_function_selection() {
+        use crate::module::{Def, DefKind};
+
+        fn check(module: &mut Module, modules: &Modules) {
+            // Reference the previous eager map, including its treatment of
+            // duplicate names, non-functions and anonymous entries.
+            let expected: FxHashMap<_, _> = module
+                .def_table
+                .iter()
+                .filter_map(|(def, name)| Some(((*name)?, *def.kind.as_function()?)))
+                .collect();
+            let solver = trait_solver_from_module!(module, modules);
+            let mut probe = TraitSolverProbe::from_solver(&solver);
+            for name in [ustr::ustr("f"), ustr::ustr("other"), ustr::ustr("missing")] {
+                assert_eq!(solver.current_function(name), expected.get(&name).copied());
+                assert_eq!(
+                    probe.with_solver(|nested| nested.current_function(name)),
+                    expected.get(&name).copied()
+                );
+            }
+            drop(probe);
+            // Finishing releases the definition-table borrow before commit mutates it.
+            let mut pending = FxHashMap::default();
+            assert!(
+                solver
+                    .finish()
+                    .commit(&mut module.functions, &mut module.def_table, &mut pending)
+                    .is_empty()
+            );
+        }
+
+        let modules = Modules::default();
+        let mut module = Module::new(ModuleId::new(0), Path::single_str("$function_lookup"));
+        let name = ustr::ustr("f");
+        let function = |id| {
+            Def::new(
+                DefKind::Function(LocalFunctionId::new(id)),
+                Visibility::Module,
+            )
+        };
+        check(&mut module, &modules);
+        module.def_table.insert(name, function(0));
+        module.def_table.insert_anonymous(function(1));
+        module.def_table.insert(
+            ustr::ustr("other"),
+            Def::public(DefKind::BareNativeTypeAlias),
+        );
+        check(&mut module, &modules);
+        module.def_table.insert(name, function(2));
+        check(&mut module, &modules);
+        module
+            .def_table
+            .insert(name, Def::public(DefKind::BareNativeTypeAlias));
+        check(&mut module, &modules);
+    }
 
     fn impl_storage_fixture() -> (Module, ConcreteTraitImplKey) {
         // No semantic query uses these entries: they exercise storage and visibility.
@@ -5021,7 +5073,7 @@ mod tests {
         let modules = session.raw_modules();
         let module_id = modules.next_id();
         let mut module = new_module_using_std(module_id, Path::single_str("$open_dictionary_test"));
-        let current_functions = current_function_map(&module.def_table);
+        let current_def_table = &module.def_table;
         let current_type_items = CurrentTypeItems::new(
             module::ModuleIdentity {
                 id: module_id,
@@ -5054,7 +5106,7 @@ mod tests {
         let mut solver = TraitSolver::new(
             current_type_items,
             &mut module.impls,
-            current_functions,
+            current_def_table,
             &mut deps,
             CurrentProjectionSubscriptTypes::empty(),
             PendingFunctionCollector::new(method_count),
@@ -5136,7 +5188,7 @@ mod tests {
             [Box::new(UnexecutedEffectMethod) as Function],
         );
 
-        let current_functions = current_function_map(&module.def_table);
+        let current_def_table = &module.def_table;
         let function_count = module.functions.len();
         let current_type_items = CurrentTypeItems::new(
             module::ModuleIdentity {
@@ -5152,7 +5204,7 @@ mod tests {
         let mut solver = TraitSolver::new(
             current_type_items,
             &mut module.impls,
-            current_functions,
+            current_def_table,
             &mut deps,
             CurrentProjectionSubscriptTypes::empty(),
             PendingFunctionCollector::new(function_count),

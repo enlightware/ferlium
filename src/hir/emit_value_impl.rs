@@ -57,7 +57,7 @@ pub(crate) fn function_value_method(
     span: Location,
 ) -> Result<LocalFunctionId, InternalCompilationError> {
     let name = function_value_method_name(method_index);
-    if let Some(local_id) = solver.current_functions.get(&name).copied() {
+    if let Some(local_id) = solver.current_function(name) {
         return Ok(local_id);
     }
     if let Some(local_id) = solver.fn_collector.get_function(name) {
@@ -152,7 +152,7 @@ pub(crate) fn generic_value_methods_for_type(
         definitions.into_iter().zip(code_entries).enumerate()
     {
         let name = method_names[method_index];
-        if let Some(local_id) = solver.current_functions.get(&name).copied() {
+        if let Some(local_id) = solver.current_function(name) {
             methods.push(local_id);
             continue;
         }
@@ -425,7 +425,7 @@ pub(super) fn emit_auto_value_impls(
                 solver_arena,
                 &mut solver,
             )?;
-            let generated = solver.commit(
+            let generated = solver.finish().commit(
                 &mut output.functions,
                 &mut output.def_table,
                 &mut pending_functions,
@@ -514,7 +514,7 @@ pub(super) fn emit_auto_value_impls(
                 let function =
                     function.check_borrows_and_elaborate_hir(&mut output.hir_arena, &mut ctx)?;
                 let generated_projection_subscripts = ctx.take_generated_projection_subscripts();
-                let generated = solver.commit(
+                let generated = solver.finish().commit(
                     &mut output.functions,
                     &mut output.def_table,
                     &mut pending_functions,

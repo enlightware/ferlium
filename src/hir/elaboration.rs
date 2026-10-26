@@ -1430,7 +1430,7 @@ pub fn elaborate_generated_functions(
             function.check_borrows_and_elaborate_hir(&mut module.hir_arena, &mut ctx)?;
         module.functions[id.as_index()] = elaborated;
         let generated_projection_subscripts = ctx.take_generated_projection_subscripts();
-        let generated = solver.commit(
+        let generated = solver.finish().commit(
             &mut module.functions,
             &mut module.def_table,
             pending_functions,
@@ -3602,7 +3602,7 @@ mod tests {
         let mut solver = TraitSolver::new(
             CurrentTypeItems::new_from_module(&current_module),
             &mut impls,
-            FxHashMap::default(),
+            &current_module.def_table,
             &mut deps,
             CurrentProjectionSubscriptTypes::empty(),
             PendingFunctionCollector::new(0),
@@ -3711,7 +3711,7 @@ mod tests {
         let mut solver = TraitSolver::new(
             CurrentTypeItems::new_from_module(&current_module),
             &mut impls,
-            FxHashMap::default(),
+            &current_module.def_table,
             &mut deps,
             CurrentProjectionSubscriptTypes::empty(),
             PendingFunctionCollector::new(0),
@@ -3781,7 +3781,7 @@ mod tests {
         let mut solver = TraitSolver::new(
             CurrentTypeItems::new_from_module(&current_module),
             &mut impls,
-            FxHashMap::default(),
+            &current_module.def_table,
             &mut deps,
             CurrentProjectionSubscriptTypes::empty(),
             PendingFunctionCollector::new(0),

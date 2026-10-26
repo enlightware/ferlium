@@ -212,7 +212,7 @@ fn emit_expr_unsafe_inner(
     }
     let mut ty_inf = ty_inf.unify(&mut solver, expr_arena)?;
     ty_inf.prepare_type_bounds()?;
-    let generated = solver.commit(
+    let generated = solver.finish().commit(
         &mut module.functions,
         &mut module.def_table,
         &mut pending_functions,
@@ -260,7 +260,7 @@ fn emit_expr_unsafe_inner(
             .with_unit_variant_seed_tys(unit_variant_seed_tys);
         ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, expr_arena)?;
         ty_inf.finalize_type_bounds(&mut solver, expr_arena)?;
-        let generated = solver.commit(
+        let generated = solver.finish().commit(
             &mut module.functions,
             &mut module.def_table,
             &mut pending_functions,
@@ -293,7 +293,7 @@ fn emit_expr_unsafe_inner(
         ty_inf.finalize_type_bounds(&mut solver, expr_arena)?;
         ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, expr_arena)?;
         ty_inf.finalize_type_bounds(&mut solver, expr_arena)?;
-        let generated = solver.commit(
+        let generated = solver.finish().commit(
             &mut module.functions,
             &mut module.def_table,
             &mut pending_functions,
@@ -437,7 +437,7 @@ fn emit_expr_unsafe_inner(
             .expect("expected pending function body")
             .definition = descr.definition.clone();
     }
-    let generated = solver.commit(
+    let generated = solver.finish().commit(
         &mut module.functions,
         &mut module.def_table,
         &mut pending_functions,
@@ -549,7 +549,7 @@ fn emit_expr_unsafe_inner(
         )?;
     }
     let generated_projection_subscripts = ctx.take_generated_projection_subscripts();
-    let generated = solver.commit(
+    let generated = solver.finish().commit(
         &mut module.functions,
         &mut module.def_table,
         &mut pending_functions,
