@@ -37,7 +37,9 @@
 //! makes the later one dead for ordinary storage DCE.
 //!
 //! **Load availability.** A `load` is keyed by the place it reads and depends on that place's root,
-//! which every write to it invalidates as it invalidates a call reading it. A stack restore does
+//! which every write to it invalidates as it invalidates a call reading it. A repeatable addressor
+//! writes only its out-slot, although it takes its storage mutably, so an element access does not
+//! invalidate the loads of its array's length. A stack restore does
 //! not: the loaded register outlives the storage it was read from, and only allocating that storage
 //! again, as a loop does, makes a later load of it read something else. A later load of the same
 //! place, available on every path from one earlier load, reads that load's register instead.
@@ -476,6 +478,7 @@ impl<'a> CallSteps<'a> {
         func: &'a Function,
         env: ModuleEnv<'_>,
         origins: &PlaceOrigins,
+        summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
         candidates: &Candidates<'_>,
     ) -> Self {
         let mut expressions = FxHashMap::default();
@@ -521,12 +524,16 @@ impl<'a> CallSteps<'a> {
             let Some(call) = call_operands_for_cse(operation, env) else {
                 return Some(CallStep::Opaque);
             };
-            let mutable = call
-                .arguments
-                .iter()
-                .filter(|(_, convention)| matches!(convention, ArgConvention::MutableRef))
-                .map(|(argument, _)| origins.origin_of(argument).map(|origin| origin.root))
-                .collect();
+            // A repeatable addressor takes its storage mutably only to address into it.
+            let mutable = if only_addresses(operation, &call, summary_of) {
+                Vec::new()
+            } else {
+                call.arguments
+                    .iter()
+                    .filter(|(_, convention)| matches!(convention, ArgConvention::MutableRef))
+                    .map(|(argument, _)| origins.origin_of(argument).map(|origin| origin.root))
+                    .collect()
+            };
             Some(CallStep::Writes {
                 result: call.result,
                 mutable,
@@ -607,6 +614,7 @@ pub(crate) fn eliminate_common_calls(
         func,
         env,
         &origins,
+        summary_of,
         &Candidates::Calls {
             constant_cells: &scan.constant_cells,
             is_value: &is_value,
@@ -725,7 +733,13 @@ pub(crate) fn eliminate_common_loads(
         return None;
     }
     let origins = PlaceOrigins::of(func, summary_of);
-    let loads = CallSteps::of(func, env, &origins, &Candidates::Loads(&repeated));
+    let loads = CallSteps::of(
+        func,
+        env,
+        &origins,
+        summary_of,
+        &Candidates::Loads(&repeated),
+    );
     let replacements = redundant_expressions(func, &loads, &origins);
     if replacements.is_empty() {
         return None;
@@ -1169,6 +1183,23 @@ fn transfer(
         _ => {}
     }
     None
+}
+
+/// Whether `operation` calls an addressor whose summary proves it mutates no visible argument, so
+/// that it writes only its out-slot.
+fn only_addresses(
+    operation: &Operation,
+    call: &CallOperands<'_>,
+    summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
+) -> bool {
+    let OperationKind::Call { ty, metadata, .. } = &operation.kind else {
+        return false;
+    };
+    ty.result_convention == CallResultConvention::ADDRESSOR_PLACE
+        && metadata
+            .as_deref()
+            .is_none_or(|metadata| metadata.owned_arguments.is_empty())
+        && matches!(call.callee, mir::Value::Function(callee) if summary_of(*callee).repeatable)
 }
 
 fn call_expression(
@@ -1705,6 +1736,29 @@ mod tests {
         };
         assert_eq!(addresses(entry), 3);
         assert_eq!(addresses(next), 1);
+    }
+
+    /// Indexing an array calls a repeatable addressor that takes the array's buffer mutably only to
+    /// address into it, so it must not invalidate the load of the array's length: the second loop
+    /// reads the length loaded before the first one.
+    #[test]
+    fn element_access_does_not_invalidate_the_length_load() {
+        let body = body_of(
+            "fn f(x: [int], y: [int]) -> int { let mut s = 0; \
+             for i in 0..len(x) { s = s + x[i] * y[i] }; \
+             for i in 0..len(x) { s = s + x[i] - y[i] }; s }",
+            "f",
+        );
+        let fields = body.lines().filter_map(|line| {
+            let (register, rest) = line.trim().split_once(": place int = subfield ")?;
+            rest.ends_with(" from %p0").then_some(register)
+        });
+        for field in fields {
+            assert!(
+                body.matches(&format!("= load {field}\n")).count() <= 1,
+                "{field} of the array must be loaded once:\n{body}"
+            );
+        }
     }
 
     fn optimized(src: &str) -> String {

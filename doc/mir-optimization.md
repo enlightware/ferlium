@@ -1082,7 +1082,9 @@ of the caller. Load CSE reads a place read twice once: two calls taking the same
 equal, and folding's identities see `x - x` as one value on both sides. Store forwarding turns the
 load of a known cell into the constant itself, so a literal argument needs no cell, and LICM hoists
 a load the loop does not change. An array loop thus reads the array's `start` once, where the read
-sat inside an addition that also took the cursor.
+sat inside an addition that also took the cursor. A repeatable addressor, such as an array element
+access, takes its storage mutably only to address into it, so it does not invalidate earlier loads:
+a second loop over an array reads the length loaded before the first.
 
 The passes read through values: folding and the integer relations take a value argument's fact as
 they take a place's, folding follows a negation through the value loaded from its result, LICM
