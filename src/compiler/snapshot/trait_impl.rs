@@ -1,6 +1,8 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
+use std::rc::Rc;
+
 use super::{
     SnapshotError, SnapshotLiteral, SnapshotTypeGraphBuilder, SnapshotTypeId,
     hir::SnapshotDictionaryReq, semantic::SnapshotConstraint,
@@ -257,33 +259,36 @@ impl SnapshotTraitImpls {
 
     pub(crate) fn materialize(&self, types: &[Type]) -> Result<TraitImpls, SnapshotError> {
         let mut value = TraitImpls::new(self.module_id);
-        value.concrete_key_to_id = self
-            .concrete
-            .iter()
-            .map(|(key, id)| Ok((key.materialize(types)?, *id)))
-            .collect::<Result<_, SnapshotError>>()?;
+        value.concrete_key_to_id = Rc::new(
+            self.concrete
+                .iter()
+                .map(|(key, id)| Ok((key.materialize(types)?, *id)))
+                .collect::<Result<_, SnapshotError>>()?,
+        );
         for (trait_id, key, id) in &self.blanket {
-            value
-                .blanket_key_to_id
+            Rc::make_mut(&mut value.blanket_key_to_id)
                 .entry(*trait_id)
                 .or_default()
                 .insert(key.materialize(types)?, *id);
         }
-        value.generated_value_key_to_id = self
-            .generated_value
-            .iter()
-            .map(|(key, id)| Ok((live_types(key, types)?, *id)))
-            .collect::<Result<_, SnapshotError>>()?;
-        value.application_key_to_id = self
-            .applications
-            .iter()
-            .map(|(key, id)| Ok((key.materialize(types)?, *id)))
-            .collect::<Result<_, SnapshotError>>()?;
-        value.data = self
-            .data
-            .iter()
-            .map(|value| value.materialize(types))
-            .collect::<Result<_, _>>()?;
+        value.generated_value_key_to_id = Rc::new(
+            self.generated_value
+                .iter()
+                .map(|(key, id)| Ok((live_types(key, types)?, *id)))
+                .collect::<Result<_, SnapshotError>>()?,
+        );
+        value.application_key_to_id = Rc::new(
+            self.applications
+                .iter()
+                .map(|(key, id)| Ok((key.materialize(types)?, *id)))
+                .collect::<Result<_, SnapshotError>>()?,
+        );
+        value.data = Rc::new(
+            self.data
+                .iter()
+                .map(|value| value.materialize(types))
+                .collect::<Result<_, _>>()?,
+        );
         Ok(value)
     }
 }
@@ -316,7 +321,13 @@ mod tests {
             restored.blanket_key_to_id,
             session.std_module().impls.blanket_key_to_id
         );
-        for (expected, actual) in session.std_module().impls.data.iter().zip(restored.data) {
+        for (expected, actual) in session
+            .std_module()
+            .impls
+            .data
+            .iter()
+            .zip(restored.data.iter())
+        {
             assert_eq!(actual.output_tys, expected.output_tys);
             assert_eq!(actual.output_effs, expected.output_effs);
             assert_eq!(actual.methods, expected.methods);

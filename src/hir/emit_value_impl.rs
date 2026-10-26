@@ -1,6 +1,8 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
+use std::rc::Rc;
+
 use indexmap::IndexSet;
 use itertools::Itertools;
 use ustr::{Ustr, ustr};
@@ -617,7 +619,8 @@ pub(super) fn emit_auto_value_impls(
             public,
             Some(type_def_span),
         );
-        output.impls.data[impl_id.as_index()].dictionary_value = dictionary_value;
+        Rc::make_mut(&mut output.impls.data)[impl_id.as_index()].dictionary_value =
+            dictionary_value;
     }
 
     Ok(())

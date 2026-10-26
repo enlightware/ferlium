@@ -757,9 +757,16 @@ impl<'a> TraitSolverProbe<'a> {
 
     fn from_solver(solver: &TraitSolver<'a>) -> Self {
         let mut impls = solver.impls.clone();
-        impls
+        // Most probes have no private concrete entries. Do not detach the shared
+        // index for a retain that would leave it unchanged.
+        if impls
             .concrete_key_to_id
-            .retain(|_, id| impls.data[id.as_index()].public);
+            .values()
+            .any(|id| !impls.data[id.as_index()].public)
+        {
+            Rc::make_mut(&mut impls.concrete_key_to_id)
+                .retain(|_, id| impls.data[id.as_index()].public);
+        }
         Self {
             current_type_items: solver.current_type_items,
             impls: Cow::Owned(impls),
@@ -960,10 +967,10 @@ struct ResolvedRuntimeRequirement {
 }
 
 pub(crate) struct DerivedImplSnapshot {
-    concrete_key_to_id: FxHashMap<ConcreteTraitImplKey, LocalImplId>,
-    blanket_key_to_id: BlanketImpls,
-    generated_value_key_to_id: FxHashMap<Vec<Type>, LocalImplId>,
-    application_key_to_id: FxHashMap<ConcreteTraitImplKey, LocalImplId>,
+    concrete_key_to_id: Rc<FxHashMap<ConcreteTraitImplKey, LocalImplId>>,
+    blanket_key_to_id: Rc<BlanketImpls>,
+    generated_value_key_to_id: Rc<FxHashMap<Vec<Type>, LocalImplId>>,
+    application_key_to_id: Rc<FxHashMap<ConcreteTraitImplKey, LocalImplId>>,
     impl_data_len: usize,
     new_function_len: usize,
 }
@@ -1272,7 +1279,7 @@ impl<'a> TraitSolver<'a> {
         };
         let mut candidates = Vec::new();
 
-        for (key, id) in &self.impls.concrete_key_to_id {
+        for (key, id) in self.impls.concrete_key_to_id.iter() {
             if key.trait_id == trait_id {
                 let imp = &self.impls.data[id.as_index()];
                 if !imp.public || !compatible(&key.input_tys) {
@@ -1308,7 +1315,7 @@ impl<'a> TraitSolver<'a> {
                 continue;
             };
 
-            for (key, id) in &module.impls.concrete_key_to_id {
+            for (key, id) in module.impls.concrete_key_to_id.iter() {
                 if key.trait_id == trait_id {
                     let imp = &module.impls.data[id.as_index()];
                     if self.can_use_other_impl(module.module_id(), imp)
@@ -2570,7 +2577,9 @@ impl<'a> TraitSolver<'a> {
         self.impls.blanket_key_to_id = snapshot.blanket_key_to_id;
         self.impls.generated_value_key_to_id = snapshot.generated_value_key_to_id;
         self.impls.application_key_to_id = snapshot.application_key_to_id;
-        self.impls.data.truncate(snapshot.impl_data_len);
+        if self.impls.data.len() != snapshot.impl_data_len {
+            Rc::make_mut(&mut self.impls.data).truncate(snapshot.impl_data_len);
+        }
         self.fn_collector
             .new_elements
             .truncate(snapshot.new_function_len);
@@ -3171,8 +3180,7 @@ impl<'a> TraitSolver<'a> {
             self.impls.add_concrete_struct(key, imp)
         } else {
             let impl_id = self.impls.add_anonymous_dictionary_struct(imp);
-            self.impls
-                .generated_value_key_to_id
+            Rc::make_mut(&mut self.impls.generated_value_key_to_id)
                 .insert(canonical_input_tys, impl_id);
             impl_id
         };
@@ -3869,7 +3877,8 @@ impl<'a> TraitSolver<'a> {
                     let resulting_key =
                         application_key(trait_id, input_tys, Some(&output_tys), Some(&output_effs));
                     for key in [requested_key, resulting_key] {
-                        self.impls.application_key_to_id.insert(key, local_impl_id);
+                        Rc::make_mut(&mut self.impls.application_key_to_id)
+                            .insert(key, local_impl_id);
                     }
 
                     if imp_module_id.is_some() {
@@ -3977,13 +3986,14 @@ impl<'a> TraitSolver<'a> {
                 let associated_const_getters = self.impls.data[local_impl_id.as_index()]
                     .associated_const_getters
                     .clone();
-                self.impls.data[local_impl_id.as_index()].dictionary_value = blanket_dictionary(
-                    trait_id,
-                    input_tys,
-                    &methods,
-                    &associated_const_getters,
-                    &method_requirements,
-                );
+                Rc::make_mut(&mut self.impls.data)[local_impl_id.as_index()].dictionary_value =
+                    blanket_dictionary(
+                        trait_id,
+                        input_tys,
+                        &methods,
+                        &associated_const_getters,
+                        &method_requirements,
+                    );
 
                 if imp_module_id.is_some() {
                     self.private_impl_scope.pop();
@@ -4747,6 +4757,145 @@ mod tests {
             r#type::FnType,
         },
     };
+
+    fn impl_storage_fixture() -> (Module, ConcreteTraitImplKey) {
+        // No semantic query uses these entries: they exercise storage and visibility.
+        let module_id = ModuleId::new(0);
+        let mut module = Module::new(module_id, Path::single_str("$impl_storage"));
+        let trait_id = TraitId::new(module_id, LocalTraitId::new(0));
+        let key = ConcreteTraitImplKey::new(trait_id, vec![Type::unit()]);
+        let imp = TraitImpl::new(
+            trait_id,
+            vec![Type::unit()],
+            vec![],
+            vec![],
+            TraitDictionary::new(&[], &[]),
+            Type::unit(),
+            true,
+            None,
+        );
+        module.impls.add_concrete_struct(key.clone(), imp);
+        (module, key)
+    }
+
+    #[test]
+    fn impl_probes_share_tables_and_isolate_nested_writes() {
+        let (mut module, key) = impl_storage_fixture();
+        let modules = Modules::default();
+        {
+            let mut borrowed = TraitSolverProbe::from_module(&module, &modules);
+            borrowed.with_solver(|scratch| {
+                assert!(Rc::ptr_eq(&scratch.impls.data, &module.impls.data));
+                assert!(Rc::ptr_eq(
+                    &scratch.impls.concrete_key_to_id,
+                    &module.impls.concrete_key_to_id
+                ));
+            });
+        }
+        let solver = trait_solver_from_module!(module, &modules);
+        let mut probe = TraitSolverProbe::from_solver(&solver);
+        assert!(Rc::ptr_eq(&probe.impls.data, &solver.impls.data));
+        assert!(Rc::ptr_eq(
+            &probe.impls.concrete_key_to_id,
+            &solver.impls.concrete_key_to_id
+        ));
+        probe.with_solver(|inner| {
+            // A no-op rollback must not detach the dictionaries.
+            let snapshot = inner.snapshot_derived_impl_state();
+            inner.rollback_derived_impl_state(snapshot);
+            assert!(Rc::ptr_eq(&inner.impls.data, &solver.impls.data));
+            let mut nested = TraitSolverProbe::from_solver(inner);
+            nested.with_solver(|nested| {
+                let mut private = nested.impls.data[0].clone();
+                private.public = false;
+                let private_key = ConcreteTraitImplKey::new(key.trait_id, vec![Type::never()]);
+                let id = nested
+                    .impls
+                    .add_concrete_struct(private_key.clone(), private);
+                Rc::make_mut(&mut nested.impls.data)[0].output_tys = vec![Type::never()];
+                assert_eq!(inner.impls.data[0].output_tys, vec![Type::unit()]);
+                assert!(!inner.impls.concrete_key_to_id.contains_key(&private_key));
+                let filtered = TraitSolverProbe::from_solver(nested);
+                assert!(Rc::ptr_eq(&filtered.impls.data, &nested.impls.data));
+                assert!(!Rc::ptr_eq(
+                    &filtered.impls.concrete_key_to_id,
+                    &nested.impls.concrete_key_to_id
+                ));
+                assert!(filtered.impls.concrete_key_to_id.contains_key(&key));
+                assert!(!filtered.impls.concrete_key_to_id.contains_key(&private_key));
+                assert_eq!(nested.impls.concrete_key_to_id[&private_key], id);
+                assert!(!filtered.impls.data[id.as_index()].public);
+            });
+            assert!(Rc::ptr_eq(&inner.impls.data, &solver.impls.data));
+        });
+        assert_eq!(solver.impls.data.len(), 1);
+        assert_eq!(solver.impls.data[0].output_tys, vec![Type::unit()]);
+    }
+
+    #[test]
+    fn impl_snapshot_rollback_restores_all_indexes_with_live_probes() {
+        let (mut module, key) = impl_storage_fixture();
+        let modules = Modules::default();
+        let mut solver = trait_solver_from_module!(module, &modules);
+        let outer = solver.snapshot_derived_impl_state();
+        let observer = TraitSolverProbe::from_solver(&solver);
+        let imp = solver.impls.data[0].clone();
+        let private_key = ConcreteTraitImplKey::new(key.trait_id, vec![Type::never()]);
+        let id = solver
+            .impls
+            .add_concrete_struct(private_key.clone(), imp.clone());
+        let blanket_key = module::BlanketTraitImplKey::new(
+            key.trait_id,
+            BlanketTraitImplSubKey {
+                input_tys: vec![Type::variable_id(0)],
+                ty_var_count: 1,
+                eff_var_count: 0,
+                constraints: vec![],
+            },
+        );
+        solver.impls.add_blanket_struct(blanket_key, imp.clone());
+        Rc::make_mut(&mut solver.impls.generated_value_key_to_id).insert(vec![Type::never()], id);
+        Rc::make_mut(&mut solver.impls.application_key_to_id).insert(private_key.clone(), id);
+        solver
+            .fn_collector
+            .reserve_with_visibility(ustr::ustr("outer"), Visibility::Module);
+        let inner = solver.snapshot_derived_impl_state();
+        solver.impls.add_anonymous_dictionary_struct(imp);
+        solver
+            .fn_collector
+            .reserve_with_visibility(ustr::ustr("inner"), Visibility::Module);
+        let retained = TraitSolverProbe::from_solver(&solver);
+        solver.rollback_derived_impl_state(inner);
+        assert_eq!(solver.impls.data.len(), 3);
+        assert_eq!(solver.fn_collector.new_elements.len(), 1);
+        assert_eq!(solver.impls.application_key_to_id[&private_key], id);
+        assert_eq!(retained.impls.data.len(), 4);
+        solver.rollback_derived_impl_state(outer);
+        assert!(Rc::ptr_eq(
+            &solver.impls.concrete_key_to_id,
+            &observer.impls.concrete_key_to_id
+        ));
+        assert!(Rc::ptr_eq(
+            &solver.impls.blanket_key_to_id,
+            &observer.impls.blanket_key_to_id
+        ));
+        assert!(Rc::ptr_eq(
+            &solver.impls.generated_value_key_to_id,
+            &observer.impls.generated_value_key_to_id
+        ));
+        assert!(Rc::ptr_eq(
+            &solver.impls.application_key_to_id,
+            &observer.impls.application_key_to_id
+        ));
+        assert_eq!(solver.impls.data.len(), 1);
+        assert!(solver.fn_collector.new_elements.is_empty());
+        assert_eq!(observer.impls.data.len(), 1);
+        assert_eq!(retained.impls.data.len(), 4);
+        assert_eq!(retained.impls.application_key_to_id[&private_key], id);
+        // The next insertion reuses the rolled-back local ID.
+        let imp = solver.impls.data[0].clone();
+        assert_eq!(solver.impls.add_concrete_struct(private_key, imp), id);
+    }
 
     #[test]
     fn improvement_head_filter_never_discards_a_successful_same_type_match() {

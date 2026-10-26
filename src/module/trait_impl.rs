@@ -1,7 +1,7 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{fmt, hash::Hash};
+use std::{fmt, hash::Hash, rc::Rc};
 
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
@@ -589,26 +589,28 @@ pub(crate) type BlanketTraitImpls = FxHashMap<BlanketTraitImplSubKey, LocalImplI
 pub(crate) type BlanketImpls = FxHashMap<TraitId, BlanketTraitImpls>;
 
 /// All trait implementations in a module or in a given context.
+/// Tables are shared by speculative solvers and copied only on mutation. Keep the
+/// indexes separate from the data so filtering visibility does not copy dictionaries.
 #[derive(Clone, Debug, new)]
 pub struct TraitImpls {
     /// The ID of the module this TraitImpls belongs to, used to construct dictionary values.
     pub(crate) module_id: ModuleId,
     #[new(default)]
-    pub(crate) concrete_key_to_id: ConcreteImpls,
+    pub(crate) concrete_key_to_id: Rc<ConcreteImpls>,
     #[new(default)]
-    pub(crate) blanket_key_to_id: BlanketImpls,
+    pub(crate) blanket_key_to_id: Rc<BlanketImpls>,
     /// Compiler-provided `Value` dictionaries for open function-surface types, keyed modulo the
     /// identities of their quantified variables. Kept separate from selectable trait impls so
     /// alpha-canonicalization cannot change ordinary semantic trait lookup.
     #[new(default)]
-    pub(crate) generated_value_key_to_id: FxHashMap<Vec<Type>, LocalImplId>,
+    pub(crate) generated_value_key_to_id: Rc<FxHashMap<Vec<Type>, LocalImplId>>,
     /// Dictionaries materialized from blanket impls, keyed by their full application, outputs
     /// included, separately from selectable concrete impls: a generated dictionary serves only the
     /// application it denotes.
     #[new(default)]
-    pub(crate) application_key_to_id: FxHashMap<ConcreteTraitImplKey, LocalImplId>,
+    pub(crate) application_key_to_id: Rc<ConcreteImpls>,
     #[new(default)]
-    pub(crate) data: Vec<TraitImpl>,
+    pub(crate) data: Rc<Vec<TraitImpl>>,
 }
 
 impl TraitImpls {
@@ -868,15 +870,15 @@ impl TraitImpls {
     ) -> LocalImplId {
         assert_eq!(imp.trait_id, key.trait_id);
         let id = LocalImplId::from_index(self.data.len());
-        self.data.push(imp);
-        self.concrete_key_to_id.insert(key, id);
+        Rc::make_mut(&mut self.data).push(imp);
+        Rc::make_mut(&mut self.concrete_key_to_id).insert(key, id);
         id
     }
 
     /// Add a module-owned runtime dictionary that is not a selectable trait impl.
     pub fn add_anonymous_dictionary_struct(&mut self, imp: TraitImpl) -> LocalImplId {
         let id = LocalImplId::from_index(self.data.len());
-        self.data.push(imp);
+        Rc::make_mut(&mut self.data).push(imp);
         id
     }
 
@@ -1043,8 +1045,8 @@ impl TraitImpls {
     pub fn add_blanket_struct(&mut self, key: BlanketTraitImplKey, imp: TraitImpl) -> LocalImplId {
         assert_eq!(imp.trait_id, key.trait_id);
         let id = LocalImplId::from_index(self.data.len());
-        self.data.push(imp);
-        self.blanket_key_to_id
+        Rc::make_mut(&mut self.data).push(imp);
+        Rc::make_mut(&mut self.blanket_key_to_id)
             .entry(key.trait_id)
             .or_default()
             .insert(key.sub_key, id);
@@ -1221,7 +1223,7 @@ impl TraitImpls {
         env: &ModuleEnv<'_>,
         filter: impl Fn(TraitId, LocalImplId) -> DisplayFilter,
     ) -> fmt::Result {
-        for (key, id) in &self.concrete_key_to_id {
+        for (key, id) in self.concrete_key_to_id.iter() {
             let imp = self.get_impl_by_local_id(*id);
             let level = filter(key.trait_id, *id);
             if level == DisplayFilter::Hide {
@@ -1237,7 +1239,7 @@ impl TraitImpls {
             }
             writeln!(f)?;
         }
-        for (trait_id, impls) in &self.blanket_key_to_id {
+        for (trait_id, impls) in self.blanket_key_to_id.iter() {
             for (sub_key, id) in impls {
                 let level = filter(*trait_id, *id);
                 if level == DisplayFilter::Hide {

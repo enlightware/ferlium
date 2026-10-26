@@ -1,7 +1,7 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{borrow::Cow, iter::once};
+use std::{borrow::Cow, iter::once, rc::Rc};
 
 use crate::{
     FxHashMap, FxHashSet, Location, Modules,
@@ -1299,7 +1299,9 @@ fn emit_module_contents(
                 );
             let new_dictionary_ty =
                 output.computer_dictionary_ty(&emit_output.functions, associated_const_tys);
-            let impl_data = output.impls.data.get_mut(stub_data.id.as_index()).unwrap();
+            let impl_data = Rc::make_mut(&mut output.impls.data)
+                .get_mut(stub_data.id.as_index())
+                .unwrap();
             // A method may accept wider callbacks than the trait requires; the dictionary keeps
             // the trait's contract, which differs only in effects.
             assert_eq!(
