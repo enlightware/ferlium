@@ -923,8 +923,10 @@ impl Specializations {
             "callee={qualified}; types=[{types}]; dictionaries=[{dictionaries}]; callbacks=[{callbacks}]"
         );
         // `m0:i` is what `Display` falls back to when a dictionary cannot be rendered through the
-        // module env; such a name would depend on id allocation order, so it is not readable.
-        let readable = types.len() <= READABLE_LIMIT && !types.contains("m0:i");
+        // module env; such a name would depend on id allocation order, so it is not readable. An
+        // impl thunk specialized on its captured dictionaries alone has no types to show.
+        let readable =
+            !types.is_empty() && types.len() <= READABLE_LIMIT && !types.contains("m0:i");
         let base = if readable {
             format!("{callee_name}#spec:[{types}]")
         } else {
@@ -1789,7 +1791,10 @@ fn substitute_in_operation(operation: &mut Operation, mapper: &mut impl TypeMapp
 /// - the callee has a body and a concrete instantiation or known immutable callback;
 /// - the call records a fully concrete instantiation, or its callee has no quantifiers and therefore
 ///   has the equivalent empty instantiation. A caller that forwards its own quantifiers records
-///   them here, and specializing *it* makes this site concrete on a later round;
+///   them here, and specializing *it* makes this site concrete on a later round. A callee without
+///   quantifiers that takes evidence is a dictionary entry, abstract only over the evidence its
+///   dictionary captured; it is specialized only when too large to inline, since inlining binds
+///   that evidence too;
 /// - every hidden evidence operand is a constant dictionary;
 /// - specializing would achieve something (see [`worth_specializing`]);
 /// - the budget allows another specialization, unless this one is already cached.
@@ -2084,8 +2089,13 @@ fn specialization_for(
     let recorded_instantiation = metadata
         .as_deref()
         .and_then(|metadata| metadata.instantiation.as_ref());
-    // Ordinary calls with neither type arguments nor callback facts need no metadata lookup.
+    // A call to a type-monomorphic impl thunk records no instantiation, yet it passes the
+    // dictionaries the thunk captured, and binding them pays off like for a generic callee.
+    let passes_evidence = visible_start(operation).is_some_and(|start| start > 1);
+    // Ordinary calls with neither type arguments, evidence nor callback facts need no metadata
+    // lookup.
     if recorded_instantiation.is_none()
+        && !passes_evidence
         && (facts.is_none() || !ty.fn_ty.args.iter().any(|arg| arg.ty.is_function()))
     {
         return None;
@@ -2141,7 +2151,7 @@ fn specialization_for(
         })
         .collect::<Vec<_>>();
     drop(invoked);
-    if recorded_instantiation.is_none() && callbacks.is_empty() {
+    if recorded_instantiation.is_none() && dictionaries.is_empty() && callbacks.is_empty() {
         return None;
     }
     let mut key = SpecializationKey {
@@ -2174,6 +2184,14 @@ fn specialization_for(
         // table borrows out of construction and allows callback refusals to use this same path.
         let callees = SemanticCallees::new(session, Some(specializations));
         let body = callees.body(callee)?;
+        // A concrete thunk that inlining admits gets its evidence bound by inlining; copying it
+        // first would only duplicate that work.
+        if !callback
+            && recorded_instantiation.is_none()
+            && !cost::hot_cost_exceeds(body, budget::INLINE_CALLEE_COST)
+        {
+            return None;
+        }
         if !callback && !worth_specializing(body, scheme, &instantiation, &key.dictionaries, env) {
             specializations.reject(key);
             return None;
@@ -3055,6 +3073,89 @@ fn use_it(x: int) { with_zero(x) }",
         assert!(
             !module.contains("fn inner#spec:"),
             "dynamic evidence must not produce a partial specialization:\n{module}"
+        );
+    }
+
+    /// A dictionary entry generated for a concrete type is type-monomorphic, yet reads the evidence
+    /// its dictionary captured through dictionary parameters: `Value<[(string, int)]>::eq` compares
+    /// elements through the captured `Value<(string, int)>`. A call to it records no instantiation.
+    /// Inlining binds that evidence when the entry is small; one over the inlining cap must be
+    /// specialized on static evidence alone, or it keeps its indirect calls.
+    #[test]
+    fn a_concrete_entry_too_large_to_inline_is_specialized_on_static_evidence() {
+        let mut session = CompilerSession::new();
+        let module_id = compile(
+            &mut session,
+            "fn same(x: [(string, int)], y: [(string, int)]) -> bool { x == y }",
+        );
+        session
+            .prepare_execution_target(ExecutionTarget::Mir, module_id)
+            .expect("MIR preparation failed");
+        let caller = body(&session, module_id, "same").clone();
+        let call = caller
+            .blocks()
+            .flat_map(|block| caller.block(block).operations())
+            .find(|operation| matches!(operation.kind, OperationKind::Call { .. }))
+            .expect("same calls the array equality entry");
+        let OperationKind::Call { metadata, .. } = &call.kind else {
+            unreachable!()
+        };
+        let Value::Function(entry) = call.operands[0] else {
+            panic!("the entry is called directly")
+        };
+        assert!(
+            metadata
+                .as_deref()
+                .is_none_or(|metadata| metadata.instantiation.is_none())
+                && call.call_visible_start() > 1
+                && static_evidence_operand(&call.operands[1]).is_some(),
+            "the call must pass static evidence without an instantiation, or this test proves \
+             nothing"
+        );
+        let function_count = session.expect_fresh_module(module_id).function_count();
+        let specialize = |entry_body: Function| {
+            let mut specializations = Specializations::new(module_id, function_count, 1);
+            specializations.finish(vec![(entry.function, entry_body)]);
+            let rewritten = specialize_call_sites(
+                &caller,
+                session.module_env(),
+                &session,
+                module_id,
+                &mut specializations,
+            )?;
+            rewritten
+                .blocks()
+                .flat_map(|block| rewritten.block(block).operations())
+                .find_map(|operation| match operation.operands.first() {
+                    Some(Value::Function(callee)) => Some(*callee),
+                    _ => None,
+                })
+                .filter(|callee| specializations.is_specialization(*callee))
+        };
+
+        let small = session
+            .mir_artifacts_for(module_id, MirOptimization::Disabled)
+            .expect("MIR must be prepared")
+            .get(entry.function)
+            .expect("the entry has a MIR body")
+            .clone();
+        assert!(!cost::hot_cost_exceeds(&small, budget::INLINE_CALLEE_COST));
+        let padding = budget::INLINE_CALLEE_COST + 1 - cost::hot_cost(&small);
+        let block = mir::BlockId::from_index(0);
+        let span = small.block(block).terminator().span;
+        let mut edit = FunctionEdit::new(small.clone());
+        edit.block_mut(block)
+            .operations
+            .extend((0..padding).map(|_| Operation::check_fuel(span)));
+        let large = edit.finish(session.module_env());
+
+        assert!(
+            specialize(small).is_none(),
+            "an entry inlining admits is left to inlining"
+        );
+        assert!(
+            specialize(large).is_some(),
+            "an entry over the inlining cap must be specialized"
         );
     }
 
