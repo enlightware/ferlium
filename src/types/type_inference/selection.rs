@@ -49,7 +49,51 @@ pub(super) struct SelectionStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::std::{logic::bool_type, math::int_type};
+    use crate::{
+        compiler::error::CompilationErrorImpl,
+        std::{logic::bool_type, math::int_type},
+    };
+
+    #[test]
+    fn publication_budget_exhaustion_returns_an_internal_error() {
+        for final_publication in [false, true] {
+            let mut inference = UnifiedTypeInference::default();
+            inference
+                .solve_publication_bounds_with_limit(final_publication, 1)
+                .unwrap();
+            let error = inference
+                .solve_publication_bounds_with_limit(final_publication, 0)
+                .unwrap_err();
+            assert!(matches!(
+                error.into_inner(),
+                CompilationErrorImpl::Internal { error, .. }
+                    if error == "type-bound publication failed to converge after 0 rounds"
+            ));
+
+            let mut inference = UnifiedTypeInference::new_with_ty_vars(1);
+            let span = Location::new_synthesized();
+            inference.bounds.insert(TypeBound {
+                lower: int_type(),
+                lower_span: span,
+                upper: Type::variable_id(0),
+                upper_span: span,
+            });
+            // Selecting the lower bound makes progress, but must not renew
+            // the budget: another round is needed to establish convergence.
+            let error = inference
+                .solve_publication_bounds_with_limit(final_publication, 1)
+                .unwrap_err();
+            assert!(matches!(
+                error.into_inner(),
+                CompilationErrorImpl::Internal { error, .. }
+                    if error == "type-bound publication failed to converge after 1 rounds"
+            ));
+            inference
+                .solve_publication_bounds(final_publication)
+                .unwrap();
+            assert_eq!(inference.normalize_type(Type::variable_id(0)), int_type());
+        }
+    }
 
     #[test]
     fn component_publication_keeps_disjoint_shapes_and_effect_rows_independent() {
@@ -1156,13 +1200,31 @@ impl UnifiedTypeInference {
     ) -> Result<(), InternalCompilationError> {
         let iteration_limit =
             100 + 16 * (self.ty_unification_table.len() + self.bounds.relations().count());
+        self.solve_publication_bounds_with_limit(final_publication, iteration_limit)
+    }
+
+    fn solve_publication_bounds_with_limit(
+        &mut self,
+        final_publication: bool,
+        iteration_limit: usize,
+    ) -> Result<(), InternalCompilationError> {
         let mut iterations = 0;
         loop {
+            // This is a robustness budget, not a proof of convergence. Keep it
+            // active in release builds, including compilers hosted in Wasm.
+            if iterations == iteration_limit {
+                return Err(internal_compilation_error!(Internal {
+                    span: self
+                        .bounds
+                        .relations()
+                        .next()
+                        .map_or(Location::new_synthesized(), |bound| bound.lower_span),
+                    error: format!(
+                        "type-bound publication failed to converge after {iteration_limit} rounds"
+                    ),
+                }));
+            }
             iterations += 1;
-            debug_assert!(
-                iterations <= iteration_limit,
-                "type-bound publication failed to converge"
-            );
             self.propagate_type_bounds()?;
             let phase = if final_publication {
                 SelectionPhase::Publication
