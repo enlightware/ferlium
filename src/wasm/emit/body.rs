@@ -294,6 +294,9 @@ pub(super) struct Body<'a, 's> {
     program: &'a ResolvedPhysicalProgram<'a>,
     session: &'a CompilerSession,
     registers: FxHashMap<ValueId, WasmLocalId>,
+    /// Constant-offset addresses recomputed from their base at every use instead of held in a
+    /// local; see [`Self::rematerializable_address`].
+    rematerialized: FxHashMap<ValueId, (&'a Value, u32)>,
     storage: FxHashMap<Value, Storage>,
     borrowed_static_strings: FxHashMap<Value, usize>,
     locals: Vec<ValType>,
@@ -424,6 +427,7 @@ impl<'a, 's> Body<'a, 's> {
             session,
             roles,
             registers: FxHashMap::default(),
+            rematerialized: FxHashMap::default(),
             storage: FxHashMap::default(),
             borrowed_static_strings: FxHashMap::default(),
             locals: Vec::new(),
@@ -772,6 +776,10 @@ impl<'a, 's> Body<'a, 's> {
                             ));
                         }
                     };
+                    if let Some(address) = this.rematerializable_address(operation, &role) {
+                        this.rematerialized.insert(id, address);
+                        continue;
+                    }
                     let local = this.local(ty);
                     this.registers.insert(id, local);
                 }
@@ -1117,6 +1125,48 @@ impl<'a, 's> Body<'a, 's> {
             }
             _ => None,
         }
+    }
+
+    /// The base and offset of an address that every use can recompute rather than read from a
+    /// local, if `operation` derives one.
+    ///
+    /// A literal, non-indexed offset from a base that stays readable costs nothing to recompute in
+    /// Wasm, where it becomes the static offset of the access, while a local holding it stays live
+    /// until its last use, across loops: an engine does not recompute it to relieve its registers.
+    /// The base stays readable when it is a parameter or a register emitted in its own local, in
+    /// a frame slot or itself recomputed; every local holds its value until the body ends, except
+    /// across the suspension of a projection, which retains only the values it reads.
+    fn rematerializable_address(
+        &self,
+        operation: &'a Operation,
+        role: &ValueRole,
+    ) -> Option<(&'a Value, u32)> {
+        if self.mode.projection()
+            || !matches!(role, ValueRole::Place(_))
+            || !matches!(
+                operation.kind,
+                OperationKind::AddressOffset { .. } | OperationKind::AddressOffsetPlace { .. }
+            )
+            || operation.operands.len() != 2
+        {
+            return None;
+        }
+        let literal = match &operation.operands[1] {
+            Value::Constant(id) => &self.body.constant(*id).representation,
+            Value::Pattern(literal) => literal.as_ref(),
+            _ => return None,
+        };
+        let offset =
+            u32::try_from(i32::try_from(*literal.as_primitive_ty::<isize>()?).ok()?).ok()?;
+        let base = &operation.operands[0];
+        let readable = match base {
+            Value::Parameter(_) => true,
+            Value::Register(id) => !self.expressions.has_pending_value(*id),
+            _ => false,
+        } && !self.expressions.has_place(base)
+            && !self.borrowed_static_strings.contains_key(base)
+            && matches!(self.storage.get(base), None | Some(Storage::Stack(_)));
+        readable.then_some((base, offset))
     }
 
     /// A literal, non-indexed address derivation which has not yet been emitted.
@@ -2709,6 +2759,17 @@ impl<'a, 's> Body<'a, 's> {
         if let Some(&Storage::Stack(offset)) = self.storage.get(value) {
             return Ok(self.frame_base(offset));
         }
+        if let Value::Register(id) = value
+            && let Some(&(base, offset)) = self.rematerialized.get(id)
+        {
+            let base = self.address_base(base)?;
+            if let Some(combined) = base.checked_add(offset) {
+                return Ok(combined);
+            }
+            self.i(I::I32Const(base as i32));
+            self.i(I::I32Add);
+            return Ok(offset);
+        }
         if let Some((id, source, root, offset)) = self.constant_address_offset(value) {
             let operation =
                 &self.body.block(source.block).operations()[source.operation_id().as_index()];
@@ -2765,6 +2826,14 @@ impl<'a, 's> Body<'a, 's> {
             Value::Register(id) => {
                 if let Some(source) = self.expressions.take_value(*id) {
                     return self.stackified(source);
+                }
+                if self.rematerialized.contains_key(id) {
+                    let offset = self.address_base(value)?;
+                    if offset != 0 {
+                        self.i(I::I32Const(offset as i32));
+                        self.i(I::I32Add);
+                    }
+                    return Ok(());
                 }
                 let local = self
                     .registers
@@ -3269,10 +3338,9 @@ impl<'a, 's> Body<'a, 's> {
                 index += 1;
                 continue;
             }
-            if operation
-                .result_id()
-                .is_some_and(|id| self.expressions.has_pending_value(id))
-            {
+            if operation.result_id().is_some_and(|id| {
+                self.expressions.has_pending_value(id) || self.rematerialized.contains_key(&id)
+            }) {
                 index += 1;
                 continue;
             }

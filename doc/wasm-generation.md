@@ -57,6 +57,16 @@ retain ordinary scalar planning. Literal aggregate initialization, selected
 method stores, aggregate comparisons and witnessed moves retain address locals because they can
 reread an address or call out before consuming it.
 
+## Recompute constant-offset addresses at each use
+
+A literal offset from a base that stays readable, a parameter or a register held in its own local,
+frame slot or itself recomputed, is recomputed at every use instead of being held in a local. In
+Wasm the recomputation is free: it becomes the static offset of the access. A local holding it would
+stay live up to its last use, across loops, and engines do not recompute it to relieve register
+pressure, so MIR can merge such places (CSE, hoisting) without the backend paying for the longer
+live range. Projection bodies keep the local, since their suspension retains only the values it
+reads.
+
 ## Keep terminal scalar results on the stack
 
 A function returning its result as a value pushes the returned value, which survives the existing

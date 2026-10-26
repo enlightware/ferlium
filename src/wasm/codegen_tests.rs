@@ -4481,6 +4481,56 @@ fn wasm_codegen_uses_static_field_memory_offsets() {
     }
 }
 
+/// A constant-offset address read several times, or in a loop, is recomputed from its base at each
+/// read, where it becomes the access's static offset, rather than held in a local live across the
+/// loop.
+#[wasm_bindgen_test]
+fn wasm_codegen_rematerializes_constant_offset_addresses() {
+    let mut session = CompilerSession::new();
+    let entry = compile(
+        &mut session,
+        "struct Image { width: int, pixels: [int] }
+         #[inline(never)] fn brighten(image: &mut Image, amount: int) {
+             for i in 0..len(image.pixels) {
+                 image.pixels[i] = image.pixels[i] + amount + image.width
+             }
+         }
+         pub fn compute(x: int) -> int {
+             let mut image = Image { width: x, pixels: [1, 2, 3] };
+             brighten(image, 10);
+             image.pixels[0] + image.pixels[2]
+         }",
+    );
+    let code = CompiledProgram::compile(&session, entry).unwrap();
+    let functions = WasmFunctions::new(code.bytes());
+    let (_, index) = functions
+        .names
+        .iter()
+        .find(|(name, _)| name.ends_with("::brighten"))
+        .unwrap();
+    let (body, parameters) = functions.body(*index);
+    let operators = body
+        .get_operators_reader()
+        .unwrap()
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(
+        !operators.windows(4).any(|window| matches!(
+            window,
+            [
+                Operator::LocalGet { local_index },
+                Operator::I32Const { .. },
+                Operator::I32Add,
+                Operator::LocalSet { .. } | Operator::LocalTee { .. },
+            ] if *local_index < parameters
+        )),
+        "no parameter offset is held in a local: {operators:?}"
+    );
+    let mut instance = code.instantiate::<(isize,), isize>().unwrap();
+    assert_eq!(instance.run((5,), WasmLimits::default()).unwrap(), 34);
+}
+
 #[wasm_bindgen_test]
 fn wasm_codegen_stackifies_scalar_tuple_field_stores() {
     let mut session = CompilerSession::new();
