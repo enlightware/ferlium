@@ -375,6 +375,23 @@ fn normalize_semantic(
     // difference was which copy of an entry they named become one expression for call CSE.
     let common_subexpressions =
         |f: &Function| cse::eliminate_common_subexpressions(f).map(Rewrite::settled);
+    // Ownership canonicalization. A read-only clone borrows a source that outlives it; the place
+    // it substitutes is then named twice, which place CSE merges, and calls reading it may become
+    // identical, which call CSE merges.
+    let clone_borrowing =
+        |f: &Function| clone_borrow::borrow_read_only_clones(f, &summary_of).map(Rewrite::settled);
+    // A private local's last ownership moves into its clone destination. Borrowing comes first
+    // because it can eliminate the destination storage too.
+    let terminal_moves = |f: &Function| {
+        owned_arguments::forward_terminal_clones(f, env, &summary_of).map(Rewrite::settled)
+    };
+    // A local product owning managed fields, such as an inlined iterator holding the array it
+    // reads, becomes one local per field. Each field's storage and lifetime is then on its own: a
+    // callback field is a known callee, a copied collection a clone to borrow.
+    let managed_split = |f: &Function| {
+        scalar_replace::split_managed_local_products(f, env, OptimizationStage::Semantic(callees))
+            .map(Rewrite::settled)
+    };
     use normalize::Rewrite;
     normalize::normalize(
         function,
@@ -413,6 +430,31 @@ fn normalize_semantic(
                 name: "common_subexpressions",
                 run: &common_subexpressions,
                 enables: &["common_loads", "common_calls"],
+            },
+            normalize::Pass {
+                name: "clone_borrowing",
+                run: &clone_borrowing,
+                enables: &["common_loads", "common_calls", "common_subexpressions"],
+            },
+            normalize::Pass {
+                name: "terminal_moves",
+                run: &terminal_moves,
+                enables: &["common_loads", "redundant_storage"],
+            },
+            normalize::Pass {
+                name: "managed_split",
+                run: &managed_split,
+                enables: &[
+                    "common_loads",
+                    "common_calls",
+                    "static_dictionaries",
+                    "fold",
+                    "redundant_storage",
+                    "stored_values",
+                    "common_subexpressions",
+                    "clone_borrowing",
+                    "terminal_moves",
+                ],
             },
         ],
     )
@@ -951,6 +993,48 @@ mod tests {
         assert!(
             !body.contains("-thunk("),
             "the array iterators must be inlined:\n{body}"
+        );
+    }
+
+    /// An inlined adaptor is a local product holding its callback beside the iterator it wraps.
+    /// Splitting it during normalization exposes the callback as a known callee, so the round that
+    /// follows inlines it, even over records owning managed fields.
+    #[test]
+    fn a_lazy_adaptor_over_records_inlines_its_callback() {
+        let module = optimized(
+            "fn map_for(people: [{ name: string, scores: [int] }]) -> int { \
+             let mut n = 0; for l in iter(people) |> map(|p| len(p.scores)) { n += l }; n }",
+        );
+        let body = body_of(&module, "map_for").split("\nfn ").next().unwrap();
+        assert!(
+            !body.contains("$lambda"),
+            "the map callback must be inlined:\n{body}"
+        );
+    }
+
+    /// Borrowing `y`'s clone from `x` makes `len(x)` and `len(y)` the same call without creating a
+    /// repeated load or place, so clone borrowing must reschedule call CSE itself.
+    #[test]
+    fn a_borrowed_clone_merges_the_calls_it_makes_identical() {
+        let module = optimized(
+            "fn f(a: [int]) -> int { let mut x = a; array_append(x, 1); let y = x; \
+             len(x) + len(y) }",
+        );
+        let body = body_of(&module, "f").split("\nfn ").next().unwrap();
+        assert_eq!(
+            body.matches("clone ").count(),
+            1,
+            "only `x` may clone, y must borrow it:\n{body}"
+        );
+        let doubled = body.lines().any(|line| {
+            line.split_once("::add#impl:")
+                .and_then(|(_, call)| call.split_once('(')?.1.split_once(')'))
+                .and_then(|(arguments, _)| arguments.split_once(", "))
+                .is_some_and(|(left, right)| left == right)
+        });
+        assert!(
+            doubled,
+            "the two lengths must merge into one value:\n{body}"
         );
     }
 

@@ -38,6 +38,9 @@ for round in 0..MAX_ROUNDS:
         copy forward  // coalesce redundant trivial-copy storage
         store forward // read single-store cells as their stored values
         place CSE     // merge repeated subfield and dictionary-entry places
+        clone borrowing // redirect read-only clone lifetimes to a source that outlives them
+        terminal moves  // move a private local's last ownership into its clone destination
+        managed split   // split local products owning managed fields
     specialize    // point generic calls at concrete copies
     inline        // budget-limited; block merging inside its own edit
     stop if neither expanded anything
@@ -235,9 +238,11 @@ Five rules, which apply to any new pass.
    carrying dead code, so "nothing changed it, so nothing is dead" does not hold.
 5. **A pass belongs in normalization only if its output feeds folding, specialization or
    inlining.** Normalizing passes expose known arguments and callees, or shrink a body before the
-   inliner prices it. Passes after the rounds consume the settled body and feed nothing back:
-   ownership proofs, bounds checks, the managed split (products are local only once inlined, and
-   callees are split before their callers price them), LICM and cleanup. A normalizing pass runs at
+   inliner prices it. The ownership canonicalizations are among them: splitting an inlined adaptor
+   product exposes its callback field as a known callee to fold and inline in the next round, and
+   borrowing and moving clones shrinks the body the inliner prices. They also run after the rounds,
+   on the settled body. Passes that consume the settled body and feed nothing back stay there:
+   bounds checks, LICM and cleanup. A normalizing pass runs at
    least once per round and again whenever an earlier pass changes the body, so moving one there
    needs an opportunity the later passes miss. A normalizing pass that enables an earlier one must
    be listed as such, or the fixpoint misses it.
