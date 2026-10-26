@@ -72,6 +72,7 @@ impl EvidenceUses {
     }
 
     fn root(&self, mut index: usize) -> usize {
+        // Keep queries read-only: path compression would detach shared snapshot data.
         while self.data.groups[index].parent != index {
             index = self.data.groups[index].parent;
         }

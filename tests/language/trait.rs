@@ -2149,3 +2149,39 @@ fn trait_default_headerless_body_determines_self() {
         )), int(42));
     }
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_improvement_keeps_generic_inputs_with_matching_heads() {
+    let declarations = r#"
+        struct Wrapped<T> { value: T }
+        trait Extract<Self |-> Item> { fn extract(value: Self) -> Item ! fallible; }
+    "#;
+    let implementations = [
+        r#"impl Extract for <Self = int |-> Item = int> {
+            fn extract(value: int) -> int { value }
+        }"#,
+        r#"impl<T> Extract for <Self = [T] |-> Item = T> where T: Value {
+            fn extract(value: [T]) -> T { value[0] }
+        }"#,
+        r#"impl<T> Extract for <Self = Wrapped<T> |-> Item = T> where T: Value {
+            fn extract(value: Wrapped<T>) -> T { value.value }
+        }"#,
+    ];
+    let body = r#"
+        fn from_array(x) { extract([x]) }
+        fn from_wrapper(x) { extract(Wrapped { value: x }) }
+        from_array(20) + from_wrapper(22)
+    "#;
+    for order in [[0, 1, 2], [2, 1, 0]] {
+        let source = [
+            declarations,
+            implementations[order[0]],
+            implementations[order[1]],
+            implementations[order[2]],
+            body,
+        ]
+        .join("\n");
+        assert_val_eq!(TestSession::new().run(&source), int(42));
+    }
+}

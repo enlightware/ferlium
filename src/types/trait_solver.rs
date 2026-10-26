@@ -924,6 +924,22 @@ enum TraitImprovementCandidate {
     },
 }
 
+/// A necessary condition for the same-type relation used by improvement probes.
+/// Reject only fixed outer-constructor conflicts; unknowns, nested arguments,
+/// mutability and effects still go through the full probe. In particular Never
+/// is not a wildcard here: improvement checks equality, not bottom subtyping.
+fn improvement_input_heads_may_match(candidate: Type, input: Type) -> bool {
+    use TypeKind::*;
+    match (&*candidate.data(), &*input.data()) {
+        (Variable(_), _) | (_, Variable(_)) => true,
+        (Native(a), Native(b)) => a.bare_ty == b.bare_ty,
+        (Named(a), Named(b)) => a.def == b.def,
+        (Tuple(a), Tuple(b)) => a.len() == b.len(),
+        (Function(a), Function(b)) => a.args.len() == b.args.len(),
+        (a, b) => mem::discriminant(a) == mem::discriminant(b),
+    }
+}
+
 /// An application resolved symbolically by a blanket implementation: the implementation's
 /// outputs and constraints in terms of the application's variables. Type and effect variables
 /// from `type_var_base` and `effect_var_base` on are the implementation's own, which the caller
@@ -1225,11 +1241,15 @@ impl<'a> TraitSolver<'a> {
             .is_some_and(|module| module.impls.concrete_key_to_id.contains_key(key))
     }
 
-    /// Collect all visible concrete and blanket impl heads for a trait.
+    /// Collect visible impls whose outer input constructors may match the application.
     ///
     /// This is used by trait improvement to probe whether a partially known
     /// trait application already has a unique matching impl.
-    fn improvement_candidates(&self, trait_id: TraitId) -> Vec<TraitImprovementCandidate> {
+    fn improvement_candidates(
+        &self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+    ) -> Vec<TraitImprovementCandidate> {
         fn semantic_constraints(constraints: &[PubTypeConstraint]) -> Vec<PubTypeConstraint> {
             constraints
                 .iter()
@@ -1244,12 +1264,18 @@ impl<'a> TraitSolver<'a> {
                 .collect()
         }
 
+        let compatible = |candidate_inputs: &[Type]| {
+            candidate_inputs
+                .iter()
+                .zip(input_tys)
+                .all(|(&candidate, &input)| improvement_input_heads_may_match(candidate, input))
+        };
         let mut candidates = Vec::new();
 
         for (key, id) in &self.impls.concrete_key_to_id {
             if key.trait_id == trait_id {
                 let imp = &self.impls.data[id.as_index()];
-                if !imp.public {
+                if !imp.public || !compatible(&key.input_tys) {
                     continue;
                 }
                 candidates.push(TraitImprovementCandidate::Concrete {
@@ -1263,6 +1289,9 @@ impl<'a> TraitSolver<'a> {
         if let Some(blankets) = self.impls.blanket_key_to_id.get(&trait_id) {
             for (sub_key, id) in blankets {
                 let imp = &self.impls.data[id.as_index()];
+                if !compatible(&sub_key.input_tys) {
+                    continue;
+                }
                 candidates.push(TraitImprovementCandidate::Blanket {
                     input_tys: sub_key.input_tys.clone(),
                     output_tys: imp.output_tys.clone(),
@@ -1282,7 +1311,9 @@ impl<'a> TraitSolver<'a> {
             for (key, id) in &module.impls.concrete_key_to_id {
                 if key.trait_id == trait_id {
                     let imp = &module.impls.data[id.as_index()];
-                    if self.can_use_other_impl(module.module_id(), imp) {
+                    if self.can_use_other_impl(module.module_id(), imp)
+                        && compatible(&key.input_tys)
+                    {
                         candidates.push(TraitImprovementCandidate::Concrete {
                             input_tys: key.input_tys.clone(),
                             output_tys: imp.output_tys.clone(),
@@ -1295,7 +1326,9 @@ impl<'a> TraitSolver<'a> {
             if let Some(blankets) = module.impls.blanket_key_to_id.get(&trait_id) {
                 for (sub_key, id) in blankets {
                     let imp = &module.impls.data[id.as_index()];
-                    if self.can_use_other_impl(module.module_id(), imp) {
+                    if self.can_use_other_impl(module.module_id(), imp)
+                        && compatible(&sub_key.input_tys)
+                    {
                         candidates.push(TraitImprovementCandidate::Blanket {
                             input_tys: sub_key.input_tys.clone(),
                             output_tys: imp.output_tys.clone(),
@@ -1687,8 +1720,8 @@ impl<'a> TraitSolver<'a> {
     /// Try to improve a deferred trait application from its partially known
     /// inputs and optional known outputs.
     ///
-    /// The algorithm probes every visible impl in a fresh scratch solver under
-    /// a snapshot of the current unifier. If exactly one candidate remains
+    /// The algorithm discards incompatible outer input constructors, then probes
+    /// the remaining visible impls under a snapshot of the unifier. If exactly one candidate remains
     /// compatible, it commits the visible equalities learned by that probe,
     /// even when some nested blanket constraints are still unresolved.
     #[allow(clippy::too_many_arguments)]
@@ -1757,7 +1790,10 @@ impl<'a> TraitSolver<'a> {
         fn_span: Location,
         arena: &mut NodeArena,
     ) -> Result<TraitImprovementMatch, InternalCompilationError> {
-        let candidates = self.improvement_candidates(trait_id);
+        // Resolve current input bindings before testing heads. Candidate variables
+        // belong to the impl's own namespace and must remain wildcards here.
+        let normalized_inputs = ty_inf.substitute_in_types(input_tys);
+        let candidates = self.improvement_candidates(trait_id, &normalized_inputs);
         let output_polarities = self.output_effect_polarities(trait_id);
         let original_vars = input_tys
             .iter()
@@ -1913,8 +1949,8 @@ impl<'a> TraitSolver<'a> {
     /// Try to improve a deferred trait application from its partially known
     /// inputs and outputs.
     ///
-    /// The algorithm probes every visible impl in a fresh scratch solver under
-    /// a snapshot of the current unifier. If exactly one candidate remains
+    /// The algorithm discards incompatible outer input constructors, then probes
+    /// the remaining visible impls under a snapshot of the unifier. If exactly one candidate remains
     /// compatible, it commits the visible equalities learned by that probe,
     /// even when some nested blanket constraints are still unresolved.
     #[allow(clippy::too_many_arguments)]
@@ -4711,6 +4747,101 @@ mod tests {
             r#type::FnType,
         },
     };
+
+    #[test]
+    fn improvement_head_filter_never_discards_a_successful_same_type_match() {
+        use crate::{
+            module::LocalTypeDefId,
+            std::{array_type::array_type, logic::bool_type},
+            types::r#type::{
+                FnArgType, SubscriptMemberType, SubscriptResultConvention, store_types,
+            },
+        };
+        let span = Location::new_synthesized();
+        let var = Type::variable_id;
+        let named = |index, parameter| {
+            Type::named(
+                TypeDefId::new(ModuleId::new(u32::MAX - 1), LocalTypeDefId::new(index)),
+                vec![parameter],
+            )
+        };
+        let callback = |args: Vec<Type>, ret, effects| {
+            Type::function_type(FnType::new_by_val(args, ret, effects))
+        };
+        let recursive = store_types(&[TypeKind::Variant(vec![
+            (ustr::ustr("End"), Type::unit()),
+            (ustr::ustr("Next"), Type::new_local(0)),
+        ])])[0];
+        let subscript = Type::subscript_type(SubscriptType {
+            args: vec![FnArgType::new_by_val(var(0))],
+            ret: var(1),
+            ref_member: Some(SubscriptMemberType::new(
+                EffType::empty(),
+                SubscriptResultConvention::AddressorPlace,
+            )),
+            mut_member: None,
+        });
+        let types = vec![
+            var(0),
+            var(1),
+            Type::never(),
+            int_type(),
+            bool_type(),
+            array_type(int_type()),
+            array_type(var(0)),
+            Type::unit(),
+            Type::tuple([var(0)]),
+            Type::tuple([int_type()]),
+            Type::tuple([int_type(), bool_type()]),
+            Type::record(vec![(ustr::ustr("x"), var(0))]),
+            Type::variant(vec![(ustr::ustr("Some"), var(0))]),
+            recursive,
+            callback(vec![], Type::never(), EffType::empty()),
+            callback(vec![], int_type(), effect(PrimitiveEffect::Read)),
+            callback(vec![var(0)], var(1), EffType::empty()),
+            callback(vec![int_type(), int_type()], int_type(), EffType::empty()),
+            Type::function_type(FnType::new_mut_resolved(
+                [(int_type(), true)],
+                int_type(),
+                EffType::empty(),
+            )),
+            named(0, int_type()),
+            named(0, var(0)),
+            named(1, int_type()),
+            subscript,
+        ];
+        let mut pruned = 0;
+        for &candidate in &types {
+            for &input in &types {
+                let keep = improvement_input_heads_may_match(candidate, input);
+                pruned += usize::from(!keep);
+                let mut inference = UnifiedTypeInference::new_with_ty_vars(2);
+                let accepted = inference
+                    .unify_same_type_with_sub_effects(candidate, span, input, span)
+                    .is_ok();
+                assert!(
+                    !accepted || keep,
+                    "discarded a compatible pair: {candidate:?}, {input:?}"
+                );
+            }
+        }
+        assert!(pruned > types.len());
+        // Never is a subtype of int, but cannot match an int impl head by equality.
+        assert!(!improvement_input_heads_may_match(
+            Type::never(),
+            int_type()
+        ));
+        // Candidate variables have their own namespace; their numeric IDs must
+        // not be looked up in the application's inference table.
+        assert!(improvement_input_heads_may_match(var(0), int_type()));
+        assert!(improvement_input_heads_may_match(int_type(), var(0)));
+        // Matching heads are only permission to probe: nested incompatibilities
+        // and independently quantified effects still need the real comparator.
+        assert!(improvement_input_heads_may_match(
+            named(0, int_type()),
+            named(0, bool_type())
+        ));
+    }
 
     /// Type-solver fixture with an unresolved effect, not an executable host entry.
     #[derive(Clone)]
