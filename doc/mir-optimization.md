@@ -122,6 +122,16 @@ expansion rounds, and normalization stops after a fixed number of runs per pass,
 never reaches unless two rewrites undo each other. Work per function is a product of named
 constants.
 
+**Order within normalization.** No normalizing rewrite undoes another, so normalization cannot
+cycle. It is not confluent: some rewrites compete for the same opportunity, such as clone borrowing
+and a terminal move of the same clone. The fixed pass order decides between them, so the result is
+deterministic.
+
+**Passes, not operations, on the worklist.** Most values travel through cells, so a fact about a
+cell depends on every store that reaches its loads, not on def-use edges. Revisiting only the
+operations a rewrite touched would therefore gain little: each pass stays a whole-function analysis
+returning a rewritten copy, so no analysis is ever stale.
+
 ## Overwritten `TrivialCopy` stores
 
 After all value-changing rewrites, a backward CFG liveness pass removes a `store` to a local
