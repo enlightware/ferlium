@@ -174,6 +174,7 @@ pub(super) fn operation_calls_only(
         | OperationKind::CompareEqual
         | OperationKind::Load
         | OperationKind::Subfield { .. }
+        | OperationKind::ClosureCapture { .. }
         | OperationKind::AddressOffset { .. }
         | OperationKind::AddressOffsetPlace { .. }
         | OperationKind::DictEntry { .. }

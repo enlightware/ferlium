@@ -3322,6 +3322,75 @@ fn role_annotation_distinguishes_a_place_slot_from_a_value_slot() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn callback_specialization_reads_known_closure_captures_in_place() {
+    // A retained callee looping over a capturing callback is specialized on the closure's lambda:
+    // the loop reads the captures in the closure it receives, across the loop's stack regions.
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+        #[inline(never)] fn from_fn(n, f) {
+            let mut data = [];
+            for i in 0..n {
+                array_append(data, f(i))
+            };
+            data
+        }
+        fn scale(v: [float], k: float) -> [float] {
+            from_fn(len(v), |i| v[i] * k)
+        }
+        fn lengths(rows: [[int]], offset: int) -> [int] {
+            from_fn(len(rows), |i| len(rows[i]) + offset)
+        }
+        fn generic_scale(v, k) {
+            from_fn(len(v), |i| v[i] * k)
+        }
+        fn counted(start: int) -> [int] {
+            let mut count = start;
+            from_fn(3, |i| {
+                count = count + i;
+                count
+            })
+        }
+        // Too large to inline, so the specialization calls the lambda's own specialization, with
+        // a place capture first.
+        fn row_sums(a, k) {
+            from_fn(len(a), |r| {
+                let mut acc = k;
+                for c in 0..len(a[r]) {
+                    acc = acc + a[r][c] * k + a[r][c] * a[r][c] - k * k
+                };
+                for c in 0..len(a[r]) {
+                    acc = acc - a[r][c] * k + a[r][c] * a[r][c] * k
+                };
+                acc
+            })
+        }
+        (
+            scale([1.0, 2.0, 3.0], 2.0),
+            lengths([[1], [], [1, 2, 3]], 10),
+            generic_scale([1, 2, 3], 3),
+            generic_scale([0.5], 4.0),
+            counted(5),
+            row_sums([[1, 2], [3]], 2),
+            row_sums([[0.5]], 2.0)
+        )
+    "#
+        ),
+        tuple!(
+            float_a![2.0, 4.0, 6.0],
+            int_a![11, 10, 13],
+            int_a![3, 6, 9],
+            float_a![2.0],
+            int_a![5, 6, 7],
+            int_a![9, 25],
+            float_a![-1.25]
+        )
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn callback_specialization_preserves_recursive_callback_changes_and_captures() {
     let mut session = TestSession::new();
     assert_val_eq!(

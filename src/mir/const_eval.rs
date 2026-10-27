@@ -111,6 +111,9 @@ pub(crate) enum NotFoldable {
     /// A hidden evidence operand is not a constant dictionary, so the callee's instantiation is not
     /// known. Specialization is what would resolve it.
     EvidenceNotKnown,
+    /// The callee is a lambda reading captures in a closure environment, which compile-time
+    /// evaluation does not reify.
+    ClosureCaptures,
     /// An argument arrives by `MutableRef`, so the callee may write through it; folding would have
     /// to reify those writes too.
     MutableArgument,
@@ -162,6 +165,7 @@ impl NotFoldable {
             Self::ArgumentStorageNotModelled => "argument storage is not modelled",
             Self::ArgumentNotLiteral => "argument is known but not a literal",
             Self::EvidenceNotKnown => "trait instantiation not known",
+            Self::ClosureCaptures => "callee reads closure captures",
             Self::MutableArgument => "argument passed by mutable reference",
             Self::UnitResult => "call produces no value",
             Self::RoundsExhausted => "optimization rounds exhausted",

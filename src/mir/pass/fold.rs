@@ -1393,7 +1393,7 @@ fn proven_nonzero_arithmetic(
     let (replacement, replacement_ty) = context.known_calls.callees.nonzero_arithmetic(known)?;
     let call = dataflow::call_operands(operation)?;
     // These concrete primitives have no hidden evidence or ownership transfer.
-    if !call.extras.is_empty() || call.arguments.len() != 2 {
+    if !call.extras.is_empty() || !call.captures.is_empty() || call.arguments.len() != 2 {
         return None;
     }
     let (divisor, _) = call.arguments.get(1)?;
@@ -1945,6 +1945,9 @@ fn try_fold_call(
         return Err(NotFoldable::ConstructiveMaterializer);
     }
 
+    if !call.captures.is_empty() {
+        return Err(NotFoldable::ClosureCaptures);
+    }
     let mut arguments = Vec::with_capacity(call.extras.len() + call.arguments.len());
     for extra in call.extras {
         match extra {

@@ -270,6 +270,7 @@ struct SnapshotInstantiation {
 struct SnapshotCallMetadata {
     instantiation: Option<SnapshotInstantiation>,
     owned_arguments: Vec<u32>,
+    captures: u32,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -389,6 +390,11 @@ enum SnapshotOperationKind {
         ty: SnapshotTypeId,
     },
     DropClosureEnv,
+    ClosureCapture {
+        function: FunctionId,
+        index: u32,
+        ty: SnapshotTypeId,
+    },
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -1020,6 +1026,15 @@ impl SnapshotOperationKind {
                 ty: graph.capture(*ty)?,
             },
             Source::DropClosureEnv => Stored::DropClosureEnv,
+            Source::ClosureCapture {
+                function,
+                index,
+                ty,
+            } => Stored::ClosureCapture {
+                function: *function,
+                index: *index,
+                ty: graph.capture(*ty)?,
+            },
         })
     }
 
@@ -1188,6 +1203,15 @@ impl SnapshotOperationKind {
                 ty: resolve_type(types, *ty)?,
             },
             Stored::DropClosureEnv => Runtime::DropClosureEnv,
+            Stored::ClosureCapture {
+                function,
+                index,
+                ty,
+            } => Runtime::ClosureCapture {
+                function: *function,
+                index: *index,
+                ty: resolve_type(types, *ty)?,
+            },
         })
     }
 }
@@ -1262,6 +1286,7 @@ impl SnapshotCallMetadata {
                 .iter_ones()
                 .map(|index| index as u32)
                 .collect(),
+            captures: metadata.captures,
         })
     }
 
@@ -1277,6 +1302,7 @@ impl SnapshotCallMetadata {
                 .map(|instantiation| instantiation.materialize(types))
                 .transpose()?,
             owned_arguments,
+            captures: self.captures,
         })
     }
 }

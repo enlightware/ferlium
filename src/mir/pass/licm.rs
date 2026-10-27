@@ -817,6 +817,7 @@ fn find_hoist(
                 let admitted =
                     call.extras
                         .iter()
+                        .chain(call.captures)
                         .chain(call.arguments.iter().map(|(argument, _)| *argument))
                         .all(|input| match roots.root_of(input) {
                             // A scalar passed as a value is invariant when the loop does not define it.
@@ -1117,6 +1118,7 @@ fn record_writes(
         | OperationKind::CompareEqual
         | OperationKind::Load
         | OperationKind::Subfield { .. }
+        | OperationKind::ClosureCapture { .. }
         | OperationKind::AddressOffset { .. }
         | OperationKind::AddressOffsetPlace { .. }
         | OperationKind::DictEntry { .. }

@@ -461,7 +461,12 @@ pub(super) fn access(
             if rooted_reader && !is_rooted_repeatable_addressor(&call, origins, summary_of) {
                 return Access::Escape;
             }
-            let start = 1 + call.extras.len();
+            let captures = 1 + call.extras.len();
+            let start = captures + call.captures.len();
+            // A capture is a read-only `let` argument.
+            if (captures..start).contains(&position) {
+                return Access::Read;
+            }
             if let Some(index) = position.checked_sub(start)
                 && let Some((_, convention)) = call.arguments.get(index)
             {

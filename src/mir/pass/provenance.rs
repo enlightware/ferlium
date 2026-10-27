@@ -238,6 +238,15 @@ impl PlaceOrigins {
             OperationKind::Subfield { .. }
             | OperationKind::AddressOffset { .. }
             | OperationKind::AddressOffsetPlace { .. } => self.origin_of(&operation.operands[0]),
+            // A capture lives in the closure's environment, which the closure owns: any change
+            // to the closure changes it, and it is read-only, so not structural storage.
+            OperationKind::ClosureCapture { .. } => {
+                self.origin_of(&operation.operands[0])
+                    .map(|origin| PlaceOrigin {
+                        root: origin.root,
+                        structural: false,
+                    })
+            }
             OperationKind::Load => {
                 self.returned_origin(&operation.operands[0])
                     .map(|origin| PlaceOrigin {

@@ -39,6 +39,7 @@ use std::{
     cell::{Cell, Ref, RefCell},
     hash::{Hash, Hasher},
     mem,
+    rc::Rc,
 };
 
 use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
@@ -47,9 +48,11 @@ use ustr::{Ustr, ustr};
 use super::{
     OptimizationStats, budget, cost,
     dataflow::{self, Analysis, Const, State},
+    local_cells::{Access, LocalCells, Write},
     scalar_arguments,
     site::{OperationIndex, OperationSite},
     stage::SemanticCallees,
+    value_cells,
 };
 use crate::{
     CompilerSession,
@@ -64,7 +67,7 @@ use crate::{
         edit::FunctionEdit,
         operation::{SourceFallibility, accepts_value_argument},
         results::{call_result_transport, check_result_limits},
-        role::MirType,
+        role::{MirType, ValueRoles},
         terminator::{Terminator, TerminatorKind, TerminatorKindDiscriminant},
         value::StaticEvidence,
     },
@@ -305,8 +308,35 @@ pub(crate) struct SpecializationKey {
     pub(crate) callee: FunctionId,
     pub(crate) instantiation: Instantiation,
     pub(crate) dictionaries: Vec<StaticEvidence>,
-    /// Immutable visible parameters bound to bare function values.
-    pub(crate) callbacks: Vec<(ParameterId, FunctionId)>,
+    /// Immutable visible parameters bound to known function values.
+    pub(crate) callbacks: Vec<(ParameterId, Callback)>,
+}
+
+/// A known function value bound to an immutable callback parameter.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum Callback {
+    /// A bare function, which the specialization materializes in a private place.
+    Function(FunctionId),
+    /// A closure of a known lambda with static hidden evidence. The specialization still receives
+    /// the closure and calls the lambda directly, reading the captures in its environment.
+    Closure(Rc<KnownClosure>),
+}
+
+impl From<FunctionId> for Callback {
+    fn from(function: FunctionId) -> Self {
+        Self::Function(function)
+    }
+}
+
+/// A closure's code and what a direct call to it needs besides its captures.
+#[derive(PartialEq, Eq, Hash, Debug)]
+pub(crate) struct KnownClosure {
+    pub(crate) function: FunctionId,
+    pub(crate) evidence: Box<[StaticEvidence]>,
+    /// How the closure instantiates `function`, if it recorded it.
+    pub(crate) instantiation: Option<Instantiation>,
+    /// Each value capture's type, and whether the lambda takes it as a value rather than a place.
+    pub(crate) captures: Box<[(Type, bool)]>,
 }
 
 /// Cumulative callback-copy cost for one type/evidence family. Neither publication nor
@@ -910,12 +940,41 @@ impl Specializations {
         let callbacks = key
             .callbacks
             .iter()
-            .map(|(parameter, function)| {
-                format!(
+            .map(|(parameter, callback)| match callback {
+                Callback::Function(function) => format!(
                     "{}={}",
                     parameter.as_index(),
                     mir::Value::Function(*function).format_with(&env)
-                )
+                ),
+                Callback::Closure(closure) => {
+                    let format_types = |tys: &mut dyn Iterator<Item = Type>| {
+                        tys.map(|ty| ty.format_with(&env).to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
+                    let types = closure
+                        .instantiation
+                        .as_ref()
+                        .map_or_else(String::new, |i| {
+                            format_types(&mut i.ty_args.iter().copied())
+                        });
+                    let evidence = closure
+                        .evidence
+                        .iter()
+                        .map(|evidence| {
+                            mir::Value::Evidence(Box::new(evidence.clone()))
+                                .format_with(&env)
+                                .to_string()
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let captures = format_types(&mut closure.captures.iter().map(|(ty, _)| *ty));
+                    format!(
+                        "{}={}<{types}>[{evidence}]({captures})",
+                        parameter.as_index(),
+                        mir::Value::Function(closure.function).format_with(&env)
+                    )
+                }
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -982,24 +1041,38 @@ pub(crate) fn specialize(
     Ok(edit.finish(env))
 }
 
-/// Materialize bound callable values in private places, preserving the visible call ABI.
-fn bind_callbacks(edit: &mut FunctionEdit, callbacks: &[(ParameterId, FunctionId)]) {
+/// Bind known callable values, preserving the visible call ABI. A bare function is materialized in
+/// a private place; a call through a known closure calls its lambda directly with its evidence and
+/// the captures read in place (`closure_capture`), as invoking the closure would.
+fn bind_callbacks(edit: &mut FunctionEdit, callbacks: &[(ParameterId, Callback)]) {
     if callbacks.is_empty() {
         return;
     }
     let mut setup = Vec::new();
     let mut replacements = FxHashMap::default();
+    let mut closures = FxHashMap::default();
     let span = edit.block(edit.entry()).terminator.span;
-    for &(parameter, function) in callbacks {
-        let mut alloca = Operation::alloca(span, edit.parameters()[parameter.as_index()].ty);
-        let place = edit.assign_new_result(&mut alloca).unwrap();
-        setup.push(alloca);
-        setup.push(Operation::store(
-            span,
-            mir::Value::Function(function),
-            place.clone(),
-        ));
-        replacements.insert(parameter, place);
+    for (parameter, callback) in callbacks {
+        match callback {
+            Callback::Function(function) => {
+                let mut alloca =
+                    Operation::alloca(span, edit.parameters()[parameter.as_index()].ty);
+                let place = edit.assign_new_result(&mut alloca).unwrap();
+                setup.push(alloca);
+                setup.push(Operation::store(
+                    span,
+                    mir::Value::Function(*function),
+                    place.clone(),
+                ));
+                replacements.insert(*parameter, place);
+            }
+            Callback::Closure(closure) => {
+                closures.insert(*parameter, closure.clone());
+            }
+        }
+    }
+    if !closures.is_empty() {
+        call_known_closures(edit, &closures);
     }
     edit.visit_operands_mut(|operand| {
         if let mir::Value::Parameter(parameter) = operand
@@ -1009,6 +1082,84 @@ fn bind_callbacks(edit: &mut FunctionEdit, callbacks: &[(ParameterId, FunctionId
         }
     });
     edit.block_mut(edit.entry()).operations.splice(0..0, setup);
+}
+
+/// Rewrites every call through a parameter bound to a known closure into a direct call to its
+/// lambda: `[lambda, evidence…, captures…, visible…]`, the order of the lambda's parameters.
+fn call_known_closures(
+    edit: &mut FunctionEdit,
+    closures: &FxHashMap<ParameterId, Rc<KnownClosure>>,
+) {
+    let blocks: Vec<_> = edit.blocks().collect();
+    for block in blocks {
+        let operations = mem::take(&mut edit.block_mut(block).operations);
+        let mut rewritten = Vec::with_capacity(operations.len());
+        for mut operation in operations {
+            call_known_closure(edit, closures, &mut operation, &mut rewritten);
+            rewritten.push(operation);
+        }
+        let mut terminator = edit.block(block).terminator.clone();
+        if let TerminatorKind::Invoke { operation, .. } = &mut terminator.kind {
+            call_known_closure(edit, closures, operation, &mut rewritten);
+        }
+        let block = edit.block_mut(block);
+        block.operations = rewritten;
+        block.terminator = terminator;
+    }
+}
+
+/// Rewrites `operation` if it calls through a known closure, appending the capture reads to
+/// `prefix`.
+fn call_known_closure(
+    edit: &mut FunctionEdit,
+    closures: &FxHashMap<ParameterId, Rc<KnownClosure>>,
+    operation: &mut Operation,
+    prefix: &mut Vec<Operation>,
+) {
+    let OperationKind::Call { metadata, .. } = &mut operation.kind else {
+        return;
+    };
+    let mir::Value::Parameter(parameter) = operation.operands[0] else {
+        return;
+    };
+    let Some(closure) = closures.get(&parameter) else {
+        return;
+    };
+    let span = operation.span;
+    let mut leading: Vec<mir::Value> = closure
+        .evidence
+        .iter()
+        .map(|evidence| mir::Value::Evidence(Box::new(evidence.clone())))
+        .collect();
+    for (index, &(ty, is_value)) in closure.captures.iter().enumerate() {
+        let mut capture = Operation::closure_capture(
+            span,
+            mir::Value::Parameter(parameter),
+            closure.function,
+            index as u32,
+            ty,
+        );
+        let place = edit.assign_new_result(&mut capture).unwrap();
+        prefix.push(capture);
+        if is_value {
+            let mut load = Operation::load(span, place);
+            leading.push(edit.assign_new_result(&mut load).unwrap());
+            prefix.push(load);
+        } else {
+            leading.push(place);
+        }
+    }
+    // A direct call to a generic lambda records its instantiation, as store forwarding does for a
+    // closure of evidence alone.
+    let metadata = metadata.get_or_insert_with(Default::default);
+    if let Some(instantiation) = &closure.instantiation {
+        metadata.instantiation = Some(instantiation.clone());
+    }
+    metadata.captures = closure.captures.len() as u32;
+    let mut operands = mem::take(&mut operation.operands).into_vec();
+    operands[0] = mir::Value::Function(closure.function);
+    operands.splice(1..1, leading);
+    operation.operands = operands.into_boxed_slice();
 }
 
 /// A generic body rewritten at one call site's instantiation, for a consumer that splices it rather
@@ -1715,7 +1866,8 @@ fn substitute_in_operation(operation: &mut Operation, mapper: &mut impl TypeMapp
         | OperationKind::BuildSubscript { ty }
         | OperationKind::CloneSubscriptEnv { ty }
         | OperationKind::BorrowSubscriptMember { ty, .. }
-        | OperationKind::CloneClosureEnv { ty } => *ty = ty.map(mapper),
+        | OperationKind::CloneClosureEnv { ty }
+        | OperationKind::ClosureCapture { ty, .. } => *ty = ty.map(mapper),
         OperationKind::BuildClosure { signature, .. } => {
             signature.ty = signature.ty.map(mapper);
             if let Some(instantiation) = &mut signature.instantiation {
@@ -1826,6 +1978,11 @@ pub(crate) fn specialize_call_sites(
             .any(|operation| may_bind_callback(operation, session, specializations))
     });
     let analysis = needs_callbacks.then(|| dataflow::analyze(func, env));
+    let closures = if needs_callbacks {
+        known_closures(func, session, specializations)
+    } else {
+        FxHashMap::default()
+    };
     let mut rewrites = Vec::new();
     for block_id in func.blocks() {
         let block = func.block(block_id);
@@ -1834,6 +1991,7 @@ pub(crate) fn specialize_call_sites(
             if let Some(id) = specialization_for(
                 operation,
                 analysis.as_ref().zip(state.as_ref()),
+                &closures,
                 env,
                 session,
                 specializations,
@@ -1854,6 +2012,7 @@ pub(crate) fn specialize_call_sites(
             && let Some(id) = specialization_for(
                 operation,
                 analysis.as_ref().zip(state.as_ref()),
+                &closures,
                 env,
                 session,
                 specializations,
@@ -1873,19 +2032,76 @@ pub(crate) fn specialize_call_sites(
     }
 
     let mut edit = FunctionEdit::new(func.clone());
+    let callees = SemanticCallees::new(session, Some(specializations));
+    let mut reads = Vec::new();
     for (site, id) in rewrites {
         let operation = operation_at_mut(&mut edit, site);
-        operation.operands[0] = mir::Value::Function(FunctionId {
+        let target = FunctionId {
             module: module_id,
             function: id,
-        });
+        };
+        let captures = flipped_captures(operation, target, &callees);
+        if !captures.is_empty() {
+            reads.push((site, captures));
+        }
+        operation.operands[0] = mir::Value::Function(target);
         // The specialization is not generic, so it has no quantifiers for an instantiation to be
-        // positional against. Leaving the old one would claim otherwise.
+        // positional against. Leaving the old one would claim otherwise. The captures a call to a
+        // lambda passes stay part of its operand layout.
         if let OperationKind::Call { metadata, .. } = &mut operation.kind {
-            *metadata = None;
+            *metadata = metadata
+                .take()
+                .filter(|metadata| metadata.captures != 0)
+                .map(|metadata| {
+                    Box::new(mir::CallMetadata {
+                        captures: metadata.captures,
+                        ..Default::default()
+                    })
+                });
         }
     }
+    // Read the captures the specialization now takes as values, last site first so that earlier
+    // sites keep their positions.
+    for (site, captures) in reads.into_iter().rev() {
+        let mut loads = Vec::with_capacity(captures.len());
+        for index in captures {
+            let operation = operation_at_mut(&mut edit, site);
+            let place = operation.operands[index].clone();
+            let mut load = Operation::load(operation.span, place);
+            let value = edit.assign_new_result(&mut load).unwrap();
+            operation_at_mut(&mut edit, site).operands[index] = value;
+            loads.push(load);
+        }
+        let at = site.index.as_index();
+        edit.block_mut(site.block).operations.splice(at..at, loads);
+    }
     Some(edit.finish_unverified())
+}
+
+/// The capture operands of the direct lambda call `operation` that `target`, a specialization of
+/// its callee, takes as values where the callee took places: specialization makes a `let`
+/// parameter a value once its type is a concrete scalar, and a capture follows its parameter.
+fn flipped_captures(
+    operation: &Operation,
+    target: FunctionId,
+    callees: &SemanticCallees<'_>,
+) -> Vec<usize> {
+    let captures = operation.call_captures();
+    if captures == 0 {
+        return Vec::new();
+    }
+    let mir::Value::Function(callee) = operation.operands[0] else {
+        return Vec::new();
+    };
+    let (Some(before), Some(after)) = (callees.body(callee), callees.body(target)) else {
+        return Vec::new();
+    };
+    let end = operation.call_visible_start();
+    (end - captures..end)
+        .filter(|&index| {
+            after.parameters()[index - 1].is_value() && !before.parameters()[index - 1].is_value()
+        })
+        .collect()
 }
 
 /// The operation recorded at `site`, where the one-past-the-end index names an invoke terminator.
@@ -1992,7 +2208,9 @@ fn visible_operand<'a>(
     let position = parameters
         .iter()
         .position(|candidate| *candidate == parameter)?;
-    operation.operands.get(visible_start(operation)? + position)
+    // A lambda's captures are visible parameters too, passed before the visible arguments.
+    let start = visible_start(operation)? - operation.call_captures();
+    operation.operands.get(start + position)
 }
 
 fn candidate<'a>(
@@ -2037,7 +2255,8 @@ fn candidate<'a>(
     if instantiation.ty_args.iter().any(Type::is_variable) {
         return None;
     }
-    let dictionaries = &operation.operands[1..visible_start(operation)?];
+    let dictionaries =
+        &operation.operands[1..visible_start(operation)? - operation.call_captures()];
     if dictionaries
         .iter()
         .any(|operand| static_evidence_operand(operand).is_none())
@@ -2048,6 +2267,113 @@ fn candidate<'a>(
         callee,
         instantiation,
         dictionaries,
+    })
+}
+
+/// The cells of `func` holding, whenever they are read, a closure of a known lambda with static
+/// hidden evidence: their only write stores a `build_closure` result, and every other use reads,
+/// calls through, moves out of or drops it. The closure itself may differ between executions of
+/// its construction, but not its lambda, evidence or capture types, which is all a callback
+/// specialization depends on.
+fn known_closures(
+    func: &Function,
+    session: &CompilerSession,
+    specializations: &Specializations,
+) -> FxHashMap<ValueId, Rc<KnownClosure>> {
+    let mut built = FxHashMap::default();
+    for block in func.blocks() {
+        for operation in func.block(block).operations() {
+            if let OperationKind::BuildClosure { .. } = operation.kind
+                && let Some(result) = operation.result_id()
+            {
+                built.insert(result, operation);
+            }
+        }
+    }
+    if built.is_empty() {
+        return FxHashMap::default();
+    }
+    let cells = LocalCells::of(func);
+    let mut roles = None;
+    let callees = SemanticCallees::new(session, Some(specializations));
+    let mut closures = FxHashMap::default();
+    'cells: for cell in cells.iter() {
+        let mut stored = None;
+        for cell_use in cells.uses(cell) {
+            match cell_use.access {
+                Access::Write(Write::Store) => {
+                    let store = value_cells::operation_at(func, cell_use.site);
+                    let mir::Value::Register(value) = store.operands[0] else {
+                        continue 'cells;
+                    };
+                    if stored.replace(value).is_some() {
+                        continue 'cells;
+                    }
+                }
+                Access::Read(_) | Access::Callee | Access::Drop | Access::MoveOut(_) => {}
+                _ => continue 'cells,
+            }
+        }
+        let Some(build) = stored.and_then(|value| built.get(&value)) else {
+            continue;
+        };
+        if let Some(closure) = known_closure(func, build, &callees, &mut roles) {
+            closures.insert(cell.id, Rc::new(closure));
+        }
+    }
+    closures
+}
+
+/// What calling the closure `build` constructs needs, if its evidence is static.
+fn known_closure(
+    func: &Function,
+    build: &Operation,
+    callees: &SemanticCallees<'_>,
+    roles: &mut Option<ValueRoles>,
+) -> Option<KnownClosure> {
+    let OperationKind::BuildClosure {
+        function,
+        num_hidden_dicts,
+        has_env_dict,
+        signature,
+    } = &build.kind
+    else {
+        return None;
+    };
+    let hidden = *num_hidden_dicts as usize;
+    let evidence = build.operands[..hidden]
+        .iter()
+        .map(static_evidence_operand)
+        .collect::<Option<Box<[_]>>>()?;
+    let values = &build.operands[hidden..build.operands.len() - usize::from(*has_env_dict)];
+    // The lambda takes its captures after its evidence, each as its own `let` parameter.
+    let lambda = callees.body(*function)?;
+    let capture_parameters = lambda
+        .parameters()
+        .iter()
+        .filter(|parameter| parameter.kind.is_visible())
+        .take(values.len())
+        .collect::<Vec<_>>();
+    if capture_parameters.len() != values.len() {
+        return None;
+    }
+    let roles = roles.get_or_insert_with(|| ValueRoles::derive(func));
+    let captures = values
+        .iter()
+        .zip(capture_parameters)
+        .map(|(value, parameter)| {
+            let MirType::Lowered(ty) = roles.get(value, func.constants())?.place_pointee_type()?
+            else {
+                return None;
+            };
+            Some((ty, parameter.kind == ParameterKind::Value))
+        })
+        .collect::<Option<Box<[_]>>>()?;
+    Some(KnownClosure {
+        function: *function,
+        evidence,
+        instantiation: signature.instantiation.clone(),
+        captures,
     })
 }
 
@@ -2079,6 +2405,7 @@ fn may_bind_callback(
 fn specialization_for(
     operation: &Operation,
     facts: Option<(&Analysis, &State)>,
+    closures: &FxHashMap<ValueId, Rc<KnownClosure>>,
     env: ModuleEnv<'_>,
     session: &CompilerSession,
     specializations: &mut Specializations,
@@ -2140,14 +2467,18 @@ fn specialization_for(
                 return None;
             }
             let operand = visible_operand(operation, &parameters, *parameter)?;
+            if let mir::Value::Register(id) = operand
+                && let Some(closure) = closures.get(id)
+            {
+                return Some((*parameter, Callback::Closure(closure.clone())));
+            }
             // Visible arguments are places, not materialized Function operands.
             let (analysis, state) = facts?;
             let fact = state.place(analysis.tracked_place_of(operand)?);
             let Const::Function(function) = fact.known()? else {
                 return None;
             };
-            let function = *function;
-            Some((*parameter, function))
+            Some((*parameter, Callback::Function(*function)))
         })
         .collect::<Vec<_>>();
     drop(invoked);
@@ -2724,8 +3055,8 @@ mod tests {
                     .clone();
                 // The operand layout the verifier assumes: callee, evidence, visible arguments,
                 // result place.
-                let visible_start = operation.call_visible_start();
-                let dictionaries = operation.operands[1..visible_start]
+                let evidence_end = operation.call_evidence_end();
+                let dictionaries = operation.operands[1..evidence_end]
                     .iter()
                     .map(static_evidence_operand)
                     .collect::<Option<Vec<_>>>()
@@ -4127,7 +4458,7 @@ fn use_it(x: int) { with_zero(x) }",
                 .unwrap();
             unseen
                 .callbacks
-                .push((parameter, FunctionId::new(module, cb128)));
+                .push((parameter, FunctionId::new(module, cb128).into()));
             assert!(!table.callback_growth_allows(&unseen));
             // Repeated keys are free even after the family's allowance is exhausted.
             assert!(
@@ -4183,7 +4514,7 @@ fn use_it(x: int) { with_zero(x) }",
             .unwrap();
         site.key
             .callbacks
-            .push((parameter, FunctionId::new(module, inc)));
+            .push((parameter, FunctionId::new(module, inc).into()));
         site.key.instantiation.eff_args.push(EffType::empty());
         let mut table = Specializations::new(
             module,
@@ -4421,7 +4752,7 @@ fn use_it(x: int) { with_zero(x) }",
             .unwrap();
         rejected.callbacks.push((
             ParameterId::from_index(parameter),
-            FunctionId::new(module, inc),
+            FunctionId::new(module, inc).into(),
         ));
         table.reject(rejected);
         check_fallback(&mut table);

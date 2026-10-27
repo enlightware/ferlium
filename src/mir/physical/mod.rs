@@ -3070,7 +3070,8 @@ fn verify_physical_operation(
         | OperationKind::DropInitialized { .. }
         | OperationKind::BuildClosure { .. }
         | OperationKind::CloneClosureEnv { .. }
-        | OperationKind::DropClosureEnv => None,
+        | OperationKind::DropClosureEnv
+        | OperationKind::ClosureCapture { .. } => None,
     };
     if let Some(operation) = unresolved {
         return Err(BackendReadinessError::UnresolvedPhysicalOperation {

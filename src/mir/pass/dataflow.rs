@@ -1601,7 +1601,10 @@ pub(crate) fn escaping_roots(
 /// argument count in the call's type. A call defining its result as a register has no `ret`.
 pub(crate) struct CallOperands<'a> {
     pub callee: &'a mir::Value,
+    /// The hidden evidence.
     pub extras: &'a [mir::Value],
+    /// The value captures a direct call to a lambda passes, each a read-only `let` argument.
+    pub captures: &'a [mir::Value],
     /// Visible arguments, paired with the convention the callee receives them under.
     pub arguments: Vec<(&'a mir::Value, ArgConvention)>,
     /// The caller-provided result place, if the call writes its result through one.
@@ -1639,16 +1642,19 @@ pub(crate) fn call_operands(operation: &Operation) -> Option<CallOperands<'_>> {
     let operands = &operation.operands;
     let visible = ty.fn_ty.args.len();
     let result = usize::from(operation.kind.call_has_result_place());
-    let extras = operands.len().checked_sub(visible + result + 1)?;
+    let leading = operands.len().checked_sub(visible + result + 1)?;
+    let captures = operation.call_captures();
+    let extras = leading.checked_sub(captures)?;
     let conventions = arg_conventions_for_args(&ty.fn_ty.args);
     Some(CallOperands {
         callee: &operands[0],
         extras: &operands[1..1 + extras],
-        arguments: operands[1 + extras..1 + extras + visible]
+        captures: &operands[1 + extras..1 + leading],
+        arguments: operands[1 + leading..1 + leading + visible]
             .iter()
             .zip(conventions)
             .collect(),
-        result: (result == 1).then(|| &operands[1 + extras + visible]),
+        result: (result == 1).then(|| &operands[1 + leading + visible]),
     })
 }
 

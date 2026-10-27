@@ -55,6 +55,7 @@ use crate::{
             CallAbi, DispatchTableSlotId, Parameter as ParameterTransport, ResultKind,
             WasmFunctionId, WasmLocalId, WasmTypeId,
         },
+        callable_environment::Environment,
         evidence::{self, ENVIRONMENT_OFFSET},
         execution::{FailureCode, InvocationState},
     },
@@ -1073,7 +1074,8 @@ impl<'a, 's> Body<'a, 's> {
                     | CheckCallDepth
                     | CheckFuel
                     | CloneClosureEnv { .. }
-                    | DropClosureEnv => (),
+                    | DropClosureEnv
+                    | ClosureCapture { .. } => (),
                 }
             }
         }
@@ -4019,6 +4021,39 @@ impl<'a, 's> Body<'a, 's> {
             AddressOffset { .. } | AddressOffsetPlace { .. } => {
                 self.address(&args[0])?;
                 self.read(&args[1])?;
+                self.i(I::I32Add);
+            }
+            // The capture's place in the closure's environment, as the callable adapter lends it:
+            // the capture tuple's base plus the capture's offset, which follows the hidden evidence.
+            ClosureCapture { index, .. } => {
+                let environment = MemArg {
+                    offset: ENVIRONMENT_OFFSET,
+                    ..memarg(2)
+                };
+                self.address(&args[0])?;
+                self.i(I::I32Load(environment));
+                self.address(&args[0])?;
+                self.i(I::I32Load(environment));
+                self.i(I::I32Load(memarg_at(
+                    2,
+                    offset_of!(Environment, values_offset) as u32,
+                )));
+                self.i(I::I32Add);
+                self.address(&args[0])?;
+                self.i(I::I32Load(environment));
+                self.address(&args[0])?;
+                self.i(I::I32Load(environment));
+                self.i(I::I32Load(memarg_at(
+                    2,
+                    offset_of!(Environment, hidden_count) as u32,
+                )));
+                self.i(I::I32Const(size_of::<DictionaryReference>() as i32));
+                self.i(I::I32Mul);
+                self.i(I::I32Add);
+                self.i(I::I32Load(memarg_at(
+                    2,
+                    Environment::capture_offset(0, *index as usize),
+                )));
                 self.i(I::I32Add);
             }
             Clear => (), // Lifetimes are explicit in MIR; backing bytes may remain stale after cleanup.

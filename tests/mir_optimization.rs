@@ -675,6 +675,27 @@ fn closures_of_dictionaries_alone_are_called_directly() {
     }
 }
 
+/// A retained callee invoking a known capturing closure in a loop is specialized on the closure's
+/// lambda: the specialization still receives the closure, reads its captures in place and calls
+/// the lambda directly, which inlining then removes, dictionary calls included.
+#[test]
+fn known_capturing_callbacks_are_called_directly() {
+    let source = "#[inline(never)] fn from_fn(n, f) {
+            let mut data = [];
+            for i in 0..n { array_append(data, f(i)) };
+            data
+        }
+        fn scale(v, k) { from_fn(len(v), |i| v[i] * k) }
+        fn view(v: [float], k: float) -> [float] { scale(v, k) }";
+    let optimized = emit("known_closure", source, MirOptimization::Enabled);
+    let specialized = rendered_function_with_prefix(&optimized, "from_fn#spec:");
+    assert!(
+        specialized.contains("closure_capture")
+            && !specialized.lines().any(|line| line.contains("call %")),
+        "the callback must be read in place and called directly:\n{specialized}"
+    );
+}
+
 /// Traversing a hash collection steps through its buckets with the generic `Value` impl of the
 /// optional entry, closed over the key and value dictionaries at run time. Once those are
 /// constants, the closed dictionary is static evidence: dropping and cloning a bucket are direct

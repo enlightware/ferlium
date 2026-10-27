@@ -160,7 +160,7 @@ fn rewrite(
             // evidence, the visible arguments named by the call-site type, and the return
             // out-pointer. Asserted rather than assumed, because a mismatch would silently shift
             // every argument the callee binds positionally.
-            let visible_start = operation.call_visible_start();
+            let visible_start = operation.call_evidence_end();
             assert_eq!(
                 visible_start - 1,
                 count,

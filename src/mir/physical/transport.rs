@@ -157,7 +157,9 @@ impl<'a> Transports<'a> {
     /// Whether the entry `call` reaches takes its visible argument at `offset` as a value.
     pub(crate) fn takes_value(&self, call: &Operation, offset: usize) -> bool {
         match &call.operands[0] {
-            Value::Function(callee) => self.function_takes_value(*callee, offset),
+            Value::Function(callee) => {
+                self.function_takes_value(*callee, call.call_captures(), offset)
+            }
             Value::Register(id) => self.entries().get(id).is_some_and(|&(trait_id, entry)| {
                 self.env
                     .trait_def(trait_id)
@@ -213,16 +215,19 @@ impl<'a> Transports<'a> {
         }
     }
 
-    fn function_takes_value(&self, callee: FunctionId, offset: usize) -> bool {
+    /// Whether `callee` takes visible argument `offset` as a value, where a call to a lambda passes
+    /// `captures` value captures before its visible arguments.
+    fn function_takes_value(&self, callee: FunctionId, captures: usize, offset: usize) -> bool {
         if callee.module == self.env.current.module_id()
             && let Some(specialization) = self.semantic.specialization(callee.function)
         {
+            // A specialization's body lists the lambda's captures among its visible parameters.
             return specialization
                 .body
                 .parameters()
                 .iter()
                 .filter(|parameter| parameter.kind.is_visible())
-                .nth(offset)
+                .nth(captures + offset)
                 .is_some_and(Parameter::is_value);
         }
         let Some(function) = self

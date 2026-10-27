@@ -215,6 +215,11 @@ impl Place {
             use Value::*;
             target = match target {
                 Tuple(tuple) => tuple.get_mut(index as usize).unwrap(),
+                Function(function) => function
+                    .closure_env
+                    .as_tuple_mut()
+                    .and_then(|captures| captures.get_mut(index as usize))
+                    .expect("a closure capture index within its environment"),
                 // A payload-free case has no slot until something writes one.
                 Variant { .. } if index == 0 => target.variant_payload_mut().unwrap(),
                 Native(primitive) => {
@@ -274,6 +279,12 @@ impl Place {
             use Value::*;
             target = match target {
                 Tuple(tuple) => tuple.get(index as usize).unwrap(),
+                // A closure's value capture, read in place (`closure_capture`).
+                Function(function) => function
+                    .closure_env
+                    .as_tuple()
+                    .and_then(|captures| captures.get(index as usize))
+                    .expect("a closure capture index within its environment"),
                 Variant {
                     payload: Some(payload),
                     ..
@@ -335,6 +346,12 @@ impl Place {
             use Value::*;
             target = match target {
                 Tuple(tuple) => tuple.get(index as usize).unwrap(),
+                // A closure's value capture, read in place (`closure_capture`).
+                Function(function) => function
+                    .closure_env
+                    .as_tuple()
+                    .and_then(|captures| captures.get(index as usize))
+                    .expect("a closure capture index within its environment"),
                 Variant {
                     payload: Some(payload),
                     ..

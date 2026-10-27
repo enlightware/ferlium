@@ -1058,6 +1058,13 @@ impl<'a> Interpreter<'a> {
             OperationKind::DropClosureEnv => {
                 self.exec_drop_closure_env(slots, &operation.operands[0], span.location)?;
             }
+            OperationKind::ClosureCapture {
+                function, index, ..
+            } => {
+                let place =
+                    self.exec_closure_capture(slots, &operation.operands[0], *function, *index);
+                Self::bind(slots, def.unwrap(), Binding::Place(place));
+            }
         }
         Ok(())
     }
@@ -2092,6 +2099,8 @@ impl<'a> Interpreter<'a> {
         for &i in &path {
             target = match target {
                 Value::Tuple(t) => t.get(i as usize)?,
+                // A closure's value capture (`closure_capture`).
+                Value::Function(function) => function.closure_env.as_tuple()?.get(i as usize)?,
                 Value::Variant {
                     payload: Some(payload),
                     ..
@@ -2404,6 +2413,37 @@ impl<'a> Interpreter<'a> {
             result_transport,
             span,
         )
+    }
+
+    /// The place of value capture `index` of the closure of `function` at `operand`: a step into
+    /// the closure's environment, valid as long as the closure's place.
+    fn exec_closure_capture(
+        &mut self,
+        slots: &FxHashMap<mir::Value, Binding>,
+        operand: &mir::Value,
+        function: FunctionId,
+        index: u32,
+    ) -> Place {
+        let mut place = self.place_operand(slots, operand);
+        if cfg!(debug_assertions) {
+            let fv = place
+                .target_ref(&self.ctx)
+                .expect("closure_capture of an invalid place")
+                .as_boxed()
+                .expect("callable requires boxed storage")
+                .as_function()
+                .expect("closure_capture of a non-function value");
+            assert_eq!(
+                fv.function, function,
+                "closure_capture names another closure's function"
+            );
+            assert!(
+                (index as usize) < fv.closure_env_len,
+                "closure_capture index out of the environment"
+            );
+        }
+        place.push_index(index as isize);
+        place
     }
 
     /// Builds a closure value from the target `function` and its `[hidden_dicts…, captures…,

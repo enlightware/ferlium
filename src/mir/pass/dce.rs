@@ -329,6 +329,7 @@ pub(crate) fn remove_dead_proven_calls(
                     // Hidden evidence can carry semantic callbacks (for example `Value::drop`),
                     // whose effects are not represented in the direct call type.
                     && call.extras.is_empty()
+                    && call.captures.is_empty()
                     && call
                         .arguments
                         .iter()
@@ -793,6 +794,7 @@ pub(super) fn may_leave_frame_storage(
         | OperationKind::RuntimeAlloc { .. }
         | OperationKind::RuntimeDealloc
         | OperationKind::Subfield { .. }
+        | OperationKind::ClosureCapture { .. }
         | OperationKind::AddressOffset { .. }
         | OperationKind::AddressOffsetPlace { .. }
         | OperationKind::BuildDictionary { .. }

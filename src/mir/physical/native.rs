@@ -377,6 +377,7 @@ fn operation_types(kind: &OperationKind, types: &mut Vec<Type>) {
         | BuildSubscript { ty }
         | CloneSubscriptEnv { ty }
         | BorrowSubscriptMember { ty, .. }
+        | ClosureCapture { ty, .. }
         | MoveBytes { ty }
         | MoveRange { ty }
         | Clone { ty }

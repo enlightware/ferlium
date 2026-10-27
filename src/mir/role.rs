@@ -676,8 +676,18 @@ pub(crate) fn check_operand_roles(
                 "MIR function `{func_name}` {at}: callee must be a function or function place, \
                  got {callee:?}"
             );
-            for index in 1..visible_start {
+            let evidence_end = visible_start - operation.call_captures();
+            for index in 1..evidence_end {
                 evidence(index);
+            }
+            // A direct call to a lambda passes its captures as read-only `let` arguments.
+            for index in evidence_end..visible_start {
+                let role = role(index);
+                assert!(
+                    role.is_place_operand() || role.is_materialized(),
+                    "MIR function `{func_name}` {at}: capture operand {index} must be a place or \
+                     a value, got {role:?}"
+                );
             }
             let (_, _, metadata) = operation.call_site().expect("a call or a projection");
             // Which types a read-only argument may pass as a value is the verifier's question, since
@@ -722,7 +732,8 @@ pub(crate) fn check_operand_roles(
         | OperationKind::DropSubscriptEnv
         | OperationKind::CloneSubscriptEnv { .. }
         | OperationKind::DropClosureEnv
-        | OperationKind::CloneClosureEnv { .. } => place(0),
+        | OperationKind::CloneClosureEnv { .. }
+        | OperationKind::ClosureCapture { .. } => place(0),
         OperationKind::CompareEqual => {
             let scrutinee = role(0);
             let pattern = role(1);

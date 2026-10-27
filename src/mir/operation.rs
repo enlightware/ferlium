@@ -379,6 +379,7 @@ impl Operation {
                     b(CallMetadata {
                         instantiation: Some(instantiation),
                         owned_arguments: DenseBitSet::empty(),
+                        captures: 0,
                     })
                 }),
                 result_transport,
@@ -411,6 +412,24 @@ impl Operation {
             .call_site()
             .expect("only a call or a projection has visible arguments");
         self.operands.len() - ty.fn_ty.args.len() - usize::from(self.kind.call_has_result_place())
+    }
+
+    /// The end of the hidden evidence of a `call` or a `project`: the operands from 1 up to it are
+    /// evidence, those from it up to [`call_visible_start`](Self::call_visible_start) the value
+    /// captures a direct call to a lambda passes.
+    pub(crate) fn call_evidence_end(&self) -> usize {
+        self.call_visible_start() - self.call_captures()
+    }
+
+    /// How many value captures a `call` passes before its visible arguments.
+    pub(crate) fn call_captures(&self) -> usize {
+        match &self.kind {
+            OperationKind::Call {
+                metadata: Some(metadata),
+                ..
+            } => metadata.captures as usize,
+            _ => 0,
+        }
     }
 
     /// The callee, call-site type and metadata of a `call` or a `project`, whose visible arguments
@@ -1229,6 +1248,28 @@ impl Operation {
             kind: OperationKind::DropClosureEnv,
         }
     }
+
+    /// Creates a `closure_capture` operation, which yields the read-only place of value capture
+    /// `index`, of type `ty`, of the closure of `function` at the place `closure`. The place is
+    /// valid while the closure is alive and unchanged, as the environment a call lends.
+    pub fn closure_capture(
+        span: impl Into<DebugLocation>,
+        closure: mir::Value,
+        function: FunctionId,
+        index: u32,
+        ty: Type,
+    ) -> Self {
+        Operation {
+            result_id: None,
+            span: span.into(),
+            operands: Box::new([closure]),
+            kind: OperationKind::ClosureCapture {
+                function,
+                index,
+                ty,
+            },
+        }
+    }
 }
 
 /// Whether an operation can raise a source-level failure.
@@ -1263,10 +1304,13 @@ pub struct Instantiation {
 /// Keeping this behind the existing optional box preserves the compact representation of the
 /// overwhelmingly common non-generic, borrowing call. Monomorphization uses `instantiation`; the
 /// final ownership-transfer pass uses `owned_arguments`, indexed by visible argument position.
+/// A direct call to a lambda passes its value captures, as invoking its closure does, between
+/// the hidden evidence and the visible arguments; `captures` counts them.
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub struct CallMetadata {
     pub(crate) instantiation: Option<Instantiation>,
     pub(crate) owned_arguments: DenseBitSet,
+    pub(crate) captures: u32,
 }
 
 /// Whether visible argument `offset` of a `call` may be a materialized value instead of a place.
@@ -1563,6 +1607,13 @@ pub enum OperationKind {
     CloneClosureEnv { ty: Type },
     /// Drop a closure's captured environment.
     DropClosureEnv,
+    /// The read-only place of value capture `index` of the closure at operand 0, known to be a
+    /// closure of `function`, whose capture parameter `index` has type `ty`.
+    ClosureCapture {
+        function: FunctionId,
+        index: u32,
+        ty: Type,
+    },
 }
 
 impl OperationKind {
@@ -1576,7 +1627,7 @@ impl OperationKind {
     pub(crate) fn visit_function_ids_mut(&mut self, mut visit: impl FnMut(&mut FunctionId)) {
         use OperationKind::*;
         match self {
-            BuildClosure { function, .. } => visit(function),
+            BuildClosure { function, .. } | ClosureCapture { function, .. } => visit(function),
             Alloca { .. }
             | AllocaPlace { .. }
             | RuntimeAlloc { .. }
@@ -1642,7 +1693,7 @@ impl OperationKind {
     pub(crate) fn function_id(&self) -> Option<FunctionId> {
         use OperationKind::*;
         match self {
-            BuildClosure { function, .. } => Some(*function),
+            BuildClosure { function, .. } | ClosureCapture { function, .. } => Some(*function),
             Alloca { .. }
             | AllocaPlace { .. }
             | RuntimeAlloc { .. }
@@ -1759,6 +1810,7 @@ impl OperationKind {
             }
             Project { yielded: ty, .. }
             | Subfield { ty, .. }
+            | ClosureCapture { ty, .. }
             | AddressOffset { ty, .. }
             | DictEntry { ty, .. }
             | SubscriptMember { ty, .. } => {
@@ -2038,6 +2090,11 @@ impl OperationKind {
                 whole.operands.len(),
                 1,
                 "drop_closure_env takes exactly the closure place"
+            ),
+            ClosureCapture { .. } => assert_eq!(
+                whole.operands.len(),
+                1,
+                "closure_capture takes exactly the closure place"
             ),
         }
     }
@@ -2365,6 +2422,14 @@ impl OperationKind {
                 whole.operands[0].format_with(env)
             ),
             DropClosureEnv => write!(f, "drop_closure_env {}", whole.operands[0].format_with(env)),
+            ClosureCapture {
+                function, index, ..
+            } => write!(
+                f,
+                "closure_capture {}, {}, {index}",
+                whole.operands[0].format_with(env),
+                mir::Value::Function(*function).format_with(env)
+            ),
         }
     }
 }

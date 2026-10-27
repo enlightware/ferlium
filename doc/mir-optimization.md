@@ -418,10 +418,13 @@ its caller or callees. Admission results are memoized per complete specializatio
 callbacks. Callback-use summaries are shared across callers and rounds, and refreshed when a
 callee's raw body is replaced by its optimized body.
 
-Known captureless callbacks enter the specialization key when an immutable parameter invokes them
-in a loop or a directly self-recursive callee. Binding preserves the visible ABI and materializes
-the known functions in private places; ordinary store forwarding exposes their direct calls to
-existing folding and inlining. Unknown callbacks and capturing closures are not bound.
+Known callbacks enter the specialization key when an immutable parameter invokes them in a loop
+or a directly self-recursive callee. Binding preserves the visible ABI. A captureless function is
+materialized in a private place, where store forwarding exposes its direct calls to folding and
+inlining. A closure built with static evidence is known by its lambda: the specialization still
+receives the closure, and calls through it become direct calls to the lambda with its captures read
+in place (`closure_capture`), so the lambda is specialized and inlined like any direct callee.
+Unknown callbacks and closures with run-time evidence are not bound.
 
 Callback copies have a smaller count allowance within the module generation budget, fixed from
 its original body population to leave capacity for type/evidence specialization. Each callee,

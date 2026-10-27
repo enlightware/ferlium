@@ -820,7 +820,8 @@ fn bind_arguments(
     };
     let visible_start =
         call.operands.len() - ty.fn_ty.args.len() - usize::from(call.kind.call_has_result_place());
-    let conversions = (0..ty.fn_ty.args.len())
+    // Each operand to convert, whether it is a value, and the type of what it passes.
+    let mut conversions = (0..ty.fn_ty.args.len())
         .filter_map(|offset| {
             let parameter = &body.parameters()[visible_start + offset - 1];
             if !matches!(
@@ -830,15 +831,34 @@ fn bind_arguments(
                 return None;
             }
             let is_value = accepts_value_argument(ty, metadata.as_deref(), offset, &env);
-            (is_value != parameter.is_value()).then_some((offset, is_value))
+            (is_value != parameter.is_value()).then_some((
+                visible_start + offset,
+                is_value,
+                ty.fn_ty.args[offset].ty,
+            ))
         })
         .collect::<Vec<_>>();
-    for (offset, is_value) in conversions {
-        let operand = call.operands[visible_start + offset].clone();
+    // A capture follows the parameter of the callee it was passed to; substituting the callee
+    // makes a `let` parameter a value once its type is a concrete scalar.
+    let captures = call.call_captures();
+    if captures != 0 {
+        let roles = edit.value_roles();
+        for index in visible_start - captures..visible_start {
+            let parameter = &body.parameters()[index - 1];
+            let is_value = roles
+                .get(&call.operands[index], edit.constants())
+                .is_some_and(|role| role.is_materialized());
+            if is_value != parameter.is_value() {
+                conversions.push((index, is_value, parameter.ty));
+            }
+        }
+    }
+    for (index, is_value, ty) in conversions {
+        let operand = call.operands[index].clone();
         let result = edit.new_value();
         let operations = &mut edit.block_mut(block).operations;
         if is_value {
-            let mut alloca = Operation::alloca(call.span, ty.fn_ty.args[offset].ty);
+            let mut alloca = Operation::alloca(call.span, ty);
             alloca.assign_result_id(Some(result));
             operations.push(alloca);
             operations.push(Operation::store(
@@ -851,7 +871,7 @@ fn bind_arguments(
             load.assign_result_id(Some(result));
             operations.push(load);
         }
-        arguments[visible_start + offset - 1] = mir::Value::Register(result);
+        arguments[index - 1] = mir::Value::Register(result);
     }
     arguments
 }

@@ -1199,6 +1199,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             | BuildClosure { .. }
             | CloneClosureEnv { .. }
             | DropClosureEnv
+            | ClosureCapture { .. }
             | BuildSubscriptEvidence { .. }
             | BuildSubscript { .. }
             | CloneSubscriptEnv { .. }
@@ -1707,7 +1708,10 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             | CloneClosureEnv { .. }
             | CloneSubscriptEnv { .. }
             | DropClosureEnv
-            | DropSubscriptEnv => self.lifecycle_operation(body, args, registers, operation)?,
+            | DropSubscriptEnv
+            | ClosureCapture { .. } => {
+                self.lifecycle_operation(body, args, registers, operation)?
+            }
             _ => {
                 // Layout getters execute guest code. Resolve them before entering the larger
                 // storage-operation frame, which must not remain live across those calls.
@@ -1780,6 +1784,19 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             DropClosureEnv | DropSubscriptEnv => {
                 self.drop_callable(place(0)?, operation.span.location)?;
                 None
+            }
+            // The capture's place in the closure's environment, as a call lends it.
+            ClosureCapture { index, .. } => {
+                let callable = self.resolve_callable(operand(0)?)?;
+                let environment = callable
+                    .environment
+                    .ok_or_else(|| invalid("closure_capture of a closure without environment"))?;
+                let values = self
+                    .environments
+                    .get(&environment)
+                    .ok_or_else(|| invalid("stale callable environment"))?
+                    .values;
+                Some(Binding::Place(self.memory.member(values, *index as usize)?))
             }
             Clone { .. } => {
                 let callable = self.resolve_callable(operand(2)?)?;

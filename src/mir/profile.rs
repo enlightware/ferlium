@@ -124,6 +124,7 @@ impl MirInstructionKind {
             Self::Operation(Op::BlackBox) => Cost::Semantic,
             Self::Operation(
                 Op::Subfield
+                | Op::ClosureCapture
                 | Op::AddressOffset
                 | Op::AddressOffsetPlace
                 | Op::DictEntry
