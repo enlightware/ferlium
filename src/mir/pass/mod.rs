@@ -685,44 +685,6 @@ pub(crate) fn optimize_function(
     if let Some(cleaned) = dead_store::remove_overwritten_trivial_copy_stores(source, env) {
         current = Some(cleaned);
     }
-    // Borrow read-only clone lifetimes only after the semantic rounds settle. Preserve the
-    // source through every normal/error cleanup path; DCE then collects the unused local.
-    let source = current.as_ref().unwrap_or(function);
-    if let Some(borrowed) =
-        clone_borrow::borrow_read_only_clones(source, &|callee| callees.addressor_summary(callee))
-    {
-        current = Some(borrowed);
-    }
-    // Transfer a private local's final ownership into its clone destination, including fields
-    // of returned aggregates. Prefer borrowing read-only locals first, since it can eliminate
-    // their destination storage too. Keep cleanup on earlier failure paths.
-    let source = current.as_ref().unwrap_or(function);
-    if let Some(moved) = owned_arguments::forward_terminal_clones(source, env, &|callee| {
-        callees.addressor_summary(callee)
-    }) {
-        current = Some(moved);
-    }
-    // Split local products owning managed fields, such as an inlined iterator holding copies of
-    // the arrays it reads, into one local per field. Forwarding, borrowing and moving then see
-    // each field's storage and lifetime on its own: run them again on what the split exposed.
-    let source = current.as_ref().unwrap_or(function);
-    if let Some(split) = scalar_replace::split_managed_local_products(
-        source,
-        env,
-        OptimizationStage::Semantic(callees),
-    ) {
-        let summary_of = |callee| callees.addressor_summary(callee);
-        let split = copy_forward::forward_redundant_storage(
-            &split,
-            env,
-            OptimizationStage::Semantic(callees),
-        )
-        .unwrap_or(split);
-        let split = clone_borrow::borrow_read_only_clones(&split, &summary_of).unwrap_or(split);
-        let split =
-            owned_arguments::forward_terminal_clones(&split, env, &summary_of).unwrap_or(split);
-        current = Some(split);
-    }
     // Hoist initialized copyable reads and terminating pure direct calls into a natural loop's
     // unique preheader. Calls require invariant passive inputs and `TrivialCopy` result storage.
     // Empty effects exclude source-visible failure and mutation; the raw-MIR summary separately
@@ -837,8 +799,8 @@ pub(crate) fn optimize_function(
         }
         repeated = true;
     }
-    // Forwarding a cell that holds a bare function, in the cleanups after the split above, names
-    // callees too, after the narrowing placed with devirtualization. A direct call must follow
+    // Forwarding a cell that holds a bare function, in the cleanups above, names callees too,
+    // after the narrowing placed with devirtualization. A direct call must follow
     // its callee's failure convention in the final body.
     let source = current.as_ref().unwrap_or(function);
     if let Some(narrowed) =

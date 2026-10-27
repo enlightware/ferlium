@@ -56,8 +56,6 @@ bounds checks     // prove array indices in range and remove checked access/fail
 discarded results // remove unread TrivialCopy result places exposed by inlining
 dead proven calls // remove unused chains of known-total numeric or proved-returning script calls
 dead stores       // remove unread initialization overwritten on every following path
-clone borrowing   // redirect read-only clone lifetimes to a source that outlives them
-managed split     // split local products owning managed fields; forward, borrow and move again
 LICM              // hoist initialized copyable reads and invariant terminating pure direct calls
 dce               // on every body, not only a changed one
 stack markers     // drop a mark duplicating one already held, and restores that pop nothing
@@ -68,7 +66,7 @@ repeat while the body shrinks:
     tail merge        // merge equivalent regions, collapse equal edges, and fold empty blocks
     finite domains    // collapse exhaustive tests; materialize Boolean results
     dead proven + dce // after each rewrite, collect its newly dead predicate
-narrow invokes    // again: forwarding after the split names callees too
+narrow invokes    // again: forwarding in the cleanups names callees too
 finish            // restores canonical form without exposing the intermediate body
 ```
 
@@ -235,9 +233,10 @@ Five rules, which apply to any new pass.
    inlining.** Normalizing passes expose known arguments and callees, or shrink a body before the
    inliner prices it. The ownership canonicalizations are among them: splitting an inlined adaptor
    product exposes its callback field as a known callee to fold and inline in the next round, and
-   borrowing and moving clones shrinks the body the inliner prices. They also run after the rounds,
-   on the settled body. Passes that consume the settled body and feed nothing back stay there:
-   bounds checks, LICM and cleanup. A normalizing pass runs at
+   borrowing and moving clones shrinks the body the inliner prices. Passes that consume the settled
+   body and feed nothing back stay after the rounds: bounds checks, LICM and cleanup. Normalization
+   does not run again after them: what they leave, such as a load repeated once a removed bounds
+   check merged the blocks around it, makes no measured difference to the Wasm code. A normalizing pass runs at
    least once per round and again whenever an earlier pass changes the body, so moving one there
    needs an opportunity the later passes miss. A normalizing pass that enables an earlier one must
    be listed as such, or the fixpoint misses it.
