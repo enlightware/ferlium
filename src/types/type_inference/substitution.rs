@@ -152,6 +152,7 @@ impl UnifiedTypeInference {
             if let LocalStorage::Deferred(deferred) = &mut local.storage {
                 deferred.initializer_mut_ty =
                     self.substitute_in_mut_type(deferred.initializer_mut_ty);
+                deferred.binding_mut_ty = self.substitute_in_mut_type(deferred.binding_mut_ty);
             }
         }
     }

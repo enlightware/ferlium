@@ -1353,13 +1353,7 @@ fn emit_with_export_kind(
         ));
         functions.function(callable_entries.signatures[&arity].as_u32());
         code.function(&callable::adapter(
-            program,
-            target,
-            captures,
-            &callees,
-            &callable_entries,
-            imports,
-            session,
+            program, target, captures, &callees, imports, session,
         )?);
     }
     for &entry in &callables.selected {

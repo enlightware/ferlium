@@ -227,26 +227,17 @@ impl<'run, 'session> HirInterpreter<'run, 'session> {
         let function_id = function_value.function;
         let mut arguments = CallArgsStorageGuard::new(arguments);
 
-        let closure_env_dictionary = function_value
-            .closure_env_value_dictionary
-            .as_ref()
-            .cloned();
+        // Lend the captured environment: its slots are read-only, and a body mutating a capture
+        // mutates a copy of its own (`doc/abi.md`). The cell only refers to the environment.
         let closure_env_temp = if function_value.closure_env_len == 0 {
             None
         } else {
-            let dictionary = closure_env_dictionary
-                .clone()
-                .expect("closures with captured values must carry a Value dictionary");
             self.runtime
                 .check_environment_cell_limit(self.runtime.environment.len(), Some(location))?;
-            let closure_env = call_value_clone_for_temp(
-                self,
-                dictionary,
-                ValOrMut::Ref(&function_value.closure_env as *const Value),
-                location,
-            )?;
             let index = self.runtime.environment.len();
-            self.runtime.environment.push(ValOrMut::Val(closure_env));
+            self.runtime
+                .environment
+                .push(ValOrMut::Ref(&function_value.closure_env as *const Value));
             Some(index)
         };
 
@@ -274,38 +265,8 @@ impl<'run, 'session> HirInterpreter<'run, 'session> {
             location,
         );
 
-        if let Some(root) = closure_env_temp {
-            let dictionary = closure_env_dictionary
-                .clone()
-                .expect("closure environment dictionary disappeared");
-            let place = Place::Boxed {
-                root,
-                path: Vec::new(),
-            };
-            let result = match result {
-                Ok(result) => match discard_call_result(call_value_drop_for_temp(
-                    self,
-                    dictionary,
-                    ValOrMut::Mut(place),
-                    location,
-                )) {
-                    Ok(()) => Ok(result),
-                    Err(error) => {
-                        discard_control_flow_value(result);
-                        Err(error)
-                    }
-                },
-                Err(error) => Err(self.cleanup_after_error(error, |ctx| {
-                    discard_call_result(call_value_drop_for_temp(
-                        ctx,
-                        dictionary,
-                        ValOrMut::Mut(place),
-                        location,
-                    ))
-                })),
-            };
+        if closure_env_temp.is_some() {
             self.runtime.pop_environment_entry_discard();
-            return result;
         }
 
         result

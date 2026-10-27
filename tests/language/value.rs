@@ -643,9 +643,127 @@ fn closure_drop_drops_captured_values() {
         "#,
         tracked_probe_value_impl()
     );
-    // Calling the closure drops its temporary capture copy (7), then scope exit drops the
-    // closure's capture (7) and the mutated original (8): observed 7 * 100 + drop log 778.
-    assert_val_eq!(session.run(&source), int(1478));
+    // Calling the closure lends its environment, and the body only reads the capture, so nothing
+    // is copied: scope exit drops the closure's capture (7) and the mutated original (8), observed
+    // 7 * 100 + drop log 78.
+    assert_val_eq!(session.run(&source), int(778));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn closure_returning_a_capture_of_a_mutable_variable_returns_a_copy() {
+    let mut session = TestSession::new();
+    // The body names the capture through a copy that aliases the lent environment; returning it,
+    // explicitly or as the tail, must clone rather than move out of the environment.
+    assert_val_eq!(
+        session.run(
+            r#"
+            let mut captured = [1];
+            let f = || { return captured; };
+            let g = || captured;
+            let h = |x| { if x { return captured; }; array_append(captured, 2); captured };
+            (f(), f(), g(), h(true), h(false), h(false), captured)
+            "#
+        ),
+        tuple!(
+            int_a![1],
+            int_a![1],
+            int_a![1],
+            int_a![1],
+            int_a![1, 2],
+            int_a![1, 2],
+            int_a![1]
+        )
+    );
+    session.allow_unsafe();
+    let source = format!(
+        r#"
+        {}
+        testing::reset_tracked_drops();
+        let observed = {{
+            let mut captured = Probe(7);
+            let f = || {{ return captured; }};
+            let a = f();
+            let b = f();
+            a.0 * 100 + b.0 * 10 + captured.0
+        }};
+        observed * 10000 + testing::tracked_drop_log()
+        "#,
+        tracked_probe_value_impl()
+    );
+    // Each call returns its own clone; scope exit drops both (7, 7), the closure's capture (7) and
+    // the original (7).
+    assert_val_eq!(session.run(&source), int(7777777));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn closures_outliving_their_frame_own_their_environment() {
+    // Construction moves the captures into the closure's own environment, so a call after the
+    // building frame returned, and other frames reused its stack, still reads the captured values.
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+            fn make_fn() { let x = 1; |y| x + y }
+            fn make_vec() { let mut v = [1, 2]; array_append(v, 3); |y| len(v) + y }
+            fn use_them() {
+                let f = make_fn();
+                let g = make_vec();
+                let big = [9, 9, 9, 9];
+                (f(10), g(10), f(20), g(20), len(big))
+            }
+            use_them()
+            "#
+        ),
+        tuple!(int(11), int(13), int(21), int(23), int(4))
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn closure_overwriting_its_own_storage_keeps_its_environment() {
+    // The call lends the closure's environment for its whole duration, so the body must not be able
+    // to drop that closure: the callee is a snapshot of `fs[0]`, which the body's write does not reach.
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+            enum Slot { Call((&mut [Slot]) -> int), Empty }
+            fn run() -> int {
+                let n = [1, 2, 3];
+                let mut fs = [Call(|s| { s[0] = Empty; len(n) })];
+                match fs[0] { Call(f) => f(fs), Empty => 0 }
+            }
+            run()
+            "#
+        ),
+        int(3)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn closure_mutating_a_capture_mutates_a_copy_per_call() {
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    let source = format!(
+        r#"
+        {}
+        testing::reset_tracked_drops();
+        let observed = {{
+            let mut captured = Probe(7);
+            let f = || {{ captured.0 = captured.0 + 1; captured.0 }};
+            let calls = f() * 10 + f();
+            calls * 10 + captured.0
+        }};
+        observed * 10000 + testing::tracked_drop_log()
+        "#,
+        tracked_probe_value_impl()
+    );
+    // Each call starts from the captured value and drops its mutated copy (8, 8); scope exit
+    // drops the closure's capture (7) and the original (7): observed 887, drop log 8877.
+    assert_val_eq!(session.run(&source), int(8878877));
 }
 
 #[test]

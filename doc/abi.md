@@ -577,9 +577,10 @@ non-zero environment pointer owns one allocation:
 - dropping the closure drops the owned capture tuple, releases captured evidence, and deallocates
   the environment exactly once.
 
-Invoking a closure borrows the closure value. It clones the owned capture tuple into a per-call
-temporary, passes the temporary captures and stored hidden evidence to the function body, and
-drops the temporary after both normal return and language failure.
+Invoking a closure borrows the closure value and lends its environment: the function body receives
+the stored hidden evidence and the captures in place, as read-only `let` parameters. A body that
+mutates a capture mutates a copy of its own, made on entry and dropped on exit, so each invocation
+still starts from the captured value; a body only reading its captures copies nothing.
 
 A closure-compatible entry uses the uniform parameter order `failure_state`, `env_ptr`, visible
 arguments, then result storage. Visible arguments and results are passed by pointer, including for

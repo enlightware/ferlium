@@ -101,6 +101,7 @@ Current lowering applies these rules in the main ownership-sensitive contexts:
 - A `let` initialized from a place whose mutability is not yet resolved records deferred local storage; after inference it resolves to either an owned snapshot or a non-owning alias.
 - A `let` initialized from a known immutable place may be non-owning.
 - Closure captures are materialized as owned values before `BuildClosure`.
+  Inside the lambda, a capture is a read-only environment slot; the body names a capture of a mutable variable through a local initialized from that slot on entry, which owns a copy only if the body mutates it and otherwise aliases the slot.
 - Function returns use `TakeLocalValue` when returning a local out of the current scope.
 - Function calls use the explicit argument passing rules described below.
 - Assignment targets may consume projections and addressor-place calls directly as places, subject to the usual mutability checks.

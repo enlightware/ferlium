@@ -240,7 +240,8 @@ impl LocalStorage<Unelaborated> {
 pub struct DeferredLocalStorage {
     pub initializer: NodeId,
     pub initializer_mut_ty: MutType,
-    pub binding_mutable: bool,
+    /// The binding's mutability, which may be resolved only by inference of its uses.
+    pub binding_mut_ty: MutType,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

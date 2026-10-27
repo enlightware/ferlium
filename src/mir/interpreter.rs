@@ -1670,7 +1670,20 @@ impl<'a> Interpreter<'a> {
         let param_tags = call_parameter_kinds(func);
         let offset = leading.len();
         let mut args: Vec<Binding> = Vec::with_capacity(offset + arg_ops.len() + 1);
-        args.extend(leading);
+        // A scalar capture is a `Let` parameter, which receives its value.
+        args.extend(
+            leading
+                .into_iter()
+                .enumerate()
+                .map(|(k, binding)| match binding {
+                    Binding::Place(place)
+                        if func.parameters().get(k).is_some_and(Parameter::is_value) =>
+                    {
+                        Binding::Value(self.load_copy(&place))
+                    }
+                    binding => binding,
+                }),
+        );
         for (k, op) in arg_ops.iter().enumerate() {
             let binding = if param_tags.get(offset + k) == Some(&ParameterKind::Dictionary) {
                 self.evidence_binding(slots, op, span)
@@ -2140,8 +2153,6 @@ impl<'a> Interpreter<'a> {
             } else {
                 (arg_ops, None)
             };
-            #[cfg(debug_assertions)]
-            let offset = leading.len();
             let mut args = self.script_arguments(slots, func, leading, arg_ops, span)?;
             // A value result gets a cell of its own, read once the call returns.
             let result_cell = if result_transport == ResultTransport::Value
@@ -2162,12 +2173,9 @@ impl<'a> Interpreter<'a> {
                 None
             };
             // Check the storage-state contract at the call boundary (debug only; see `doc/mir-ir.md`
-            // §4.3). Only the *visible* operand arguments and the return out-pointer are checked: the
-            // leading closure-environment slots (`[..offset]`) are excluded, because the body may
-            // legitimately consume a captured value, leaving its (per-call cloned) slot a husk.
+            // §4.3), including the lent closure-environment slots, which are `let` parameters.
             #[cfg(debug_assertions)]
-            let boundary =
-                Self::call_boundary(&call_parameter_kinds(func)[offset..], &args[offset..]);
+            let boundary = Self::call_boundary(&call_parameter_kinds(func), &args);
             #[cfg(debug_assertions)]
             self.check_call_boundary(&boundary, CallPhase::Before, false);
             self.run_function(key, args)?;
@@ -2344,7 +2352,7 @@ impl<'a> Interpreter<'a> {
         result_transport: ResultTransport,
         span: Location,
     ) -> Result<Option<Value>, RuntimeError> {
-        let (module_id, function_id, hidden_args, env_len, env_dict, env_ptr) = {
+        let (module_id, function_id, hidden_args, env_len, env_ptr) = {
             let fv = place
                 .target_ref(&self.ctx)
                 .expect("closure call of an invalid place")
@@ -2357,7 +2365,6 @@ impl<'a> Interpreter<'a> {
                 fv.function.function,
                 fv.hidden_args.clone(),
                 fv.closure_env_len,
-                fv.closure_env_value_dictionary.clone(),
                 &fv.closure_env as *const Value,
             )
         };
@@ -2368,27 +2375,26 @@ impl<'a> Interpreter<'a> {
         // environment slots, matching the lambda signature `[@extra dicts…, captures…, visible…, ret]`.
         let mut leading = self.hidden_evidence_bindings(&hidden_args, span)?;
 
-        // Clone the captured environment into a fresh environment temporary. `env_ptr` points into
-        // the closure's heap box (stable across `environment` growth).
-        // Check before cloning so a limit failure cannot leave a freshly cloned managed
-        // environment requiring semantic cleanup outside MIR's explicit drop path.
-        self.check_environment_cell_capacity(span)?;
-        let cloned_env = match env_dict.clone() {
-            // SAFETY: `env_ptr` targets the closure's environment, which lives in its heap box (stable
-            // across `environment` growth) at `place`; the clone call borrows its source, and
-            // stack discipline keeps `place` from being mutably aliased during the call.
-            Some(dict) => self.clone_capture_environment(dict, env_ptr, span)?,
-            None => Value::uninit(),
-        };
-        let env_idx = self.alloc_cell(cloned_env, span)?.boxed_parts().0;
-        for i in 0..env_len {
-            leading.push(Binding::Place(Place::Boxed {
-                root: env_idx,
-                path: vec![i as isize],
-            }));
+        // Lend the captured environment: its slots are read-only `let` parameters, and a body
+        // mutating a capture mutates a copy of its own (`doc/abi.md`). The cell only refers to the
+        // environment; the outer scope reclaims it without dropping anything.
+        if env_len != 0 {
+            // SAFETY: `env_ptr` targets the closure's environment, which lives in its heap box
+            // (stable across `environment` growth) at `place`; stack discipline keeps `place` from
+            // being mutably aliased during the call.
+            let env_idx = self
+                .alloc_argument_cell(ValOrMut::Ref(env_ptr), span)?
+                .boxed_parts()
+                .0;
+            for i in 0..env_len {
+                leading.push(Binding::Place(Place::Boxed {
+                    root: env_idx,
+                    path: vec![i as isize],
+                }));
+            }
         }
 
-        let call_result = self.exec_resolved_call(
+        self.exec_resolved_call(
             slots,
             module_id,
             function_id,
@@ -2397,46 +2403,7 @@ impl<'a> Interpreter<'a> {
             arg_ops,
             result_transport,
             span,
-        );
-
-        // Drop the cloned environment temporary; the outer scope reclaims its backing storage.
-        // The closure itself is left untouched in `place`.
-        let drop_result = if call_result.as_ref().is_err_and(RuntimeError::is_poisoning) {
-            self.discard_place_storage(&Place::Boxed {
-                root: env_idx,
-                path: vec![],
-            });
-            Ok(())
-        } else {
-            match env_dict {
-                Some(dict) => {
-                    let target = Place::Boxed {
-                        root: env_idx,
-                        path: vec![],
-                    };
-                    match self.drop_capture_environment(dict, ValOrMut::Mut(target.clone()), span) {
-                        Ok(()) => Ok(()),
-                        Err(err) => {
-                            // Failed semantic cleanup must not be retried.
-                            self.discard_place_storage(&target);
-                            Err(err)
-                        }
-                    }
-                }
-                None => Ok(()),
-            }
-        };
-        match (call_result, drop_result) {
-            (Ok(value), Ok(())) => Ok(value),
-            (Ok(value), Err(error)) => {
-                if let Some(value) = value {
-                    value.discard_storage();
-                }
-                Err(error)
-            }
-            (Err(error), Ok(())) => Err(error),
-            (Err(initial), Err(during_cleanup)) => Err(self.ctx.poison(initial, during_cleanup)),
-        }
+        )
     }
 
     /// Builds a closure value from the target `function` and its `[hidden_dicts…, captures…,

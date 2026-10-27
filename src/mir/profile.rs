@@ -403,7 +403,7 @@ mod tests {
                     ExecutionTarget::Mir,
                     "pub fn main(x: int) -> int {
                         let f = captures::make(x);
-                        let g = f;
+                        let mut g = f;
                         f() + g()
                     }",
                     "profile",

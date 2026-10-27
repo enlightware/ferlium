@@ -401,9 +401,9 @@ impl<'a> Emitter<'a> {
         let mut value_locals = FxHashMap::default();
         for i in 0..runtime_arg_count {
             let passing = if i < capture_count {
-                // A captured-environment slot is handed to the body as a mutable reference into the
-                // (per-call cloned) environment.
-                ArgConvention::MutableRef
+                // A captured-environment slot is read-only: the call lends the environment
+                // (`doc/abi.md`).
+                ArgConvention::Let
             } else {
                 f.parameter_passing[i - capture_count]
             };
@@ -1357,12 +1357,10 @@ impl<'a> Emitter<'a> {
     /// [`LocalStorage::Owned`](crate::module::function::LocalStorage::Owned) local of the lowered function and
     /// binds it to its `alloca` place.
     ///
-    /// Arguments are `NonOwning` and keep their by-value parameter binding. A lowered closure's
-    /// captured-environment slots are `Owned` (the body owns the cloned environment) but are *also*
-    /// parameters, already bound to their incoming pointers by the parameter loop; they must keep
-    /// that binding rather than be re-allocated, so locals already bound (the runtime arguments) are
-    /// skipped here. Non-owning, non-argument locals (aliases) are bound to their initializer's place
-    /// when their `StoreLocal` is lowered.
+    /// Arguments, including a lowered closure's captured-environment slots, are `NonOwning` and keep
+    /// their parameter binding, so locals already bound (the runtime arguments) are skipped here.
+    /// Non-owning, non-argument locals (aliases) are bound to their initializer's place when their
+    /// `StoreLocal` is lowered.
     ///
     /// A mutable owned scalar local is tracked as a value (see `variables`) unless it is one of
     /// `place_locals`.

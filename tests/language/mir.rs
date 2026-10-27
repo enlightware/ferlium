@@ -1650,7 +1650,7 @@ fn value_capturing_closure() {
     // closure is called by borrowing its place (`call %r1`, no intervening load — so it survives
     // repeated calls and is dropped once), and dropped at scope exit through the generated
     // `Value::drop` for the closure type (whose body lowers `drop_closure_env`). The lambda body
-    // reads its captured environment slot (`%p0`) directly.
+    // receives its captured environment slot (`%p0`), a scalar `let` parameter, as a value.
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_mir("fn capture() -> int { let b = 1; let g = || b; g() }"),
@@ -1662,10 +1662,9 @@ fn value_capturing_closure() {
     store @c0 to %p1
     ret
 
-fn $lambda$1(%p0: @arg &mut int) -> int:
+fn $lambda$1(%p0: @arg value int) -> int:
   b0:
-    %r0: int = load %p0
-    ret %r0
+    ret %p0
 
 fn capture() -> int:
   @c0: int = 1

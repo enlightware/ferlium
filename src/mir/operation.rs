@@ -340,7 +340,7 @@ impl Operation {
     /// A function value is **never loaded into a register to be called**; it is always referenced in
     /// place and read *by reference*. This keeps the contract uniform and, crucially, never copies or
     /// moves a non-trivially-copyable closure environment out of its storage. The callee is applied
-    /// uniformly: its hidden evidence and (per-call cloned) environment, if any, are prepended ahead
+    /// uniformly: its hidden evidence and lent environment slots, if any, are prepended ahead
     /// of the visible arguments; a bare function value adds nothing. The same contract governs the
     /// [`drop`](Self::drop) callee.
     pub fn call<T: IntoIterator<Item = mir::Value>>(

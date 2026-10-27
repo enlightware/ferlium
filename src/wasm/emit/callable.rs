@@ -37,9 +37,8 @@ use crate::{
 };
 
 use super::{
-    Global, ScalarType,
+    ScalarType,
     adapters::AdapterTarget,
-    allocate_frame,
     body::{
         Body,
         HelperLocal::{DynamicAlign, DynamicBase, DynamicSize, Scratch},
@@ -359,26 +358,13 @@ pub(super) fn drop_entry(imports: &Imports, method: ValueMethod) -> WasmFunction
     code
 }
 
-/// State needed to copy and clean up a callable's source captures.
-struct CaptureState {
-    frame: WasmLocalId,
-    temporary: WasmLocalId,
-    size: WasmLocalId,
-    align: WasmLocalId,
-    base: WasmLocalId,
-    end: WasmLocalId,
-    pending: Option<WasmLocalId>,
-    methods: ValueMethods,
-}
-
-/// Bridge one uniform entry to its target. Evidence-only calls borrow their environment; source
-/// captures get an independent invocation copy, destroyed on both success and source failure.
+/// Bridge one uniform entry to its target. The call lends the environment: its evidence and source
+/// captures are passed in place, and a target writing a capture writes a copy of its own.
 pub(super) fn adapter(
     program: &ResolvedPhysicalProgram<'_>,
     target: FunctionId,
     captures: Captures,
     callees: &FxHashMap<FunctionId, (WasmFunctionId, &CallAbi)>,
-    entries: &Entries,
     imports: &Imports,
     session: &CompilerSession,
 ) -> Result<WasmFunction, String> {
@@ -410,58 +396,10 @@ pub(super) fn adapter(
         .as_ref()
         .filter(|adapter| adapter.needs_scratch())
         .map(|_| local(ValType::I32));
-    let capture_state = (captures.values != 0).then(|| CaptureState {
-        frame: local(ValType::I32),
-        temporary: local(ValType::I32),
-        size: local(ValType::I32),
-        align: local(ValType::I32),
-        base: local(ValType::I32),
-        pending: status.map(|_| local(ValType::I32)),
-        // Keep the wide allocation helper last so declarations form at most two type groups.
-        end: local(ValType::I64),
-        methods: entries
-            .value_methods
-            .expect("value captures require callable Value methods"),
-    });
     let mut code = WasmFunction::new_with_locals_types(locals);
     if let Some(environment) = environment {
         code.instruction(&I::LocalGet(abi.input_local(0).as_u32()));
         code.instruction(&I::LocalSet(environment.as_u32()));
-    }
-    if let Some(capture) = &capture_state {
-        let environment = environment.unwrap();
-        code.instruction(&I::GlobalGet(Global::Stack as u32));
-        code.instruction(&I::LocalSet(capture.frame.as_u32()));
-        field(&mut code, environment, offset_of!(Environment, values_size));
-        code.instruction(&I::LocalSet(capture.size.as_u32()));
-        field(
-            &mut code,
-            environment,
-            offset_of!(Environment, values_align),
-        );
-        code.instruction(&I::LocalSet(capture.align.as_u32()));
-        allocate_frame(
-            &mut code,
-            imports.failure_function(),
-            capture.size,
-            capture.align,
-            capture.temporary,
-            capture.end,
-        );
-        code.instruction(&I::Drop);
-        dictionary(&mut code, environment);
-        values(&mut code, environment);
-        code.instruction(&I::LocalGet(capture.temporary.as_u32()));
-        value_entry(
-            &mut code,
-            environment,
-            capture.base,
-            capture.methods.clone.entry,
-        );
-        code.instruction(&I::CallIndirect {
-            type_index: capture.methods.clone.ty.as_u32(),
-            table_index: 0,
-        });
     }
     if let Some(optional) = &optional {
         enter_frame(
@@ -485,8 +423,7 @@ pub(super) fn adapter(
                 Environment::hidden_offset(i),
             );
         } else if i < leading {
-            let capture = capture_state.as_ref().unwrap();
-            code.instruction(&I::LocalGet(capture.temporary.as_u32()));
+            values(&mut code, environment.unwrap());
             field(
                 &mut code,
                 environment.unwrap(),
@@ -521,47 +458,6 @@ pub(super) fn adapter(
         leave_frame(&mut code, optional_frame.unwrap());
     } else if matches!(direct.result, ResultKind::Direct(_)) {
         ScalarType::in_env(result_ty, &env)?.store(&mut code);
-    }
-    if let Some(capture) = &capture_state {
-        let environment = environment.unwrap();
-        // Detach the call's diagnostic before invoking guest cleanup, so a trap during drop
-        // preserves the original cause in the invocation's pending-failure stack.
-        if let Some(status) = status {
-            code.instruction(&I::LocalGet(status.as_u32()));
-            code.instruction(&I::If(BlockType::Empty));
-            context_pointer(&mut code, offset_of!(InvocationState, diagnostics));
-            code.instruction(&I::I32Const(0));
-            code.instruction(&I::Call(imports.function_index("capture_failure").as_u32()));
-            code.instruction(&I::LocalSet(capture.pending.unwrap().as_u32()));
-            code.instruction(&I::End);
-        }
-        dictionary(&mut code, environment);
-        code.instruction(&I::LocalGet(capture.temporary.as_u32()));
-        code.instruction(&I::LocalGet(capture.temporary.as_u32())); // Unit result, no bytes written.
-        value_entry(
-            &mut code,
-            environment,
-            capture.base,
-            capture.methods.drop.entry,
-        );
-        code.instruction(&I::CallIndirect {
-            type_index: capture.methods.drop.ty.as_u32(),
-            table_index: 0,
-        });
-        leave_frame(&mut code, capture.frame);
-        if let Some(status) = status {
-            code.instruction(&I::LocalGet(status.as_u32()));
-            code.instruction(&I::If(BlockType::Empty));
-            context_pointer(&mut code, offset_of!(InvocationState, diagnostics));
-            code.instruction(&I::LocalGet(capture.pending.unwrap().as_u32()));
-            code.instruction(&I::Call(
-                imports.function_index("propagate_failure").as_u32(),
-            ));
-            code.instruction(&I::If(BlockType::Empty));
-            code.instruction(&I::Unreachable);
-            code.instruction(&I::End);
-            code.instruction(&I::End);
-        }
     }
     if let Some(status) = status {
         code.instruction(&I::LocalGet(status.as_u32()));

@@ -1405,20 +1405,9 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 .get(&environment)
                 .cloned()
                 .ok_or_else(|| invalid("stale callable environment"))?;
-            if let Some(dictionary) = env.value_dictionary.clone() {
-                let span = Location::new_synthesized();
-                let marker = self.memory.len();
-                let temporary = self.memory.allocate(env.values.ty, Some(span))?;
-                let clone =
-                    self.dictionary_entry(dictionary.clone(), VALUE_CLONE_METHOD_INDEX.as_index())?;
-                let cloned = self.invoke(
-                    clone,
-                    vec![Binding::Place(env.values), Binding::Place(temporary)],
-                );
-                if let Err(error) = cloned {
-                    self.memory.restore(marker);
-                    return Err(error);
-                }
+            // Lend the environment: its captures are read-only `let` parameters, and a body
+            // mutating a capture mutates a copy of its own (`doc/abi.md`).
+            if env.value_dictionary.is_some() {
                 let count = env
                     .values
                     .ty
@@ -1427,7 +1416,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     .ok_or_else(|| invalid("closure capture tuple expected"))?
                     .len();
                 let values = (0..count)
-                    .map(|i| self.memory.member(temporary, i).map(Binding::Place))
+                    .map(|i| self.memory.member(env.values, i).map(Binding::Place))
                     .collect::<Result<Vec<_>, _>>()?;
                 let leading = callable
                     .captures
@@ -1436,20 +1425,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     .chain(values)
                     .chain(args)
                     .collect();
-                let result = self.call(callable.function, leading);
-                let cleanup = if result
-                    .as_ref()
-                    .is_err_and(|e| !matches!(e, RuntimeError::SourceFailure(_)))
-                {
-                    Ok(())
-                } else {
-                    self.drop_capture_tuple(dictionary, temporary, span)
-                };
-                self.memory.restore(marker);
-                return match (result, cleanup) {
-                    (Ok(()), result) | (result, Ok(())) => result,
-                    (Err(initial), Err(cleanup)) => Err(initial.interrupted_by(cleanup)),
-                };
+                return self.call(callable.function, leading);
             }
         }
         let args = callable

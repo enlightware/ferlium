@@ -626,6 +626,11 @@ impl TypeInference {
         sorted_free_vars.sort();
 
         let mut fn_all_locals = Vec::new();
+        // The call lends the environment, so the body names a capture of a mutable variable through
+        // a copy of its own, initialized from the environment slot on entry: each call starts from
+        // the captured value. The copy is mutable only where the body mutates it, which only a
+        // mutable variable allows; otherwise it aliases the slot.
+        let mut copied_captures = Vec::new();
         for var_name in sorted_free_vars {
             let found = env.get_variable_id(&var_name);
             if let Some(outer_id) = found {
@@ -641,6 +646,14 @@ impl TypeInference {
                 capture_tys.push(local.ty);
                 let mut inner_local = local.clone();
                 inner_local.scope = span; // the local's scope is the whole lambda
+                if inner_local.mut_ty != MutType::constant() {
+                    let mut copy = inner_local.clone();
+                    copy.mut_ty = self.fresh_mut_var_ty();
+                    self.add_mut_be_at_least_constraint(local.mut_ty, span, copy.mut_ty, span);
+                    copied_captures.push((capture_args.len(), copy));
+                    inner_local.mut_ty = MutType::constant();
+                }
+                inner_local.set_non_owning_storage();
                 let inner_id = LocalDecl::push_with_next_slot(&mut fn_all_locals, inner_local);
                 capture_args.push(inner_id);
             }
@@ -680,10 +693,33 @@ impl TypeInference {
             .map(|id| fn_all_locals[id.as_index()].as_fn_arg_type())
             .collect();
 
-        // 4. Build environment for typing the function's body.
+        // 4. Build environment for typing the function's body. The body names a copied capture's
+        // copy, which follows the runtime arguments.
         let runtime_arg_count = capture_args.len() + explicit_locals.len();
-        let fn_cur_locals = capture_args.into_iter().chain(explicit_locals).collect();
+        let copies: Vec<_> = copied_captures
+            .into_iter()
+            .map(|(index, copy)| {
+                let slot = capture_args[index];
+                let copy = LocalDecl::push_with_next_slot(&mut fn_all_locals, copy);
+                (index, slot, copy)
+            })
+            .collect();
+        let mut body_captures = capture_args.clone();
+        for &(index, _, copy) in &copies {
+            body_captures[index] = copy;
+        }
+        let fn_cur_locals = body_captures.into_iter().chain(explicit_locals).collect();
         let mut fn_arena = NodeArena::default();
+        // A copy's storage is decided once its mutability is known, so the body's uses of it, such
+        // as returning it, must already see it as deferred.
+        let copies: Vec<_> = copies
+            .into_iter()
+            .map(|(_, slot, copy)| {
+                let initializer =
+                    Self::defer_capture_copy(&mut fn_arena, &mut fn_all_locals, slot, copy, span);
+                (initializer, copy)
+            })
+            .collect();
         let mut inner_env = TypingEnv::new(
             &mut fn_all_locals,
             fn_cur_locals,
@@ -714,6 +750,9 @@ impl TypeInference {
         if inner_env.ir_arena[code_id].ty != Type::never() {
             code_id =
                 self.materialize_owned_value(&mut inner_env, code_id, env.ast_arena[body].span);
+        }
+        if !copies.is_empty() {
+            code_id = self.copy_captures(&mut inner_env, &copies, code_id, span);
         }
         report_needless_returns_in_tail(inner_env.ast_arena, body, inner_env.warnings);
 
@@ -791,6 +830,64 @@ impl TypeInference {
         };
 
         Ok((node_id, fn_ty_wrapper, MutType::constant(), no_effects()))
+    }
+
+    /// Gives the capture copy `copy` deferred storage initialized from the environment slot `slot`:
+    /// a clone if the body mutates the copy, an alias of the slot otherwise. Returns the initializer.
+    fn defer_capture_copy(
+        arena: &mut NodeArena,
+        locals: &mut [LocalDecl],
+        slot: LocalDeclId,
+        copy: LocalDeclId,
+        span: Location,
+    ) -> NodeId {
+        let initializer = arena.alloc(hir::Node::new(
+            NodeKind::LoadLocal(hir::LoadLocal { id: slot }),
+            locals[slot.as_index()].ty,
+            no_effects(),
+            span,
+        ));
+        let copy = &mut locals[copy.as_index()];
+        let binding_mut_ty = copy.mut_ty;
+        copy.set_deferred_storage(DeferredLocalStorage {
+            initializer,
+            initializer_mut_ty: MutType::constant(),
+            binding_mut_ty,
+        });
+        initializer
+    }
+
+    /// Wraps a lambda `body` in a block that first initializes each capture copy `(initializer,
+    /// copy)` (see `defer_capture_copy`), and drops the copies that own storage on exit.
+    fn copy_captures(
+        &mut self,
+        env: &mut TypingEnv,
+        copies: &[(NodeId, LocalDeclId)],
+        body: NodeId,
+        span: Location,
+    ) -> NodeId {
+        use hir::{Node as N, NodeKind as K};
+        let mut statements = Vec::with_capacity(copies.len() + 1);
+        for &(value, id) in copies {
+            statements.push(env.ir_arena.alloc(N::new(
+                K::StoreLocal(StoreLocal { value, id }),
+                Type::unit(),
+                no_effects(),
+                span,
+            )));
+        }
+        statements.push(body);
+        let body = &env.ir_arena[body];
+        let (ty, effects) = (body.ty, body.effects.clone());
+        env.ir_arena.alloc(N::new(
+            K::Block(b(hir::Block {
+                body: b(SVec2::from_vec(statements)),
+                cleanup: copies.iter().map(|&(_, copy)| copy).collect(),
+            })),
+            ty,
+            effects,
+            span,
+        ))
     }
 
     /// Lower one source literal to HIR. Most literal representations already
@@ -1191,7 +1288,7 @@ impl TypeInference {
                     local.set_deferred_storage(DeferredLocalStorage {
                         initializer: node_id,
                         initializer_mut_ty,
-                        binding_mutable: mut_val.is_mutable(),
+                        binding_mut_ty: MutType::resolved(mut_val),
                     });
                 }
                 if needs_clone && !initializer_place_needs_temp {
@@ -4023,7 +4120,7 @@ impl TypeInference {
             local.set_deferred_storage(DeferredLocalStorage {
                 initializer: value,
                 initializer_mut_ty: env.all_locals[load.id.as_index()].mut_ty,
-                binding_mutable: false,
+                binding_mut_ty: MutType::constant(),
             });
             let id = env.push_local(local);
             prefix.push(env.ir_arena.alloc(hir::Node::new(

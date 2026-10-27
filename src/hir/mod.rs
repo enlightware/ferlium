@@ -298,7 +298,11 @@ pub(crate) fn resolve_deferred_local_storage_shape(
         .initializer_mut_ty
         .as_resolved()
         .is_some_and(|mut_ty| !mut_ty.is_mutable());
-    let can_alias_initializer = !deferred.binding_mutable
+    let binding_is_mutable = deferred
+        .binding_mut_ty
+        .as_resolved()
+        .is_some_and(|mut_ty| mut_ty.is_mutable());
+    let can_alias_initializer = !binding_is_mutable
         && initializer_is_known_immutable
         && node_is_stable_place_reference(arena, deferred.initializer);
 
