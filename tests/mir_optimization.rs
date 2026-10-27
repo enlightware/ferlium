@@ -696,6 +696,20 @@ fn known_capturing_callbacks_are_called_directly() {
     );
 }
 
+/// Once inlining has brought an adaptor's call through its callback into the function building the
+/// closure, that call is direct too, and the lambda is inlined with its dictionary calls.
+#[test]
+fn local_capturing_closures_are_called_directly() {
+    let source = "fn scaled(values, k) { values |> map(|x| x * k + 1) }
+        fn view(v: [int], k: int) -> [int] { scaled(v, k) }";
+    let optimized = emit("local_closure", source, MirOptimization::Enabled);
+    let view = rendered_function(&optimized, "view");
+    assert!(
+        !view.lines().any(|line| line.contains("call %")),
+        "the closure must be called directly and inlined:\n{view}"
+    );
+}
+
 /// Traversing a hash collection steps through its buckets with the generic `Value` impl of the
 /// optional entry, closed over the key and value dictionaries at run time. Once those are
 /// constants, the closed dictionary is static evidence: dropping and cloning a bucket are direct

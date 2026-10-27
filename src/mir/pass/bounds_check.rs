@@ -679,6 +679,13 @@ mod tests {
                          work[16]; work[17]; work[18]; work[19];\n\
                          work[20]; work[21]; work[22]; work[23];\n\
                          work[24]; work[25]; work[26]; work[27];\n\
+                         work[28]; work[29]; work[30]; work[31];\n\
+                         work[32]; work[33]; work[34]; work[35];\n\
+                         work[36]; work[37]; work[38]; work[39];\n\
+                         work[40]; work[41]; work[42]; work[43];\n\
+                         work[44]; work[45]; work[46]; work[47];\n\
+                         work[48]; work[49]; work[50]; work[51];\n\
+                         work[52]; work[53]; work[54]; work[55];\n\
                          a[i]\n\
                      } else { panic(\"bad index\") }\n\
                  } else {\n\

@@ -32,9 +32,11 @@ pub const CALL_DEPTH_PROOF_DEPTH: usize = 64;
 ///
 /// Folding and inlining feed each other — inlining a generic callee lets folding resolve its
 /// `dict_entry`s, which turns indirect calls direct, which offers new inlining candidates — so one
-/// pass of each is not enough. In practice the chain is short; this bounds the outer loop of the
-/// driver. Normalization runs to a fixpoint within a round, so a round is spent only on expansion.
-pub const MAX_ROUNDS: usize = 4;
+/// pass of each is not enough. A chain of iterator adaptors is the longest: each round inlines one
+/// adaptor level, until the closure the caller built reaches the call through it, which a further
+/// round calls directly, then specializes and inlines. This bounds the outer loop of the driver.
+/// Normalization runs to a fixpoint within a round, so a round is spent only on expansion.
+pub const MAX_ROUNDS: usize = 8;
 
 /// The largest [hot cost](super::cost::hot_cost) of a callee inlining will copy into a caller.
 ///

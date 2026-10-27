@@ -424,6 +424,8 @@ materialized in a private place, where store forwarding exposes its direct calls
 inlining. A closure built with static evidence is known by its lambda: the specialization still
 receives the closure, and calls through it become direct calls to the lambda with its captures read
 in place (`closure_capture`), so the lambda is specialized and inlined like any direct callee.
+A call through a local cell holding such a closure is rewritten the same way: once inlining has
+brought an iterator adaptor's call to its callback into the function that built the closure.
 Unknown callbacks and closures with run-time evidence are not bound.
 
 Callback copies have a smaller count allowance within the module generation budget, fixed from

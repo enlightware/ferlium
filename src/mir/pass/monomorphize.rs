@@ -1067,7 +1067,7 @@ fn bind_callbacks(edit: &mut FunctionEdit, callbacks: &[(ParameterId, Callback)]
                 replacements.insert(*parameter, place);
             }
             Callback::Closure(closure) => {
-                closures.insert(*parameter, closure.clone());
+                closures.insert(mir::Value::Parameter(*parameter), closure.clone());
             }
         }
     }
@@ -1084,11 +1084,12 @@ fn bind_callbacks(edit: &mut FunctionEdit, callbacks: &[(ParameterId, Callback)]
     edit.block_mut(edit.entry()).operations.splice(0..0, setup);
 }
 
-/// Rewrites every call through a parameter bound to a known closure into a direct call to its
-/// lambda: `[lambda, evidence…, captures…, visible…]`, the order of the lambda's parameters.
+/// Rewrites every call through a place holding a known closure, a bound parameter or a local cell,
+/// into a direct call to its lambda: `[lambda, evidence…, captures…, visible…]`, the order of the
+/// lambda's parameters.
 fn call_known_closures(
     edit: &mut FunctionEdit,
-    closures: &FxHashMap<ParameterId, Rc<KnownClosure>>,
+    closures: &FxHashMap<mir::Value, Rc<KnownClosure>>,
 ) {
     let blocks: Vec<_> = edit.blocks().collect();
     for block in blocks {
@@ -1112,19 +1113,17 @@ fn call_known_closures(
 /// `prefix`.
 fn call_known_closure(
     edit: &mut FunctionEdit,
-    closures: &FxHashMap<ParameterId, Rc<KnownClosure>>,
+    closures: &FxHashMap<mir::Value, Rc<KnownClosure>>,
     operation: &mut Operation,
     prefix: &mut Vec<Operation>,
 ) {
     let OperationKind::Call { metadata, .. } = &mut operation.kind else {
         return;
     };
-    let mir::Value::Parameter(parameter) = operation.operands[0] else {
+    let Some(closure) = closures.get(&operation.operands[0]) else {
         return;
     };
-    let Some(closure) = closures.get(&parameter) else {
-        return;
-    };
+    let place = operation.operands[0].clone();
     let span = operation.span;
     let mut leading: Vec<mir::Value> = closure
         .evidence
@@ -1132,13 +1131,8 @@ fn call_known_closure(
         .map(|evidence| mir::Value::Evidence(Box::new(evidence.clone())))
         .collect();
     for (index, &(ty, is_value)) in closure.captures.iter().enumerate() {
-        let mut capture = Operation::closure_capture(
-            span,
-            mir::Value::Parameter(parameter),
-            closure.function,
-            index as u32,
-            ty,
-        );
+        let mut capture =
+            Operation::closure_capture(span, place.clone(), closure.function, index as u32, ty);
         let place = edit.assign_new_result(&mut capture).unwrap();
         prefix.push(capture);
         if is_value {
@@ -1951,6 +1945,9 @@ fn substitute_in_operation(operation: &mut Operation, mapper: &mut impl TypeMapp
 /// - specializing would achieve something (see [`worth_specializing`]);
 /// - the budget allows another specialization, unless this one is already cached.
 ///
+/// A call through a local cell holding a known closure becomes a direct call to its lambda, as in a
+/// specialization bound to that closure, so that a later round specializes it like any other.
+///
 /// The callee may live in another module: the specialization is still created in the *optimizing*
 /// module's table, from the callee's optimized body, which is safe because the session tracks the
 /// dependency.
@@ -1966,23 +1963,39 @@ pub(crate) fn specialize_call_sites(
     // still borrowed, then pay for an editable copy only when there is something to apply.
     // Avoid another dataflow analysis unless a call can bind a function argument.
     // Callback descriptors are shared across callers and invalidated when a callee is published.
-    let needs_callbacks = func.blocks().any(|block| {
-        let block = func.block(block);
-        block
-            .operations()
-            .iter()
-            .chain(match &block.terminator().kind {
-                TerminatorKind::Invoke { operation, .. } => Some(operation),
-                _ => None,
-            })
-            .any(|operation| may_bind_callback(operation, session, specializations))
-    });
+    let calls = || {
+        func.blocks().flat_map(|block| {
+            let block = func.block(block);
+            block
+                .operations()
+                .iter()
+                .chain(match &block.terminator().kind {
+                    TerminatorKind::Invoke { operation, .. } => Some(operation),
+                    _ => None,
+                })
+                .filter(|operation| matches!(operation.kind, OperationKind::Call { .. }))
+        })
+    };
+    let needs_callbacks =
+        calls().any(|operation| may_bind_callback(operation, session, specializations));
+    // A call through a local cell may call a known closure, as through a bound parameter.
+    let calls_through_cells =
+        calls().any(|operation| matches!(operation.operands[0], mir::Value::Register(_)));
     let analysis = needs_callbacks.then(|| dataflow::analyze(func, env));
-    let closures = if needs_callbacks {
+    let closures = if needs_callbacks || calls_through_cells {
         known_closures(func, session, specializations)
     } else {
         FxHashMap::default()
     };
+    // Rewritten once the call sites have been, as reading a capture makes its cell opaque.
+    let called_closures: FxHashMap<_, _> = calls()
+        .filter_map(|operation| match operation.operands[0] {
+            mir::Value::Register(cell) => closures
+                .get(&cell)
+                .map(|closure| (mir::Value::Register(cell), closure.clone())),
+            _ => None,
+        })
+        .collect();
     let mut rewrites = Vec::new();
     for block_id in func.blocks() {
         let block = func.block(block_id);
@@ -2027,7 +2040,7 @@ pub(crate) fn specialize_call_sites(
             ));
         }
     }
-    if rewrites.is_empty() {
+    if rewrites.is_empty() && called_closures.is_empty() {
         return None;
     }
 
@@ -2074,6 +2087,9 @@ pub(crate) fn specialize_call_sites(
         }
         let at = site.index.as_index();
         edit.block_mut(site.block).operations.splice(at..at, loads);
+    }
+    if !called_closures.is_empty() {
+        call_known_closures(&mut edit, &called_closures);
     }
     Some(edit.finish_unverified())
 }
