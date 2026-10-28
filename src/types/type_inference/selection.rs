@@ -46,579 +46,6 @@ pub(super) struct SelectionStats {
     selections: usize,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        compiler::error::CompilationErrorImpl,
-        std::{logic::bool_type, math::int_type},
-    };
-
-    #[test]
-    fn publication_budget_exhaustion_returns_an_internal_error() {
-        for final_publication in [false, true] {
-            let mut inference = UnifiedTypeInference::default();
-            inference
-                .solve_publication_bounds_with_limit(final_publication, 1)
-                .unwrap();
-            let error = inference
-                .solve_publication_bounds_with_limit(final_publication, 0)
-                .unwrap_err();
-            assert!(matches!(
-                error.into_inner(),
-                CompilationErrorImpl::Internal { error, .. }
-                    if error == "type-bound publication failed to converge after 0 rounds"
-            ));
-
-            let mut inference = UnifiedTypeInference::new_with_ty_vars(1);
-            let span = Location::new_synthesized();
-            inference.bounds.insert(TypeBound {
-                lower: int_type(),
-                lower_span: span,
-                upper: Type::variable_id(0),
-                upper_span: span,
-            });
-            // Selecting the lower bound makes progress, but must not renew
-            // the budget: another round is needed to establish convergence.
-            let error = inference
-                .solve_publication_bounds_with_limit(final_publication, 1)
-                .unwrap_err();
-            assert!(matches!(
-                error.into_inner(),
-                CompilationErrorImpl::Internal { error, .. }
-                    if error == "type-bound publication failed to converge after 1 rounds"
-            ));
-            inference
-                .solve_publication_bounds(final_publication)
-                .unwrap();
-            assert_eq!(inference.normalize_type(Type::variable_id(0)), int_type());
-        }
-    }
-
-    #[test]
-    fn component_publication_keeps_disjoint_shapes_and_effect_rows_independent() {
-        const COMPONENTS: u32 = 32;
-        let mut inference = UnifiedTypeInference::new_with_ty_vars(2 * COMPONENTS + 5);
-        let span = Location::new_synthesized();
-        let edge = |lower, upper| TypeBound {
-            lower,
-            lower_span: span,
-            upper,
-            upper_span: span,
-        };
-        let variable = Type::variable_id;
-        let bottom = Type::nullary_function_by_val(Type::never());
-        let result = |index| {
-            if index % 2 == 0 {
-                int_type()
-            } else {
-                bool_type()
-            }
-        };
-        let mut relations = Vec::new();
-        for index in (0..COMPONENTS).rev() {
-            relations.push(edge(variable(2 * index), variable(2 * index + 1)));
-            relations.push(edge(bottom, variable(2 * index)));
-        }
-        for index in 0..COMPONENTS {
-            relations.push(edge(
-                Type::nullary_function_by_val(result(index)),
-                variable(2 * index + 1),
-            ));
-            relations.push(edge(Type::never(), variable(2 * index)));
-        }
-        let empty = 2 * COMPONENTS;
-        let recursive = empty + 2;
-        let singleton = empty + 4;
-        relations.extend([
-            edge(variable(empty), variable(empty + 1)),
-            edge(variable(recursive), variable(recursive + 1)),
-            edge(
-                Type::nullary_function_by_val(variable(recursive)),
-                variable(recursive + 1),
-            ),
-            edge(bottom, variable(singleton)),
-            edge(bottom, Type::nullary_function_by_val(int_type())),
-        ]);
-        assert!(inference.publish_component_shapes(&relations).unwrap());
-        let mut effects = FxHashSet::default();
-        for index in 0..COMPONENTS {
-            for var in [2 * index, 2 * index + 1] {
-                let ty = inference.normalize_type(variable(var));
-                let data = ty.data();
-                let function = data.as_function().unwrap();
-                assert_eq!(function.ret, result(index));
-                assert!(effects.insert(function.effects.to_single_variable().unwrap()));
-            }
-        }
-        for var in empty..=singleton {
-            assert_eq!(inference.normalize_type(variable(var)), variable(var));
-        }
-    }
-
-    #[test]
-    fn component_publication_preserves_component_and_contributor_diagnostic_order() {
-        use crate::compiler::error::CompilationErrorImpl;
-        let mut inference = UnifiedTypeInference::new_with_ty_vars(4);
-        let location =
-            |offset| Location::new(offset, offset + 1, Location::new_synthesized().source_id);
-        let edge = |lower, upper, offset| TypeBound {
-            lower,
-            lower_span: location(offset),
-            upper,
-            upper_span: location(offset),
-        };
-        let int = Type::nullary_function_by_val(int_type());
-        let boolean = Type::nullary_function_by_val(bool_type());
-        let variable = Type::variable_id;
-        // Component 2 appears first, but component 0 must still publish first.
-        // Its contributors retain input order, even with spans in reverse order.
-        let relations = [
-            edge(variable(2), variable(3), 0),
-            edge(variable(0), variable(1), 1),
-            edge(boolean, variable(2), 2),
-            edge(int, variable(1), 50),
-            edge(int, variable(3), 40),
-            edge(boolean, variable(0), 5),
-        ];
-        let error = inference.publish_component_shapes(&relations).unwrap_err();
-        let CompilationErrorImpl::TypeMismatch {
-            current_ty,
-            current_span,
-            expected_ty,
-            expected_span,
-            ..
-        } = error.into_inner()
-        else {
-            panic!("expected callable mismatch");
-        };
-        assert_eq!((current_ty, current_span), (boolean, location(5)));
-        assert_eq!((expected_ty, expected_span), (int, location(50)));
-    }
-
-    #[test]
-    fn immutable_bound_comparisons_survive_rebuilds_and_rollback() {
-        let mut inference = UnifiedTypeInference::new_with_ty_vars(2);
-        let span = Location::new_synthesized();
-        let lower = Type::nullary_function_by_val(Type::never());
-        let upper = Type::nullary_function_by_val(int_type());
-        let a = Type::variable_id(0);
-        let b = Type::variable_id(1);
-        for (lower, upper) in [(lower, a), (a, upper), (b, a)] {
-            inference.unify_sub_type(lower, span, upper, span).unwrap();
-        }
-        let snapshot = inference.snapshot();
-        inference.propagate_type_bounds().unwrap();
-        assert!(inference.checked_bounds.contains(&(lower, upper)));
-        let comparisons = inference.selection_stats.structural_comparisons;
-        inference.unify_same_type(b, span, lower, span).unwrap();
-        inference.propagate_type_bounds().unwrap();
-        assert_eq!(
-            inference.selection_stats.structural_comparisons,
-            comparisons
-        );
-        inference.rollback_to(snapshot);
-        inference.propagate_type_bounds().unwrap();
-        assert_eq!(
-            inference.selection_stats.structural_comparisons,
-            comparisons
-        );
-        inference
-            .unify_same_type(b, span, Type::nullary_function_by_val(bool_type()), span)
-            .unwrap();
-        assert!(inference.propagate_type_bounds().is_err());
-        assert_eq!(inference.checked_bounds.len(), 1);
-    }
-
-    #[test]
-    fn symbolic_effect_comparisons_are_not_cached() {
-        use crate::types::{effects::PrimitiveEffect, r#type::FnType};
-        let mut inference = UnifiedTypeInference::default();
-        let span = Location::new_synthesized();
-        let effect = EffType::single_variable(inference.fresh_effect_var());
-        let lower = Type::function_type(FnType::new(vec![], int_type(), effect.clone()));
-        let upper = Type::nullary_function_by_val(int_type());
-        inference.bounds.insert(TypeBound {
-            lower,
-            lower_span: span,
-            upper,
-            upper_span: span,
-        });
-        let snapshot = inference.snapshot();
-        inference.propagate_type_bounds().unwrap();
-        assert!(inference.checked_bounds.is_empty());
-        inference.rollback_to(snapshot);
-        inference
-            .unify_same_effect(
-                effect,
-                span,
-                EffType::single_primitive(PrimitiveEffect::Write),
-                span,
-            )
-            .unwrap();
-        assert!(inference.propagate_type_bounds().is_err());
-    }
-
-    #[test]
-    fn discharged_bounds_are_restored_by_speculative_rollback() {
-        let span = Location::new_synthesized();
-        let var = Type::variable_id(0);
-        let mut inference = UnifiedTypeInference::new_with_ty_vars(1);
-        inference
-            .unify_sub_type(var, span, int_type(), span)
-            .unwrap();
-        let snapshot = inference.snapshot();
-        inference
-            .unify_same_type(var, span, Type::never(), span)
-            .unwrap();
-        inference.propagate_type_bounds().unwrap();
-        assert_eq!(inference.bounds.relations().count(), 0);
-        inference.rollback_to(snapshot);
-        inference
-            .unify_same_type(var, span, bool_type(), span)
-            .unwrap();
-        assert!(inference.propagate_type_bounds().is_err());
-    }
-
-    #[test]
-    fn selected_bounds_hold_for_every_remaining_model_instantiation() {
-        let domain = [
-            (Type::never(), 0_u8),
-            (int_type(), 1),
-            (bool_type(), 2),
-            (Type::nullary_function_by_val(Type::never()), 4),
-            (Type::nullary_function_by_val(int_type()), 12),
-        ];
-        let terms: Vec<_> = [Type::variable_id(0), Type::variable_id(1)]
-            .into_iter()
-            .chain(domain.iter().map(|(ty, _)| *ty))
-            .collect();
-        let edges: Vec<_> = terms
-            .iter()
-            .flat_map(|a| terms.iter().map(move |b| (*a, *b)))
-            .collect();
-        let span = Location::new_synthesized();
-        for (i, first) in edges.iter().enumerate() {
-            for second in &edges[i..] {
-                let mut accepted = None;
-                for inputs in [[*first, *second], [*second, *first]] {
-                    let mut inference = UnifiedTypeInference::new_with_ty_vars(2);
-                    let result = inputs
-                        .iter()
-                        .try_for_each(|(a, b)| inference.unify_sub_type(*a, span, *b, span))
-                        .and_then(|()| inference.publish_type_bounds());
-                    if let Some(previous) = accepted {
-                        assert_eq!(previous, result.is_ok(), "{inputs:?}");
-                    }
-                    accepted = Some(result.is_ok());
-                    if result.is_err() {
-                        continue;
-                    }
-                    inference
-                        .minimize_unobservable_effects(FxHashSet::default())
-                        .unwrap();
-                    inference.finalize_effect_dependencies().unwrap();
-                    for x in 0..domain.len() {
-                        for y in 0..domain.len() {
-                            let assignment = [x, y];
-                            let mut value = |ty| {
-                                let ty = inference.substitute_in_type(ty);
-                                if let Some(var) = ty.data().as_variable() {
-                                    domain[assignment[var.name() as usize]].1
-                                } else {
-                                    domain
-                                        .iter()
-                                        .find(|(t, _)| *t == ty)
-                                        .expect("model is closed")
-                                        .1
-                                }
-                            };
-                            for (a, b) in inputs {
-                                let (a, b) = (value(a), value(b));
-                                assert_eq!(a & b, a, "{inputs:?}, assignment {assignment:?}");
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn selection_waits_for_late_equalities_and_rolls_back_bounds() {
-        let span = Location::new_synthesized();
-        let result = Type::variable_id(0);
-        let joined = Type::variable_id(1);
-        for order in [
-            [0, 1, 2],
-            [0, 2, 1],
-            [1, 0, 2],
-            [1, 2, 0],
-            [2, 0, 1],
-            [2, 1, 0],
-        ] {
-            let mut inference = UnifiedTypeInference::new_with_ty_vars(2);
-            let snapshot = inference.snapshot();
-            for step in order {
-                match step {
-                    0 => inference
-                        .unify_sub_type(Type::nullary_function_by_val(result), span, joined, span)
-                        .unwrap(),
-                    1 => inference
-                        .unify_sub_type(
-                            Type::nullary_function_by_val(int_type()),
-                            span,
-                            joined,
-                            span,
-                        )
-                        .unwrap(),
-                    _ => inference
-                        .unify_same_type(result, span, Type::never(), span)
-                        .unwrap(),
-                }
-            }
-            inference.publish_type_bounds().unwrap();
-            assert_eq!(
-                inference.substitute_in_type(joined),
-                Type::nullary_function_by_val(int_type())
-            );
-            inference.rollback_to(snapshot);
-            assert_eq!(inference.substitute_in_type(result), result);
-            assert_eq!(inference.substitute_in_type(joined), joined);
-            assert_eq!(inference.bounds.relations().count(), 0);
-            assert!(inference.bottom_sources.is_empty());
-        }
-    }
-
-    #[test]
-    fn dependent_recursive_selection_uses_equation_validation() {
-        let span = Location::new_synthesized();
-        let a = Type::variable_id(0);
-        let b = Type::variable_id(1);
-        for reversed in [false, true] {
-            let mut inference = UnifiedTypeInference::new_with_ty_vars(2);
-            let mut inputs = [(a, Type::tuple([b])), (b, Type::tuple([a]))];
-            if reversed {
-                inputs.reverse();
-            }
-            for (lower, upper) in inputs {
-                inference.unify_sub_type(lower, span, upper, span).unwrap();
-            }
-            assert!(inference.publish_type_bounds().is_err());
-            assert_eq!(inference.ty_unification_table.len(), 2);
-        }
-    }
-
-    #[test_log::test]
-    fn selection_batches_long_chains_and_dense_components() {
-        let span = Location::new_synthesized();
-        for (count, dense) in [(1024, false), (64, true)] {
-            for reverse in [false, true] {
-                let mut inference = UnifiedTypeInference::new_with_ty_vars(count);
-                let mut edges = Vec::new();
-                for i in 0..count - 1 {
-                    for j in i + 1..if dense { count } else { i + 2 } {
-                        edges.push((Type::variable_id(i), Type::variable_id(j)));
-                    }
-                }
-                if reverse {
-                    edges.reverse();
-                }
-                for (a, b) in edges {
-                    inference.unify_sub_type(a, span, b, span).unwrap();
-                }
-                inference
-                    .unify_sub_type(int_type(), span, Type::variable_id(0), span)
-                    .unwrap();
-                assert!(
-                    inference
-                        .select_lower_bounds(false, SelectionPhase::Inference)
-                        .unwrap()
-                );
-                for i in 0..count {
-                    assert_eq!(
-                        inference.substitute_in_type(Type::variable_id(i)),
-                        int_type()
-                    );
-                }
-                // The first root is forced immediately by its maximal lower bound.
-                assert_eq!(inference.selection_stats.selections, count as usize - 1);
-                assert!(inference.selection_stats.normalizations <= 2);
-                assert!(
-                    !inference
-                        .select_lower_bounds(false, SelectionPhase::Inference)
-                        .unwrap()
-                );
-                inference.log_bounds_stats();
-            }
-        }
-    }
-
-    #[test]
-    fn selection_waits_for_unconstrained_predecessors() {
-        let span = Location::new_synthesized();
-        let mut inference = UnifiedTypeInference::new_with_ty_vars(3);
-        for (a, b) in [
-            (Type::variable_id(0), Type::variable_id(1)),
-            (Type::variable_id(1), Type::variable_id(2)),
-            (
-                Type::nullary_function_by_val(Type::never()),
-                Type::variable_id(1),
-            ),
-        ] {
-            inference.unify_sub_type(a, span, b, span).unwrap();
-        }
-        assert!(
-            !inference
-                .select_lower_bounds(false, SelectionPhase::Inference)
-                .unwrap()
-        );
-        assert_eq!(
-            inference.substitute_in_type(Type::variable_id(2)),
-            Type::variable_id(2)
-        );
-    }
-
-    #[test]
-    fn selection_without_contributors_still_saturates_bounds() {
-        let span = Location::new_synthesized();
-        for phase in [
-            SelectionPhase::Inference,
-            SelectionPhase::Preparation,
-            SelectionPhase::Publication,
-        ] {
-            let mut inference = UnifiedTypeInference::new_with_ty_vars(2);
-            let a = Type::variable_id(0);
-            let b = Type::variable_id(1);
-            for (lower, upper) in [(a, b), (b, a)] {
-                inference.unify_sub_type(lower, span, upper, span).unwrap();
-            }
-            // Neither variable has a concrete contributor, but the cycle must
-            // still collapse before selection reports that it made no choice.
-            assert!(!inference.select_lower_bounds(false, phase).unwrap());
-            assert_eq!(inference.normalize_type(a), inference.normalize_type(b));
-            assert_eq!(inference.selection_stats.selections, 0);
-
-            // A structural pair also has no variable to select. Its queued
-            // check must not disappear behind the empty-contributor return.
-            inference.bounds.insert(TypeBound {
-                lower: Type::nullary_function_by_val(int_type()),
-                lower_span: span,
-                upper: Type::nullary_function_by_val(bool_type()),
-                upper_span: span,
-            });
-            assert!(inference.select_lower_bounds(false, phase).is_err());
-        }
-    }
-
-    #[test]
-    fn bottom_generalization_requires_known_read_only_access() {
-        use crate::types::r#type::{FnArgType, FnType};
-        let inner = Type::function_type(FnType::new_mut_resolved(
-            [(Type::never(), false)],
-            Type::unit(),
-            Default::default(),
-        ));
-        for access in [
-            MutType::constant(),
-            MutType::mutable(),
-            MutType::variable_id(0),
-        ] {
-            let mut inference = UnifiedTypeInference::default();
-            let outer = Type::function_type(FnType::new(
-                vec![FnArgType::new(inner, access)],
-                Type::unit(),
-                Default::default(),
-            ));
-            let generalized = inference.generalize_bottom_leaves(outer);
-            if access == MutType::constant() {
-                assert_eq!(generalized.inner_ty_vars().len(), 1);
-            } else {
-                assert_eq!(generalized, outer);
-            }
-        }
-    }
-
-    #[test]
-    fn unsuccessful_reduction_rolls_back_all_effect_meets() {
-        use crate::types::r#type::FnType;
-        let mut inference = UnifiedTypeInference::new_with_ty_vars(1);
-        let first = EffType::single_variable(inference.fresh_effect_var());
-        let second = EffType::single_variable(inference.fresh_effect_var());
-        let function = |ret, effects| Type::function_type(FnType::new(vec![], ret, effects));
-        let span = Location::new_synthesized();
-        let bounds: Vec<_> = [
-            function(int_type(), first),
-            function(int_type(), second),
-            function(Type::variable_id(0), Default::default()),
-        ]
-        .into_iter()
-        .map(|upper| TypeBound {
-            lower: Type::variable_id(0),
-            lower_span: span,
-            upper,
-            upper_span: span,
-        })
-        .collect();
-        let before = inference.effects.var_count();
-        assert!(
-            inference
-                .reduce_bounds(&bounds, BoundOperation::Meet)
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(inference.effects.var_count(), before);
-    }
-
-    #[test]
-    fn pending_trait_outputs_block_prepublication_selection() {
-        use crate::{
-            module::{LocalTraitId, ModuleId, TraitId},
-            types::type_scheme::PubTypeConstraint,
-        };
-        let mut inference = UnifiedTypeInference::new_with_ty_vars(3);
-        let input = Type::variable_id(0);
-        let output = Type::variable_id(1);
-        let nested = Type::variable_id(2);
-        let span = Location::new_synthesized();
-        inference
-            .unify_sub_type(
-                Type::nullary_function_by_val(Type::never()),
-                span,
-                output,
-                span,
-            )
-            .unwrap();
-        inference
-            .remaining_ty_constraints
-            .push(PubTypeConstraint::new_have_trait(
-                TraitId::new(ModuleId::new(0), LocalTraitId::new(0)),
-                vec![input],
-                vec![output],
-                vec![],
-                span,
-            ));
-        inference
-            .unify_sub_type(Type::nullary_function_by_val(output), span, nested, span)
-            .unwrap();
-        assert!(
-            !inference
-                .select_lower_bounds(false, SelectionPhase::Inference)
-                .unwrap()
-        );
-        assert_eq!(inference.substitute_in_type(output), output);
-        assert_eq!(inference.substitute_in_type(nested), nested);
-        // A later implementation determines the exact output, which is wider
-        // than the current lower contributor. Saturation must still accept it.
-        let actual = Type::nullary_function_by_val(int_type());
-        inference
-            .unify_same_type(output, span, actual, span)
-            .unwrap();
-        inference.propagate_type_bounds().unwrap();
-        assert_eq!(inference.substitute_in_type(output), actual);
-    }
-}
-
 impl UnifiedTypeInference {
     fn ordered_bounds(&self) -> Vec<TypeBound> {
         let mut relations: Vec<_> = self.bounds.relations().copied().collect();
@@ -1399,5 +826,578 @@ impl UnifiedTypeInference {
             }
         }
         self.validate_type_coverage()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        compiler::error::CompilationErrorImpl,
+        std::{logic::bool_type, math::int_type},
+    };
+
+    #[test]
+    fn publication_budget_exhaustion_returns_an_internal_error() {
+        for final_publication in [false, true] {
+            let mut inference = UnifiedTypeInference::default();
+            inference
+                .solve_publication_bounds_with_limit(final_publication, 1)
+                .unwrap();
+            let error = inference
+                .solve_publication_bounds_with_limit(final_publication, 0)
+                .unwrap_err();
+            assert!(matches!(
+                error.into_inner(),
+                CompilationErrorImpl::Internal { error, .. }
+                    if error == "type-bound publication failed to converge after 0 rounds"
+            ));
+
+            let mut inference = UnifiedTypeInference::new_with_ty_vars(1);
+            let span = Location::new_synthesized();
+            inference.bounds.insert(TypeBound {
+                lower: int_type(),
+                lower_span: span,
+                upper: Type::variable_id(0),
+                upper_span: span,
+            });
+            // Selecting the lower bound makes progress, but must not renew
+            // the budget: another round is needed to establish convergence.
+            let error = inference
+                .solve_publication_bounds_with_limit(final_publication, 1)
+                .unwrap_err();
+            assert!(matches!(
+                error.into_inner(),
+                CompilationErrorImpl::Internal { error, .. }
+                    if error == "type-bound publication failed to converge after 1 rounds"
+            ));
+            inference
+                .solve_publication_bounds(final_publication)
+                .unwrap();
+            assert_eq!(inference.normalize_type(Type::variable_id(0)), int_type());
+        }
+    }
+
+    #[test]
+    fn component_publication_keeps_disjoint_shapes_and_effect_rows_independent() {
+        const COMPONENTS: u32 = 32;
+        let mut inference = UnifiedTypeInference::new_with_ty_vars(2 * COMPONENTS + 5);
+        let span = Location::new_synthesized();
+        let edge = |lower, upper| TypeBound {
+            lower,
+            lower_span: span,
+            upper,
+            upper_span: span,
+        };
+        let variable = Type::variable_id;
+        let bottom = Type::nullary_function_by_val(Type::never());
+        let result = |index| {
+            if index % 2 == 0 {
+                int_type()
+            } else {
+                bool_type()
+            }
+        };
+        let mut relations = Vec::new();
+        for index in (0..COMPONENTS).rev() {
+            relations.push(edge(variable(2 * index), variable(2 * index + 1)));
+            relations.push(edge(bottom, variable(2 * index)));
+        }
+        for index in 0..COMPONENTS {
+            relations.push(edge(
+                Type::nullary_function_by_val(result(index)),
+                variable(2 * index + 1),
+            ));
+            relations.push(edge(Type::never(), variable(2 * index)));
+        }
+        let empty = 2 * COMPONENTS;
+        let recursive = empty + 2;
+        let singleton = empty + 4;
+        relations.extend([
+            edge(variable(empty), variable(empty + 1)),
+            edge(variable(recursive), variable(recursive + 1)),
+            edge(
+                Type::nullary_function_by_val(variable(recursive)),
+                variable(recursive + 1),
+            ),
+            edge(bottom, variable(singleton)),
+            edge(bottom, Type::nullary_function_by_val(int_type())),
+        ]);
+        assert!(inference.publish_component_shapes(&relations).unwrap());
+        let mut effects = FxHashSet::default();
+        for index in 0..COMPONENTS {
+            for var in [2 * index, 2 * index + 1] {
+                let ty = inference.normalize_type(variable(var));
+                let data = ty.data();
+                let function = data.as_function().unwrap();
+                assert_eq!(function.ret, result(index));
+                assert!(effects.insert(function.effects.to_single_variable().unwrap()));
+            }
+        }
+        for var in empty..=singleton {
+            assert_eq!(inference.normalize_type(variable(var)), variable(var));
+        }
+    }
+
+    #[test]
+    fn component_publication_preserves_component_and_contributor_diagnostic_order() {
+        use crate::compiler::error::CompilationErrorImpl;
+        let mut inference = UnifiedTypeInference::new_with_ty_vars(4);
+        let location =
+            |offset| Location::new(offset, offset + 1, Location::new_synthesized().source_id);
+        let edge = |lower, upper, offset| TypeBound {
+            lower,
+            lower_span: location(offset),
+            upper,
+            upper_span: location(offset),
+        };
+        let int = Type::nullary_function_by_val(int_type());
+        let boolean = Type::nullary_function_by_val(bool_type());
+        let variable = Type::variable_id;
+        // Component 2 appears first, but component 0 must still publish first.
+        // Its contributors retain input order, even with spans in reverse order.
+        let relations = [
+            edge(variable(2), variable(3), 0),
+            edge(variable(0), variable(1), 1),
+            edge(boolean, variable(2), 2),
+            edge(int, variable(1), 50),
+            edge(int, variable(3), 40),
+            edge(boolean, variable(0), 5),
+        ];
+        let error = inference.publish_component_shapes(&relations).unwrap_err();
+        let CompilationErrorImpl::TypeMismatch {
+            current_ty,
+            current_span,
+            expected_ty,
+            expected_span,
+            ..
+        } = error.into_inner()
+        else {
+            panic!("expected callable mismatch");
+        };
+        assert_eq!((current_ty, current_span), (boolean, location(5)));
+        assert_eq!((expected_ty, expected_span), (int, location(50)));
+    }
+
+    #[test]
+    fn immutable_bound_comparisons_survive_rebuilds_and_rollback() {
+        let mut inference = UnifiedTypeInference::new_with_ty_vars(2);
+        let span = Location::new_synthesized();
+        let lower = Type::nullary_function_by_val(Type::never());
+        let upper = Type::nullary_function_by_val(int_type());
+        let a = Type::variable_id(0);
+        let b = Type::variable_id(1);
+        for (lower, upper) in [(lower, a), (a, upper), (b, a)] {
+            inference.unify_sub_type(lower, span, upper, span).unwrap();
+        }
+        let snapshot = inference.snapshot();
+        inference.propagate_type_bounds().unwrap();
+        assert!(inference.checked_bounds.contains(&(lower, upper)));
+        let comparisons = inference.selection_stats.structural_comparisons;
+        inference.unify_same_type(b, span, lower, span).unwrap();
+        inference.propagate_type_bounds().unwrap();
+        assert_eq!(
+            inference.selection_stats.structural_comparisons,
+            comparisons
+        );
+        inference.rollback_to(snapshot);
+        inference.propagate_type_bounds().unwrap();
+        assert_eq!(
+            inference.selection_stats.structural_comparisons,
+            comparisons
+        );
+        inference
+            .unify_same_type(b, span, Type::nullary_function_by_val(bool_type()), span)
+            .unwrap();
+        assert!(inference.propagate_type_bounds().is_err());
+        assert_eq!(inference.checked_bounds.len(), 1);
+    }
+
+    #[test]
+    fn symbolic_effect_comparisons_are_not_cached() {
+        use crate::types::{effects::PrimitiveEffect, r#type::FnType};
+        let mut inference = UnifiedTypeInference::default();
+        let span = Location::new_synthesized();
+        let effect = EffType::single_variable(inference.fresh_effect_var());
+        let lower = Type::function_type(FnType::new(vec![], int_type(), effect.clone()));
+        let upper = Type::nullary_function_by_val(int_type());
+        inference.bounds.insert(TypeBound {
+            lower,
+            lower_span: span,
+            upper,
+            upper_span: span,
+        });
+        let snapshot = inference.snapshot();
+        inference.propagate_type_bounds().unwrap();
+        assert!(inference.checked_bounds.is_empty());
+        inference.rollback_to(snapshot);
+        inference
+            .unify_same_effect(
+                effect,
+                span,
+                EffType::single_primitive(PrimitiveEffect::Write),
+                span,
+            )
+            .unwrap();
+        assert!(inference.propagate_type_bounds().is_err());
+    }
+
+    #[test]
+    fn discharged_bounds_are_restored_by_speculative_rollback() {
+        let span = Location::new_synthesized();
+        let var = Type::variable_id(0);
+        let mut inference = UnifiedTypeInference::new_with_ty_vars(1);
+        inference
+            .unify_sub_type(var, span, int_type(), span)
+            .unwrap();
+        let snapshot = inference.snapshot();
+        inference
+            .unify_same_type(var, span, Type::never(), span)
+            .unwrap();
+        inference.propagate_type_bounds().unwrap();
+        assert_eq!(inference.bounds.relations().count(), 0);
+        inference.rollback_to(snapshot);
+        inference
+            .unify_same_type(var, span, bool_type(), span)
+            .unwrap();
+        assert!(inference.propagate_type_bounds().is_err());
+    }
+
+    #[test]
+    fn selected_bounds_hold_for_every_remaining_model_instantiation() {
+        let domain = [
+            (Type::never(), 0_u8),
+            (int_type(), 1),
+            (bool_type(), 2),
+            (Type::nullary_function_by_val(Type::never()), 4),
+            (Type::nullary_function_by_val(int_type()), 12),
+        ];
+        let terms: Vec<_> = [Type::variable_id(0), Type::variable_id(1)]
+            .into_iter()
+            .chain(domain.iter().map(|(ty, _)| *ty))
+            .collect();
+        let edges: Vec<_> = terms
+            .iter()
+            .flat_map(|a| terms.iter().map(move |b| (*a, *b)))
+            .collect();
+        let span = Location::new_synthesized();
+        for (i, first) in edges.iter().enumerate() {
+            for second in &edges[i..] {
+                let mut accepted = None;
+                for inputs in [[*first, *second], [*second, *first]] {
+                    let mut inference = UnifiedTypeInference::new_with_ty_vars(2);
+                    let result = inputs
+                        .iter()
+                        .try_for_each(|(a, b)| inference.unify_sub_type(*a, span, *b, span))
+                        .and_then(|()| inference.publish_type_bounds());
+                    if let Some(previous) = accepted {
+                        assert_eq!(previous, result.is_ok(), "{inputs:?}");
+                    }
+                    accepted = Some(result.is_ok());
+                    if result.is_err() {
+                        continue;
+                    }
+                    inference
+                        .minimize_unobservable_effects(FxHashSet::default())
+                        .unwrap();
+                    inference.finalize_effect_dependencies().unwrap();
+                    for x in 0..domain.len() {
+                        for y in 0..domain.len() {
+                            let assignment = [x, y];
+                            let mut value = |ty| {
+                                let ty = inference.substitute_in_type(ty);
+                                if let Some(var) = ty.data().as_variable() {
+                                    domain[assignment[var.name() as usize]].1
+                                } else {
+                                    domain
+                                        .iter()
+                                        .find(|(t, _)| *t == ty)
+                                        .expect("model is closed")
+                                        .1
+                                }
+                            };
+                            for (a, b) in inputs {
+                                let (a, b) = (value(a), value(b));
+                                assert_eq!(a & b, a, "{inputs:?}, assignment {assignment:?}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn selection_waits_for_late_equalities_and_rolls_back_bounds() {
+        let span = Location::new_synthesized();
+        let result = Type::variable_id(0);
+        let joined = Type::variable_id(1);
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let mut inference = UnifiedTypeInference::new_with_ty_vars(2);
+            let snapshot = inference.snapshot();
+            for step in order {
+                match step {
+                    0 => inference
+                        .unify_sub_type(Type::nullary_function_by_val(result), span, joined, span)
+                        .unwrap(),
+                    1 => inference
+                        .unify_sub_type(
+                            Type::nullary_function_by_val(int_type()),
+                            span,
+                            joined,
+                            span,
+                        )
+                        .unwrap(),
+                    _ => inference
+                        .unify_same_type(result, span, Type::never(), span)
+                        .unwrap(),
+                }
+            }
+            inference.publish_type_bounds().unwrap();
+            assert_eq!(
+                inference.substitute_in_type(joined),
+                Type::nullary_function_by_val(int_type())
+            );
+            inference.rollback_to(snapshot);
+            assert_eq!(inference.substitute_in_type(result), result);
+            assert_eq!(inference.substitute_in_type(joined), joined);
+            assert_eq!(inference.bounds.relations().count(), 0);
+            assert!(inference.bottom_sources.is_empty());
+        }
+    }
+
+    #[test]
+    fn dependent_recursive_selection_uses_equation_validation() {
+        let span = Location::new_synthesized();
+        let a = Type::variable_id(0);
+        let b = Type::variable_id(1);
+        for reversed in [false, true] {
+            let mut inference = UnifiedTypeInference::new_with_ty_vars(2);
+            let mut inputs = [(a, Type::tuple([b])), (b, Type::tuple([a]))];
+            if reversed {
+                inputs.reverse();
+            }
+            for (lower, upper) in inputs {
+                inference.unify_sub_type(lower, span, upper, span).unwrap();
+            }
+            assert!(inference.publish_type_bounds().is_err());
+            assert_eq!(inference.ty_unification_table.len(), 2);
+        }
+    }
+
+    #[test_log::test]
+    fn selection_batches_long_chains_and_dense_components() {
+        let span = Location::new_synthesized();
+        for (count, dense) in [(1024, false), (64, true)] {
+            for reverse in [false, true] {
+                let mut inference = UnifiedTypeInference::new_with_ty_vars(count);
+                let mut edges = Vec::new();
+                for i in 0..count - 1 {
+                    for j in i + 1..if dense { count } else { i + 2 } {
+                        edges.push((Type::variable_id(i), Type::variable_id(j)));
+                    }
+                }
+                if reverse {
+                    edges.reverse();
+                }
+                for (a, b) in edges {
+                    inference.unify_sub_type(a, span, b, span).unwrap();
+                }
+                inference
+                    .unify_sub_type(int_type(), span, Type::variable_id(0), span)
+                    .unwrap();
+                assert!(
+                    inference
+                        .select_lower_bounds(false, SelectionPhase::Inference)
+                        .unwrap()
+                );
+                for i in 0..count {
+                    assert_eq!(
+                        inference.substitute_in_type(Type::variable_id(i)),
+                        int_type()
+                    );
+                }
+                // The first root is forced immediately by its maximal lower bound.
+                assert_eq!(inference.selection_stats.selections, count as usize - 1);
+                assert!(inference.selection_stats.normalizations <= 2);
+                assert!(
+                    !inference
+                        .select_lower_bounds(false, SelectionPhase::Inference)
+                        .unwrap()
+                );
+                inference.log_bounds_stats();
+            }
+        }
+    }
+
+    #[test]
+    fn selection_waits_for_unconstrained_predecessors() {
+        let span = Location::new_synthesized();
+        let mut inference = UnifiedTypeInference::new_with_ty_vars(3);
+        for (a, b) in [
+            (Type::variable_id(0), Type::variable_id(1)),
+            (Type::variable_id(1), Type::variable_id(2)),
+            (
+                Type::nullary_function_by_val(Type::never()),
+                Type::variable_id(1),
+            ),
+        ] {
+            inference.unify_sub_type(a, span, b, span).unwrap();
+        }
+        assert!(
+            !inference
+                .select_lower_bounds(false, SelectionPhase::Inference)
+                .unwrap()
+        );
+        assert_eq!(
+            inference.substitute_in_type(Type::variable_id(2)),
+            Type::variable_id(2)
+        );
+    }
+
+    #[test]
+    fn selection_without_contributors_still_saturates_bounds() {
+        let span = Location::new_synthesized();
+        for phase in [
+            SelectionPhase::Inference,
+            SelectionPhase::Preparation,
+            SelectionPhase::Publication,
+        ] {
+            let mut inference = UnifiedTypeInference::new_with_ty_vars(2);
+            let a = Type::variable_id(0);
+            let b = Type::variable_id(1);
+            for (lower, upper) in [(a, b), (b, a)] {
+                inference.unify_sub_type(lower, span, upper, span).unwrap();
+            }
+            // Neither variable has a concrete contributor, but the cycle must
+            // still collapse before selection reports that it made no choice.
+            assert!(!inference.select_lower_bounds(false, phase).unwrap());
+            assert_eq!(inference.normalize_type(a), inference.normalize_type(b));
+            assert_eq!(inference.selection_stats.selections, 0);
+
+            // A structural pair also has no variable to select. Its queued
+            // check must not disappear behind the empty-contributor return.
+            inference.bounds.insert(TypeBound {
+                lower: Type::nullary_function_by_val(int_type()),
+                lower_span: span,
+                upper: Type::nullary_function_by_val(bool_type()),
+                upper_span: span,
+            });
+            assert!(inference.select_lower_bounds(false, phase).is_err());
+        }
+    }
+
+    #[test]
+    fn bottom_generalization_requires_known_read_only_access() {
+        use crate::types::r#type::{FnArgType, FnType};
+        let inner = Type::function_type(FnType::new_mut_resolved(
+            [(Type::never(), false)],
+            Type::unit(),
+            Default::default(),
+        ));
+        for access in [
+            MutType::constant(),
+            MutType::mutable(),
+            MutType::variable_id(0),
+        ] {
+            let mut inference = UnifiedTypeInference::default();
+            let outer = Type::function_type(FnType::new(
+                vec![FnArgType::new(inner, access)],
+                Type::unit(),
+                Default::default(),
+            ));
+            let generalized = inference.generalize_bottom_leaves(outer);
+            if access == MutType::constant() {
+                assert_eq!(generalized.inner_ty_vars().len(), 1);
+            } else {
+                assert_eq!(generalized, outer);
+            }
+        }
+    }
+
+    #[test]
+    fn unsuccessful_reduction_rolls_back_all_effect_meets() {
+        use crate::types::r#type::FnType;
+        let mut inference = UnifiedTypeInference::new_with_ty_vars(1);
+        let first = EffType::single_variable(inference.fresh_effect_var());
+        let second = EffType::single_variable(inference.fresh_effect_var());
+        let function = |ret, effects| Type::function_type(FnType::new(vec![], ret, effects));
+        let span = Location::new_synthesized();
+        let bounds: Vec<_> = [
+            function(int_type(), first),
+            function(int_type(), second),
+            function(Type::variable_id(0), Default::default()),
+        ]
+        .into_iter()
+        .map(|upper| TypeBound {
+            lower: Type::variable_id(0),
+            lower_span: span,
+            upper,
+            upper_span: span,
+        })
+        .collect();
+        let before = inference.effects.var_count();
+        assert!(
+            inference
+                .reduce_bounds(&bounds, BoundOperation::Meet)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(inference.effects.var_count(), before);
+    }
+
+    #[test]
+    fn pending_trait_outputs_block_prepublication_selection() {
+        use crate::{
+            module::{LocalTraitId, ModuleId, TraitId},
+            types::type_scheme::PubTypeConstraint,
+        };
+        let mut inference = UnifiedTypeInference::new_with_ty_vars(3);
+        let input = Type::variable_id(0);
+        let output = Type::variable_id(1);
+        let nested = Type::variable_id(2);
+        let span = Location::new_synthesized();
+        inference
+            .unify_sub_type(
+                Type::nullary_function_by_val(Type::never()),
+                span,
+                output,
+                span,
+            )
+            .unwrap();
+        inference
+            .remaining_ty_constraints
+            .push(PubTypeConstraint::new_have_trait(
+                TraitId::new(ModuleId::new(0), LocalTraitId::new(0)),
+                vec![input],
+                vec![output],
+                vec![],
+                span,
+            ));
+        inference
+            .unify_sub_type(Type::nullary_function_by_val(output), span, nested, span)
+            .unwrap();
+        assert!(
+            !inference
+                .select_lower_bounds(false, SelectionPhase::Inference)
+                .unwrap()
+        );
+        assert_eq!(inference.substitute_in_type(output), output);
+        assert_eq!(inference.substitute_in_type(nested), nested);
+        // A later implementation determines the exact output, which is wider
+        // than the current lower contributor. Saturation must still accept it.
+        let actual = Type::nullary_function_by_val(int_type());
+        inference
+            .unify_same_type(output, span, actual, span)
+            .unwrap();
+        inference.propagate_type_bounds().unwrap();
+        assert_eq!(inference.substitute_in_type(output), actual);
     }
 }

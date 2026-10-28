@@ -1959,7 +1959,7 @@ mod tests {
                 .clone()
         };
         let (pair_clone, text_clone) = (clone_callee("pair"), clone_callee("text"));
-        let env = session.modules().env_for(&module);
+        let env = session.modules().env_for(module);
         let span = Location::new_synthesized();
         let pair = Type::tuple(vec![string_type(), string_type()]);
         let outer = Type::tuple(vec![pair, int_type()]);

@@ -1811,7 +1811,8 @@ mod tests {
             let mut solver = EffectSolver::default();
             let var = solver.fresh_var_ty();
             let span = Location::new_synthesized();
-            let mut constraints: Vec<Box<dyn Fn(&mut EffectSolver)>> = vec![
+            type Constraint<'a> = Box<dyn Fn(&mut EffectSolver) + 'a>;
+            let mut constraints: Vec<Constraint<'_>> = vec![
                 Box::new(|solver| {
                     solver
                         .unify_same_effect(fallible().union(&var), span, fallible(), span)
