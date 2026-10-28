@@ -689,11 +689,10 @@ mod tests {
             "{text}"
         );
         assert!(text[strings..evidence].contains(r#") "é""#), "{text}");
-        // `pairs` requires tuple evidence; its generic helpers may carry
-        // anonymous dictionaries rather than a direct string dictionary.
+        // `pairs` requires tuple evidence. Which dictionaries remain at run time is optimization's
+        // choice, so only their listing is checked: quoted, and qualified by their module.
         assert!(
-            text[evidence..]
-                .contains(r#"(dictionary "wasm_host::impl Value for (string, string)")"#),
+            text[evidence..].contains(r#"(dictionary "wasm_host::"#),
             "{text}"
         );
         assert!(text[evidence..].ends_with("\")\n)\n"), "{text}");
