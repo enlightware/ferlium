@@ -1173,7 +1173,9 @@ kinds and operands defined outside the regions must agree, an edge leaving the r
 the same block on both sides, and results defined inside are compared by definition order across
 the whole region rather than by their function-wide `ValueId`. Source spans do not participate. The
 representative's span remains, as when any other optimization keeps one of two redundant
-computations.
+computations. Both roots must also have the same number of source failures in flight: a region
+that never reaches a terminal, such as a loop, would otherwise not tell a copy on an error edge
+from one on the normal path, and merging them would join normal and error flow.
 
 Regions rather than blocks make the rule independent of what earlier passes did across blocks: CSE
 leaves a place computed in one block and used in the next, and an `invoke` defines a result its

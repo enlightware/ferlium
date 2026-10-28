@@ -364,6 +364,30 @@ fn equivalent_region(
     Some(pairs.into_keys().collect())
 }
 
+/// How many source failures are in flight in each block, by block index. Normal and error flow
+/// never join, so every reachable block has exactly one depth: an `invoke`'s error edge adds one.
+fn failure_depths(function: &Function) -> Vec<usize> {
+    let mut depths = vec![None; function.blocks().count()];
+    depths[function.entry().as_index()] = Some(0);
+    let mut pending = vec![function.entry()];
+    while let Some(block) = pending.pop() {
+        let depth = depths[block.as_index()].expect("a pending block has its depth");
+        let terminator = &function.block(block).terminator().kind;
+        let error = match terminator {
+            TerminatorKind::Invoke { error, .. } => Some(*error),
+            _ => None,
+        };
+        for successor in terminator.successors() {
+            let successor_depth = depth + usize::from(Some(successor) == error);
+            if depths[successor.as_index()].is_none() {
+                depths[successor.as_index()] = Some(successor_depth);
+                pending.push(successor);
+            }
+        }
+    }
+    depths.into_iter().map(Option::unwrap_or_default).collect()
+}
+
 /// The result of simplifying tails, including whether the rewrite can have made values dead.
 pub(crate) struct SimplifiedTails {
     pub(crate) body: Function,
@@ -516,7 +540,9 @@ pub(crate) fn simplify_tails(function: &Function) -> Option<SimplifiedTails> {
         return None;
     }
 
-    let mut representatives = FxHashMap::<u64, Representatives>::default();
+    // Keyed by failure depth too: regions alike but for the failures in flight are not
+    // interchangeable, and one that never reaches a terminal, such as a loop, would not say so.
+    let mut representatives = FxHashMap::<(usize, u64), Representatives>::default();
     let mut replacement = FxHashMap::<BlockId, BlockId>::default();
     // The blocks others were redirected to, and those a merged region left unreachable.
     let mut standing_for_others = FxHashSet::default();
@@ -537,6 +563,7 @@ pub(crate) fn simplify_tails(function: &Function) -> Option<SimplifiedTails> {
         })
         .collect();
     let dominance = Dominance::of(&successors, function.entry().as_index());
+    let failures = failure_depths(function);
     // Ordinary forward branch tails occur later in canonical block order. Walking backwards means
     // their representatives are already known, so the tails two blocks share are found first and
     // compared by identity; what is left of the two regions is paired.
@@ -558,12 +585,15 @@ pub(crate) fn simplify_tails(function: &Function) -> Option<SimplifiedTails> {
         if discarded.contains(&block) {
             continue;
         }
-        let fingerprint = block_fingerprint(
-            function,
-            block,
-            &replacement,
-            &dominance,
-            &mut local_results,
+        let fingerprint = (
+            failures[block.as_index()],
+            block_fingerprint(
+                function,
+                block,
+                &replacement,
+                &dominance,
+                &mut local_results,
+            ),
         );
         let representative = representatives.get(&fingerprint).and_then(|candidates| {
             candidates.find(|candidate| {
@@ -701,7 +731,12 @@ mod tests {
             terminator::{Terminator, TerminatorKind},
             verify::verify_function,
         },
+        module::{FunctionId, LocalFunctionId, ModuleId},
         std::{logic::bool_type, math::int_type},
+        types::{
+            effects::{PrimitiveEffect, effect},
+            r#type::{CallImplType, FnType},
+        },
     };
 
     fn optimized_body(src: &str) -> String {
@@ -846,6 +881,43 @@ mod tests {
             assert!(messages.contains(&ustr("first")));
             assert_eq!(messages.contains(&ustr("second")), !same);
         }
+    }
+
+    /// A loop never reaches a terminal, which would otherwise tell normal flow from a failure in
+    /// flight. Merging the copy on an error edge with the one on the normal edge would join them.
+    #[test]
+    fn equal_regions_merge_only_with_the_same_failures_in_flight() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new("failure_tails".into(), Default::default());
+        let entry = builder.add_block();
+        let loops = [builder.add_block(), builder.add_block()];
+        let result = builder
+            .append_operation(entry, Operation::alloca(span, int_type()))
+            .unwrap();
+        let call = Operation::call(
+            span,
+            Value::Function(FunctionId::new(
+                ModuleId::default(),
+                LocalFunctionId::default(),
+            )),
+            [result],
+            CallImplType::value(FnType::new_by_val(
+                [],
+                int_type(),
+                effect(PrimitiveEffect::Fallible),
+            )),
+        );
+        builder.set_terminator(entry, Terminator::invoke(span, call, loops[0], loops[1]));
+        for block in loops {
+            builder.append_operation(block, Operation::check_fuel(span));
+            builder.set_terminator(block, Terminator::goto(span, block));
+        }
+        let body = builder.finish(env);
+        let body = simplify_tails(&body).map_or(body, |result| result.body);
+        verify_function(&body, env);
+        assert_eq!(body.blocks().count(), 3);
     }
 
     #[test]
