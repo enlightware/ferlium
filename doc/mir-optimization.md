@@ -405,6 +405,12 @@ type. See [generic-instantiation.md](generic-instantiation.md).
 
 ### When a call site is specialized
 
+A call site is any dispatch to a function: a `call`, or a `clone` or `drop` naming its `Value`
+method with the evidence that method captured. They remain distinct operations because ownership
+passes reason about clones and drops, but deciding about the callee is the same for all three.
+A `clone` or `drop` is not inlined, and records no instantiation, so it is specialized only for a
+method without quantifiers, such as a concrete type's method abstract over its captured evidence.
+
 All of: the callee is statically known, has a body and is not itself a specialization; the recorded
 instantiation is fully concrete (or empty for a callee with no quantifiers); every evidence operand
 is recursively static; the linear admission preflight finds a payoff; and the budget allows another
@@ -508,9 +514,9 @@ evidence. A final whole-module pass removes a dictionary prefix only when none o
 and removes the operands that pass it, running once after the
 specialization worklist has drained so that every optimization decision above it is taken against
 the signatures the optimizer has always seen. One module suffices: `specialize_call_sites` only ever
-writes a specialization into a `call` callee operand, self-calls are redirected within the same
-table, and a dependency's bodies name only its own specializations, which its finished artifact
-keeps with their final signatures.
+writes a specialization into a call site's callee operand, self-calls are redirected within the
+same table, and a dependency's bodies name only its own specializations, which its finished
+artifact keeps with their final signatures.
 
 ## Owned argument forwarding
 

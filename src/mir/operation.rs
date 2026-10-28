@@ -28,7 +28,7 @@
 //! [`Terminator`](crate::mir::terminator::Terminator). Operations never carry intra-function
 //! successors; all normal and source-failure control flow is explicit in the terminator.
 
-use std::fmt;
+use std::{fmt, ops::Range};
 
 use itertools::Itertools;
 use ustr::Ustr;
@@ -442,6 +442,28 @@ impl Operation {
             OperationKind::Project { ty, .. } => Some((&self.operands[0], ty, None)),
             _ => None,
         }
+    }
+
+    /// The index of the callee of a dispatch: a `call`, or a `clone` or `drop`, which names its
+    /// `Value` method exactly as a call names its callee.
+    pub(crate) fn dispatch_callee_index(&self) -> Option<usize> {
+        match self.kind {
+            OperationKind::Call { .. } => Some(0),
+            OperationKind::Drop { .. } | OperationKind::DropInitialized { .. } => Some(1),
+            OperationKind::Clone { .. } => Some(2),
+            _ => None,
+        }
+    }
+
+    /// The hidden evidence a dispatch passes its callee, right after the callee: up to the captures
+    /// of a `call`, and the remaining operands of a `clone` or `drop`.
+    pub(crate) fn dispatch_evidence(&self) -> Option<Range<usize>> {
+        let callee = self.dispatch_callee_index()?;
+        let end = match self.kind {
+            OperationKind::Call { .. } => self.call_evidence_end(),
+            _ => self.operands.len(),
+        };
+        Some(callee + 1..end)
     }
 
     /// The index of the caller-provided result place of a `call`, if it has one.

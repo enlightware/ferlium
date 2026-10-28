@@ -16,8 +16,8 @@
 //! module is enough because the set of things that can name a specialization is closed within it:
 //!
 //! - [`specialize_call_sites`](super::monomorphize::specialize_call_sites) and the final owned-ABI
-//!   variant pass write generated bodies only into `OperationKind::Call` callee operands, so one
-//!   never reaches a `build_closure`, `clone` or `drop` function operand;
+//!   variant pass write generated bodies only into the callee operands of dispatches, a `call` or
+//!   a `clone` or `drop` naming its `Value` method, so one never reaches a `build_closure`;
 //! - [`redirect_recursion`](super::monomorphize) points a specialization's self-calls at itself,
 //!   inside the same module's table;
 //! - every cross-module lookup in the driver reads the *raw* stage, which is exactly the HIR
@@ -33,8 +33,7 @@ use std::mem;
 use crate::{
     compiler::Specialization,
     mir::{
-        self, Function, OperationKind, ParameterId, ParameterKind, edit::FunctionEdit,
-        terminator::TerminatorKind,
+        self, Function, ParameterId, ParameterKind, edit::FunctionEdit, terminator::TerminatorKind,
     },
     module::{ModuleId, id::Id},
 };
@@ -150,28 +149,29 @@ fn rewrite(
                 _ => None,
             });
         for operation in operations {
-            let OperationKind::Call { .. } = &operation.kind else {
+            let (Some(callee), Some(evidence)) = (
+                operation.dispatch_callee_index(),
+                operation.dispatch_evidence(),
+            ) else {
                 continue;
             };
-            let Some(count) = dropped_at(&operation.operands[0]) else {
+            let Some(count) = dropped_at(&operation.operands[callee]) else {
                 continue;
             };
-            // The operand layout the verifier and the interpreter both read: the callee, the hidden
-            // evidence, the visible arguments named by the call-site type, and the return
-            // out-pointer. Asserted rather than assumed, because a mismatch would silently shift
-            // every argument the callee binds positionally.
-            let visible_start = operation.call_evidence_end();
+            // The operand layout the verifier and the interpreter both read: the hidden evidence
+            // follows the callee. Asserted rather than assumed, because a mismatch would silently
+            // shift every argument the callee binds positionally.
             assert_eq!(
-                visible_start - 1,
+                evidence.len(),
                 count,
-                "MIR function `{}`: a call to a specialization passes {} hidden operands for {} \
+                "MIR function `{}`: a dispatch to a specialization passes {} hidden operands for {} \
                  dictionary parameters",
                 name,
-                visible_start - 1,
+                evidence.len(),
                 count
             );
             assert!(
-                operation.operands[1..visible_start].iter().all(|operand| {
+                operation.operands[evidence.clone()].iter().all(|operand| {
                     matches!(
                         operand,
                         mir::Value::Dictionary(_)
@@ -179,35 +179,37 @@ fn rewrite(
                             | mir::Value::Evidence(_)
                     )
                 }),
-                "MIR function `{}`: a call to a specialization passes hidden evidence that is not \
-                 recursively static",
+                "MIR function `{}`: a dispatch to a specialization passes hidden evidence that is \
+                 not recursively static",
                 name
             );
             let mut operands = mem::take(&mut operation.operands).into_vec();
-            operands.drain(1..visible_start);
+            operands.drain(evidence);
             operation.operands = operands.into_boxed_slice();
         }
     }
     edit.finish_unverified()
 }
 
-/// Whether any call in `body` names a callee whose signature this pass narrows.
+/// Whether any dispatch in `body` names a callee whose signature this pass narrows.
 fn calls_a_narrowed_callee(
     body: &Function,
     dropped_at: &impl Fn(&mir::Value) -> Option<usize>,
 ) -> bool {
     body.blocks().any(|block_id| {
         let block = body.block(block_id);
-        let operations = block
+        let mut operations = block
             .operations()
             .iter()
             .chain(match &block.terminator().kind {
                 TerminatorKind::Invoke { operation, .. } => Some(operation),
                 _ => None,
             });
-        operations
-            .filter(|operation| matches!(operation.kind, OperationKind::Call { .. }))
-            .any(|operation| dropped_at(&operation.operands[0]).is_some())
+        operations.any(|operation| {
+            operation
+                .dispatch_callee_index()
+                .is_some_and(|callee| dropped_at(&operation.operands[callee]).is_some())
+        })
     })
 }
 
@@ -298,22 +300,22 @@ mod tests {
                         _ => None,
                     });
                 for operation in operations {
-                    let OperationKind::Call { ty, .. } = &operation.kind else {
+                    let (Some(callee), Some(evidence)) = (
+                        operation.dispatch_callee_index(),
+                        operation.dispatch_evidence(),
+                    ) else {
                         continue;
                     };
                     let mir::Value::Function(FunctionId { module, function }) =
-                        &operation.operands[0]
+                        &operation.operands[callee]
                     else {
                         continue;
                     };
                     if *module != std_id || function.as_index() < first_index {
                         continue;
                     }
-                    assert_eq!(
-                        operation.operands.len(),
-                        ty.fn_ty.args.len()
-                            + 1
-                            + usize::from(operation.kind.call_has_result_place()),
+                    assert!(
+                        evidence.is_empty(),
                         "MIR function `{}` passes hidden evidence to a specialization",
                         body.name
                     );

@@ -2057,7 +2057,10 @@ pub(crate) fn specialize_call_sites(
         if !captures.is_empty() {
             reads.push((site, captures));
         }
-        operation.operands[0] = mir::Value::Function(target);
+        let callee = operation
+            .dispatch_callee_index()
+            .expect("a specialization site is a dispatch");
+        operation.operands[callee] = mir::Value::Function(target);
         // The specialization is not generic, so it has no quantifiers for an instantiation to be
         // positional against. Leaving the old one would claim otherwise. The captures a call to a
         // lambda passes stay part of its operand layout.
@@ -2229,15 +2232,24 @@ fn visible_operand<'a>(
     operation.operands.get(start + position)
 }
 
+/// The instantiation a dispatch records for its callee: only a call records one.
+fn recorded_instantiation(operation: &Operation) -> Option<&Instantiation> {
+    match &operation.kind {
+        OperationKind::Call {
+            metadata: Some(metadata),
+            ..
+        } => metadata.instantiation.as_ref(),
+        _ => None,
+    }
+}
+
 fn candidate<'a>(
     operation: &'a Operation,
     session: &CompilerSession,
     specializations: &Specializations,
 ) -> Option<Candidate<'a>> {
-    let OperationKind::Call { metadata, .. } = &operation.kind else {
-        return None;
-    };
-    let mir::Value::Function(callee) = operation.operands[0] else {
+    let mir::Value::Function(callee) = operation.operands[operation.dispatch_callee_index()?]
+    else {
         return None;
     };
     if specializations.is_specialization(callee) {
@@ -2255,10 +2267,7 @@ fn candidate<'a>(
         .ty_scheme;
     // Hidden-evidence variables need the complete recorded instantiation; visible types alone
     // cannot prove them. A non-generic callee has the equivalent empty instantiation.
-    let instantiation = match metadata
-        .as_deref()
-        .and_then(|metadata| metadata.instantiation.as_ref())
-    {
+    let instantiation = match recorded_instantiation(operation) {
         Some(instantiation) => Cow::Borrowed(instantiation),
         None if scheme.ty_quantifiers.is_empty() && scheme.eff_quantifiers.is_empty() => {
             Cow::Owned(Instantiation {
@@ -2271,8 +2280,7 @@ fn candidate<'a>(
     if instantiation.ty_args.iter().any(Type::is_variable) {
         return None;
     }
-    let dictionaries =
-        &operation.operands[1..visible_start(operation)? - operation.call_captures()];
+    let dictionaries = &operation.operands[operation.dispatch_evidence()?];
     if dictionaries
         .iter()
         .any(|operand| static_evidence_operand(operand).is_none())
@@ -2426,21 +2434,23 @@ fn specialization_for(
     session: &CompilerSession,
     specializations: &mut Specializations,
 ) -> Option<LocalFunctionId> {
-    let OperationKind::Call { ty, metadata, .. } = &operation.kind else {
-        return None;
+    // A `clone` or `drop` dispatches to its `Value` method like a call, but is not inlined and
+    // passes no callback.
+    let call_ty = match &operation.kind {
+        OperationKind::Call { ty, .. } => Some(ty),
+        _ => None,
     };
-    let recorded_instantiation = metadata
-        .as_deref()
-        .and_then(|metadata| metadata.instantiation.as_ref());
+    let recorded_instantiation = recorded_instantiation(operation);
     // A call to a type-monomorphic impl thunk records no instantiation, yet it passes the
     // dictionaries the thunk captured, and binding them pays off like for a generic callee.
-    let passes_evidence = visible_start(operation).is_some_and(|start| start > 1);
+    let passes_evidence = operation
+        .dispatch_evidence()
+        .is_some_and(|evidence| !evidence.is_empty());
+    let passes_functions = facts.is_some()
+        && call_ty.is_some_and(|ty| ty.fn_ty.args.iter().any(|arg| arg.ty.is_function()));
     // Ordinary calls with neither type arguments, evidence nor callback facts need no metadata
     // lookup.
-    if recorded_instantiation.is_none()
-        && !passes_evidence
-        && (facts.is_none() || !ty.fn_ty.args.iter().any(|arg| arg.ty.is_function()))
-    {
+    if recorded_instantiation.is_none() && !passes_evidence && !passes_functions {
         return None;
     }
     let Candidate {
@@ -2453,13 +2463,7 @@ fn specialization_for(
         .get_function_by_id(callee.function)?
         .definition
         .ty_scheme;
-    let invoked = if facts.is_some()
-        && ty
-            .fn_ty
-            .args
-            .iter()
-            .any(|argument| argument.ty.is_function())
-    {
+    let invoked = if passes_functions {
         specializations.invoked_callbacks(callee, session)
     } else {
         None
@@ -2534,6 +2538,7 @@ fn specialization_for(
         // A concrete thunk that inlining admits gets its evidence bound by inlining; copying it
         // first would only duplicate that work.
         if !callback
+            && call_ty.is_some()
             && recorded_instantiation.is_none()
             && !cost::hot_cost_exceeds(body, budget::INLINE_CALLEE_COST)
         {

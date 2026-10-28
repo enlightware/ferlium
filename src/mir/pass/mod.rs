@@ -84,7 +84,7 @@ pub(crate) use stage::{OptimizationStage, SemanticCallees};
 use crate::{
     FxHashSet,
     compiler::CompilerSession,
-    mir::{self, Function, OperationKind, edit::FunctionEdit, terminator::TerminatorKind},
+    mir::{self, Function, edit::FunctionEdit, terminator::TerminatorKind},
     module::{FunctionId, LocalFunctionId, ModuleEnv, ModuleId},
 };
 
@@ -233,8 +233,8 @@ fn clean_dead_representation_chains(
     }
 }
 
-/// The specializations `function` calls that wait to be optimized before a caller reads them, in
-/// the order of their first call.
+/// The specializations `function` dispatches to that wait to be optimized before a caller reads
+/// them, in the order of their first dispatch.
 fn ready_callees(function: &Function, specializations: &Specializations) -> Vec<LocalFunctionId> {
     let mut ready = Vec::new();
     for block in function.blocks() {
@@ -247,8 +247,8 @@ fn ready_callees(function: &Function, specializations: &Specializations) -> Vec<
                 _ => None,
             })
         {
-            if matches!(operation.kind, OperationKind::Call { .. })
-                && let Some(mir::Value::Function(callee)) = operation.operands.first()
+            if let Some(index) = operation.dispatch_callee_index()
+                && let mir::Value::Function(callee) = &operation.operands[index]
                 && specializations.is_ready(*callee)
                 && !ready.contains(&callee.function)
             {

@@ -710,6 +710,39 @@ fn local_capturing_closures_are_called_directly() {
     );
 }
 
+/// A `clone` names its `Value` method as a call names its callee, with the static evidence the
+/// method's dictionary captured, so it is specialized on that evidence like a call: the copy reads
+/// no dictionary entry, and so neither does the drop it makes.
+#[test]
+fn lifecycle_dispatches_are_specialized_on_static_evidence() {
+    let source = "fn pair(v: [int]) -> ([int], [int]) { (v, v) }";
+    let optimized = emit("lifecycle_dispatch", source, MirOptimization::Enabled);
+    let pair = rendered_function(&optimized, "pair");
+    assert!(
+        pair.lines()
+            .filter(|line| line.trim_start().starts_with("clone "))
+            .all(|line| line.contains("#spec:") && !line.contains(" with (")),
+        "the clones must name an evidence-free specialization:\n{pair}"
+    );
+    let start = optimized
+        .lines()
+        .position(|line| {
+            line.starts_with("fn std::Value<[std::int]>::clone#impl") && line.contains("#spec:")
+        })
+        .expect("the clone method must be specialized");
+    let specialized = optimized
+        .lines()
+        .skip(start)
+        .take_while(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !specialized.contains("dict_entry")
+            && !specialized.lines().any(|line| line.contains("call %")),
+        "the specialized method must dispatch nothing through its dictionaries:\n{specialized}"
+    );
+}
+
 /// Traversing a hash collection steps through its buckets with the generic `Value` impl of the
 /// optional entry, closed over the key and value dictionaries at run time. Once those are
 /// constants, the closed dictionary is static evidence: dropping and cloning a bucket are direct

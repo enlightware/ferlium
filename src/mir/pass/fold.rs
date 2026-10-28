@@ -754,7 +754,7 @@ fn plan_folds_and_devirtualizations(
 }
 
 fn dispatch_callee(operation: &Operation) -> Option<&mir::Value> {
-    operation.operands.get(callee_operand_index(operation)?)
+    operation.operands.get(operation.dispatch_callee_index()?)
 }
 
 fn is_indirect_callee(callee: &mir::Value) -> bool {
@@ -1610,19 +1610,6 @@ fn partial_call_outcome(
     }
 }
 
-/// Where an operation carries its callee for direct and lifecycle dispatch.
-///
-/// Drop and clone operations name a `Value` method exactly as a call names a function: a constant
-/// reference or the place of a function value read by reference.
-fn callee_operand_index(operation: &Operation) -> Option<usize> {
-    match operation.kind {
-        OperationKind::Call { .. } => Some(0),
-        OperationKind::Drop { .. } | OperationKind::DropInitialized { .. } => Some(1),
-        OperationKind::Clone { .. } => Some(2),
-        _ => None,
-    }
-}
-
 /// The function an indirect dispatch's callee place is known to hold, when naming it directly is
 /// safe, paired with the operand index to write it into.
 ///
@@ -1639,7 +1626,7 @@ fn resolved_callee(
     state: &State,
     analysis: &Analysis,
 ) -> Option<ResolvedCallee> {
-    let operand = callee_operand_index(operation)?;
+    let operand = operation.dispatch_callee_index()?;
     let callee = operation.operands.get(operand)?;
     if matches!(callee, mir::Value::Function(_)) {
         return None;
