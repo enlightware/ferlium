@@ -78,7 +78,7 @@ use crate::{
     std::value::{dynamic_product_member_layouts, type_has_static_layout},
     types::{
         effects::{EffType, Effect, PrimitiveEffect},
-        r#type::{CallImplType, FnType, Type},
+        r#type::{CallImplType, FnType, Type, TypeKind, TypeVar},
         type_like::TypeLike,
         type_mapper::{BitmapInstantiationMapper, TypeMapper},
         type_properties::concrete_type_is_trivial_copy,
@@ -2243,6 +2243,79 @@ fn recorded_instantiation(operation: &Operation) -> Option<&Instantiation> {
     }
 }
 
+/// The instantiation of the generic `Value` method a `clone` or `drop` names, determined by the
+/// operation's type rather than recorded as a call's is: the method takes the value it clones or
+/// drops first, and its only quantifiers are its impl's, which all occur in that value's type.
+/// `None` when the type is not concrete or does not determine every quantifier.
+fn lifecycle_instantiation(
+    operation: &Operation,
+    scheme: &TypeScheme<FnType>,
+) -> Option<Instantiation> {
+    let (OperationKind::Clone { ty }
+    | OperationKind::Drop { ty }
+    | OperationKind::DropInitialized { ty }) = operation.kind
+    else {
+        return None;
+    };
+    if !ty.is_constant() || !scheme.eff_quantifiers.is_empty() {
+        return None;
+    }
+    let mut bindings = FxHashMap::default();
+    if !bind_type_variables(scheme.ty.args.first()?.ty, ty, &mut bindings) {
+        return None;
+    }
+    Some(Instantiation {
+        ty_args: scheme
+            .ty_quantifiers
+            .iter()
+            .map(|quantifier| bindings.get(quantifier).copied())
+            .collect::<Option<_>>()?,
+        eff_args: Vec::new(),
+    })
+}
+
+/// Binds the type variables of `pattern` so that it becomes the concrete `ty`, if it can.
+/// Conservative: a variable under a function or subscript type is not matched.
+fn bind_type_variables(pattern: Type, ty: Type, bindings: &mut FxHashMap<TypeVar, Type>) -> bool {
+    if pattern == ty {
+        return true;
+    }
+    let all = |patterns: &[Type], tys: &[Type], bindings: &mut FxHashMap<TypeVar, Type>| {
+        patterns.len() == tys.len()
+            && patterns
+                .iter()
+                .zip(tys)
+                .all(|(pattern, ty)| bind_type_variables(*pattern, *ty, bindings))
+    };
+    let fields = |patterns: &[(Ustr, Type)],
+                  tys: &[(Ustr, Type)],
+                  bindings: &mut FxHashMap<TypeVar, Type>| {
+        patterns.len() == tys.len()
+            && patterns
+                .iter()
+                .zip(tys)
+                .all(|((name, pattern), (other, ty))| {
+                    name == other && bind_type_variables(*pattern, *ty, bindings)
+                })
+    };
+    match (&*pattern.data(), &*ty.data()) {
+        (TypeKind::Variable(variable), _) => *bindings.entry(*variable).or_insert(ty) == ty,
+        (TypeKind::Native(pattern), TypeKind::Native(native)) => {
+            pattern.bare_ty == native.bare_ty
+                && all(&pattern.arguments, &native.arguments, bindings)
+        }
+        (TypeKind::Tuple(patterns), TypeKind::Tuple(tys)) => all(patterns, tys, bindings),
+        (TypeKind::Record(patterns), TypeKind::Record(tys))
+        | (TypeKind::Variant(patterns), TypeKind::Variant(tys)) => fields(patterns, tys, bindings),
+        (TypeKind::Named(pattern), TypeKind::Named(named)) => {
+            pattern.def == named.def
+                && pattern.effect_params == named.effect_params
+                && all(&pattern.params, &named.params, bindings)
+        }
+        _ => false,
+    }
+}
+
 fn candidate<'a>(
     operation: &'a Operation,
     session: &CompilerSession,
@@ -2275,7 +2348,7 @@ fn candidate<'a>(
                 eff_args: Vec::new(),
             })
         }
-        None => return None,
+        None => Cow::Owned(lifecycle_instantiation(operation, scheme)?),
     };
     if instantiation.ty_args.iter().any(Type::is_variable) {
         return None;

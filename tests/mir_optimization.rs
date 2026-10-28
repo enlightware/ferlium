@@ -743,6 +743,47 @@ fn lifecycle_dispatches_are_specialized_on_static_evidence() {
     );
 }
 
+/// A generic type's `Value` method is generic over the impl's quantifiers, which a `clone` does not
+/// record but its type determines: the method is specialized at the concrete type, and the element
+/// copies it makes go direct with it.
+#[test]
+fn generic_lifecycle_methods_are_specialized_at_the_dispatched_type() {
+    let source = "struct Wrap<T> { items: [T] }
+        fn keep<T>(w: Wrap<T>) -> (Wrap<T>, Wrap<T>) { (w, w) }
+        fn view(w: Wrap<float>) -> (Wrap<float>, Wrap<float>) { keep(w) }";
+    let optimized = emit("generic_lifecycle", source, MirOptimization::Enabled);
+    let view = rendered_function(&optimized, "view");
+    let clones: Vec<_> = view
+        .lines()
+        .filter(|line| line.trim_start().starts_with("clone "))
+        .collect();
+    assert!(
+        !clones.is_empty()
+            && clones
+                .iter()
+                .all(|line| line.contains("-generic#spec:[float]") && !line.contains(" with (")),
+        "the clones must name the method specialized at `float`:\n{view}"
+    );
+    let start = optimized
+        .lines()
+        .position(|line| {
+            line.starts_with("fn std::Value<generic_lifecycle::Wrap<A>>::clone#impl:")
+                && line.contains("-generic#spec:[float](")
+        })
+        .expect("the generic clone method must be specialized at `float`");
+    let specialized = optimized
+        .lines()
+        .skip(start)
+        .take_while(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !specialized.contains("dict_entry")
+            && !specialized.lines().any(|line| line.contains("call %")),
+        "the specialized method must dispatch nothing through its dictionaries:\n{specialized}"
+    );
+}
+
 /// Traversing a hash collection steps through its buckets with the generic `Value` impl of the
 /// optional entry, closed over the key and value dictionaries at run time. Once those are
 /// constants, the closed dictionary is static evidence: dropping and cloning a bucket are direct

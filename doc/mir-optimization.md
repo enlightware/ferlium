@@ -397,7 +397,7 @@ is latent until a pass acts on it, and then unsound: folding evaluates a call at
 instantiation and has nowhere type-correct to put the result. `specialize` takes both, so the
 incoherent intermediate is never a `Function` and nothing can verify one.
 
-**A call site's instantiation is recorded, not recovered.** The compiler knows the mapping exactly
+**A call's instantiation is recorded, not recovered.** The compiler knows the mapping exactly
 once, when `TypeScheme::instantiate_with_fresh_vars` allocates a fresh variable per quantifier;
 `FnInstData` keeps it and `emit_mir` carries it into the `Call` operation. The verifier checks that
 substituting the callee's declared signature by the recorded arguments reproduces the call's own
@@ -408,13 +408,14 @@ type. See [generic-instantiation.md](generic-instantiation.md).
 A call site is any dispatch to a function: a `call`, or a `clone` or `drop` naming its `Value`
 method with the evidence that method captured. They remain distinct operations because ownership
 passes reason about clones and drops, but deciding about the callee is the same for all three.
-A `clone` or `drop` is not inlined, and records no instantiation, so it is specialized only for a
-method without quantifiers, such as a concrete type's method abstract over its captured evidence.
+A `clone` or `drop` is not inlined. It needs no recorded instantiation: its method takes the value
+first, and the method's only quantifiers are its impl's, which all occur in that value's type, so
+matching the method's signature against the operation's type recovers them exactly.
 
-All of: the callee is statically known, has a body and is not itself a specialization; the recorded
-instantiation is fully concrete (or empty for a callee with no quantifiers); every evidence operand
-is recursively static; the linear admission preflight finds a payoff; and the budget allows another
-specialization unless one is already cached.
+All of: the callee is statically known, has a body and is not itself a specialization; the
+instantiation, recorded or recovered, is fully concrete (or empty for a callee with no
+quantifiers); every evidence operand is recursively static; the linear admission preflight finds a
+payoff; and the budget allows another specialization unless one is already cached.
 
 The admission preflight recognizes local devirtualization, trivial-copy clone/drop simplification,
 static-layout witness removal, binding a repeatedly invoked callback to a known function, making a
