@@ -1859,20 +1859,32 @@ fn wasm_codegen_generated_helpers_and_adapters_are_shared() {
         )
         .unwrap()
         .module_id;
-    let program = session.prepare_physical_program(module).unwrap();
-    let roots = (0..program.module(module).unwrap().entry_count())
-        .map(LocalFunctionId::from_index)
-        .filter(|&id| program.module(module).unwrap().get(id).is_some())
-        .map(|id| FunctionId::new(module, id))
-        .collect::<Vec<_>>();
-    let mut imports = Imports::new().unwrap();
-    let mapped = emit::emit_with_source_map(&program, &roots, &[], &mut imports, &session).unwrap();
-    let mut imports = Imports::new().unwrap();
-    let plain = emit::emit(&program, &roots, &[], &mut imports, &session).unwrap();
-    assert_eq!(
-        mapped.bytes, plain.bytes,
-        "debug locations must not affect sharing"
+    let entry = FunctionId::new(
+        module,
+        session
+            .expect_fresh_module(module)
+            .get_local_function_id(ustr("quicksort_float_a"))
+            .unwrap(),
     );
+    // Sharing is the emitter's: the raw pipeline retains the dictionary dispatch whose adapters it
+    // shares, which semantic optimization would otherwise remove.
+    let mapped = with_raw_program(&session, entry, |program| {
+        let roots = (0..program.module(module).unwrap().entry_count())
+            .map(LocalFunctionId::from_index)
+            .filter(|&id| program.module(module).unwrap().get(id).is_some())
+            .map(|id| FunctionId::new(module, id))
+            .collect::<Vec<_>>();
+        let mut imports = Imports::new().unwrap();
+        let mapped =
+            emit::emit_with_source_map(program, &roots, &[], &mut imports, &session).unwrap();
+        let mut imports = Imports::new().unwrap();
+        let plain = emit::emit(program, &roots, &[], &mut imports, &session).unwrap();
+        assert_eq!(
+            mapped.bytes, plain.bytes,
+            "debug locations must not affect sharing"
+        );
+        mapped
+    });
     // Compiling the result checks call signatures and all remapped table/function indices.
     WebAssembly::Module::new(&Uint8Array::from(mapped.bytes.as_slice())).unwrap();
     let mut imported = 0;
