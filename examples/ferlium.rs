@@ -144,20 +144,18 @@ fn pretty_print_checking_error(error: &CompilationError, src: &str, source_table
             source_span,
             reason_span,
             what,
-            ..
+            ctx,
         } => {
             let source = &src[source_span.as_range()];
             let reason = &src[reason_span.as_range()];
+            let subject = ctx.subject(&source.fg(Color::Blue).to_string());
             let span = span_union_range(*source_span, *reason_span);
             let source_span = Span(*source_span);
             let reason_span = Span(*reason_span);
             use MutabilityMustBeWhat::*;
             match what {
                 Mutable => Report::build(ReportKind::Error, span)
-                    .with_message(format!(
-                        "Expression {} must be mutable.",
-                        source.fg(Color::Blue),
-                    ))
+                    .with_message(format!("{subject} must be mutable."))
                     .with_label(
                         Label::new(source_span)
                             .with_message("This expression is just a value.")
@@ -173,10 +171,7 @@ fn pretty_print_checking_error(error: &CompilationError, src: &str, source_table
                     .eprint(&mut cache)
                     .unwrap(),
                 Constant => Report::build(ReportKind::Error, span)
-                    .with_message(format!(
-                        "Expression {} must be constant.",
-                        source.fg(Color::Blue),
-                    ))
+                    .with_message(format!("{subject} must be constant."))
                     .with_label(
                         Label::new(source_span)
                             .with_message("This expression is mutable.")
@@ -193,8 +188,7 @@ fn pretty_print_checking_error(error: &CompilationError, src: &str, source_table
                     .unwrap(),
                 Equal => Report::build(ReportKind::Error, span)
                     .with_message(format!(
-                        "Expressions {} and {} must have the same mutability.",
-                        source.fg(Color::Blue),
+                        "{subject} must have the same mutability as {}.",
                         reason.fg(Color::Green),
                     ))
                     .with_label(

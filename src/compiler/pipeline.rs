@@ -211,7 +211,7 @@ pub(crate) fn compile_with_source_id(
             // Resolve types against the partially emitted module, which contains every name
             // registered before the failure.
             let env = ModuleEnv::new(&failure.module, modules);
-            let error = CompilationError::resolve_types(failure.error, &env, source_table);
+            let error = CompilationError::resolve_types(failure.error, &env);
             let path_for_new = module_ref.into_path();
             process_compilation_failed(
                 modules,
@@ -240,7 +240,7 @@ pub(crate) fn compile_with_source_id(
             Err(error) => {
                 // Resolve types in the error, to provide better error messages.
                 let env = ModuleEnv::new(&module, modules);
-                let error = CompilationError::resolve_types(error, &env, source_table);
+                let error = CompilationError::resolve_types(error, &env);
                 let path_for_new = module_ref.into_path();
                 process_compilation_failed(
                     modules,
@@ -568,7 +568,7 @@ pub(crate) fn add_code_to_module_with_capabilities(
     )
     .map_err(|failure| {
         let env = ModuleEnv::new(&failure.module, other_modules);
-        CompilationError::resolve_types(failure.error, &env, source_table)
+        CompilationError::resolve_types(failure.error, &env)
     })?;
 
     Ok(module)

@@ -10,8 +10,8 @@ use crate::{
     CompilationError, DiagnosticSeverity, Location, SourceId,
     compiler::error::{
         CompilationErrorImpl, ImportKind, InfiniteTypeKind, InvalidRecordFieldContext,
-        MutabilityMustBeWhat, WhatIsNotAProductType, WhichProductTypeIsNot,
-        format_output_effect_mismatches,
+        MutabilityMustBeContext, MutabilityMustBeWhat, WhatIsNotAProductType,
+        WhichProductTypeIsNot, format_output_effect_mismatches,
     },
     parser::location::SourceTable,
     types::effects::EffectRow,
@@ -261,20 +261,24 @@ pub(super) fn compilation_error_to_data(
             source_span,
             reason_span,
             what,
-            ..
+            ctx,
         } => vec![error_data_from_location(source_span, {
+            let subject = match ctx {
+                MutabilityMustBeContext::Value => "Expression".to_string(),
+                MutabilityMustBeContext::FnTypeArg(index) => format!("Argument {}", index + 1),
+            };
             use MutabilityMustBeWhat::*;
             match what {
                 Mutable => format!(
-                    "Expression must be mutable due to `{}`",
+                    "{subject} must be mutable due to `{}`",
                     fmt_span(reason_span)
                 ),
                 Constant => format!(
-                    "Expression must be constant due to `{}`",
+                    "{subject} must be constant due to `{}`",
                     fmt_span(reason_span)
                 ),
                 Equal => format!(
-                    "Expression must be of the same mutability as `{}`",
+                    "{subject} must be of the same mutability as `{}`",
                     fmt_span(reason_span)
                 ),
             }

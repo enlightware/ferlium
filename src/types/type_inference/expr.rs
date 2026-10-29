@@ -1541,6 +1541,23 @@ impl TypeInference {
                             }
                             _ => (false, None),
                         };
+                        // When the callee's parameters are already known, check each argument's
+                        // mutability at its own span, as for static calls. Function subtyping
+                        // implies these constraints but can only report the whole call.
+                        if let Some(params) = &abi_args
+                            && params.len() == args_tys.len()
+                        {
+                            for ((arg, arg_ty), param) in
+                                data.args.iter().zip(&args_tys).zip(params)
+                            {
+                                self.add_mut_be_at_least_constraint(
+                                    arg_ty.mut_ty,
+                                    sp(*arg),
+                                    param.mut_ty,
+                                    sp(data.func),
+                                );
+                            }
+                        }
                         let ret_ty = if returns_never {
                             Type::never()
                         } else {

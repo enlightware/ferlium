@@ -3,7 +3,9 @@
 
 use ustr::ustr;
 
-use ferlium::compiler::error::{CompilationErrorImpl, MutabilityMustBeWhat, SourceFailureKind};
+use ferlium::compiler::error::{
+    CompilationErrorImpl, MutabilityMustBeContext, MutabilityMustBeWhat, SourceFailureKind,
+};
 use ferlium::hir::value::Value;
 use ferlium::{Compiler, Path, hir::interpreter::eval_function};
 use test_log::test;
@@ -153,6 +155,34 @@ fn a_non_place_mutable_argument_does_not_panic() {
         session.run("fn g(x: &mut int) { x = x + 1 }\nfn f() { let mut a = 1; g(a); a }\nf()"),
         int(2)
     );
+}
+
+/// Calling a function value with an argument that is not mutable enough reports that argument, also
+/// when it is piped in.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_immutable_argument_to_a_function_value_is_reported_at_the_argument() {
+    let mut session = TestSession::new();
+    for call in ["f(a)", "a |> f()"] {
+        let source = format!("let f = |x| (x[0] = 1); let a = [1]; {call}");
+        let error = session.fail_compilation(&source);
+        let (source_span, reason_span, what, _) = error.as_mutability_must_be().unwrap();
+        assert_eq!(*what, MutabilityMustBeWhat::Mutable);
+        assert_eq!(&source[source_span.as_range()], "a");
+        assert_eq!(&source[reason_span.as_range()], "f");
+    }
+}
+
+/// When the callee's type is only known after inference, function subtyping reports the mismatch
+/// by argument index rather than by locating the argument in the source text, which a pipe defeats.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_mutability_mismatch_on_a_piped_argument_does_not_panic() {
+    let mut session = TestSession::new();
+    let error = session.fail_compilation("fn a(mut a) { for Some in a.a |> a() { a |> a() } }");
+    let (_, _, what, ctx) = error.as_mutability_must_be().unwrap();
+    assert_eq!(*what, MutabilityMustBeWhat::Equal);
+    assert_eq!(*ctx, MutabilityMustBeContext::FnTypeArg(0));
 }
 
 /// The same analysis reaches a subscript index before type checking rejects it, so an index that is

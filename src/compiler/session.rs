@@ -903,7 +903,7 @@ impl CompilerSession {
             Ok(entry_id) => entry_id,
             Err(error) => {
                 let env = ModuleEnv::new(&scratch, &self.modules);
-                let error = CompilationError::resolve_types(error, &env, &self.source_table);
+                let error = CompilationError::resolve_types(error, &env);
                 let error = format!("{}", error.format_with(self.source_table()));
                 discard_values(values);
                 self.source_table.truncate(source_table_len);
@@ -1075,7 +1075,7 @@ impl CompilerSession {
         let env = self.module_env();
         let mut modules_used = FxHashSet::default();
         ast.desugar(span, false, &env, &mut modules_used)
-            .map_err(|error| CompilationError::resolve_types(error, &env, &self.source_table))
+            .map_err(|error| CompilationError::resolve_types(error, &env))
     }
 
     /// Parse a type from a source code and return the corresponding Type,
@@ -1110,7 +1110,7 @@ impl CompilerSession {
         let env = self.module_env();
         let mut modules_used = FxHashSet::default();
         ast.desugar(span, false, &env, &mut modules_used)
-            .map_err(|error| CompilationError::resolve_types(error, &env, &self.source_table))
+            .map_err(|error| CompilationError::resolve_types(error, &env))
     }
 
     /// Compile a source code and return the compiled module and an expression (if any), or an error.

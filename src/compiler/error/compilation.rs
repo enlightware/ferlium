@@ -11,7 +11,6 @@ use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
 use ustr::Ustr;
 
-use super::resolve_must_be_mutable_ctx;
 use crate::{
     ast::{self, PatternType, PropertyAccess},
     containers::iterable_to_string,
@@ -87,10 +86,22 @@ pub enum MutabilityMustBeWhat {
     Equal,
 }
 
+/// What a mutability error is about: the value at its source span, or the argument at that
+/// index of the function type at its source span.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MutabilityMustBeContext {
     Value,
     FnTypeArg(usize),
+}
+
+impl MutabilityMustBeContext {
+    /// Describes the constrained entity, given the rendering of the source span.
+    pub fn subject(self, source: &str) -> String {
+        match self {
+            Self::Value => format!("Expression {source}"),
+            Self::FnTypeArg(index) => format!("Argument {} of {source}", index + 1),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1329,7 +1340,7 @@ impl FormatWith<(ModuleEnv<'_>, &SourceTable)> for InternalCompilationError {
         data: &(ModuleEnv<'_>, &SourceTable),
     ) -> fmt::Result {
         let (env, source_table) = data;
-        let error = CompilationError::resolve_types(self.clone(), env, source_table);
+        let error = CompilationError::resolve_types(self.clone(), env);
         write!(f, "{}", error.format_with(*source_table))
     }
 }
@@ -1530,9 +1541,9 @@ impl FormatWith<SourceTable> for CompilationError {
                 source_span,
                 reason_span,
                 what,
-                ..
+                ctx,
             } => {
-                let source_name = fmt_span(source_span);
+                let subject = ctx.subject(&fmt_span(source_span));
                 let reason_name = fmt_span(reason_span);
                 use MutabilityMustBeWhat::*;
                 let what = match what {
@@ -1540,7 +1551,7 @@ impl FormatWith<SourceTable> for CompilationError {
                     Constant => "constant due to",
                     Equal => "of same mutability to",
                 };
-                write!(f, "Expression {source_name} must be {what} {reason_name}")
+                write!(f, "{subject} must be {what} {reason_name}")
             }
             TypeMismatch {
                 current_ty,
@@ -2237,11 +2248,7 @@ macro_rules! compilation_error {
 }
 
 impl CompilationError {
-    pub fn resolve_types(
-        error: InternalCompilationError,
-        env: &ModuleEnv<'_>,
-        source_table: &SourceTable,
-    ) -> Self {
+    pub fn resolve_types(error: InternalCompilationError, env: &ModuleEnv<'_>) -> Self {
         use CompilationErrorImpl::*;
         match error.into_inner() {
             CompilerLimitExceeded(error) => compilation_error!(CompilerLimitExceeded(error)),
@@ -2360,16 +2367,12 @@ impl CompilationError {
                 reason_span,
                 what,
                 ctx,
-            } => {
-                let (source_span, reason_span) =
-                    resolve_must_be_mutable_ctx(source_span, reason_span, ctx, source_table);
-                compilation_error!(MutabilityMustBe {
-                    source_span,
-                    reason_span,
-                    what,
-                    ctx
-                })
-            }
+            } => compilation_error!(MutabilityMustBe {
+                source_span,
+                reason_span,
+                what,
+                ctx
+            }),
             TypeMismatch {
                 current_ty,
                 current_span,

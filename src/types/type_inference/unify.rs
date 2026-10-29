@@ -834,9 +834,9 @@ impl UnifiedTypeInference {
                     // Contravariance of argument types.
                     self.unify_mut_must_be_at_least_or_equal(
                         exp_arg.mut_ty,
-                        current_span,
-                        cur_arg.mut_ty,
                         expected_span,
+                        cur_arg.mut_ty,
+                        current_span,
                         MutabilityMustBeContext::FnTypeArg(index),
                         sub_or_same,
                     )?;
@@ -898,9 +898,9 @@ impl UnifiedTypeInference {
                     // Contravariance of argument types.
                     self.unify_mut_must_be_at_least_or_equal(
                         exp_arg.mut_ty,
-                        current_span,
-                        cur_arg.mut_ty,
                         expected_span,
+                        cur_arg.mut_ty,
+                        current_span,
                         MutabilityMustBeContext::FnTypeArg(index),
                         sub_or_same,
                     )?;
