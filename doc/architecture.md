@@ -13,8 +13,9 @@ Compiled execution uses one generated module for all Ferlium modules in a `Compi
 Independent compilation and dynamic linking of Ferlium modules are outside the current design.
 Physical lowering processes each source module separately: every result is a relocatable
 function table with dictionary and subscript catalogs. A target-independent assembly step creates a
-resolved whole-program view over the unchanged module artifacts. It validates their imports and
-interns referenced static evidence before an interpreter or machine backend executes them. Wasm,
+resolved whole-program view over the unchanged module artifacts. It validates their imports, once
+per module since they reach only its unchanged dependencies, and interns referenced static evidence
+before an interpreter or machine backend executes them. Wasm,
 Cranelift, and other machine backends assign their own target indexes and addresses later.
 
 In the browser, the Rust runtime and generated Ferlium code are separate Wasm instances sharing

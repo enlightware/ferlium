@@ -435,6 +435,11 @@ pub(crate) struct BackendReadyMirArtifacts {
     native_requirements: NativeRequirements,
     dictionaries: PhysicalDictionaryCatalog,
     subscripts: PhysicalSubscriptCatalog,
+    /// Set once this module's references into a program were verified. They reach only the
+    /// module and its dependencies, whose artifacts stay the same for as long as this one does: a
+    /// session rebuilds a module whenever a dependency changes. So one verification holds for
+    /// every program this module is resolved into.
+    pub(super) references_verified: OnceCell<()>,
 }
 
 impl BackendReadyMirArtifacts {
@@ -800,6 +805,7 @@ pub(crate) fn prepare_physical_mir(
         native_requirements,
         dictionaries,
         subscripts,
+        references_verified: OnceCell::new(),
     };
     verify_physical_mir(&artifacts, env)?;
     Ok(artifacts)
@@ -3906,6 +3912,9 @@ mod tests {
                 Err(BackendReadinessError::InvalidPhysicalProtocol { function, .. }) if function == target));
             assert!(matches!(resolve_physical_program([&artifacts]),
                 Err(PhysicalProgramError::InvalidResultParameter { function }) if function == target));
+            // Only a successful verification is remembered: resolving again rejects it again.
+            assert!(matches!(resolve_physical_program([&artifacts]),
+                Err(PhysicalProgramError::InvalidResultParameter { function }) if function == target));
         }
     }
 
@@ -4858,6 +4867,7 @@ mod tests {
             native_requirements: NativeRequirements::default(),
             dictionaries,
             subscripts,
+            references_verified: OnceCell::new(),
         };
         assert_eq!(physical.dictionary_imports(), &[foreign, nested_foreign]);
     }

@@ -424,48 +424,61 @@ pub(crate) fn resolve_physical_program<'a>(
     Ok(program)
 }
 
+/// Verifies what each module refers to, once per module: see
+/// [`BackendReadyMirArtifacts::references_verified`].
 fn verify_program(program: &ResolvedPhysicalProgram) -> Result<(), PhysicalProgramError> {
     for module in program.modules() {
-        for dictionary in module.dictionaries() {
-            for (index, entry) in dictionary.entries().iter().enumerate() {
-                if !has_function(program, entry.function())
-                    || program.function(entry.function()).is_some_and(|body| {
-                        body.result_convention() == CallResultConvention::NoValue
-                    })
-                {
-                    return Err(PhysicalProgramError::InvalidDictionaryEntryFunction {
-                        dictionary: dictionary.id(),
-                        entry: TraitDictionaryEntryIndex::from_index(index),
-                        target: entry.function(),
-                    });
-                }
+        if module.references_verified.get().is_none() {
+            verify_module(program, module)?;
+            let _ = module.references_verified.set(());
+        }
+    }
+    Ok(())
+}
+
+fn verify_module(
+    program: &ResolvedPhysicalProgram,
+    module: &BackendReadyMirArtifacts,
+) -> Result<(), PhysicalProgramError> {
+    for dictionary in module.dictionaries() {
+        for (index, entry) in dictionary.entries().iter().enumerate() {
+            if !has_function(program, entry.function())
+                || program
+                    .function(entry.function())
+                    .is_some_and(|body| body.result_convention() == CallResultConvention::NoValue)
+            {
+                return Err(PhysicalProgramError::InvalidDictionaryEntryFunction {
+                    dictionary: dictionary.id(),
+                    entry: TraitDictionaryEntryIndex::from_index(index),
+                    target: entry.function(),
+                });
             }
         }
-        for subscript in module.subscripts() {
-            for mut_member in [false, true] {
-                let Some(member) = subscript.member(mut_member) else {
-                    continue;
-                };
-                let signature = program
-                    .module(member.function().module)
-                    .and_then(|module| module.native_signature(member.function()));
-                let wrong_access = signature.is_some_and(|signature| {
+    }
+    for subscript in module.subscripts() {
+        for mut_member in [false, true] {
+            let Some(member) = subscript.member(mut_member) else {
+                continue;
+            };
+            let signature = program
+                .module(member.function().module)
+                .and_then(|module| module.native_signature(member.function()));
+            let wrong_access = signature.is_some_and(|signature| {
                     matches!(signature.result, NativeResult::Addressor { mutable, .. } if mutable != mut_member)
                 });
-                if !has_function(program, member.function()) || wrong_access {
-                    return Err(PhysicalProgramError::InvalidSubscriptMemberFunction {
-                        subscript: subscript.id(),
-                        mut_member,
-                        target: member.function(),
-                    });
-                }
+            if !has_function(program, member.function()) || wrong_access {
+                return Err(PhysicalProgramError::InvalidSubscriptMemberFunction {
+                    subscript: subscript.id(),
+                    mut_member,
+                    target: member.function(),
+                });
             }
         }
-        for (index, body) in module.entries.iter().enumerate() {
-            let Some(body) = body else { continue };
-            let owner = FunctionId::new(module.module(), LocalFunctionId::from_index(index));
-            verify_function_body(program, owner, body)?;
-        }
+    }
+    for (index, body) in module.entries.iter().enumerate() {
+        let Some(body) = body else { continue };
+        let owner = FunctionId::new(module.module(), LocalFunctionId::from_index(index));
+        verify_function_body(program, owner, body)?;
     }
     Ok(())
 }
