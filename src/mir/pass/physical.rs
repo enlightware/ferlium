@@ -204,7 +204,8 @@ fn normalize_physical(
             Pass {
                 name: "redundant_storage",
                 run: &redundant_storage,
-                enables: &[],
+                // A call or address computation on a copy becomes one on its source.
+                enables: &["common_calls", "common_subexpressions"],
             },
             Pass {
                 name: "stored_values",
@@ -262,7 +263,7 @@ fn normalize_physical(
 #[cfg(test)]
 mod tests {
     use crate::{
-        CompilerSession, MirOptimization,
+        CompilerSession, Location, MirOptimization,
         hir::value::{LiteralValue, Value},
         mir::{
             self, BlockId, Operation, OperationKind,
@@ -274,7 +275,7 @@ mod tests {
         },
         module::{FunctionId, LocalFunctionId, ModuleEnv, Path, id::Id},
         std::math::int_type,
-        types::r#type::CallResultConvention,
+        types::r#type::{CallResultConvention, Type},
     };
     use ustr::ustr;
 
@@ -351,6 +352,40 @@ mod tests {
     /// here, two copies of an address passed to the same call.
     #[test]
     fn merging_places_merges_the_calls_reading_them() {
+        // A call ends what CSE knows of physical addresses, so both are computed before the calls.
+        calls_merge_once_their_places_are(|builder, address| [address(builder), address(builder)]);
+    }
+
+    /// Storage forwarding can make two calls identical after call CSE has run, which must then run
+    /// again: here, a call on a local and on its copy.
+    #[test]
+    fn forwarding_storage_merges_the_calls_reading_it() {
+        calls_merge_once_their_places_are(|builder, address| {
+            let block = BlockId::from_index(0);
+            let span = Location::new_synthesized();
+            let source = address(builder);
+            let ty = Type::tuple(vec![int_type(), int_type()]);
+            let local = builder
+                .append_operation(block, Operation::alloca(span, ty))
+                .unwrap();
+            builder.append_operation(block, Operation::memcpy(span, source, local.clone()));
+            let copy = builder
+                .append_operation(block, Operation::alloca(span, ty))
+                .unwrap();
+            builder.append_operation(block, Operation::memcpy(span, local.clone(), copy.clone()));
+            [local, copy]
+        });
+    }
+
+    /// Checks that a body calling an `#[inline(never)]` function on the two places `places` builds
+    /// keeps one call once optimized. `places` builds them in the body's only block, and is given a
+    /// function appending one more address of the same argument field.
+    fn calls_merge_once_their_places_are(
+        places: impl FnOnce(
+            &mut FunctionBuilder,
+            &dyn Fn(&mut FunctionBuilder) -> mir::Value,
+        ) -> [mir::Value; 2],
+    ) {
         let mut session = CompilerSession::new();
         session.set_mir_optimization(MirOptimization::Enabled);
         session.set_physical_mir_optimization(MirOptimization::Enabled);
@@ -373,7 +408,7 @@ mod tests {
         let mut bodies: Vec<_> = (0..artifacts.entry_count())
             .map(|index| artifacts.get(LocalFunctionId::from_index(index)).cloned())
             .collect();
-        // `compute` reads `p.0` and calls `first` on it; rebuild it doing both twice.
+        // `compute` reads `p.0` and calls `first` on it; rebuild it calling `first` twice.
         let template = bodies[compute.as_index()].take().unwrap();
         let operations = template.block(BlockId::from_index(0)).operations();
         let address = operations
@@ -403,20 +438,12 @@ mod tests {
             unreachable!()
         };
         let callee = &call.operands[0];
-        // A call ends what CSE knows of physical addresses, so both are computed before the calls.
-        let places: Vec<_> = (0..2)
-            .map(|_| {
-                let address = Operation::address_offset(
-                    address.span,
-                    base.clone(),
-                    offset.clone(),
-                    *ty,
-                    *member,
-                );
-                builder.append_operation(block, address).unwrap()
-            })
-            .collect();
-        let results: Vec<_> = places
+        let append_address = |builder: &mut FunctionBuilder| {
+            let address =
+                Operation::address_offset(address.span, base.clone(), offset.clone(), *ty, *member);
+            builder.append_operation(block, address).unwrap()
+        };
+        let results: Vec<_> = places(&mut builder, &append_address)
             .into_iter()
             .map(|place| {
                 let call = Operation::call(call.span, callee.clone(), [place], (**call_ty).clone())

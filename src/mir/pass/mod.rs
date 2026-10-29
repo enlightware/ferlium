@@ -420,7 +420,8 @@ fn normalize_semantic(
             normalize::Pass {
                 name: "redundant_storage",
                 run: &redundant_storage,
-                enables: &[],
+                // A load or call reading a copy becomes one reading its source.
+                enables: &["common_loads", "common_calls"],
             },
             normalize::Pass {
                 name: "stored_values",
