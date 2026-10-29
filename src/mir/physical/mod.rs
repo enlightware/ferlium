@@ -556,7 +556,7 @@ pub(crate) fn lower_physical_mir(
     known: &KnownCallees,
 ) -> Result<BackendReadyMirArtifacts, BackendReadinessError> {
     let entries = expand_physical_mir(module, semantic, env, known, true)?;
-    let entries = optimize(&entries, semantic, env, known);
+    let entries = optimize(entries, semantic, env, known);
     let (entries, direct) = results::select(entries, env);
     prepare_physical_mir(entries, direct, semantic, env)
 }

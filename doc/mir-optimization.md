@@ -1333,10 +1333,12 @@ SROA before the passes that remove copies and move code.
 
 Physical MIR reuses shared folding, CSE, inlining, storage and single-store value forwarding,
 control-flow, and stack-region cleanup passes. Physical expansion introduces further single-store
-cells in generated helpers. Stage-specific callee lookup reads immutable inputs: the module's
-finished or raw and its dependencies' optimized semantic bodies for semantic optimization,
-expanded module-local bodies and helpers for physical optimization. Foreign physical bodies
-remain opaque. Generic specialization and constructive semantic reification do not run on
+cells in generated helpers. It is scheduled as the semantic stage is: callees before their
+callers, and within each body, shrinking passes run to a fixpoint between inlining steps, so the
+inliner prices settled bodies and copies finished ones. Stage-specific callee lookup reads the
+module's finished or raw and its dependencies' optimized semantic bodies for semantic
+optimization, module-local physical bodies and helpers for physical optimization. Foreign
+physical bodies remain opaque. Generic specialization and constructive semantic reification do not run on
 physical bodies; arithmetic/boolean identities and constant integer arithmetic need no script
 evaluation. Both stages fold constant wrapping integer addition, subtraction, multiplication and
 negation directly, without invoking the boxed constant evaluator.

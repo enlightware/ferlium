@@ -24,14 +24,15 @@
 //! [`MAX_ROUNDS`](budget::MAX_ROUNDS) bounds the expansion rounds, and normalization caps its pass
 //! runs.
 //!
-//! Each stage reads immutable pre-pass callee bodies, so a result never depends on the order
-//! functions are optimized in. Semantic inlining may cross module boundaries — that is
+//! Each stage optimizes callees before their callers, which read a callee's finished body once it
+//! is, and its body as first built within their own call-graph cycle. Semantic inlining may cross module boundaries — that is
 //! where most inlinable script callees live — which is sound because function, dictionary and
 //! subscript identities are global while constant identities are function-local and remapped into
 //! the caller's pool. This is not whole-program optimization: nothing outside the module being
 //! optimized is modified.
-//! Physical scheduling reuses these passes after expansion, without semantic specialization or
-//! boxed script evaluation. Its callee view includes module-local physical bodies and helpers.
+//! Physical scheduling reuses these passes after expansion, with the same alternation of
+//! normalization and inlining, without semantic specialization or boxed script evaluation. Its
+//! callee view includes module-local physical bodies and helpers.
 
 pub(crate) mod bounds_check;
 pub(crate) mod branch_forward;
