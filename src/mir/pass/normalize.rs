@@ -23,12 +23,38 @@
 
 use crate::mir::Function;
 
+/// Every normalizing pass, across both stages; each stage lists the ones it runs, in its order.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum NormalizingPass {
+    CommonLoads,
+    StaticDictionaries,
+    Fold,
+    CommonCalls,
+    RedundantStorage,
+    StoredValues,
+    CommonSubexpressions,
+    CloneBorrowing,
+    TerminalMoves,
+    ManagedSplit,
+    BooleanBranches,
+    BooleanResults,
+    OverwrittenStores,
+    DeadStorage,
+    StackMarkers,
+    DeadTrivialResults,
+    Tails,
+}
+
+impl NormalizingPass {
+    const COUNT: usize = Self::Tails as usize + 1;
+}
+
 /// One normalizing pass, as the driver sees it.
 pub(super) struct Pass<'a> {
-    pub(super) name: &'static str,
+    pub(super) id: NormalizingPass,
     pub(super) run: &'a dyn Fn(&Function) -> Option<Rewrite>,
-    /// The earlier passes a change by this one can enable, by name.
-    pub(super) enables: &'static [&'static str],
+    /// The earlier passes a change by this one can enable.
+    pub(super) enables: &'static [NormalizingPass],
 }
 
 /// A body a pass rewrote.
@@ -54,48 +80,56 @@ impl Rewrite {
 /// bounds a defect.
 const RUNS_PER_PASS: usize = 8;
 
+/// Sets of passes, as bits indexed by position in a stage's list.
+type Positions = u32;
+
+const _: () = assert!(NormalizingPass::COUNT <= Positions::BITS as usize);
+
 /// Runs `passes` over `function` to a fixpoint, returning the rewritten body if any pass changed it.
 pub(super) fn normalize(function: &Function, passes: &[Pass<'_>]) -> Option<Function> {
-    let back_edges: Vec<Vec<usize>> = passes
-        .iter()
-        .enumerate()
-        .map(|(index, pass)| {
-            pass.enables
-                .iter()
-                .map(|name| {
-                    let target = passes
-                        .iter()
-                        .position(|pass| pass.name == *name)
-                        .unwrap_or_else(|| panic!("unknown normalizing pass `{name}`"));
-                    debug_assert!(target < index, "`{name}` must run before `{}`", pass.name);
-                    target
-                })
-                .collect()
-        })
-        .collect();
-    let mut pending = vec![true; passes.len()];
+    let mut position = [None; NormalizingPass::COUNT];
+    for (index, pass) in passes.iter().enumerate() {
+        let slot = &mut position[pass.id as usize];
+        assert!(slot.is_none(), "{:?} is listed twice", pass.id);
+        *slot = Some(index);
+    }
+    let mut back_edges = [0 as Positions; NormalizingPass::COUNT];
+    for (index, pass) in passes.iter().enumerate() {
+        for &target in pass.enables {
+            let target_index = position[target as usize]
+                .unwrap_or_else(|| panic!("{target:?}, enabled by {:?}, is not run", pass.id));
+            debug_assert!(
+                target_index < index,
+                "{target:?} must run before {:?}",
+                pass.id
+            );
+            back_edges[index] |= 1 << target_index;
+        }
+    }
+    let all: Positions = (1 << passes.len()) - 1;
+    let mut pending = all;
     let mut current: Option<Function> = None;
     let mut runs = 0;
-    while let Some(index) = pending.iter().position(|&pending| pending) {
+    while pending != 0 {
+        let index = pending.trailing_zeros() as usize;
         if runs == RUNS_PER_PASS * passes.len() {
             debug_assert!(
                 false,
-                "normalizing `{}` reached its cap of {RUNS_PER_PASS} runs per pass with `{}` pending",
-                function.name, passes[index].name
+                "normalizing `{}` reached its cap of {RUNS_PER_PASS} runs per pass with {:?} pending",
+                function.name, passes[index].id
             );
             return current;
         }
         runs += 1;
+        let bit = 1 << index;
         let Some(rewrite) = (passes[index].run)(current.as_ref().unwrap_or(function)) else {
-            pending[index] = false;
+            pending &= !bit;
             continue;
         };
         current = Some(rewrite.body);
-        pending[index] = rewrite.enables_itself;
-        pending[index + 1..].fill(true);
-        for &target in &back_edges[index] {
-            pending[target] = true;
-        }
+        let later = all & !(bit | (bit - 1));
+        let itself = if rewrite.enables_itself { bit } else { 0 };
+        pending = (pending & !bit) | itself | later | back_edges[index];
     }
     #[cfg(debug_assertions)]
     {
@@ -103,9 +137,9 @@ pub(super) fn normalize(function: &Function, passes: &[Pass<'_>]) -> Option<Func
         for pass in passes {
             assert!(
                 (pass.run)(settled).is_none(),
-                "normalizing `{}` left work for `{}`: a back edge is missing",
+                "normalizing `{}` left work for {:?}: a back edge is missing",
                 function.name,
-                pass.name
+                pass.id
             );
         }
     }

@@ -393,69 +393,80 @@ fn normalize_semantic(
         scalar_replace::split_managed_local_products(f, env, OptimizationStage::Semantic(callees))
             .map(Rewrite::settled)
     };
-    use normalize::Rewrite;
+    use normalize::{NormalizingPass, Rewrite};
     normalize::normalize(
         function,
         &[
             normalize::Pass {
-                name: "common_loads",
+                id: NormalizingPass::CommonLoads,
                 run: &common_loads,
                 enables: &[],
             },
             normalize::Pass {
-                name: "static_dictionaries",
+                id: NormalizingPass::StaticDictionaries,
                 run: &static_dictionaries,
                 enables: &[],
             },
             normalize::Pass {
-                name: "fold",
+                id: NormalizingPass::Fold,
                 run: &fold,
                 enables: &[],
             },
             normalize::Pass {
-                name: "common_calls",
+                id: NormalizingPass::CommonCalls,
                 run: &common_calls,
                 enables: &[],
             },
             normalize::Pass {
-                name: "redundant_storage",
+                id: NormalizingPass::RedundantStorage,
                 run: &redundant_storage,
                 // A load or call reading a copy becomes one reading its source.
-                enables: &["common_loads", "common_calls"],
+                enables: &[NormalizingPass::CommonLoads, NormalizingPass::CommonCalls],
             },
             normalize::Pass {
-                name: "stored_values",
+                id: NormalizingPass::StoredValues,
                 run: &stored_values,
-                enables: &["common_loads", "fold", "common_calls"],
+                enables: &[
+                    NormalizingPass::CommonLoads,
+                    NormalizingPass::Fold,
+                    NormalizingPass::CommonCalls,
+                ],
             },
             normalize::Pass {
-                name: "common_subexpressions",
+                id: NormalizingPass::CommonSubexpressions,
                 run: &common_subexpressions,
-                enables: &["common_loads", "common_calls"],
+                enables: &[NormalizingPass::CommonLoads, NormalizingPass::CommonCalls],
             },
             normalize::Pass {
-                name: "clone_borrowing",
+                id: NormalizingPass::CloneBorrowing,
                 run: &clone_borrowing,
-                enables: &["common_loads", "common_calls", "common_subexpressions"],
+                enables: &[
+                    NormalizingPass::CommonLoads,
+                    NormalizingPass::CommonCalls,
+                    NormalizingPass::CommonSubexpressions,
+                ],
             },
             normalize::Pass {
-                name: "terminal_moves",
+                id: NormalizingPass::TerminalMoves,
                 run: &terminal_moves,
-                enables: &["common_loads", "redundant_storage"],
+                enables: &[
+                    NormalizingPass::CommonLoads,
+                    NormalizingPass::RedundantStorage,
+                ],
             },
             normalize::Pass {
-                name: "managed_split",
+                id: NormalizingPass::ManagedSplit,
                 run: &managed_split,
                 enables: &[
-                    "common_loads",
-                    "common_calls",
-                    "static_dictionaries",
-                    "fold",
-                    "redundant_storage",
-                    "stored_values",
-                    "common_subexpressions",
-                    "clone_borrowing",
-                    "terminal_moves",
+                    NormalizingPass::CommonLoads,
+                    NormalizingPass::CommonCalls,
+                    NormalizingPass::StaticDictionaries,
+                    NormalizingPass::Fold,
+                    NormalizingPass::RedundantStorage,
+                    NormalizingPass::StoredValues,
+                    NormalizingPass::CommonSubexpressions,
+                    NormalizingPass::CloneBorrowing,
+                    NormalizingPass::TerminalMoves,
                 ],
             },
         ],
