@@ -13,7 +13,7 @@ use crate::{
 use super::{
     OptimizationStage, branch_forward, budget,
     call_graph::CallGraph,
-    copy_forward, cost, cse, dce, dead_store, fold, inline,
+    copy_forward, cost, cse, dce, dead_loop, dead_store, fold, inline,
     known_callee::{KnownCallee, KnownCallees},
     normalize::{self, NormalizingPass, Pass, Rewrite},
     peephole,
@@ -192,6 +192,17 @@ fn normalize_physical(
         )
         .map(Rewrite::settled)
     };
+    // Terminating loops come from trusted code, whose loops have no fuel check.
+    let dead_loops = |f: &Function| {
+        dead_loop::remove_dead_loops(
+            f,
+            env,
+            known,
+            &|callee| Some(stage.original(callee)),
+            &|_| false,
+        )
+        .map(Rewrite::settled)
+    };
     let dead_storage = |f: &Function| dce::remove_dead_storage(f).map(Rewrite::settled);
     let stack_markers =
         |f: &Function| stack_region::remove_redundant_stack_markers(f).map(Rewrite::settled);
@@ -273,6 +284,19 @@ fn normalize_physical(
                 ],
             },
             Pass {
+                id: NormalizingPass::DeadLoops,
+                run: &dead_loops,
+                // Deleting a loop deletes the writes and calls in it, and joins the code around it.
+                enables: &[
+                    NormalizingPass::CommonCalls,
+                    NormalizingPass::CommonSubexpressions,
+                    NormalizingPass::StoredValues,
+                    NormalizingPass::OverwrittenStores,
+                    NormalizingPass::DiscardedResults,
+                    NormalizingPass::DeadCalls,
+                ],
+            },
+            Pass {
                 id: NormalizingPass::DeadStorage,
                 run: &dead_storage,
                 enables: &[
@@ -293,11 +317,13 @@ fn normalize_physical(
             Pass {
                 id: NormalizingPass::DeadTrivialResults,
                 run: &dead_trivial_results,
-                // Removing an unread load can leave a local only written.
+                // Removing an unread load can leave a local only written, or a loop computing
+                // what it read dead.
                 enables: &[
                     NormalizingPass::OverwrittenStores,
                     NormalizingPass::DiscardedResults,
                     NormalizingPass::DeadCalls,
+                    NormalizingPass::DeadLoops,
                     NormalizingPass::DeadStorage,
                 ],
             },

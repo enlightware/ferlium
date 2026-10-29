@@ -247,6 +247,78 @@ pub(crate) fn remove_dead_trivial_results(func: &Function) -> Option<Function> {
     remove_dead_results(func, candidates, |_| 0, Vec::new())
 }
 
+/// Whether `operation` is a call known to return without source-visible effects, so that not
+/// running it changes nothing but its result. This is the eligibility rule of
+/// [`remove_dead_proven_calls`], which documents it; `trivial_copy` caches the result-type test.
+pub(super) fn is_proven_pure_call(
+    operation: &Operation,
+    env: ModuleEnv<'_>,
+    known: &KnownCallees,
+    original_of: &dyn Fn(FunctionId) -> Option<FunctionId>,
+    will_return: &dyn Fn(FunctionId) -> bool,
+    trivial_copy: &mut FxHashMap<Type, bool>,
+) -> bool {
+    let OperationKind::Call { ty, metadata, .. } = &operation.kind else {
+        return false;
+    };
+    if !ty.effects().is_empty()
+        || !matches!(
+            ty.result_convention,
+            CallResultConvention::Value | CallResultConvention::NoValue
+        )
+    {
+        return false;
+    }
+    let Some(mut call) = dataflow::call_operands(operation) else {
+        return false;
+    };
+    let mir::Value::Function(callee) = *call.callee else {
+        return false;
+    };
+    let known_callee = known.resolve(callee, original_of);
+    if known_callee.is_some_and(|callee| callee.is_optimization_barrier()) {
+        return false;
+    }
+    if known_callee.is_some_and(|callee| callee.is_total_and_speculatable()) {
+        return true;
+    }
+    let Some(function) = env
+        .module_by_id(callee.module)
+        .and_then(|module| module.get_function_by_id(callee.function))
+    else {
+        return false;
+    };
+    if function.code.as_script().is_none()
+        || function.parameter_passing.len() != call.arguments.len()
+    {
+        return false;
+    }
+    call.arguments = call
+        .arguments
+        .into_iter()
+        .zip(&function.parameter_passing)
+        .map(|((argument, _), convention)| (argument, *convention))
+        .collect();
+    !metadata
+        .as_deref()
+        // Vacuous in today's pipeline because whole-module owned-argument forwarding
+        // runs after per-function DCE. Retain the guard so a future reordering cannot
+        // delete an ownership transfer and its callee-side cleanup.
+        .is_some_and(|metadata| !metadata.owned_arguments.is_empty())
+        // Hidden evidence can carry semantic callbacks (for example `Value::drop`),
+        // whose effects are not represented in the direct call type.
+        && call.extras.is_empty()
+        && call.captures.is_empty()
+        && call
+            .arguments
+            .iter()
+            .all(|(_, convention)| *convention == ArgConvention::Let)
+        && *trivial_copy
+            .entry(ty.ret())
+            .or_insert_with(|| concrete_type_is_trivial_copy(ty.ret(), &env))
+        && will_return(callee)
+}
+
 /// Removes unused calls known to return without source-visible effects.
 ///
 /// An empty effect row is intentionally insufficient: a pure script call may diverge, and deleting
@@ -278,69 +350,21 @@ pub(crate) fn remove_dead_proven_calls(
             {
                 allocas.insert(result);
             }
-            let OperationKind::Call { ty, metadata, .. } = &operation.kind else {
+            if !is_proven_pure_call(
+                operation,
+                env,
+                known,
+                original_of,
+                will_return,
+                &mut trivial_copy,
+            ) {
                 continue;
+            }
+            let (OperationKind::Call { ty, .. }, Some(call)) =
+                (&operation.kind, dataflow::call_operands(operation))
+            else {
+                unreachable!("a proven pure call is a direct call");
             };
-            if !ty.effects().is_empty()
-                || !matches!(
-                    ty.result_convention,
-                    CallResultConvention::Value | CallResultConvention::NoValue
-                )
-            {
-                continue;
-            }
-            let Some(mut call) = dataflow::call_operands(operation) else {
-                continue;
-            };
-            let mir::Value::Function(callee) = *call.callee else {
-                continue;
-            };
-            let known_callee = known.resolve(callee, original_of);
-            if known_callee.is_some_and(|callee| callee.is_optimization_barrier()) {
-                continue;
-            }
-            let known_total = known_callee.is_some_and(|callee| callee.is_total_and_speculatable());
-            if !known_total {
-                let Some(function) = env
-                    .module_by_id(callee.module)
-                    .and_then(|module| module.get_function_by_id(callee.function))
-                else {
-                    continue;
-                };
-                if function.code.as_script().is_none()
-                    || function.parameter_passing.len() != call.arguments.len()
-                {
-                    continue;
-                }
-                call.arguments = call
-                    .arguments
-                    .into_iter()
-                    .zip(&function.parameter_passing)
-                    .map(|((argument, _), convention)| (argument, *convention))
-                    .collect();
-            }
-            let eligible = known_total
-                || (!metadata
-                    .as_deref()
-                    // Vacuous in today's pipeline because whole-module owned-argument forwarding
-                    // runs after per-function DCE. Retain the guard so a future reordering cannot
-                    // delete an ownership transfer and its callee-side cleanup.
-                    .is_some_and(|metadata| !metadata.owned_arguments.is_empty())
-                    // Hidden evidence can carry semantic callbacks (for example `Value::drop`),
-                    // whose effects are not represented in the direct call type.
-                    && call.extras.is_empty()
-                    && call.captures.is_empty()
-                    && call
-                        .arguments
-                        .iter()
-                        .all(|(_, convention)| *convention == ArgConvention::Let)
-                    && *trivial_copy
-                        .entry(ty.ret())
-                        .or_insert_with(|| concrete_type_is_trivial_copy(ty.ret(), &env))
-                    && will_return(callee));
-            if !eligible {
-                continue;
-            }
             if ty.result_convention == CallResultConvention::NoValue {
                 no_results.push(DeadResultCandidate {
                     block,

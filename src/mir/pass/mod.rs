@@ -45,6 +45,7 @@ pub(crate) mod cse;
 pub(crate) mod dataflow;
 pub(crate) mod dce;
 pub(crate) mod dead_evidence;
+pub(crate) mod dead_loop;
 pub(crate) mod dead_store;
 pub(crate) mod float_speculation;
 pub(crate) mod fold;

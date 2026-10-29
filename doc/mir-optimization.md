@@ -1167,6 +1167,23 @@ Deliberately narrow, and intra-function only.
 Constants left unreferenced are pruned from the pool, explicitly, since that renumbers every
 `ConstantId`.
 
+### Dead loops
+
+A loop goes when it terminates and leaving it changes nothing anything reads: its preheader then
+jumps directly to the loop's single exit. Its operations may only compute, allocate, mark the stack,
+call what the call rule above removes, and write `TrivialCopy` locals that nothing outside the loop
+reads. No register it defines may be used outside it, and it may not return, fail or yield.
+
+Termination comes from the sandbox contract (see
+[runtime-sandboxing.md](runtime-sandboxing.md)): every cycle of untrusted code crosses a fuel
+check, so a loop without one is trusted code, which must terminate. A loop with a fuel check is
+kept, as it may not terminate. Deleting a loop that runs forever would make a non-terminating
+execution return.
+
+Only the physical stage runs this rule. There it removes the loop over trivial elements a
+specialized array drop is left with once the element take is gone: std's drop counts its elements
+down in a local, not in the array's length.
+
 ## Tail merging
 
 `mir::pass::tail_merge` simplifies shared control-flow tails after ordinary DCE has removed dead
@@ -1335,8 +1352,8 @@ SROA before the passes that remove copies and move code.
 ## Post-expansion optimization
 
 Physical MIR reuses shared folding, CSE, inlining, storage and single-store value forwarding,
-dead-code elimination (unread storage, discarded `TrivialCopy` results, and unused calls known to
-be total), control-flow, and stack-region cleanup passes. Physical expansion introduces further single-store
+dead-code elimination (unread storage, discarded `TrivialCopy` results, unused calls known to
+be total, and dead loops), control-flow, and stack-region cleanup passes. Physical expansion introduces further single-store
 cells in generated helpers. It is scheduled as the semantic stage is: callees before their
 callers, and within each body, shrinking passes run to a fixpoint between inlining steps, so the
 inliner prices settled bodies and copies finished ones. Stage-specific callee lookup reads the

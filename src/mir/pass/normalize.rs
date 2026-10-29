@@ -41,6 +41,7 @@ pub(super) enum NormalizingPass {
     OverwrittenStores,
     DiscardedResults,
     DeadCalls,
+    DeadLoops,
     DeadStorage,
     StackMarkers,
     DeadTrivialResults,

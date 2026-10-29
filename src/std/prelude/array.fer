@@ -79,20 +79,20 @@ impl<A> Value for [A] where A: Value {
 #[no_fuel_check]
 fn array_drop_storage<A>(target: &mut [A]) where A: Value {
 	let element_size = Value::<A>::SIZE;
+	let mut index = array_len(target);
 	loop {
-		let len = array_len(target);
-		if len <= 0 {
+		if index <= 0 {
+			target.len = 0;
 			buffer_drop(target.data);
 			return ();
 		};
-		let index = len - 1;
+		index -= 1;
 		// Taking the element into a discarded temporary runs its ordinary semantic drop.
 		buffer_take(
 			target.data,
 			array_physical_offset_unchecked(target, index),
 			element_size,
 		);
-		target.len -= 1;
 	}
 }
 
