@@ -49,10 +49,11 @@ receive semantic cleanup. An incompletely constructed value does not run its own
 ## Optimization, progress and poisoning
 
 Compiler correctness is defined independently of a particular host resource budget. Optimization
-must preserve whether a source execution returns, raises a source failure, or does not terminate;
-it may not speculate a computation which may not return onto a path where the source program would
-not execute it. In particular, an empty effect row does not by itself make a call safe to move out
-of a zero-trip loop.
+must preserve whether a source execution returns or raises a source failure, and may never
+introduce non-termination: it may not speculate a computation which may not return onto a path
+where the source program would not execute it. A non-terminating execution must not be made to
+return or to raise a source failure; it may instead be made to fail with a sandbox violation. In
+particular, an empty effect row does not by itself make a call safe to move out of a zero-trip loop.
 
 The exact consumption of fuel, call depth, interpreter capacity and other host resources is not a
 source-language observation. Optimization may move checks and change their frequency, so a run
