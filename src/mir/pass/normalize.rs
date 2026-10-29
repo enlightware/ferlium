@@ -39,6 +39,8 @@ pub(super) enum NormalizingPass {
     BooleanBranches,
     BooleanResults,
     OverwrittenStores,
+    DiscardedResults,
+    DeadCalls,
     DeadStorage,
     StackMarkers,
     DeadTrivialResults,

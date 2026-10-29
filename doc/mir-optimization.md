@@ -211,13 +211,16 @@ This runs after the semantic rounds settle, before DCE removes the unused destin
 ## Discarded `TrivialCopy` results
 
 Inlining exposes the callee's writes into a discarded call's throwaway result allocation. DCE
-removes a concrete `TrivialCopy` root, its subfield place derivations, and its `store`, `memcpy` and
-`clear` uses when nothing reads or otherwise observes any place in that tree. Computations feeding
-those writes remain, so mutations, failures and termination are preserved. The driver skips this
-scan unless the inliner changed the function.
+removes a concrete `TrivialCopy` root, its subfield place derivations, and its `store`, `memcpy`,
+move and `clear` uses when nothing reads or otherwise observes any place in that tree: moving a
+`TrivialCopy` value copies its bytes, so the absent source it leaves owns nothing. Computations
+feeding those writes remain, so mutations, failures and termination are preserved. The semantic
+driver skips this scan unless the inliner changed the function; the physical stage runs it with
+its other shrinking passes, where it removes the element a specialized drop loop takes out of a
+buffer of trivial values.
 
-A trivial variant shell is removed with its stores when no other use survives. A read, move, call
-result, drop, terminator operand or unknown role rejects the complete root. Managed results and
+A trivial variant shell is removed with its stores when no other use survives. A read, being
+moved from, call result, drop, terminator operand or unknown role rejects the complete root. Managed results and
 non-inlined calls remain unchanged.
 
 ## Placement rules
@@ -1332,7 +1335,8 @@ SROA before the passes that remove copies and move code.
 ## Post-expansion optimization
 
 Physical MIR reuses shared folding, CSE, inlining, storage and single-store value forwarding,
-control-flow, and stack-region cleanup passes. Physical expansion introduces further single-store
+dead-code elimination (unread storage, discarded `TrivialCopy` results, and unused calls known to
+be total), control-flow, and stack-region cleanup passes. Physical expansion introduces further single-store
 cells in generated helpers. It is scheduled as the semantic stage is: callees before their
 callers, and within each body, shrinking passes run to a fixpoint between inlining steps, so the
 inliner prices settled bodies and copies finished ones. Stage-specific callee lookup reads the

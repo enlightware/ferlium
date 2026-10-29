@@ -400,7 +400,7 @@ struct ConsumingDefinition {
 /// A variant result then survives as a shell store followed by payload-place projections and
 /// writes, even though the caller never reads it. This extends the ordinary storage cleanup with
 /// one linear place-tree proof: an eligible allocation and every place derived from it may only be
-/// used as a `store`/`memcpy` destination, be cleared, or derive another subfield. Those operations
+/// used as a `store`, `memcpy` or move destination, be cleared, or derive another subfield. Those operations
 /// can all disappear while the computations which produced their inputs remain.
 ///
 /// The complete root type must be concrete `TrivialCopy`. That is what makes deleting a variant
@@ -502,7 +502,12 @@ pub(crate) fn remove_discarded_trivial_copy_results(
                     OperationKind::Subfield { .. }
                     | OperationKind::AddressOffset { .. }
                     | OperationKind::AddressOffsetPlace { .. } => position == 0,
-                    OperationKind::Store | OperationKind::Memcpy => position == 1,
+                    // Moving a `TrivialCopy` value copies its bytes: the absent source it leaves owns
+                    // nothing, so the move goes like a copy.
+                    OperationKind::Store
+                    | OperationKind::Memcpy
+                    | OperationKind::Move
+                    | OperationKind::MoveBytes { .. } => position == 1,
                     OperationKind::Clear => position == 0,
                     _ => false,
                 };

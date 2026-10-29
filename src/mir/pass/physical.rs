@@ -149,6 +149,8 @@ fn normalize_physical(
         })
         .map(Rewrite::settled)
     };
+    // Place CSE forgets addresses at writes, calls and stack restores, so a pass removing one can
+    // let it merge the addresses around it.
     let common_subexpressions =
         |f: &Function| cse::eliminate_common_subexpressions(f).map(Rewrite::settled);
     // One forwarding can expose another, as in the semantic stage.
@@ -170,6 +172,25 @@ fn normalize_physical(
         |f: &Function| peephole::materialize_boolean_results(f).map(Rewrite::settled);
     let overwritten_stores = |f: &Function| {
         dead_store::remove_overwritten_trivial_copy_stores(f, env).map(Rewrite::settled)
+    };
+    // An unread `TrivialCopy` local goes with the writes into it, such as the element a drop loop
+    // takes out of its buffer. That can leave the local moved or copied into it only written.
+    let discarded_results = |f: &Function| {
+        dce::remove_discarded_trivial_copy_results(f, env).map(|body| Rewrite {
+            body,
+            enables_itself: true,
+        })
+    };
+    // Only calls known to be total: a script body may not return.
+    let dead_calls = |f: &Function| {
+        dce::remove_dead_proven_calls(
+            f,
+            env,
+            known,
+            &|callee| Some(stage.original(callee)),
+            &|_| false,
+        )
+        .map(Rewrite::settled)
     };
     let dead_storage = |f: &Function| dce::remove_dead_storage(f).map(Rewrite::settled);
     let stack_markers =
@@ -232,7 +253,24 @@ fn normalize_physical(
             Pass {
                 id: NormalizingPass::OverwrittenStores,
                 run: &overwritten_stores,
-                enables: &[NormalizingPass::StoredValues],
+                enables: &[
+                    NormalizingPass::CommonSubexpressions,
+                    NormalizingPass::StoredValues,
+                ],
+            },
+            Pass {
+                id: NormalizingPass::DiscardedResults,
+                run: &discarded_results,
+                enables: &[NormalizingPass::CommonSubexpressions],
+            },
+            Pass {
+                id: NormalizingPass::DeadCalls,
+                run: &dead_calls,
+                // Removing a call can remove the last load of a local.
+                enables: &[
+                    NormalizingPass::CommonSubexpressions,
+                    NormalizingPass::DiscardedResults,
+                ],
             },
             Pass {
                 id: NormalizingPass::DeadStorage,
@@ -241,18 +279,25 @@ fn normalize_physical(
                     NormalizingPass::CommonSubexpressions,
                     NormalizingPass::StoredValues,
                     NormalizingPass::OverwrittenStores,
+                    NormalizingPass::DeadCalls,
                 ],
             },
             Pass {
                 id: NormalizingPass::StackMarkers,
                 run: &stack_markers,
-                enables: &[NormalizingPass::CommonCalls],
+                enables: &[
+                    NormalizingPass::CommonCalls,
+                    NormalizingPass::CommonSubexpressions,
+                ],
             },
             Pass {
                 id: NormalizingPass::DeadTrivialResults,
                 run: &dead_trivial_results,
+                // Removing an unread load can leave a local only written.
                 enables: &[
                     NormalizingPass::OverwrittenStores,
+                    NormalizingPass::DiscardedResults,
+                    NormalizingPass::DeadCalls,
                     NormalizingPass::DeadStorage,
                 ],
             },
@@ -279,7 +324,7 @@ mod tests {
             self, BlockId, Operation, OperationKind,
             builder::FunctionBuilder,
             operation::OperationKindDiscriminant,
-            pass::known_callee::KnownCallee,
+            pass::known_callee::{KnownCallee, KnownCallees},
             profile::MirInstructionKind,
             terminator::{Terminator, TerminatorKind},
         },
@@ -486,6 +531,173 @@ mod tests {
             .filter(|operation| operation.operands.first() == Some(callee))
             .count();
         assert_eq!(calls, 1, "{}", body.render_with_source_map(&env).text);
+    }
+
+    /// Removing a local whose only use moves another one into it leaves that other one only
+    /// written, so the cleanup must run again.
+    #[test]
+    fn removing_an_unread_local_frees_the_one_moved_into_it() {
+        moves_are_removed(|builder, block, local, _, _| {
+            let span = Location::new_synthesized();
+            let ty = Type::tuple(vec![int_type(), int_type()]);
+            let last = builder
+                .append_operation(block, Operation::alloca(span, ty))
+                .unwrap();
+            builder.append_operation(block, Operation::move_value(span, local, last));
+        });
+    }
+
+    /// Removing an unused call can remove a local's last read, so the cleanup must run again.
+    #[test]
+    fn removing_an_unused_call_frees_the_local_it_read() {
+        moves_are_removed(|builder, block, local, field, known| {
+            let span = Location::new_synthesized();
+            let address = field(builder, local);
+            let value = builder
+                .append_operation(block, Operation::load(span, address))
+                .unwrap();
+            let (add, add_ty) = known.int_add();
+            let sum = Operation::call(
+                span,
+                mir::Value::Function(add),
+                [value.clone(), value],
+                add_ty.clone(),
+            );
+            builder.append_operation(block, sum.with_value_result());
+        });
+    }
+
+    /// Checks that no move is left once optimized in a body which moves one of two call results
+    /// into a local, depending on a branch, then hands that local to `uses` after the join, which
+    /// must not keep it alive. `uses` is also given a function appending the address of a place's
+    /// second field, and the known callees. The calls and the branch keep storage forwarding from
+    /// writing the local directly. A third call result's field is read just before and after
+    /// `uses`, whose operations must not keep the two addresses from merging once removed.
+    fn moves_are_removed(
+        uses: impl FnOnce(
+            &mut FunctionBuilder,
+            BlockId,
+            mir::Value,
+            &dyn Fn(&mut FunctionBuilder, mir::Value) -> mir::Value,
+            &KnownCallees,
+        ),
+    ) {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        session.set_physical_mir_optimization(MirOptimization::Enabled);
+        let module = session
+            .compile(
+                "#[inline(never)]
+                 fn pair(x: int) -> (int, int) { (x, x + 1) }
+                 pub fn compute(c: bool, x: int) -> int { pair(x).1 }",
+                "physical_unread_locals",
+                Path::single_str("physical_unread_locals"),
+            )
+            .unwrap()
+            .module_id;
+        let compute = session
+            .expect_fresh_module(module)
+            .get_local_function_id(ustr("compute"))
+            .unwrap();
+        let program = session.prepare_physical_program(module).unwrap();
+        let artifacts = program.module(module).unwrap();
+        let mut bodies: Vec<_> = (0..artifacts.entry_count())
+            .map(|index| artifacts.get(LocalFunctionId::from_index(index)).cloned())
+            .collect();
+        // `compute` calls `pair` into a local and reads its second field; rebuild it as above.
+        let template = bodies[compute.as_index()].take().unwrap();
+        let operations = template.block(BlockId::from_index(0)).operations();
+        let call = operations
+            .iter()
+            .find(|operation| matches!(operation.kind, OperationKind::Call { .. }))
+            .unwrap();
+        let address = operations
+            .iter()
+            .find(|operation| matches!(operation.kind, OperationKind::AddressOffset { .. }))
+            .unwrap();
+        let env = ModuleEnv::new(session.expect_fresh_module(module), session.raw_modules());
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new(template.name, CallResultConvention::Value);
+        builder.set_value_result(int_type());
+        let [condition, argument] = [0, 1].map(|index| {
+            let parameter = template.parameters()[index].clone();
+            mir::Value::Parameter(builder.add_parameter(parameter.ty, parameter.kind))
+        });
+        let [zero, offset] = [0isize, 8].map(|value| {
+            mir::Value::Constant(builder.add_constant(
+                int_type(),
+                LiteralValue::new_native(value),
+                &env,
+            ))
+        });
+        let ty = Type::tuple(vec![int_type(), int_type()]);
+        let entry = builder.add_block();
+        let [read, results @ ..] = [argument.clone(), argument, zero.clone()].map(|argument| {
+            let result = builder
+                .append_operation(entry, Operation::alloca(span, ty))
+                .unwrap();
+            let mut call = call.clone();
+            call.operands = Box::new([call.operands[0].clone(), argument, result.clone()]);
+            builder.append_operation(entry, call);
+            result
+        });
+        let local = builder
+            .append_operation(entry, Operation::alloca(span, ty))
+            .unwrap();
+        let join = builder.add_block();
+        let branches = results.map(|result| {
+            let branch = builder.add_block();
+            builder.append_operation(branch, Operation::move_value(span, result, local.clone()));
+            builder.set_terminator(branch, Terminator::goto(span, join));
+            branch
+        });
+        builder.set_terminator(
+            entry,
+            Terminator::cond_br(span, condition, branches[0], branches[1]),
+        );
+        let OperationKind::AddressOffset { ty, member } = &address.kind else {
+            unreachable!()
+        };
+        let field = |builder: &mut FunctionBuilder, base: mir::Value| {
+            let address = Operation::address_offset(span, base, offset.clone(), *ty, *member);
+            builder.append_operation(join, address).unwrap()
+        };
+        // Reading `read`'s field around `uses` keeps its two addresses live but separated.
+        let load_field = |builder: &mut FunctionBuilder| {
+            let address = field(builder, read.clone());
+            builder
+                .append_operation(join, Operation::load(span, address))
+                .unwrap()
+        };
+        let before = load_field(&mut builder);
+        uses(&mut builder, join, local, &field, session.known_callees());
+        let after = load_field(&mut builder);
+        let (add, add_ty) = session.known_callees().int_add();
+        let sum = Operation::call(
+            span,
+            mir::Value::Function(add),
+            [before, after],
+            add_ty.clone(),
+        );
+        let sum = builder
+            .append_operation(join, sum.with_value_result())
+            .unwrap();
+        builder.set_terminator(join, Terminator::ret_value(span, sum));
+        bodies[compute.as_index()] = Some(builder.finish_physical(env));
+        let semantic = session
+            .mir_artifacts_for(module, MirOptimization::Enabled)
+            .unwrap();
+        let optimized = optimize(bodies, semantic, env, session.known_callees());
+        let body = optimized[compute.as_index()].as_ref().unwrap();
+        let count = |kind: OperationKindDiscriminant| {
+            body.blocks()
+                .flat_map(|block| body.block(block).operations())
+                .filter(|operation| OperationKindDiscriminant::from(&operation.kind) == kind)
+                .count()
+        };
+        let text = body.render_with_source_map(&env).text;
+        assert_eq!(count(OperationKindDiscriminant::Move), 0, "{text}");
+        assert_eq!(count(OperationKindDiscriminant::AddressOffset), 1, "{text}");
     }
 
     #[test]
