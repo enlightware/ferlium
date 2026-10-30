@@ -61,6 +61,7 @@ use crate::{
             EffType, Effect, EffectVar, EffectsInstSubst, PrimitiveEffect, effect, no_effects,
         },
         mutability::{MutType, MutVar, MutVarKey},
+        never::reject_reserved_name,
         r#trait::{Trait, TraitMethodIndex},
         trait_solver::{TraitSolver, TraitSolverProbe},
         r#type::{
@@ -1162,6 +1163,7 @@ impl TypeInference {
                             span: expr_span,
                         }));
                     }
+                    reject_reserved_name(path.segments[0].0, path.segments[0].1)?;
                     // Create a fresh type and add a constraint for that type to include this variant.
                     let variant_ty = self.fresh_type_var_ty();
                     let payload_ty = Type::unit();
@@ -1874,6 +1876,7 @@ impl TypeInference {
                             span: data.path.segments[0].1,
                         }));
                     }
+                    reject_reserved_name(data.path.segments[0].0, data.path.segments[0].1)?;
                     // If it is not a known type def, assume it to be a variant constructor.
                     let (record_node, record_ty, effects) = self.infer_record(env, &fields)?;
                     let record_span =
@@ -6009,6 +6012,7 @@ impl TypeInference {
                         span: path_span,
                     }));
                 }
+                reject_reserved_name(path.segments[0].0, path.segments[0].1)?;
                 // If it is not a known function or trait or type def, assume it to be a variant constructor.
                 let (payload_node_ids, payload_types, effects, diverges) =
                     self.infer_exprs_drop_mut_until_never(env, args)?;

@@ -41,6 +41,7 @@ use crate::{
         effect_polarity::EffectVarPolarities,
         effects::{EffType, Effect, EffectVar, PrimitiveEffect, format_effect_binding_value},
         mutability::{FormatInFnArg, MutType, MutVar},
+        never::NEVER_NAME,
         type_like::{CastableToType, TypeLike},
         type_mapper::TypeMapper,
         type_scheme::TypeScheme,
@@ -2750,7 +2751,7 @@ where
             }
             Ok(())
         }
-        Never => write!(f, "never"),
+        Never => write!(f, "{NEVER_NAME}"),
     }
 }
 
@@ -2853,7 +2854,7 @@ fn fmt_type_kind_with_qualified_name_env(
             }
             Ok(())
         }
-        Never => write!(f, "never"),
+        Never => write!(f, "{NEVER_NAME}"),
     }
 }
 

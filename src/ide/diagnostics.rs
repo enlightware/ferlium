@@ -555,6 +555,14 @@ pub(super) fn compilation_error_to_data(
                 ),
             )]
         }
+        ReservedName { name, span } => {
+            vec![error_data_from_location(
+                span,
+                format!(
+                    "`{name}` is reserved for the type of computations that never produce a value. It cannot name a variant or a type."
+                ),
+            )]
+        }
         RecordWildcardPatternNotAtEnd { pattern_span, .. } => {
             vec![error_data_from_location(
                 pattern_span,

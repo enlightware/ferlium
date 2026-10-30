@@ -13,6 +13,7 @@ use crate::{
     module::{TraitId, Visibility, id::Id},
     types::{
         effects::EffectVar,
+        never::reject_reserved_name,
         r#trait::{
             Trait, TraitAssociatedConst, TraitImplPolicy, TraitMethodIndex, TraitMethodSpans,
             TraitSpans, TraitValidationError,
@@ -636,6 +637,14 @@ fn build_named_type_graph(
     type_aliases: Vec<PTypeAlias>,
     type_defs: Vec<PTypeDef>,
 ) -> Result<NamedTypeGraph, InternalCompilationError> {
+    for (name, span) in type_aliases
+        .iter()
+        .map(|alias| alias.name)
+        .chain(type_defs.iter().map(|def| def.name))
+    {
+        reject_reserved_name(name, span)?;
+    }
+
     // First gather all local aliases and type definitions into a single indexed
     // list. `ty_names` maps source names back to those indices so dependency
     // collection can recognize same-module references without consulting the

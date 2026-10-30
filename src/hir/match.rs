@@ -13,6 +13,7 @@ use crate::{
     },
     std::core_traits_names::REPR_TRAIT_NAME,
     types::mutability::MutVal,
+    types::never::reject_reserved_name,
     types::r#type::TypeKind,
 };
 use itertools::{Itertools, multiunzip};
@@ -197,6 +198,7 @@ impl TypeInference {
                     if let Some(variant) = pattern.kind.as_variant() {
                         let (path, kind, vars) = variant;
                         let (tag, tag_span) = path.tag();
+                        reject_reserved_name(tag, tag_span)?;
                         if path.is_qualified() {
                             let path_span = path.path.span().unwrap_or(pattern.span);
                             match env.get_type_def(&path.path)? {

@@ -1091,6 +1091,10 @@ pub enum CompilationErrorImpl<S: Scope> {
         name: Ustr,
         span: Location,
     },
+    ReservedName {
+        name: Ustr,
+        span: Location,
+    },
     RecordWildcardPatternNotAtEnd {
         pattern_span: Location,
         wildcard_span: Location,
@@ -1869,6 +1873,13 @@ impl FormatWith<SourceTable> for CompilationError {
                     fmt_span(span)
                 )
             }
+            ReservedName { name, span } => {
+                write!(
+                    f,
+                    "Name `{name}` is reserved for the type of computations that never produce a value, found in {}",
+                    fmt_span(span)
+                )
+            }
             RecordWildcardPatternNotAtEnd { pattern_span, .. } => {
                 write!(
                     f,
@@ -2602,6 +2613,9 @@ impl CompilationError {
             }),
             VariantNameConflictsWithType { name, span } => {
                 compilation_error!(VariantNameConflictsWithType { name, span })
+            }
+            ReservedName { name, span } => {
+                compilation_error!(ReservedName { name, span })
             }
             RecordWildcardPatternNotAtEnd {
                 pattern_span,

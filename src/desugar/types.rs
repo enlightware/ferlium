@@ -6,6 +6,7 @@ use crate::compiler::error::{
     AttributeTarget, InvalidAttributeKind, InvalidRecursiveTypeKind, UnsafeFeature,
 };
 use crate::std::{array::array_type_def, value::NO_DERIVE_VALUE_ATTRIBUTE};
+use crate::types::never::reject_reserved_name;
 use crate::types::r#type::{
     BareNativeTypeB, NamedType, PRIVATE_REPR_ATTRIBUTE, TypeAliasEntry, TypeDef as HirTypeDef,
     TypeKind, store_types,
@@ -181,7 +182,8 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
         }
         if let Some(resolved) = resolve_type_path(path, self.env, self.modules_used)? {
             desugar_resolved_type_without_args(resolved, path, span, self.env)
-        } else if let [(name, _)] = &path.segments[..] {
+        } else if let [(name, name_span)] = &path.segments[..] {
+            reject_reserved_name(*name, *name_span)?;
             Ok(self.store_kind(TypeKind::Variant(vec![(*name, Type::unit())]), None))
         } else {
             Err(internal_compilation_error!(TypeNotFound(span)))
@@ -331,6 +333,7 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
                                 },
                             }))
                         } else {
+                            reject_reserved_name(*name, *name_span)?;
                             if self.variant_name_conflicts_with_type(*name, *name_span)? {
                                 return Err(internal_compilation_error!(
                                     VariantNameConflictsWithType {
@@ -837,7 +840,8 @@ impl ast::PType {
                     Type::variable(*ty_var)
                 } else if let Some(resolved) = resolve_type_path(path, env, modules_used)? {
                     desugar_resolved_type_without_args(resolved, path, span, env)?
-                } else if let [(name, _)] = &path.segments[..] {
+                } else if let [(name, name_span)] = &path.segments[..] {
+                    reject_reserved_name(*name, *name_span)?;
                     Type::variant([(*name, Type::unit())])
                 } else {
                     return Err(internal_compilation_error!(TypeNotFound(span)));
@@ -899,6 +903,7 @@ impl ast::PType {
                                     },
                                 }))
                             } else {
+                                reject_reserved_name(*name, *name_span)?;
                                 if generic_ty_params.contains_key(name)
                                     || variant_name_resolves_as_type(
                                         *name,
@@ -1165,10 +1170,11 @@ fn collect_trait_impl_generic_ty_params_from_ty(
     match ty {
         Never | Unit | Infer | Resolved(_) => {}
         Path(path) => {
-            if let [(name, _)] = &path.segments[..]
+            if let [(name, name_span)] = &path.segments[..]
                 && env.type_alias_with_module(path)?.is_none()
                 && env.type_def_with_module(path)?.is_none()
             {
+                reject_reserved_name(*name, *name_span)?;
                 generic_ty_params.entry(*name).or_insert_with(|| {
                     let ty_var = TypeVar::new(*next_index);
                     *next_index += 1;
@@ -1277,6 +1283,7 @@ pub(crate) fn extend_generic_ty_params(
     let next_index = next_free_generic_ty_var(existing);
     let mut generic_ty_params = existing.clone();
     for (generic_index, param) in generic_params.iter().enumerate() {
+        reject_reserved_name(param.0, param.1)?;
         let ty_var = TypeVar::new(next_index + generic_index as u32);
         if generic_ty_params.insert(param.0, ty_var).is_some() {
             return Err(invalid_generic_params_error(owner, param.0, param.1));

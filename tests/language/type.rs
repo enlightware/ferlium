@@ -953,3 +953,48 @@ fn trait_method_circular_deps() {
         }
     "# });
 }
+
+/// `never` names the bottom type, so a variant tag or type name spelled the same would display like it.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn never_is_reserved() {
+    let mut session = TestSession::new();
+    for (source, span) in [
+        ("fn f(x: never) { 0 }", 8..13),
+        ("let a: [never] = []; 0", 8..13),
+        ("let x: never | Foo = Foo; 0", 7..12),
+        ("type T = A | never(int); 0", 13..18),
+        ("enum E { never } 0", 9..14),
+        ("never", 0..5),
+        ("never(1)", 0..5),
+        ("never { a: 1 }", 0..5),
+        ("match Foo { never => 0, _ => 1 }", 12..17),
+        ("type never = int; let x: never = 1; x", 5..10),
+        ("struct never; never", 7..12),
+        ("enum never { A } 0", 5..10),
+        ("fn f<never>(x: never) { x } 0", 5..10),
+        ("struct S<never>(never) 0", 9..14),
+        (
+            "trait Tr<Self> { fn m(x: Self) -> int; } impl Tr for never { fn m(x) { 0 } } 0",
+            53..58,
+        ),
+        (
+            "trait Tr<Self> { fn m(x: Self) -> int; } impl Tr for [never] { fn m(x) { 0 } } 0",
+            54..59,
+        ),
+    ] {
+        let error = session.fail_compilation(source).into_inner();
+        let CompilationErrorImpl::ReservedName {
+            name,
+            span: error_span,
+        } = error
+        else {
+            panic!("unexpected diagnostic for {source}: {error:?}")
+        };
+        assert_eq!(name, ustr("never"), "{source}");
+        assert_eq!(error_span.as_range(), span, "{source}");
+    }
+    // The name stays free outside variants.
+    assert_val_eq!(session.run("let never = 1; never"), int(1));
+    assert_val_eq!(session.run("#[inline(never)] fn f() { 2 } f()"), int(2));
+}

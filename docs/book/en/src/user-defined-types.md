@@ -129,6 +129,8 @@ type Value = bool | int;
 type Value = Bool(bool) | Int(int);
 ```
 
+The name `never` is reserved for the type of computations that never produce a value, so it cannot name a tag or a type.
+
 ### Inference with sum types
 
 Inference works with sum types as well.
