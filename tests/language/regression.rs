@@ -185,6 +185,41 @@ fn a_mutability_mismatch_on_a_piped_argument_does_not_panic() {
     assert_eq!(*ctx, MutabilityMustBeContext::FnTypeArg(0));
 }
 
+/// A value used both as an array and as its index has incompatible upper bounds. Their only common
+/// subtype is `never`, which would make the function uncallable and its body ill-formed, so this is
+/// a type error at the two uses, also when the value is nested or bound by a pattern.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_value_used_as_incompatible_types_is_a_type_error() {
+    let mut session = TestSession::new();
+    for (source, container, index) in [
+        ("fn b(a) { a[a] }", 10..11, 12..13),
+        ("fn b(c, a, d) { a[a] = 0 }", 16..17, 18..19),
+        ("fn b(c, a) { if c { a[a] } else { 0 } }", 20..21, 22..23),
+        ("fn b(a) { a.1[a.1] }", 10..13, 14..17),
+        ("fn b(a) { a.x[a.x] }", 10..13, 14..17),
+        (
+            "fn f(o) { match o { Some(x) => x[x], None => 0 } }",
+            31..32,
+            33..34,
+        ),
+    ] {
+        let error = session.fail_compilation(source).into_inner();
+        let CompilationErrorImpl::TypeMismatch {
+            current_ty,
+            current_span,
+            expected_span,
+            ..
+        } = error
+        else {
+            panic!("unexpected diagnostic for {source}: {error:?}")
+        };
+        assert_eq!(current_ty, "int", "{source}");
+        assert_eq!(current_span.as_range(), index, "{source}");
+        assert_eq!(expected_span.as_range(), container, "{source}");
+    }
+}
+
 /// The same analysis reaches a subscript index before type checking rejects it, so an index that is
 /// not an integer literal is dynamic rather than an integer to read out.
 #[test]

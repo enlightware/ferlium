@@ -6,7 +6,7 @@
 use std::{collections::hash_map::Entry, mem};
 
 use super::{
-    ground_bounds::{BoundOperation, ground_bound, symbolic_bound},
+    ground_bounds::{BoundOperation, collapsed_meet, selected_bound},
     type_bounds::TypeBound,
     unify::{SubOrSameType, UnifiedTypeInference},
 };
@@ -553,11 +553,27 @@ impl UnifiedTypeInference {
             return Ok(None);
         };
         let mut candidate = endpoint(first);
-        for bound in &bounds[1..] {
+        // The first pair whose meet collapsed, reported if no later bound justifies it.
+        let mut collapse = None;
+        // A contributor undecidable against the current candidate may become decidable once
+        // other contributors refine it, for instance when a `Never` bound justifies a collapsed
+        // meet. Defer it rather than give up, so the outcome does not depend on bound order.
+        // Popped from the back, so reversed to keep span order for diagnostics.
+        let mut pending: Vec<&TypeBound> = bounds[1..].iter().rev().collect();
+        let mut deferred = Vec::new();
+        let mut progress = false;
+        while let Some(bound) = pending.pop().or_else(|| {
+            if !mem::take(&mut progress) {
+                return None;
+            }
+            pending = mem::take(&mut deferred);
+            pending.reverse();
+            pending.pop()
+        }) {
             let other = endpoint(bound);
             self.selection_stats.products += 1;
             let result = if candidate.is_constant() && other.is_constant() {
-                ground_bound(candidate, other, operation)
+                selected_bound(candidate, other, operation, None)
             } else {
                 let mut effect_meet = |left: &EffType, right: &EffType| {
                     let result = EffType::single_variable(self.fresh_effect_var());
@@ -568,11 +584,17 @@ impl UnifiedTypeInference {
                         .expect("fresh effect lower bound");
                     result
                 };
-                symbolic_bound(candidate, other, operation, Some(&mut effect_meet))
+                selected_bound(candidate, other, operation, Some(&mut effect_meet))
             };
             match result {
-                Ok(Some(ty)) => candidate = ty,
-                Err(_) => return Ok(None),
+                Ok(Some(ty)) => {
+                    if collapse.is_none() && contains_collapsed_meet(ty) {
+                        collapse = Some((other, bound.lower_span, candidate));
+                    }
+                    candidate = ty;
+                    progress = true;
+                }
+                Err(_) => deferred.push(bound),
                 Ok(None) => {
                     if let (TypeKind::Named(current), TypeKind::Named(expected)) =
                         (&*other.data(), &*candidate.data())
@@ -595,6 +617,20 @@ impl UnifiedTypeInference {
                     }));
                 }
             }
+        }
+        if !deferred.is_empty() {
+            return Ok(None);
+        }
+        if let Some((other, other_span, previous)) = collapse
+            && contains_collapsed_meet(candidate)
+        {
+            return Err(internal_compilation_error!(TypeMismatch {
+                current_ty: other,
+                current_span: other_span,
+                expected_ty: previous,
+                expected_span: first.lower_span,
+                sub_or_same: SubOrSameType::SubType,
+            }));
         }
         Ok(Some(candidate))
     }
@@ -829,11 +865,31 @@ impl UnifiedTypeInference {
     }
 }
 
+/// Whether a selected bound still holds a meet of incompatible types.
+fn contains_collapsed_meet(ty: Type) -> bool {
+    let marker = collapsed_meet();
+    let mut seen = FxHashSet::default();
+    let mut pending = vec![ty];
+    while let Some(ty) = pending.pop() {
+        if ty == marker {
+            return true;
+        }
+        if seen.insert(ty) {
+            ty.data().for_each_inner_type(|child| pending.push(child));
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use itertools::Itertools;
+
     use crate::{
+        SourceId,
         compiler::error::CompilationErrorImpl,
+        module::id::Id,
         std::{logic::bool_type, math::int_type},
     };
 
@@ -1122,6 +1178,46 @@ mod tests {
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_collapsed_meet_is_rejected_unless_a_bound_justifies_it_in_any_order() {
+        // Selection folds bounds in span order, so spans set the order.
+        let span = |position| Location::new_usize(position, position + 1, SourceId::from_index(1));
+        let var = Type::variable_id(0);
+        let unknown = Type::variable_id(1);
+        let returning = |ty| Type::nullary_function_by_val(ty);
+        let select = |uppers: Vec<Type>| {
+            let mut inference = UnifiedTypeInference::new_with_ty_vars(2);
+            for (position, upper) in uppers.into_iter().enumerate() {
+                inference
+                    .unify_sub_type(var, span(position), upper, span(position))
+                    .unwrap();
+            }
+            inference
+                .publish_type_bounds()
+                .map(|()| inference.substitute_in_type(var))
+        };
+        let int = returning(int_type());
+        let bool = returning(bool_type());
+        let never = returning(Type::never());
+        let symbolic = returning(unknown);
+        for (uppers, expected) in [
+            (vec![int, bool], None),
+            (vec![int, bool, never], Some(never)),
+            // An unresolved contributor must not stop the fold before the justifying bound.
+            (vec![int, bool, symbolic, never], Some(never)),
+            (vec![int, bool, symbolic], None),
+        ] {
+            let count = uppers.len();
+            for order in uppers.into_iter().permutations(count) {
+                let result = select(order.clone());
+                match expected {
+                    Some(expected) => assert_eq!(result.unwrap(), expected, "{order:?}"),
+                    None => assert!(result.is_err(), "{order:?}"),
                 }
             }
         }

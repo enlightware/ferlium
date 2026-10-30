@@ -13,7 +13,7 @@
 use std::mem;
 
 use crate::{
-    FxHashMap, FxHashSet,
+    FxHashMap, FxHashSet, cached_primitive_ty,
     parser::location::Location,
     types::{
         effects::EffType,
@@ -98,8 +98,10 @@ pub(super) struct UnresolvedBound;
 
 type EffectMeet<'a> = Option<&'a mut dyn FnMut(&EffType, &EffType) -> EffType>;
 
-/// `None` means the join is unrepresentable. Binary meet always has a result.
-/// Reject unknowns even in identical inputs: equality does not make them ground.
+/// The exact lattice bound: `None` means the join is unrepresentable, while a
+/// binary meet always has a result. Reject unknowns even in identical inputs:
+/// equality does not make them ground.
+#[cfg(test)]
 pub(super) fn ground_bound(
     left: Type,
     right: Type,
@@ -108,26 +110,44 @@ pub(super) fn ground_bound(
     if !left.is_constant() || !right.is_constant() {
         return Err(UnresolvedBound);
     }
-    known_bound(left, right, operation)
+    bound_product(left, right, operation, None, false)
+}
+
+/// Stands for a meet of incompatible types while selection folds a variable's
+/// upper bounds. A bound that is `Never` at the same position justifies it:
+/// their meet is `Never`. Meeting anything else keeps it, so the fold's
+/// outcome does not depend on the order of the bounds. It never escapes
+/// selection.
+struct CollapsedMeet;
+
+pub(super) fn collapsed_meet() -> Type {
+    cached_primitive_ty!(CollapsedMeet)
+}
+
+/// The bound that selection may choose for a variable. Unlike the lattice
+/// meet, a meet of incompatible types is `collapsed_meet()` rather than
+/// `Never`: `Never` is their only common subtype, and choosing it would use
+/// bottom as an inference wildcard. A join's collapsed meet remains `Never`:
+/// that `Never` is a callable argument.
+pub(super) fn selected_bound(
+    left: Type,
+    right: Type,
+    operation: BoundOperation,
+    effect_meet: EffectMeet<'_>,
+) -> Result<Option<Type>, UnresolvedBound> {
+    bound_product(left, right, operation, effect_meet, true)
 }
 
 /// A symbolic product is usable only when every constructor decision is known.
 /// Identical symbolic leaves and bottom identities are exact for every
 /// instantiation. An undecidable equality or meet blocks the whole operation;
 /// it must not be mistaken for a failed join and collapse an enclosing meet.
-pub(super) fn known_bound(
-    left: Type,
-    right: Type,
-    operation: BoundOperation,
-) -> Result<Option<Type>, UnresolvedBound> {
-    symbolic_bound(left, right, operation, None)
-}
-
-pub(super) fn symbolic_bound(
+fn bound_product(
     left: Type,
     right: Type,
     operation: BoundOperation,
     effect_meet: EffectMeet<'_>,
+    mark_collapsed_meet: bool,
 ) -> Result<Option<Type>, UnresolvedBound> {
     let mut product = Product {
         effect_meet,
@@ -180,13 +200,20 @@ pub(super) fn symbolic_bound(
     if failed[root_index] && operation == BoundOperation::Join {
         return Ok(None);
     }
+    // Under a meet, every meet state shares the root's polarity, and a failed
+    // join can only be absorbed by collapsing an enclosing meet.
+    let collapsed = if mark_collapsed_meet && operation == BoundOperation::Meet {
+        collapsed_meet().data().clone()
+    } else {
+        TypeKind::Never
+    };
     let kinds: Vec<_> = product
         .kinds
         .into_iter()
         .enumerate()
         .map(|(index, kind)| {
             if failed[index] {
-                TypeKind::Never
+                collapsed.clone()
             } else {
                 kind.expect("successful product state has a constructor")
             }

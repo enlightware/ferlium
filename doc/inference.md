@@ -99,6 +99,8 @@ For an unresolved inference variable `a`, `Never <: a` imposes no restriction; a
 can determine its type. Conversely, `a <: Never` and equality with `Never` bind `a` to `Never`.
 Defaulting unconstrained diverging returns and unused variant payloads remains a separate step
 with its own eligibility checks. Bottom is neither an inference wildcard nor a universal default.
+In particular, selection does not resolve incompatible upper bounds, such as `a <: int` and
+`a <: [b]` from `a[a]`, to their meet `Never` or to a type containing it: that is a type error.
 
 With `diverge: () -> Never` and `one: () -> int`, either contributor order in
 `if c { one } else { diverge }` infers a callable returning `int`. Callable joins may also infer
