@@ -429,12 +429,13 @@ function shardsOf(names, count) {
     return shards;
 }
 
-/// Merge the shards of one axis, of which exactly one measured the standard library build.
-function mergeShards(shards) {
+/// Merge the shards of one axis, of which exactly one measured the standard library build, unless
+/// `measuresStd` is false.
+function mergeShards(shards, measuresStd) {
     const merged = new Map();
     const stdShards = shards.filter(({ dumps }) => dumps.has('phase=std_build'));
-    if (stdShards.length !== 1) {
-        throw new Error(`expected one standard library range, found ${stdShards.length}`);
+    if (stdShards.length !== Number(measuresStd)) {
+        throw new Error(`expected ${Number(measuresStd)} standard library range, found ${stdShards.length}`);
     }
     for (const { dumps, moduleBytes } of shards) {
         const stdBuild = dumps.get('phase=std_build');
@@ -491,6 +492,9 @@ async function main() {
     // The unoptimized axis is only a reference point; skipping it halves the processes to run,
     // leaving room for a concurrent run of another checkout.
     const axes = args.includes('--optimized-only') ? AXES.filter((axis) => axis.optimized) : AXES;
+    // The standard library build is the longest worker, so skipping it shortens a run to its
+    // workloads; the baseline keeps the last standard library measurement.
+    const measuresStd = !args.includes('--no-std');
     const names = args.filter((arg) => !arg.startsWith('--'));
     const selected = names.length === 0 ? available : names;
     for (const name of selected) {
@@ -511,17 +515,19 @@ async function main() {
     // total work for wall time. That trade is only sound because Callgrind counts the simulated
     // program: what else runs on the machine cannot move the numbers.
     const jobs = count('jobs', Math.max(1, Math.round(Number(process.env.BENCH_JOBS ?? availableParallelism() / 2))));
-    // Shard as if both axes ran, even when one does: the runtime code a workload executes depends on
-    // what ran before it in the same process, so only equal shardings give comparable counts. Each
-    // axis keeps one of its jobs for the standard library build.
+    // Shard as if both axes ran and the standard library were measured, even when not: the runtime
+    // code a workload executes depends on what ran before it in the same process, so only equal
+    // shardings give comparable counts. Each axis keeps one of its jobs for the standard library
+    // build.
     const shards = shardsOf(selected, Math.max(1, Math.min(Math.floor(jobs / AXES.length) - 1, selected.length)));
-    console.log(`${axes.length} axes x (std + ${shards.length} shard(s) of ${selected.length} workload(s)), ${jobs} at a time\n`);
+    const stdLabel = measuresStd ? 'std + ' : '';
+    console.log(`${axes.length} axes x (${stdLabel}${shards.length} shard(s) of ${selected.length} workload(s)), ${jobs} at a time\n`);
 
-    const options = { axes, batch, mirBatch, selected };
+    const options = { axes, batch, mirBatch, selected, measuresStd };
     const started = Date.now();
     // The standard library builds go first: they are the longest workers.
     const finished = await inParallel(jobs, [
-        ...axes.map((axis) => () => runShard(valgrind, axis, 'std', options, [selected[0]])),
+        ...(measuresStd ? axes : []).map((axis) => () => runShard(valgrind, axis, 'std', options, [selected[0]])),
         ...axes.flatMap(
             (axis) => shards.map((names, shard) => () => runShard(valgrind, axis, shard, options, names)),
         ),
@@ -529,9 +535,9 @@ async function main() {
     console.log(`measured in ${((Date.now() - started) / 1000).toFixed(0)}s\n`);
 
     const results = new Map(axes.map(
-        (axis) => [axis.id, mergeShards(finished.filter((shard) => shard.axis === axis.id))],
+        (axis) => [axis.id, mergeShards(finished.filter((shard) => shard.axis === axis.id), measuresStd)],
     ));
-    validate(results, axes, selected, batch, mirBatch);
+    validate(results, options);
 
     // Counts only mean the same thing under the same harness, engine, tool and batch sizes.
     const run = { protocol: PROTOCOL, node: process.version, valgrind: version, arch: process.arch, batch, mirBatch };
@@ -564,10 +570,10 @@ async function inParallel(limit, tasks) {
 }
 
 /// Fail loudly rather than report a range that measured nothing.
-function validate(results, axes, selected, batch, mirBatch) {
+function validate(results, { axes, selected, batch, mirBatch, measuresStd }) {
     for (const axis of axes) {
         const dumps = results.get(axis.id);
-        if (!dumps.get('phase=std_build')?.Instructions) {
+        if (measuresStd && !dumps.get('phase=std_build')?.Instructions) {
             throw new Error(`${axis.id} collected nothing for the standard library build`);
         }
         for (const name of selected) {
