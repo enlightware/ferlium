@@ -784,6 +784,32 @@ fn generic_lifecycle_methods_are_specialized_at_the_dispatched_type() {
     );
 }
 
+/// An inlined lookup builds its `Option` result, then runs its own cleanup before the caller tests
+/// the tag. Forwarding replays that cleanup on each construction path, and the drops lowering puts
+/// on failure paths before the result exists go, so the value is borrowed from the map.
+#[test]
+fn a_map_lookup_reads_its_value_in_place() {
+    for (name, body) in [
+        (
+            "int keys",
+            "fn view(t: map<int, [int]>) -> int { match map_get(t, 3) { Some(v) => len(v), None => 0 } }",
+        ),
+        (
+            "string keys",
+            "fn view(t: map<string, [int]>) -> int { match map_get(t, \"a\") { Some(v) => len(v), None => 0 } }",
+        ),
+    ] {
+        let optimized = emit("map_lookup", body, MirOptimization::Enabled);
+        let view = rendered_function(&optimized, "view");
+        assert!(
+            !view
+                .lines()
+                .any(|line| line.trim_start().starts_with("clone ")),
+            "{name}: the looked-up value must be read in place:\n{view}"
+        );
+    }
+}
+
 /// Traversing a hash collection steps through its buckets with the generic `Value` impl of the
 /// optional entry, closed over the key and value dictionaries at run time. Once those are
 /// constants, the closed dictionary is static evidence: dropping and cloning a bucket are direct

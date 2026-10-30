@@ -858,7 +858,11 @@ definitions store statically tagged shells. Multiple tag reads may feed `switch_
 directly from the place or through an immediately preceding load. A forward analysis tracks known
 tags through joins; drops, clears and re-executed allocations reset that knowledge. Constructor
 paths with known tags jump directly to the selected case, retaining payload storage and replaying
-intervening stack restores. A path may leave its constructor along an `invoke`'s normal edge, as
+intervening stack restores. The join may also end other locals' lifetimes before its tag test, as
+an inlined callee's epilogue does after building its variant result: each redirected path replays
+those drops too, so each path still runs the cleanup once, at the same point. A stack marker taken
+last in the join, by a spliced destructor, moves to the one consumer that restores it, since only
+the tag test separates the two. A path may leave its constructor along an `invoke`'s normal edge, as
 an inlined iterator's `next` does when a fallible callback computes the payload after `Some` is
 stored: only that edge is redirected, and the call and its error edge stay. A switch whose tag is already known within its own block becomes a
 direct jump even when other work precedes the tag read; that work remains in place. The variant

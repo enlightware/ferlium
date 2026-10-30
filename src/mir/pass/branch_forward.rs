@@ -30,7 +30,10 @@
 //! stores `Some` before computing its payload: a forward analysis gives the tag each block leaves,
 //! and the join's predecessors that leave a known tag are redirected. Drops and clears invalidate
 //! tag knowledge; payload ownership operations remain in place. Escaping storage is outside this
-//! rule. A one-case `comp_eq` tag test is instead replaced by a boolean shadow of the variant's
+//! rule. The variant's join may also end other locals' lifetimes before its tag test, as an inlined
+//! callee's epilogue does after building its result: each arm replays those drops, as it does stack
+//! restores. A stack marker taken last in that join, by a spliced destructor, moves to the one
+//! consumer that restores it. A one-case `comp_eq` tag test is instead replaced by a boolean shadow of the variant's
 //! stores, which leaves the flag shape above.
 //!
 //! A store need not sit in an immediate predecessor of the join. A short-circuit `or` or `and` with
@@ -128,6 +131,9 @@ enum Exit {
 
 struct Forward {
     arms: Vec<Arm>,
+    /// A stack marker taken in the bypassed join, moved to the start of the one consumer that
+    /// restores it.
+    sunk_save: Option<(BlockId, Operation)>,
 }
 
 /// Bypasses boolean storage diamonds, returning `None` when the function has none.
@@ -393,6 +399,12 @@ pub(crate) fn forward_variant_branches(func: &Function) -> Option<Function> {
     }
 
     let incoming = incoming_predecessors(func);
+    let local_allocas: FxHashSet<_> = func
+        .blocks()
+        .flat_map(|block| func.block(block).operations())
+        .filter(|operation| matches!(operation.kind, OperationKind::Alloca { .. }))
+        .filter_map(Operation::result_id)
+        .collect();
     let tags: FxHashMap<_, _> = uses
         .iter()
         .map(|(&storage, summary)| {
@@ -402,19 +414,17 @@ pub(crate) fn forward_variant_branches(func: &Function) -> Option<Function> {
             )
         })
         .collect();
+    let facts = VariantFacts {
+        local_allocas: &local_allocas,
+        incoming: &incoming,
+        uses: &uses,
+        extract_uses: &extract_uses,
+        tag_loads: &tag_loads,
+        tags: &tags,
+    };
     let forwards: Vec<_> = func
         .blocks()
-        .filter_map(|join| {
-            plan_variant_join(
-                func,
-                join,
-                &incoming,
-                &uses,
-                &extract_uses,
-                &tag_loads,
-                &tags,
-            )
-        })
+        .filter_map(|join| plan_variant_join(func, join, &facts))
         .collect();
     // Cleanup expansion can leave a known-tag switch after ordinary work in its block.
     // Keep that work and fold just the terminator; bypassing the block would be wrong.
@@ -465,6 +475,9 @@ pub(crate) fn forward_variant_branches(func: &Function) -> Option<Function> {
         edit.block_mut(block).terminator = Exit::Goto(target).terminator(span);
     }
     for forward in forwards {
+        if let Some((consumer, save)) = forward.sunk_save {
+            edit.block_mut(consumer).operations.insert(0, save);
+        }
         for arm in forward.arms {
             arm.redirect(&mut edit);
         }
@@ -474,15 +487,25 @@ pub(crate) fn forward_variant_branches(func: &Function) -> Option<Function> {
     Some(edit.finish_unverified())
 }
 
-fn plan_variant_join(
-    func: &Function,
-    join: BlockId,
-    incoming: &[Vec<BlockId>],
-    uses: &FxHashMap<ValueId, VariantUses>,
-    extract_uses: &FxHashMap<ValueId, usize>,
-    tag_loads: &FxHashMap<ValueId, (ValueId, OperationSite)>,
-    tags: &FxHashMap<ValueId, Vec<ExitTag>>,
-) -> Option<Forward> {
+/// The function-wide facts variant join planning reads.
+struct VariantFacts<'a> {
+    local_allocas: &'a FxHashSet<ValueId>,
+    incoming: &'a [Vec<BlockId>],
+    uses: &'a FxHashMap<ValueId, VariantUses>,
+    extract_uses: &'a FxHashMap<ValueId, usize>,
+    tag_loads: &'a FxHashMap<ValueId, (ValueId, OperationSite)>,
+    tags: &'a FxHashMap<ValueId, Vec<ExitTag>>,
+}
+
+fn plan_variant_join(func: &Function, join: BlockId, facts: &VariantFacts<'_>) -> Option<Forward> {
+    let VariantFacts {
+        local_allocas,
+        incoming,
+        uses,
+        extract_uses,
+        tag_loads,
+        tags,
+    } = *facts;
     let block = func.block(join);
     let read_index = block.operations().len().checked_sub(1)?;
     let read = &block.operations()[read_index];
@@ -522,19 +545,63 @@ fn plan_variant_join(
     let is_load = |operation: &Operation| {
         matches!(operation.kind, OperationKind::Load) && operation.result_id() == Some(*variant)
     };
+    // Besides stack restores, the join may end the lifetimes of other locals, as an inlined
+    // callee's epilogue does after building its variant result. Each path runs exactly one copy of
+    // that cleanup at the same point, so the arms can replay it. Its operands must be defined above
+    // the join, hence dominate every arm.
+    let defined_in_join: FxHashSet<_> = block
+        .operations()
+        .iter()
+        .filter_map(Operation::result_id)
+        .collect();
+    let replayable_cleanup = |operation: &Operation| {
+        matches!(
+            operation.kind,
+            OperationKind::Drop { .. } | OperationKind::Clear
+        ) && matches!(
+            operation.operands.first(),
+            Some(mir::Value::Register(target))
+                if target != storage && local_allocas.contains(target)
+        ) && operation.operands.iter().all(
+            |operand| !matches!(operand, mir::Value::Register(id) if defined_in_join.contains(id)),
+        )
+    };
+    // A spliced destructor brackets its body with a stack marker taken just before its tag test.
+    // Only the tag read separates it from the switch, and neither changes the frontier, so taking
+    // it at the start of the one consumer that restores it records the same mark.
+    let save_index = block.operations()[..read_index]
+        .iter()
+        .rposition(|operation| !is_load(operation))
+        .filter(|&index| matches!(block.operations()[index].kind, OperationKind::StackSave));
+    let sunk_save = match save_index {
+        Some(index) => Some(sink_target(
+            func,
+            join,
+            incoming,
+            &block.operations()[index],
+        )?),
+        None => None,
+    };
     if !summary.reads.contains(&read_site)
-        || !block.operations()[..read_index].iter().all(|operation| {
-            matches!(operation.kind, OperationKind::StackRestore) || is_load(operation)
-        })
+        || !block.operations()[..read_index]
+            .iter()
+            .enumerate()
+            .all(|(index, operation)| {
+                Some(index) == save_index
+                    || matches!(operation.kind, OperationKind::StackRestore)
+                    || is_load(operation)
+                    || replayable_cleanup(operation)
+            })
     {
         return None;
     }
 
-    // The arms replay the join's stack restores; the load goes with the read.
+    // The arms replay the join's stack restores and cleanup; the load goes with the read.
     let join_prefix = block.operations()[..read_index]
         .iter()
-        .filter(|operation| !is_load(operation))
-        .cloned()
+        .enumerate()
+        .filter(|&(index, operation)| Some(index) != save_index && !is_load(operation))
+        .map(|(_, operation)| operation.clone())
         .collect::<Vec<_>>();
     let mut arms = Vec::with_capacity(summary.stores.len());
     // The tag each path leaves decides its consumer, however far up it was stored: paths that
@@ -554,13 +621,53 @@ fn plan_variant_join(
             .unwrap_or(*default);
         let mut replay = reaching.replay;
         replay.extend(join_prefix.iter().cloned());
+        if replay.len() > FORWARD_BOOLEAN_REPLAYED_OPERATIONS {
+            return None;
+        }
         arms.push(Arm {
             source: reaching.source,
             exit: Exit::Goto(target),
             replay,
         });
     }
-    Some(Forward { arms })
+    Some(Forward { arms, sunk_save })
+}
+
+/// The block a stack marker taken at the end of `join` can move to: the one successor holding
+/// every use of the marker, reached only from `join`.
+fn sink_target(
+    func: &Function,
+    join: BlockId,
+    incoming: &[Vec<BlockId>],
+    save: &Operation,
+) -> Option<(BlockId, Operation)> {
+    let marker = mir::Value::Register(save.result_id()?);
+    let mut consumer = None;
+    for block in func.blocks() {
+        let basic = func.block(block);
+        let used = basic
+            .operations()
+            .iter()
+            .flat_map(|operation| operation.operands.iter())
+            .chain(basic.terminator().operands())
+            .any(|operand| *operand == marker);
+        if used {
+            if block == join || consumer.is_some_and(|consumer| consumer != block) {
+                return None;
+            }
+            consumer = Some(block);
+        }
+    }
+    let consumer = consumer?;
+    (incoming[consumer.as_index()]
+        .iter()
+        .all(|&from| from == join)
+        && func
+            .block(join)
+            .terminator()
+            .successors()
+            .any(|to| to == consumer))
+    .then(|| (consumer, save.clone()))
 }
 
 /// Replaces tag tests on local variants with loads of boolean shadows, returning `None` when there
@@ -939,7 +1046,10 @@ fn plan_join(
         })
         .collect();
 
-    Some(Forward { arms })
+    Some(Forward {
+        arms,
+        sunk_save: None,
+    })
 }
 
 /// One block found by the backward walk to decide the value the join sees, with the cleanup between
@@ -1609,6 +1719,227 @@ mod tests {
             forwarded.block(*error).terminator().kind,
             TerminatorKind::PropagateError
         ));
+    }
+
+    /// How the join of [`cleanup_join`] uses a stack marker.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Marker {
+        /// No marker.
+        None,
+        /// Taken last in the join, restored by the `Some` consumer only.
+        SomeConsumer,
+        /// Restored by both consumers.
+        BothConsumers,
+        /// Restored by the `Some` consumer, which the `None` consumer also reaches.
+        SharedConsumer,
+    }
+
+    /// A variant built on two paths, `Some` leaving along an `invoke`'s normal edge, whose join
+    /// drops another local before its tag test, as an inlined callee's epilogue does, then
+    /// optionally takes a stack marker, as a spliced destructor does. Returns the forwarded body,
+    /// verified, if forwarding applies.
+    fn cleanup_join(marker: Marker) -> Option<crate::mir::Function> {
+        let mut session = CompilerSession::new();
+        let module = session
+            .compile(
+                "pub fn dispose(x: &mut int) {}",
+                "cleanup_join",
+                crate::Path::single_str("cleanup_join"),
+            )
+            .unwrap()
+            .module_id;
+        let source = session.expect_fresh_module(module);
+        let dispose = crate::module::FunctionId::new(
+            module,
+            source.get_local_function_id("dispose".into()).unwrap(),
+        );
+        let env = crate::module::ModuleEnv::new(source, session.raw_modules());
+        let span = Location::new_synthesized();
+        let some = ustr("Some");
+        let none = ustr("None");
+        let payload_ty = Type::tuple([int_type()]);
+        let variant_ty = Type::variant([(none, Type::unit()), (some, payload_ty)]);
+        let callee_ty = FnType::new_mut_resolved(
+            [],
+            Type::unit(),
+            EffType::single_primitive(PrimitiveEffect::Fallible),
+        );
+        let mut builder = FunctionBuilder::new("cleanup_join".into(), Default::default());
+        let flag = builder.add_parameter(Type::primitive::<bool>(), ParameterKind::Value);
+        let callee = builder.add_parameter(
+            Type::function_type(callee_ty.clone()),
+            ParameterKind::Place(ArgConvention::Let),
+        );
+        let entry = builder.add_block();
+        let some_source = builder.add_block();
+        let none_source = builder.add_block();
+        let failure = builder.add_block();
+        let join = builder.add_block();
+        let some_target = builder.add_block();
+        let none_target = builder.add_block();
+
+        let storage = builder
+            .append_operation(entry, Operation::alloca(span, variant_ty))
+            .unwrap();
+        let other = builder
+            .append_operation(entry, Operation::alloca(span, int_type()))
+            .unwrap();
+        let one = Value::Constant(builder.add_constant(
+            int_type(),
+            LiteralValue::new_native(1isize),
+            &env,
+        ));
+        builder.append_operation(entry, Operation::store(span, one, other.clone()));
+        builder.set_terminator(
+            entry,
+            Terminator::cond_br(span, Value::Parameter(flag), some_source, none_source),
+        );
+        for (block, tag, payload) in [
+            (some_source, some, payload_ty),
+            (none_source, none, Type::unit()),
+        ] {
+            let shell = builder
+                .append_operation(
+                    block,
+                    Operation::variant(
+                        span,
+                        tag,
+                        variant_ty,
+                        payload,
+                        Some(VariantPayloadStorage::Inline),
+                        None,
+                        None,
+                    ),
+                )
+                .unwrap();
+            builder.append_operation(block, Operation::store(span, shell, storage.clone()));
+        }
+        builder.set_terminator(
+            some_source,
+            Terminator::invoke(
+                span,
+                Operation::call(
+                    span,
+                    Value::Parameter(callee),
+                    [],
+                    CallImplType::new(callee_ty, CallResultConvention::NoValue),
+                ),
+                join,
+                failure,
+            ),
+        );
+        builder.set_terminator(none_source, Terminator::goto(span, join));
+        builder.set_terminator(failure, Terminator::propagate_error(span));
+        builder.append_operation(
+            join,
+            Operation::drop(span, other, Value::Function(dispose), int_type()),
+        );
+        let saved = (marker != Marker::None).then(|| {
+            builder
+                .append_operation(join, Operation::stack_save(span))
+                .unwrap()
+        });
+        let tag = builder
+            .append_operation(join, Operation::extract_tag(span, storage))
+            .unwrap();
+        builder.set_terminator(
+            join,
+            Terminator::switch_variant(span, tag, vec![(some, some_target)], none_target),
+        );
+        if let Some(saved) = &saved {
+            builder.append_operation(some_target, Operation::stack_restore(span, saved.clone()));
+            if marker == Marker::BothConsumers {
+                builder
+                    .append_operation(none_target, Operation::stack_restore(span, saved.clone()));
+            }
+        }
+        builder.set_terminator(some_target, Terminator::ret(span));
+        builder.set_terminator(
+            none_target,
+            if marker == Marker::SharedConsumer {
+                Terminator::goto(span, some_target)
+            } else {
+                Terminator::ret(span)
+            },
+        );
+
+        let function = builder.finish(env);
+        let forwarded = forward_variant_branches(&function)?;
+        crate::mir::verify::verify_function(&forwarded, env);
+        Some(forwarded)
+    }
+
+    fn count_operations(
+        function: &crate::mir::Function,
+        kind: impl Fn(&OperationKind) -> bool,
+    ) -> usize {
+        function
+            .blocks()
+            .flat_map(|block| function.block(block).operations())
+            .filter(|operation| kind(&operation.kind))
+            .count()
+    }
+
+    /// Each constructor path, including the one leaving along an `invoke`'s normal edge, replays
+    /// the join's drop of another local, so the tag test goes.
+    #[test]
+    fn a_join_ending_another_lifetime_is_forwarded_with_its_cleanup_replayed() {
+        let forwarded = cleanup_join(Marker::None).expect("the join is forwarded");
+        assert!(
+            !forwarded.blocks().any(|block| matches!(
+                forwarded.block(block).terminator().kind,
+                TerminatorKind::SwitchVariant { .. }
+            )),
+            "both constructor paths must select their consumers directly"
+        );
+        assert_eq!(
+            count_operations(&forwarded, |kind| matches!(
+                kind,
+                OperationKind::Drop { .. }
+            )),
+            2,
+            "each path must run the cleanup once"
+        );
+    }
+
+    /// A marker taken last in the join, restored only by the `Some` consumer, moves there.
+    #[test]
+    fn a_marker_restored_by_one_consumer_moves_to_it() {
+        let forwarded = cleanup_join(Marker::SomeConsumer).expect("the join is forwarded");
+        assert_eq!(
+            count_operations(&forwarded, |kind| matches!(kind, OperationKind::StackSave)),
+            1
+        );
+        let save_block = forwarded
+            .blocks()
+            .find(|&block| {
+                forwarded
+                    .block(block)
+                    .operations()
+                    .iter()
+                    .any(|operation| matches!(operation.kind, OperationKind::StackSave))
+            })
+            .unwrap();
+        let operations = forwarded.block(save_block).operations();
+        let save = operations
+            .iter()
+            .position(|operation| matches!(operation.kind, OperationKind::StackSave))
+            .unwrap();
+        assert!(
+            operations[save..]
+                .iter()
+                .any(|operation| matches!(operation.kind, OperationKind::StackRestore)),
+            "the marker must be taken in the consumer, before its restore"
+        );
+    }
+
+    /// A marker restored by several consumers, or by a consumer reached from elsewhere too, has
+    /// no single place to move to, so the join stays.
+    #[test]
+    fn a_marker_without_a_single_exclusive_consumer_keeps_the_join() {
+        for marker in [Marker::BothConsumers, Marker::SharedConsumer] {
+            assert!(cleanup_join(marker).is_none(), "{marker:?}");
+        }
     }
 
     /// A boolean alternative head lowers to `load`, so nothing in the emitter produces the
