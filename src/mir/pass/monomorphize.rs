@@ -3091,8 +3091,10 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split("\nfn ").next())
             .expect("the open concrete thunk must remain");
+        // `%p0` is the element's dictionary; `%p1`, the array's own, is read only by a drop of
+        // moved-out storage that the removal of absent drops deletes.
         assert!(
-            thunk.contains("from %p1"),
+            thunk.contains("from %p0"),
             "the open concrete thunk must still read its element evidence:\n{thunk}"
         );
     }

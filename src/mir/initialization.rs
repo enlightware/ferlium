@@ -1,7 +1,9 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-//! Logical initialization paths, before physical projections erase their field identities.
+//! Initialization states of logical storage paths, before physical projections erase their field
+//! identities: which storage is absent, live or maybe live at each point. Semantic optimization
+//! uses it to remove drops of absent storage; physical drop elaboration, to place drop flags.
 
 use std::collections::VecDeque;
 
@@ -19,7 +21,7 @@ use crate::{
 
 /// Possible initialization states at a control-flow point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum InitState {
+pub(crate) enum InitState {
     Absent,
     Live,
     MaybeLive,
@@ -40,20 +42,20 @@ define_id_type!(
 
 /// A product member or variant payload along a logical storage path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(super) enum Field {
+pub(crate) enum Field {
     Product(ProjectionIndex),
     Payload(Type),
 }
 
 /// An initialization-state assignment, copied from another place or set explicitly.
 #[derive(Clone, Copy)]
-pub(super) enum Update {
+pub(crate) enum Update {
     Copy(LogicalPlaceId),
     Set(InitState),
 }
 
 /// A logical storage node whose initialization is tracked independently of its physical address.
-pub(super) struct Place {
+pub(crate) struct Place {
     pub ty: Type,
     pub parent: Option<LogicalPlaceId>,
     pub children: Vec<(Field, LogicalPlaceId)>,
@@ -66,7 +68,7 @@ pub(super) struct Place {
 }
 
 /// Logical storage paths and MIR definitions used to derive initialization-state transitions.
-pub(super) struct Places {
+pub(crate) struct Places {
     pub nodes: Vec<Place>,
     pub values: FxHashMap<Value, LogicalPlaceId>,
     pub definitions: FxHashMap<ValueId, Operation>,
@@ -410,6 +412,34 @@ impl Places {
             && self.nodes[id.as_index()].split
             && !self.nodes[id.as_index()].children.is_empty()
             && self.status(state, id) == MaybeLive
+    }
+
+    /// The nodes whose states decide a `drop` or an initialization query of its first operand:
+    /// the place itself, or, where independent writes split it, its tracked leaves and variant
+    /// shells. Empty for an untracked place.
+    pub fn tested_nodes(&self, op: &Operation) -> Vec<LogicalPlaceId> {
+        let Some(&id) = self.values.get(&op.operands[0]) else {
+            return vec![];
+        };
+        if matches!(op.kind, OperationKind::IsInitialized) && self.nodes[id.as_index()].variant {
+            return vec![id];
+        }
+        let mut nodes = vec![];
+        fn visit(places: &Places, id: LogicalPlaceId, nodes: &mut Vec<LogicalPlaceId>) {
+            let node = &places.nodes[id.as_index()];
+            if !node.split || node.children.is_empty() {
+                nodes.push(id);
+                return;
+            }
+            if node.variant {
+                nodes.push(id);
+            }
+            for &(_, child) in &node.children {
+                visit(places, child, nodes);
+            }
+        }
+        visit(self, id, &mut nodes);
+        nodes
     }
 
     /// Whole-place effects shared by split discovery, dataflow, and flag emission.

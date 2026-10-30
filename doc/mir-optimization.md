@@ -40,6 +40,7 @@ for round in 0..MAX_ROUNDS:
         place CSE     // merge repeated subfield and dictionary-entry places
         clone borrowing // redirect read-only clone lifetimes to a source that outlives them
         terminal moves  // move a private local's last ownership into its clone destination
+        absent drops    // remove drops of storage that no path has initialized
         managed split   // split local products owning managed fields
     specialize    // point generic calls at concrete copies
     inline        // budget-limited; block merging inside its own edit
@@ -1123,6 +1124,25 @@ own.
 
 Callee parameters of a concrete scalar type are values too (see `doc/mir-ir.md`); inlining
 converts where an argument and its parameter disagree. Results still use places.
+
+## Drops of absent storage
+
+A semantic `drop` does nothing on absent storage (see `mir-uninit-tracking.md`). Lowering relies on
+that: a scope registers its locals' drops when it opens, so a failure path can drop a local nothing
+has initialized yet, and inlining carries such drops into callers. Normalization exposes more: a
+merged call no longer writes its result place, a borrowed clone no longer initializes its
+destination, and folding or place merging lets the analysis prove more storage absent. Physical
+drop elaboration removes all of them, but too late for the semantic passes that expand a drop into
+its destructor, such as the managed split, which would read the tag of a variant never built and
+refuse.
+
+`mir::pass::absent_drop` therefore removes, during normalization, every drop whose storage is absent
+on all paths reaching it, by the same initialization analysis as drop elaboration
+(`mir::initialization`). It differs on one point: in semantic MIR, a failed operation may leave
+what it writes partly built, such as a callee's result whose shell it stored before failing, so
+those places are only maybe live on an error edge. Physical lowering is what makes a failing callee
+clear its result. Since most normalizing passes can expose such drops, the pass runs in the
+normalization fixpoint after them, just before the managed split that needs it.
 
 ## Dead code elimination
 

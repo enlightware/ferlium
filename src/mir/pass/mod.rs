@@ -34,6 +34,7 @@
 //! normalization and inlining, without semantic specialization or boxed script evaluation. Its
 //! callee view includes module-local physical bodies and helpers.
 
+pub(crate) mod absent_drop;
 pub(crate) mod bounds_check;
 pub(crate) mod branch_forward;
 pub mod budget;
@@ -390,6 +391,13 @@ fn normalize_semantic(
     // A local product owning managed fields, such as an inlined iterator holding the array it
     // reads, becomes one local per field. Each field's storage and lifetime is then on its own: a
     // callback field is a known callee, a copied collection a clone to borrow.
+    // Lowering drops a scope's locals on every failure path, including where nothing initialized
+    // them yet, and inlining carries those drops into callers. Earlier passes expose more: a merged
+    // call or a borrowed clone leaves its result's drops behind, and folding or place merging lets
+    // the analysis prove more storage absent. The managed split expands a drop into its
+    // destructor, which would read the tag of a variant never built: remove them first.
+    let absent_drops =
+        |f: &Function| absent_drop::remove_absent_drops(f, env).map(Rewrite::settled);
     let managed_split = |f: &Function| {
         scalar_replace::split_managed_local_products(f, env, OptimizationStage::Semantic(callees))
             .map(Rewrite::settled)
@@ -453,6 +461,19 @@ fn normalize_semantic(
                 enables: &[
                     NormalizingPass::CommonLoads,
                     NormalizingPass::RedundantStorage,
+                ],
+            },
+            normalize::Pass {
+                id: NormalizingPass::AbsentDrops,
+                run: &absent_drops,
+                // A drop was a use and a write of its place.
+                enables: &[
+                    NormalizingPass::CommonLoads,
+                    NormalizingPass::CommonCalls,
+                    NormalizingPass::RedundantStorage,
+                    NormalizingPass::StoredValues,
+                    NormalizingPass::CloneBorrowing,
+                    NormalizingPass::TerminalMoves,
                 ],
             },
             normalize::Pass {

@@ -7,6 +7,7 @@ pub mod debug_location;
 pub(crate) mod dominance;
 pub(crate) mod edit;
 pub mod function;
+pub(crate) mod initialization;
 pub mod interpreter;
 pub mod operation;
 pub mod pass;

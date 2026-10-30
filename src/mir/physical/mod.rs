@@ -7,7 +7,6 @@ mod buffer;
 mod dictionary;
 mod drop_elaboration;
 mod evidence;
-mod initialization;
 pub(crate) mod interpreter;
 mod interpreter_memory;
 mod native;

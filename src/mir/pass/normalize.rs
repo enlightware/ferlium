@@ -35,6 +35,7 @@ pub(super) enum NormalizingPass {
     CommonSubexpressions,
     CloneBorrowing,
     TerminalMoves,
+    AbsentDrops,
     ManagedSplit,
     BooleanBranches,
     BooleanResults,

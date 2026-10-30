@@ -12,6 +12,7 @@ use crate::{
     mir::{
         BlockId, Function, Operation, OperationKind, ParameterId, ParameterKind, Value,
         edit::FunctionEdit,
+        initialization::{Field, InitState, LogicalPlaceId, Places, Update},
         pass::{
             dataflow::resolve_dictionary_callee,
             inline::{cleanup_template, expand_cleanup},
@@ -27,10 +28,7 @@ use crate::{
     },
 };
 
-use super::{
-    initialization::{Field, InitState, LogicalPlaceId, Places, Update},
-    variant_payload_release_call,
-};
+use super::variant_payload_release_call;
 
 use InitState::{Absent, Live, MaybeLive};
 
@@ -244,31 +242,6 @@ fn transfer_owned_parts(places: &Places, state: &mut [InitState], op: &Operation
     }
 }
 
-fn tested_nodes(places: &Places, op: &Operation) -> Vec<LogicalPlaceId> {
-    let Some(&id) = places.values.get(&op.operands[0]) else {
-        return vec![];
-    };
-    if matches!(op.kind, OperationKind::IsInitialized) && places.nodes[id.as_index()].variant {
-        return vec![id];
-    }
-    let mut nodes = vec![];
-    fn visit(places: &Places, id: LogicalPlaceId, nodes: &mut Vec<LogicalPlaceId>) {
-        let node = &places.nodes[id.as_index()];
-        if !node.split || node.children.is_empty() {
-            nodes.push(id);
-            return;
-        }
-        if node.variant {
-            nodes.push(id);
-        }
-        for &(_, child) in &node.children {
-            visit(places, child, nodes);
-        }
-    }
-    visit(places, id, &mut nodes);
-    nodes
-}
-
 fn emit_flags(
     body: Function,
     places: Places,
@@ -285,7 +258,7 @@ fn emit_flags(
                 op.kind,
                 OperationKind::Drop { .. } | OperationKind::IsInitialized
             ) {
-                let nodes = tested_nodes(&places, op);
+                let nodes = places.tested_nodes(op);
                 let any = matches!(op.kind, OperationKind::Drop { .. })
                     && places
                         .values
@@ -384,7 +357,7 @@ fn emit_flags(
                     .expect("destruction must refer to a logical place");
                 let any = matches!(op.kind, OperationKind::Drop { .. })
                     && !places.nodes[id.as_index()].structural;
-                let nodes = tested_nodes(&places, &op);
+                let nodes = places.tested_nodes(&op);
                 // A custom destructor must never silently abandon a partial receiver. Guard on
                 // any ownership, leaving DropInitialized's completeness contract to diagnose it.
                 // This still accepts control-flow joins of entirely live and entirely absent.

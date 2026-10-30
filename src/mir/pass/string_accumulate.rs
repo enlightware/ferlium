@@ -470,7 +470,8 @@ struct Forward {
     self_push: OperationIndex,
     rendered_drop: OperationIndex,
     builder_move: OperationIndex,
-    builder_drop: OperationIndex,
+    /// Absent when an earlier pass removed this drop of the moved-out builder, a no-op.
+    builder_drop: Option<OperationIndex>,
     displaced_drop: OperationIndex,
     commit: OperationIndex,
     accumulator: ValueId,
@@ -530,9 +531,14 @@ pub(crate) fn forward_string_accumulation(
             forward.self_push,
             forward.rendered_drop,
             forward.builder_move,
-            forward.builder_drop,
             forward.displaced_drop,
         ]);
+        if let Some(builder_drop) = forward.builder_drop {
+            removals
+                .entry(forward.block)
+                .or_default()
+                .insert(builder_drop);
+        }
     }
 
     Some(apply_site_edits(func, replacements, &removals))
@@ -614,7 +620,7 @@ fn plan_forward(
     }
 
     let builder_uses = census.uses.get(builder)?;
-    if builder_uses.len() < 4
+    if builder_uses.len() < 3
         || builder_uses[0] != operation_use(initialize_builder, 2)
         || !matches!(builder_uses[1], UseSite::Operation { .. })
     {
@@ -660,32 +666,45 @@ fn plan_forward(
         return None;
     }
 
-    let [builder_move_use, builder_drop_use] =
-        &builder_uses[builder_uses.len().checked_sub(2)?..]
-    else {
-        return None;
+    // The builder's drop right after its move is a no-op, which the removal of drops of absent
+    // storage may already have deleted.
+    let drops_builder = |site: OperationSite| {
+        site.block == initialize_builder.block
+            && is_string_drop(&operations[site.index.as_index()], functions.drop, *builder)
+    };
+    let (builder_move_use, builder_drop) = match builder_uses.as_slice() {
+        [
+            ..,
+            move_use,
+            UseSite::Operation {
+                site: drop_site,
+                operand: 0,
+            },
+        ] if drops_builder(*drop_site) => (*move_use, Some(*drop_site)),
+        [.., move_use] => (*move_use, None),
+        [] => return None,
     };
     let UseSite::Operation {
         site: builder_move,
         operand: 0,
-    } = *builder_move_use
-    else {
-        return None;
-    };
-    let UseSite::Operation {
-        site: builder_drop,
-        operand: 0,
-    } = *builder_drop_use
+    } = builder_move_use
     else {
         return None;
     };
     if builder_move.block != initialize_builder.block
-        || builder_drop.block != initialize_builder.block
-        || builder_drop.index.as_index() != builder_move.index.as_index() + 1
+        || builder_drop
+            .is_some_and(|drop| drop.index.as_index() != builder_move.index.as_index() + 1)
     {
         return None;
     }
-    for use_site in &builder_uses[2..builder_uses.len() - 2] {
+    let tail_uses = 1 + usize::from(builder_drop.is_some());
+    // Initialization and the self push come first.
+    if builder_uses.len() < 2 + tail_uses {
+        return None;
+    }
+    // The assignment tail follows the last of the move and the builder's drop.
+    let tail = builder_drop.unwrap_or(builder_move).index.as_index();
+    for use_site in &builder_uses[2..builder_uses.len() - tail_uses] {
         let UseSite::Operation { site, operand: 1 } = *use_site else {
             return None;
         };
@@ -713,22 +732,17 @@ fn plan_forward(
     if !matches!(move_to_temporary.kind, OperationKind::Move)
         || moved_builder != builder
         || !census.is_local_alloca(*temporary, string_type())
-        || !is_string_drop(
-            &operations[builder_drop.index.as_index()],
-            functions.drop,
-            *builder,
-        )
     {
         return None;
     }
 
     let commit = OperationSite {
         block: initialize_builder.block,
-        index: OperationIndex::from_index(builder_drop.index.as_index() + 1),
+        index: OperationIndex::from_index(tail + 1),
     };
     let displaced_drop = OperationSite {
         block: initialize_builder.block,
-        index: OperationIndex::from_index(builder_drop.index.as_index() + 2),
+        index: OperationIndex::from_index(tail + 2),
     };
     if !is_string_drop(
         operations.get(displaced_drop.index.as_index())?,
@@ -765,7 +779,7 @@ fn plan_forward(
         self_push: self_push.index,
         rendered_drop: rendered_drop.index,
         builder_move: builder_move.index,
-        builder_drop: builder_drop.index,
+        builder_drop: builder_drop.map(|site| site.index),
         displaced_drop: displaced_drop.index,
         commit: commit.index,
         accumulator: *accumulator,
