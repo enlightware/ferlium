@@ -72,23 +72,27 @@ neither the compiler nor the generated code can issue client requests — both a
 Instrumentation is enabled once and only collection is toggled afterwards; restarting it would flush
 Valgrind's translations and distort later ranges.
 
-Before that, each process builds the standard library, compiles and runs one workload, then drops
-that state through `reset_std_cache`. Without this warmup the first compilation in a process costs
-several times a later one, and a workload would measure differently depending on how the shards were
-cut. The warmup uses the *opposite* optimization setting because V8 keys its compiled module cache
-on the module bytes, which would otherwise serve back the very module about to be measured.
+Before that, each process builds the standard library, then compiles and runs one workload. Without
+this warmup the first compilation in a process costs several times a later one, and a workload would
+measure differently depending on how the shards were cut. The warmup uses the *opposite*
+optimization setting because V8 keys its compiled module cache on the module bytes, which would
+otherwise serve back the very module about to be measured. The warmup runs before instrumentation
+starts, so it does not fill the simulated caches: the first measured range of a process starts from
+cold caches.
 
-The measured standard library build then serves every later compilation, so a second collected build
-must be nearly free; the run fails otherwise.
+One process per axis measures the standard library build: it drops the warmup's state through
+`reset_std_cache` and builds it again. A second collected build must then be nearly free; the run
+fails otherwise. The other processes measure workloads, reusing the warmup's standard library, built
+at a small fraction of the cost of an instrumented build.
 
 Node runs with `--predictable --no-liftoff --no-wasm-lazy-compilation`. Without the first, identical
 work varied 20x depending on whether a background compile had landed. The other two make V8 compile
 with TurboFan during instantiation, so `execute` measures generated code and not Liftoff output.
 
 Workloads are sharded across processes and both axes run concurrently; each process pays for its own
-standard library build. That trade is sound only because Callgrind counts the simulated program.
-`BENCH_JOBS` or `--jobs` sets the process count. The repeated standard library builds double as a
-check that a repeated measurement lands on the same counts.
+uninstrumented standard library build. That trade is sound only because Callgrind counts the
+simulated program. `BENCH_JOBS` or `--jobs` sets the process count, of which each axis keeps one for
+the standard library build. A baseline recorded by a different version of the harness is ignored.
 
 ### Comparing results
 

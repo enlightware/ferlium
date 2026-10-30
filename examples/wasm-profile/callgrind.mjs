@@ -3,10 +3,11 @@
 
 // Callgrind benchmark for the Wasm pipeline, reporting instruction counts and simulated cache
 // behaviour per phase instead of the wall-clock times of `run.mjs`. Each optimization axis runs in
-// its own Node process so that its standard library build is measured from the same state.
+// its own Node processes so that its standard library build is measured from the same state.
 //
-// The outer process builds the marker addon, drives one Valgrind child per axis and shard of the
-// workload list, and reports; a child runs with `--worker` and owns the measured ranges.
+// The outer process builds the marker addon, drives one Valgrind child per axis measuring the
+// standard library build and one per axis and shard of the workload list, and reports; a child runs
+// with `--worker` and owns the measured ranges.
 
 import { execFileSync, spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -34,6 +35,10 @@ const AXES = [
     { id: 'optimize:off', optimized: false },
 ];
 
+// Bump when a change to this harness moves the counts of unchanged compiler code, so that a
+// baseline recorded before it is ignored instead of reported as a performance change.
+const PROTOCOL = 2;
+
 const DEFAULT_BATCH = 10;
 const WASM_WARMUP_CALLS = 50;
 // Interpreted linalg workloads dominate wall time by orders of magnitude. Keep the normal Wasm
@@ -46,7 +51,8 @@ function runWorker(argv) {
     const optimized = argv[0] === 'on';
     const batch = Number(argv[1]);
     const mirBatch = Number(argv[2]);
-    const names = argv.slice(3);
+    const measuresStd = argv[3] === 'std';
+    const names = argv.slice(4);
     const require = createRequire(import.meta.url);
     const cg = require(addonPath);
     if (!cg.runningOnValgrind()) {
@@ -63,9 +69,10 @@ function runWorker(argv) {
         return result;
     };
 
-    // Warm V8's compiler machine code and Ferlium's incidental global machinery, then drop the
-    // state it cached so that the measured build below is a complete one. The reset asserts that
-    // no session still shares the standard library.
+    // Warm V8's compiler machine code and Ferlium's incidental global machinery. Outside
+    // instrumentation, this standard library build costs a small fraction of an instrumented one,
+    // so only the worker measuring it builds it again under instrumentation; the workload workers
+    // reuse this one.
     //
     // The warmup compiles and runs a workload as well: the first compilation in a process costs
     // several times a later one, so without this a workload would measure differently depending on
@@ -76,14 +83,22 @@ function runWorker(argv) {
     warmup.instantiate();
     warmup.run();
     warmup.free();
-    runtime.reset_std_cache();
 
+    if (measuresStd) {
+        // Drop the cached state so that the measured build is a complete one. The reset asserts
+        // that no session still shares the standard library.
+        runtime.reset_std_cache();
+        cg.startInstrumentation();
+        range('phase=std_build', () => runtime.prepare_std(optimized));
+        // Every compilation depends on this being near zero: it is the same build again, now
+        // served from the process cache that the measured build populated.
+        range('phase=std_reuse', () => runtime.prepare_std(optimized));
+        return;
+    }
+
+    // Starting instrumentation empties the simulated caches, which the uninstrumented warmup does
+    // not fill: the first workload of a shard starts from cold caches.
     cg.startInstrumentation();
-    range('phase=std_build', () => runtime.prepare_std(optimized));
-    // Every later compilation depends on this being near zero: it is the same build again, now
-    // served from the process cache that the measured build populated.
-    range('phase=std_reuse', () => runtime.prepare_std(optimized));
-
     for (const name of names) {
         const phases = workloadPhases(name, mirBatch > 0);
         const workload = range(phases.compile, () => new runtime.Workload(name, optimized));
@@ -349,7 +364,10 @@ function valgrindIncludeFor(valgrind) {
 }
 
 /// One Valgrind process: one axis, one shard of the workload list.
+/// Run one worker: with `shard` 'std', it measures the standard library build after a warmup with
+/// the first of `names`; otherwise it measures the workloads `names`.
 function runShard(valgrind, axis, shard, options, names) {
+    const measuresStd = shard === 'std';
     const directory = join(outRoot, `${axis.id.replace(':', '-')}-${shard}`);
     rmSync(directory, { recursive: true, force: true });
     mkdirSync(directory, { recursive: true });
@@ -366,6 +384,7 @@ function runShard(valgrind, axis, shard, options, names) {
         axis.optimized ? 'on' : 'off',
         String(options.batch),
         String(options.mirBatch),
+        measuresStd ? 'std' : 'workloads',
         ...names,
     ], { stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '';
@@ -382,11 +401,12 @@ function runShard(valgrind, axis, shard, options, names) {
                 [...output.matchAll(/^wasm-module-bytes\t([^\t]+)\t(\d+)$/gm)]
                     .map((match) => [match[1], Number(match[2])]),
             );
-            if (moduleBytes.size !== names.length || names.some((name) => !moduleBytes.has(name))) {
+            const reported = measuresStd ? [] : names;
+            if (moduleBytes.size !== reported.length || reported.some((name) => !moduleBytes.has(name))) {
                 reject(new Error(`${axis.id} shard ${shard} did not report every Wasm module size\n${output}`));
                 return;
             }
-            console.log(`  done: ${axis.id} [${names.join(' ')}]`);
+            console.log(`  done: ${axis.id} [${measuresStd ? 'std' : names.join(' ')}]`);
             resolve({ axis: axis.id, dumps: readDumps(directory), moduleBytes });
         });
     });
@@ -409,24 +429,28 @@ function shardsOf(names, count) {
     return shards;
 }
 
-/// Merge the shards of one axis, keeping the standard library ranges of the first.
+/// Merge the shards of one axis, of which exactly one measured the standard library build.
 function mergeShards(shards) {
     const merged = new Map();
-    const stdBuilds = [];
+    const stdShards = shards.filter(({ dumps }) => dumps.has('phase=std_build'));
+    if (stdShards.length !== 1) {
+        throw new Error(`expected one standard library range, found ${stdShards.length}`);
+    }
     for (const { dumps, moduleBytes } of shards) {
         const stdBuild = dumps.get('phase=std_build');
         const stdReuse = dumps.get('phase=std_reuse');
-        if (!stdBuild || !stdReuse) {
-            throw new Error('a shard produced no standard library ranges');
+        if (stdBuild) {
+            if (!stdReuse) {
+                throw new Error('the standard library build was measured without its reuse');
+            }
+            if (stdReuse.Instructions * 100 > stdBuild.Instructions) {
+                throw new Error(
+                    'the standard library was rebuilt instead of reused ' +
+                    `(${stdReuse.Instructions} against ${stdBuild.Instructions} instructions)`,
+                );
+            }
+            dumps.delete('phase=std_reuse');
         }
-        stdBuilds.push(stdBuild.Instructions);
-        if (stdReuse.Instructions * 100 > stdBuild.Instructions) {
-            throw new Error(
-                'the standard library was rebuilt instead of reused ' +
-                `(${stdReuse.Instructions} against ${stdBuild.Instructions} instructions)`,
-            );
-        }
-        dumps.delete('phase=std_reuse');
         for (const [name, bytes] of moduleBytes) {
             const phase = workloadPhases(name, false).compile;
             const metrics = dumps.get(phase);
@@ -436,16 +460,8 @@ function mergeShards(shards) {
             metrics[WASM_BYTES] = bytes;
         }
         for (const [phase, metrics] of dumps) {
-            if (phase !== 'phase=std_build' || !merged.has(phase)) {
-                merged.set(phase, metrics);
-            }
+            merged.set(phase, metrics);
         }
-    }
-    // Shards repeat the same standard library build in separate processes, which makes them a free
-    // check that a repeated measurement lands on the same counts.
-    const spread = (Math.max(...stdBuilds) - Math.min(...stdBuilds)) / Math.min(...stdBuilds);
-    if (spread > 0.01) {
-        throw new Error(`standard library builds disagree across shards by ${(spread * 100).toFixed(2)}%`);
     }
     return merged;
 }
@@ -491,20 +507,25 @@ async function main() {
     console.log(`Node ${process.version} ${V8_FLAGS.join(' ')}, ${version}, ${process.arch}`);
     console.log('Estimated Cycles = L1 Hits + 5 * LL Hits + 35 * RAM Hits.');
 
-    // Every process pays for its own standard library build, so sharding trades total work for
-    // wall time. That trade is only sound because Callgrind counts the simulated program: what
-    // else runs on the machine cannot move the numbers.
+    // Every process pays for its own uninstrumented standard library build, so sharding trades
+    // total work for wall time. That trade is only sound because Callgrind counts the simulated
+    // program: what else runs on the machine cannot move the numbers.
     const jobs = count('jobs', Math.max(1, Math.round(Number(process.env.BENCH_JOBS ?? availableParallelism() / 2))));
     // Shard as if both axes ran, even when one does: the runtime code a workload executes depends on
-    // what ran before it in the same process, so only equal shardings give comparable counts.
-    const shards = shardsOf(selected, Math.max(1, Math.min(Math.floor(jobs / AXES.length), selected.length)));
-    console.log(`${axes.length} axes x ${shards.length} shard(s) of ${selected.length} workload(s), ${jobs} at a time\n`);
+    // what ran before it in the same process, so only equal shardings give comparable counts. Each
+    // axis keeps one of its jobs for the standard library build.
+    const shards = shardsOf(selected, Math.max(1, Math.min(Math.floor(jobs / AXES.length) - 1, selected.length)));
+    console.log(`${axes.length} axes x (std + ${shards.length} shard(s) of ${selected.length} workload(s)), ${jobs} at a time\n`);
 
     const options = { axes, batch, mirBatch, selected };
     const started = Date.now();
-    const finished = await inParallel(jobs, axes.flatMap(
-        (axis) => shards.map((names, shard) => () => runShard(valgrind, axis, shard, options, names)),
-    ));
+    // The standard library builds go first: they are the longest workers.
+    const finished = await inParallel(jobs, [
+        ...axes.map((axis) => () => runShard(valgrind, axis, 'std', options, [selected[0]])),
+        ...axes.flatMap(
+            (axis) => shards.map((names, shard) => () => runShard(valgrind, axis, shard, options, names)),
+        ),
+    ]);
     console.log(`measured in ${((Date.now() - started) / 1000).toFixed(0)}s\n`);
 
     const results = new Map(axes.map(
@@ -512,8 +533,8 @@ async function main() {
     ));
     validate(results, axes, selected, batch, mirBatch);
 
-    // Counts only mean the same thing under the same engine, tool and batch sizes.
-    const run = { node: process.version, valgrind: version, arch: process.arch, batch, mirBatch };
+    // Counts only mean the same thing under the same harness, engine, tool and batch sizes.
+    const run = { protocol: PROTOCOL, node: process.version, valgrind: version, arch: process.arch, batch, mirBatch };
     const baseline = existsSync(baselinePath) ? JSON.parse(readFileSync(baselinePath, 'utf8')) : undefined;
     const differs = baseline && Object.keys(run).filter((key) => baseline[key] !== run[key]);
     if (differs?.length > 0) {
