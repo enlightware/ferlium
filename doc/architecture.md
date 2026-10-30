@@ -55,7 +55,7 @@ lowering with native pointers and runtime wrappers.
   interpreter.
 - `emit_mir.rs`: final-HIR-to-MIR lowering.
 - `module/`: module identity, paths, imports, module environments, function metadata, trait impl metadata, and symbol lookup.
-- `std/`: Rust-backed standard library modules and bundled Ferlium prelude source.
+- `std/`: Rust-backed standard library modules and bundled Ferlium prelude source; API design decisions are in `doc/std.md`.
 - `ide/`: IDE-facing compiler wrapper, annotations, diagnostics, execution result shaping, signatures, and source index helpers.
 - Top-level helpers: small shared utilities such as `containers.rs`, `format.rs`, `graph.rs`, `assert.rs`, and `sync.rs`.
 
