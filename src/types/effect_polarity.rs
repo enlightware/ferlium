@@ -155,6 +155,9 @@ fn output_effect_polarities_inner<'a>(
 ) -> Vec<EffectPolarity> {
     let def = trait_def(trait_id);
     let count = def.output_effect_count() as usize;
+    if count == 0 {
+        return Vec::new();
+    }
     if visiting.contains(&trait_id) {
         return vec![EffectPolarity::Invariant; count];
     }

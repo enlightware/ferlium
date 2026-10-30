@@ -29,6 +29,7 @@ use crate::{
     },
     module::{Module, ModuleEnv, ModuleId, Path, Uses, id::Id},
     parser::{self, Token, describe_parse_error},
+    types::coherence::check_module_coherence,
 };
 
 pub(crate) enum ModuleRef {
@@ -527,6 +528,20 @@ pub fn parse_module_and_expr(
         validate_no_unstable(&module_and_expr.0, module_and_expr.1.iter(), &arena)?;
     }
     Ok((module_and_expr.0, module_and_expr.1, arena))
+}
+
+/// Validate coherence of a module built by successive additions, once all of them are added.
+///
+/// Each addition is checked against the impls known so far; this check, run before the module is
+/// published, revalidates non-overlap against the complete module.
+pub(crate) fn check_extended_module_coherence(
+    module: &Module,
+    other_modules: &Modules,
+) -> Result<(), CompilationError> {
+    check_module_coherence(module, other_modules).map_err(|error| {
+        let env = ModuleEnv::new(module, other_modules);
+        CompilationError::resolve_types(error, &env)
+    })
 }
 
 /// Compile source code into an existing module with explicit compiler capabilities.

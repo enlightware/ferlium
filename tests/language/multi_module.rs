@@ -5,6 +5,7 @@ use test_log::test;
 
 use ferlium::{
     CompilerSession, DiagnosticSeverity, ExecutionTarget, Path,
+    compiler::error::CompilationErrorImpl,
     compiler::test_support::{
         module_compilation_revision, module_diagnostics_len, module_entry_exists,
         module_has_compiled_version, module_has_mir_artifacts, module_is_stale, module_latest_deps,
@@ -724,7 +725,7 @@ fn generated_trait_method_names_use_qualified_type_names() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn generated_trait_method_names_disambiguate_impl_outputs() {
+fn generated_trait_method_names_disambiguate_impls_with_same_inputs() {
     let mut session = TestSession::new();
     let module_id = compile_module(
         &mut session,
@@ -733,10 +734,18 @@ fn generated_trait_method_names_disambiguate_impl_outputs() {
             pub trait Adapter<Self |-> Output> {
                 fn adapt(value: Self) -> Output;
             }
+            pub trait Small<Self> {}
+            pub trait Big<Self> {}
+
+            // Two candidates each, so neither constraint improves `A` to a concrete type.
+            impl Small for [int] {}
+            impl Small for [bool] {}
+            impl Big for [float] {}
+            impl Big for [string] {}
 
             impl<A> Adapter for <Self = [A] |-> Output = [A]>
             where
-                A: Value
+                [A]: Small
             {
                 fn adapt(value: [A]) -> [A] {
                     value
@@ -745,7 +754,7 @@ fn generated_trait_method_names_disambiguate_impl_outputs() {
 
             impl<A> Adapter for <Self = [A] |-> Output = ArrayIterator<A>>
             where
-                A: Value
+                [A]: Big
             {
                 fn adapt(value: [A]) -> ArrayIterator<A> {
                     iter(value)
@@ -771,7 +780,7 @@ fn generated_trait_method_names_disambiguate_impl_outputs() {
     );
     assert_ne!(
         adapter_names[0], adapter_names[1],
-        "impl methods with the same readable prefix but different outputs must not collide"
+        "impl methods with the same readable prefix but different constraints must not collide"
     );
     assert_eq!(
         adapter_names
@@ -782,6 +791,41 @@ fn generated_trait_method_names_disambiguate_impl_outputs() {
         1,
         "test should exercise identical readable prefixes: {adapter_names:?}"
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn coherence_checks_imported_prerequisites_with_their_private_impls() {
+    // `base`'s public `P` impl for arrays requires a private `Hidden` impl, which resolution uses
+    // when checking that prerequisite. Both `R` impls therefore apply to `[int]`.
+    let mut session = TestSession::new();
+    compile_module(
+        &mut session,
+        "base",
+        indoc! { r#"
+            trait Hidden<Self> {}
+            pub trait P<Self> {}
+            struct W<T>(T)
+            impl<T> Hidden for W<T> {}
+            impl<T> P for [T] where W<T>: Hidden {}
+        "# },
+    );
+    let err = session
+        .try_compile_module(
+            "user",
+            indoc! { r#"
+                pub trait Q<Self> {}
+                pub trait R<Self> {}
+                impl<T> Q for [T] {}
+                impl<T> R for [T] where [T]: base::P {}
+                impl<T> R for [T] where [T]: Q {}
+            "# },
+        )
+        .unwrap_err();
+    match err.into_inner() {
+        CompilationErrorImpl::OverlappingTraitImpls { .. } => {}
+        other => panic!("expected OverlappingTraitImpls, got {other:?}"),
+    }
 }
 
 #[test]

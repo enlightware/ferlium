@@ -227,6 +227,21 @@ impl Serialize for Wrapper {
 The same rule also rejects overlapping generic impls.
 For example, if two generic impl declarations could both apply to the same types, Ferlium rejects them.
 
+Impls that differ only in their output types still overlap.
+
+So do impls that differ only in `where` constraints on a type parameter, because another module could define a type that meets both constraints:
+
+```ferlium,compile_fail
+trait Small<Self> {}
+trait Large<Self> {}
+trait Describe<Self> {}
+
+struct Wrapper<T>(T)
+
+impl<T> Describe for Wrapper<T> where T: Small {}
+impl<T> Describe for Wrapper<T> where T: Large {}
+```
+
 ## The orphan rule
 
 Ferlium does not let an arbitrary module implement an existing foreign trait for arbitrary foreign input types.

@@ -186,6 +186,9 @@ pub(crate) fn diagnostics_from_error(
         | TraitImplForAnonymousStructuralType {
             impl_span: span, ..
         }
+        | TraitImplOutputNotDetermined {
+            impl_span: span, ..
+        }
         | UnsafeFeatureUseNotAllowed { span, .. }
         | InvalidLoopControl { span, .. }
         | InvalidSubscriptDefinition { span, .. }

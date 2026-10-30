@@ -3,6 +3,7 @@
 
 use crate::{
     CompilationCapabilities, Modules, add_code_to_module_with_capabilities,
+    check_extended_module_coherence,
     format::FormatWithData,
     module::{Module, ModuleId},
     parser::location::SourceTable,
@@ -98,11 +99,19 @@ pub fn add_ferlium_serialization_prelude(
         prelude!("json.fer"),
         prelude!("data_text.fer"),
     ];
-    add_chunks(
+    let std = add_chunks(
         to,
         source_table,
         module_id,
         codes,
         "add serialization prelude to module",
-    )
+    );
+    // This is the last source added to std.
+    check_extended_module_coherence(&std, &Modules::default()).unwrap_or_else(|e| {
+        panic!(
+            "Std impls are not coherent: {}",
+            FormatWithData::new(&e, source_table)
+        )
+    });
+    std
 }

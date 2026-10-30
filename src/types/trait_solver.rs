@@ -180,7 +180,7 @@ impl<'a> TraitSolver<'a> {
     }
 }
 
-const TRAIT_SOLVER_RECURSION_LIMIT: usize = 128;
+pub(crate) const TRAIT_SOLVER_RECURSION_LIMIT: usize = 128;
 
 fn materialized_associated_const_values(
     trait_id: TraitId,
@@ -798,16 +798,6 @@ impl<'a> TraitSolverProbe<'a> {
             PendingFunctionCollector::new(initial_count),
         );
         result
-    }
-
-    pub(crate) fn solve_outputs(
-        &mut self,
-        trait_id: TraitId,
-        input_tys: &[Type],
-        fn_span: Location,
-        arena: &mut NodeArena,
-    ) -> Result<(Vec<Type>, Vec<EffType>), InternalCompilationError> {
-        self.with_solver(|solver| solver.solve_outputs(trait_id, input_tys, fn_span, arena))
     }
 
     pub(crate) fn concrete_type_is_trivial_copy(&mut self, ty: Type) -> bool {
@@ -1557,7 +1547,7 @@ impl<'a> TraitSolver<'a> {
 
     /// Relate an implementation's output effect to the requested one by the output's polarity:
     /// an effect the methods perform may be smaller than requested, one they receive larger.
-    fn match_trait_output_effect(
+    pub(crate) fn match_trait_output_effect(
         ty_inf: &mut UnifiedTypeInference,
         impl_eff: &EffType,
         requested_eff: &EffType,

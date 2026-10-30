@@ -30,13 +30,13 @@ pub mod types;
 pub mod wasm;
 
 pub(crate) use compiler::Modules;
-pub(crate) use compiler::add_code_to_module_with_capabilities;
 pub use compiler::error::{CompilationError, LocatedError};
 pub use compiler::{
     CompilationCapabilities, CompilationOutput, CompilationRevision, CompilerSession,
     DiagnosticSeverity, MirOptimization, ModuleDiagnostic, ModuleInfo, ModuleRegistry,
     ModuleSource, SourceVersion, parse_module_and_expr,
 };
+pub(crate) use compiler::{add_code_to_module_with_capabilities, check_extended_module_coherence};
 pub use execution::ExecutionTarget;
 pub use ide::Compiler;
 pub use module::{ModuleEnv, Path};

@@ -824,6 +824,292 @@ fn overlapping_blanket_trait_impls_are_rejected() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_impls_differing_only_in_outputs_overlap() {
+    // Inputs select at most one impl, so different outputs do not make impls disjoint,
+    // whichever impl is declared first.
+    let to_int = r#"impl<T> Convert for <Self = W<T> |-> Output = int> {
+            fn convert(x: W<T>) -> int { 1 }
+        }"#;
+    let to_string = r#"impl<T> Convert for <Self = W<T> |-> Output = string> {
+            fn convert(x: W<T>) -> string { "different" }
+        }"#;
+    for (first, second) in [(to_int, to_string), (to_string, to_int)] {
+        let mut session = TestSession::new();
+        let err = session.fail_compilation(&format!(
+            "trait Convert<Self |-> Output> {{ fn convert(x: Self) -> Output; }}
+            struct W<T>(T)
+            {first}
+            {second}"
+        ));
+        match err.into_inner() {
+            CompilationErrorImpl::OverlappingTraitImpls { .. } => {}
+            other => panic!("expected OverlappingTraitImpls, got {other:?}"),
+        }
+    }
+}
+
+fn expect_overlap(source: &str) {
+    let mut session = TestSession::new();
+    match session.fail_compilation(source).into_inner() {
+        CompilationErrorImpl::OverlappingTraitImpls { .. } => {}
+        other => panic!("expected OverlappingTraitImpls, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn constraints_on_type_variables_do_not_make_impls_disjoint() {
+    // Another module may implement both `P` and `Q` for its own type, so these impls overlap
+    // whether or not this module implements `P` or `Q`, and in either declaration order.
+    let header = "trait P<Self> {}
+        trait Q<Self> {}
+        trait R<Self> { fn r(x: Self) -> int; }
+        struct W<T>(T)";
+    let r_impls = "impl<T> R for W<T> where T: P { fn r(x: W<T>) -> int { 1 } }
+        impl<T> R for W<T> where T: Q { fn r(x: W<T>) -> int { 2 } }";
+    let p_q_impls = "impl<T> P for T {}
+        impl<T> Q for T {}";
+    expect_overlap(&format!("{header}\n{r_impls}\n{p_q_impls}"));
+    expect_overlap(&format!("{header}\n{p_q_impls}\n{r_impls}"));
+    expect_overlap(&format!("{header}\n{r_impls}"));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn nested_prerequisites_on_type_variables_do_not_make_impls_disjoint() {
+    // `[A]: P` has a concrete head, but its only candidate needs `A: Q`, which another module may
+    // provide together with `A: S`.
+    expect_overlap(indoc! { r#"
+        trait P<Self> {}
+        trait Q<Self> {}
+        trait S<Self> {}
+        trait R<Self> { fn r(x: Self) -> int; }
+        struct W<T>(T)
+        impl<T> P for [T] where T: Q {}
+        impl<A> R for W<A> where [A]: P { fn r(x: W<A>) -> int { 1 } }
+        impl<A> R for W<A> where A: S { fn r(x: W<A>) -> int { 2 } }
+    "# });
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn impls_overlap_through_prerequisites_satisfied_later_in_the_module() {
+    // Both `R` impls apply to `[int]` once `P` and `Q` are implemented for it, whether those
+    // impls come before or after the `R` impls.
+    let header = "trait P<Self> {}
+        trait Q<Self> {}
+        trait R<Self> { fn r(x: Self) -> int; }";
+    let r_impls = "impl<A> R for [A] where [A]: P { fn r(x: [A]) -> int { 1 } }
+        impl<A> R for [A] where [A]: Q { fn r(x: [A]) -> int { 2 } }";
+    let p_q_impls = "impl P for [int] {}
+        impl Q for [int] {}";
+    expect_overlap(&format!("{header}\n{r_impls}\n{p_q_impls}"));
+    expect_overlap(&format!("{header}\n{p_q_impls}\n{r_impls}"));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn constraints_with_concrete_heads_make_impls_disjoint() {
+    // Only this module may implement `Small` or `Big` for arrays, and no array has both.
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            trait Small<Self> {}
+            trait Big<Self> {}
+            trait R<Self> { fn r(x: Self) -> int; }
+            impl Small for [int] {}
+            impl Small for [bool] {}
+            impl Big for [float] {}
+            impl<A> R for [A] where [A]: Small { fn r(x: [A]) -> int { 1 } }
+            impl<A> R for [A] where [A]: Big { fn r(x: [A]) -> int { 2 } }
+            r([1.5])
+        "# }),
+        int(2)
+    );
+}
+
+/// Two `R` impls whose prerequisites ask `W<T>` for `trait_name` with the `read` and `write`
+/// output effects, after `prelude` declaring the traits and the impls for `W<T>`.
+fn effect_prerequisite_impls(prelude: &str, trait_name: &str) -> [String; 2] {
+    let header = format!(
+        "trait R<Self> {{ fn r(x: Self) -> int; }}
+        struct W<T>(T)
+        struct B<T>(T)
+        {prelude}"
+    );
+    let read = format!(
+        "impl<T> R for B<T> where W<T>: {trait_name}<! E = read> {{ fn r(x: B<T>) -> int {{ 1 }} }}"
+    );
+    let write = format!(
+        "impl<T> R for B<T> where W<T>: {trait_name}<! E = write> {{ fn r(x: B<T>) -> int {{ 2 }} }}"
+    );
+    [
+        format!("{header}\n{read}\n{write}\n0"),
+        format!("{header}\n{write}\n{read}\n0"),
+    ]
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn effect_prerequisites_overlap_by_resolution_polarities() {
+    // A pure source satisfies both a `read` and a `write` bound on a performed effect.
+    for source in effect_prerequisite_impls(
+        "trait Source<Self |-> ! E> { fn source(x: Self) -> int ! E; }
+        impl<T> Source for <Self = W<T> |-> ! E = ()> { fn source(x: W<T>) -> int { 0 } }",
+        "Source",
+    ) {
+        expect_overlap(&source);
+    }
+    // Accepting `read` and `write` callbacks satisfies both bounds on a received effect.
+    for source in effect_prerequisite_impls(
+        "trait Apply<Self |-> ! E> { fn apply(x: Self, f: () -> int ! E) -> int; }
+        impl<T> Apply for <Self = W<T> |-> ! E = (read, write)> {
+            fn apply(x: W<T>, f: () -> int ! (read, write)) -> int { 0 }
+        }",
+        "Apply",
+    ) {
+        expect_overlap(&source);
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn effect_prerequisites_stay_disjoint_by_resolution_polarities() {
+    for (prelude, trait_name) in [
+        // Accepting only pure callbacks satisfies neither a `read` nor a `write` bound.
+        (
+            "trait Apply<Self |-> ! E> { fn apply(x: Self, f: () -> int ! E) -> int; }
+            impl<T> Apply for <Self = W<T> |-> ! E = ()> { fn apply(x: W<T>, f: () -> int) -> int { 0 } }",
+            "Apply",
+        ),
+        // An effect both performed and received must be equal, not a sub-effect.
+        (
+            "trait Both<Self |-> ! E> { fn both(x: Self, f: () -> int ! E) -> int ! E; }
+            impl<T> Both for <Self = W<T> |-> ! E = ()> { fn both(x: W<T>, f: () -> int) -> int { f() } }",
+            "Both",
+        ),
+    ] {
+        for source in effect_prerequisite_impls(prelude, trait_name) {
+            let mut session = TestSession::new();
+            assert_val_eq!(session.run(&source), int(0));
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn ground_effect_prerequisites_keep_effect_polymorphic_providers() {
+    // The provider accepts callbacks of any effect, so `W<int>` meets the `read` requirement and
+    // both `R` impls apply to `B<int>`, in either order.
+    let header = "trait Apply<Self |-> ! E> { fn apply(x: Self, f: () -> int ! E) -> int; }
+        trait R<Self> { fn r(x: Self) -> int; }
+        struct W<T>(T)
+        struct B<T>(T)
+        impl<T ! E> Apply for <Self = W<T> |-> ! E = E> { fn apply(x: W<T>, f: () -> int ! E) -> int { 0 } }";
+    let generic = "impl<T> R for B<T> where W<T>: Apply<! E = read> { fn r(x: B<T>) -> int { 1 } }";
+    let concrete = "impl R { fn r(x: B<int>) -> int { 2 } }";
+    expect_overlap(&format!("{header}\n{generic}\n{concrete}"));
+    expect_overlap(&format!("{header}\n{concrete}\n{generic}"));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn ever_growing_prerequisites_are_undecided_not_disjoint() {
+    // `[T]: P` requires `[[T]]: P`, and so on: the search stops at the recursion limit and does
+    // not conclude that the `R` impls are disjoint.
+    expect_overlap(indoc! { r#"
+        trait P<Self> {}
+        trait Q<Self> {}
+        trait R<Self> {}
+        impl<T> R for [T] where [T]: P {}
+        impl<T> R for [T] where [T]: Q {}
+        impl<T> Q for [T] {}
+        impl<T> P for [T] where [[T]]: P {}
+    "# });
+    // The same when the competing impl makes the prerequisite ground.
+    expect_overlap(indoc! { r#"
+        trait P<Self> {}
+        trait R<Self> {}
+        impl<T> R for [T] where [T]: P {}
+        impl R for [int] {}
+        impl<T> P for [T] where [[T]]: P {}
+    "# });
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn prerequisite_chains_deeper_than_the_recursion_limit_are_undecided() {
+    // `P` holds for any nesting of `W` around `int`, so both `R` impls apply to `B<W<…<int>…>>`,
+    // but checking it exceeds the recursion limit, which must not prove the impls disjoint.
+    let deep = (0..130).fold("int".to_string(), |ty, _| format!("W<{ty}>"));
+    expect_overlap(&format!(
+        "trait P<Self> {{}}
+        trait R<Self> {{}}
+        struct W<T>(T)
+        struct B<T>(T)
+        impl P for int {{}}
+        impl<T> P for W<T> where T: P {{}}
+        impl<T> R for B<T> where T: P {{}}
+        impl R for B<{deep}> {{}}"
+    ));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_impl_outputs_must_be_determined_by_inputs() {
+    // `T: Default` restricts `T` but does not determine it from `Self = int`.
+    let mut session = TestSession::new();
+    let err = session.fail_compilation(indoc! { r#"
+        trait Make<Self |-> Out> { fn make(x: Self) -> Out; }
+        impl<T> Make for <Self = int |-> Out = T> where T: Default {
+            fn make(x: int) -> T { default() }
+        }
+    "# });
+    match err.into_inner() {
+        CompilationErrorImpl::TraitImplOutputNotDetermined { .. } => {}
+        other => panic!("expected TraitImplOutputNotDetermined, got {other:?}"),
+    }
+
+    // Constraint outputs determine variables only from an input-derived start.
+    let mut session = TestSession::new();
+    let err = session.fail_compilation(indoc! { r#"
+        trait Link<Self |-> Out> { fn link(x: Self) -> Out; }
+        trait Make<Self |-> Out> { fn make(x: Self) -> Out; }
+        impl<A, B> Make for <Self = int |-> Out = A> where A: Link<Out = B>, B: Link<Out = A> {
+            fn make(x: int) -> A { make(x) }
+        }
+    "# });
+    match err.into_inner() {
+        CompilationErrorImpl::TraitImplOutputNotDetermined { .. } => {}
+        other => panic!("expected TraitImplOutputNotDetermined, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_impl_outputs_can_be_determined_through_constraint_outputs() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            trait First<Self |-> Out> { fn first(x: Self) -> Out; }
+            struct Wrap<I>(I)
+            impl<I, T> First for <Self = Wrap<I> |-> Out = Option<T>> where I: Iterator<Item = T> {
+                fn first(x: Wrap<I>) -> Option<T> {
+                    let mut it = x.0;
+                    next(it)
+                }
+            }
+            match first(Wrap(iter([3, 4]))) {
+                Some(x) => x,
+                None => 0,
+            }
+        "# }),
+        int(3)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn blanket_impls_with_inferred_field_requirements_overlap() {
     let mut session = TestSession::new();
     let err = session.fail_compilation(indoc! { r#"

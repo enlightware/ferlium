@@ -25,8 +25,8 @@ pub(crate) use artifacts::ensure_mir_artifacts;
 pub(crate) use artifacts::{MirArtifacts, ModuleArtifacts, Specialization};
 pub use diagnostics::{DiagnosticSeverity, ModuleDiagnostic};
 pub use error::*;
-pub(crate) use pipeline::add_code_to_module_with_capabilities;
 pub use pipeline::parse_module_and_expr;
+pub(crate) use pipeline::{add_code_to_module_with_capabilities, check_extended_module_coherence};
 pub(crate) use session::Modules;
 pub use session::{
     CompilationCapabilities, CompilationOutput, CompilationRevision, CompilerSession, ModuleInfo,
@@ -43,7 +43,7 @@ pub mod test_support {
     use crate::{
         compiler::{
             CompilationError, CompilationRevision, CompilerSession, SourceVersion,
-            add_code_to_module_with_capabilities,
+            add_code_to_module_with_capabilities, check_extended_module_coherence,
         },
         module::{Module, ModuleId},
     };
@@ -55,7 +55,7 @@ pub mod test_support {
         source: &str,
     ) -> Result<Module, CompilationError> {
         let module_id = module.module_id();
-        add_code_to_module_with_capabilities(
+        let module = add_code_to_module_with_capabilities(
             "<fixture>",
             source,
             module,
@@ -63,7 +63,9 @@ pub mod test_support {
             &session.modules,
             &mut session.source_table,
             session.capabilities,
-        )
+        )?;
+        check_extended_module_coherence(&module, &session.modules)?;
+        Ok(module)
     }
 
     pub fn module_entry_exists(session: &CompilerSession, module_id: ModuleId) -> bool {

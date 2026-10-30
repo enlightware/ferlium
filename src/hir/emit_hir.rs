@@ -80,7 +80,7 @@ use crate::{
         value::{is_compiler_provided_value_trait_application, is_value_trait},
     },
     types::{
-        coherence::check_trait_impl,
+        coherence::{check_module_coherence, check_trait_impl},
         effects::{EffType, EffectVar},
         trait_solver::{TraitSolver, trait_solver_from_module},
         r#type::{Type, TypeKind, TypeVar},
@@ -910,6 +910,9 @@ pub(crate) fn emit_module_with_capabilities(
     capabilities: CompilationCapabilities,
     warnings: &mut Vec<CompilationWarning>,
 ) -> Result<Module, Box<ModuleEmissionError>> {
+    // A module emitted from one source is complete here. An extended module is validated by
+    // whoever extends it, once all its sources are added.
+    let complete = matches!(emit_from, EmitModuleFrom::Uses(_));
     let mut output = match emit_from {
         EmitModuleFrom::Uses(uses) => Module::from_uses(module_id, module_path, uses),
         EmitModuleFrom::Existing(module) => *module,
@@ -922,7 +925,15 @@ pub(crate) fn emit_module_with_capabilities(
         &mut output,
         capabilities,
         warnings,
-    ) {
+    )
+    .and_then(|()| {
+        if complete {
+            // Revalidate non-overlap against the complete module.
+            check_module_coherence(&output, others)
+        } else {
+            Ok(())
+        }
+    }) {
         Ok(()) => {
             super::recursion::guard_module(&mut output, others);
             Ok(output)
@@ -1030,7 +1041,6 @@ fn emit_module_contents(
                 trait_module_id.is_none(),
                 &input_tys,
                 &output_tys,
-                &output_effs,
                 0,
                 0,
                 &[],
@@ -1327,7 +1337,6 @@ fn emit_module_contents(
                 trait_module_id.is_none(),
                 &emit_output.input_tys,
                 &emit_output.output_tys,
-                &emit_output.output_effs,
                 emit_output.ty_var_count,
                 emit_output.eff_var_count,
                 &emit_output.constraints,

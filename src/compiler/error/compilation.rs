@@ -1150,6 +1150,11 @@ pub enum CompilationErrorImpl<S: Scope> {
         input_ty: S::Type,
         impl_span: Location,
     },
+    TraitImplOutputNotDetermined {
+        trait_ref: S::TraitName,
+        output_ty: S::Type,
+        impl_span: Location,
+    },
     TraitImplNativeOnly {
         trait_ref: S::TraitName,
         impl_span: Location,
@@ -1993,6 +1998,19 @@ impl FormatWith<SourceTable> for CompilationError {
                     fmt_span(impl_span)
                 )
             }
+            TraitImplOutputNotDetermined {
+                trait_ref,
+                output_ty,
+                impl_span,
+            } => {
+                write!(
+                    f,
+                    "Output `{}` of the implementation of trait `{}` is not determined by its input types in {}; each type variable of an output must occur in the inputs or be an output of a constraint on them",
+                    output_ty,
+                    trait_ref,
+                    fmt_span(impl_span)
+                )
+            }
             TraitImplNativeOnly {
                 trait_ref,
                 impl_span,
@@ -2722,6 +2740,15 @@ impl CompilationError {
                 impl_span,
             } => compilation_error!(TraitImplForAnonymousStructuralType {
                 input_ty: input_ty.format_with(env).to_string(),
+                impl_span,
+            }),
+            TraitImplOutputNotDetermined {
+                trait_ref,
+                output_ty,
+                impl_span,
+            } => compilation_error!(TraitImplOutputNotDetermined {
+                trait_ref: env.trait_name(trait_ref).to_string(),
+                output_ty: output_ty.format_with(env).to_string(),
                 impl_span,
             }),
             TraitImplNativeOnly {

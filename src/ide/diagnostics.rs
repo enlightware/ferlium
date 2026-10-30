@@ -687,6 +687,18 @@ pub(super) fn compilation_error_to_data(
                 ),
             )]
         }
+        TraitImplOutputNotDetermined {
+            trait_ref,
+            output_ty,
+            impl_span,
+        } => {
+            vec![error_data_from_location(
+                impl_span,
+                format!(
+                    "Output `{output_ty}` of the implementation of trait `{trait_ref}` is not determined by its input types; each type variable of an output must occur in the inputs or be an output of a constraint on them",
+                ),
+            )]
+        }
         TraitImplNativeOnly {
             trait_ref,
             impl_span,

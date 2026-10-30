@@ -409,7 +409,6 @@ pub(super) fn emit_auto_value_impls(
             value_trait_id.module == output.module_id(),
             &[input_ty],
             &[],
-            &[],
             ty_var_count,
             eff_var_count,
             &constraints,
