@@ -40,7 +40,7 @@ gungraun = "0.19.4"
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3.78"
-wasmparser = { version = "0.259", default-features = false, features = ["std"] }
+wasmparser = { version = "0.262", default-features = false, features = ["std"] }
 
 [dependencies]
 dyn-clone = "1.0.17"
@@ -85,9 +85,9 @@ ferlium_macros = { path = "ferlium_macros", features = ["ferlium_abi_64"] }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2.128"
 js-sys = "0.3.105"
-wasm-encoder = { version = "0.259", default-features = false, features = ["std"] }
-wasmparser = { version = "0.259", default-features = false, features = ["std"] }
-wasmprinter = { version = "0.259", default-features = false, optional = true }
+wasm-encoder = { version = "0.262", default-features = false, features = ["std"] }
+wasmparser = { version = "0.262", default-features = false, features = ["std"] }
+wasmprinter = { version = "0.262", default-features = false, optional = true }
 
 [lints.rust]
 # As we are developing, some assignments may be unused temporarily.
