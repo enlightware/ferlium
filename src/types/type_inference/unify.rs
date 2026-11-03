@@ -8,6 +8,7 @@ use std::{
 };
 
 use ena::unify::{InPlace, Snapshot};
+use itertools::Itertools;
 use ustr::Ustr;
 
 use super::{
@@ -93,6 +94,7 @@ pub struct UnifiedTypeInference {
     pub(super) publication_inputs: Vec<Type>,
     ty_coverage_constraints: Vec<(Location, Type, Vec<LiteralValue>)>,
     pub(super) given_constraints: Vec<PubTypeConstraint>,
+    pub(super) declared_generics: Vec<Type>,
     pub(super) evidence_uses: EvidenceUses,
     pub(super) ty_unification_table: RevisionedTable<TyVarKey>,
     /// Remaining constraints that cannot be solved, will be part of the resulting type scheme
@@ -272,6 +274,46 @@ impl UnifiedTypeInference {
     }
 
     /// A fresh effect variable that solving may not constrain, standing for one fixed elsewhere.
+    /// The variables that the written generic parameters currently stand for.
+    pub(crate) fn declared_generic_roots(&mut self) -> Vec<Type> {
+        if self.declared_generics.is_empty() {
+            return Vec::new();
+        }
+        let generics = self.declared_generics.clone();
+        self.substitute_in_types(&generics)
+            .into_iter()
+            .filter(|ty| ty.data().is_variable())
+            .unique()
+            .collect()
+    }
+
+    /// Whether `roots`, as given by [`Self::declared_generic_roots`], are still distinct variables
+    /// and no subtype bound will restrict them to a shape.
+    pub(crate) fn declared_generics_intact(&mut self, roots: &[Type]) -> bool {
+        if roots.is_empty() {
+            return true;
+        }
+        if self.propagate_type_bounds().is_err() {
+            return false;
+        }
+        let roots = self.substitute_in_types(roots);
+        if !roots.iter().all(|ty| ty.data().is_variable()) || !roots.iter().all_unique() {
+            return false;
+        }
+        let bounds = self.bounds.relations().copied().collect::<Vec<_>>();
+        bounds.into_iter().all(|bound| {
+            let lower = self.substitute_in_type(bound.lower);
+            let upper = self.substitute_in_type(bound.upper);
+            let restricts = |generic: Type, other: Type| {
+                roots.contains(&generic) && {
+                    let other = other.data();
+                    !other.is_variable() && !other.is_never()
+                }
+            };
+            !restricts(lower, upper) && !restricts(upper, lower)
+        })
+    }
+
     pub(crate) fn fresh_rigid_effect_var(&mut self) -> EffectVar {
         self.effects.fresh_rigid_var(None)
     }
@@ -321,6 +363,7 @@ impl UnifiedTypeInference {
     ) -> Result<Self, InternalCompilationError> {
         let TypeInference {
             given_constraints,
+            declared_generics,
             evidence_uses,
             ty_unification_table,
             ty_constraints,
@@ -340,6 +383,7 @@ impl UnifiedTypeInference {
             publication_inputs: Vec::new(),
             ty_coverage_constraints,
             given_constraints,
+            declared_generics,
             evidence_uses,
             ty_unification_table: ty_unification_table.into(),
             remaining_ty_constraints: RevisionedConstraints::default(),

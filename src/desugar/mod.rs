@@ -35,7 +35,7 @@ use crate::{
     graph::{find_strongly_connected_components, topological_sort_sccs},
     internal_compilation_error,
     module::{Module, ModuleEnv, ModuleId, TypeDefId, TypeDefLookupResult},
-    parser::helpers::syn_static_apply,
+    parser::helpers::{std_path, syn_static_apply_path},
     std::{STD_MODULE_ID, math::int_type},
     types::{
         effects::{EffType, Effect, EffectVar, EffectsInstSubst, PrimitiveEffect},
@@ -59,6 +59,18 @@ impl graph::Node for DepGraphNode {
 
 pub type FnSccs = Vec<ast::FunctionScc>;
 pub type ModuleImplementationSccs = Vec<ast::ModuleImplementationScc>;
+
+/// What the module implementation SCCs and the impls of a module name, as indices of SCCs in
+/// [`ModuleImplementationSccs`].
+#[derive(Debug)]
+pub struct ModuleImplementationDependencies {
+    /// For each SCC, the other SCCs it names.
+    pub sccs: Vec<Vec<usize>>,
+    /// For each impl, the SCCs its methods name.
+    pub impls: Vec<Vec<usize>>,
+    /// The SCC of each function, by function AST index.
+    pub function_sccs: Vec<usize>,
+}
 
 type FnMap = FxHashMap<Ustr, usize>;
 type SubscriptMap = FxHashMap<Ustr, Vec<usize>>;

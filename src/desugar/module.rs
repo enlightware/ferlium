@@ -1,13 +1,16 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeSet;
+
 use super::{expr::desugar, *};
 use crate::{
     ast::FunctionAstIndex,
     compiler::error::{InvalidRecursiveTypeKind, InvalidTraitDefinitionKind},
     desugar::types::{
-        RecursiveAliasRef, RecursiveTypeBuilder, desugar_type_constraints_with_next_effect_var,
-        extend_generic_eff_params, extend_generic_ty_params,
+        ModuleImplementationNames, RecursiveAliasRef, RecursiveTypeBuilder,
+        desugar_type_constraints_with_next_effect_var, extend_generic_eff_params,
+        extend_generic_ty_params,
     },
     hir::function::CallableDefinition,
     module::{TraitId, Visibility, id::Id},
@@ -908,7 +911,8 @@ impl PModule {
     /// Desugars a parsed module and resolve its types and write them into output.
     /// Returns a desugared AST, the desugared expression arena, and a list of
     /// strongly connected components of its function dependency graph, sorted topologically,
-    /// and the trait method identities of generated default functions.
+    /// the dependencies of these components and of impls, and the trait method identities of
+    /// generated default functions.
     pub fn desugar(
         self,
         output: &mut Module,
@@ -916,7 +920,13 @@ impl PModule {
         parsed_arena: &PExprArena,
         capabilities: CompilationCapabilities,
     ) -> Result<
-        (DModule, DExprArena, ModuleImplementationSccs, TraitDefaults),
+        (
+            DModule,
+            DExprArena,
+            ModuleImplementationSccs,
+            ModuleImplementationDependencies,
+            TraitDefaults,
+        ),
         InternalCompilationError,
     > {
         // Flatten uses from self and check for conflicts with local definitions.
@@ -1036,17 +1046,65 @@ impl PModule {
         let mut impl_dep_graph = function_dep_graph;
         impl_dep_graph.extend(subscript_dep_graphs.into_iter().flatten());
         let sccs = find_strongly_connected_components(&impl_dep_graph);
+        let sorted_node_sccs = topological_sort_sccs(&impl_dep_graph, &sccs);
+        let mut scc_of_node = vec![0; impl_dep_graph.len()];
+        for (scc_index, nodes) in sorted_node_sccs.iter().enumerate() {
+            for node in nodes {
+                scc_of_node[*node] = scc_index;
+            }
+        }
+        let sccs_of = |nodes: &mut dyn Iterator<Item = usize>, exclude: Option<usize>| {
+            nodes
+                .map(|node| scc_of_node[node])
+                .filter(|scc| Some(*scc) != exclude)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+        let scc_dependencies = sorted_node_sccs
+            .iter()
+            .enumerate()
+            .map(|(scc_index, nodes)| {
+                sccs_of(
+                    &mut nodes
+                        .iter()
+                        .flat_map(|node| impl_dep_graph[*node].0.iter().copied()),
+                    Some(scc_index),
+                )
+            })
+            .collect();
         let sorted_sccs = module_implementation_sccs(
             &module_implementation_indices,
             &impl_dep_graph,
-            topological_sort_sccs(&impl_dep_graph, &sccs),
+            sorted_node_sccs,
         );
 
         // Desugar trait implementations
-        let impls = impls
-            .into_iter()
-            .map(|i| i.desugar(&env, parsed_arena, &mut desugared_arena, &mut modules_used))
-            .collect::<Result<_, _>>()?;
+        let module_names = ModuleImplementationNames {
+            functions: &fn_map,
+            subscripts: &subscript_map,
+            projection_subscripts: &projection_subscript_map,
+        };
+        let (impls, impl_dependencies): (Vec<_>, Vec<_>) = process_results(
+            impls.into_iter().map(|i| {
+                i.desugar(
+                    &module_names,
+                    &env,
+                    parsed_arena,
+                    &mut desugared_arena,
+                    &mut modules_used,
+                )
+            }),
+            |iter| iter.unzip(),
+        )?;
+        let dependencies = ModuleImplementationDependencies {
+            sccs: scc_dependencies,
+            impls: impl_dependencies
+                .into_iter()
+                .map(|nodes: Vec<usize>| sccs_of(&mut nodes.into_iter(), None))
+                .collect(),
+            function_sccs: scc_of_node[..functions.len()].to_vec(),
+        };
 
         // Build result
         output.deps.extend(modules_used);
@@ -1059,7 +1117,7 @@ impl PModule {
             type_defs: vec![],
             uses,
         };
-        Ok((module, desugared_arena, sorted_sccs, defaults))
+        Ok((module, desugared_arena, sorted_sccs, dependencies, defaults))
     }
 }
 

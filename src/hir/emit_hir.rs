@@ -65,6 +65,7 @@ use crate::{
         },
         emit_subscripts::{predeclare_subscripts, synthetic_subscript_member_function},
         emit_value_impl::emit_auto_value_impls,
+        impl_schedule::ImplSchedule,
     },
     internal_compilation_error,
     module::{
@@ -927,6 +928,7 @@ pub(crate) fn emit_module_with_capabilities(
         warnings,
     )
     .and_then(|()| {
+        debug_assert!(output.impls.pending.is_empty());
         if complete {
             // Revalidate non-overlap against the complete module.
             check_module_coherence(&output, others)
@@ -957,7 +959,7 @@ fn emit_module_contents(
     validate_name_uniqueness(&source)?;
 
     // First desugar the module.
-    let (source, mut desugared_arena, sorted_sccs, trait_defaults) =
+    let (source, mut desugared_arena, mut sorted_sccs, dependencies, trait_defaults) =
         source.desugar(output, others, parsed_arena, capabilities)?;
 
     // This gate applies only to explicit source impls, never compiler-derived ownership glue.
@@ -981,7 +983,7 @@ fn emit_module_contents(
     // Pre-registration pass: for trait impls with an explicit `for ConcreteType` annotation,
     // register a stub implementation before processing any function SCCs. This allows module
     // functions to use trait methods from these impls regardless of source order.
-    let mut concrete_impl_stubs: FxHashMap<usize, ImplStubData> = FxHashMap::default();
+    let mut concrete_impl_stubs: FxHashMap<ImplAstIndex, ImplStubData> = FxHashMap::default();
     for (imp_idx, imp) in source.impls.iter().enumerate() {
         if let Some(for_trait) = &imp.for_trait {
             let input_tys = for_trait.input_tys();
@@ -1114,7 +1116,7 @@ fn emit_module_contents(
             let key = ConcreteTraitImplKey::new(trait_id, input_tys.clone());
             let id = output.impls.add_concrete_struct(key, stub);
             concrete_impl_stubs.insert(
-                imp_idx,
+                ImplAstIndex::from_index(imp_idx),
                 ImplStubData {
                     id,
                     method_ids,
@@ -1131,17 +1133,72 @@ fn emit_module_contents(
 
     let subscript_ids = predeclare_subscripts(output, &source, others)?;
 
-    // Process each implementation SCC one by one.
-    for mut scc in sorted_sccs.into_iter().rev() {
-        // Keep the existing deterministic intra-SCC order used as a compatibility workaround for
-        // effect tracking. Mixed function/subscript-member SCCs are intentionally included here.
+    // Keep the existing deterministic intra-SCC order used as a compatibility workaround for
+    // effect tracking. Mixed function/subscript-member SCCs are intentionally included here.
+    for scc in &mut sorted_sccs {
         scc.implementations.sort();
+    }
+    let emission = ModuleEmission {
+        source: &source,
+        sccs: &sorted_sccs,
+        subscript_ids: &subscript_ids,
+        trait_defaults: &trait_defaults,
+        concrete_impl_stubs: &concrete_impl_stubs,
+        others,
+        capabilities,
+    };
+
+    // Impls, and the implementation SCCs they reach, are emitted in an order where no pending
+    // impl of the module can change their inference. The other SCCs see every impl.
+    let schedule = ImplSchedule::new(output, &emission, &dependencies);
+    let mut ctx = EmissionCtx {
+        output,
+        solver_arena: &mut solver_arena,
+        desugared_arena: &mut desugared_arena,
+    };
+    schedule.run(&mut ctx, &emission, warnings)?;
+    for scc_index in (0..sorted_sccs.len()).rev() {
+        if !schedule.is_helper(scc_index) {
+            emission.emit_scc(&mut ctx, scc_index, warnings)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// What the emission of a module's items reads.
+pub(super) struct ModuleEmission<'a> {
+    pub(super) source: &'a ast::DModule,
+    pub(super) sccs: &'a [ast::ModuleImplementationScc],
+    subscript_ids: &'a [LocalSubscriptId],
+    pub(super) trait_defaults: &'a FxHashMap<FunctionAstIndex, (TraitId, TraitMethodIndex)>,
+    pub(super) concrete_impl_stubs: &'a FxHashMap<ImplAstIndex, ImplStubData>,
+    pub(super) others: &'a Modules,
+    capabilities: CompilationCapabilities,
+}
+
+/// What the emission of a module's items writes.
+pub(super) struct EmissionCtx<'a> {
+    pub(super) output: &'a mut Module,
+    solver_arena: &'a mut UNodeArena,
+    desugared_arena: &'a mut ast::DExprArena,
+}
+
+impl ModuleEmission<'_> {
+    /// Infer and emit the implementation SCC at `scc_index`.
+    pub(super) fn emit_scc(
+        &self,
+        ctx: &mut EmissionCtx<'_>,
+        scc_index: usize,
+        warnings: &mut Vec<CompilationWarning>,
+    ) -> Result<(), InternalCompilationError> {
+        let scc = &self.sccs[scc_index];
         let emissions = module_implementation_emissions(
-            &source,
-            &desugared_arena,
-            &subscript_ids,
-            &scc,
-            &trait_defaults,
+            self.source,
+            ctx.desugared_arena,
+            self.subscript_ids,
+            scc,
+            self.trait_defaults,
         );
         let recursive_function_names = if scc.recursive {
             emissions
@@ -1164,20 +1221,33 @@ fn emit_module_contents(
 
         // Emit the corresponding implementation bodies.
         emit_functions(
-            output,
-            &mut solver_arena,
+            ctx.output,
+            ctx.solver_arena,
             || emissions.iter().map(ModuleImplementationEmission::input),
-            &desugared_arena,
-            others,
+            ctx.desugared_arena,
+            self.others,
             None,
             &recursive_function_names,
-            capabilities,
+            self.capabilities,
             warnings,
         )?;
+        Ok(())
     }
 
-    // Process trait implementations
-    for (imp_idx, imp) in source.impls.iter().enumerate() {
+    /// Infer and register the source impl at `imp_idx`.
+    pub(super) fn emit_impl(
+        &self,
+        ctx: &mut EmissionCtx<'_>,
+        imp_idx: ImplAstIndex,
+        warnings: &mut Vec<CompilationWarning>,
+    ) -> Result<(), InternalCompilationError> {
+        let imp = &self.source.impls[imp_idx.as_index()];
+        let output = &mut *ctx.output;
+        let others = self.others;
+        let capabilities = self.capabilities;
+        let concrete_impl_stubs = self.concrete_impl_stubs;
+        let desugared_arena = &mut *ctx.desugared_arena;
+        let solver_arena = &mut *ctx.solver_arena;
         // Validate the function mapping.
         let module_env = ModuleEnv::new(output, others);
         let (trait_module_id, trait_id) = module_env
@@ -1261,7 +1331,7 @@ fn emit_module_contents(
             trait_def,
             span: imp.span,
             stub_data: concrete_impl_stubs.get(&imp_idx),
-            generic_param_count: imp.generic_params.type_params().len(),
+            generic_type_params: imp.generic_params.type_params(),
             generic_effect_param_names: imp
                 .generic_params
                 .effect_params()
@@ -1283,9 +1353,9 @@ fn emit_module_contents(
             .collect::<FxHashSet<_>>();
         let emit_output = emit_functions(
             output,
-            &mut solver_arena,
+            solver_arena,
             functions,
-            &desugared_arena,
+            desugared_arena,
             others,
             Some(trait_ctx),
             &recursive_function_names,
@@ -1297,10 +1367,12 @@ fn emit_module_contents(
         // Register the implementation if no stub was present.
         let is_concrete = emit_output.ty_var_count == 0 && emit_output.eff_var_count == 0;
         let local_impl_id = if let Some(stub_data) = concrete_impl_stubs.get(&imp_idx) {
-            assert_eq!(
-                &emit_output.functions,
-                &output.impls.data[stub_data.id.as_index()].methods
-            );
+            // The stub's contract was published before its body was checked, and other code may
+            // already rely on it: body checking validates the contract and cannot change it.
+            let stub = &output.impls.data[stub_data.id.as_index()];
+            assert_eq!(emit_output.functions, stub.methods);
+            assert_eq!(emit_output.input_tys, stub_data.input_tys);
+            assert_eq!(emit_output.output_tys, stub.output_tys);
             let associated_const_tys = trait_def_for_consts
                 .instantiate_associated_const_tys_for_tys(
                     &emit_output.input_tys,
@@ -1403,9 +1475,8 @@ fn emit_module_contents(
         let header = header.strip_suffix("\n").unwrap_or_else(|| &header);
         let impl_type = if is_concrete { "Concrete" } else { "Blanket" };
         log::trace!("Emitted {impl_type} {header}");
+        Ok(())
     }
-
-    Ok(())
 }
 
 pub(super) type PubTypeConstraintPtr = *const PubTypeConstraint;

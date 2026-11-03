@@ -3,6 +3,7 @@
 
 use std::{
     fmt::{self, Debug, Display},
+    iter::once,
     mem,
     ops::Deref,
 };
@@ -1155,6 +1156,11 @@ pub enum CompilationErrorImpl<S: Scope> {
         output_ty: S::Type,
         impl_span: Location,
     },
+    /// Items whose inference waits for impls of the same module that are not finished, each
+    /// with the spans of the impls it waits for.
+    InferenceBlockedByPendingImpls {
+        blocked: Vec<(Location, Vec<Location>)>,
+    },
     TraitImplNativeOnly {
         trait_ref: S::TraitName,
         impl_span: Location,
@@ -2011,6 +2017,18 @@ impl FormatWith<SourceTable> for CompilationError {
                     fmt_span(impl_span)
                 )
             }
+            InferenceBlockedByPendingImpls { blocked } => {
+                write!(
+                    f,
+                    "Cannot infer the types of {}, because they depend on each other. Give the impl a header with all its types and no generic parameters, such as `impl Trait for int`, or stop calling this function from the impl",
+                    blocked
+                        .iter()
+                        .flat_map(|(span, blockers)| once(span).chain(blockers))
+                        .unique()
+                        .map(fmt_span)
+                        .join(" and ")
+                )
+            }
             TraitImplNativeOnly {
                 trait_ref,
                 impl_span,
@@ -2751,6 +2769,9 @@ impl CompilationError {
                 output_ty: output_ty.format_with(env).to_string(),
                 impl_span,
             }),
+            InferenceBlockedByPendingImpls { blocked } => {
+                compilation_error!(InferenceBlockedByPendingImpls { blocked })
+            }
             TraitImplNativeOnly {
                 trait_ref,
                 impl_span,

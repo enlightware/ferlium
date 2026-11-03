@@ -3150,7 +3150,7 @@ fn callable_joins_can_infer_uninhabited_arguments() {
             TestSession::new().run(&format!("{prefix} let f = select(true); 7")),
             int(7)
         );
-        for argument in ["42", "true"] {
+        for argument in ["(42: int)", "true"] {
             assert!(matches!(
                 TestSession::new()
                     .fail_compilation(&format!("{prefix} select(true)({argument})"))

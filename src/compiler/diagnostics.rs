@@ -351,6 +351,9 @@ pub(crate) fn diagnostics_from_error(
             ..
         } => vec![*instantiation_span],
         MethodsNotPartOfTrait { spans, .. } => spans.clone(),
+        InferenceBlockedByPendingImpls { blocked } => {
+            blocked.iter().map(|(span, _)| *span).collect()
+        }
         TraitMethodImplsMissing { impl_span, .. } => vec![*impl_span],
         OverlappingTraitImpls {
             impl_span,

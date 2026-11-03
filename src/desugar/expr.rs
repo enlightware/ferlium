@@ -1,8 +1,6 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-use std::iter::once;
-
 use super::{
     format_string::emit_format_string_ast,
     patterns::{desugar_block_exprs, desugar_let_exprs, desugar_pattern_bindings},
@@ -131,11 +129,10 @@ pub(crate) fn desugar(
     let kind = match expr_kind {
         Literal(value, ty) => {
             if ty == int_type() {
-                // Convert integer literals to from_int(literal).
+                // Convert integer literals to std::Num::from_int(literal), whatever `from_int` is in scope.
                 let lit =
                     desugared_arena.alloc(DExpr::new(ExprKind::literal(value, ty), expr_span));
-                let from_int =
-                    desugared_arena.alloc(DExpr::single_identifier(ustr("from_int"), expr_span));
+                let from_int = std_trait_identifier("Num", "from_int", expr_span, desugared_arena);
                 ExprKind::apply(from_int, vec![lit], UnnamedArg::All)
             } else {
                 Literal(value, ty)
@@ -490,8 +487,9 @@ pub(crate) fn desugar(
             ));
             let it_name =
                 desugared_arena.alloc(DExpr::single_identifier(ustr("@it"), body_start_span));
-            let it_next = syn_static_apply(
-                (ustr("next"), body_start_span),
+            let it_next = syn_static_apply_path(
+                ["std", "Iterator", "next"],
+                body_start_span,
                 vec![it_name],
                 desugared_arena,
             );
@@ -633,15 +631,6 @@ fn inferred_collection_type(
         ctx.generic_ty_params,
         Some(ctx.generic_eff_params),
         modules_used,
-    )
-}
-
-fn std_path(segments: &[&str], span: Location) -> Path {
-    Path::new(
-        once("std")
-            .chain(segments.iter().copied())
-            .map(|segment| (ustr(segment), span))
-            .collect(),
     )
 }
 

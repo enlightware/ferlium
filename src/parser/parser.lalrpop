@@ -912,7 +912,7 @@ CastExpr<NoStruct>: ExprKind = {
     <e:Es<CastExpr<NoStruct>>> <l:@L> "as" <ty:Sp<CastTargetType>> <r:@R> => {
         let e_span = arena[e].span;
         let cast_expr = arena.alloc(Expr::new(
-            ExprKind::identifier(Path::single_str("cast", e_span)),
+            ExprKind::identifier(std_path(&["Cast", "cast"], e_span)),
             span(l, r, source_id)
         ));
         let apply_expr = arena.alloc(Expr::new(

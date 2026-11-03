@@ -11,6 +11,7 @@ mod bits;
 mod complex;
 mod effect_inference;
 mod effects;
+mod impl_order;
 mod math;
 mod mir;
 mod multi_module;

@@ -15,6 +15,7 @@ use super::{
 use crate::{
     Location,
     compiler::error::LocatedError,
+    define_id_type,
     format::{
         FormatWith, write_identifier, write_identifier_list, write_with_separator_and_format_fn,
     },
@@ -292,6 +293,12 @@ impl FunctionAstIndex {
         self.0
     }
 }
+
+define_id_type!(
+    /// Index of an impl in an AST-local impl list.
+    #[derive(PartialOrd, Ord)]
+    ImplAstIndex
+);
 
 /// Index of a subscript in an AST-local subscript list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, new)]

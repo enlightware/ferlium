@@ -72,11 +72,16 @@ impl<T> SizedSeq for Bag<T> {
 ```
 
 Here the impl says: for every `T`, `Bag<T>` is a sized sequence.
+An impl's methods must work for every choice of generic parameters satisfying its requirements.
+They cannot silently specialize a parameter to one concrete type or require two independent parameters to be equal.
 The same binder syntax also works for more involved generic impls, including iterator-like types.
 The next sections show those richer impl headers.
 
-Currently, module functions cannot use a generic impl declared in the same module.
-The module's trailing expression and callers in other modules can use it.
+Functions and impls can use any impl of their module, whether it is declared before or after them.
+A generic impl and a generic helper can call each other when the helper can carry the trait requirement without needing more type or effect information from the impl.
+If each needs information that can only be inferred from the other, the compiler reports an inference limitation.
+Moving the helper's body into the impl method can resolve this.
+If only a concrete implementation is needed, another option is a header specifying all input and output types and effects, with no generic parameters, such as `impl SizedSeq for Bag<int>`.
 
 ## Impl-level `where` clauses
 

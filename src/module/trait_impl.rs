@@ -23,8 +23,8 @@ use crate::{
     },
     module::{
         Def, DefKind, DefTable, LocalDecl, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId,
-        PendingModuleFunction, QualifiedNameEnv, TraitId, Visibility, fmt_ordered_quantifiers,
-        id::Id, unique_generated_name,
+        PendingImpls, PendingModuleFunction, QualifiedNameEnv, TraitId, Visibility,
+        fmt_ordered_quantifiers, id::Id, unique_generated_name,
     },
     parser::location::Location,
     std::value::{
@@ -631,6 +631,9 @@ pub struct TraitImpls {
     pub(crate) application_key_to_id: Rc<ConcreteImpls>,
     #[new(default)]
     pub(crate) data: Rc<Vec<TraitImpl>>,
+    /// Same-module impls not emitted yet, empty once the module is complete.
+    #[new(default)]
+    pub(crate) pending: Rc<PendingImpls>,
 }
 
 impl TraitImpls {

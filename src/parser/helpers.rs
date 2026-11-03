@@ -1,6 +1,8 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
+use std::iter::once;
+
 use crate::Location;
 use crate::SourceId;
 use crate::ast::Attribute;
@@ -449,13 +451,14 @@ fn suffix_tail_kind<L, T>(
     }
 }
 
-pub(crate) fn syn_static_apply<P: Phase>(
-    identifier: UstrSpan,
-    args: Vec<ExprId<P>>,
-    arena: &mut ExprArena<P>,
-) -> ExprKind<P> {
-    let func = arena.alloc(Expr::<P>::single_identifier(identifier.0, identifier.1));
-    ExprKind::apply(func, args, UnnamedArg::All)
+/// The path of an item of std, which local names cannot shadow.
+pub(crate) fn std_path(segments: &[&str], span: Location) -> Path {
+    Path::new(
+        once("std")
+            .chain(segments.iter().copied())
+            .map(|segment| (ustr(segment), span))
+            .collect(),
+    )
 }
 
 pub(crate) fn syn_static_apply_path<P: Phase>(
@@ -661,7 +664,7 @@ pub(crate) fn for_loop(
 ) -> PExprKind {
     let seq_span = arena[seq].span;
     let seq_span_start = seq_span.start_location();
-    let iter_kind = syn_static_apply((ustr("iter"), seq_span_start), vec![seq], arena);
+    let iter_kind = syn_static_apply_path(["std", "Seq", "iter"], seq_span_start, vec![seq], arena);
     let iterator = arena.alloc(PExpr::new(iter_kind, seq_span));
     ExprKind::for_loop(b(ForLoopData::new(pattern, iterator, body)))
 }

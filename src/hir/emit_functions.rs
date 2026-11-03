@@ -77,7 +77,7 @@ pub(super) struct EmitTraitCtx<'a> {
     pub(super) trait_def: Trait,
     pub(super) span: Location,
     pub(super) stub_data: Option<&'a ImplStubData>,
-    pub(super) generic_param_count: usize,
+    pub(super) generic_type_params: &'a [ast::UstrSpan],
     pub(super) generic_effect_param_names: Vec<Ustr>,
     pub(super) for_trait: Option<&'a ast::DTraitImplFor>,
     pub(super) impl_constraints: &'a [PubTypeConstraint],
@@ -557,8 +557,8 @@ where
         let output_effs = (0..trait_def.output_effect_count())
             .map(|_| ty_inf.fresh_effect_var_ty())
             .collect::<Vec<_>>();
-        let explicit_quantifiers = if trait_ctx.generic_param_count > 0 {
-            (0..trait_ctx.generic_param_count)
+        let explicit_quantifiers = if !trait_ctx.generic_type_params.is_empty() {
+            (0..trait_ctx.generic_type_params.len())
                 .map(|index| TypeVar::new(index as u32))
                 .collect::<Vec<_>>()
         } else if let Some(for_trait) = trait_ctx.for_trait {
@@ -584,10 +584,12 @@ where
                     )
                 })
                 .collect();
-            impl_annotation_subst = Some((
-                ty_inf.fresh_type_var_subst(&explicit_quantifiers),
-                eff_subst,
-            ));
+            let ty_subst = ty_inf.fresh_type_var_subst(&explicit_quantifiers);
+            // Variables of a header without generic parameters are holes to infer.
+            if !trait_ctx.generic_type_params.is_empty() {
+                ty_inf.add_declared_generics(ty_subst.values().copied());
+            }
+            impl_annotation_subst = Some((ty_subst, eff_subst));
         }
         explicit_trait_impl = trait_ctx.for_trait.map(|for_trait| {
             let mut mapper = impl_annotation_subst
@@ -938,6 +940,7 @@ where
                         .entry(*var)
                         .or_insert_with(|| ty_inf.fresh_rigid_effect_var_ty(None));
                 }
+                ty_inf.add_declared_generics(scheme.ty_quantifiers.iter().map(|var| subst.0[var]));
                 Ok::<_, InternalCompilationError>(scheme.instantiate_simple(&subst))
             })
             .transpose()?;
@@ -1023,6 +1026,7 @@ where
         }
         local_fns.push(id);
         function_annotation_substs.push(annotation_subst);
+        ty_inf.add_declared_generics(explicit_root_tys.iter().copied());
         function_explicit_root_tys.push(explicit_root_tys);
         function_attrs.push(attrs);
         function_kinds.push(kind);
@@ -1436,11 +1440,8 @@ where
                 .filter(|c| !is_compiler_provided_value_constraint(c, module_env))
                 .collect();
             if !remaining_orphans.is_empty() {
-                return Err(internal_compilation_error!(Internal {
-                    error: format!(
-                        "Orphan constraints found in trait impl: {}",
-                        remaining_orphans.format_with(&module_env)
-                    ),
+                return Err(internal_compilation_error!(UnresolvedConstraints {
+                    constraints: remaining_orphans.iter().map(|c| (*c).clone()).collect(),
                     span: remaining_orphans[0].use_site(),
                 }));
             }
@@ -1534,6 +1535,23 @@ where
         let trait_ctx = trait_ctx.unwrap();
         let trait_id = trait_ctx.trait_id;
         let trait_def = &trait_ctx.trait_def;
+        let mut generic_roots = FxHashSet::default();
+        for (index, (name, span)) in trait_ctx.generic_type_params.iter().enumerate() {
+            let root = impl_annotation_subst
+                .as_ref()
+                .and_then(|(subst, _)| subst.get(&TypeVar::new(index as u32)))
+                .map(|ty| ty_inf.substitute_in_type(*ty))
+                .expect("a written impl generic has a type variable");
+            if root.data().as_variable().is_none() || !generic_roots.insert(root) {
+                return Err(internal_compilation_error!(InvalidGenericParams {
+                    owner: GenericParamsOwner::TraitImpl {
+                        trait_name: trait_def.name,
+                    },
+                    kind: InvalidGenericParamsKind::RestrictedTypeParameter { name: *name },
+                    span: *span,
+                }));
+            }
+        }
         let trait_effect_subst = trait_def.effect_param_subst_for_effs(&trait_output.output_effs);
         for (i, id) in local_fns.iter().enumerate() {
             let i = TraitMethodIndex::from_index(i);

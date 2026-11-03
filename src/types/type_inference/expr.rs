@@ -142,6 +142,8 @@ fn loop_control_error(
 pub struct TypeInference {
     /// Evidence supplied by the enclosing checked declaration, not obligations to select an impl.
     pub(super) given_constraints: Vec<PubTypeConstraint>,
+    /// The type variables standing for generic parameters written by the enclosing declaration.
+    pub(super) declared_generics: Vec<Type>,
     pub(super) evidence_uses: EvidenceUses,
     pub(super) ty_unification_table: InPlaceUnificationTable<TyVarKey>,
     pub(super) ty_constraints: Vec<TypeConstraint>,
@@ -513,6 +515,11 @@ impl TypeInference {
             .iter()
             .map(|&eff_var| (eff_var, self.fresh_effect_var_ty()))
             .collect()
+    }
+
+    /// Declare `generics` as written generic parameters: selecting an impl will not narrow them.
+    pub(crate) fn add_declared_generics(&mut self, generics: impl IntoIterator<Item = Type>) {
+        self.declared_generics.extend(generics);
     }
 
     pub(crate) fn add_given_constraint(&mut self, constraint: PubTypeConstraint) -> GivenId {

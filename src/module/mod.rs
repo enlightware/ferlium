@@ -14,11 +14,12 @@ mod generated_projection;
 pub mod id;
 pub mod module_env;
 pub mod path;
+mod pending_impls;
 pub mod trait_impl;
 mod type_alias_name;
 pub mod uses;
 
-use std::{fmt, hash::Hash, ops};
+use std::{fmt, hash::Hash, mem, ops};
 
 pub use debug_info::*;
 use derive_new::new;
@@ -28,6 +29,7 @@ pub(crate) use generated_projection::*;
 use itertools::Itertools;
 pub use module_env::*;
 pub use path::*;
+pub(crate) use pending_impls::*;
 pub use trait_impl::*;
 pub use uses::*;
 use ustr::{Ustr, ustr};
@@ -57,7 +59,7 @@ use crate::{
     types::{
         effects::EffType,
         mutability::MutType,
-        r#trait::Trait,
+        r#trait::{Trait, TraitDefaultMethod},
         trait_solver::application_key,
         r#type::{
             BareNativeType, CallResultConvention, FnArgType, LocalTypeAliasId, SubscriptMemberType,
@@ -585,7 +587,79 @@ pub struct Module {
     pub hir_arena: ENodeArena,
 }
 
+/// The parts of a module that emitting an item may change, to undo that emission.
+///
+/// Emitting an item only appends functions and HIR nodes, except that it may replace the
+/// functions it was given slots for, such as the methods of a pre-registered impl. Restoring
+/// truncates the appended ones; the other parts are small enough to copy.
+pub(crate) struct ModuleCheckpoint {
+    deps: FxHashSet<ModuleId>,
+    def_table: DefTable,
+    unsafe_items: FxHashSet<Ustr>,
+    function_count: usize,
+    replaced_functions: Vec<(LocalFunctionId, ModuleFunction)>,
+    subscripts: Vec<SubscriptDefinition>,
+    projection_subscripts: FxHashMap<ProjectionKey, ProjectionEntry>,
+    type_defs: TypeDefSlots,
+    trait_default_methods: Vec<Vec<Option<TraitDefaultMethod>>>,
+    impls: TraitImpls,
+    hir_node_count: usize,
+}
+
 impl Module {
+    /// Record the state of the module before emitting an item that may replace the functions
+    /// `replaced_functions`.
+    pub(crate) fn checkpoint(&self, replaced_functions: &[LocalFunctionId]) -> ModuleCheckpoint {
+        ModuleCheckpoint {
+            deps: self.deps.clone(),
+            def_table: self.def_table.clone(),
+            unsafe_items: self.unsafe_items.clone(),
+            function_count: self.functions.len(),
+            replaced_functions: replaced_functions
+                .iter()
+                .map(|id| (*id, self.functions[id.as_index()].clone()))
+                .collect(),
+            subscripts: self.subscripts.clone(),
+            projection_subscripts: self.projection_subscripts.clone(),
+            type_defs: self.type_defs.clone(),
+            trait_default_methods: self
+                .traits
+                .iter()
+                .map(|trait_def| trait_def.default_methods.clone())
+                .collect(),
+            impls: self.impls.clone(),
+            hir_node_count: self.hir_arena.len(),
+        }
+    }
+
+    /// Undo everything done to the module since `checkpoint` was recorded.
+    pub(crate) fn restore(&mut self, checkpoint: ModuleCheckpoint) {
+        self.deps = checkpoint.deps;
+        self.def_table = checkpoint.def_table;
+        self.unsafe_items = checkpoint.unsafe_items;
+        self.functions.truncate(checkpoint.function_count);
+        for (id, function) in checkpoint.replaced_functions {
+            self.functions[id.as_index()] = function;
+        }
+        self.subscripts = checkpoint.subscripts;
+        self.projection_subscripts = checkpoint.projection_subscripts;
+        self.type_defs = checkpoint.type_defs;
+        debug_assert_eq!(self.traits.len(), checkpoint.trait_default_methods.len());
+        for (trait_def, default_methods) in
+            self.traits.iter_mut().zip(checkpoint.trait_default_methods)
+        {
+            trait_def.default_methods = default_methods;
+        }
+        self.impls = checkpoint.impls;
+        if self.hir_arena.len() > checkpoint.hir_node_count {
+            self.hir_arena = mem::take(&mut self.hir_arena)
+                .into_iter()
+                .take(checkpoint.hir_node_count)
+                .map(|(_, node)| node)
+                .collect();
+        }
+    }
+
     fn mark_custom_value_impl_for_inputs(&mut self, is_value: bool, input_tys: &[Type]) {
         if !is_value {
             return;

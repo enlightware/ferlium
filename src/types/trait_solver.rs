@@ -22,13 +22,13 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        self, BlanketImpls, BlanketTraitImpls, ConcreteTraitImplKey, CurrentTypeItems, DefTable,
-        DictionaryEntryRequirements, FunctionId, LocalDecl, LocalDeclId, LocalFunctionId,
-        LocalImplId, LocalTraitId, Module, ModuleEnv, ModuleId, PendingFunctionBody,
-        PendingFunctionCollector, PendingModuleFunction, ProjectionKey, QualifiedNameEnv,
-        ResolvedValueLayout, TraitDictionary, TraitId, TraitImpl, TraitImplId, TraitImpls,
-        TypeDefId, Visibility, build_capturing_dictionary_value, build_dictionary_value,
-        dictionary_capture_plan, id::Id,
+        self, BlanketImpls, BlanketTraitImpls, CandidateSearch, ConcreteTraitImplKey,
+        CurrentTypeItems, DefTable, DictionaryEntryRequirements, FunctionId, LocalDecl,
+        LocalDeclId, LocalFunctionId, LocalImplId, LocalTraitId, Module, ModuleEnv, ModuleId,
+        PendingFunctionBody, PendingFunctionCollector, PendingModuleFunction, ProjectionKey,
+        QualifiedNameEnv, ResolvedValueLayout, TraitDictionary, TraitId, TraitImpl, TraitImplId,
+        TraitImpls, TypeDefId, Visibility, build_capturing_dictionary_value,
+        build_dictionary_value, dictionary_capture_plan, id::Id,
     },
     std::{
         STD_MODULE_ID,
@@ -181,6 +181,10 @@ impl<'a> TraitSolver<'a> {
 }
 
 pub(crate) const TRAIT_SOLVER_RECURSION_LIMIT: usize = 128;
+
+/// Improvement nests deeper frames than solving, and giving up only leaves an application to be
+/// resolved later, so its limit is lower.
+const IMPROVEMENT_DEPTH_LIMIT: usize = 32;
 
 fn materialized_associated_const_values(
     trait_id: TraitId,
@@ -879,6 +883,7 @@ impl TraitOutputQuery for TraitSolverProbe<'_> {
                 output_tys,
                 output_effs,
                 assumptions,
+                true,
                 fn_span,
                 arena,
             )
@@ -1717,6 +1722,7 @@ impl<'a> TraitSolver<'a> {
         output_tys: Option<&[Type]>,
         output_effs: Option<&[EffType]>,
         assumptions: ConstraintAssumptions<'_>,
+        answer_used: bool,
         fn_span: Location,
         arena: &mut NodeArena,
     ) -> Result<TraitImprovementMatch, InternalCompilationError> {
@@ -1745,7 +1751,10 @@ impl<'a> TraitSolver<'a> {
                     .collect()
             }),
         };
-        if !self.active_improvements.insert(key.clone()) {
+        // A cycle, or nesting over ever-growing types, learns nothing conclusive.
+        if self.active_improvements.len() > IMPROVEMENT_DEPTH_LIMIT
+            || !self.active_improvements.insert(key.clone())
+        {
             return Ok(TraitImprovementMatch::Unknown);
         }
         let result = self.improve_trait_application_match_actual(
@@ -1755,6 +1764,7 @@ impl<'a> TraitSolver<'a> {
             output_tys,
             output_effs,
             assumptions,
+            answer_used,
             fn_span,
             arena,
         );
@@ -1771,12 +1781,32 @@ impl<'a> TraitSolver<'a> {
         output_tys: Option<&[Type]>,
         output_effs: Option<&[EffType]>,
         assumptions: ConstraintAssumptions<'_>,
+        answer_used: bool,
         fn_span: Location,
         arena: &mut NodeArena,
     ) -> Result<TraitImprovementMatch, InternalCompilationError> {
         // Resolve current input bindings before testing heads. Candidate variables
         // belong to the impl's own namespace and must remain wildcards here.
         let normalized_inputs = ty_inf.substitute_in_types(input_tys);
+        // A written generic stands for every type: an impl that fits only by narrowing it may
+        // apply to some instances, but cannot be selected.
+        let generics = ty_inf.declared_generic_roots();
+        // When only written generics are unknown and nobody reads the answer, the requirement stays
+        // on the caller's signature whatever impls exist, so no impl needs to be looked at. In
+        // particular, this does not wait for a pending impl that calls this function.
+        if !answer_used
+            && !generics.is_empty()
+            && self.nothing_to_learn(
+                ty_inf,
+                trait_id,
+                &normalized_inputs,
+                output_tys,
+                output_effs,
+                &generics,
+            )
+        {
+            return Ok(TraitImprovementMatch::Unknown);
+        }
         let candidates = self.improvement_candidates(trait_id, &normalized_inputs);
         let output_polarities = self.output_effect_polarities(trait_id);
         let original_vars = input_tys
@@ -1829,10 +1859,17 @@ impl<'a> TraitSolver<'a> {
             let improved_input_tys = ty_inf.substitute_in_types(input_tys);
             let improved_output_tys =
                 output_tys.map(|output_tys| ty_inf.substitute_in_types(output_tys));
+            let keeps_generics = ty_inf.declared_generics_intact(&generics);
             ty_inf.rollback_to(snapshot);
             use TraitImprovementMatch::*;
             match matched {
                 No => {}
+                // This candidate fits only some instances of a written generic, so it may apply
+                // but cannot be selected.
+                Unknown | Yes if !keeps_generics => {
+                    found_multiple_candidates = true;
+                    unique_candidate = None;
+                }
                 Unknown | Yes => {
                     if unique_candidate.is_some() {
                         found_multiple_candidates = true;
@@ -1846,6 +1883,11 @@ impl<'a> TraitSolver<'a> {
         }
 
         if found_multiple_candidates {
+            return Ok(TraitImprovementMatch::Unknown);
+        }
+        // A pending impl may be another candidate, or the only one. One that fits only by
+        // narrowing a written generic cannot be selected, but it can prevent selecting another.
+        if self.impls.pending.blocks(trait_id, &normalized_inputs) {
             return Ok(TraitImprovementMatch::Unknown);
         }
         let Some((candidate, matched, improved_input_tys, improved_output_tys)) = unique_candidate
@@ -1930,6 +1972,33 @@ impl<'a> TraitSolver<'a> {
         }
     }
 
+    /// Whether the written generics in `generics` are all that a trait application leaves unknown.
+    fn nothing_to_learn(
+        &self,
+        ty_inf: &mut UnifiedTypeInference,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        output_tys: Option<&[Type]>,
+        output_effs: Option<&[EffType]>,
+        generics: &[Type],
+    ) -> bool {
+        let trait_def = self.trait_def(trait_id);
+        if (output_tys.is_none() && trait_def.output_type_count() > 0)
+            || (output_effs.is_none() && trait_def.output_effect_count() > 0)
+        {
+            return false;
+        }
+        let output_tys = ty_inf.substitute_in_types(output_tys.unwrap_or_default());
+        let output_effs = ty_inf.substitute_in_effect_types(output_effs.unwrap_or_default());
+        let tys = || input_tys.iter().chain(&output_tys);
+        output_effs.iter().all(|eff| eff.inner_vars().is_empty())
+            && tys()
+                .all(|ty| ty.inner_effect_vars().is_empty() && ty.inner_mut_ty_vars().is_empty())
+            && tys()
+                .flat_map(TypeLike::inner_ty_vars)
+                .all(|var| generics.contains(&Type::variable(var)))
+    }
+
     /// Try to improve a deferred trait application from its partially known
     /// inputs and outputs.
     ///
@@ -1957,6 +2026,7 @@ impl<'a> TraitSolver<'a> {
                 output_tys,
                 output_effs,
                 assumptions,
+                false,
                 fn_span,
                 arena,
             )?,
@@ -2913,8 +2983,9 @@ impl<'a> TraitSolver<'a> {
     /// Check if a concrete trait implementation exists, without performing any solving.
     /// This searches in current module first, then in other modules.
     /// Only public implementations from other modules are considered.
+    /// An absence that a pending impl may fill is recorded as blocked.
     pub fn has_concrete_impl(&self, key: &ConcreteTraitImplKey) -> bool {
-        self.impls.concrete_key_to_id.contains_key(key)
+        let found = self.impls.concrete_key_to_id.contains_key(key)
             || self.others.iter_named().any(|(_, entry)| {
                 entry.module().is_some_and(|module| {
                     let impls = &module.impls;
@@ -2925,7 +2996,11 @@ impl<'a> TraitSolver<'a> {
                         false
                     }
                 })
-            })
+            });
+        if !found {
+            self.impls.pending.blocks(key.trait_id, &key.input_tys);
+        }
+        found
     }
 
     /// Get a concrete trait implementation by its key, without performing any solving.
@@ -3472,6 +3547,8 @@ impl<'a> TraitSolver<'a> {
 
         // Recursion limit check
         if self.recursion_depth > TRAIT_SOLVER_RECURSION_LIMIT {
+            // Callers may read this failure as "this impl does not apply", yet nothing is known.
+            self.impls.pending.block_all();
             return Err(internal_compilation_error!(
                 TraitSolverRecursionLimitExceeded {
                     trait_ref: trait_id,
@@ -3570,9 +3647,12 @@ impl<'a> TraitSolver<'a> {
             .get_blanket_impls(trait_id)
             .map(|(module_id, blankets)| (module_id, blankets.clone()))
             .collect::<Vec<_>>();
+        let mut search = CandidateSearch::new(&self.impls.pending);
+        let fully_determined = input_tys.iter().all(Type::is_constant);
         // Then we iterate over all blanket implementations, trying to unify their input types
         for (imp_module_id, blanket_impls) in blankets {
             'impl_loop: for (sub_key, impl_id) in blanket_impls.iter() {
+                search.next_candidate();
                 let imp_input_tys = &sub_key.input_tys;
                 let imp_ty_var_count = sub_key.ty_var_count;
                 let imp_eff_var_count = sub_key.eff_var_count;
@@ -3850,6 +3930,9 @@ impl<'a> TraitSolver<'a> {
                     if imp_module_id.is_some() {
                         self.private_impl_scope.pop();
                     }
+                    if fully_determined {
+                        search.succeed();
+                    }
                     return Ok(self.impl_id(self.current_type_items.module.id, local_impl_id));
                 }
 
@@ -3964,8 +4047,21 @@ impl<'a> TraitSolver<'a> {
                 if imp_module_id.is_some() {
                     self.private_impl_scope.pop();
                 }
+                if fully_determined {
+                    search.succeed();
+                }
                 return Ok(self.impl_id(self.current_type_items.module.id, local_impl_id));
             }
+        }
+
+        // A pending impl may still provide this application: neither derive nor conclude that
+        // none exists.
+        if self.impls.pending.blocks(trait_id, input_tys) {
+            return Err(internal_compilation_error!(TraitImplNotFound {
+                trait_ref: trait_id,
+                input_tys: input_tys.to_vec(),
+                fn_span,
+            }));
         }
 
         // No blanket implementation found, look for a derived implementation.
@@ -4191,8 +4287,11 @@ impl<'a> TraitSolver<'a> {
             .get_blanket_impls(trait_id)
             .map(|(module_id, blankets)| (module_id, blankets.clone()))
             .collect::<Vec<_>>();
+        let mut search = CandidateSearch::new(&self.impls.pending);
+        let fully_determined = input_tys.iter().all(Type::is_constant);
         for (imp_module_id, blanket_impls) in blankets {
             for (sub_key, impl_id) in blanket_impls.iter() {
+                search.next_candidate();
                 let (imp_public, imp_output_tys, imp_output_effs) = match imp_module_id {
                     Some(module_id) => {
                         let imp = &self
@@ -4245,6 +4344,9 @@ impl<'a> TraitSolver<'a> {
                 }
                 if !matches!(selected?, BlanketImplMatch::Yes { .. }) {
                     continue;
+                }
+                if fully_determined {
+                    search.succeed();
                 }
                 // ...then instantiate its head alone, keeping its constraints as obligations.
                 let mut ty_inf = scratch_inference();
@@ -4699,6 +4801,7 @@ impl TraitOutputQuery for TraitSolver<'_> {
             output_tys,
             output_effs,
             assumptions,
+            true,
             fn_span,
             arena,
         )
@@ -4733,6 +4836,7 @@ mod tests {
     use super::*;
     use crate::{
         CompilerSession,
+        ast::ImplAstIndex,
         eval::{EvalCtx, EvalResult, ValOrMut},
         hir::function::{ArgConvention, Callable, Function},
         module::{BlanketTraitImplSubKey, ELocalDecl, Path},
@@ -5032,6 +5136,113 @@ mod tests {
             named(0, int_type()),
             named(0, bool_type())
         ));
+    }
+
+    #[test]
+    fn pending_impls_block_negative_answers_only() {
+        use crate::{
+            module::{PendingImpl, PendingImpls},
+            std::{array_type::array_type, logic::bool_type},
+        };
+        let span = Location::new_synthesized();
+        let session = CompilerSession::new();
+        let modules = session.raw_modules();
+        let module_id = modules.next_id();
+        let mut module = new_module_using_std(module_id, Path::single_str("$pending_test"));
+        let default_trait = trait_solver_from_module!(module, modules).std_trait_id("Default");
+        let pair = |first| Type::tuple([first, int_type()]);
+        let mut arena = NodeArena::default();
+        let mut solver = trait_solver_from_module!(module, modules);
+        assert!(
+            solver
+                .solve_outputs(default_trait, &[pair(int_type())], span, &mut arena)
+                .is_ok()
+        );
+        drop(solver);
+
+        let set_pending = |module: &mut Module, input_tys| {
+            let pending = Rc::new(PendingImpls::new(vec![PendingImpl {
+                index: ImplAstIndex::new(7),
+                trait_id: default_trait,
+                input_tys,
+            }]));
+            module.impls.pending = pending.clone();
+            pending
+        };
+        let pending = set_pending(&mut module, Some(vec![pair(Type::variable_id(0))]));
+        let mut solver = trait_solver_from_module!(module, modules);
+        // A visible impl proves this answer whatever is pending.
+        assert!(
+            solver
+                .solve_outputs(default_trait, &[array_type(int_type())], span, &mut arena)
+                .is_ok()
+        );
+        assert!(pending.blockers().is_empty());
+        // The pending impl may provide this application, so it is not derived.
+        assert!(
+            solver
+                .solve_outputs(default_trait, &[pair(int_type())], span, &mut arena)
+                .is_err()
+        );
+        assert_eq!(pending.blockers(), vec![ImplAstIndex::new(7)]);
+        drop(solver);
+
+        // Probes share the pending impls of the module they read.
+        let pending = set_pending(&mut module, Some(vec![pair(bool_type())]));
+        let mut probe = TraitSolverProbe::from_module(&module, modules);
+        let mut arena = NodeArena::default();
+        assert!(probe.with_solver(|solver| {
+            solver
+                .solve_outputs(default_trait, &[pair(bool_type())], span, &mut arena)
+                .is_err()
+        }));
+        assert_eq!(pending.blockers(), vec![ImplAstIndex::new(7)]);
+        drop(probe);
+
+        // An absent concrete impl that the pending impl may fill is blocked.
+        let pending = set_pending(&mut module, Some(vec![pair(bool_type())]));
+        let solver = trait_solver_from_module!(module, modules);
+        assert!(!solver.has_concrete_impl(&ConcreteTraitImplKey::new(
+            default_trait,
+            vec![pair(bool_type())]
+        )));
+        assert_eq!(pending.blockers(), vec![ImplAstIndex::new(7)]);
+        drop(solver);
+
+        // A headerless pending impl is another candidate for improvement: the single visible
+        // candidate, `impl<A> Slice for <Self = [A] |-> Output = [A]>`, no longer determines the
+        // output.
+        let slice_trait = trait_solver_from_module!(module, modules).std_trait_id("Slice");
+        let improves = |module: &mut Module| {
+            let mut solver = trait_solver_from_module!(module, modules);
+            let mut ty_inf = UnifiedTypeInference::new_with_ty_vars(0);
+            let element = Type::variable(ty_inf.fresh_type_var());
+            let output = Type::variable(ty_inf.fresh_type_var());
+            solver
+                .try_improve_trait_application(
+                    &mut ty_inf,
+                    slice_trait,
+                    &[array_type(element)],
+                    Some(&[output]),
+                    Some(&[]),
+                    ConstraintAssumptions::all(&[]),
+                    span,
+                    &mut NodeArena::default(),
+                )
+                .unwrap();
+            drop(solver);
+            ty_inf.substitute_in_type(output) == array_type(ty_inf.substitute_in_type(element))
+        };
+        module.impls.pending = Rc::default();
+        assert!(improves(&mut module));
+        let pending = Rc::new(PendingImpls::new(vec![PendingImpl {
+            index: ImplAstIndex::new(7),
+            trait_id: slice_trait,
+            input_tys: None,
+        }]));
+        module.impls.pending = pending.clone();
+        assert!(!improves(&mut module));
+        assert_eq!(pending.blockers(), vec![ImplAstIndex::new(7)]);
     }
 
     /// Type-solver fixture with an unresolved effect, not an executable host entry.

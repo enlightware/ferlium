@@ -687,6 +687,15 @@ pub(super) fn compilation_error_to_data(
                 ),
             )]
         }
+        InferenceBlockedByPendingImpls { blocked } => blocked
+            .iter()
+            .map(|(span, _)| {
+                error_data_from_location(
+                    span,
+                    "Cannot infer the types of this item, because it depends on an impl that depends on it".to_string(),
+                )
+            })
+            .collect(),
         TraitImplOutputNotDetermined {
             trait_ref,
             output_ty,

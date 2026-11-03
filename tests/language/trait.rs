@@ -1592,27 +1592,22 @@ fn trait_default_missing_required_method() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn trait_default_l2_module_functions_still_cannot_use_local_blanket_impls() {
+fn trait_default_l2_module_functions_can_use_local_blanket_impls() {
     let mut session = TestSession::new();
-    let source = indoc! {r#"
-        trait Size<Self> {
-            fn size(x: Self) -> int;
-            fn double(x: Self) -> int { size(x) * 2 }
-        }
-        impl<T> Size for [T] where T: Value {
-            fn size(x: [T]) -> int { len(x) }
-        }
-        fn local_use(x: [int]) -> int { double(x) }
-    "#};
-    let error = session.fail_compilation(source).into_inner();
-    let CompilationErrorImpl::TraitImplNotFound {
-        trait_ref, fn_span, ..
-    } = error
-    else {
-        panic!("unexpected diagnostic: {error:?}")
-    };
-    assert_eq!(trait_ref, "Size");
-    assert_eq!(&source[fn_span.as_range()], "double");
+    assert_val_eq!(
+        session.run(indoc! {r#"
+            trait Size<Self> {
+                fn size(x: Self) -> int;
+                fn double(x: Self) -> int { size(x) * 2 }
+            }
+            impl<T> Size for [T] where T: Value {
+                fn size(x: [T]) -> int { len(x) }
+            }
+            fn local_use(x: [int]) -> int { double(x) }
+            local_use([1, 2, 3])
+        "#}),
+        int(6)
+    );
 }
 
 #[test]

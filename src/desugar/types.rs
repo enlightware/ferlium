@@ -1731,14 +1731,25 @@ fn desugar_resolved_type_with_args(
     }
 }
 
+/// The module-level functions and subscripts that impl methods may name, as nodes of the module
+/// implementation graph.
+pub(crate) struct ModuleImplementationNames<'a> {
+    pub(crate) functions: &'a FnMap,
+    pub(crate) subscripts: &'a SubscriptMap,
+    pub(crate) projection_subscripts: &'a SubscriptMap,
+}
+
 impl PTraitImpl {
-    pub fn desugar(
+    /// Desugar the impl, also returning the nodes of the module implementation graph that its
+    /// methods name.
+    pub(crate) fn desugar(
         self,
+        module_names: &ModuleImplementationNames<'_>,
         env: &ModuleEnv<'_>,
         parsed_arena: &PExprArena,
         desugared_arena: &mut DExprArena,
         modules_used: &mut FxHashSet<ModuleId>,
-    ) -> Result<DTraitImpl, InternalCompilationError> {
+    ) -> Result<(DTraitImpl, Vec<usize>), InternalCompilationError> {
         let generic_ty_params = if self.generic_params.is_empty() {
             self.for_trait
                 .as_ref()
@@ -1761,15 +1772,37 @@ impl PTraitImpl {
                 trait_name: self.trait_name.0,
             },
         )?;
-        let fn_map = self
+        // Sibling methods take nodes `0..method_count` and shadow module functions, whose nodes
+        // follow.
+        let method_count = self.functions.len();
+        let offset = |nodes: &Vec<usize>| {
+            nodes
+                .iter()
+                .map(|node| node + method_count)
+                .collect::<Vec<_>>()
+        };
+        let mut fn_map = module_names
             .functions
             .iter()
-            .enumerate()
-            .map(|(index, func)| (func.name.0, index))
+            .map(|(name, node)| (*name, node + method_count))
             .collect::<FxHashMap<_, _>>();
-        let subscript_map = FxHashMap::default();
-        let projection_subscript_map = FxHashMap::default();
-        let (functions, fn_dep_graph): (_, Vec<_>) = process_results(
+        fn_map.extend(
+            self.functions
+                .iter()
+                .enumerate()
+                .map(|(index, func)| (func.name.0, index)),
+        );
+        let subscript_map = module_names
+            .subscripts
+            .iter()
+            .map(|(name, nodes)| (*name, offset(nodes)))
+            .collect::<FxHashMap<_, _>>();
+        let projection_subscript_map = module_names
+            .projection_subscripts
+            .iter()
+            .map(|(name, nodes)| (*name, offset(nodes)))
+            .collect::<FxHashMap<_, _>>();
+        let (functions, mut fn_dep_graph): (_, Vec<DepGraphNode>) = process_results(
             self.functions.into_iter().map(|f| {
                 f.desugar_with_ty_and_eff_params(
                     &fn_map,
@@ -1785,6 +1818,19 @@ impl PTraitImpl {
             }),
             |iter| iter.unzip(),
         )?;
+        let mut module_nodes = FxHashSet::default();
+        for node in &mut fn_dep_graph {
+            node.0.retain(|&index| {
+                if index < method_count {
+                    true
+                } else {
+                    module_nodes.insert(index - method_count);
+                    false
+                }
+            });
+        }
+        let mut module_nodes = module_nodes.into_iter().collect::<Vec<_>>();
+        module_nodes.sort_unstable();
         let sccs = find_strongly_connected_components(&fn_dep_graph);
         let function_sccs =
             local_function_sccs(&fn_dep_graph, topological_sort_sccs(&fn_dep_graph, &sccs));
@@ -1814,16 +1860,19 @@ impl PTraitImpl {
             env,
             modules_used,
         )?;
-        Ok(DTraitImpl {
-            span: self.span,
-            generic_params: self.generic_params,
-            trait_name: self.trait_name,
-            for_trait,
-            where_clause,
-            associated_consts: self.associated_consts,
-            functions,
-            function_sccs,
-        })
+        Ok((
+            DTraitImpl {
+                span: self.span,
+                generic_params: self.generic_params,
+                trait_name: self.trait_name,
+                for_trait,
+                where_clause,
+                associated_consts: self.associated_consts,
+                functions,
+                function_sccs,
+            },
+            module_nodes,
+        ))
     }
 }
 
