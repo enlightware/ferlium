@@ -5,8 +5,9 @@ use std::{fmt, hash::Hash, rc::Rc};
 
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
+use indexmap::IndexMap;
 use itertools::Itertools;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxBuildHasher, FxHashSet};
 use ustr::Ustr;
 
 use crate::{
@@ -604,9 +605,12 @@ pub(crate) enum DisplayFilter {
     MethodCode,
 }
 
-pub(crate) type ConcreteImpls = FxHashMap<ConcreteTraitImplKey, LocalImplId>;
-pub(crate) type BlanketTraitImpls = FxHashMap<BlanketTraitImplSubKey, LocalImplId>;
-pub(crate) type BlanketImpls = FxHashMap<TraitId, BlanketTraitImpls>;
+// Searches stop at the first matching impl, so these tables keep their registration order: a
+// hash order would depend on the numbering of the types in their keys, making the cost of a
+// search and the first error it reports change with unrelated code.
+pub(crate) type ConcreteImpls = IndexMap<ConcreteTraitImplKey, LocalImplId, FxBuildHasher>;
+pub(crate) type BlanketTraitImpls = IndexMap<BlanketTraitImplSubKey, LocalImplId, FxBuildHasher>;
+pub(crate) type BlanketImpls = IndexMap<TraitId, BlanketTraitImpls, FxBuildHasher>;
 
 /// All trait implementations in a module or in a given context.
 /// Tables are shared by speculative solvers and copied only on mutation. Keep the

@@ -321,6 +321,29 @@ mod tests {
             restored.blanket_key_to_id,
             session.std_module().impls.blanket_key_to_id
         );
+        // Map equality ignores order, but impl searches stop at the first match.
+        assert!(
+            restored.concrete_key_to_id.iter().eq(session
+                .std_module()
+                .impls
+                .concrete_key_to_id
+                .iter())
+        );
+        let blanket_order = |impls: &TraitImpls| {
+            impls
+                .blanket_key_to_id
+                .iter()
+                .flat_map(|(trait_id, blankets)| {
+                    blankets
+                        .iter()
+                        .map(move |(key, id)| (*trait_id, key.clone(), *id))
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            blanket_order(&restored),
+            blanket_order(&session.std_module().impls)
+        );
         for (expected, actual) in session
             .std_module()
             .impls

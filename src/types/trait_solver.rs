@@ -22,12 +22,12 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        self, BlanketImpls, BlanketTraitImpls, CandidateSearch, ConcreteTraitImplKey,
-        CurrentTypeItems, DefTable, DictionaryEntryRequirements, FunctionId, LocalDecl,
-        LocalDeclId, LocalFunctionId, LocalImplId, LocalTraitId, Module, ModuleEnv, ModuleId,
-        PendingFunctionBody, PendingFunctionCollector, PendingModuleFunction, ProjectionKey,
-        QualifiedNameEnv, ResolvedValueLayout, TraitDictionary, TraitId, TraitImpl, TraitImplId,
-        TraitImpls, TypeDefId, Visibility, build_capturing_dictionary_value,
+        self, BlanketImpls, BlanketTraitImpls, CandidateSearch, ConcreteImpls,
+        ConcreteTraitImplKey, CurrentTypeItems, DefTable, DictionaryEntryRequirements, FunctionId,
+        LocalDecl, LocalDeclId, LocalFunctionId, LocalImplId, LocalTraitId, Module, ModuleEnv,
+        ModuleId, PendingFunctionBody, PendingFunctionCollector, PendingModuleFunction,
+        ProjectionKey, QualifiedNameEnv, ResolvedValueLayout, TraitDictionary, TraitId, TraitImpl,
+        TraitImplId, TraitImpls, TypeDefId, Visibility, build_capturing_dictionary_value,
         build_dictionary_value, dictionary_capture_plan, id::Id,
     },
     std::{
@@ -913,11 +913,41 @@ enum TraitImprovementCandidate {
     },
 }
 
-/// A necessary condition for the same-type relation used by improvement probes.
+/// The blanket impls of a trait visible from a module with the given local table: the local
+/// ones first, then those of each other module.
+fn visible_blanket_impls<'b>(
+    local: &'b BlanketImpls,
+    others: &'b Modules,
+    trait_id: TraitId,
+) -> impl Iterator<Item = (Option<ModuleId>, &'b BlanketTraitImpls)> + use<'b> {
+    local
+        .get(&trait_id)
+        .map(|blankets| (None, blankets))
+        .into_iter()
+        .chain(others.enumerates().flat_map(move |(module_id, entry, _)| {
+            entry.module().and_then(|module| {
+                module
+                    .impls
+                    .blanket_key_to_id
+                    .get(&trait_id)
+                    .map(|blankets| (Some(module_id), blankets))
+            })
+        }))
+}
+
+/// Whether an impl's input types may match the requested ones, see [`input_head_may_match`].
+pub(crate) fn input_heads_may_match(candidates: &[Type], inputs: &[Type]) -> bool {
+    candidates
+        .iter()
+        .zip(inputs)
+        .all(|(&candidate, &input)| input_head_may_match(candidate, input))
+}
+
+/// A necessary condition for the same-type relation that matches impl inputs.
 /// Reject only fixed outer-constructor conflicts; unknowns, nested arguments,
-/// mutability and effects still go through the full probe. In particular Never
-/// is not a wildcard here: improvement checks equality, not bottom subtyping.
-fn improvement_input_heads_may_match(candidate: Type, input: Type) -> bool {
+/// mutability and effects still go through the full match. In particular Never
+/// is not a wildcard here: matching checks equality, not bottom subtyping.
+fn input_head_may_match(candidate: Type, input: Type) -> bool {
     use TypeKind::*;
     match (&*candidate.data(), &*input.data()) {
         (Variable(_), _) | (_, Variable(_)) => true,
@@ -949,10 +979,10 @@ struct ResolvedRuntimeRequirement {
 }
 
 pub(crate) struct DerivedImplSnapshot {
-    concrete_key_to_id: Rc<FxHashMap<ConcreteTraitImplKey, LocalImplId>>,
+    concrete_key_to_id: Rc<ConcreteImpls>,
     blanket_key_to_id: Rc<BlanketImpls>,
     generated_value_key_to_id: Rc<FxHashMap<Vec<Type>, LocalImplId>>,
-    application_key_to_id: Rc<FxHashMap<ConcreteTraitImplKey, LocalImplId>>,
+    application_key_to_id: Rc<ConcreteImpls>,
     impl_data_len: usize,
     new_function_len: usize,
 }
@@ -1253,12 +1283,8 @@ impl<'a> TraitSolver<'a> {
                 .collect()
         }
 
-        let compatible = |candidate_inputs: &[Type]| {
-            candidate_inputs
-                .iter()
-                .zip(input_tys)
-                .all(|(&candidate, &input)| improvement_input_heads_may_match(candidate, input))
-        };
+        let compatible =
+            |candidate_inputs: &[Type]| input_heads_may_match(candidate_inputs, input_tys);
         let mut candidates = Vec::new();
 
         for (key, id) in self.impls.concrete_key_to_id.iter() {
@@ -2182,10 +2208,6 @@ impl<'a> TraitSolver<'a> {
             .iter()
             .map(|eff| mapper.map_effect_type(eff))
             .collect();
-        let remaining = instantiate_types(imp_constraints, &mut mapper)
-            .into_iter()
-            .enumerate()
-            .collect::<Vec<_>>();
         let mut runtime_requirements = Vec::new();
 
         // Then unify the instantiated blanket input and output types against
@@ -2230,6 +2252,11 @@ impl<'a> TraitSolver<'a> {
             }
         }
 
+        // Most candidates fail above, so only now pay for instantiating the constraints.
+        let remaining = instantiate_types(imp_constraints, &mut mapper)
+            .into_iter()
+            .enumerate()
+            .collect::<Vec<_>>();
         let mut remaining = Self::normalize_blanket_remaining_constraints(ty_inf, remaining);
         loop {
             let old_remaining = mem::take(&mut remaining);
@@ -3030,32 +3057,6 @@ impl<'a> TraitSolver<'a> {
         })
     }
 
-    /// Get the blanket trait implementations for the given trait id, without performing any solving.
-    /// This searches in other modules first, then in the current module.
-    fn get_blanket_impls<'s: 'b, 'b>(
-        &'s self,
-        trait_id: TraitId,
-    ) -> impl Iterator<Item = (Option<ModuleId>, &'b BlanketTraitImpls)> + use<'b> {
-        self.impls
-            .blanket_key_to_id
-            .get(&trait_id)
-            .map(|blankets| (None, blankets))
-            .into_iter()
-            .chain(
-                self.others
-                    .enumerates()
-                    .flat_map(move |(module_id, entry, _)| {
-                        entry.module().and_then(|module| {
-                            module
-                                .impls
-                                .blanket_key_to_id
-                                .get(&trait_id)
-                                .map(|imp| (Some(module_id), imp))
-                        })
-                    }),
-            )
-    }
-
     /// Print all known implementations for the given trait id.
     fn log_debug_impls(&self, trait_id: TraitId) {
         if !log::log_enabled!(log::Level::Trace) {
@@ -3642,16 +3643,18 @@ impl<'a> TraitSolver<'a> {
 
         // No concrete implementation found, search for a matching blanket implementation.
         let output_polarities = self.output_effect_polarities(trait_id);
-        // We first clone all blanket implementations to avoid borrowing issues.
-        let blankets = self
-            .get_blanket_impls(trait_id)
-            .map(|(module_id, blankets)| (module_id, blankets.clone()))
-            .collect::<Vec<_>>();
+        // We first share the local table to avoid borrowing issues: adding a blanket
+        // implementation during the search copies it and leaves this view unchanged.
+        let local_blankets = self.impls.blanket_key_to_id.clone();
+        let blankets = visible_blanket_impls(&local_blankets, self.others, trait_id);
         let mut search = CandidateSearch::new(&self.impls.pending);
         let fully_determined = input_tys.iter().all(Type::is_constant);
         // Then we iterate over all blanket implementations, trying to unify their input types
         for (imp_module_id, blanket_impls) in blankets {
             'impl_loop: for (sub_key, impl_id) in blanket_impls.iter() {
+                if !input_heads_may_match(&sub_key.input_tys, input_tys) {
+                    continue 'impl_loop;
+                }
                 search.next_candidate();
                 let imp_input_tys = &sub_key.input_tys;
                 let imp_ty_var_count = sub_key.ty_var_count;
@@ -4283,14 +4286,15 @@ impl<'a> TraitSolver<'a> {
             ty_inf
         };
         let mut arena = NodeArena::default();
-        let blankets = self
-            .get_blanket_impls(trait_id)
-            .map(|(module_id, blankets)| (module_id, blankets.clone()))
-            .collect::<Vec<_>>();
+        let local_blankets = self.impls.blanket_key_to_id.clone();
+        let blankets = visible_blanket_impls(&local_blankets, self.others, trait_id);
         let mut search = CandidateSearch::new(&self.impls.pending);
         let fully_determined = input_tys.iter().all(Type::is_constant);
         for (imp_module_id, blanket_impls) in blankets {
             for (sub_key, impl_id) in blanket_impls.iter() {
+                if !input_heads_may_match(&sub_key.input_tys, input_tys) {
+                    continue;
+                }
                 search.next_candidate();
                 let (imp_public, imp_output_tys, imp_output_effs) = match imp_module_id {
                     Some(module_id) => {
@@ -5108,7 +5112,7 @@ mod tests {
         let mut pruned = 0;
         for &candidate in &types {
             for &input in &types {
-                let keep = improvement_input_heads_may_match(candidate, input);
+                let keep = input_head_may_match(candidate, input);
                 pruned += usize::from(!keep);
                 let mut inference = UnifiedTypeInference::new_with_ty_vars(2);
                 let accepted = inference
@@ -5122,17 +5126,14 @@ mod tests {
         }
         assert!(pruned > types.len());
         // Never is a subtype of int, but cannot match an int impl head by equality.
-        assert!(!improvement_input_heads_may_match(
-            Type::never(),
-            int_type()
-        ));
+        assert!(!input_head_may_match(Type::never(), int_type()));
         // Candidate variables have their own namespace; their numeric IDs must
         // not be looked up in the application's inference table.
-        assert!(improvement_input_heads_may_match(var(0), int_type()));
-        assert!(improvement_input_heads_may_match(int_type(), var(0)));
+        assert!(input_head_may_match(var(0), int_type()));
+        assert!(input_head_may_match(int_type(), var(0)));
         // Matching heads are only permission to probe: nested incompatibilities
         // and independently quantified effects still need the real comparator.
-        assert!(improvement_input_heads_may_match(
+        assert!(input_head_may_match(
             named(0, int_type()),
             named(0, bool_type())
         ));

@@ -16,7 +16,7 @@ use crate::{
         effect_polarity::{EffectPolarity, trait_output_effect_polarities},
         effects::EffType,
         r#trait::TraitImplPolicy,
-        trait_solver::{TRAIT_SOLVER_RECURSION_LIMIT, TraitSolver},
+        trait_solver::{TRAIT_SOLVER_RECURSION_LIMIT, TraitSolver, input_heads_may_match},
         r#type::{Type, TypeKind, TypeVar},
         type_inference::unify::{UnifiedTypeInference, UnifiedTypeInferenceSnapshot},
         type_like::{TypeLike, instantiate_types},
@@ -440,7 +440,9 @@ fn blanket_impls_overlap(
     (lhs, lhs_scope): (&BlanketTraitImplSubKey, ModuleId),
     (rhs, rhs_scope): (&BlanketTraitImplSubKey, ModuleId),
 ) -> Result<bool, InternalCompilationError> {
-    if lhs.input_tys.len() != rhs.input_tys.len() {
+    if lhs.input_tys.len() != rhs.input_tys.len()
+        || !input_heads_may_match(&lhs.input_tys, &rhs.input_tys)
+    {
         return Ok(false);
     }
 
@@ -453,7 +455,6 @@ fn blanket_impls_overlap(
     let lhs_inst_subst = (FxHashMap::default(), lhs_eff_subst);
     let mut lhs_mapper = SimpleInstantiationMapper::new(&lhs_inst_subst);
     let lhs_inputs = instantiate_types(&lhs.input_tys, &mut lhs_mapper);
-    let lhs_constraints = instantiate_types(&lhs.constraints, &mut lhs_mapper);
 
     let rhs_ty_subst: FxHashMap<_, _> = (0..rhs.ty_var_count)
         .map(|index| {
@@ -466,7 +467,6 @@ fn blanket_impls_overlap(
     let inst_subst = (rhs_ty_subst, rhs_eff_subst);
     let mut mapper = SimpleInstantiationMapper::new(&inst_subst);
     let rhs_inputs = instantiate_types(&rhs.input_tys, &mut mapper);
-    let rhs_constraints = instantiate_types(&rhs.constraints, &mut mapper);
     for (&lhs_ty, &rhs_ty) in lhs_inputs.iter().zip(rhs_inputs.iter()) {
         if ty_inf
             .unify_same_type_with_sub_effects(lhs_ty, span, rhs_ty, span)
@@ -475,6 +475,8 @@ fn blanket_impls_overlap(
             return Ok(false);
         }
     }
+    let lhs_constraints = instantiate_types(&lhs.constraints, &mut lhs_mapper);
+    let rhs_constraints = instantiate_types(&rhs.constraints, &mut mapper);
     let pending = scoped(lhs_constraints, lhs_scope)
         .chain(scoped(rhs_constraints, rhs_scope))
         .collect();
@@ -667,13 +669,17 @@ fn trait_constraint_may_be_satisfiable(
         // the current scope, as resolution does.
         let candidate_scope = module_id.unwrap_or(private_scope);
 
+        if !input_heads_may_match(key.input_tys(), input_tys) {
+            continue;
+        }
+
         let snapshot = ty_inf.snapshot();
         let result = match &key {
             TraitKey::Concrete(key) => concrete_impl_may_match_constraint(
                 current,
                 others,
                 ty_inf,
-                pending.clone(),
+                &pending,
                 next_ty_var_index,
                 stack,
                 key,
@@ -686,7 +692,7 @@ fn trait_constraint_may_be_satisfiable(
                 current,
                 others,
                 ty_inf,
-                pending.clone(),
+                &pending,
                 next_ty_var_index,
                 stack,
                 (key, candidate_scope),
@@ -738,7 +744,7 @@ fn concrete_impl_may_match_constraint(
     current: &Module,
     others: &Modules,
     ty_inf: &mut CoherenceTypeUnifier,
-    pending: Vec<ScopedConstraint>,
+    pending: &[ScopedConstraint],
     next_ty_var_index: u32,
     stack: &mut FxHashSet<(TraitId, Vec<Type>, Vec<Type>)>,
     key: &ConcreteTraitImplKey,
@@ -768,7 +774,14 @@ fn concrete_impl_may_match_constraint(
     if !ty_inf.match_output_effects(&polarities, &imp.output_effs, output_effs) {
         return Ok(false);
     }
-    constraints_may_be_satisfiable(current, others, ty_inf, pending, next_ty_var_index, stack)
+    constraints_may_be_satisfiable(
+        current,
+        others,
+        ty_inf,
+        pending.to_vec(),
+        next_ty_var_index,
+        stack,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -776,7 +789,7 @@ fn blanket_impl_may_match_constraint(
     current: &Module,
     others: &Modules,
     ty_inf: &mut CoherenceTypeUnifier,
-    mut pending: Vec<ScopedConstraint>,
+    pending: &[ScopedConstraint],
     next_ty_var_index: u32,
     stack: &mut FxHashSet<(TraitId, Vec<Type>, Vec<Type>)>,
     (key, candidate_scope): (&BlanketTraitImplKey, ModuleId),
@@ -806,7 +819,6 @@ fn blanket_impl_may_match_constraint(
         .iter()
         .map(|eff| mapper.map_effect_type(eff))
         .collect();
-    let candidate_constraints = instantiate_types(&key.sub_key.constraints, &mut mapper);
 
     let span = Location::new_synthesized();
     for (&candidate_input_ty, &constraint_input_ty) in candidate_inputs.iter().zip(input_tys) {
@@ -829,6 +841,8 @@ fn blanket_impl_may_match_constraint(
     if !ty_inf.match_output_effects(&polarities, &candidate_output_effs, output_effs) {
         return Ok(false);
     }
+    let candidate_constraints = instantiate_types(&key.sub_key.constraints, &mut mapper);
+    let mut pending = pending.to_vec();
     pending.extend(scoped(candidate_constraints, candidate_scope));
     constraints_may_be_satisfiable(
         current,
