@@ -3449,3 +3449,104 @@ fn native_integer_extremes_and_fallible_first_class_calls() {
         SourceFailureKind::DivisionByZero
     );
 }
+
+const HASH_COLLECTION_BUILDERS: &str = r#"
+fn set_of(values: [int]) -> set<int> {
+    let mut result: set<int> = empty();
+    for value in values {
+        set_insert(result, value);
+    };
+    result
+}
+fn map_of(values: [int]) -> map<int, int> {
+    let mut result: map<int, int> = empty();
+    for value in values {
+        map_insert(result, value, value * 10);
+    };
+    result
+}
+"#;
+
+const ASCENDING: &str = "[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]";
+const DESCENDING: &str = "[20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1]";
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_collection_equality_ignores_insertion_order() {
+    let run = |term: String| TestSession::new().run(&format!("{HASH_COLLECTION_BUILDERS}\n{term}"));
+    for ctor in ["set_of", "map_of"] {
+        assert_val_eq!(
+            run(format!("{ctor}({ASCENDING}) == {ctor}({DESCENDING})")),
+            bool(true)
+        );
+        assert_val_eq!(
+            run(format!("{ctor}({ASCENDING}) != {ctor}({DESCENDING})")),
+            bool(false)
+        );
+        assert_val_eq!(
+            run(format!("{ctor}([1, 2]) == {ctor}([1, 3])")),
+            bool(false)
+        );
+        assert_val_eq!(run(format!("{ctor}([1, 2]) == {ctor}([1])")), bool(false));
+    }
+    assert_val_eq!(
+        run("let mut a = map_of([1]); map_insert(a, 1, 11); a == map_of([1])".into()),
+        bool(false)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_collections_render_their_elements() {
+    let run = |term: &str| TestSession::new().run(&format!("{HASH_COLLECTION_BUILDERS}\n{term}"));
+    assert_val_eq!(run("to_string(set_of([1]))"), string("{ 1 }"));
+    assert_val_eq!(run("to_string(map_of([1]))"), string("{ (1, 10) }"));
+    assert_val_eq!(run("to_string(set_of([]))"), string("{  }"));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_collection_hash_ignores_insertion_order() {
+    let run = |term: String| TestSession::new().run(&format!("{HASH_COLLECTION_BUILDERS}\n{term}"));
+    for ctor in ["set_of", "map_of"] {
+        // Equal collections are one key of a set.
+        assert_val_eq!(
+            run(format!(
+                "let mut sets: set<_> = empty();
+                set_insert(sets, {ctor}({ASCENDING}));
+                set_insert(sets, {ctor}({DESCENDING}));
+                len(sets)"
+            )),
+            int(1)
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_collections_are_values_after_clone_and_nesting() {
+    let run = |term: String| TestSession::new().run(&format!("{HASH_COLLECTION_BUILDERS}\n{term}"));
+    // A copy does not see later insertions.
+    assert_val_eq!(
+        run("let mut a = set_of([1]); let b = a; set_insert(a, 2); (len(a), len(b))".into()),
+        expected_tuple([int(2), int(1)])
+    );
+    // Generic and derived values use the same comparison.
+    assert_val_eq!(
+        run(format!(
+            "fn same<T>(a: T, b: T) -> bool where T: Value {{ a == b }}
+            same(set_of({ASCENDING}), set_of({DESCENDING}))"
+        )),
+        bool(true)
+    );
+    assert_val_eq!(
+        run(format!(
+            "(1, set_of({ASCENDING})) == (1, set_of({DESCENDING}))"
+        )),
+        bool(true)
+    );
+    assert_val_eq!(
+        run(format!("[map_of({ASCENDING})] == [map_of({DESCENDING})]")),
+        bool(true)
+    );
+}

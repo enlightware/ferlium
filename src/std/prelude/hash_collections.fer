@@ -552,7 +552,7 @@ fn hash_collection_eq(left, right, contain_fn) -> bool {
 	};
 
 	for value in left {
-		if not contain_fn(right, value) {
+		if not effects_unsafe { contain_fn(right, value) } {
 			return false;
 		}
 	};
