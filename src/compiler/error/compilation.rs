@@ -291,6 +291,50 @@ impl InvalidTraitConstraintKind {
     }
 }
 
+/// A requirement that a default method needs and its trait lacks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MissingRequirement {
+    /// Valid source for a `where` clause.
+    WhereClause(String),
+    /// A description that has no source form.
+    Description(String),
+}
+
+/// Say what effect arguments `subject` gives to `type_name`, and how to give them to a function
+/// type instead, if `function_type_span` shows that this is what the source may mean.
+pub(crate) fn effect_arguments_message(
+    subject: &str,
+    type_name: Ustr,
+    expected: usize,
+    got: usize,
+    function_type_span: Option<Location>,
+    source_table: &SourceTable,
+) -> String {
+    let count = |count: usize| match count {
+        0 => "no effect arguments".to_string(),
+        1 => "1 effect argument".to_string(),
+        count => format!("{count} effect arguments"),
+    };
+    let takes = match expected {
+        0 => "none".to_string(),
+        expected => expected.to_string(),
+    };
+    let mut message = format!(
+        "{subject} gives {} to `{type_name}`, which takes {takes}.",
+        count(got)
+    );
+    if let Some(span) = function_type_span
+        && let Some(entry) = source_table.get_source_entry(span.source_id())
+    {
+        let function_type = entry.get_snippet(span.start_usize(), span.end_usize());
+        message.push_str(&format!(
+            " To put the effect on the function type, wrap that type in parentheses: `({})`.",
+            function_type.trim()
+        ));
+    }
+    message
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvalidDefaultMethodKind {
     SpecializedTypeParameter,
@@ -317,6 +361,8 @@ pub enum InvalidTraitDefinitionKind {
     InvalidDefaultMethod {
         method_name: Ustr,
         reason: InvalidDefaultMethodKind,
+        /// The requirement the declaration lacks, if that is the reason and it can be named.
+        missing_constraint: Option<MissingRequirement>,
     },
     MissingInputTypes,
     DuplicateItem {
@@ -342,10 +388,19 @@ impl InvalidTraitDefinitionKind {
             InvalidDefaultMethod {
                 method_name,
                 reason,
-            } => format!(
-                "Default method `{trait_name}::{method_name}` does not satisfy its declaration: {}",
-                reason.message()
-            ),
+                missing_constraint,
+            } => match missing_constraint {
+                Some(MissingRequirement::WhereClause(clause)) => format!(
+                    "Default method `{trait_name}::{method_name}` requires `{clause}`, which the trait declaration does not provide. Consider adding `{clause}` to the trait's where clause"
+                ),
+                Some(MissingRequirement::Description(description)) => format!(
+                    "Default method `{trait_name}::{method_name}` requires `{description}`, which the trait declaration does not provide"
+                ),
+                None => format!(
+                    "Default method `{trait_name}::{method_name}` does not satisfy its declaration: {}",
+                    reason.message()
+                ),
+            },
             MissingInputTypes => {
                 format!("Trait `{trait_name}` must have at least one input type parameter")
             }
@@ -968,6 +1023,15 @@ pub enum CompilationErrorImpl<S: Scope> {
         got: usize,
         got_span: Location,
     },
+    WrongNumberOfEffectArguments {
+        type_name: Ustr,
+        expected: usize,
+        expected_span: Location,
+        got: usize,
+        got_span: Location,
+        /// The last type argument and the effects after it, if that argument is a function type.
+        function_type_span: Option<Location>,
+    },
     MutabilityMustBe {
         source_span: Location,
         reason_span: Location,
@@ -1535,6 +1599,27 @@ impl FormatWith<SourceTable> for CompilationError {
                     "{} in {}",
                     kind.message(*attribute_name, target),
                     fmt_span(span)
+                )
+            }
+            WrongNumberOfEffectArguments {
+                type_name,
+                expected,
+                got,
+                got_span,
+                function_type_span,
+                ..
+            } => {
+                write!(
+                    f,
+                    "{}",
+                    effect_arguments_message(
+                        &fmt_span(got_span),
+                        *type_name,
+                        *expected,
+                        *got,
+                        *function_type_span,
+                        data,
+                    )
                 )
             }
             WrongNumberOfArguments {
@@ -2397,6 +2482,21 @@ impl CompilationError {
                 target,
                 kind,
                 span,
+            }),
+            WrongNumberOfEffectArguments {
+                type_name,
+                expected,
+                expected_span,
+                got,
+                got_span,
+                function_type_span,
+            } => compilation_error!(WrongNumberOfEffectArguments {
+                type_name,
+                expected,
+                expected_span,
+                got,
+                got_span,
+                function_type_span,
             }),
             WrongNumberOfArguments {
                 expected,

@@ -6,7 +6,7 @@ use test_log::test;
 use ferlium::{
     compiler::error::{
         CompilationErrorImpl, InvalidDefaultMethodKind, InvalidTraitAssociatedConstImplKind,
-        InvalidTraitDefinitionKind,
+        InvalidTraitDefinitionKind, MissingRequirement,
     },
     format::FormatWith,
     hir::{
@@ -1492,6 +1492,7 @@ fn trait_default_checked_without_an_impl() {
                 InvalidTraitDefinitionKind::InvalidDefaultMethod {
                     method_name,
                     reason,
+                    ..
                 },
             span,
         } = error
@@ -2179,4 +2180,53 @@ fn trait_improvement_keeps_generic_inputs_with_matching_heads() {
         .join("\n");
         assert_val_eq!(TestSession::new().run(&source), int(42));
     }
+}
+
+fn missing_requirement_of_default_method(source: &str) -> Option<MissingRequirement> {
+    let error = TestSession::new().fail_compilation(source).into_inner();
+    let CompilationErrorImpl::InvalidTraitDefinition {
+        kind:
+            InvalidTraitDefinitionKind::InvalidDefaultMethod {
+                missing_constraint, ..
+            },
+        ..
+    } = error
+    else {
+        panic!("unexpected diagnostic: {error:?}")
+    };
+    missing_constraint
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn invalid_default_method_suggests_a_where_clause_that_works() {
+    for (header, method, clause) in [
+        (
+            "trait Tr<Self>",
+            "fn go(x: Self) -> Self { x }",
+            "Self: Value",
+        ),
+        // Quantifiers follow the method's signature, not the trait's parameters.
+        ("trait Tr<A, B>", "fn go(b: B, a: A) -> B { b }", "B: Value"),
+        (
+            "trait Tr<Self |-> Out>",
+            "fn go(s: Self, o: Out) -> Out { o }",
+            "Out: Value",
+        ),
+    ] {
+        assert_eq!(
+            missing_requirement_of_default_method(&format!("{header} {{ {method} }}")),
+            Some(MissingRequirement::WhereClause(clause.to_string())),
+        );
+        TestSession::new().compile(&format!("{header} where {clause} {{ {method} }}"));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn invalid_default_method_does_not_suggest_a_clause_without_source_syntax() {
+    assert!(matches!(
+        missing_requirement_of_default_method("trait Tr<Self> { fn go(x: Self) -> int { x.foo } }"),
+        Some(MissingRequirement::Description(_))
+    ));
 }

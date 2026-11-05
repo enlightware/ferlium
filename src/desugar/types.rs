@@ -3,7 +3,8 @@
 
 use super::*;
 use crate::compiler::error::{
-    AttributeTarget, InvalidAttributeKind, InvalidRecursiveTypeKind, UnsafeFeature,
+    AttributeTarget, CompilationErrorImpl, InvalidAttributeKind, InvalidRecursiveTypeKind,
+    UnsafeFeature,
 };
 use crate::std::{array::array_type_def, value::NO_DERIVE_VALUE_ATTRIBUTE};
 use crate::types::never::reject_reserved_name;
@@ -307,11 +308,13 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
                 effect_args,
             } => {
                 if !effect_args.is_empty() {
-                    return Err(internal_compilation_error!(WrongNumberOfArguments {
+                    return Err(internal_compilation_error!(WrongNumberOfEffectArguments {
+                        type_name: path_last_name(path),
                         expected: 0,
                         expected_span: span,
                         got: effect_args.len(),
                         got_span: span,
+                        function_type_span: function_type_with_effects_span(args, span),
                     }));
                 }
                 self.desugar_path_with_args(path, args, span)?
@@ -870,7 +873,8 @@ impl ast::PType {
                         span,
                         env,
                         None,
-                    )?
+                    )
+                    .map_err(|error| with_function_type_hint(error, args, span))?
                 } else if let [(name, name_span)] = &path.segments[..] {
                     if generic_ty_params.contains_key(name) {
                         return Err(internal_compilation_error!(WrongNumberOfArguments {
@@ -1645,6 +1649,79 @@ fn expect_type_argument_count(
     }
 }
 
+fn path_last_name(path: &ast::Path) -> Ustr {
+    path.segments
+        .last()
+        .map_or_else(|| ustr(""), |(name, _)| *name)
+}
+
+fn expect_effect_argument_count(
+    path: &ast::Path,
+    expected: usize,
+    expected_span: Location,
+    got: usize,
+    got_span: Location,
+) -> Result<(), InternalCompilationError> {
+    if expected == got {
+        Ok(())
+    } else {
+        Err(internal_compilation_error!(WrongNumberOfEffectArguments {
+            type_name: path_last_name(path),
+            expected,
+            expected_span,
+            got,
+            got_span,
+            function_type_span: None,
+        }))
+    }
+}
+
+/// The last type argument and the effects after it, up to the closing `>`, if that argument is a
+/// function type without parentheses of its own: its author may have meant the effects for the
+/// function, and wrapping that text in parentheses gives them to it.
+fn function_type_with_effects_span(
+    args: &[ast::TypeSpan<Parsed>],
+    span: Location,
+) -> Option<Location> {
+    let (ast::PType::Function(function), arg_span) = args.last()? else {
+        return None;
+    };
+    // Parentheses around the function type would end the argument after its return type.
+    (arg_span.end_usize() == function.ret.1.end_usize()).then(|| {
+        Location::new_usize(
+            arg_span.start_usize(),
+            span.end_usize().saturating_sub(1),
+            span.source_id(),
+        )
+    })
+}
+
+/// Point an error about too many effect arguments at the function type they may be meant for.
+fn with_function_type_hint(
+    error: InternalCompilationError,
+    args: &[ast::TypeSpan<Parsed>],
+    span: Location,
+) -> InternalCompilationError {
+    match error.into_inner() {
+        CompilationErrorImpl::WrongNumberOfEffectArguments {
+            type_name,
+            expected,
+            expected_span,
+            got,
+            got_span,
+            ..
+        } if got > expected => internal_compilation_error!(WrongNumberOfEffectArguments {
+            type_name,
+            expected,
+            expected_span,
+            got,
+            got_span,
+            function_type_span: function_type_with_effects_span(args, span),
+        }),
+        error => InternalCompilationError::new(error),
+    }
+}
+
 fn desugar_resolved_type_without_args(
     resolved: ResolvedTypePath,
     path: &ast::Path,
@@ -1686,7 +1763,13 @@ fn desugar_resolved_type_with_args(
                 args.len(),
                 span,
             )?;
-            expect_type_argument_count(0, path.span().unwrap_or(span), effect_args.len(), span)?;
+            expect_effect_argument_count(
+                path,
+                0,
+                path.span().unwrap_or(span),
+                effect_args.len(),
+                span,
+            )?;
             let ty_subst = (0..entry.ty_var_count)
                 .map(TypeVar::new)
                 .zip(args)
@@ -1706,7 +1789,8 @@ fn desugar_resolved_type_with_args(
                 span,
             )?;
             let effect_param_count = env.type_def_effect_param_count(type_def);
-            expect_type_argument_count(
+            expect_effect_argument_count(
+                path,
                 effect_param_count,
                 env.type_def_span(type_def),
                 effect_args.len(),
@@ -1722,7 +1806,13 @@ fn desugar_resolved_type_with_args(
             ))
         }
         ResolvedTypePath::BareNative(bare) => {
-            expect_type_argument_count(0, path.span().unwrap_or(span), effect_args.len(), span)?;
+            expect_effect_argument_count(
+                path,
+                0,
+                path.span().unwrap_or(span),
+                effect_args.len(),
+                span,
+            )?;
             Ok(store_type_kind(
                 TypeKind::Native(b(NativeType::new(bare, args))),
                 graph,

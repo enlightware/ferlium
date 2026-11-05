@@ -201,7 +201,12 @@ pub(crate) fn diagnostics_from_error(
         | Internal { span, .. }
         | EffectNotFound { span, .. }
         | EffectVariablesCombined { span, .. } => vec![*span],
-        WrongNumberOfArguments {
+        WrongNumberOfEffectArguments {
+            expected_span,
+            got_span,
+            ..
+        }
+        | WrongNumberOfArguments {
             expected_span,
             got_span,
             ..

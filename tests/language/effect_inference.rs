@@ -585,3 +585,89 @@ fn named_type_parameters_preserve_effect_polymorphism() {
         SourceFailureKind::DivisionByZero,
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn effect_after_type_arguments_is_an_argument_of_the_outer_type() {
+    let error = TestSession::new().fail_compilation(
+        "struct Box<T>(T)
+        fn f<! E>(g: Box<() -> int ! E>) -> int { 1 }",
+    );
+    let CompilationErrorImpl::WrongNumberOfEffectArguments {
+        type_name,
+        expected: 0,
+        got: 1,
+        function_type_span: Some(_),
+        ..
+    } = &*error
+    else {
+        panic!("unexpected diagnostic: {error:?}")
+    };
+    assert_eq!(*type_name, ustr("Box"));
+    // No function type to give the effect to, so no hint.
+    let error = TestSession::new().fail_compilation(
+        "struct Box<T>(T)
+        fn f<! E>(g: Box<int ! E>) -> int { 1 }",
+    );
+    assert!(
+        matches!(
+            &*error,
+            CompilationErrorImpl::WrongNumberOfEffectArguments {
+                function_type_span: None,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    // The parentheses keep the effect on the function.
+    assert_val_eq!(
+        TestSession::new().run(
+            "struct Box<T>(T)
+            fn f<! E>(g: Box<(() -> int ! E)>) -> int { g.0() }
+            f(Box(|| 3))"
+        ),
+        int(3)
+    );
+    // Wrapping these in parentheses would not parse, so no hint.
+    for parenthesized in [
+        "(() -> int) ! E",
+        "((() -> int)) ! E",
+        "(() -> int ! E) ! E",
+    ] {
+        let error = TestSession::new().fail_compilation(&format!(
+            "struct Box<T>(T)
+            fn f<! E>(g: Box<{parenthesized}>) -> int {{ 1 }}"
+        ));
+        assert!(
+            matches!(
+                &*error,
+                CompilationErrorImpl::WrongNumberOfEffectArguments {
+                    function_type_span: None,
+                    ..
+                }
+            ),
+            "{parenthesized}: {error:?}"
+        );
+    }
+    // The hint is the argument in parentheses, which must compile.
+    for function_type in ["() -> int ! E", "() -> (int) ! E", "() -> () -> int ! E"] {
+        let error = TestSession::new().fail_compilation(&format!(
+            "struct Box<T>(T)
+            fn f<! E>(g: Box<{function_type}>) -> int {{ 1 }}"
+        ));
+        assert!(
+            matches!(
+                &*error,
+                CompilationErrorImpl::WrongNumberOfEffectArguments {
+                    function_type_span: Some(_),
+                    ..
+                }
+            ),
+            "{function_type}: {error:?}"
+        );
+        TestSession::new().compile(&format!(
+            "struct Box<T>(T)
+            fn f<! E>(g: Box<({function_type})>) -> int {{ 1 }}"
+        ));
+    }
+}

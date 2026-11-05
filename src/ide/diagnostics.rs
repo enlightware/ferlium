@@ -11,7 +11,7 @@ use crate::{
     compiler::error::{
         CompilationErrorImpl, ImportKind, InfiniteTypeKind, InvalidRecordFieldContext,
         MutabilityMustBeContext, MutabilityMustBeWhat, WhatIsNotAProductType,
-        WhichProductTypeIsNot, format_output_effect_mismatches,
+        WhichProductTypeIsNot, effect_arguments_message, format_output_effect_mismatches,
     },
     parser::location::SourceTable,
     types::effects::EffectRow,
@@ -242,6 +242,30 @@ pub(super) fn compilation_error_to_data(
             span,
             kind.message(*attribute_name, target),
         )],
+        WrongNumberOfEffectArguments {
+            type_name,
+            expected,
+            expected_span,
+            got,
+            got_span,
+            function_type_span,
+        } => vec![
+            error_data_from_location(
+                expected_span,
+                format!("`{type_name}` takes {expected} effect arguments, as declared here"),
+            ),
+            error_data_from_location(
+                got_span,
+                effect_arguments_message(
+                    "This",
+                    *type_name,
+                    *expected,
+                    *got,
+                    *function_type_span,
+                    source_table,
+                ),
+            ),
+        ],
         WrongNumberOfArguments {
             expected,
             expected_span,

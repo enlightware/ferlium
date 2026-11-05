@@ -16,7 +16,8 @@ use crate::{
         error::{
             AttributeTarget, GenericParamsOwner, InternalCompilationError, InvalidAttributeKind,
             InvalidGenericParamsKind, InvalidSubscriptDefinitionKind, InvalidTraitDefinitionKind,
-            SubscriptDefinitionSubject, UnsafeFeature, UnsupportedSubscriptFeatureKind,
+            MissingRequirement, SubscriptDefinitionSubject, UnsafeFeature,
+            UnsupportedSubscriptFeatureKind,
         },
         lints::report_needless_returns_in_tail,
     },
@@ -51,7 +52,9 @@ use crate::{
         mutability::MutType,
         r#trait::{Trait, TraitDefaultMethod, TraitMethodIndex},
         trait_solver::{TraitSolver, trait_solver_from_module},
-        r#type::{CallResultConvention, FnArgType, FnType, Type, TypeInstSubst, TypeVar},
+        r#type::{
+            CallResultConvention, FnArgType, FnType, Type, TypeDisplayEnv, TypeInstSubst, TypeVar,
+        },
         type_constraints::named_type_constraints_in_types,
         type_inference::{
             defaulting::{ConstraintBoundary, DefaultingScope},
@@ -2034,16 +2037,31 @@ where
                         ModuleEnv::new(output, others),
                     )
                 });
-                if let Err(reason) =
+                if let Err((reason, missing)) =
                     check_declared_signature(declared, checked_constraints, &mut ty_inf)
                 {
                     let (trait_id, index) = input.trait_default.unwrap();
                     let trait_def = output.trait_def(trait_id);
+                    let missing_constraint = missing.and_then(|constraint| {
+                        let env = ModuleEnv::new(output, others);
+                        let scheme = trait_def
+                            .default_method_scheme(trait_id, index, env, function.span)
+                            .ok()?;
+                        missing_requirement(
+                            &constraint,
+                            trait_def,
+                            &scheme,
+                            declared,
+                            &mut ty_inf,
+                            &env,
+                        )
+                    });
                     return Err(internal_compilation_error!(InvalidTraitDefinition {
                         trait_name: trait_def.name,
                         kind: InvalidTraitDefinitionKind::InvalidDefaultMethod {
                             method_name: trait_def.method(index).0,
-                            reason
+                            reason,
+                            missing_constraint,
                         },
                         span: function.span,
                     }));
@@ -2345,4 +2363,50 @@ fn check_declared_effects_not_combined(
         }
     }
     Ok(())
+}
+
+/// How to report a requirement that a default method needs and its trait lacks, if its type
+/// variables are all parameters of the trait. Names go through `scheme`, the declaration that
+/// `declared` instantiates, because its quantifiers follow their use in the method's signature.
+fn missing_requirement(
+    constraint: &PubTypeConstraint,
+    trait_def: &Trait,
+    scheme: &TypeScheme<FnType>,
+    declared: &TypeScheme<FnType>,
+    ty_inf: &mut UnifiedTypeInference,
+    env: &ModuleEnv<'_>,
+) -> Option<MissingRequirement> {
+    let parameter_names = trait_def
+        .input_type_names
+        .iter()
+        .chain(&trait_def.output_type_names)
+        .collect::<Vec<_>>();
+    let names = scheme
+        .ty_quantifiers
+        .iter()
+        .zip(&declared.ty_quantifiers)
+        .filter_map(|(source_var, var)| {
+            let name = **parameter_names.get(source_var.name() as usize)?;
+            let root = ty_inf.substitute_in_type(Type::variable(*var));
+            let root = *root.data().as_variable()?;
+            Some((root, name))
+        })
+        .collect::<FxHashMap<_, _>>();
+    if constraint
+        .inner_ty_vars()
+        .iter()
+        .any(|var| !names.contains_key(var))
+    {
+        return None;
+    }
+    let rendered = constraint
+        .format_with(&TypeDisplayEnv::new(env, &names))
+        .to_string();
+    let is_where_clause = matches!(constraint, PubTypeConstraint::HaveTrait { .. })
+        && constraint.inner_effect_vars().is_empty();
+    Some(if is_where_clause {
+        MissingRequirement::WhereClause(rendered)
+    } else {
+        MissingRequirement::Description(rendered)
+    })
 }

@@ -21,19 +21,19 @@ pub(crate) fn check_declared_signature<'a>(
     declaration: &TypeScheme<FnType>,
     inferred_constraints: impl IntoIterator<Item = &'a PubTypeConstraint>,
     inference: &mut UnifiedTypeInference,
-) -> Result<(), InvalidDefaultMethodKind> {
+) -> Result<(), (InvalidDefaultMethodKind, Option<Box<PubTypeConstraint>>)> {
     let mut types = FxHashSet::default();
     for var in &declaration.ty_quantifiers {
         let ty = inference.substitute_in_type(Type::variable(*var));
         if !ty.data().is_variable() || !types.insert(ty) {
-            return Err(InvalidDefaultMethodKind::SpecializedTypeParameter);
+            return Err((InvalidDefaultMethodKind::SpecializedTypeParameter, None));
         }
     }
     let mut effects = FxHashSet::default();
     for var in &declaration.eff_quantifiers {
         let effect = inference.substitute_in_effect_type(&EffType::single_variable(*var));
         if effect.to_single_variable().is_none() || !effects.insert(effect) {
-            return Err(InvalidDefaultMethodKind::RestrictedEffectParameter);
+            return Err((InvalidDefaultMethodKind::RestrictedEffectParameter, None));
         }
     }
     let givens = declaration
@@ -41,11 +41,14 @@ pub(crate) fn check_declared_signature<'a>(
         .iter()
         .map(|constraint| inference.substitute_in_constraint(constraint))
         .collect::<Vec<_>>();
-    if inferred_constraints
+    if let Some(missing) = inferred_constraints
         .into_iter()
-        .any(|constraint| !givens.contains(constraint))
+        .find(|constraint| !givens.contains(constraint))
     {
-        return Err(InvalidDefaultMethodKind::UndeclaredConstraint);
+        return Err((
+            InvalidDefaultMethodKind::UndeclaredConstraint,
+            Some(Box::new(missing.clone())),
+        ));
     }
     Ok(())
 }
