@@ -36,18 +36,9 @@ Override it when you want fewer workers:
 make fuzz-grammar FUZZ_TIME=300 FUZZ_JOBS=4
 ```
 
-The equivalent direct commands are:
-
-```sh
-mkdir -p fuzz/corpus-generated/parse_any
-ASAN_OPTIONS=detect_leaks=0 cargo +nightly fuzz run parse_any fuzz/corpus-generated/parse_any fuzz/corpus/parse_any -- -max_total_time=30 -timeout=60 -jobs=$(nproc) -workers=$(nproc)
-mkdir -p fuzz/corpus-generated/ide_compile_any
-ASAN_OPTIONS=detect_leaks=0 cargo +nightly fuzz run ide_compile_any fuzz/corpus-generated/ide_compile_any fuzz/corpus/programs fuzz/corpus/diagnostics -- -max_total_time=30 -timeout=60 -jobs=$(nproc) -workers=$(nproc)
-mkdir -p fuzz/corpus-generated/grammar_ide_compile
-ASAN_OPTIONS=detect_leaks=0 cargo +nightly fuzz run grammar_ide_compile fuzz/corpus-generated/grammar_ide_compile fuzz/corpus/grammar_ide_compile -- -max_total_time=30 -timeout=60 -jobs=$(nproc) -workers=$(nproc)
-```
-
 The Make targets set `ASAN_OPTIONS=detect_leaks=0` because short fuzz smoke runs are looking for compiler crashes, not process-lifetime leak reports from the sanitizer runtime.
+They also pass `-detect_leaks=0` to libFuzzer, because otherwise libFuzzer reruns inputs for a leak check that is turned off.
+Use `make fuzz-optimization-leaks` to run the optimization target with leak detection, which costs roughly three times the throughput.
 The first corpus directory passed to libFuzzer is writable.
 The committed `fuzz/corpus/*` directories are seed inputs; generated discoveries go under the ignored `fuzz/corpus-generated/` directory.
 
@@ -58,9 +49,13 @@ make fuzz-cmin
 ```
 
 This runs `cargo fuzz cmin` for each generated corpus directory.
-Use `make fuzz-cmin-parse`, `make fuzz-cmin-ide`, `make fuzz-cmin-grammar`, or `make fuzz-cmin-effects` to minimize a single target.
+Use `make fuzz-cmin-ide`, `make fuzz-cmin-grammar`, `make fuzz-cmin-optimization`, or `make fuzz-cmin-effects` to minimize a single target.
 These targets also use `FUZZ_ITEM_TIMEOUT`, so pathological inputs do not block minimization indefinitely.
 Minimization preserves the coverage observed by the current fuzz target binary and instrumentation; it is still worth keeping a backup or commit boundary before replacing a very large corpus.
+
+A run first replays its whole corpus, and only then tries new inputs.
+A slow target can spend all of `FUZZ_TIME` replaying: if a worker log shows `INITED` and `DONE` at the same run count, the run tried nothing new.
+Give the run more time than the replay takes, or start from an empty corpus folder to try new inputs right away.
 
 Grammar-level fuzzing uses Barkus, pinned as a Git dependency in the fuzz crate.
 The EBNF grammar lives in `fuzz/grammar/ferlium.ebnf`.
@@ -68,14 +63,13 @@ It is a generation grammar for structured compiler inputs, not the official lang
 
 Targets:
 
-- `parse_any` feeds valid UTF-8 directly to `parse_module_and_expr`.
 - `ide_compile_any` feeds valid UTF-8 through the IDE compiler path, including the normal compiler and diagnostic position conversion.
 - `grammar_ide_compile` decodes Barkus decision tapes into Ferlium-shaped source, then feeds the source through the IDE compiler path.
-- `grammar_optimization_differential` runs grammar-generated expressions with MIR optimization off and on, and compares their outcomes.
+- `grammar_optimization_differential` runs grammar-generated source with MIR optimization off and on, and compares their outcomes.
 - `effect_soundness` generates programs combining traits with output effects, concrete and blanket impls, generic callers and fallible callbacks (`make fuzz-effects`).
 
-The raw byte targets ignore invalid UTF-8 and inputs larger than 32 KiB.
-The grammar target ignores invalid decision tapes, very large tapes, and generated source larger than 32 KiB.
+The raw byte target ignores invalid UTF-8 and inputs larger than 32 KiB.
+The grammar targets ignore invalid decision tapes, very large tapes, and generated source larger than 32 KiB.
 Panics are left uncaught on purpose: a compiler panic is a fuzz finding.
 
 When a crash is found, minimize it with cargo-fuzz and keep the reduced input as a regression test if it represents a real compiler bug.

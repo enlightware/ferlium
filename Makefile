@@ -15,6 +15,8 @@ FUZZ_LOG_DIR ?= fuzz/logs
 CXX_STDLIB_PATH ?= $(shell c++ -print-file-name=libstdc++.so 2>/dev/null)
 CXX_STDLIB_DIR ?= $(if $(filter /%,$(CXX_STDLIB_PATH)),$(dir $(CXX_STDLIB_PATH)))
 FUZZ_ENV := ASAN_OPTIONS=detect_leaks=0
+# Without this, libFuzzer reruns inputs for a leak check that ASAN_OPTIONS has turned off.
+FUZZ_NO_LEAK_CHECK := -detect_leaks=0
 # Leak detection costs roughly 3x throughput, so it is opt-in rather than on by default.
 FUZZ_ENV_LEAKS := ASAN_OPTIONS=detect_leaks=1
 ifneq ($(strip $(CXX_STDLIB_DIR)),)
@@ -104,19 +106,19 @@ bench-wasm-callgrind: check-valgrind
 
 fuzz-ide:
 	mkdir -p fuzz/corpus-generated/ide_compile_any $(FUZZ_LOG_DIR)/ide_compile_any
-	cd $(FUZZ_LOG_DIR)/ide_compile_any && $(FUZZ_ENV) cargo +nightly fuzz run --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target ide_compile_any $(CURDIR)/fuzz/corpus-generated/ide_compile_any $(CURDIR)/fuzz/corpus/programs $(CURDIR)/fuzz/corpus/diagnostics $(CURDIR)/fuzz/corpus/parse_any -- -max_total_time=$(FUZZ_TIME) -timeout=$(FUZZ_ITEM_TIMEOUT) -rss_limit_mb=$(FUZZ_RSS_LIMIT_MB) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS)
+	cd $(FUZZ_LOG_DIR)/ide_compile_any && $(FUZZ_ENV) cargo +nightly fuzz run --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target ide_compile_any $(CURDIR)/fuzz/corpus-generated/ide_compile_any $(CURDIR)/fuzz/corpus/programs $(CURDIR)/fuzz/corpus/diagnostics $(CURDIR)/fuzz/corpus/parse_any -- $(FUZZ_NO_LEAK_CHECK) -max_total_time=$(FUZZ_TIME) -timeout=$(FUZZ_ITEM_TIMEOUT) -rss_limit_mb=$(FUZZ_RSS_LIMIT_MB) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS)
 
 fuzz-grammar:
 	mkdir -p fuzz/corpus-generated/grammar_ide_compile $(FUZZ_LOG_DIR)/grammar_ide_compile
-	cd $(FUZZ_LOG_DIR)/grammar_ide_compile && $(FUZZ_ENV) cargo +nightly fuzz run --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target grammar_ide_compile $(CURDIR)/fuzz/corpus-generated/grammar_ide_compile $(CURDIR)/fuzz/corpus/grammar_ide_compile -- -max_total_time=$(FUZZ_TIME) -timeout=$(FUZZ_ITEM_TIMEOUT) -rss_limit_mb=$(FUZZ_RSS_LIMIT_MB) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS)
+	cd $(FUZZ_LOG_DIR)/grammar_ide_compile && $(FUZZ_ENV) cargo +nightly fuzz run --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target grammar_ide_compile $(CURDIR)/fuzz/corpus-generated/grammar_ide_compile $(CURDIR)/fuzz/corpus/grammar_ide_compile -- $(FUZZ_NO_LEAK_CHECK) -max_total_time=$(FUZZ_TIME) -timeout=$(FUZZ_ITEM_TIMEOUT) -rss_limit_mb=$(FUZZ_RSS_LIMIT_MB) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS)
 
 fuzz-optimization:
 	mkdir -p fuzz/corpus-generated/grammar_optimization_differential $(FUZZ_LOG_DIR)/grammar_optimization_differential
-	cd $(FUZZ_LOG_DIR)/grammar_optimization_differential && $(FUZZ_ENV) cargo +nightly fuzz run --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target grammar_optimization_differential $(CURDIR)/fuzz/corpus-generated/grammar_optimization_differential $(CURDIR)/fuzz/corpus/grammar_ide_compile -- -max_total_time=$(FUZZ_TIME) -timeout=$(FUZZ_ITEM_TIMEOUT) -rss_limit_mb=$(FUZZ_RSS_LIMIT_MB) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS)
+	cd $(FUZZ_LOG_DIR)/grammar_optimization_differential && $(FUZZ_ENV) cargo +nightly fuzz run --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target grammar_optimization_differential $(CURDIR)/fuzz/corpus-generated/grammar_optimization_differential $(CURDIR)/fuzz/corpus/grammar_ide_compile -- $(FUZZ_NO_LEAK_CHECK) -max_total_time=$(FUZZ_TIME) -timeout=$(FUZZ_ITEM_TIMEOUT) -rss_limit_mb=$(FUZZ_RSS_LIMIT_MB) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS)
 
 fuzz-effects:
 	mkdir -p fuzz/corpus-generated/effect_soundness $(FUZZ_LOG_DIR)/effect_soundness
-	cd $(FUZZ_LOG_DIR)/effect_soundness && $(FUZZ_ENV) cargo +nightly fuzz run --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target effect_soundness $(CURDIR)/fuzz/corpus-generated/effect_soundness -- -max_len=512 -len_control=0 -max_total_time=$(FUZZ_TIME) -timeout=$(FUZZ_ITEM_TIMEOUT) -rss_limit_mb=$(FUZZ_RSS_LIMIT_MB) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS)
+	cd $(FUZZ_LOG_DIR)/effect_soundness && $(FUZZ_ENV) cargo +nightly fuzz run --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target effect_soundness $(CURDIR)/fuzz/corpus-generated/effect_soundness -- $(FUZZ_NO_LEAK_CHECK) -max_len=512 -len_control=0 -max_total_time=$(FUZZ_TIME) -timeout=$(FUZZ_ITEM_TIMEOUT) -rss_limit_mb=$(FUZZ_RSS_LIMIT_MB) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS)
 
 fuzz-optimization-leaks:
 	mkdir -p fuzz/corpus-generated/grammar_optimization_differential $(FUZZ_LOG_DIR)/grammar_optimization_differential
@@ -126,19 +128,19 @@ fuzz: fuzz-ide fuzz-grammar fuzz-optimization fuzz-effects
 
 fuzz-cmin-ide:
 	mkdir -p fuzz/corpus-generated/ide_compile_any
-	$(FUZZ_ENV) cargo +nightly fuzz cmin --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target ide_compile_any $(CURDIR)/fuzz/corpus-generated/ide_compile_any -- -timeout=$(FUZZ_ITEM_TIMEOUT) -rss_limit_mb=$(FUZZ_RSS_LIMIT_MB)
+	$(FUZZ_ENV) cargo +nightly fuzz cmin --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target ide_compile_any $(CURDIR)/fuzz/corpus-generated/ide_compile_any -- $(FUZZ_NO_LEAK_CHECK) -timeout=$(FUZZ_ITEM_TIMEOUT) -rss_limit_mb=$(FUZZ_RSS_LIMIT_MB)
 
 fuzz-cmin-grammar:
 	mkdir -p fuzz/corpus-generated/grammar_ide_compile
-	$(FUZZ_ENV) cargo +nightly fuzz cmin --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target grammar_ide_compile $(CURDIR)/fuzz/corpus-generated/grammar_ide_compile -- -timeout=$(FUZZ_ITEM_TIMEOUT) -rss_limit_mb=$(FUZZ_RSS_LIMIT_MB)
+	$(FUZZ_ENV) cargo +nightly fuzz cmin --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target grammar_ide_compile $(CURDIR)/fuzz/corpus-generated/grammar_ide_compile -- $(FUZZ_NO_LEAK_CHECK) -timeout=$(FUZZ_ITEM_TIMEOUT) -rss_limit_mb=$(FUZZ_RSS_LIMIT_MB)
 
 fuzz-cmin-optimization:
 	mkdir -p fuzz/corpus-generated/grammar_optimization_differential
-	$(FUZZ_ENV) cargo +nightly fuzz cmin --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target grammar_optimization_differential $(CURDIR)/fuzz/corpus-generated/grammar_optimization_differential -- -timeout=$(FUZZ_ITEM_TIMEOUT) -rss_limit_mb=$(FUZZ_RSS_LIMIT_MB)
+	$(FUZZ_ENV) cargo +nightly fuzz cmin --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target grammar_optimization_differential $(CURDIR)/fuzz/corpus-generated/grammar_optimization_differential -- $(FUZZ_NO_LEAK_CHECK) -timeout=$(FUZZ_ITEM_TIMEOUT) -rss_limit_mb=$(FUZZ_RSS_LIMIT_MB)
 
 fuzz-cmin-effects:
 	mkdir -p fuzz/corpus-generated/effect_soundness
-	$(FUZZ_ENV) cargo +nightly fuzz cmin --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target effect_soundness $(CURDIR)/fuzz/corpus-generated/effect_soundness -- -timeout=$(FUZZ_ITEM_TIMEOUT) -rss_limit_mb=$(FUZZ_RSS_LIMIT_MB)
+	$(FUZZ_ENV) cargo +nightly fuzz cmin --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target effect_soundness $(CURDIR)/fuzz/corpus-generated/effect_soundness -- $(FUZZ_NO_LEAK_CHECK) -timeout=$(FUZZ_ITEM_TIMEOUT) -rss_limit_mb=$(FUZZ_RSS_LIMIT_MB)
 
 fuzz-cmin: fuzz-cmin-ide fuzz-cmin-grammar fuzz-cmin-optimization fuzz-cmin-effects
 
