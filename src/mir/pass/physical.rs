@@ -147,7 +147,11 @@ fn normalize_physical(
                 .resolve(callee, |callee| Some(stage.original(callee)))
                 .is_some_and(KnownCallee::is_optimization_barrier)
         })
-        .map(Rewrite::settled)
+        .map(|body| Rewrite {
+            body,
+            // Merging two calls can make the calls reading their results identical.
+            enables_itself: true,
+        })
     };
     // Place CSE forgets addresses at writes, calls and stack restores, so a pass removing one can
     // let it merge the addresses around it.
@@ -264,7 +268,9 @@ fn normalize_physical(
             Pass {
                 id: NormalizingPass::OverwrittenStores,
                 run: &overwritten_stores,
+                // A write between two calls keeps them apart.
                 enables: &[
+                    NormalizingPass::CommonCalls,
                     NormalizingPass::CommonSubexpressions,
                     NormalizingPass::StoredValues,
                 ],
@@ -272,13 +278,17 @@ fn normalize_physical(
             Pass {
                 id: NormalizingPass::DiscardedResults,
                 run: &discarded_results,
-                enables: &[NormalizingPass::CommonSubexpressions],
+                enables: &[
+                    NormalizingPass::CommonCalls,
+                    NormalizingPass::CommonSubexpressions,
+                ],
             },
             Pass {
                 id: NormalizingPass::DeadCalls,
                 run: &dead_calls,
-                // Removing a call can remove the last load of a local.
+                // Removing a call can remove the last load of a local, and joins the calls around it.
                 enables: &[
+                    NormalizingPass::CommonCalls,
                     NormalizingPass::CommonSubexpressions,
                     NormalizingPass::DiscardedResults,
                 ],
@@ -299,7 +309,9 @@ fn normalize_physical(
             Pass {
                 id: NormalizingPass::DeadStorage,
                 run: &dead_storage,
+                // A write between two calls keeps them apart.
                 enables: &[
+                    NormalizingPass::CommonCalls,
                     NormalizingPass::CommonSubexpressions,
                     NormalizingPass::StoredValues,
                     NormalizingPass::OverwrittenStores,

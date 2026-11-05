@@ -877,3 +877,52 @@ fn failed_call_does_not_drop_uninitialized_result() {
         SourceFailureKind::InvalidArgument("failure".into())
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn merging_calls_exposes_more_identical_calls() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            fn f(g, n: int) -> int {
+                if n > 0 {
+                    f(g, n - 1) + f(g, n - 1)
+                } else {
+                    1
+                }
+            }
+            f(|z| z + 0, 3)
+        "# }),
+        int(8)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn removing_a_store_exposes_identical_calls() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            trait Tr<Self |-> ! E> {
+                fn m(s: Self, x: int) -> int ! E;
+            }
+            struct S { v: int }
+            struct W<T>(T)
+            impl Tr for <Self = S |-> ! E = ()> {
+                fn m(s, x) { x + s.v }
+            }
+            impl<T ! E> Tr for <Self = W<T> |-> ! E = (fallible, E)>
+            where
+                T: Tr<! E = E>
+            {
+                fn m(s, x) {
+                    idiv(m(s.0, x), 1)
+                }
+            }
+            fn g0(s, x) { m(s, x) }
+            fn g1(s, x) { g0(W(s), x) }
+            g1(S { v: 1 }, 3) + g1(S { v: 1 }, 3)
+        "# }),
+        int(8)
+    );
+}

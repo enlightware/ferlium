@@ -347,8 +347,13 @@ fn normalize_semantic(
     // proof remains true when types are substituted or operations removed. An unresolved original
     // remains conservatively non-repeatable even when its concrete copy could prove more.
     let common_calls = |f: &Function| {
-        cse::eliminate_common_calls(f, env, &summary_of, &is_optimization_barrier)
-            .map(Rewrite::settled)
+        // Merging two calls can make the calls reading their results identical.
+        cse::eliminate_common_calls(f, env, &summary_of, &is_optimization_barrier).map(|body| {
+            Rewrite {
+                body,
+                enables_itself: true,
+            }
+        })
     };
     // Lowering and value-call CSE both leave results in fresh slots before transferring them to
     // their real destinations. Storage forwarding is a separate proof from expression equivalence,
