@@ -17,7 +17,9 @@ use crate::{
         self, UNodeArena,
         borrow_checker::check_elaborated_borrows,
         dictionary::DictElaborationCtx,
-        elaboration::{elaborate_generated_functions, elaborate_hir_with_warnings},
+        elaboration::{
+            elaborate_generated_functions_with_private_impls, elaborate_hir_with_warnings,
+        },
         emit_functions::check_unbounds,
         emit_hir::{
             PendingModuleFunctions, PubTypeConstraintPtr, add_pending_function_anonymous,
@@ -217,7 +219,13 @@ fn emit_expr_unsafe_inner(
         &mut module.def_table,
         &mut pending_functions,
     );
-    elaborate_generated_functions(module, others, &mut pending_functions, generated)?;
+    elaborate_generated_functions_with_private_impls(
+        module,
+        others,
+        &mut pending_functions,
+        generated,
+        private_impl_module,
+    )?;
     let module_env = ModuleEnv::new(module, others);
     ty_inf.log_debug_substitution_tables(module_env);
     ty_inf.log_debug_constraints(module_env);
@@ -265,7 +273,13 @@ fn emit_expr_unsafe_inner(
             &mut module.def_table,
             &mut pending_functions,
         );
-        elaborate_generated_functions(module, others, &mut pending_functions, generated)?;
+        elaborate_generated_functions_with_private_impls(
+            module,
+            others,
+            &mut pending_functions,
+            generated,
+            private_impl_module,
+        )?;
         let module_env = ModuleEnv::new(module, others);
         for lambda_id in &lambda_functions {
             let descr = pending_functions
@@ -298,7 +312,13 @@ fn emit_expr_unsafe_inner(
             &mut module.def_table,
             &mut pending_functions,
         );
-        elaborate_generated_functions(module, others, &mut pending_functions, generated)?;
+        elaborate_generated_functions_with_private_impls(
+            module,
+            others,
+            &mut pending_functions,
+            generated,
+            private_impl_module,
+        )?;
     }
 
     // An expression is not generalized over effects it only performs: they and the effects of
@@ -442,7 +462,13 @@ fn emit_expr_unsafe_inner(
         &mut module.def_table,
         &mut pending_functions,
     );
-    elaborate_generated_functions(module, others, &mut pending_functions, generated)?;
+    elaborate_generated_functions_with_private_impls(
+        module,
+        others,
+        &mut pending_functions,
+        generated,
+        private_impl_module,
+    )?;
 
     // Log dropped constraints.
     if log_enabled!(log::Level::Trace) {
@@ -557,7 +583,13 @@ fn emit_expr_unsafe_inner(
     if let Some(generated_projection_subscripts) = generated_projection_subscripts {
         generated_projection_subscripts.commit(module, others);
     }
-    elaborate_generated_functions(module, others, &mut pending_functions, generated)?;
+    elaborate_generated_functions_with_private_impls(
+        module,
+        others,
+        &mut pending_functions,
+        generated,
+        private_impl_module,
+    )?;
     for lambda_id in lambda_functions {
         module.functions[lambda_id.as_index()].refresh_debug_info();
     }

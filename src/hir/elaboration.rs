@@ -23,7 +23,7 @@ use crate::{
     internal_compilation_error,
     module::{
         ELocalDecl, EvidenceBindingId, FunctionId, GeneratedStructuralProjectionSpec, LocalDecl,
-        LocalDeclId, LocalFunctionId, Module, ModuleEnv,
+        LocalDeclId, LocalFunctionId, Module, ModuleEnv, ModuleId,
         PendingGeneratedStructuralProjectionSubscripts, PendingLocalClone, PendingLocalDrop,
         PendingModuleFunction, PendingTakeLocalValueMode, ProjectionIndex, ProjectionKey,
         ResolvedLocalClone, ResolvedLocalDrop, ResolvedTakeLocalValueMode, SubscriptId,
@@ -1374,6 +1374,18 @@ pub fn elaborate_generated_functions(
     pending_functions: &mut FxHashMap<LocalFunctionId, PendingModuleFunction>,
     ids: impl IntoIterator<Item = LocalFunctionId>,
 ) -> Result<(), InternalCompilationError> {
+    elaborate_generated_functions_with_private_impls(module, others, pending_functions, ids, None)
+}
+
+/// As [`elaborate_generated_functions`], for functions generated while compiling an expression
+/// that may use the private impls of `private_impl_module`: they resolve evidence on its behalf.
+pub(crate) fn elaborate_generated_functions_with_private_impls(
+    module: &mut Module,
+    others: &Modules,
+    pending_functions: &mut FxHashMap<LocalFunctionId, PendingModuleFunction>,
+    ids: impl IntoIterator<Item = LocalFunctionId>,
+    private_impl_module: Option<ModuleId>,
+) -> Result<(), InternalCompilationError> {
     let mut pending = ids.into_iter().collect::<Vec<_>>();
     let mut index = 0;
     while index < pending.len() {
@@ -1429,6 +1441,9 @@ pub fn elaborate_generated_functions(
         let generated_projection_subscripts =
             PendingGeneratedStructuralProjectionSubscripts::new(module);
         let mut solver = trait_solver_from_module!(module, others);
+        if let Some(module_id) = private_impl_module {
+            solver.allow_private_impls_from(module_id);
+        }
         let mut ctx = DictElaborationCtx::new_with_generated_projection_subscripts(
             &dicts,
             None,

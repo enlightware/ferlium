@@ -2965,6 +2965,20 @@ impl<'a> TraitSolver<'a> {
         }
     }
 
+    /// Whether `requirement` is closed and its application is being solved.
+    fn closes_a_cycle(&self, requirement: &DictionaryReq) -> bool {
+        let DictionaryReq::TraitImpl {
+            trait_id,
+            input_tys,
+            ..
+        } = requirement
+        else {
+            return false;
+        };
+        requirement.is_closed_trait_impl()
+            && self.solving_stack.contains(&(*trait_id, input_tys.clone()))
+    }
+
     fn blanket_method_requirements(
         &self,
         dictionary: &TraitDictionary,
@@ -2981,8 +2995,14 @@ impl<'a> TraitSolver<'a> {
                 {
                     requirements.push(self_requirement.clone());
                 }
+                // Evidence for an application still being solved closes a cycle of recursive
+                // `Value` dictionaries: capturing it would nest them endlessly, so the thunk
+                // resolves it itself, once the dictionaries exist.
+                let entry_requirements = requirements.iter().filter(|requirement| {
+                    **requirement == self_requirement || !self.closes_a_cycle(requirement)
+                });
                 BlanketMethodRequirements {
-                    entry: DictionaryEntryRequirements::canonical(&requirements, |id| {
+                    entry: DictionaryEntryRequirements::canonical(entry_requirements, |id| {
                         self.trait_def(id)
                     }),
                     callee: requirements,

@@ -139,6 +139,22 @@ impl DictionaryReq {
         }
     }
 
+    /// Whether this is a trait requirement without type or effect variables.
+    pub(crate) fn is_closed_trait_impl(&self) -> bool {
+        match self {
+            Self::TraitImpl {
+                input_tys,
+                output_tys,
+                output_effs,
+                ..
+            } => {
+                input_tys.iter().chain(output_tys).all(Type::is_constant)
+                    && !output_effs.iter().any(EffType::has_variables)
+            }
+            _ => false,
+        }
+    }
+
     pub fn new_variant_payload_indirection(variant_ty: Type, tag: Ustr, payload_ty: Type) -> Self {
         Self::VariantPayloadIndirection {
             variant_ty,

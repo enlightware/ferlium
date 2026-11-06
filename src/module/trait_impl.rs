@@ -224,11 +224,11 @@ impl DictionaryEntryRequirements {
     }
 
     /// Erase compile-time-only evidence and deduplicate while preserving ABI order.
-    pub(crate) fn canonical<'a>(
-        requirements: &[DictionaryReq],
+    pub(crate) fn canonical<'a, 'r>(
+        requirements: impl IntoIterator<Item = &'r DictionaryReq>,
         trait_def: impl Fn(TraitId) -> &'a Trait,
     ) -> Self {
-        let mut canonical = Vec::with_capacity(requirements.len());
+        let mut canonical = Vec::new();
         for requirement in requirements {
             if let DictionaryReq::TraitImpl {
                 trait_id,

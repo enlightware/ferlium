@@ -374,6 +374,65 @@ fn array_clone_returns_owned_array_without_extra_drop() {
     assert_val_eq!(session.run(&source), int(3921));
 }
 
+/// Two custom impls requiring each other once nested their dictionaries endlessly, overflowing the
+/// compiler's stack. Found by review.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn mutually_recursive_custom_value_impls() {
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    assert_val_eq!(
+        session.run(
+            r#"
+            struct Even<T>(int, T)
+            struct Odd<T>(int, T)
+
+            impl<T> Value for Even<T> where T: Value, Odd<T>: Value {
+                fn eq(x: Even<T>, y: Even<T>) -> bool { x.0 == y.0 and x.1 == y.1 }
+                fn to_string(x: Even<T>) -> string {
+                    if x.0 == 0 {
+                        let value = to_string(x.1);
+                        f"even {value}"
+                    } else {
+                        let next: Odd<T> = Odd(x.0 - 1, x.1);
+                        to_string(next)
+                    }
+                }
+                fn hash(x: Even<T>, state: &mut hasher) { hash(x.1, state) }
+                fn clone(x: Even<T>) -> Even<T> { Even(x.0, x.1) }
+                fn drop(x: &mut Even<T>) {}
+            }
+
+            impl<T> Value for Odd<T> where T: Value, Even<T>: Value {
+                fn eq(x: Odd<T>, y: Odd<T>) -> bool { x.0 == y.0 and x.1 == y.1 }
+                fn to_string(x: Odd<T>) -> string {
+                    if x.0 == 0 {
+                        let value = to_string(x.1);
+                        f"odd {value}"
+                    } else {
+                        let next: Even<T> = Even(x.0 - 1, x.1);
+                        to_string(next)
+                    }
+                }
+                fn hash(x: Odd<T>, state: &mut hasher) { hash(x.1, state) }
+                fn clone(x: Odd<T>) -> Odd<T> { Odd(x.0, x.1) }
+                fn drop(x: &mut Odd<T>) {}
+            }
+
+            fn show<T>(n: int, x: T) -> string where T: Value {
+                to_string(Even(n, x))
+            }
+
+            let three = to_string(Even(3, 7));
+            let four = show(4, true);
+            let same = Odd(1, 2) == Odd(1, 2);
+            f"{three}, {four}, {same}"
+            "#
+        ),
+        string("odd 7, even true, true")
+    );
+}
+
 /// A unit-shaped generic type has no data to copy, so its derived `Value::clone` must construct a
 /// fresh value rather than copy the whole one — a `memcpy` of a generic named type is not
 /// statically trivially copyable, and lowering emitted MIR the verifier rejects. Found by the
