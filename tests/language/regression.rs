@@ -926,3 +926,53 @@ fn removing_a_store_exposes_identical_calls() {
         int(8)
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_failing_element_leaves_an_array_literal_droppable() {
+    let prelude = "fn s(x) -> string { to_string(idiv(1, x)) }\n";
+    for term in [
+        // The first element, the last one, and each kind of enclosing storage.
+        "let a = [s(0)]; 1",
+        "let a = [s(1), s(0)]; 1",
+        "let a = [s(1), s(2), s(0), s(4)]; 1",
+        "let a = ([s(0)],); 1",
+        "let a = { x: [s(0)] }; 1",
+        "let a = Some([s(0)]); 1",
+        "let a = Some([s(1), s(0)]); 1",
+        "fn f() { Some([s(0)]) }\nlet a = f(); 1",
+        "fn f() { [s(1), s(0)] }\nlet a = f(); 1",
+        "fn f() -> string { let a = [s(1), s(0)]; a[0] }\nf(); 1",
+        // Nested literals, the inner one failing after the outer one has started.
+        "let a = [[s(1)], [s(0)]]; 1",
+        "let a = [[s(1), s(0)]]; 1",
+    ] {
+        assert_eq!(
+            TestSession::new().fail_run(&format!("{prelude}{term}")),
+            SourceFailureKind::DivisionByZero,
+            "{term}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_failing_derived_serializer_member_leaves_the_result_droppable() {
+    let prelude = "struct W(int)
+        impl Serialize for W {
+            fn serialize(x: W) -> DataValue { serialize(idiv(1, x.0)) }
+        }\n";
+    for term in [
+        "let d = serialize((W(0),)); 1",
+        "let d = serialize((W(1), W(0))); 1",
+        "let d = serialize({ a: W(0) }); 1",
+        "let d = serialize([W(0)]); 1",
+        "let d = DataValue::Tuple([serialize(W(0))]); 1",
+    ] {
+        assert_eq!(
+            TestSession::new().fail_run(&format!("{prelude}{term}")),
+            SourceFailureKind::DivisionByZero,
+            "{term}"
+        );
+    }
+}

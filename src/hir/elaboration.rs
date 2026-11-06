@@ -1296,6 +1296,15 @@ pub struct ElaboratedHir {
     pub locals: Vec<ELocalDecl>,
 }
 
+/// Where a constructor keeps its members while building them.
+#[derive(Clone, Copy)]
+enum ConstructionStorage {
+    /// In the constructed value itself, which owns nothing else.
+    Inline,
+    /// In storage the constructor allocates before building its first member.
+    AllocatedFirst,
+}
+
 /// Whether evaluation can leave a construction needing guest cleanup (poisoning does not).
 fn can_interrupt(arena: &UNodeArena, node: UNodeId) -> bool {
     !arena[node].effects.cannot_fail()
@@ -1879,17 +1888,25 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
         old: UNodeId,
         nodes: &[UNodeId],
         constructor: fn(hir::NodeIds<Elaborated>) -> NodeKind<Elaborated>,
+        storage: ConstructionStorage,
     ) -> Result<NodeKind<Elaborated>, InternalCompilationError> {
         let ty = src[old].ty;
         let effects = &src[old].effects;
         let span = src[old].span;
         // Poisoning needs no guest cleanup. Only source failure or a control transfer can
         // require dropping a completed prefix; straight-line constructors stay unchanged.
-        let prefix_len = nodes
-            .iter()
-            .rposition(|node| can_interrupt(src, *node))
-            .unwrap_or(0);
-        if prefix_len == 0 {
+        let last_interruption = nodes.iter().rposition(|node| can_interrupt(src, *node));
+        let prefix_len = last_interruption.unwrap_or(0);
+        // An array allocates before building its first element, so it owns storage even when that
+        // element is the one interrupted, except a trivially copied one, built after its elements.
+        let allocates_first = matches!(storage, ConstructionStorage::AllocatedFirst)
+            && nodes.first().is_some_and(|element| {
+                !self
+                    .ctx
+                    .trait_solver
+                    .concrete_type_is_trivial_copy(src[*element].ty)
+            });
+        if last_interruption.is_none() || (prefix_len == 0 && !allocates_first) {
             let fields = b(SVec2::from_vec(
                 self.elaborate_node_iter(src, nodes.iter().copied())?,
             ));
@@ -1904,7 +1921,8 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     .into_elaborated()
             });
         }
-        let needs_cleanup = drops.iter().any(|drop| *drop != ResolvedLocalDrop::Skip);
+        let needs_cleanup =
+            allocates_first || drops.iter().any(|drop| *drop != ResolvedLocalDrop::Skip);
         let mut fields = Vec::with_capacity(nodes.len());
         let mut body = Vec::new();
         let mut cleanup = Vec::new();
@@ -3003,7 +3021,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             PendingAssignment(_) => unreachable!("assignment preparation precedes HIR elaboration"),
             Tuple(nodes) => {
                 self.ensure_product_layout_evidence(node_ty, node_span)?;
-                self.elaborate_construction(src, old, nodes, Tuple)?
+                self.elaborate_construction(src, old, nodes, Tuple, ConstructionStorage::Inline)?
             }
             Project(project) => {
                 let value = project.value;
@@ -3021,7 +3039,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             }
             Record(nodes) => {
                 self.ensure_product_layout_evidence(node_ty, node_span)?;
-                self.elaborate_construction(src, old, nodes, Record)?
+                self.elaborate_construction(src, old, nodes, Record, ConstructionStorage::Inline)?
             }
             FieldAccess(field_access) => {
                 use TypeKind::*;
@@ -3185,7 +3203,13 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 if let Some(element) = nodes.first() {
                     self.ensure_value_layout_evidence(src[*element].ty, node_span)?;
                 }
-                self.elaborate_construction(src, old, nodes, Array)?
+                self.elaborate_construction(
+                    src,
+                    old,
+                    nodes,
+                    Array,
+                    ConstructionStorage::AllocatedFirst,
+                )?
             }
             Case(case) => {
                 let value = case.value;
