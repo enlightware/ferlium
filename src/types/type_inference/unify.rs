@@ -314,6 +314,14 @@ impl UnifiedTypeInference {
         })
     }
 
+    pub(crate) fn seed_effect_marker(&mut self, var: EffectVar) -> EffectVar {
+        self.effects.seed_marker(var, None)
+    }
+
+    pub(crate) fn effect_provenance(&mut self, row: &EffType) -> EffType {
+        self.effects.provenance(row)
+    }
+
     pub(crate) fn fresh_rigid_effect_var(&mut self) -> EffectVar {
         self.effects.fresh_rigid_var(None)
     }
@@ -1310,6 +1318,7 @@ impl UnifiedTypeInference {
         for given_inputs in potential_inputs {
             // Probe compatibility without learning input equalities from evidence.
             // In particular Convert<A, ?b> must not force ?b to a given's B.
+            let declared_roots = self.declared_generic_roots();
             let snapshot = self.snapshot();
             let compatible = input_tys
                 .iter()
@@ -1317,7 +1326,9 @@ impl UnifiedTypeInference {
                 .all(|(actual, expected)| {
                     self.unify_same_type_with_sub_effects(*actual, span, *expected, span)
                         .is_ok()
-                });
+                })
+                // A written generic stands for every type, so it can never become a query's type.
+                && self.declared_generics_intact(&declared_roots);
             self.rollback_to(snapshot);
             if compatible {
                 return Ok(GivenMatch::Deferred);

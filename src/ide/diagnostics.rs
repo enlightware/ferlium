@@ -186,6 +186,85 @@ pub(super) fn compilation_error_to_data(
             span,
             format!("Cannot find effect `{name}` in this scope"),
         )],
+        RecursiveGroupBodyDoesNotFit {
+            function,
+            reason,
+            span,
+        } => vec![error_data_from_location(
+            span,
+            format!(
+                "Function `{function}` does not fit the signature inferred for its recursive group, as {}: write its signature",
+                reason.message()
+            ),
+        )],
+        AmbiguousEffectInRecursiveGroup {
+            function,
+            parameter,
+            first,
+            second,
+            span,
+        } => {
+            let (position, fix) = match parameter {
+                Some(parameter) => (
+                    format!("parameter `{parameter}`"),
+                    format!("write the type of `{parameter}`"),
+                ),
+                None => (
+                    "a requirement".to_string(),
+                    "write this requirement in a `where` clause".to_string(),
+                ),
+            };
+            vec![error_data_from_location(
+                span,
+                format!(
+                    "Cannot infer the effect of {position} of `{function}`, as it could be `{first}` or `{second}`: {fix}"
+                ),
+            )]
+        }
+        EffectConflictWithInferredSignature {
+            function,
+            source,
+            source_span,
+            target,
+            target_span,
+        } => vec![
+            error_data_from_location(
+                source_span,
+                format!(
+                    "This has effect `{}`, because the signature of `{function}` was inferred for its recursive group",
+                    EffectRow(source),
+                ),
+            ),
+            error_data_from_location(
+                target_span,
+                format!(
+                    "and it must fit `{}` here: write the parameter types of `{function}`, with their effects",
+                    EffectRow(target),
+                ),
+            ),
+        ],
+        EffectGenericConflictInRecursiveGroup {
+            generic,
+            source,
+            source_span,
+            target,
+            target_span,
+        } => vec![
+            error_data_from_location(
+                source_span,
+                format!(
+                    "Effect generic `{generic}` has one instance while this recursive group is inferred, but it is used with `{}` here",
+                    EffectRow(source),
+                ),
+            ),
+            error_data_from_location(
+                target_span,
+                format!(
+                    "and it must fit `{}` here. Change one of these uses so they agree",
+                    EffectRow(target),
+                ),
+            ),
+        ],
         EffectVariablesCombined {
             first,
             second,

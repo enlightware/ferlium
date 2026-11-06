@@ -144,6 +144,9 @@ pub struct TypeInference {
     pub(super) given_constraints: Vec<PubTypeConstraint>,
     /// The type variables standing for generic parameters written by the enclosing declaration.
     pub(super) declared_generics: Vec<Type>,
+    /// For each function of a recursive group checked against contracts, the types its type
+    /// quantifiers take in this body: the group keeps one type instance, only effects vary.
+    group_type_instances: FxHashMap<FunctionId, Vec<Type>>,
     pub(super) evidence_uses: EvidenceUses,
     pub(super) ty_unification_table: InPlaceUnificationTable<TyVarKey>,
     pub(super) ty_constraints: Vec<TypeConstraint>,
@@ -499,6 +502,13 @@ impl TypeInference {
         EffType::single_variable(self.effects.fresh_rigid_var(name))
     }
 
+    /// A flexible effect variable for a written generic, with the marker that tracks it.
+    pub(crate) fn fresh_provisional_effect_var_ty(&mut self, name: Ustr) -> (EffType, EffectVar) {
+        let var = self.effects.fresh_var();
+        let marker = self.effects.seed_marker(var, Some(name));
+        (EffType::single_variable(var), marker)
+    }
+
     pub fn fresh_fn_arg(&mut self) -> FnArgType {
         FnArgType::new(self.fresh_type_var_ty(), self.fresh_mut_var_ty())
     }
@@ -520,6 +530,33 @@ impl TypeInference {
     /// Declare `generics` as written generic parameters: selecting an impl will not narrow them.
     pub(crate) fn add_declared_generics(&mut self, generics: impl IntoIterator<Item = Type>) {
         self.declared_generics.extend(generics);
+    }
+
+    /// Give the functions of a recursive group, in this body, one instance of their type
+    /// quantifiers each, in quantifier order.
+    pub(crate) fn set_group_type_instances(&mut self, instances: FxHashMap<FunctionId, Vec<Type>>) {
+        self.group_type_instances = instances;
+    }
+
+    /// A call to a function of the group takes the body's instance of its types.
+    fn share_group_type_instance(
+        &mut self,
+        function: FunctionId,
+        ty_quantifiers: &[TypeVar],
+        subst: &InstSubst,
+        span: Location,
+    ) {
+        let Some(instance) = self.group_type_instances.get(&function) else {
+            return;
+        };
+        for (var, expected) in ty_quantifiers.iter().zip(instance.clone()) {
+            self.ty_constraints.push(TypeConstraint::SameType {
+                current: subst.0[var],
+                current_span: span,
+                expected,
+                expected_span: span,
+            });
+        }
     }
 
     pub(crate) fn add_given_constraint(&mut self, constraint: PubTypeConstraint) -> GivenId {
@@ -1012,9 +1049,15 @@ impl TypeInference {
                         (definition.clone(), function, module_id, runtime_arg_passing)
                     })
                 {
-                    let (fn_ty, inst_data, _subst) = definition
+                    let (fn_ty, inst_data, subst) = definition
                         .ty_scheme
                         .instantiate_with_fresh_vars(self, expr_span, None, env.module_env);
+                    self.share_group_type_instance(
+                        function,
+                        &definition.ty_scheme.ty_quantifiers,
+                        &subst,
+                        expr_span,
+                    );
                     let node = K::GetFunction(b(hir::GetFunction {
                         function,
                         function_path: path.clone(),
@@ -4368,11 +4411,17 @@ impl TypeInference {
                 }));
             }
 
-            let (inst_fn_ty, inst_data, _subst) = definition.ty_scheme.instantiate_with_fresh_vars(
+            let (inst_fn_ty, inst_data, subst) = definition.ty_scheme.instantiate_with_fresh_vars(
                 self,
                 path_span,
                 None,
                 env.module_env,
+            );
+            self.share_group_type_instance(
+                function,
+                &definition.ty_scheme.ty_quantifiers,
+                &subst,
+                path_span,
             );
             let visible_arg_passing = visible_arg_passing_from_runtime(
                 runtime_arg_passing.as_deref(),

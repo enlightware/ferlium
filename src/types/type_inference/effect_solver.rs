@@ -179,6 +179,10 @@ pub(crate) struct EffectSolver {
     substitution_revision: Revision,
     /// The declared names of rigid variables, for diagnostics.
     rigid_names: FxHashMap<EffectVar, Ustr>,
+    /// Atoms that only record which variables flow where, see [`Self::seed_marker`].
+    markers: FxHashSet<EffectVar>,
+    /// The same markers, as a row to remove from others.
+    markers_row: EffType,
 }
 
 /// The substitution of class roots once effect dependencies are finalized.
@@ -227,6 +231,57 @@ impl EffectSolver {
             self.rigid_names.insert(var, name);
         }
         var
+    }
+
+    /// Make a provenance marker flow from `var` through its inclusions.
+    ///
+    /// A marker is an atom in lower bounds, so it follows existing propagation, but it stands for
+    /// nothing: it is invisible in rows and never exceeds a ceiling.
+    pub(crate) fn seed_marker(&mut self, var: EffectVar, name: Option<Ustr>) -> EffectVar {
+        let marker = self.fresh_rigid_var(name);
+        self.markers.insert(marker);
+        self.markers_row = self.markers_row.union(&EffType::single_variable(marker));
+        let source = BoundSource {
+            span: Location::new_synthesized(),
+            origin: EffectConstraintOrigin::Inference,
+        };
+        self.add_lower(
+            var,
+            &EffType::single_variable(marker),
+            &source,
+            &EffectConstraintOrigin::Inference,
+        )
+        .expect("a marker never exceeds a ceiling");
+        marker
+    }
+
+    /// The primitive effects and markers that reach `row`.
+    pub(crate) fn provenance(&mut self, row: &EffType) -> EffType {
+        let mut atoms = row.primitive_effects();
+        for var in row.inner_vars() {
+            self.ensure_var(var);
+            let root = self.table.find(var);
+            let class = self.class(root);
+            match class.alias {
+                Some(alias) => atoms.extend(&self.provenance(&alias)),
+                None => atoms.extend(&class.lower),
+            }
+        }
+        atoms
+    }
+
+    fn markers_in(&self, row: &EffType) -> Vec<EffectVar> {
+        row.inner_vars()
+            .into_iter()
+            .filter(|var| self.markers.contains(var))
+            .collect()
+    }
+
+    fn without_markers(&self, row: &EffType) -> EffType {
+        if self.markers.is_empty() {
+            return row.clone();
+        }
+        row.difference(&self.markers_row)
     }
 
     fn ensure_var(&mut self, var: EffectVar) {
@@ -696,14 +751,15 @@ impl EffectSolver {
             self.ensure_var(var);
             let root = self.table.find(var);
             let class = self.class(root);
+            let visible = self.without_markers(&class.lower);
             match class.alias {
                 Some(alias) => resolved.extend(&self.resolve(&alias)),
                 None if class
                     .ceiling
                     .as_ref()
-                    .is_some_and(|ceiling| ceiling.row == class.lower) =>
+                    .is_some_and(|ceiling| ceiling.row == visible) =>
                 {
-                    resolved.extend(&class.lower)
+                    resolved.extend(&visible)
                 }
                 None => resolved.insert(Effect::Variable(root)),
             }
@@ -809,7 +865,7 @@ impl EffectSolver {
             let root = self.table.find(*var);
             lower.extend(&self.class(root).lower);
         }
-        lower
+        self.without_markers(&lower)
     }
 
     fn has_edge_into(
@@ -971,11 +1027,27 @@ impl EffectSolver {
         let Some(ceiling) = &class.ceiling else {
             return Ok(());
         };
-        let excess = class.lower.difference(&ceiling.row);
+        let excess = self.without_markers(&class.lower.difference(&ceiling.row));
         let Some(first) = excess.iter().next() else {
             return Ok(());
         };
         let source = class.lower_source(first);
+        // A written generic of a group in joint inference has one instance for all its calls.
+        let generic = self
+            .markers_in(&class.lower)
+            .into_iter()
+            .find_map(|marker| self.rigid_names.get(&marker).copied());
+        if let Some(generic) = generic {
+            return Err(internal_compilation_error!(
+                EffectGenericConflictInRecursiveGroup {
+                    generic,
+                    source: excess,
+                    source_span: source.span,
+                    target: ceiling.row.clone(),
+                    target_span: ceiling.source.span,
+                }
+            ));
+        }
         // An impl method check is the most useful diagnostic, wherever it took part.
         let origin = [origin, &source.origin, &ceiling.source.origin]
             .into_iter()
@@ -1137,9 +1209,10 @@ impl EffectSolver {
             return self.publication_view().roots[&root].clone();
         }
         let representative = class.smallest.unwrap_or(root);
+        let visible = self.without_markers(&class.lower);
         match class.ceiling {
-            Some(ceiling) if ceiling.row == class.lower => class.lower,
-            _ => class.lower.union(&EffType::single_variable(representative)),
+            Some(ceiling) if ceiling.row == visible => visible,
+            _ => visible.union(&EffType::single_variable(representative)),
         }
     }
 

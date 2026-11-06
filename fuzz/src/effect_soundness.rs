@@ -185,6 +185,51 @@ pub struct EffectProgram {
     pub traits: Vec<TraitImpls>,
     pub callers: Vec<Caller>,
     pub terms: Vec<Term>,
+    pub cycles: Vec<Cycle>,
+}
+
+/// One of the two callback parameters, `f0` and `f1`, of a function of a recursive cycle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallbackParam {
+    F0,
+    F1,
+}
+
+const CALLBACK_PARAMS: [CallbackParam; 2] = [CallbackParam::F0, CallbackParam::F1];
+
+impl CallbackParam {
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// An argument that a function of a recursive cycle passes for a callback parameter.
+#[derive(Clone, Copy, Debug)]
+pub enum CycleArg {
+    /// One of the caller's own callback parameters.
+    Param(CallbackParam),
+    Closure(Callback),
+}
+
+/// A function of a recursive cycle, calling the next one with a decreasing counter.
+#[derive(Clone, Debug)]
+pub struct CycleFn {
+    /// Whether the function writes its effect generics and the types of its parameters.
+    pub annotated: bool,
+    /// Whether the written row of each parameter also declares `fallible`.
+    pub declares_fallible: [bool; 2],
+    /// The arguments of each call to the next function.
+    pub calls: Vec<[CycleArg; 2]>,
+    /// The callback parameter called when the counter ends, if any.
+    pub performs: Option<CallbackParam>,
+}
+
+/// Functions that call each other in a cycle, each possibly writing its own effect generics.
+#[derive(Clone, Debug)]
+pub struct Cycle {
+    pub functions: Vec<CycleFn>,
+    pub arguments: [Callback; 2],
+    pub count: u8,
 }
 
 /// Rendering choices that must not change a program's outcome.
@@ -194,6 +239,98 @@ pub struct Variant {
     pub rename: bool,
     /// Impls, and the compilation of entry terms, in reverse order.
     pub reverse: bool,
+}
+
+fn arbitrary_cycle(u: &mut Unstructured) -> Result<Cycle> {
+    let length = u.int_in_range(1..=3)?;
+    let mut functions = Vec::new();
+    for _ in 0..length {
+        let call_count = u.int_in_range(1..=2)?;
+        let mut calls = Vec::new();
+        for _ in 0..call_count {
+            let mut arguments = CALLBACK_PARAMS.map(CycleArg::Param);
+            for argument in &mut arguments {
+                *argument = match u.int_in_range(0..=3)? {
+                    0 => CycleArg::Closure(arbitrary_callback(u)?),
+                    1 => CycleArg::Param(CallbackParam::F0),
+                    2 => CycleArg::Param(CallbackParam::F1),
+                    _ => *argument,
+                };
+            }
+            calls.push(arguments);
+        }
+        functions.push(CycleFn {
+            annotated: u.ratio(3, 4)?,
+            declares_fallible: [u.ratio(1, 4)?, u.ratio(1, 4)?],
+            calls,
+            performs: match u.int_in_range(0..=2)? {
+                0 => None,
+                1 => Some(CallbackParam::F0),
+                _ => Some(CallbackParam::F1),
+            },
+        });
+    }
+    Ok(Cycle {
+        functions,
+        arguments: [arbitrary_callback(u)?, arbitrary_callback(u)?],
+        count: u.int_in_range(0..=3)?,
+    })
+}
+
+impl Cycle {
+    fn render_function(&self, cycle: usize, index: usize, e: &str) -> String {
+        let function = &self.functions[index];
+        let next = (index + 1) % self.functions.len();
+        let header = if function.annotated {
+            let row = |param: CallbackParam| {
+                let param = param.index();
+                if function.declares_fallible[param] {
+                    format!("(fallible, {e}{param})")
+                } else {
+                    format!("{e}{param}")
+                }
+            };
+            format!(
+                "fn r{cycle}_{index}<! {e}0, {e}1>(f0: (int) -> int ! {}, f1: (int) -> int ! {}, n: int) -> int",
+                row(CallbackParam::F0),
+                row(CallbackParam::F1)
+            )
+        } else {
+            format!("fn r{cycle}_{index}(f0, f1, n: int) -> int")
+        };
+        let calls: Vec<_> = function
+            .calls
+            .iter()
+            .map(|arguments| {
+                let render = |argument: &CycleArg| match argument {
+                    CycleArg::Param(param) => format!("f{}", param.index()),
+                    CycleArg::Closure(callback) => callback.render("z"),
+                };
+                format!(
+                    "r{cycle}_{next}({}, {}, n - 1)",
+                    render(&arguments[0]),
+                    render(&arguments[1])
+                )
+            })
+            .collect();
+        let base = match function.performs {
+            Some(param) => format!("f{}(n)", param.index()),
+            None => "0".to_string(),
+        };
+        format!(
+            "{header} {{\n\tif n > 0 {{\n\t\t{}\n\t}} else {{\n\t\t{base}\n\t}}\n}}\n",
+            calls.join(" + ")
+        )
+    }
+
+    fn render_term(&self, cycle: usize) -> String {
+        format!(
+            "r{cycle}_0({}, {}, {})",
+            self.arguments[0].render("z"),
+            self.arguments[1].render("z"),
+            self.count
+        )
+    }
 }
 
 impl EffectProgram {
@@ -264,6 +401,7 @@ impl EffectProgram {
             traits,
             callers: Vec::new(),
             terms: Vec::new(),
+            cycles: Vec::new(),
         };
 
         let caller_count = u.int_in_range(0..=4)?;
@@ -325,6 +463,10 @@ impl EffectProgram {
             if let Some(term) = program.term(u)? {
                 program.terms.push(term);
             }
+        }
+        let cycle_count = u.int_in_range(0..=2)?;
+        for _ in 0..cycle_count {
+            program.cycles.push(arbitrary_cycle(u)?);
         }
         Ok(program)
     }
@@ -453,11 +595,30 @@ impl EffectProgram {
             out.push_str(&self.render_caller(index, caller, e));
         }
 
-        let terms: Vec<_> = self
+        let mut cycle_functions = Vec::new();
+        for (index, cycle) in self.cycles.iter().enumerate() {
+            for function in 0..cycle.functions.len() {
+                cycle_functions.push(cycle.render_function(index, function, e));
+            }
+        }
+        if variant.reverse {
+            cycle_functions.reverse();
+        }
+        for function in cycle_functions {
+            out.push_str(&function);
+        }
+
+        let mut terms: Vec<_> = self
             .terms
             .iter()
             .map(|term| self.render_term(term))
             .collect();
+        terms.extend(
+            self.cycles
+                .iter()
+                .enumerate()
+                .map(|(index, cycle)| cycle.render_term(index)),
+        );
         if terms.is_empty() {
             out.push_str("0\n");
         } else if variant.reverse {

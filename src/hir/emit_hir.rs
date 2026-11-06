@@ -61,7 +61,7 @@ use crate::{
         elaboration::elaborate_generated_functions,
         emit_functions::{
             EmitFunctionInput, EmitFunctionKind, EmitTraitCtx, SubscriptMemberAttachment,
-            emit_functions,
+            emit_function_group, emit_impl_methods,
         },
         emit_subscripts::{predeclare_subscripts, synthetic_subscript_member_function},
         emit_value_impl::emit_auto_value_impls,
@@ -1220,18 +1220,16 @@ impl ModuleEmission<'_> {
         }
 
         // Emit the corresponding implementation bodies.
-        emit_functions(
+        emit_function_group(
             ctx.output,
             ctx.solver_arena,
             || emissions.iter().map(ModuleImplementationEmission::input),
             ctx.desugared_arena,
             self.others,
-            None,
             &recursive_function_names,
             self.capabilities,
             warnings,
-        )?;
-        Ok(())
+        )
     }
 
     /// Infer and register the source impl at `imp_idx`.
@@ -1351,18 +1349,17 @@ impl ModuleEmission<'_> {
                     .map(|index| imp.functions[index.as_index()].name.0)
             })
             .collect::<FxHashSet<_>>();
-        let emit_output = emit_functions(
+        let emit_output = emit_impl_methods(
             output,
             solver_arena,
             functions,
             desugared_arena,
             others,
-            Some(trait_ctx),
+            trait_ctx,
             &recursive_function_names,
             capabilities,
             warnings,
-        )?
-        .unwrap();
+        )?;
 
         // Register the implementation if no stub was present.
         let is_concrete = emit_output.ty_var_count == 0 && emit_output.eff_var_count == 0;

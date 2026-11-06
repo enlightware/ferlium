@@ -195,6 +195,13 @@ needs no runtime adapter (see [abi.md](abi.md)).
 Declared effect variables (function, implementation and trait default effect parameters) are rigid
 atoms: the body is checked against them and can neither specialize nor widen them.
 
+A recursive group with declared effect variables is inferred in two steps. Joint inference of the
+group proposes a contract for each function, keeping its written effects as written. Each body is
+then checked alone against these fixed contracts, with its declared variables rigid, and each call
+in the group instantiates its callee's contract. The result is sound whatever the first step
+proposed, but a contract may be coarser than the least one. Only effects are instantiated per call
+in this way; types keep one instance per group.
+
 ### Solving
 
 Each inclusion is split per solvable variable into three kinds of constraints over atoms (primitive

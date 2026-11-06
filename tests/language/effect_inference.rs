@@ -9,7 +9,7 @@ use test_log::test;
 use indoc::indoc;
 use ustr::ustr;
 
-use crate::harness::{TestSession, int, string};
+use crate::harness::{TestSession, float, int, string};
 use ferlium::{
     compiler::error::{CompilationErrorImpl, ImplEffectRestriction, SourceFailureKind},
     format::FormatWith,
@@ -35,6 +35,22 @@ fn signature(session: &mut TestSession, src: &str, name: &str) -> String {
     match line.rfind(" (#") {
         Some(index) => line[..index].to_string(),
         None => line.to_string(),
+    }
+}
+
+/// Runs `call` after `prelude` and the two `functions`, declared in both orders.
+fn assert_in_both_orders(prelude: &str, functions: [&str; 2], call: &str, expected: isize) {
+    for [first, second] in [functions, [functions[1], functions[0]]] {
+        let src = format!("{prelude}\n{first}\n{second}\n{call}");
+        assert_val_eq!(TestSession::new().run(&src), int(expected));
+    }
+}
+
+/// Checks the signature of `function` with the two `functions` declared in both orders.
+fn assert_signature_in_both_orders(functions: [&str; 2], function: &str, expected: &str) {
+    for [first, second] in [functions, [functions[1], functions[0]]] {
+        let src = format!("{first}\n{second}\n");
+        assert_eq!(signature(&mut TestSession::new(), &src, function), expected);
     }
 }
 
@@ -584,6 +600,1271 @@ fn named_type_parameters_preserve_effect_polymorphism() {
         session.fail_run(&format!("{src}\napply(Box(|| idiv(1, 0)))")),
         SourceFailureKind::DivisionByZero,
     );
+}
+
+// Written effect generics in mutually recursive functions
+
+const MUTUAL_F: &str = "fn f<! E>(g: () -> int ! E, n: int) -> int {
+    if n > 0 {
+        h(g, n - 1)
+    } else {
+        g()
+    }
+}
+";
+const MUTUAL_H: &str = "fn h<! F>(g: () -> int ! F, n: int) -> int {
+    if n > 0 {
+        f(g, n - 1)
+    } else {
+        g()
+    }
+}
+";
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn mutually_recursive_effect_generics_work_in_any_order() {
+    let calls = "let a = [10, 20];
+        f(|| 1, 3) + h(|| a[1], 2) + f(|| a[0], 2) + h(|| 2, 1)";
+    for declarations in [
+        format!("{MUTUAL_F}{MUTUAL_H}"),
+        format!("{MUTUAL_H}{MUTUAL_F}"),
+    ] {
+        let mut session = TestSession::new();
+        assert_val_eq!(session.run(&format!("{declarations}{calls}")), int(33));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn mutually_recursive_effect_generics_stay_independent_for_callers() {
+    let src = format!("{MUTUAL_F}{MUTUAL_H}");
+    assert_eq!(
+        signature(&mut TestSession::new(), &src, "f"),
+        "fn f<! E>(g: () -> int ! E, n: int) -> int ! E"
+    );
+    assert_eq!(
+        signature(&mut TestSession::new(), &src, "h"),
+        "fn h<! F>(g: () -> int ! F, n: int) -> int ! F"
+    );
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.fail_run(&format!("{src}\nh(|| idiv(1, 0), 1)")),
+        SourceFailureKind::DivisionByZero,
+    );
+    let pure_caller = format!("{src}\nfn pure_caller() -> int {{ f(|| 1, 2) }}");
+    assert_eq!(
+        fn_effects(&mut TestSession::new(), &pure_caller, "pure_caller"),
+        no_effects()
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn effect_generics_work_across_a_longer_cycle() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+        fn a1<! A>(g: () -> int ! A, n: int) -> int {
+            if n > 0 {
+                b1(g, n - 1)
+            } else {
+                g()
+            }
+        }
+        fn b1<! B>(g: () -> int ! B, n: int) -> int {
+            if n > 0 {
+                c1(g, n - 1)
+            } else {
+                g()
+            }
+        }
+        fn c1<! C>(g: () -> int ! C, n: int) -> int {
+            if n > 0 {
+                a1(g, n - 1)
+            } else {
+                g()
+            }
+        }
+        let v = [4];
+        a1(|| 1, 5) + c1(|| v[0], 5)
+    "# }),
+        int(5)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn crossed_effect_generics_keep_their_names_in_any_order() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+        fn p<! E1, E2>(x: () -> int ! E1, y: () -> int ! E2, n: int) -> int {
+            if n > 0 {
+                q(y, x, n - 1)
+            } else {
+                n
+            }
+        }
+        fn q<! F1, F2>(x: () -> int ! F1, y: () -> int ! F2, n: int) -> int {
+            if n > 0 {
+                p(y, x, n - 1)
+            } else {
+                n
+            }
+        }
+        let v = [4];
+        p(|| 1, || v[0], 3)
+    "# }),
+        int(0)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn effect_generics_work_in_invariant_positions() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+        fn f<! E>(gs: [() -> int ! E], n: int) -> int {
+            if n > 0 {
+                h(gs, n - 1)
+            } else {
+                gs[0]()
+            }
+        }
+        fn h<! F>(gs: [() -> int ! F], n: int) -> int {
+            if n > 0 {
+                f(gs, n - 1)
+            } else {
+                gs[0]()
+            }
+        }
+        let v = [3];
+        f([|| v[0]], 2) + h([|| 9], 1)
+    "# }),
+        int(12)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn effects_of_two_generics_cannot_share_a_row_through_a_cycle() {
+    let mut session = TestSession::new();
+    session.fail_compilation(indoc! { r#"
+        fn f<! E, F>(a: () -> int ! E, b: () -> int ! F, n: int) -> int {
+            if n > 0 {
+                h(a, n - 1) + h(b, n - 1)
+            } else {
+                0
+            }
+        }
+        fn h<! X>(g: () -> int ! X, n: int) -> int {
+            if n > 0 {
+                f(g, g, n - 1)
+            } else {
+                g()
+            }
+        }
+    "# });
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn effect_generics_of_a_group_work_with_an_impl_in_any_order() {
+    let types = "struct Foo(int)\ntrait Tally<Self> { fn tally(x: Self) -> int; }\n";
+    let imp = "impl Tally for Foo { fn tally(x: Foo) -> int { h(|| 5, 0) + 1 } }\n";
+    let caller = "fn f<! E>(g: () -> int ! E, n: int) -> int {
+        if n > 0 {
+            h(g, n - 1)
+        } else {
+            g() + tally(Foo(n))
+        }
+    }\n";
+    for src in [
+        format!("{types}{imp}{MUTUAL_H}{caller}"),
+        format!("{caller}{MUTUAL_H}{types}{imp}"),
+    ] {
+        let mut session = TestSession::new();
+        assert_val_eq!(session.run(&format!("{src}f(|| 1, 2)")), int(7));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn validating_a_group_does_not_repeat_its_warnings() {
+    let mut session = TestSession::new();
+    let module_id = session
+        .compile(&format!(
+            "{MUTUAL_H}{}",
+            "fn f<! E>(g: () -> int ! E, n: int) -> int { return h(g, n) }"
+        ))
+        .module_id;
+    let compiler_session = session.session();
+    let diagnostics = compiler_session
+        .modules()
+        .info(module_id)
+        .unwrap()
+        .diagnostics();
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+}
+
+/// Check the result of `call` in both orders of `functions`, after `prelude`.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn crossed_effect_generics_publish_their_source_names() {
+    let p = indoc! { r#"
+        fn p<! E1, E2>(x: () -> int ! E1, y: () -> int ! E2, n: int) -> int {
+            if n > 0 {
+                q(y, x, n - 1)
+            } else {
+                x()
+            }
+        }
+    "# };
+    let q = indoc! { r#"
+        fn q<! F1, F2>(x: () -> int ! F1, y: () -> int ! F2, n: int) -> int {
+            if n > 0 {
+                p(y, x, n - 1)
+            } else {
+                y()
+            }
+        }
+    "# };
+    for src in [format!("{p}{q}"), format!("{q}{p}")] {
+        assert_eq!(
+            signature(&mut TestSession::new(), &src, "p"),
+            "fn p<! E1, E2>(x: () -> int ! E1, y: () -> int ! E2, n: int) -> int ! E1"
+        );
+        assert_eq!(
+            signature(&mut TestSession::new(), &src, "q"),
+            "fn q<! F1, F2>(x: () -> int ! F1, y: () -> int ! F2, n: int) -> int ! F2"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn unrelated_effect_generics_keep_their_own_effects() {
+    let f = "fn f<! E>(g: () -> int ! E, n: int) -> int {
+        if n > 0 {
+            h(|| 1, n - 1)
+        } else {
+            g()
+        }
+    }";
+    let h = "fn h<! F>(g: () -> int ! F, n: int) -> int {
+        if n > 0 {
+            f(|| 1, n - 1)
+        } else {
+            g()
+        }
+    }";
+    assert_in_both_orders("", [f, h], "f(|| 3, 2)", 1);
+    let src = format!("{f}\n{h}\n");
+    assert_eq!(
+        signature(&mut TestSession::new(), &src, "f"),
+        "fn f<! E>(g: () -> int ! E, n: int) -> int ! E"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn call_in_a_group_may_instantiate_an_effect_generic_concretely() {
+    let f = "fn f<! E>(g: () -> int ! E, n: int) -> int {
+        let a = [1];
+        if n > 0 {
+            h(|| a[0], n - 1)
+        } else {
+            g()
+        }
+    }";
+    assert_in_both_orders("", [f, MUTUAL_H], "f(|| 1, 2)", 1);
+    let src = format!("{f}\n{MUTUAL_H}");
+    assert_eq!(
+        signature(&mut TestSession::new(), &src, "f"),
+        "fn f<! E>(g: () -> int ! E, n: int) -> int ! (fallible, E)"
+    );
+    assert_eq!(
+        signature(&mut TestSession::new(), &src, "h"),
+        "fn h<! F>(g: () -> int ! F, n: int) -> int ! (fallible, F)"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn call_in_a_group_may_instantiate_with_a_row() {
+    let f = "fn f<! E>(g: () -> int ! E, n: int) -> int {
+        let a = [1];
+        if n > 0 {
+            h(|| a[0], n - 1)
+        } else {
+            g()
+        }
+    }";
+    let h = "fn h<! F>(g: () -> int ! (fallible, F), n: int) -> int {
+        if n > 0 {
+            f(g, n - 1)
+        } else {
+            g()
+        }
+    }";
+    assert_in_both_orders("", [f, h], "f(|| 1, 2)", 1);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generics_of_one_function_can_be_called_with_equal_arguments() {
+    let f = "fn f<! E, F>(a: () -> int ! E, b: () -> int ! F, n: int) -> int {
+        if n > 0 {
+            h(a, n - 1) + h(b, n - 1)
+        } else {
+            0
+        }
+    }";
+    let h = "fn h<! X>(g: () -> int ! X, n: int) -> int {
+        if n > 0 {
+            f(g, g, n - 1)
+        } else {
+            0
+        }
+    }";
+    assert_in_both_orders("", [f, h], "f(|| 1, || 2, 2)", 0);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn self_recursion_can_swap_effect_generics() {
+    let mut session = TestSession::new();
+    let src = indoc! { r#"
+        fn f<! E, F>(a: () -> int ! E, b: () -> int ! F, n: int) -> int {
+            if n > 0 {
+                f(b, a, n - 1)
+            } else {
+                0
+            }
+        }
+    "# };
+    assert_val_eq!(session.run(&format!("{src}\nf(|| 1, || 2, 2)")), int(0));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn unannotated_helper_in_a_group_is_generic() {
+    let mut session = TestSession::new();
+    let src = indoc! { r#"
+        fn f<! E>(g: () -> int ! E, n: int) -> int {
+            if n > 0 {
+                k(g, n - 1)
+            } else {
+                g()
+            }
+        }
+        fn k(g, n: int) -> int {
+            if n > 0 {
+                f(g, n - 1)
+            } else {
+                g()
+            }
+        }
+    "# };
+    assert_eq!(
+        signature(&mut session, src, "k"),
+        "fn k<! e₀>(g: () -> int ! e₀, n: int) -> int ! e₀"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn unused_effect_generics_in_a_group_disappear() {
+    let f = "fn f<! E>(n: int) -> int {
+        if n > 0 {
+            h(n - 1)
+        } else {
+            1
+        }
+    }";
+    let h = "fn h<! F>(n: int) -> int {
+        if n > 0 {
+            f(n - 1)
+        } else {
+            2
+        }
+    }";
+    assert_in_both_orders("", [f, h], "f(2)", 1);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn group_with_effect_generics_passes_dictionaries() {
+    let f = "fn f<T ! E>(x: T, g: () -> int ! E, n: int) -> T where T: Num {
+        if n > 0 {
+            h(x + x, g, n - 1)
+        } else {
+            g();
+            x
+        }
+    }";
+    let h = "fn h<U ! F>(x: U, g: () -> int ! F, n: int) -> U where U: Num {
+        if n > 0 {
+            f(x * x, g, n - 1)
+        } else {
+            x
+        }
+    }";
+    assert_in_both_orders("", [f, h], "f(2, || 1, 2) + h(3, || 1, 1)", 25);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn group_with_effect_generics_propagates_inferred_requirements() {
+    let f = "fn f<T ! E>(x: T, g: () -> int ! E, n: int) -> T {
+        if n > 0 {
+            h(x, g, n - 1)
+        } else {
+            g();
+            x
+        }
+    }";
+    let h = "fn h<U ! F>(x: U, g: () -> int ! F, n: int) -> U {
+        if n > 0 {
+            f(x, g, n - 1)
+        } else {
+            x + x
+        }
+    }";
+    assert_in_both_orders("", [f, h], "f(2, || 1, 1)", 4);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn group_with_effect_generics_passes_user_trait_dictionaries() {
+    let prelude = indoc! { r#"
+        trait Size<Self> {
+            fn size(x: Self) -> int;
+        }
+        impl Size for int {
+            fn size(x: int) -> int {
+                x
+            }
+        }
+        impl Size for string {
+            fn size(x: string) -> int {
+                9
+            }
+        }
+    "# };
+    let f = "fn f<T ! E>(x: T, g: () -> int ! E, n: int) -> int {
+        if n > 0 {
+            h(x, g, n - 1)
+        } else {
+            size(x) + g()
+        }
+    }";
+    let h = "fn h<U ! F>(x: U, g: () -> int ! F, n: int) -> int {
+        if n > 0 {
+            f(x, g, n - 1)
+        } else {
+            g()
+        }
+    }";
+    assert_in_both_orders(prelude, [f, h], r#"f(5, || 1, 2) + h("s", || 1, 1)"#, 16);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn written_type_generic_stays_general_in_a_group_with_effect_generics() {
+    let mut session = TestSession::new();
+    session.fail_compilation(indoc! { r#"
+        fn f<T ! E>(x: T, g: () -> int ! E, n: int) -> int {
+            if n > 0 {
+                h(true, g, n - 1)
+            } else {
+                g()
+            }
+        }
+        fn h<U ! F>(x: U, g: () -> int ! F, n: int) -> int {
+            if n > 0 {
+                f(x, g, n - 1)
+            } else {
+                0
+            }
+        }
+    "# });
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn body_cannot_pin_its_own_effect_generic_through_recursion() {
+    let mut session = TestSession::new();
+    session.fail_compilation(indoc! { r#"
+        fn p(k: () -> int ! fallible) -> int {
+            k()
+        }
+        fn f<! E>(g: () -> int ! E, n: int) -> int {
+            if n > 0 {
+                f(g, n - 1)
+            } else {
+                p(g)
+            }
+        }
+    "# });
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn conflicting_uses_of_an_effect_generic_in_joint_inference_are_rejected() {
+    let mut session = TestSession::new();
+    let error = session.fail_compilation(indoc! { r#"
+        fn h<! F>(g: () -> int ! F, n: int) {
+            if n > 0 {
+                f(n - 1);
+                g
+            } else {
+                g
+            }
+        }
+        fn p(k: () -> int ! ()) -> int {
+            k()
+        }
+        fn f(n: int) -> int {
+            let a = [1];
+            let failing = h(|| a[0], n);
+            p(h(|| 1, n)) + failing()
+        }
+    "# });
+    assert!(matches!(
+        &*error,
+        CompilationErrorImpl::EffectGenericConflictInRecursiveGroup { .. }
+    ));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn unwritten_position_with_two_generics_of_one_function_is_rejected() {
+    let mut session = TestSession::new();
+    let error = session.fail_compilation(indoc! { r#"
+        fn f<! E, F>(a: () -> int ! E, b: () -> int ! F, x, n: int) -> int {
+            if n > 0 {
+                h(a, x, n - 1) + h(b, x, n - 1)
+            } else {
+                0
+            }
+        }
+        fn h<! X>(g: () -> int ! X, x, n: int) -> int {
+            let chosen = if n > 1 {
+                g
+            } else {
+                x
+            };
+            if n > 0 {
+                f(g, g, chosen, n - 1)
+            } else {
+                0
+            }
+        }
+    "# });
+    assert!(matches!(
+        &*error,
+        CompilationErrorImpl::AmbiguousEffectInRecursiveGroup { parameter: Some(parameter), .. }
+            if *parameter == ustr("x")
+    ));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn each_body_of_a_group_has_its_own_trait_applications() {
+    let f = "fn c1<! e>(it: FilterIterator<ArrayIterator<int>, int ! e>, n: int) -> int {
+        if n > 0 {
+            c2(it, n - 1)
+        } else {
+            count(it)
+        }
+    }";
+    let h = "fn c2<! d>(it: FilterIterator<ArrayIterator<int>, int ! d>, n: int) -> int {
+        if n > 0 {
+            c1(it, n - 1)
+        } else {
+            count(it) + 1
+        }
+    }";
+    assert_in_both_orders("", [f, h], "1", 1);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn output_effect_of_a_requirement_joins_the_written_generic_in_a_group() {
+    let prelude = indoc! { r#"
+        trait Do<Self |-> ! Eff> {
+            fn run(x: Self) -> int ! Eff;
+        }
+        struct P;
+        struct Q;
+        impl Do for P {
+            fn run(x: P) -> int {
+                1
+            }
+        }
+        impl Do for Q {
+            fn run(x: Q) -> int {
+                idiv(4, 2)
+            }
+        }
+    "# };
+    let f = "fn f<T ! E>(x: T, g: () -> int ! E, n: int) -> int where T: Do {
+        if n > 0 {
+            h(x, g, n - 1)
+        } else {
+            run(x) + g()
+        }
+    }";
+    let h = "fn h<U ! F>(x: U, g: () -> int ! F, n: int) -> int where U: Do {
+        if n > 0 {
+            f(x, g, n - 1)
+        } else {
+            g()
+        }
+    }";
+    assert_in_both_orders(prelude, [f, h], "f(P, || 1, 2) + h(Q, || 1, 1)", 5);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn output_effect_of_a_requirement_is_kept_in_self_recursion() {
+    let mut session = TestSession::new();
+    let src = indoc! { r#"
+        trait Do<Self |-> ! Eff> {
+            fn run(x: Self) -> int ! Eff;
+        }
+        fn f<T ! E>(x: T, g: () -> int ! E, n: int) -> int where T: Do {
+            if n > 0 {
+                f(x, g, n - 1)
+            } else {
+                run(x) + g()
+            }
+        }
+    "# };
+    assert_eq!(
+        signature(&mut session, src, "f"),
+        "fn f<T ! E>(x: T, g: () -> int ! E, n: int) -> int ! E where T: Do < ! Eff = E>"
+    );
+}
+
+// The remaining shapes of written effect generics in recursive groups.
+
+/// Check `function`'s signature in both orders of `functions`.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn one_way_forwarding_keeps_each_written_generic() {
+    let f = "fn f<! E>(g: () -> int ! E, n: int) -> int {
+        if n > 0 {
+            h(g, n - 1)
+        } else {
+            0
+        }
+    }";
+    let h = "fn h<! F>(g: () -> int ! F, n: int) -> int {
+        if n > 0 {
+            f(|| 1, n - 1)
+        } else {
+            g()
+        }
+    }";
+    assert_in_both_orders("", [f, h], "f(|| 3, 2)", 0);
+    assert_signature_in_both_orders(
+        [f, h],
+        "f",
+        "fn f<! E>(g: () -> int ! E, n: int) -> int ! E",
+    );
+    assert_signature_in_both_orders(
+        [f, h],
+        "h",
+        "fn h<! F>(g: () -> int ! F, n: int) -> int ! F",
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn unannotated_parameter_in_a_group_takes_each_written_generic() {
+    let f = "fn f<! E>(g: () -> int ! E, x, n: int) -> int {
+        if n > 0 {
+            h(g, x, n - 1)
+        } else {
+            x()
+        }
+    }";
+    let h = "fn h<! F>(g: () -> int ! F, x, n: int) -> int {
+        if n > 0 {
+            f(g, x, n - 1)
+        } else {
+            g()
+        }
+    }";
+    assert_in_both_orders("", [f, h], "f(|| 1, || 2, 2)", 2);
+    assert_signature_in_both_orders(
+        [f, h],
+        "f",
+        "fn f<! E>(g: () -> int ! E, x: () -> int ! E, n: int) -> int ! E",
+    );
+    assert_signature_in_both_orders(
+        [f, h],
+        "h",
+        "fn h<! F>(g: () -> int ! F, x: () -> int ! F, n: int) -> int ! F",
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn returned_callback_in_a_group_takes_each_written_generic() {
+    let f = "fn f<! E>(g: () -> int ! E, n: int) {
+        if n > 0 {
+            h(g, n - 1)
+        } else {
+            g
+        }
+    }";
+    let h = "fn h<! F>(g: () -> int ! F, n: int) {
+        if n > 0 {
+            f(g, n - 1)
+        } else {
+            g
+        }
+    }";
+    assert_in_both_orders("", [f, h], "f(|| 1, 2)()", 1);
+    assert_signature_in_both_orders(
+        [f, h],
+        "f",
+        "fn f<! E>(g: () -> int ! E, n: int) -> () -> int ! E",
+    );
+    assert_signature_in_both_orders(
+        [f, h],
+        "h",
+        "fn h<! F>(g: () -> int ! F, n: int) -> () -> int ! F",
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn fallibility_declared_on_both_functions_of_a_group() {
+    let f = "fn f<! E>(g: () -> int ! (fallible, E), n: int) -> int {
+        let a = [1];
+        if n > 0 {
+            h(|| a[0], n - 1)
+        } else {
+            g()
+        }
+    }";
+    let h = "fn h<! F>(g: () -> int ! (fallible, F), n: int) -> int {
+        if n > 0 {
+            f(g, n - 1)
+        } else {
+            g()
+        }
+    }";
+    assert_in_both_orders("", [f, h], "f(|| 1, 2)", 1);
+    assert_signature_in_both_orders(
+        [f, h],
+        "f",
+        "fn f<! E>(g: () -> int ! (fallible, E), n: int) -> int ! (fallible, E)",
+    );
+    assert_signature_in_both_orders(
+        [f, h],
+        "h",
+        "fn h<! F>(g: () -> int ! (fallible, F), n: int) -> int ! (fallible, F)",
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn fallibility_declared_where_it_arrives_without_forwarding() {
+    let f = "fn f<! E>(g: () -> int ! E, n: int) -> int {
+        let a = [1];
+        if n > 0 {
+            h(|| a[0], n - 1)
+        } else {
+            g()
+        }
+    }";
+    let h = "fn h<! F>(g: () -> int ! (fallible, F), n: int) -> int {
+        if n > 0 {
+            f(|| 1, n - 1)
+        } else {
+            g()
+        }
+    }";
+    assert_in_both_orders("", [f, h], "f(|| 1, 2)", 1);
+    assert_signature_in_both_orders(
+        [f, h],
+        "f",
+        "fn f<! E>(g: () -> int ! E, n: int) -> int ! (fallible, E)",
+    );
+    assert_signature_in_both_orders(
+        [f, h],
+        "h",
+        "fn h<! F>(g: () -> int ! (fallible, F), n: int) -> int ! (fallible, F)",
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn type_and_effect_generics_are_independent_for_callers() {
+    let f = "fn f<T ! E>(x: T, g: (T) -> int ! E, n: int) -> int {
+        if n > 0 {
+            h(x, g, n - 1)
+        } else {
+            g(x)
+        }
+    }";
+    let h = "fn h<U ! F>(x: U, g: (U) -> int ! F, n: int) -> int {
+        if n > 0 {
+            f(x, g, n - 1)
+        } else {
+            g(x)
+        }
+    }";
+    assert_in_both_orders("", [f, h], r#"f(1, |x| x + 1, 2) + h("a", |s| 1, 1)"#, 3);
+    assert_signature_in_both_orders(
+        [f, h],
+        "f",
+        "fn f<T ! E>(x: T, g: (T) -> int ! E, n: int) -> int ! E ",
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn unannotated_helper_keeps_its_own_generic_between_written_ones() {
+    let mut session = TestSession::new();
+    let src = indoc! { r#"
+        fn f<! E>(g: () -> int ! E, n: int) -> int {
+            if n > 0 {
+                k(g, n - 1)
+            } else {
+                g()
+            }
+        }
+        fn k(g, n: int) -> int {
+            if n > 0 {
+                h(g, n - 1)
+            } else {
+                g()
+            }
+        }
+        fn h<! F>(g: () -> int ! F, n: int) -> int {
+            if n > 0 {
+                f(g, n - 1)
+            } else {
+                g()
+            }
+        }
+    "# };
+    assert_eq!(
+        signature(&mut session, src, "k"),
+        "fn k<! e₀>(g: () -> int ! e₀, n: int) -> int ! e₀"
+    );
+    assert_val_eq!(session.run(&format!("{src}\nf(|| 1, 3)")), int(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn concrete_effect_through_an_unannotated_helper_pins_the_helper() {
+    let f = "fn f<! E>(g: () -> int ! E, n: int) -> int {
+        let a = [1];
+        if n > 0 {
+            k(|| a[0], n - 1)
+        } else {
+            g()
+        }
+    }";
+    let k = "fn k(g, n: int) -> int {
+        if n > 0 {
+            f(g, n - 1)
+        } else {
+            g()
+        }
+    }";
+    assert_in_both_orders("", [f, k], "f(|| 1, 2)", 1);
+    assert_signature_in_both_orders(
+        [f, k],
+        "f",
+        "fn f<! E>(g: () -> int ! E, n: int) -> int ! (fallible, E)",
+    );
+    assert_signature_in_both_orders(
+        [f, k],
+        "k",
+        "fn k(g: () -> int ! fallible, n: int) -> int ! fallible",
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn group_without_written_generics_lets_inference_choose_the_effect() {
+    let f = "fn f(g, n: int) -> int {
+        let a = [1];
+        if n > 0 {
+            h(|| a[0], n - 1)
+        } else {
+            g()
+        }
+    }";
+    let h = "fn h(g, n: int) -> int {
+        if n > 0 {
+            f(g, n - 1)
+        } else {
+            g()
+        }
+    }";
+    assert_in_both_orders("", [f, h], "f(|| 1, 2)", 1);
+    assert_signature_in_both_orders(
+        [f, h],
+        "f",
+        "fn f(g: () -> int ! fallible, n: int) -> int ! fallible",
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn call_outside_recursion_instantiates_a_written_generic() {
+    let f = "fn f<! E>(g: () -> int ! E, n: int) -> int {
+        let a = [1];
+        if n > 0 {
+            h(|| a[0], n - 1)
+        } else {
+            g()
+        }
+    }";
+    let h = "fn h<! F>(g: () -> int ! F, n: int) -> int {
+        g() + n
+    }";
+    assert_in_both_orders("", [f, h], "f(|| 1, 2)", 2);
+    assert_signature_in_both_orders(
+        [f, h],
+        "f",
+        "fn f<! E>(g: () -> int ! E, n: int) -> int ! (fallible, E)",
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn self_recursion_with_a_declared_row_keeps_its_signature() {
+    let src = "fn f<! E>(g: () -> int ! (fallible, E), n: int) -> int {
+        let a = [1];
+        if n > 0 {
+            f(|| a[0], n - 1)
+        } else {
+            g()
+        }
+    }\n";
+    assert_eq!(
+        signature(&mut TestSession::new(), src, "f"),
+        "fn f<! E>(g: () -> int ! (fallible, E), n: int) -> int ! (fallible, E)"
+    );
+    assert_val_eq!(TestSession::new().run(&format!("{src}f(|| 1, 2)")), int(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn helper_with_an_unwritten_callback_effect_stays_generic_in_a_group() {
+    let f = "fn f<! E>(g: () -> int ! E, n: int) -> int {
+        if n > 0 {
+            p(g, n - 1)
+        } else {
+            0
+        }
+    }";
+    let p = "fn p(k: () -> int, n: int) -> int {
+        f(k, 0) + k()
+    }";
+    assert_in_both_orders("", [f, p], "f(|| 1, 2)", 1);
+    assert_signature_in_both_orders(
+        [f, p],
+        "p",
+        "fn p<! e₀>(k: () -> int ! e₀, n: int) -> int ! e₀",
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn crossed_programs_with_a_failure_still_fail_at_runtime() {
+    let p = "fn p<! E1, E2>(x: () -> int ! E1, y: () -> int ! E2, n: int) -> int {
+        if n > 0 {
+            q(y, x, n - 1)
+        } else {
+            x()
+        }
+    }";
+    let q = "fn q<! F1, F2>(x: () -> int ! F1, y: () -> int ! F2, n: int) -> int {
+        if n > 0 {
+            p(y, x, n - 1)
+        } else {
+            y()
+        }
+    }";
+    for [first, second] in [[p, q], [q, p]] {
+        let mut session = TestSession::new();
+        assert_eq!(
+            session.fail_run(&format!("{first}\n{second}\np(|| idiv(1, 0), || 1, 2)")),
+            SourceFailureKind::DivisionByZero,
+        );
+    }
+}
+
+const APPLY: &str = "fn apply(g) { g() }";
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn returned_function_in_a_group_keeps_its_own_effect_generic() {
+    let f = "fn f<! E>(n: int) {
+        if n > 0 {
+            f(n - 1)
+        } else {
+            apply
+        }
+    }";
+    assert_in_both_orders("", [APPLY, f], "f(1)(|| idiv(4, 2))", 2);
+    // Each use of the result chooses its effect.
+    assert_in_both_orders(
+        "",
+        [APPLY, f],
+        "let k = f(1); k(|| 1) + f(1)(|| idiv(4, 2))",
+        3,
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn returned_function_keeps_its_own_effect_beside_a_used_generic() {
+    let f = "fn f<! E>(h: () -> int ! E, n: int) {
+        if n > 0 {
+            f(h, n - 1)
+        } else {
+            h();
+            apply
+        }
+    }";
+    assert_in_both_orders("", [APPLY, f], "f(|| 1, 1)(|| idiv(4, 2))", 2);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn returned_function_across_a_cycle_keeps_its_own_effect() {
+    let f = "fn f<! E>(n: int) {
+        if n > 0 {
+            h(n - 1)
+        } else {
+            apply
+        }
+    }";
+    let h = "fn h<! F>(n: int) {
+        f(n)
+    }";
+    assert_in_both_orders(APPLY, [f, h], "f(1)(|| idiv(4, 2)) + h(1)(|| 3)", 5);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn returned_closure_in_a_group_keeps_its_effect() {
+    let f = "fn f<! E>(n: int) {
+        if n > 0 {
+            f(n - 1)
+        } else {
+            || idiv(1, 0)
+        }
+    }
+    fn run(g: () -> int ! ()) -> int {
+        g()
+    }";
+    let mut session = TestSession::new();
+    session.fail_compilation(&format!("{f}\nrun(f(1))"));
+    assert_eq!(
+        session.fail_run(&format!("{f}\nf(1)()")),
+        SourceFailureKind::DivisionByZero
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn returned_closure_takes_the_generic_it_captures() {
+    let src = "fn f<! E>(g: () -> int ! E, n: int) {
+        if n > 0 {
+            f(g, n - 1)
+        } else {
+            || g() + 1
+        }
+    }
+    fn run(g: () -> int ! ()) -> int {
+        g()
+    }
+    run(f(|| 1, 1))";
+    assert_val_eq!(TestSession::new().run(src), int(2));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn given_does_not_serve_a_concrete_query() {
+    let src = "fn f<T>(x: T) -> T where T: Num {
+        let a: int = 1 + 2;
+        if a > 2 {
+            x + x
+        } else {
+            x
+        }
+    }
+    f(3.5)";
+    assert_val_eq!(TestSession::new().run(src), float(7.0));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn given_serves_an_inferred_query_that_becomes_the_generic() {
+    let src = "fn f<T>(x: T) -> T where T: Num {
+        let add = |a, b| a + b;
+        add(x, x)
+    }
+    f(3)";
+    assert_val_eq!(TestSession::new().run(src), int(6));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn given_serves_an_inferred_query_in_a_group_with_contracts() {
+    let src = "fn f<T ! E>(x: T, g: () -> int ! E, n: int) -> T where T: Num {
+        let add = |a, b| a + b;
+        if n > 0 {
+            add(f(x, g, n - 1), x)
+        } else {
+            g();
+            x
+        }
+    }
+    f(3, || 1, 2)";
+    assert_val_eq!(TestSession::new().run(src), int(9));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn given_does_not_serve_a_concrete_query_without_an_impl() {
+    let mut session = TestSession::new();
+    session
+        .fail_compilation(
+            "struct S { v: int }
+            fn f<T>(x: T, s: S) -> T where T: Num {
+                let t = s + s;
+                x
+            }",
+        )
+        .expect_trait_impl_not_found("Num", &["Self = S"]);
+    session
+        .fail_compilation(
+            "struct S { v: int }
+            trait Tr<Self> where Self: Num {
+                fn go(x: Self, s: S) -> Self {
+                    let t = s + s;
+                    x
+                }
+            }",
+        )
+        .expect_trait_impl_not_found("Num", &["Self = S"]);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_default_mixes_a_given_with_concrete_and_inferred_queries() {
+    let src = "trait Tr<Self> where Self: Num {
+        fn go(x: Self) -> Self {
+            let k: int = 1 + 2;
+            let add = |a, b| a + b;
+            add(x, x)
+        }
+    }
+    impl Tr for int {}
+    go(3)";
+    assert_val_eq!(TestSession::new().run(src), int(6));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn diverging_recursion_with_an_effect_generic_returns_never() {
+    let f = "fn f<! E>(n: int) { f(n) }";
+    assert_val_eq!(TestSession::new().run(&format!("{f}\n1")), int(1));
+    assert_eq!(
+        signature(&mut TestSession::new(), f, "f"),
+        "fn f(n: int) -> never"
+    );
+    // The whole cycle diverges, so both functions return never.
+    let f = "fn f<! E>(n: int) { h(n) }";
+    let h = "fn h(n: int) { f(n) }";
+    assert_signature_in_both_orders([f, h], "f", "fn f(n: int) -> never");
+    assert_signature_in_both_orders([f, h], "h", "fn h(n: int) -> never");
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn group_publishes_the_quantifiers_of_its_contract() {
+    let f = "fn f<T ! E>(x, y: T, g: () -> int ! E, n: int) {
+        if n > 0 {
+            h(x, y, g, n - 1)
+        } else {
+            (x, y, g())
+        }
+    }";
+    let h = "fn h(x, y, g, n) { f(x, y, g, n) }";
+    assert_in_both_orders("", [f, h], "let r = f(true, \"s\", || 3, 2); r.2", 3);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn calls_in_a_group_share_its_types() {
+    // `f` returns what `h` returns, so a result `h` discards still has `h`'s type.
+    let f = "fn f<! E>() { h(f()) }";
+    let h = "fn h<T>(x: T) -> T { f(); x }";
+    assert_in_both_orders("", [f, h], "1", 1);
+    // The same signatures as without the effect generic.
+    assert_signature_in_both_orders([f, h], "f", "fn f<A>() -> A where A: Value");
+    assert_signature_in_both_orders([f, h], "h", "fn h<T>(x: T) -> T where T: Value");
+    let f = "fn f<! E>(g: () -> int ! E, x, n: int) {
+        if n > 0 {
+            h(g, x, n - 1)
+        } else {
+            x
+        }
+    }";
+    let h = "fn h<T>(g, x: T, n: int) -> T {
+        if n > 0 {
+            f(g, x, n - 1);
+            x
+        } else {
+            x
+        }
+    }";
+    assert_in_both_orders("", [f, h], "f(|| 1, 7, 3)", 7);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn conflict_with_an_inferred_signature_names_the_function_to_write() {
+    let r = "fn r(f0, f1, n: int) -> int {
+        if n > 0 {
+            s(f1, f1, n - 1)
+        } else {
+            f1(n)
+        }
+    }";
+    let s = "fn s<! E0, E1>(f0: (int) -> int ! E0, f1: (int) -> int ! E1, n: int) -> int {
+        if n > 0 {
+            r(f0, |z| idiv(z, 1), n - 1) + r(f0, f1, n - 1)
+        } else {
+            f1(n)
+        }
+    }";
+    for [first, second] in [[r, s], [s, r]] {
+        let error = TestSession::new().fail_compilation(&format!("{first}\n{second}"));
+        match &*error {
+            CompilationErrorImpl::EffectConflictWithInferredSignature { function, .. } => {
+                assert_eq!(*function, ustr("r"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
 }
 
 #[test]
