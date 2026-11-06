@@ -3,15 +3,15 @@
 
 //! Prints the Ferlium program an `effect_soundness` input generates.
 //!
-//! Usage: `cargo run --manifest-path fuzz/Cargo.toml --bin decode_effect_program -- <input>`
+//! Usage: `cargo run --manifest-path fuzz/Cargo.toml --bin decode_effect_soundness_program -- <input>`
 
 use arbitrary::Unstructured;
-use ferlium_fuzz::effects::{EffectProgram, Variant};
+use ferlium_fuzz::effect_soundness::{EffectProgram, Variant};
 
 fn main() {
     let path = std::env::args()
         .nth(1)
-        .expect("usage: decode_effect_program <input>");
+        .expect("usage: decode_effect_soundness_program <input>");
     let data = std::fs::read(&path).expect("readable input");
     let program = EffectProgram::generate(&mut Unstructured::new(&data))
         .expect("the input generates a program");

@@ -48,7 +48,7 @@ use crate::{
         mutability::{MutType, MutVal},
         r#trait::{
             Deriver, Trait, TraitAssociatedConst, TraitAssociatedConstIndex,
-            TraitDictionaryEntryIndex, TraitMethodIndex,
+            TraitDictionaryEntryIndex, TraitMethodIndex, structural_members,
         },
         trait_solver::TraitSolver,
         r#type::{CallImplType, FnArgType, FnType, Type, TypeDef, TypeKind, tuple_type},
@@ -2325,6 +2325,10 @@ fn derive_inspect_body(
 struct InspectDeriver;
 
 impl Deriver for InspectDeriver {
+    fn derived_members(&self, ty: Type, solver: &TraitSolver) -> Vec<Type> {
+        structural_members(ty, solver)
+    }
+
     fn derive_impl(
         &self,
         trait_id: TraitId,
@@ -3342,6 +3346,10 @@ pub(crate) fn derive_generic_value_code_entries(
 struct ValueDeriver;
 
 impl Deriver for ValueDeriver {
+    fn derived_members(&self, ty: Type, solver: &TraitSolver) -> Vec<Type> {
+        structural_members(ty, solver)
+    }
+
     fn derive_impl(
         &self,
         trait_id: TraitId,

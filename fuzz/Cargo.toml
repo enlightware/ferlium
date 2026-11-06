@@ -50,15 +50,15 @@ doc = false
 bench = false
 
 [[bin]]
-name = "decode_effect_program"
-path = "src/bin/decode_effect_program.rs"
+name = "decode_effect_soundness_program"
+path = "src/bin/decode_effect_soundness_program.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "effect_program_census"
-path = "src/bin/effect_program_census.rs"
+name = "effect_soundness_census"
+path = "src/bin/effect_soundness_census.rs"
 test = false
 doc = false
 bench = false
@@ -66,6 +66,20 @@ bench = false
 [[bin]]
 name = "check_effect_source"
 path = "src/bin/check_effect_source.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "effect_selection"
+path = "fuzz_targets/effect_selection.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "effect_selection_census"
+path = "src/bin/effect_selection_census.rs"
 test = false
 doc = false
 bench = false

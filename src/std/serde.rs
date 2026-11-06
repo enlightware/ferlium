@@ -31,7 +31,7 @@ use crate::{
     },
     types::effects::{EffType, PrimitiveEffect},
     types::mutability::MutVal,
-    types::r#trait::{Deriver, Trait, TraitMethodIndex},
+    types::r#trait::{Deriver, Trait, TraitMethodIndex, structural_members},
     types::trait_solver::TraitSolver,
     types::r#type::{
         CallImplType, CallResultConvention, FnArgType, FnType, Type, TypeKind, tuple_type,
@@ -103,6 +103,10 @@ fn record_payload_type() -> Type {
 #[derive(Debug, Clone)]
 struct AlgebraicTypeSerializeDeriver;
 impl Deriver for AlgebraicTypeSerializeDeriver {
+    fn derived_members(&self, ty: Type, solver: &TraitSolver) -> Vec<Type> {
+        structural_members(ty, solver)
+    }
+
     fn derive_impl(
         &self,
         trait_id: TraitId,
@@ -358,6 +362,10 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
 #[derive(Debug, Clone)]
 struct AlgebraicTypeDeserializeDeriver;
 impl Deriver for AlgebraicTypeDeserializeDeriver {
+    fn derived_members(&self, ty: Type, solver: &TraitSolver) -> Vec<Type> {
+        structural_members(ty, solver)
+    }
+
     fn derive_impl(
         &self,
         trait_id: TraitId,

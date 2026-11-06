@@ -8,7 +8,7 @@ use crate::{
     hir::{self, NodeArena, NodeId, value_dispatch::trait_apply_generated_with_locals},
     module::{LocalDecl, PendingFunctionBody, TraitId, TraitImplId},
     types::effects::EffType,
-    types::r#trait::{Deriver, TraitMethodIndex},
+    types::r#trait::{Deriver, TraitMethodIndex, structural_members},
     types::trait_solver::TraitSolver,
     types::r#type::{Type, TypeKind},
     types::type_like::TypeLike,
@@ -22,6 +22,14 @@ use crate::{
 pub(crate) struct ProductValueDeriver;
 
 impl Deriver for ProductValueDeriver {
+    fn derived_members(&self, ty: Type, solver: &TraitSolver) -> Vec<Type> {
+        // Enums have no structural value: `structural_members` of their shape is empty here.
+        if ty.data().as_variant().is_some() {
+            return vec![];
+        }
+        structural_members(ty, solver)
+    }
+
     fn derive_impl(
         &self,
         trait_id: TraitId,

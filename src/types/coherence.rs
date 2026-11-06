@@ -5,7 +5,7 @@ use ustr::ustr;
 
 use crate::{
     FxHashMap, FxHashSet, Location, Modules,
-    compiler::error::{InternalCompilationError, InternalTraitImplHeader},
+    compiler::error::{ImplEffectRestriction, InternalCompilationError, InternalTraitImplHeader},
     internal_compilation_error,
     module::{
         BlanketTraitImplKey, BlanketTraitImplSubKey, ConcreteTraitImplKey, Module, ModuleEnv,
@@ -13,16 +13,15 @@ use crate::{
     },
     std::value::{NO_DERIVE_VALUE_ATTRIBUTE, is_value_trait},
     types::{
-        effect_polarity::{EffectPolarity, trait_output_effect_polarities},
         effects::EffType,
         r#trait::TraitImplPolicy,
-        trait_solver::{TRAIT_SOLVER_RECURSION_LIMIT, TraitSolver, input_heads_may_match},
+        trait_solver::{TRAIT_SOLVER_RECURSION_LIMIT, input_heads_may_match},
         r#type::{Type, TypeKind, TypeVar},
         type_inference::unify::{UnifiedTypeInference, UnifiedTypeInferenceSnapshot},
         type_like::{TypeLike, instantiate_types},
-        type_mapper::{BitmapInstantiationMapper, SimpleInstantiationMapper, TypeMapper},
+        type_mapper::{BitmapInstantiationMapper, EffectErasingMapper, SimpleInstantiationMapper},
         type_scheme::PubTypeConstraint,
-        type_visitor::collect_ty_vars,
+        type_visitor::{TypeInnerVisitor, collect_ty_vars},
     },
 };
 
@@ -66,32 +65,60 @@ impl CoherenceTypeUnifier {
             .unify_same_type_with_sub_effects(current, current_span, expected, expected_span)
     }
 
-    /// Relate an impl's output effects to the requested ones by each output's polarity, with
-    /// the rule resolution uses, so that coherence is never stricter than resolution.
-    fn match_output_effects(
-        &mut self,
-        polarities: &[EffectPolarity],
-        impl_effs: &[EffType],
-        requested_effs: &[EffType],
-    ) -> bool {
-        let span = Location::new_synthesized();
-        impl_effs.iter().zip(requested_effs).zip(polarities).all(
-            |((impl_eff, requested_eff), &polarity)| {
-                TraitSolver::match_trait_output_effect(
-                    &mut self.inner,
-                    impl_eff,
-                    requested_eff,
-                    polarity,
-                    span,
-                )
-                .is_ok()
-            },
-        )
-    }
-
     fn substitute_in_constraint(&mut self, constraint: &PubTypeConstraint) -> PubTypeConstraint {
         self.inner.substitute_in_constraint(constraint)
     }
+}
+
+/// Whether an impl's constraints mention an effect, which its overlaps do not consider.
+fn has_effect_requirement(key: &TraitKey) -> bool {
+    let TraitKey::Blanket(key) = key else {
+        return false;
+    };
+    let mut rows = EffectRowCollector::default();
+    key.sub_key.constraints.visit(&mut rows);
+    !rows.0.is_empty()
+}
+
+/// Collects every occurrence of an effect row in the types it visits.
+#[derive(Default)]
+struct EffectRowCollector(Vec<EffType>);
+
+impl TypeInnerVisitor for EffectRowCollector {
+    fn visit_eff_ty(&mut self, eff_ty: &EffType) {
+        self.0.push(eff_ty.clone());
+    }
+}
+
+/// Effects never select impls, so each effect in an impl's inputs must be a variable of the impl,
+/// used once: such an input applies whatever the effects of a query.
+fn check_impl_leaves_effects_open(
+    trait_id: TraitId,
+    input_tys: &[Type],
+    span: Location,
+) -> Result<(), InternalCompilationError> {
+    let restricted = |ty: Type, restriction: ImplEffectRestriction| {
+        internal_compilation_error!(TraitImplInputRestrictsEffect {
+            trait_ref: trait_id,
+            input_ty: ty,
+            restriction,
+            impl_span: span,
+        })
+    };
+    let mut seen = FxHashSet::default();
+    for &input_ty in input_tys {
+        let mut rows = EffectRowCollector::default();
+        input_ty.visit(&mut rows);
+        for row in rows.0 {
+            let Some(var) = row.to_single_variable() else {
+                return Err(restricted(input_ty, ImplEffectRestriction::FixedInInput));
+            };
+            if !seen.insert(var) {
+                return Err(restricted(input_ty, ImplEffectRestriction::RepeatedInInput));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -127,6 +154,8 @@ pub(crate) fn check_trait_impl(
             }
         ));
     }
+
+    check_impl_leaves_effects_open(trait_id, input_tys, span)?;
 
     if is_value_trait(trait_id, trait_def)
         && current.module_id() != trait_id.module
@@ -185,6 +214,7 @@ pub(crate) fn check_trait_impl(
                 impl_span: span,
                 existing_impl: existing_impl_header(&key, imp, module_id),
                 existing_span: imp.source_span,
+                effects_ignored: has_effect_requirement(&new_key) || has_effect_requirement(&key),
             }));
         }
     }
@@ -293,6 +323,8 @@ pub(crate) fn check_module_coherence(
                     impl_span: imp.source_span.unwrap_or_else(Location::new_synthesized),
                     existing_impl: existing_impl_header(other_key, other_imp, *other_module_id),
                     existing_span: other_imp.source_span,
+                    effects_ignored: has_effect_requirement(key)
+                        || has_effect_requirement(other_key),
                 }));
             }
         }
@@ -391,7 +423,8 @@ fn iter_visible_impls<'a>(
 /// Whether two impls of the same trait may apply to a common application.
 ///
 /// An application's inputs select at most one impl, so overlap is decided on inputs and
-/// constraints alone: impls differing only in their output types or effects still overlap.
+/// constraints alone: impls differing only in their output types or effects still overlap, and
+/// so do impls differing only in the output effects their constraints require.
 /// The new impl belongs to the current module; the existing one may be imported from
 /// `existing_module`, in whose private scope its constraints are checked.
 fn impls_overlap(
@@ -430,6 +463,11 @@ fn impls_overlap(
     )
 }
 
+/// The same types or constraints, without any effect.
+fn erased<T: TypeLike>(values: &[T]) -> Vec<T> {
+    instantiate_types(values, &mut EffectErasingMapper)
+}
+
 fn concrete_as_blanket_sub_key(input_tys: &[Type]) -> BlanketTraitImplSubKey {
     BlanketTraitImplSubKey::new(input_tys.to_vec(), 0, 0, Vec::new())
 }
@@ -454,7 +492,8 @@ fn blanket_impls_overlap(
     let lhs_eff_subst = ty_inf.inner.fresh_effect_var_subst(lhs.eff_var_count);
     let lhs_inst_subst = (FxHashMap::default(), lhs_eff_subst);
     let mut lhs_mapper = SimpleInstantiationMapper::new(&lhs_inst_subst);
-    let lhs_inputs = instantiate_types(&lhs.input_tys, &mut lhs_mapper);
+    // Effects never select an impl, so they cannot keep two impls apart.
+    let lhs_inputs = erased(&instantiate_types(&lhs.input_tys, &mut lhs_mapper));
 
     let rhs_ty_subst: FxHashMap<_, _> = (0..rhs.ty_var_count)
         .map(|index| {
@@ -466,7 +505,7 @@ fn blanket_impls_overlap(
     let rhs_eff_subst = ty_inf.inner.fresh_effect_var_subst(rhs.eff_var_count);
     let inst_subst = (rhs_ty_subst, rhs_eff_subst);
     let mut mapper = SimpleInstantiationMapper::new(&inst_subst);
-    let rhs_inputs = instantiate_types(&rhs.input_tys, &mut mapper);
+    let rhs_inputs = erased(&instantiate_types(&rhs.input_tys, &mut mapper));
     for (&lhs_ty, &rhs_ty) in lhs_inputs.iter().zip(rhs_inputs.iter()) {
         if ty_inf
             .unify_same_type_with_sub_effects(lhs_ty, span, rhs_ty, span)
@@ -475,8 +514,8 @@ fn blanket_impls_overlap(
             return Ok(false);
         }
     }
-    let lhs_constraints = instantiate_types(&lhs.constraints, &mut lhs_mapper);
-    let rhs_constraints = instantiate_types(&rhs.constraints, &mut mapper);
+    let lhs_constraints = erased(&instantiate_types(&lhs.constraints, &mut lhs_mapper));
+    let rhs_constraints = erased(&instantiate_types(&rhs.constraints, &mut mapper));
     let pending = scoped(lhs_constraints, lhs_scope)
         .chain(scoped(rhs_constraints, rhs_scope))
         .collect();
@@ -556,8 +595,7 @@ fn constraints_may_be_satisfiable(
     }
     // Structural requirements that impl methods infer, such as a field of `Self`, are not
     // decided here: taking them as satisfiable can report an overlap, never hide one.
-    let Ok((_, trait_id, input_tys, output_tys, output_effs, _span)) = constraint.into_have_trait()
-    else {
+    let Ok((_, trait_id, input_tys, output_tys, _, _span)) = constraint.into_have_trait() else {
         return constraints_may_be_satisfiable(
             current,
             others,
@@ -577,18 +615,8 @@ fn constraints_may_be_satisfiable(
         trait_id,
         &input_tys,
         &output_tys,
-        &output_effs,
         private_scope,
     )
-}
-
-fn output_effect_polarities(
-    current: &Module,
-    others: &Modules,
-    trait_id: TraitId,
-) -> Vec<EffectPolarity> {
-    let env = ModuleEnv::new(current, others);
-    trait_output_effect_polarities(trait_id, &|id| env.trait_def(id))
 }
 
 /// Whether other modules may add impls satisfying this constraint: by the orphan rule, a module
@@ -623,7 +651,6 @@ fn trait_constraint_may_be_satisfiable(
     trait_id: TraitId,
     input_tys: &[Type],
     output_tys: &[Type],
-    output_effs: &[EffType],
     private_scope: ModuleId,
 ) -> Result<bool, InternalCompilationError> {
     let derivers_enabled = !value_deriver_disabled_for_input(current, others, trait_id, input_tys);
@@ -686,7 +713,6 @@ fn trait_constraint_may_be_satisfiable(
                 imp,
                 input_tys,
                 output_tys,
-                output_effs,
             )?,
             TraitKey::Blanket(key) => blanket_impl_may_match_constraint(
                 current,
@@ -699,7 +725,6 @@ fn trait_constraint_may_be_satisfiable(
                 imp,
                 input_tys,
                 output_tys,
-                output_effs,
             )?,
         };
         ty_inf.rollback_to(snapshot);
@@ -751,10 +776,11 @@ fn concrete_impl_may_match_constraint(
     imp: &TraitImpl,
     input_tys: &[Type],
     output_tys: &[Type],
-    output_effs: &[EffType],
 ) -> Result<bool, InternalCompilationError> {
     let span = Location::new_synthesized();
-    for (&candidate_input_ty, &constraint_input_ty) in key.input_tys.iter().zip(input_tys) {
+    let candidate_inputs = erased(&key.input_tys);
+    let candidate_outputs = erased(&imp.output_tys);
+    for (&candidate_input_ty, &constraint_input_ty) in candidate_inputs.iter().zip(input_tys) {
         if ty_inf
             .unify_same_type_with_sub_effects(candidate_input_ty, span, constraint_input_ty, span)
             .is_err()
@@ -762,17 +788,13 @@ fn concrete_impl_may_match_constraint(
             return Ok(false);
         }
     }
-    for (&candidate_output_ty, &constraint_output_ty) in imp.output_tys.iter().zip(output_tys) {
+    for (&candidate_output_ty, &constraint_output_ty) in candidate_outputs.iter().zip(output_tys) {
         if ty_inf
             .unify_same_type_with_sub_effects(candidate_output_ty, span, constraint_output_ty, span)
             .is_err()
         {
             return Ok(false);
         }
-    }
-    let polarities = output_effect_polarities(current, others, key.trait_id);
-    if !ty_inf.match_output_effects(&polarities, &imp.output_effs, output_effs) {
-        return Ok(false);
     }
     constraints_may_be_satisfiable(
         current,
@@ -796,7 +818,6 @@ fn blanket_impl_may_match_constraint(
     imp: &TraitImpl,
     input_tys: &[Type],
     output_tys: &[Type],
-    output_effs: &[EffType],
 ) -> Result<bool, InternalCompilationError> {
     let offset = next_ty_var_index;
     ty_inf.add_ty_vars(key.sub_key.ty_var_count);
@@ -812,13 +833,8 @@ fn blanket_impl_may_match_constraint(
         .fresh_effect_var_subst(key.sub_key.eff_var_count);
     let inst_subst = (candidate_ty_subst, candidate_eff_subst);
     let mut mapper = BitmapInstantiationMapper::new(&inst_subst);
-    let candidate_inputs = instantiate_types(&key.sub_key.input_tys, &mut mapper);
-    let candidate_outputs = instantiate_types(&imp.output_tys, &mut mapper);
-    let candidate_output_effs: Vec<_> = imp
-        .output_effs
-        .iter()
-        .map(|eff| mapper.map_effect_type(eff))
-        .collect();
+    let candidate_inputs = erased(&instantiate_types(&key.sub_key.input_tys, &mut mapper));
+    let candidate_outputs = erased(&instantiate_types(&imp.output_tys, &mut mapper));
 
     let span = Location::new_synthesized();
     for (&candidate_input_ty, &constraint_input_ty) in candidate_inputs.iter().zip(input_tys) {
@@ -837,11 +853,7 @@ fn blanket_impl_may_match_constraint(
             return Ok(false);
         }
     }
-    let polarities = output_effect_polarities(current, others, key.trait_id);
-    if !ty_inf.match_output_effects(&polarities, &candidate_output_effs, output_effs) {
-        return Ok(false);
-    }
-    let candidate_constraints = instantiate_types(&key.sub_key.constraints, &mut mapper);
+    let candidate_constraints = erased(&instantiate_types(&key.sub_key.constraints, &mut mapper));
     let mut pending = pending.to_vec();
     pending.extend(scoped(candidate_constraints, candidate_scope));
     constraints_may_be_satisfiable(

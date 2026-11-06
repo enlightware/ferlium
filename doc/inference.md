@@ -13,6 +13,25 @@ type, trait, mutability, and effect constraints belong to that language-specific
 The framework's principal-type guarantees depend on conditions on the domain and solver;
 citing HM(X) does not establish those guarantees for every implementation choice below.
 
+## Effects and trait selection
+
+Changing only effect annotations or inferred effect bounds cannot select a different impl. It can
+change the effects of that impl's application, or make the application ill-typed. An effect is an
+upper bound used for checking, so an approximation must not change what a program runs.
+
+So selection has two steps. It first finds the impl by structure, with all effects ignored, in the
+head and throughout prerequisites. Coherence uses the same view, so impls that differ only by
+effects overlap, and improvement does not let effects decide what gets inferred. The effects are
+then checked on that impl, and a mismatch is an error: never a reason to try another impl or to
+derive one.
+
+To keep this true by construction, each effect in an impl's inputs must be a variable of the impl,
+used once. An impl whose methods perform such an effect exposes it as an output effect of its trait.
+
+Derived dictionaries are shared at erased effects, which is valid as derivable traits have no outputs
+and an impl method cannot perform an effect its trait does not expose. Source impls that a derivation
+needs for a member are still applied with the real effects, so that their prerequisites hold.
+
 ## Publication policy
 
 Type subtyping and effect inclusion follow the same design choice: retain directional constraints

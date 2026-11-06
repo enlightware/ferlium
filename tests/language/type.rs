@@ -974,7 +974,8 @@ fn effect_prerequisites_overlap_by_resolution_polarities() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn effect_prerequisites_stay_disjoint_by_resolution_polarities() {
+fn effect_prerequisites_do_not_separate_impls() {
+    // Effects never select impls, even when no provider meets either requirement.
     for (prelude, trait_name) in [
         // Accepting only pure callbacks satisfies neither a `read` nor a `write` bound.
         (
@@ -990,8 +991,7 @@ fn effect_prerequisites_stay_disjoint_by_resolution_polarities() {
         ),
     ] {
         for source in effect_prerequisite_impls(prelude, trait_name) {
-            let mut session = TestSession::new();
-            assert_val_eq!(session.run(&source), int(0));
+            expect_overlap(&source);
         }
     }
 }

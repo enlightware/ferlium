@@ -22,6 +22,10 @@ use CallableDefinition as Def;
 #[derive(Debug, Clone)]
 struct SelfCastDeriver;
 impl Deriver for SelfCastDeriver {
+    fn derived_members(&self, _ty: Type, _solver: &TraitSolver) -> Vec<Type> {
+        vec![]
+    }
+
     fn derive_impl(
         &self,
         trait_id: TraitId,

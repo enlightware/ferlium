@@ -5,13 +5,13 @@
 //! rejected, by rejection kind: measures how much the `effect_soundness` generator reaches.
 //! Rejections are not findings by themselves; their samples are for inspection.
 //!
-//! Usage: `cargo run --release --manifest-path fuzz/Cargo.toml --bin effect_program_census --
+//! Usage: `cargo run --release --manifest-path fuzz/Cargo.toml --bin effect_soundness_census --
 //! [count] [seed]`
 
 use arbitrary::Unstructured;
 use ferlium_fuzz::{
     effect_oracle::{Outcome, Report, check_program},
-    effects::{EffectProgram, Variant},
+    effect_soundness::{EffectProgram, Variant},
 };
 use std::collections::BTreeMap;
 use std::panic::{self, AssertUnwindSafe};

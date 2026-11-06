@@ -12,7 +12,7 @@
 
 use std::cell::Cell;
 
-use crate::effects::{EffectProgram, Variant};
+use crate::effect_soundness::{EffectProgram, Variant};
 use ferlium::{
     CompilerSession, ExecutionTarget, MirOptimization,
     compiler::error::RuntimeErrorKind,
@@ -118,7 +118,14 @@ fn limits() -> ReferenceInterpreterLimits {
 
 /// Compiles and runs `source` on every backend; panics on a finding.
 pub fn check_source(source: &str) -> Report {
+    check_source_with_trust(source, false)
+}
+
+/// As `check_source`, compiling `source` as trusted code when `trusted`, which allows custom
+/// `Value` impls.
+pub fn check_source_with_trust(source: &str, trusted: bool) -> Report {
     let mut session = CompilerSession::new();
+    session.set_allow_unsafe(trusted);
     register_effects(&mut session);
     let output = match session.compile(source, "program.fer", Path::single_str("program")) {
         Ok(output) => output,

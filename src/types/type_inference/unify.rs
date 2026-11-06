@@ -47,7 +47,7 @@ use crate::{
         },
         type_inference::substitution::InstSubst,
         type_like::{TypeLike, instantiate_types},
-        type_mapper::{BitmapInstantiationMapper, TypeMapper},
+        type_mapper::{BitmapInstantiationMapper, EffectErasingMapper, TypeMapper},
         type_scheme::{ConstraintOrigin, PubTypeConstraint},
         type_visitor::TypeInnerVisitor,
     },
@@ -2182,6 +2182,66 @@ impl UnifiedTypeInference {
         }
     }
 
+    /// Derivation erases the effects of its input, so that its dictionaries can be shared. An impl
+    /// from source that a derivation needs for a member may however require something of these
+    /// effects: apply such impls here, where the real effects are known. A derivable trait has no
+    /// output and a member's impl cannot perform an effect its trait does not expose, so what
+    /// remains is valid for every effect.
+    fn check_effects_through_derivation(
+        &mut self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        span: Location,
+        trait_solver: &mut TraitSolver<'_>,
+        arena: &mut NodeArena,
+    ) -> Result<(), InternalCompilationError> {
+        if input_tys.iter().all(|ty| ty.inner_effect_vars().is_empty()) {
+            return Ok(());
+        }
+        let trait_def = trait_solver.trait_def(trait_id);
+        if trait_def.derivers.is_empty()
+            || trait_def.output_type_count() != 0
+            || !trait_def.output_effect_names.is_empty()
+        {
+            return Ok(());
+        }
+        let derivers = trait_def.derivers.clone();
+        let members_of = |ty: Type, trait_solver: &TraitSolver<'_>| {
+            derivers
+                .iter()
+                .flat_map(|deriver| deriver.derived_members(ty, trait_solver))
+                .collect::<Vec<_>>()
+        };
+        let mut seen = FxHashSet::default();
+        let mut pending = input_tys
+            .iter()
+            .flat_map(|ty| members_of(*ty, trait_solver))
+            .collect::<Vec<_>>();
+        while let Some(ty) = pending.pop() {
+            if ty.inner_effect_vars().is_empty() || !seen.insert(ty) {
+                continue;
+            }
+            let member = [ty];
+            if trait_solver
+                .resolve_application_symbolically(trait_id, &member, &[], &[], span)?
+                .is_some()
+            {
+                self.resolve_trait_application(
+                    trait_id,
+                    &member,
+                    &[],
+                    &[],
+                    span,
+                    trait_solver,
+                    arena,
+                )?;
+            } else {
+                pending.extend(members_of(ty, trait_solver));
+            }
+        }
+        Ok(())
+    }
+
     /// Resolve a trait application whose inputs are known: relate its outputs to those of the
     /// implementation the solver selects, output effects by their polarity. A blanket
     /// implementation is instantiated here, its constraints becoming obligations, so that its
@@ -2234,29 +2294,62 @@ impl UnifiedTypeInference {
                     obligation.fill_with_inner_effect_vars(&mut vars);
                     add_fresh_vars(obligation.inner_ty_vars(), vars, self);
                 }
+                for ty in &application.input_tys {
+                    add_fresh_vars(ty.inner_ty_vars(), ty.inner_effect_vars(), self);
+                }
                 let mut mapper = BitmapInstantiationMapper::new(&subst);
+                // Selection saw the inputs in a scratch solver: their effects must really fit the
+                // impl, which may require two of them to be equal.
+                for (imp_input_ty, input_ty) in application.input_tys.iter().zip(input_tys) {
+                    let imp_input_ty = imp_input_ty.map(&mut mapper);
+                    self.unify_same_type_with_sub_effects(imp_input_ty, span, *input_ty, span)?;
+                }
                 let impl_output_tys = instantiate_types(&application.output_tys, &mut mapper);
                 let impl_output_effs = application
                     .output_effs
                     .iter()
                     .map(|eff| mapper.map_effect_type(eff))
                     .collect::<Vec<_>>();
-                self.obligations.extend(
-                    application
-                        .obligations
-                        .iter()
-                        .map(|obligation| obligation.map(&mut mapper)),
-                );
+                // What the impl requires, this application must provide: report it here.
+                self.obligations
+                    .extend(application.obligations.iter().map(|obligation| {
+                        obligation
+                            .map(&mut mapper)
+                            .instantiate_location_cloned(span)
+                    }));
                 (impl_output_tys, impl_output_effs)
             }
-            None => trait_solver.solve_application_outputs(
-                trait_id,
-                input_tys,
-                output_tys,
-                output_effs,
-                span,
-                arena,
-            )?,
+            None => {
+                self.check_effects_through_derivation(
+                    trait_id,
+                    input_tys,
+                    span,
+                    trait_solver,
+                    arena,
+                )?;
+                // `Value` has no outputs, and its effects are only known once inference is over:
+                // select it here by the types, and check its effects when its dictionary is
+                // elaborated, where open effects have taken their least solution.
+                let erased_input_tys;
+                let input_tys = if trait_id == trait_solver.std_trait_id(VALUE_TRAIT_NAME)
+                    && input_tys
+                        .iter()
+                        .any(|ty| !ty.inner_effect_vars().is_empty())
+                {
+                    erased_input_tys = instantiate_types(input_tys, &mut EffectErasingMapper);
+                    &erased_input_tys[..]
+                } else {
+                    input_tys
+                };
+                trait_solver.solve_application_outputs(
+                    trait_id,
+                    input_tys,
+                    output_tys,
+                    output_effs,
+                    span,
+                    arena,
+                )?
+            }
         };
         assert_eq!(output_tys.len(), impl_output_tys.len());
         for (cur_ty, exp_ty) in output_tys.iter().zip(impl_output_tys.iter()) {

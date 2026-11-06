@@ -9,9 +9,9 @@ use test_log::test;
 use indoc::indoc;
 use ustr::ustr;
 
-use crate::harness::{TestSession, int};
+use crate::harness::{TestSession, int, string};
 use ferlium::{
-    compiler::error::{CompilationErrorImpl, SourceFailureKind},
+    compiler::error::{CompilationErrorImpl, ImplEffectRestriction, SourceFailureKind},
     format::FormatWith,
     types::effects::*,
 };
@@ -668,6 +668,956 @@ fn effect_after_type_arguments_is_an_argument_of_the_outer_type() {
         TestSession::new().compile(&format!(
             "struct Box<T>(T)
             fn f<! E>(g: Box<({function_type})>) -> int {{ 1 }}"
+        ));
+    }
+}
+
+const CALL_THROUGH_TRAIT: &str = indoc! { r#"
+    trait Run<Self |-> ! E> {
+        fn run(x: Self) -> int ! E;
+    }
+    struct Cb<! F>(() -> int ! F)
+    impl<! F> Run for <Self = Cb<! F> |-> ! E = F> {
+        fn run(x: Cb<! F>) -> int {
+            (x.0)()
+        }
+    }
+"# };
+
+/// A serializer that calls its callback, relying on a prerequisite for that call to be pure.
+const PURE_RUN_SERIALIZER: &str = indoc! { r#"
+    struct Wrap<T>(T)
+    impl<T> Serialize for Wrap<T>
+    where T: Run<! E = ()> {
+        fn serialize(x: Wrap<T>) -> DataValue {
+            serialize(run(x.0))
+        }
+    }
+"# };
+
+fn expect_input_restriction(source: &str, expected: ImplEffectRestriction) {
+    let error = TestSession::new().fail_compilation(source);
+    let CompilationErrorImpl::TraitImplInputRestrictsEffect { restriction, .. } = &*error else {
+        panic!("unexpected diagnostic for {source}: {error:?}")
+    };
+    assert_eq!(*restriction, expected, "{source}");
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn impl_inputs_cannot_fix_effects() {
+    let prelude = "struct Box<T>(T)
+        type Pure = () -> int ! ();
+        type Failing = () -> int ! fallible;
+        trait Pick<Self> { fn pick(x: Self) -> int; }\n";
+    for imp in [
+        // Also through aliases, nested, and left unwritten.
+        "impl Pick for Box<Pure> { fn pick(x: Box<Pure>) -> int { 1 } }",
+        "impl Pick for Box<Failing> { fn pick(x: Box<Failing>) -> int { 2 } }",
+        "impl<T> Pick for Box<(T, Pure)> where T: Value { fn pick(x: Box<(T, Pure)>) -> int { 1 } }",
+        "impl Pick for Box<() -> int> { fn pick(x: Box<() -> int>) -> int { 1 } }",
+    ] {
+        expect_input_restriction(
+            &format!("{prelude}{imp}"),
+            ImplEffectRestriction::FixedInInput,
+        );
+    }
+    expect_input_restriction(
+        "struct Two<A, B>(A, B)
+        trait Tr<Self> { fn go(x: Self) -> int; }
+        impl<! E> Tr for Two<(() -> int ! E), (() -> int ! E)> {
+            fn go(x: Two<(() -> int ! E), (() -> int ! E)>) -> int { 1 }
+        }",
+        ImplEffectRestriction::RepeatedInInput,
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn every_function_form_selects_the_effect_polymorphic_impl() {
+    assert_val_eq!(
+        TestSession::new().run(&format!(
+            "{CALL_THROUGH_TRAIT}
+            fn f(g) {{ run(Cb(g)) }}
+            fn h<! E>(g: () -> int ! E) -> int {{ run(Cb(g)) }}
+            fn k(g: () -> int) -> int {{ run(Cb(g)) }}
+            f(|| 1) + h(|| 2) + k(|| 3) + f(|| idiv(4, 2)) + h(|| idiv(4, 2)) + k(|| idiv(4, 2))"
+        )),
+        int(12)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_repeated_type_variable_equates_the_effects_of_the_caller() {
+    let prelude = format!(
+        "{CALL_THROUGH_TRAIT}
+        trait Tr<Self |-> ! E> {{ fn go(x: Self) -> int ! E; }}
+        struct Pair<A, B>(A, B)
+        impl<T ! F> Tr for <Self = Pair<T, T> |-> ! E = F>
+        where T: Run<! E = F> {{
+            fn go(x: Pair<T, T>) -> int {{ run(x.0) + run(x.1) }}
+        }}"
+    );
+    // Written generics stay distinct.
+    TestSession::new().fail_compilation(&format!(
+        "{prelude}
+        fn f<! A, B>(a: () -> int ! A, b: () -> int ! B) -> int {{ go(Pair(Cb(a), Cb(b))) }}"
+    ));
+    // Inferred effects are merged, so the failure of either callback is visible in the caller.
+    assert_val_eq!(
+        TestSession::new().run(&format!(
+            "{prelude}
+            fn f(a, b) {{ go(Pair(Cb(a), Cb(b))) }}
+            f(|| 1, || idiv(4, 2))"
+        )),
+        int(3)
+    );
+    assert_val_eq!(
+        TestSession::new().run(&format!("{prelude}\ngo(Pair(Cb(|| 1), Cb(|| idiv(4, 2))))")),
+        int(3)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn derivation_checks_prerequisites_with_the_real_effects() {
+    let prelude = format!("{CALL_THROUGH_TRAIT}{PURE_RUN_SERIALIZER}");
+    for (generic, value) in [
+        // Through derivation, for a tuple and for a record.
+        ("(Wrap(Cb(g)),)", "(Wrap(Cb(|| 3)),)"),
+        ("{ a: Wrap(Cb(g)) }", "{ a: Wrap(Cb(|| 3)) }"),
+    ] {
+        TestSession::new().fail_compilation(&format!(
+            "{prelude}
+            fn f<! E>(g: () -> int ! E) -> DataValue {{ serialize({generic}) }}"
+        ));
+        // Also when a pure use already derived the impl that the erased effects would find.
+        TestSession::new().fail_compilation(&format!(
+            "{prelude}
+            fn pure() -> DataValue {{ serialize({value}) }}
+            fn f<! E>(g: () -> int ! E) -> DataValue {{ serialize({generic}) }}"
+        ));
+        // An unwritten effect is held to the prerequisite instead.
+        TestSession::new().fail_compilation(&format!(
+            "{prelude}
+            fn f(g) {{ serialize({generic}) }}
+            f(|| idiv(1, 0))"
+        ));
+        TestSession::new().run(&format!(
+            "{prelude}
+            fn f(g) {{ serialize({generic}) }}
+            f(|| 3)"
+        ));
+        TestSession::new().run(&format!("{prelude}\nserialize({value})"));
+    }
+    // Through a source impl whose own prerequisite carries no visible effect.
+    TestSession::new().fail_compilation(&format!(
+        "{prelude}
+        struct Outer<T>(T)
+        impl<T> Serialize for Outer<T> where T: Serialize {{
+            fn serialize(x: Outer<T>) -> DataValue {{ serialize(x.0) }}
+        }}
+        fn f<! E>(g: () -> int ! E) -> DataValue {{ serialize(Outer(Wrap(Cb(g)))) }}"
+    ));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_failed_effect_requirement_is_an_error_not_an_absent_impl() {
+    // Derivation could serve `Other` if the source impl did not count as selected.
+    let error = TestSession::new().fail_compilation(&format!(
+        "{CALL_THROUGH_TRAIT}
+        struct Other<T>(T)
+        impl<T> Serialize for Other<T> where T: Run<! E = ()> {{
+            fn serialize(x: Other<T>) -> DataValue {{ serialize(1) }}
+        }}
+        impl<! F> Serialize for Cb<! F> {{
+            fn serialize(x: Cb<! F>) -> DataValue {{ serialize(2) }}
+        }}
+        serialize(Other(Cb(|| idiv(1, 0))))"
+    ));
+    assert!(
+        !matches!(&*error, CompilationErrorImpl::TraitImplNotFound { .. }),
+        "{error:?}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_missing_impl_stays_an_error_when_a_member_has_one() {
+    let error = TestSession::new().fail_compilation(indoc! { r#"
+struct Cb<! E>(() -> int ! E)
+struct Outer<T>(T)
+trait Get<Self |-> Out> { fn get(x: Self) -> Out; }
+impl<! E> Get for <Self = Cb<! E> |-> Out = int> {
+    fn get(x: Cb<! E>) -> int { 1 }
+}
+fn f<! E>(g: () -> int ! E) -> int { get(Outer(Cb(g))) }
+f(|| 5)
+"# });
+    assert!(
+        matches!(&*error, CompilationErrorImpl::TraitImplNotFound { .. }),
+        "{error:?}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn selection_considers_the_whole_structure_before_effects() {
+    for source in [
+        indoc! { r#"
+struct Cb<T>(T)
+type Pure = () -> int ! ();
+type Failing = () -> int ! fallible;
+struct Pair<A, B>(A, B)
+struct Mark<T>(T)
+trait Select<Self, Other> { fn select(x: Self, y: Other) -> int; }
+impl<T> Select for <Self = Pair<T, T>, Other = Mark<int>> where T: Value {
+    fn select(x: Pair<T, T>, y: Mark<int>) -> int { 1 }
+}
+impl<A, B> Select for <Self = Pair<A, B>, Other = Mark<bool>> where A: Value, B: Value {
+    fn select(x: Pair<A, B>, y: Mark<bool>) -> int { 2 }
+}
+let a: Cb<Pure> = Cb(|| 5);
+let b: Cb<Failing> = Cb(|| idiv(4, 2));
+select(Pair(a, b), Mark(true))
+"# },
+        indoc! { r#"
+struct Cb<T>(T)
+type Pure = () -> int ! ();
+type Failing = () -> int ! fallible;
+struct Pair<A, B>(A, B)
+struct Mark<T>(T)
+trait Select<Self, Other> { fn select(x: Self, y: Other) -> int; }
+impl<A, B> Select for <Self = Pair<A, B>, Other = Mark<bool>> where A: Value, B: Value {
+    fn select(x: Pair<A, B>, y: Mark<bool>) -> int { 2 }
+}
+impl<T> Select for <Self = Pair<T, T>, Other = Mark<int>> where T: Value {
+    fn select(x: Pair<T, T>, y: Mark<int>) -> int { 1 }
+}
+let a: Cb<Pure> = Cb(|| 5);
+let b: Cb<Failing> = Cb(|| idiv(4, 2));
+select(Pair(a, b), Mark(true))
+"# },
+    ] {
+        assert_val_eq!(TestSession::new().run(source), int(2));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn effects_in_prerequisite_output_types_do_not_separate_impls() {
+    for source in [
+        indoc! { r#"
+struct Cb<T>(T)
+struct X<T>(T)
+struct W<T>(T)
+type Pure = () -> int ! ();
+type Failing = () -> int ! fallible;
+trait Source<Self |-> Item> { fn source(x: Self) -> Item; }
+impl<! E> Source for <Self = X<(() -> int ! E)> |-> Item = Cb<(() -> int ! E)>> {
+    fn source(x: X<(() -> int ! E)>) -> Cb<(() -> int ! E)> { Cb(x.0) }
+}
+trait R<Self> { fn r(x: Self) -> int; }
+impl<T> R for W<T> where T: Value, X<T>: Source<Item = Cb<Pure>> {
+    fn r(x: W<T>) -> int { 1 }
+}
+impl<T> R for W<T> where T: Value, X<T>: Source<Item = Cb<Failing>> {
+    fn r(x: W<T>) -> int { 2 }
+}
+let pure: Pure = || 5;
+let widened: Failing = || 5;
+(r(W(pure)), r(W(widened)))
+"# },
+        indoc! { r#"
+struct Cb<T>(T)
+struct X<T>(T)
+struct W<T>(T)
+type Pure = () -> int ! ();
+type Failing = () -> int ! fallible;
+trait Source<Self |-> Item> { fn source(x: Self) -> Item; }
+impl<! E> Source for <Self = X<(() -> int ! E)> |-> Item = Cb<(() -> int ! E)>> {
+    fn source(x: X<(() -> int ! E)>) -> Cb<(() -> int ! E)> { Cb(x.0) }
+}
+trait R<Self> { fn r(x: Self) -> int; }
+impl<T> R for W<T> where T: Value, X<T>: Source<Item = Cb<Failing>> {
+    fn r(x: W<T>) -> int { 2 }
+}
+impl<T> R for W<T> where T: Value, X<T>: Source<Item = Cb<Pure>> {
+    fn r(x: W<T>) -> int { 1 }
+}
+let pure: Pure = || 5;
+let widened: Failing = || 5;
+(r(W(pure)), r(W(widened)))
+"# },
+    ] {
+        let error = TestSession::new().fail_compilation(source);
+        assert!(
+            matches!(
+                &*error,
+                CompilationErrorImpl::OverlappingTraitImpls {
+                    effects_ignored: true,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_nested_effect_mismatch_does_not_fall_back_to_derivation() {
+    let error = TestSession::new().fail_compilation(indoc! { r#"
+struct Cb<! E>(() -> int ! E)
+struct Out<T>(T)
+struct W<T>(T)
+type Pure = () -> int ! ();
+trait Source<Self |-> Item> { fn source(x: Self) -> Item; }
+impl<! E> Source for <Self = Cb<! E> |-> Item = Out<(() -> int ! E)>> {
+    fn source(x: Cb<! E>) -> Out<(() -> int ! E)> { Out(x.0) }
+}
+impl<T> Serialize for W<T> where T: Value, T: Source<Item = Out<Pure>> {
+    fn serialize(x: W<T>) -> DataValue { serialize(1) }
+}
+impl<! E> Serialize for Cb<! E> {
+    fn serialize(x: Cb<! E>) -> DataValue { serialize(2) }
+}
+serialize(W(Cb(|| idiv(1, 0))))
+"# });
+    assert!(
+        matches!(
+            &*error,
+            CompilationErrorImpl::TraitImplEffectsMismatch { .. }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn derivation_requires_only_what_it_uses() {
+    // `Default` constructs the default variant alone, so the payload's prerequisite is irrelevant.
+    TestSession::new().run(indoc! { r#"
+trait Run<Self |-> ! E> { fn run(x: Self) -> int ! E; }
+struct Cb<! F>(() -> int ! F)
+impl<! F> Run for <Self = Cb<! F> |-> ! E = F> {
+    fn run(x: Cb<! F>) -> int { (x.0)() }
+}
+impl<! F> Default for Cb<! F> {
+    fn default() -> Cb<! F> { Cb(|| 5) }
+}
+struct Wrap<T>(T)
+impl<T> Default for Wrap<T> where T: Value, T: Default, T: Run<! E = ()> {
+    fn default() -> Wrap<T> { Wrap(default()) }
+}
+enum Maybe<! F> { #[default] None, Some(Wrap<Cb<! F>>) }
+fn f<! E>(g: () -> int ! E) -> int { let x: Maybe<! E> = default(); 1 }
+f(|| idiv(1, 0))
+"# });
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn effects_in_concrete_prerequisite_outputs_do_not_separate_impls() {
+    for source in [
+        indoc! { r#"
+struct Cb<T>(T)
+struct Seed<T>(T)
+struct W<T>(T)
+type Pure = () -> int ! ();
+type Failing = () -> int ! fallible;
+trait Source<Self |-> Item> { fn source(x: Self) -> Item; }
+impl Source for <Self = Seed<int> |-> Item = Cb<Failing>> {
+ fn source(x: Seed<int>) -> Cb<Failing> { Cb(||idiv(4,2)) }
+}
+trait R<Self> { fn r(x: Self) -> int; }
+impl<T> R for W<T> where T: Value, Seed<T>: Source<Item = Cb<Pure>> {
+ fn r(x: W<T>) -> int { 1 }
+}
+impl<T> R for W<T> where T: Value, Seed<T>: Source<Item = Cb<Failing>> {
+ fn r(x: W<T>) -> int { 2 }
+}
+r(W(0))"# },
+        indoc! { r#"
+struct Cb<T>(T)
+struct Seed<T>(T)
+struct W<T>(T)
+type Pure = () -> int ! ();
+type Failing = () -> int ! fallible;
+trait Source<Self |-> Item> { fn source(x: Self) -> Item; }
+impl Source for <Self = Seed<int> |-> Item = Cb<Failing>> {
+ fn source(x: Seed<int>) -> Cb<Failing> { Cb(||idiv(4,2)) }
+}
+trait R<Self> { fn r(x: Self) -> int; }
+impl<T> R for W<T> where T: Value, Seed<T>: Source<Item = Cb<Failing>> {
+ fn r(x: W<T>) -> int { 2 }
+}
+impl<T> R for W<T> where T: Value, Seed<T>: Source<Item = Cb<Pure>> {
+ fn r(x: W<T>) -> int { 1 }
+}
+r(W(0))"# },
+    ] {
+        let error = TestSession::new().fail_compilation(source);
+        assert!(
+            matches!(
+                &*error,
+                CompilationErrorImpl::OverlappingTraitImpls {
+                    effects_ignored: true,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn effects_do_not_decide_what_improvement_infers() {
+    // Effects do not choose the type of the literal: it defaults to `int` in every case.
+    for source in [
+        indoc! { r#"
+struct Cb<T>(T)
+struct W<T>(T)
+trait Run<Self |-> ! E> { fn run(x: Self) -> int ! E; }
+impl<! E> Run for <Self = Cb<(() -> int ! E)> |-> ! E = E> {
+ fn run(x: Cb<(() -> int ! E)>) -> int { x.0() }
+}
+trait Pick<Self, Other> { fn pick(x: Self, y: Other) -> int; }
+impl<T> Pick for <Self = Cb<T>, Other = W<int>>
+where T: Value, Cb<T>: Run<! E = ()> {
+ fn pick(x: Cb<T>, y: W<int>) -> int { 1 }
+}
+impl<T> Pick for <Self = Cb<T>, Other = W<float>>
+where T: Value, Cb<T>: Run<! E = fallible> {
+ fn pick(x: Cb<T>, y: W<float>) -> int { 2 }
+}
+type F = () -> int ! ();
+let g: F = || 5;
+pick(Cb(g), W(0))
+"# },
+        indoc! { r#"
+struct Cb<T>(T)
+struct W<T>(T)
+trait Run<Self |-> ! E> { fn run(x: Self) -> int ! E; }
+impl<! E> Run for <Self = Cb<(() -> int ! E)> |-> ! E = E> {
+ fn run(x: Cb<(() -> int ! E)>) -> int { x.0() }
+}
+trait Pick<Self, Other> { fn pick(x: Self, y: Other) -> int; }
+impl<T> Pick for <Self = Cb<T>, Other = W<float>>
+where T: Value, Cb<T>: Run<! E = fallible> {
+ fn pick(x: Cb<T>, y: W<float>) -> int { 2 }
+}
+impl<T> Pick for <Self = Cb<T>, Other = W<int>>
+where T: Value, Cb<T>: Run<! E = ()> {
+ fn pick(x: Cb<T>, y: W<int>) -> int { 1 }
+}
+type F = () -> int ! ();
+let g: F = || 5;
+pick(Cb(g), W(0))
+"# },
+    ] {
+        assert_val_eq!(TestSession::new().run(source), int(1));
+    }
+    for source in [
+        indoc! { r#"
+struct Cb<T>(T)
+struct W<T>(T)
+trait Run<Self |-> ! E> { fn run(x: Self) -> int ! E; }
+impl<! E> Run for <Self = Cb<(() -> int ! E)> |-> ! E = E> {
+ fn run(x: Cb<(() -> int ! E)>) -> int { x.0() }
+}
+trait Pick<Self, Other> { fn pick(x: Self, y: Other) -> int; }
+impl<T> Pick for <Self = Cb<T>, Other = W<int>>
+where T: Value, Cb<T>: Run<! E = ()> {
+ fn pick(x: Cb<T>, y: W<int>) -> int { 1 }
+}
+impl<T> Pick for <Self = Cb<T>, Other = W<float>>
+where T: Value, Cb<T>: Run<! E = fallible> {
+ fn pick(x: Cb<T>, y: W<float>) -> int { 2 }
+}
+type F = () -> int ! fallible;
+let g: F = || 5;
+pick(Cb(g), W(0))
+"# },
+        indoc! { r#"
+struct Cb<T>(T)
+struct W<T>(T)
+trait Run<Self |-> ! E> { fn run(x: Self) -> int ! E; }
+impl<! E> Run for <Self = Cb<(() -> int ! E)> |-> ! E = E> {
+ fn run(x: Cb<(() -> int ! E)>) -> int { x.0() }
+}
+trait Pick<Self, Other> { fn pick(x: Self, y: Other) -> int; }
+impl<T> Pick for <Self = Cb<T>, Other = W<float>>
+where T: Value, Cb<T>: Run<! E = fallible> {
+ fn pick(x: Cb<T>, y: W<float>) -> int { 2 }
+}
+impl<T> Pick for <Self = Cb<T>, Other = W<int>>
+where T: Value, Cb<T>: Run<! E = ()> {
+ fn pick(x: Cb<T>, y: W<int>) -> int { 1 }
+}
+type F = () -> int ! fallible;
+let g: F = || 5;
+pick(Cb(g), W(0))
+"# },
+    ] {
+        let error = TestSession::new().fail_compilation(source);
+        assert!(
+            matches!(
+                &*error,
+                CompilationErrorImpl::TraitImplEffectsMismatch { .. }
+            ),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn structural_selection_erases_effects_through_nested_prerequisites() {
+    for source in [
+        indoc! { r#"
+struct Cb<T>(T)
+struct Out<T>(T)
+struct Inner<T>(T)
+struct Outer<T>(T)
+type Pure = () -> int ! ();
+type Failing = () -> int ! fallible;
+trait Source<Self |-> Item> { fn source(x: Self) -> Item; }
+trait Gate<Self> { fn gate(x: Self) -> int; }
+impl<! E> Source for <Self = Cb<(() -> int ! E)> |-> Item = Out<(() -> int ! E)>> {
+ fn source(x: Cb<(() -> int ! E)>) -> Out<(() -> int ! E)> { Out(x.0) }
+}
+impl<T> Gate for Inner<T> where T: Value, T: Source<Item = Out<Failing>> {
+ fn gate(x: Inner<T>) -> int { 1 }
+}
+impl<T> Serialize for Outer<T> where T: Value, Inner<T>: Gate {
+ fn serialize(x: Outer<T>) -> DataValue { serialize(1) }
+}
+impl<! E> Serialize for Cb<(() -> int ! E)> {
+ fn serialize(x: Cb<(() -> int ! E)>) -> DataValue { serialize(2) }
+}
+let cb: Cb<Pure> = Cb(||5);
+serialize(Outer(cb))
+"# },
+        indoc! { r#"
+struct Cb<T>(T)
+struct Out<T>(T)
+struct Inner<T>(T)
+struct Outer<T>(T)
+type Pure = () -> int ! ();
+type Failing = () -> int ! fallible;
+trait Source<Self |-> Item> { fn source(x: Self) -> Item; }
+trait Gate<Self> { fn gate(x: Self) -> int; }
+impl<! E> Serialize for Cb<(() -> int ! E)> {
+ fn serialize(x: Cb<(() -> int ! E)>) -> DataValue { serialize(2) }
+}
+impl<T> Serialize for Outer<T> where T: Value, Inner<T>: Gate {
+ fn serialize(x: Outer<T>) -> DataValue { serialize(1) }
+}
+impl<T> Gate for Inner<T> where T: Value, T: Source<Item = Out<Failing>> {
+ fn gate(x: Inner<T>) -> int { 1 }
+}
+impl<! E> Source for <Self = Cb<(() -> int ! E)> |-> Item = Out<(() -> int ! E)>> {
+ fn source(x: Cb<(() -> int ! E)>) -> Out<(() -> int ! E)> { Out(x.0) }
+}
+let cb: Cb<Pure> = Cb(||5);
+serialize(Outer(cb))
+"# },
+    ] {
+        let error = TestSession::new().fail_compilation(source);
+        assert!(
+            matches!(
+                &*error,
+                CompilationErrorImpl::TraitImplEffectsMismatch { .. }
+            ),
+            "{error:?}"
+        );
+    }
+    for source in [
+        indoc! { r#"
+struct Cb<T>(T)
+struct Out<T>(T)
+struct Inner<T>(T)
+struct Outer<T>(T)
+type Pure = () -> int ! ();
+type Failing = () -> int ! fallible;
+trait Source<Self |-> Item> { fn source(x: Self) -> Item; }
+trait Gate<Self> { fn gate(x: Self) -> int; }
+impl<! E> Source for <Self = Cb<(() -> int ! E)> |-> Item = Out<(() -> int ! E)>> {
+ fn source(x: Cb<(() -> int ! E)>) -> Out<(() -> int ! E)> { Out(x.0) }
+}
+impl<T> Gate for Inner<T> where T: Value, T: Source<Item = Out<Failing>> {
+ fn gate(x: Inner<T>) -> int { 1 }
+}
+impl<T> Serialize for Outer<T> where T: Value, Inner<T>: Gate {
+ fn serialize(x: Outer<T>) -> DataValue { serialize(1) }
+}
+impl<! E> Serialize for Cb<(() -> int ! E)> {
+ fn serialize(x: Cb<(() -> int ! E)>) -> DataValue { serialize(2) }
+}
+let cb: Cb<Failing> = Cb(||5);
+serialize(Outer(cb))
+"# },
+        indoc! { r#"
+struct Cb<T>(T)
+struct Out<T>(T)
+struct Inner<T>(T)
+struct Outer<T>(T)
+type Pure = () -> int ! ();
+type Failing = () -> int ! fallible;
+trait Source<Self |-> Item> { fn source(x: Self) -> Item; }
+trait Gate<Self> { fn gate(x: Self) -> int; }
+impl<! E> Serialize for Cb<(() -> int ! E)> {
+ fn serialize(x: Cb<(() -> int ! E)>) -> DataValue { serialize(2) }
+}
+impl<T> Serialize for Outer<T> where T: Value, Inner<T>: Gate {
+ fn serialize(x: Outer<T>) -> DataValue { serialize(1) }
+}
+impl<T> Gate for Inner<T> where T: Value, T: Source<Item = Out<Failing>> {
+ fn gate(x: Inner<T>) -> int { 1 }
+}
+impl<! E> Source for <Self = Cb<(() -> int ! E)> |-> Item = Out<(() -> int ! E)>> {
+ fn source(x: Cb<(() -> int ! E)>) -> Out<(() -> int ! E)> { Out(x.0) }
+}
+let cb: Cb<Failing> = Cb(||5);
+serialize(Outer(cb))
+"# },
+    ] {
+        TestSession::new().run(source);
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_custom_value_impl_with_wrong_effects_does_not_fall_back_to_derivation() {
+    for source in [
+        indoc! { r#"
+struct Cb<T>(T)
+struct Wrap<T>(T)
+trait Run<Self |-> ! E> { fn run(x: Self) -> int ! E; }
+impl<! E> Run for <Self = Cb<(() -> int ! E)> |-> ! E = E> {
+ fn run(x: Cb<(() -> int ! E)>) -> int { x.0() }
+}
+impl<T> Value for Wrap<T> where T: Value, T: Run<! E = ()> {
+ fn eq(x: Wrap<T>, y: Wrap<T>) -> bool { run(x.0) == run(y.0) }
+ fn to_string(x: Wrap<T>) -> string { to_string(run(x.0)) }
+ fn hash(x: Wrap<T>, state: &mut hasher) { hash(run(x.0), state) }
+ fn clone(x: Wrap<T>) -> Wrap<T> { Wrap(x.0) }
+ fn drop(x: &mut Wrap<T>) {}
+}
+type F = () -> int ! fallible; let cb: Cb<F> = Cb(||5);
+to_string(Wrap(cb))"# },
+        indoc! { r#"
+struct Cb<T>(T)
+struct Wrap<T>(T)
+trait Run<Self |-> ! E> { fn run(x: Self) -> int ! E; }
+impl<! E> Run for <Self = Cb<(() -> int ! E)> |-> ! E = E> {
+ fn run(x: Cb<(() -> int ! E)>) -> int { x.0() }
+}
+impl<T> Value for Wrap<T> where T: Value, T: Run<! E = ()> {
+ fn eq(x: Wrap<T>, y: Wrap<T>) -> bool { run(x.0) == run(y.0) }
+ fn to_string(x: Wrap<T>) -> string { to_string(run(x.0)) }
+ fn hash(x: Wrap<T>, state: &mut hasher) { hash(run(x.0), state) }
+ fn clone(x: Wrap<T>) -> Wrap<T> { Wrap(x.0) }
+ fn drop(x: &mut Wrap<T>) {}
+}
+type F = () -> int ! fallible; let cb: Cb<F> = Cb(||5);
+to_string((Wrap(cb),))"# },
+    ] {
+        let mut session = TestSession::new();
+        session.allow_unsafe();
+        let error = session.fail_compilation(source);
+        assert!(
+            matches!(
+                &*error,
+                CompilationErrorImpl::TraitImplEffectsMismatch { .. }
+            ),
+            "{error:?}"
+        );
+    }
+    for source in [
+        indoc! { r#"
+struct Cb<T>(T)
+struct Wrap<T>(T)
+trait Run<Self |-> ! E> { fn run(x: Self) -> int ! E; }
+impl<! E> Run for <Self = Cb<(() -> int ! E)> |-> ! E = E> {
+ fn run(x: Cb<(() -> int ! E)>) -> int { x.0() }
+}
+impl<T> Value for Wrap<T> where T: Value, T: Run<! E = ()> {
+ fn eq(x: Wrap<T>, y: Wrap<T>) -> bool { run(x.0) == run(y.0) }
+ fn to_string(x: Wrap<T>) -> string { to_string(run(x.0)) }
+ fn hash(x: Wrap<T>, state: &mut hasher) { hash(run(x.0), state) }
+ fn clone(x: Wrap<T>) -> Wrap<T> { Wrap(x.0) }
+ fn drop(x: &mut Wrap<T>) {}
+}
+type F = () -> int ! (); let cb: Cb<F> = Cb(||5);
+to_string(Wrap(cb))"# },
+        indoc! { r#"
+struct Cb<T>(T)
+struct Wrap<T>(T)
+trait Run<Self |-> ! E> { fn run(x: Self) -> int ! E; }
+impl<! E> Run for <Self = Cb<(() -> int ! E)> |-> ! E = E> {
+ fn run(x: Cb<(() -> int ! E)>) -> int { x.0() }
+}
+impl<T> Value for Wrap<T> where T: Value, T: Run<! E = ()> {
+ fn eq(x: Wrap<T>, y: Wrap<T>) -> bool { run(x.0) == run(y.0) }
+ fn to_string(x: Wrap<T>) -> string { to_string(run(x.0)) }
+ fn hash(x: Wrap<T>, state: &mut hasher) { hash(run(x.0), state) }
+ fn clone(x: Wrap<T>) -> Wrap<T> { Wrap(x.0) }
+ fn drop(x: &mut Wrap<T>) {}
+}
+type F = () -> int ! (); let cb: Cb<F> = Cb(||5);
+to_string((Wrap(cb),))"# },
+    ] {
+        let mut session = TestSession::new();
+        session.allow_unsafe();
+        session.run(source);
+    }
+}
+
+const DEFAULT_METHOD_HELPERS: &str = indoc! { r#"
+    trait Size<Self> { fn size(x: Self) -> int; }
+    impl<! F> Size for Cb<! F> {
+        fn size(x: Cb<! F>) -> int { 7 }
+    }
+    struct W<T>(T)
+    trait Pure<Self> { fn pure(x: Self) -> int; }
+    impl<T> Pure for W<T> where T: Run<! E = ()> {
+        fn pure(x: W<T>) -> int { run(x.0) }
+    }
+    struct M<! F>(() -> int ! F)
+"# };
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn selection_does_not_strengthen_the_contract_of_a_default_method() {
+    let prelude = format!("{CALL_THROUGH_TRAIT}{PURE_RUN_SERIALIZER}{DEFAULT_METHOD_HELPERS}");
+    let imp = "impl<! F> D for <Self = M<! F> |-> ! E = F> {}";
+    // An impl that applies for every effect serves every effect.
+    assert_val_eq!(
+        TestSession::new().run(&format!(
+            "{prelude}
+            trait D<Self |-> ! E> {{ fn go(x: Self, g: () -> int ! E) -> int {{ size(Cb(g)) }} }}
+            {imp}
+            go(M(|| 1), || 1) + go(M(|| idiv(4, 2)), || idiv(4, 2))"
+        )),
+        int(14)
+    );
+    // An effect the contract exposes may be performed.
+    assert_val_eq!(
+        TestSession::new().run(&format!(
+            "{prelude}
+            trait D<Self |-> ! E> {{ fn go(x: Self, g: () -> int ! E) -> int ! E {{ run(Cb(g)) }} }}
+            {imp}
+            go(M(|| 1), || 1) + go(M(|| idiv(4, 2)), || idiv(4, 2))"
+        )),
+        int(3)
+    );
+    // What an impl requires of the effect, the default cannot promise.
+    for body in [
+        "run(Cb(g))",
+        "pure(W(Cb(g)))",
+        "to_string(serialize((Wrap(Cb(g)),)))",
+    ] {
+        TestSession::new().fail_compilation(&format!(
+            "{prelude}
+            trait D<Self |-> ! E> {{ fn go(x: Self, g: () -> int ! E) -> int {{ {body}; 1 }} }}"
+        ));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn effect_independent_selection_holds_across_modules() {
+    const LIB: &str = r#"
+        pub trait Run<Self |-> ! E> { fn run(x: Self) -> int ! E; }
+        pub struct Cb<! F>(() -> int ! F)
+        pub fn cb<! F>(f: () -> int ! F) -> Cb<! F> { Cb(f) }
+        impl<! F> Run for <Self = Cb<! F> |-> ! E = F> {
+            fn run(x: Cb<! F>) -> int { (x.0)() }
+        }
+        pub struct Wrap<T>(T)
+        pub fn wrap<T>(x: T) -> Wrap<T> { Wrap(x) }
+        impl<T> Serialize for Wrap<T> where T: Run<! E = ()> {
+            fn serialize(x: Wrap<T>) -> DataValue { serialize(run(x.0)) }
+        }
+        pub fn warm() -> DataValue { serialize((wrap(cb(|| 3)),)) }
+    "#;
+    let session = || {
+        let mut session = TestSession::new();
+        session
+            .try_compile_module("lib", LIB)
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        session
+    };
+    // The prerequisite of an imported impl uses the real effects, through derivation too, even
+    // when the imported module already derived the erased form.
+    for term in ["lib::wrap(lib::cb(g))", "(lib::wrap(lib::cb(g)),)"] {
+        assert!(
+            session()
+                .try_compile_module(
+                    "user",
+                    &format!("fn f<! E>(g: () -> int ! E) -> DataValue {{ serialize({term}) }}"),
+                )
+                .is_err(),
+            "{term}"
+        );
+    }
+    // An importing module may not restrict effects in its own impl either.
+    let error = session()
+        .try_compile_module(
+            "user",
+            "use lib::{Run, Cb};
+            struct Box<T>(T)
+            impl Run for <Self = Box<Cb<! fallible>> |-> ! E = ()> {
+                fn run(x: Box<Cb<! fallible>>) -> int { 1 }
+            }",
+        )
+        .expect_err("the impl fixes an effect");
+    assert!(
+        matches!(
+            &*error,
+            CompilationErrorImpl::TraitImplInputRestrictsEffect { .. }
+        ),
+        "{error:?}"
+    );
+    // A polymorphic impl from another module serves every effect.
+    let mut session = session();
+    assert_val_eq!(
+        session.run(
+            "use lib::{Run, cb};
+            fn f(g) { run(cb(g)) }
+            f(|| 1) + f(|| idiv(4, 2))"
+        ),
+        int(3)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_effect_mismatch_does_not_hide_a_nested_output_type_mismatch() {
+    // `Get` produces `int`, so the `W<int>` candidate cannot apply, whatever the effects of `Run`.
+    assert_val_eq!(
+        TestSession::new().run(indoc! { r#"
+struct Seed<T>(T)
+struct W<T>(T)
+trait Run<Self |-> ! E> { fn run(x: Self) -> int ! E; }
+impl<T> Run for <Self = Seed<T> |-> ! E = fallible> where T: Value {
+ fn run(x: Seed<T>) -> int { 2 }
+}
+trait Get<Self |-> Item> { fn get(x: Self) -> Item; }
+impl<T> Get for <Self = Seed<T> |-> Item = int> where T: Value, Seed<T>: Run<! E = ()> {
+ fn get(x: Seed<T>) -> int { 3 }
+}
+trait Pick<Self, Other> { fn pick(x: Self, y: Other) -> int; }
+impl<T> Pick for <Self = Seed<T>, Other = W<int>> where T: Value, Seed<T>: Get<Item = bool> {
+ fn pick(x: Seed<T>, y: W<int>) -> int { 1 }
+}
+impl<T> Pick for <Self = Seed<T>, Other = W<float>> where T: Value {
+ fn pick(x: Seed<T>, y: W<float>) -> int { 2 }
+}
+let x: Seed<int> = Seed(0); pick(x, W(0))"# }),
+        int(2)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_effect_requirement_of_a_selected_impl_is_reported_where_it_is_applied() {
+    let source = format!(
+        "{CALL_THROUGH_TRAIT}{PURE_RUN_SERIALIZER}
+        fn f<! E>(g: () -> int ! E) -> DataValue {{ serialize((Wrap(Cb(g)),)) }}"
+    );
+    let error = TestSession::new().fail_compilation(&source);
+    let CompilationErrorImpl::InvalidEffectDependency { source_span, .. } = &*error else {
+        panic!("unexpected diagnostic: {error:?}")
+    };
+    let call = source.rfind("serialize(").expect("the program has a call");
+    assert_eq!(source_span.start_usize(), call, "{error:?}");
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn outputs_of_a_concrete_impl_differing_only_in_effects_are_an_effect_error() {
+    let error = TestSession::new().fail_compilation(indoc! { r#"
+        struct Cb<T>(T)
+        struct Seed(int)
+        struct W<T>(T)
+        type Pure = () -> int ! ();
+        type Failing = () -> int ! fallible;
+        trait Source<Self |-> Item> { fn source(x: Self) -> Item; }
+        impl Source for <Self = Seed |-> Item = Cb<Failing>> {
+            fn source(x: Seed) -> Cb<Failing> { Cb(|| idiv(4, 2)) }
+        }
+        trait R<Self> { fn r(x: Self) -> int; }
+        impl<T> R for W<T> where T: Value, Seed: Source<Item = Cb<Pure>> {
+            fn r(x: W<T>) -> int { 1 }
+        }
+    "# });
+    assert!(
+        matches!(
+            &*error,
+            CompilationErrorImpl::TraitImplEffectsMismatch { .. }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_custom_value_impl_checks_prerequisites_with_the_real_effects() {
+    const PRELUDE: &str = indoc! { r#"
+trait Run<Self |-> ! E> { fn run(x: Self) -> int ! E; }
+struct Cb<! E>(() -> int ! E)
+impl<! E> Run for <Self = Cb<! E> |-> ! E = E> { fn run(x: Cb<! E>) -> int { (x.0)() } }
+struct Wrap<T>(T)
+impl<T> Value for Wrap<T> where T: Value, T: Run<! E = ()> {
+fn eq(x: Wrap<T>, y: Wrap<T>) -> bool { run(x.0) == run(y.0) }
+fn to_string(x: Wrap<T>) -> string { to_string(run(x.0)) }
+fn hash(x: Wrap<T>, state: &mut hasher) { hash(run(x.0), state) }
+fn clone(x: Wrap<T>) -> Wrap<T> { Wrap(x.0) }
+fn drop(x: &mut Wrap<T>) {}
+}
+"# };
+    for term in ["Wrap(Cb(g))", "(Wrap(Cb(g)),)", "{ a: Wrap(Cb(g)) }"] {
+        let mut session = TestSession::new();
+        session.allow_unsafe();
+        session.fail_compilation(&format!(
+            "{PRELUDE}
+            fn f<! E>(g: () -> int ! E) -> string {{ to_string({term}) }}
+            f(|| idiv(1, 0))"
+        ));
+    }
+    // A pure callback runs the source impl, whether its effect is written or inferred.
+    for (term, expected) in [
+        ("Wrap(Cb(|| 5))", "5"),
+        ("(Wrap(Cb(|| 5)),)", "(5)"),
+        ("Some(Wrap(Cb(|| 5)))", "Some (5)"),
+        ("Wrap(Cb(g))", "5"),
+    ] {
+        let mut session = TestSession::new();
+        session.allow_unsafe();
+        assert_val_eq!(
+            session.run(&format!(
+                "{PRELUDE}
+                let g: () -> int ! () = || 5;
+                to_string({term})"
+            )),
+            string(expected),
+            "{term}"
+        );
+    }
+    // Effects do not reach the derived rendering: a failing callback is an error.
+    for term in ["Wrap(Cb(g))", "(Wrap(Cb(g)),)"] {
+        let mut session = TestSession::new();
+        session.allow_unsafe();
+        session.fail_compilation(&format!(
+            "{PRELUDE}
+            let g = || idiv(1, 0);
+            to_string({term})"
         ));
     }
 }

@@ -335,6 +335,40 @@ pub(crate) fn effect_arguments_message(
     message
 }
 
+/// Why requirements on effects do not keep two impls apart, if they might be meant to.
+pub(crate) fn overlap_effects_hint(effects_ignored: bool) -> &'static str {
+    if effects_ignored {
+        ". Requirements on effects do not separate impls, because effects cannot select impls"
+    } else {
+        ""
+    }
+}
+
+/// How an impl restricts effects, which never select impls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImplEffectRestriction {
+    /// An input fixes the effect of a function.
+    FixedInInput,
+    /// An effect variable occurs twice in the inputs.
+    RepeatedInInput,
+}
+
+/// Explain why an impl may not restrict effects.
+pub(crate) fn impl_effect_restriction_message(
+    trait_name: &str,
+    ty: &str,
+    restriction: ImplEffectRestriction,
+) -> String {
+    match restriction {
+        ImplEffectRestriction::FixedInInput => format!(
+            "Impl of `{trait_name}` for `{ty}` fixes the effect of a function in its input, but effects cannot select impls. Use an effect variable instead, such as `impl<! E>`; if the methods call that function, also declare `E` as an output effect of the trait"
+        ),
+        ImplEffectRestriction::RepeatedInInput => format!(
+            "Impl of `{trait_name}` for `{ty}` uses the same effect variable twice, which would make the impl depend on two functions having the same effect, but effects cannot select impls. Use a separate variable for each function; to require equal effects, repeat a type variable or use a where clause"
+        ),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvalidDefaultMethodKind {
     SpecializedTypeParameter,
@@ -1215,6 +1249,18 @@ pub enum CompilationErrorImpl<S: Scope> {
         input_ty: S::Type,
         impl_span: Location,
     },
+    /// An impl's input restricts an effect, but effects never select impls.
+    TraitImplInputRestrictsEffect {
+        trait_ref: S::TraitName,
+        input_ty: S::Type,
+        restriction: ImplEffectRestriction,
+        impl_span: Location,
+    },
+    /// The impl selected by the structure of the input does not accept its effects.
+    TraitImplEffectsMismatch {
+        input_ty: S::Type,
+        fn_span: Location,
+    },
     TraitImplOutputNotDetermined {
         trait_ref: S::TraitName,
         output_ty: S::Type,
@@ -1235,6 +1281,8 @@ pub enum CompilationErrorImpl<S: Scope> {
         impl_span: Location,
         existing_impl: S::TraitImplHeader,
         existing_span: Option<Location>,
+        /// Whether an impl requires something of effects, which does not separate it.
+        effects_ignored: bool,
     },
     TraitMethodArgCountMismatch {
         trait_ref: S::TraitName,
@@ -2089,6 +2137,27 @@ impl FormatWith<SourceTable> for CompilationError {
                     fmt_span(impl_span)
                 )
             }
+            TraitImplInputRestrictsEffect {
+                trait_ref,
+                input_ty,
+                restriction,
+                impl_span,
+            } => {
+                write!(
+                    f,
+                    "{} in {}",
+                    impl_effect_restriction_message(trait_ref, input_ty, *restriction),
+                    fmt_span(impl_span)
+                )
+            }
+            TraitImplEffectsMismatch { input_ty, fn_span } => {
+                write!(
+                    f,
+                    "The impl selected by the types of `{}` does not accept their effects, and effects cannot select another impl (when calling {})",
+                    input_ty,
+                    fmt_span(fn_span)
+                )
+            }
             TraitImplOutputNotDetermined {
                 trait_ref,
                 output_ty,
@@ -2130,15 +2199,17 @@ impl FormatWith<SourceTable> for CompilationError {
                 input_tys,
                 impl_span,
                 existing_impl,
+                effects_ignored,
                 ..
             } => {
                 write!(
                     f,
-                    "Implementation of trait `{}` over types `{}` overlaps with existing impl `{}` in {}",
+                    "Implementation of trait `{}` over types `{}` overlaps with existing impl `{}` in {}{}",
                     trait_ref,
                     input_tys.join(", "),
                     existing_impl.display(trait_ref),
-                    fmt_span(impl_span)
+                    fmt_span(impl_span),
+                    overlap_effects_hint(*effects_ignored)
                 )
             }
             TraitMethodArgCountMismatch {
@@ -2860,6 +2931,23 @@ impl CompilationError {
                 input_ty: input_ty.format_with(env).to_string(),
                 impl_span,
             }),
+            TraitImplInputRestrictsEffect {
+                trait_ref,
+                input_ty,
+                restriction,
+                impl_span,
+            } => compilation_error!(TraitImplInputRestrictsEffect {
+                trait_ref: env.trait_name(trait_ref).to_string(),
+                input_ty: input_ty.format_with(env).to_string(),
+                restriction,
+                impl_span,
+            }),
+            TraitImplEffectsMismatch { input_ty, fn_span } => {
+                compilation_error!(TraitImplEffectsMismatch {
+                    input_ty: input_ty.format_with(env).to_string(),
+                    fn_span,
+                })
+            }
             TraitImplOutputNotDetermined {
                 trait_ref,
                 output_ty,
@@ -2885,6 +2973,7 @@ impl CompilationError {
                 impl_span,
                 existing_impl,
                 existing_span,
+                effects_ignored,
             } => compilation_error!(OverlappingTraitImpls {
                 trait_ref: env.trait_name(trait_ref).to_string(),
                 input_tys: input_tys
@@ -2899,6 +2988,7 @@ impl CompilationError {
                     env
                 ),
                 existing_span,
+                effects_ignored,
             }),
             TraitMethodArgCountMismatch {
                 trait_ref,

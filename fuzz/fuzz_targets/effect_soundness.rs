@@ -8,7 +8,7 @@
 //! under renaming and reordering. See `ferlium_fuzz::effects`.
 
 use arbitrary::Unstructured;
-use ferlium_fuzz::{effect_oracle::check_program, effects::EffectProgram};
+use ferlium_fuzz::{effect_oracle::check_program, effect_soundness::EffectProgram};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

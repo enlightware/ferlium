@@ -9,7 +9,8 @@
 //! moves every grammar target at once.
 
 pub mod effect_oracle;
-pub mod effects;
+pub mod effect_selection;
+pub mod effect_soundness;
 
 use barkus_core::generate::decode;
 use barkus_core::ir::grammar::GrammarIr;

@@ -186,6 +186,10 @@ pub(crate) fn diagnostics_from_error(
         | TraitImplForAnonymousStructuralType {
             impl_span: span, ..
         }
+        | TraitImplInputRestrictsEffect {
+            impl_span: span, ..
+        }
+        | TraitImplEffectsMismatch { fn_span: span, .. }
         | TraitImplOutputNotDetermined {
             impl_span: span, ..
         }

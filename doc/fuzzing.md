@@ -15,30 +15,19 @@ Run short local smoke sessions:
 make fuzz
 ```
 
-Override the default 30 second per-target duration with `FUZZ_TIME`:
+Options, all optional:
 
-```sh
-make fuzz FUZZ_TIME=120
-```
-
-Each generated input has a default one minute timeout.
-Override it with `FUZZ_ITEM_TIMEOUT` when investigating slower inputs:
-
-```sh
-make fuzz-grammar FUZZ_ITEM_TIMEOUT=10
-```
-
-Fuzzing uses multiple libFuzzer workers by default.
-`FUZZ_JOBS` defaults to the online CPU count reported by `nproc`, with a `getconf _NPROCESSORS_ONLN` fallback.
-Override it when you want fewer workers:
+- `FUZZ_TIME`: seconds per target, default 30.
+- `FUZZ_ITEM_TIMEOUT`: seconds per input, default 60.
+- `FUZZ_JOBS`: workers, default the number of online CPUs.
+- `FUZZ_RSS_LIMIT_MB`: memory per worker, default 4096.
 
 ```sh
 make fuzz-grammar FUZZ_TIME=300 FUZZ_JOBS=4
 ```
 
-The Make targets set `ASAN_OPTIONS=detect_leaks=0` because short fuzz smoke runs are looking for compiler crashes, not process-lifetime leak reports from the sanitizer runtime.
-They also pass `-detect_leaks=0` to libFuzzer, because otherwise libFuzzer reruns inputs for a leak check that is turned off.
-Use `make fuzz-optimization-leaks` to run the optimization target with leak detection, which costs roughly three times the throughput.
+The Make targets turn leak detection off, in both the sanitizer and libFuzzer, as they look for crashes and checking leaks costs about three times the throughput.
+`make fuzz-optimization-leaks` runs the optimization target with leak detection.
 The first corpus directory passed to libFuzzer is writable.
 The committed `fuzz/corpus/*` directories are seed inputs; generated discoveries go under the ignored `fuzz/corpus-generated/` directory.
 
@@ -49,7 +38,7 @@ make fuzz-cmin
 ```
 
 This runs `cargo fuzz cmin` for each generated corpus directory.
-Use `make fuzz-cmin-ide`, `make fuzz-cmin-grammar`, `make fuzz-cmin-optimization`, or `make fuzz-cmin-effects` to minimize a single target.
+Each `make fuzz-<target>` has a `make fuzz-cmin-<target>` that minimizes only its corpus.
 These targets also use `FUZZ_ITEM_TIMEOUT`, so pathological inputs do not block minimization indefinitely.
 Minimization preserves the coverage observed by the current fuzz target binary and instrumentation; it is still worth keeping a backup or commit boundary before replacing a very large corpus.
 
@@ -63,10 +52,11 @@ It is a generation grammar for structured compiler inputs, not the official lang
 
 Targets:
 
-- `ide_compile_any` feeds valid UTF-8 through the IDE compiler path, including the normal compiler and diagnostic position conversion.
-- `grammar_ide_compile` decodes Barkus decision tapes into Ferlium-shaped source, then feeds the source through the IDE compiler path.
-- `grammar_optimization_differential` runs grammar-generated source with MIR optimization off and on, and compares their outcomes.
-- `effect_soundness` generates programs combining traits with output effects, concrete and blanket impls, generic callers and fallible callbacks (`make fuzz-effects`).
+- `ide_compile_any` (`make fuzz-ide`) feeds valid UTF-8 through the IDE compiler path, including diagnostic position conversion.
+- `grammar_ide_compile` (`make fuzz-grammar`) decodes Barkus decision tapes into Ferlium-shaped source for the IDE compiler path.
+- `grammar_optimization_differential` (`make fuzz-optimization`) runs grammar-generated source with MIR optimization off and on, and compares the outcomes.
+- `effect_soundness` (`make fuzz-effect-soundness`) generates programs combining traits with output effects, impls, generic callers and fallible callbacks.
+- `effect_selection` (`make fuzz-effect-selection`) generates programs in which effects could reach impl selection.
 
 The raw byte target ignores invalid UTF-8 and inputs larger than 32 KiB.
 The grammar targets ignore invalid decision tapes, very large tapes, and generated source larger than 32 KiB.
@@ -86,13 +76,21 @@ Its programs are well typed by construction, so a rejection is worth a look, but
 Its artifacts are generator inputs; print the program one generates, and rerun the checks on a source file while reducing it:
 
 ```sh
-cargo run --manifest-path fuzz/Cargo.toml --bin decode_effect_program -- fuzz/artifacts/effect_soundness/crash-... > program.fer
+cargo run --manifest-path fuzz/Cargo.toml --bin decode_effect_soundness_program -- fuzz/artifacts/effect_soundness/crash-... > program.fer
 cargo run --release --manifest-path fuzz/Cargo.toml --bin check_effect_source -- program.fer
 ```
 
 Under the sanitizer, the target checks a few programs per second and worker.
-For a faster search without coverage guidance, `effect_program_census` checks programs from pseudo-random inputs, recording crashes and rejections by kind instead of stopping at the first:
+For a faster search without coverage guidance, `effect_soundness_census` and `effect_selection_census` check programs from pseudo-random inputs, recording crashes and rejections by kind instead of stopping at the first:
 
 ```sh
-cargo run --release --manifest-path fuzz/Cargo.toml --bin effect_program_census -- 1000 42
+cargo run --release --manifest-path fuzz/Cargo.toml --bin effect_soundness_census -- 1000 42
 ```
+
+The effect selection target makes the same backend checks as the effect soundness target, and checks that:
+
+- changing only a callback's annotation, or the declaration order, does not change what runs;
+- a declaration that would let effects select an impl is rejected with the matching error;
+- a pure callback is accepted unless an impl it reaches requires an effect.
+
+Its programs are compiled as trusted code, so that they can implement `Value`.

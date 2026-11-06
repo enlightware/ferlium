@@ -12,6 +12,7 @@ use crate::{
         CompilationErrorImpl, ImportKind, InfiniteTypeKind, InvalidRecordFieldContext,
         MutabilityMustBeContext, MutabilityMustBeWhat, WhatIsNotAProductType,
         WhichProductTypeIsNot, effect_arguments_message, format_output_effect_mismatches,
+        impl_effect_restriction_message, overlap_effects_hint,
     },
     parser::location::SourceTable,
     types::effects::EffectRow,
@@ -711,6 +712,25 @@ pub(super) fn compilation_error_to_data(
                 ),
             )]
         }
+        TraitImplInputRestrictsEffect {
+            trait_ref,
+            input_ty,
+            restriction,
+            impl_span,
+        } => {
+            vec![error_data_from_location(
+                impl_span,
+                impl_effect_restriction_message(trait_ref, input_ty, *restriction),
+            )]
+        }
+        TraitImplEffectsMismatch { input_ty, fn_span } => {
+            vec![error_data_from_location(
+                fn_span,
+                format!(
+                    "The impl selected by the types of `{input_ty}` does not accept their effects, and effects cannot select another impl",
+                ),
+            )]
+        }
         InferenceBlockedByPendingImpls { blocked } => blocked
             .iter()
             .map(|(span, _)| {
@@ -747,12 +767,14 @@ pub(super) fn compilation_error_to_data(
             impl_span,
             existing_impl,
             existing_span,
+            effects_ignored,
         } => {
             let mut diagnostics = vec![error_data_from_location(
                 impl_span,
                 format!(
-                    "Implementation of trait `{trait_ref}` over types `{}` overlaps with existing impl `{existing_impl}`",
+                    "Implementation of trait `{trait_ref}` over types `{}` overlaps with existing impl `{existing_impl}`{}",
                     input_tys.join(", "),
+                    overlap_effects_hint(*effects_ignored),
                     existing_impl = existing_impl.display(trait_ref)
                 ),
             )];

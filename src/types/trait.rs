@@ -22,7 +22,7 @@ use crate::{
     types::{
         effects::{EffType, EffectVar, EffectsInstSubst},
         trait_solver::TraitSolver,
-        r#type::{FnType, Type, TypeInstSubst, TypeVar},
+        r#type::{FnType, Type, TypeInstSubst, TypeKind, TypeVar},
         type_inference::{substitution::InstSubst, unify::UnifiedTypeInference},
         type_like::TypeLike,
         type_mapper::BitmapInstantiationMapper,
@@ -43,9 +43,29 @@ pub trait Deriver: Debug + DynClone + Sync + Send {
         arena: &mut NodeArena,
         solver: &mut TraitSolver,
     ) -> Result<Option<TraitImplId>, InternalCompilationError>;
+
+    /// The types for which a derivation for `ty` needs the same trait.
+    fn derived_members(&self, ty: Type, solver: &TraitSolver) -> Vec<Type>;
 }
 
 dyn_clone::clone_trait_object!(Deriver);
+
+/// The direct parts of a type: the shape of a named type, or the members of a structural type.
+pub(crate) fn structural_members(ty: Type, solver: &TraitSolver) -> Vec<Type> {
+    let kind = ty.data().clone();
+    match kind {
+        TypeKind::Named(named) => vec![
+            solver
+                .type_def(named.def)
+                .instantiated_shape_with_effects(&named.params, &named.effect_params),
+        ],
+        TypeKind::Tuple(members) => members,
+        TypeKind::Record(fields) | TypeKind::Variant(fields) => {
+            fields.into_iter().map(|(_, ty)| ty).collect()
+        }
+        _ => vec![],
+    }
+}
 
 /// A trait method argument span, storing the spans of the argument name and its type.
 pub type TraitMethodArgSpan = (Location, Location);

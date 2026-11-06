@@ -24,6 +24,25 @@ use CallableDefinition as Def;
 struct EnumDefaultDeriver;
 
 impl Deriver for EnumDefaultDeriver {
+    fn derived_members(&self, ty: Type, solver: &TraitSolver) -> Vec<Type> {
+        let Some(named) = ty.data().as_named().cloned() else {
+            return vec![];
+        };
+        let type_def = solver.type_def(named.def);
+        let Some(default_variant) = type_def.default_variant else {
+            return vec![];
+        };
+        let shape = type_def.instantiated_shape_with_effects(&named.params, &named.effect_params);
+        let shape_data = shape.data();
+        shape_data
+            .as_variant()
+            .into_iter()
+            .flatten()
+            .filter(|(name, _)| *name == default_variant)
+            .map(|(_, payload_ty)| *payload_ty)
+            .collect()
+    }
+
     fn derive_impl(
         &self,
         trait_id: TraitId,

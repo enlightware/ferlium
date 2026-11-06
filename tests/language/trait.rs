@@ -796,12 +796,19 @@ fn blanket_impl_of_pure_method_accepts_pure_iterator_evidence() {
 fn blanket_impl_of_pure_method_rejects_fallible_iterator_evidence() {
     // Read once, the method's effect is the evidence's; read twice, it is a union of variables.
     for before_match in ["()", "next(iterator)"] {
-        TestSession::new()
-            .fail_compilation(&pure_method_over_iterator_source(
-                before_match,
-                "idiv(1, iterator.divisor)",
-            ))
-            .expect_trait_impl_not_found("First", &["Self = Ratio"]);
+        // The impl is selected by its types, so its effects are wrong rather than the impl absent.
+        let error = TestSession::new().fail_compilation(&pure_method_over_iterator_source(
+            before_match,
+            "idiv(1, iterator.divisor)",
+        ));
+        assert!(
+            matches!(
+                &*error,
+                CompilationErrorImpl::TraitImplEffectsMismatch { .. }
+                    | CompilationErrorImpl::TraitImplOutputEffectsMismatch { .. }
+            ),
+            "{error:?}"
+        );
     }
 }
 

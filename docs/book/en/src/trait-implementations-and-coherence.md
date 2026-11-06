@@ -283,6 +283,45 @@ impl SizedSeq for int {
 The orphan rule prevents unrelated modules from attaching competing impls to the same foreign types.
 Combined with coherence, it keeps trait resolution predictable across module boundaries, which is important for separate compilation.
 
+## Effects do not choose an implementation
+
+Effects never select an implementation.
+The compiler chooses an implementation from the types alone, and only then checks the effects.
+So changing only an effect annotation cannot change which implementation runs: it either changes the effects of the call, or makes the call an error.
+
+An implementation therefore cannot fix the effect of a function in its input:
+
+```ferlium,compile_fail
+struct Task<T>(T)
+trait Run<Self |-> ! E> {
+	fn run(x: Self) -> int ! E;
+}
+// Rejected: this input only accepts pure functions.
+impl Run for <Self = Task<(() -> int ! ())> |-> ! E = ()> {
+	fn run(x: Task<(() -> int ! ())>) -> int {
+		x.0()
+	}
+}
+```
+
+Use an effect variable, and expose it as an output effect of the trait if the methods call the function:
+
+```ferlium
+struct Task<T>(T)
+trait Run<Self |-> ! E> {
+	fn run(x: Self) -> int ! E;
+}
+impl<! E> Run for <Self = Task<(() -> int ! E)> |-> ! E = E> {
+	fn run(x: Task<(() -> int ! E)>) -> int {
+		x.0()
+	}
+}
+run(Task(|| 1)) // 1
+```
+
+Two implementations that differ only by effects overlap, including when the difference is in a `where` clause.
+A `where` clause can still require an effect: it is checked after the implementation is chosen, and a mismatch is an error.
+
 ## Current scope
 
 Today, user code can:
@@ -295,7 +334,7 @@ Today, user code can:
 User code still cannot:
 
 - write per-method generic parameter lists inside traits or impls
-- write method-local `where` clauses inside trait impls
+- write method-local `where` clauses inside traits or impls
 
 ## What comes next
 
