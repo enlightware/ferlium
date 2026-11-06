@@ -1242,6 +1242,7 @@ fn explain_conflict_with_inferred_signature(
                 source_span,
                 target,
                 target_span,
+                names,
             },
             Some(function),
         ) => internal_compilation_error!(EffectConflictWithInferredSignature {
@@ -1250,6 +1251,7 @@ fn explain_conflict_with_inferred_signature(
             source_span: name_span(source_span),
             target,
             target_span: name_span(target_span),
+            names,
         }),
         (error, _) => InternalCompilationError::new(error),
     }

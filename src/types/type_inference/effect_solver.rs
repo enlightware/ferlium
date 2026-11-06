@@ -14,7 +14,7 @@ use crate::{
     module::TraitId,
     parser::location::Location,
     types::{
-        effects::{EffType, Effect, EffectVar, EffectVarKey},
+        effects::{EffType, Effect, EffectNames, EffectVar, EffectVarKey},
         r#type::{FnType, SubscriptMemberType, SubscriptType, Type, TypeKind},
     },
 };
@@ -268,6 +268,55 @@ impl EffectSolver {
             }
         }
         atoms
+    }
+
+    /// The written names of the variables in `rows`, for a diagnostic.
+    fn effect_names(&self, rows: &[&EffType]) -> EffectNames {
+        let mut names = Vec::new();
+        for row in rows {
+            for var in row.inner_vars() {
+                if let Some(name) = self.rigid_names.get(&var)
+                    && !names.iter().any(|(named, _)| *named == var)
+                {
+                    names.push((var, *name));
+                }
+            }
+        }
+        EffectNames(names)
+    }
+
+    fn invalid_effect_dependency(
+        &self,
+        source: EffType,
+        source_span: Location,
+        target: EffType,
+        target_span: Location,
+        origin: EffectConstraintOrigin,
+    ) -> InternalCompilationError {
+        let names = self.effect_names(&[&source, &target]);
+        match origin {
+            EffectConstraintOrigin::Inference => {
+                internal_compilation_error!(InvalidEffectDependency {
+                    source,
+                    source_span,
+                    target,
+                    target_span,
+                    names,
+                })
+            }
+            EffectConstraintOrigin::TraitMethodImpl {
+                trait_id,
+                method_name,
+                impl_span,
+            } => internal_compilation_error!(TraitMethodEffectMismatch {
+                trait_ref: trait_id,
+                method_name,
+                expected: target,
+                got: source,
+                span: impl_span,
+                names,
+            }),
+        }
     }
 
     fn markers_in(&self, row: &EffType) -> Vec<EffectVar> {
@@ -573,7 +622,7 @@ impl EffectSolver {
                 .map_or_else(Location::new_synthesized, |(_, source)| source.span);
             let missing = class.lower.difference(&row);
             if !missing.is_empty() {
-                return Err(invalid_effect_dependency(
+                return Err(self.invalid_effect_dependency(
                     missing,
                     lower_span,
                     row,
@@ -584,7 +633,7 @@ impl EffectSolver {
             if let Some(ceiling) = &class.ceiling {
                 let excess = row.difference(&ceiling.row);
                 if !excess.is_empty() {
-                    return Err(invalid_effect_dependency(
+                    return Err(self.invalid_effect_dependency(
                         excess,
                         lower_span,
                         ceiling.row.clone(),
@@ -597,7 +646,7 @@ impl EffectSolver {
                 let upper = mask.union(&self.substitute_var(target));
                 let excess = row.difference(&upper);
                 if !excess.is_empty() {
-                    return Err(invalid_effect_dependency(
+                    return Err(self.invalid_effect_dependency(
                         excess,
                         lower_span,
                         upper,
@@ -811,7 +860,7 @@ impl EffectSolver {
         match upper_vars.as_slice() {
             [] => {
                 if !extra.is_empty() {
-                    return Err(invalid_effect_dependency(
+                    return Err(self.invalid_effect_dependency(
                         lower_atoms,
                         inclusion.lower_span,
                         upper,
@@ -1038,6 +1087,7 @@ impl EffectSolver {
             .into_iter()
             .find_map(|marker| self.rigid_names.get(&marker).copied());
         if let Some(generic) = generic {
+            let names = self.effect_names(&[&excess, &ceiling.row]);
             return Err(internal_compilation_error!(
                 EffectGenericConflictInRecursiveGroup {
                     generic,
@@ -1045,6 +1095,7 @@ impl EffectSolver {
                     source_span: source.span,
                     target: ceiling.row.clone(),
                     target_span: ceiling.source.span,
+                    names,
                 }
             ));
         }
@@ -1054,7 +1105,7 @@ impl EffectSolver {
             .find(|origin| origin.is_trait_method_impl())
             .unwrap_or(origin)
             .clone();
-        Err(invalid_effect_dependency(
+        Err(self.invalid_effect_dependency(
             excess,
             source.span,
             ceiling.row.clone(),
@@ -1447,34 +1498,6 @@ impl UnifyValue for EffectVar {
     }
 }
 
-fn invalid_effect_dependency(
-    source: EffType,
-    source_span: Location,
-    target: EffType,
-    target_span: Location,
-    origin: EffectConstraintOrigin,
-) -> InternalCompilationError {
-    match origin {
-        EffectConstraintOrigin::Inference => internal_compilation_error!(InvalidEffectDependency {
-            source,
-            source_span,
-            target,
-            target_span,
-        }),
-        EffectConstraintOrigin::TraitMethodImpl {
-            trait_id,
-            method_name,
-            impl_span,
-        } => internal_compilation_error!(TraitMethodEffectMismatch {
-            trait_ref: trait_id,
-            method_name,
-            expected: target,
-            got: source,
-            span: impl_span,
-        }),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use ustr::ustr;
@@ -1742,6 +1765,7 @@ mod tests {
                 expected,
                 got,
                 span: got_span,
+                ..
             } => {
                 assert_eq!(*trait_ref, trait_id);
                 assert_eq!(*got_method_name, method_name);

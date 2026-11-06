@@ -11,6 +11,7 @@ use std::{
 
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
+use ustr::Ustr;
 
 use crate::{
     FxHashMap, FxHashSet,
@@ -769,6 +770,48 @@ impl Display for EffectRow<'_> {
     }
 }
 
+/// The written names of the effect variables in a diagnostic's rows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EffectNames(pub Vec<(EffectVar, Ustr)>);
+
+impl EffectNames {
+    fn get(&self, var: EffectVar) -> Option<Ustr> {
+        self.0
+            .iter()
+            .find_map(|(named, name)| (*named == var).then_some(*name))
+    }
+}
+
+/// Displays an effect row for a diagnostic, as [`EffectRow`] does, with each effect variable
+/// written by its name, and any variable without one as `…`: effects without a written name.
+pub struct NamedEffectRow<'a>(pub &'a EffType, pub &'a EffectNames);
+
+impl Display for NamedEffectRow<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut items = self
+            .0
+            .primitives()
+            .iter()
+            .map(|effect| effect.to_string())
+            .collect::<Vec<_>>();
+        let mut open = false;
+        for var in self.0.variables() {
+            match self.1.get(var) {
+                Some(name) => items.push(name.to_string()),
+                None => open = true,
+            }
+        }
+        if open {
+            items.push("…".to_string());
+        }
+        match items.as_slice() {
+            [] => write!(f, "()"),
+            [item] => write!(f, "{item}"),
+            items => write!(f, "({})", items.join(", ")),
+        }
+    }
+}
+
 pub fn no_effects() -> EffType {
     EffType::empty()
 }
@@ -892,5 +935,30 @@ mod tests {
             vec![EV::new(1), EV::new(63), EV::new(64)]
         );
         assert_eq!(format!("{effects}"), "e₁, e₆₃, e₆₄");
+    }
+
+    #[test]
+    fn named_rows_show_written_names_and_open_effects() {
+        use PrimitiveEffect::*;
+        let (e, open, other) = (EffectVar::new(0), EffectVar::new(1), EffectVar::new(2));
+        let names = EffectNames(vec![(e, ustr::ustr("E"))]);
+        let row = |effects: &[Effect]| EffType::from_vec(effects.to_vec());
+        let show = |row: &EffType| NamedEffectRow(row, &names).to_string();
+        assert_eq!(show(&EffType::empty()), "()");
+        assert_eq!(show(&row(&[Effect::Variable(e)])), "E");
+        assert_eq!(show(&row(&[Effect::Variable(open)])), "…");
+        assert_eq!(
+            show(&row(&[Effect::Primitive(Fallible), Effect::Variable(e)])),
+            "(fallible, E)"
+        );
+        // Effects without a written name are shown once, together.
+        assert_eq!(
+            show(&row(&[
+                Effect::Primitive(Fallible),
+                Effect::Variable(open),
+                Effect::Variable(other)
+            ])),
+            "(fallible, …)"
+        );
     }
 }

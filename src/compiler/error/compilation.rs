@@ -19,7 +19,7 @@ use crate::{
     module::{ModuleEnv, ModuleId, SubscriptMemberKind, TraitId, TypeDefId, path::Path},
     parser::location::{Location, SourceTable},
     types::{
-        effects::{EffType, EffectRow, EffectVar},
+        effects::{EffType, EffectNames, EffectRow, EffectVar, NamedEffectRow},
         r#type::{Type, TypeVar},
         type_inference::unify::SubOrSameType,
         type_scheme::PubTypeConstraint,
@@ -1042,6 +1042,7 @@ pub enum CompilationErrorImpl<S: Scope> {
         source_span: Location,
         target: EffType,
         target_span: Location,
+        names: EffectNames,
     },
     /// A body cannot use a function of its recursive group through its inferred signature.
     EffectConflictWithInferredSignature {
@@ -1050,6 +1051,7 @@ pub enum CompilationErrorImpl<S: Scope> {
         source_span: Location,
         target: EffType,
         target_span: Location,
+        names: EffectNames,
     },
     TraitNotFound(Location),
     InvalidGenericParams {
@@ -1330,6 +1332,7 @@ pub enum CompilationErrorImpl<S: Scope> {
         expected: EffType,
         got: EffType,
         span: Location,
+        names: EffectNames,
     },
     CompilerOnlyTraitMethodUse {
         trait_ref: S::TraitName,
@@ -1385,6 +1388,7 @@ pub enum CompilationErrorImpl<S: Scope> {
         source_span: Location,
         target: EffType,
         target_span: Location,
+        names: EffectNames,
     },
     UnknownProperty {
         scope: ast::Path,
@@ -1662,13 +1666,14 @@ impl FormatWith<SourceTable> for CompilationError {
                 source_span,
                 target,
                 target_span,
+                names,
             } => {
                 write!(
                     f,
                     "Effect `{}` due to {} is incompatible with `{}` due to {}, because the signature of `{function}` was inferred for its recursive group: write the parameter types of `{function}`, with their effects",
-                    EffectRow(source),
+                    NamedEffectRow(source, names),
                     fmt_span(source_span),
-                    EffectRow(target),
+                    NamedEffectRow(target, names),
                     fmt_span(target_span),
                 )
             }
@@ -1678,13 +1683,14 @@ impl FormatWith<SourceTable> for CompilationError {
                 source_span,
                 target,
                 target_span,
+                names,
             } => {
                 write!(
                     f,
                     "Cannot infer this recursive group: effect generic `{generic}` has one instance while the group is inferred, but it is used with `{}` due to {} and must fit `{}` due to {}. Change one of these uses so they agree",
-                    EffectRow(source),
+                    NamedEffectRow(source, names),
                     fmt_span(source_span),
-                    EffectRow(target),
+                    NamedEffectRow(target, names),
                     fmt_span(target_span),
                 )
             }
@@ -2334,14 +2340,15 @@ impl FormatWith<SourceTable> for CompilationError {
                 expected,
                 got,
                 span,
+                names,
             } => {
                 write!(
                     f,
                     "Method `{}` of trait `{}` has effects `{}`, but implementation has effects `{}` in {}",
                     method_name,
                     trait_ref,
-                    EffectRow(expected),
-                    EffectRow(got),
+                    NamedEffectRow(expected, names),
+                    NamedEffectRow(got, names),
                     fmt_span(span)
                 )
             }
@@ -2458,13 +2465,14 @@ impl FormatWith<SourceTable> for CompilationError {
                 source_span,
                 target,
                 target_span,
+                names,
             } => {
                 write!(
                     f,
                     "Invalid effect dependency: `{}` due to {} is incompatible with `{}` due to {}",
-                    EffectRow(source),
+                    NamedEffectRow(source, names),
                     fmt_span(source_span),
-                    EffectRow(target),
+                    NamedEffectRow(target, names),
                     fmt_span(target_span),
                 )
             }
@@ -2617,12 +2625,14 @@ impl CompilationError {
                 source_span,
                 target,
                 target_span,
+                names,
             } => compilation_error!(EffectConflictWithInferredSignature {
                 function,
                 source,
                 source_span,
                 target,
                 target_span,
+                names,
             }),
             EffectGenericConflictInRecursiveGroup {
                 generic,
@@ -2630,12 +2640,14 @@ impl CompilationError {
                 source_span,
                 target,
                 target_span,
+                names,
             } => compilation_error!(EffectGenericConflictInRecursiveGroup {
                 generic,
                 source,
                 source_span,
                 target,
                 target_span,
+                names,
             }),
             TraitNotFound(span) => compilation_error!(TraitNotFound(span)),
             AmbiguousTraitMethod {
@@ -3157,12 +3169,14 @@ impl CompilationError {
                 expected,
                 got,
                 span,
+                names,
             } => compilation_error!(TraitMethodEffectMismatch {
                 trait_ref: env.trait_name(trait_ref).to_string(),
                 method_name,
                 expected,
                 got,
                 span,
+                names,
             }),
             CompilerOnlyTraitMethodUse {
                 trait_ref,
@@ -3246,11 +3260,13 @@ impl CompilationError {
                 source_span,
                 target,
                 target_span,
+                names,
             } => compilation_error!(InvalidEffectDependency {
                 source,
                 source_span,
                 target,
                 target_span,
+                names,
             }),
             UnknownProperty {
                 scope,

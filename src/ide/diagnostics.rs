@@ -15,7 +15,7 @@ use crate::{
         impl_effect_restriction_message, overlap_effects_hint,
     },
     parser::location::SourceTable,
-    types::effects::EffectRow,
+    types::effects::NamedEffectRow,
 };
 use itertools::Itertools;
 #[cfg(target_arch = "wasm32")]
@@ -227,19 +227,20 @@ pub(super) fn compilation_error_to_data(
             source_span,
             target,
             target_span,
+            names,
         } => vec![
             error_data_from_location(
                 source_span,
                 format!(
                     "This has effect `{}`, because the signature of `{function}` was inferred for its recursive group",
-                    EffectRow(source),
+                    NamedEffectRow(source, names),
                 ),
             ),
             error_data_from_location(
                 target_span,
                 format!(
                     "and it must fit `{}` here: write the parameter types of `{function}`, with their effects",
-                    EffectRow(target),
+                    NamedEffectRow(target, names),
                 ),
             ),
         ],
@@ -249,19 +250,20 @@ pub(super) fn compilation_error_to_data(
             source_span,
             target,
             target_span,
+            names,
         } => vec![
             error_data_from_location(
                 source_span,
                 format!(
                     "Effect generic `{generic}` has one instance while this recursive group is inferred, but it is used with `{}` here",
-                    EffectRow(source),
+                    NamedEffectRow(source, names),
                 ),
             ),
             error_data_from_location(
                 target_span,
                 format!(
                     "and it must fit `{}` here. Change one of these uses so they agree",
-                    EffectRow(target),
+                    NamedEffectRow(target, names),
                 ),
             ),
         ],
@@ -890,6 +892,7 @@ pub(super) fn compilation_error_to_data(
             expected,
             got,
             span,
+            names,
         } => {
             vec![error_data_from_location(
                 span,
@@ -897,8 +900,8 @@ pub(super) fn compilation_error_to_data(
                     "Method `{}` of trait `{}` has effects `{}`, but implementation has effects `{}`",
                     method_name,
                     trait_ref,
-                    EffectRow(expected),
-                    EffectRow(got),
+                    NamedEffectRow(expected, names),
+                    NamedEffectRow(got, names),
                 ),
             )]
         }
@@ -1036,14 +1039,15 @@ pub(super) fn compilation_error_to_data(
             source,
             source_span,
             target,
+            names,
             ..
         } => {
             vec![error_data_from_location(
                 source_span,
                 format!(
                     "Effect `{}` cannot depend on `{}`",
-                    EffectRow(source),
-                    EffectRow(target)
+                    NamedEffectRow(source, names),
+                    NamedEffectRow(target, names)
                 ),
             )]
         }
